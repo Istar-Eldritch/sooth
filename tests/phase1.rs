@@ -79,6 +79,20 @@ fn bad_line_reports_and_session_survives() {
 }
 
 #[test]
+fn type_error_line_reports_and_session_survives() {
+    let out = run_session(&["5", "true 1 +", "1 +"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], "stack: 5");
+    assert!(
+        lines[1].contains("expected `i64`") && lines[1].contains("found `bool`"),
+        "expected a type-mismatch diagnostic: {}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "stack: 6");
+}
+
+#[test]
 fn failed_redefinition_keeps_old_generation_resident() {
     let out = run_session(&[
         ": sq ( i64 -- i64 ) | n | n n * ;",

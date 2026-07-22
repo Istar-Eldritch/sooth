@@ -42,6 +42,69 @@ fn lerp_compiles_and_runs() {
 }
 
 #[test]
+fn sign_compiles_and_runs() {
+    let (stdout, code) = run_and_capture_stdout("examples/sign.sth");
+    assert_eq!(stdout, "0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn if_condition_not_bool_reports_diagnostic() {
+    let src = ": oops ( -- i64 )\n  5 if 1 else 2 then ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("expected `bool`"), "unexpected message: {err}");
+    assert!(err.contains("found `i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn operand_type_mismatch_reports_diagnostic() {
+    let src = ": oops ( -- i64 )\n  true 1 + ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("expected `i64`"), "unexpected message: {err}");
+    assert!(err.contains("found `bool`"), "unexpected message: {err}");
+}
+
+#[test]
+fn branch_join_type_mismatch_reports_diagnostic() {
+    let src = ": oops ( bool -- i64 )\n  if 1 else true then ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("different types"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+    assert!(err.contains("`bool`"), "unexpected message: {err}");
+}
+
+#[test]
+fn declared_output_type_mismatch_reports_diagnostic() {
+    let src = ": oops ( i64 -- bool )\n  1 + ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("type mismatch"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+    assert!(err.contains("`bool`"), "unexpected message: {err}");
+}
+
+#[test]
+fn unknown_type_name_reports_diagnostic() {
+    let src = ": oops ( foo -- i64 )\n  1 ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let err = parser::parse(&tokens).expect_err("parsing should fail");
+
+    assert!(err.contains("unknown type"), "unexpected message: {err}");
+    assert!(err.contains("foo"), "unexpected message: {err}");
+}
+
+#[test]
 fn stack_effect_mismatch_reports_diagnostic() {
     let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
