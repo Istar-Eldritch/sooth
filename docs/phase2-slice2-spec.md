@@ -165,18 +165,18 @@ Each negative asserts the **right message** and the **type names**, not merely t
   differing boolean results in a run (proves R10 codegen).
 - **S5 → Exit 5.** A sub-word value survives a REPL line boundary correctly (R16).
 - **S6 → Exit 6 (dogfood).** `examples/rgb.sth` packs three `u8` channels into an `i32` via pure
-  homogeneous `i32` arithmetic (exercising `u8 -> i32` widening) and unpacks one channel back to a
-  `u8` via `/`… wait — division is not in this slice. Use `mod` and `*`/`+`/`-` only per the
-  brief's `r >i32 65536 >i32 * ...` sketch and unpack via `mod` (narrowing back through `>u8`);
+  homogeneous `i32` arithmetic (`r >i32 65536 >i32 * ...`, exercising `u8 -> i32` widening) and
+  unpacks the **lowest** channel (blue) back to a `u8` via `rgb 256 >i32 mod >u8` (narrowing);
   printed via `>i64 .`; compiled to a native binary producing a known value and runnable in the
   REPL. Plus the X1 headline negative golden and a truncation golden (`511 >u8 >i64 .` prints
   `255`).
 
 > Note on the dogfood arithmetic: the brief's unpack sketch mentions `/`, but `/` is not a Slice
-> 1 builtin and integer division is not introduced by this slice (only `+ - * mod`). The dogfood
-> must unpack using only `+ - * mod` and `>uN`/`>iN` (e.g. isolate a channel with `mod` and a
-> shift-by-multiply, then narrow with `>u8`). This is an Open question (Q3) for the implementer to
-> resolve within the locked operator set; do **not** add `/` to satisfy the dogfood.
+> 1 builtin and integer division is not introduced by this slice (only `+ - * mod`). Resolution:
+> unpack only the **lowest** channel (blue) via `rgb 256 >i32 mod >u8`, which needs no division.
+> The middle and high channels cannot be isolated to a bare value without `/` (multiply only
+> shifts up), so the dogfood does not extract them; blue alone still exercises the `i32 -> u8`
+> narrowing the criterion wants. Do **not** add `/` to satisfy the dogfood.
 
 ## Scope and boundaries
 
@@ -294,9 +294,10 @@ Lead risk first.
   Recommendation to evaluate: path (a) is likely sufficient because the checker already tracks the
   true `Type` and canonicalization (Q1) makes the stored 8-byte value's low `bits` authoritative —
   but the implementer verifies, does not assume.
-- **Q3 — dogfood unpack without `/`.** `/` is not in the slice's operator set. The RGB unpack must
-  isolate a channel using only `+ - * mod` and conversions (e.g. `mod` to mask a channel, multiply
-  to shift). Resolve within the locked set; do not add `/`.
+- **Q3 (RESOLVED) — dogfood unpack without `/`.** `/` is not in the slice's operator set. Locked
+  resolution: unpack only the **lowest** channel (blue) via `rgb 256 >i32 mod >u8`. The middle and
+  high channels need division to isolate to a bare value, so the dogfood does not extract them;
+  blue exercises the `i32 -> u8` narrowing the criterion needs. Do not add `/`.
 - **Q4 — display of a carried unsigned/sub-word value.** `format_stack` interprets each slot as
   `i64`. A `u32` with the high bit set, or a canonicalized sub-word value, would display as its
   `i64` reinterpretation. The slice ships no unsigned printing (D6), so this is acceptable, but the
@@ -409,8 +410,8 @@ narrow, `>i64 .`) lowers end-to-end.
 **Files:** `examples/rgb.sth` (new), `tests/phase0.rs`, `tests/phase1.rs`.
 
 **Work.** Write `examples/rgb.sth` (S6): pack three `u8` channels into an `i32` via homogeneous
-`i32` arithmetic (`>i32` widening, `+`/`-`/`*`), unpack one channel back to a `u8` using only
-`+ - * mod` and `>u8` (Q3 — no `/`), print via `>i64 .`, producing a known value. Add goldens to
+`i32` arithmetic (`>i32` widening, `+`/`-`/`*`), unpack the lowest channel (blue) via
+`256 >i32 mod >u8` (Q3, no `/`), print via `>i64 .`, producing a known value. Add goldens to
 `tests/phase0.rs`: RGB-pack binary runs and prints the known packed and unpacked values (S2, S6);
 signed-vs-unsigned comparison program whose two results differ on the same bit pattern (S4);
 truncation golden `511 >u8 >i64 .` prints `255` (S6); the five negatives X1–X5 as
