@@ -105,10 +105,6 @@ fn next_generation(existing: Option<&WordEntry>) -> u64 {
     existing.map(|e| e.generation + 1).unwrap_or(0)
 }
 
-/// Build a call-name resolver from the current generations in `env`, with
-/// `override_name` forced to `override_symbol` regardless of what `env` says
-/// (used so a definition's own recursive calls bind its new generation, not
-/// whatever `env` still holds from the previous definition).
 /// A resolver over the current generations (no override), for compiling an
 /// expression line.
 fn resolver_for(env: &HashMap<String, WordEntry>) -> impl Fn(&str) -> String + '_ {
@@ -119,6 +115,10 @@ fn resolver_for(env: &HashMap<String, WordEntry>) -> impl Fn(&str) -> String + '
     }
 }
 
+/// A call-name resolver over the current generations in `env`, with
+/// `override_name` forced to `override_symbol` regardless of what `env` says
+/// (so a definition's own recursive calls bind its new generation, not
+/// whatever `env` still holds from the previous definition).
 fn resolver_with_override<'a>(
     env: &'a HashMap<String, WordEntry>,
     override_name: &'a str,
