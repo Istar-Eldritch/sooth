@@ -10,7 +10,7 @@ discipline already is move semantics, so affine types drop in for free. `dup` is
 explicit copy, and drop is a statically-known destructor point.
 
 ```forth
-: gcd ( int int -- int )
+: gcd ( i64 i64 -- i64 )
   dup 0 = if
     drop
   else
@@ -48,7 +48,7 @@ process, with a stack that persists across lines (no prompt is printed in Phase 
 lines below are input, other lines are the session's output):
 
 ```forth
-: sq ( int -- int ) | n | n n * ;
+: sq ( i64 -- i64 ) | n | n n * ;
 defined sq
 5 sq
 stack: 25

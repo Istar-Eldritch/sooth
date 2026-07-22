@@ -34,14 +34,14 @@ fn run_session(lines: &[&str]) -> String {
 
 #[test]
 fn define_then_call_across_lines() {
-    let out = run_session(&[": sq ( int -- int ) | n | n n * ;", "5 sq"]);
+    let out = run_session(&[": sq ( i64 -- i64 ) | n | n n * ;", "5 sq"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["defined sq", "stack: 25"]);
 }
 
 #[test]
 fn stack_persists_across_lines() {
-    let out = run_session(&[": sq ( int -- int ) | n | n n * ;", "5", "sq", "1 +"]);
+    let out = run_session(&[": sq ( i64 -- i64 ) | n | n n * ;", "5", "sq", "1 +"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -52,9 +52,9 @@ fn stack_persists_across_lines() {
 #[test]
 fn redefinition_takes_effect_for_later_lines() {
     let out = run_session(&[
-        ": sq ( int -- int ) | n | n n * ;",
+        ": sq ( i64 -- i64 ) | n | n n * ;",
         "3 sq",
-        ": sq ( int -- int ) | n | n n n * * ;",
+        ": sq ( i64 -- i64 ) | n | n n n * * ;",
         "3 sq",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -79,11 +79,25 @@ fn bad_line_reports_and_session_survives() {
 }
 
 #[test]
+fn type_error_line_reports_and_session_survives() {
+    let out = run_session(&["5", "true 1 +", "1 +"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], "stack: 5");
+    assert!(
+        lines[1].contains("expected `i64`") && lines[1].contains("found `bool`"),
+        "expected a type-mismatch diagnostic: {}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "stack: 6");
+}
+
+#[test]
 fn failed_redefinition_keeps_old_generation_resident() {
     let out = run_session(&[
-        ": sq ( int -- int ) | n | n n * ;",
+        ": sq ( i64 -- i64 ) | n | n n * ;",
         "3 sq",
-        ": sq ( int -- int ) dup dup * ;",
+        ": sq ( i64 -- i64 ) dup dup * ;",
         "3 sq",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -104,10 +118,28 @@ fn failed_redefinition_keeps_old_generation_resident() {
 }
 
 #[test]
+fn sign_definable_and_callable_in_repl() {
+    let out = run_session(&[
+        ": sign ( i64 -- i64 ) 0 > if 1 else 0 then ;",
+        "-7 sign",
+        "7 sign",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["defined sign", "stack: 0", "stack: 0 1"]);
+}
+
+#[test]
+fn bool_residual_displays_as_zero_or_one() {
+    let out = run_session(&["true", "false"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["stack: 1", "stack: 1 0"]);
+}
+
+#[test]
 fn calculator_session_dogfood() {
     let out = run_session(&[
-        ": sq ( int -- int ) | n | n n * ;",
-        ": neg ( int -- int ) 0 swap - ;",
+        ": sq ( i64 -- i64 ) | n | n n * ;",
+        ": neg ( i64 -- i64 ) 0 swap - ;",
         "3 sq",
         "neg",
         "10 +",

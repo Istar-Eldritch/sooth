@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::mem;
 
-use crate::ast::{Module, Term, TermKind, WordDef};
+use crate::ast::{Module, Term, TermKind, Type, WordDef};
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -23,15 +23,26 @@ pub struct IrFunc {
     pub params: Vec<IrType>,
     pub ret: Option<IrType>,
     pub blocks: Vec<Block>,
+    /// The `IrType` of each SSA value in the function, indexed by `Value.0`.
+    pub value_types: Vec<IrType>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrType {
     Int,
+    Bool,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
     Ptr,
+}
+
+/// Map a frontend `Type` to its `IrType`.
+pub fn ir_type_of(ty: Type) -> IrType {
+    match ty {
+        Type::I64 => IrType::Int,
+        Type::Bool => IrType::Bool,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,8 +96,11 @@ pub enum Terminator {
     Jmp(BlockId),
 }
 
-/// Declared arity of a user word: (inputs, outputs).
-pub type Arity = (usize, usize);
+/// Declared signature of a user word: (input count, output count, output
+/// `IrType` if any). The build path derives this from declared slot types; the
+/// REPL derives it from the checker's typed env. A `None` output type (e.g. a
+/// word with no output) is treated as `IrType::Int` by callers.
+pub type Arity = (usize, usize, Option<IrType>);
 
 /// Maps a called user-word name to the symbol it is emitted/linked as. The build
 /// path uses identity; the REPL supplies generation-mangled symbols so a unit
@@ -98,9 +112,10 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .map(|w| {
+            let ret_ty = w.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
             (
                 w.name.clone(),
-                (w.effect.inputs.len(), w.effect.outputs.len()),
+                (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
             )
         })
         .collect();
@@ -134,15 +149,19 @@ pub fn lower_line(
     let mut b = FuncBuilder::new(env, resolve);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
-    let base = b.fresh_value();
-    let top = b.fresh_value();
+    let base = b.fresh_value(IrType::Ptr);
+    let top = b.fresh_value(IrType::Int);
 
     // Prologue: load slot `i` at byte offset `i*8`, deepest (slot 0) first.
     let mut stack = Vec::with_capacity(entry_depth);
     for i in 0..entry_depth {
-        let ptr = b.fresh_value();
+        let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
-        let v = b.fresh_value();
+        // Every carried slot loads as `IrType::Int` (l-width) regardless of its
+        // logical type. Value-correct in Slice 1 (i64 and bool both fit one
+        // 8-byte slot, and the epilogue zero-extends a bool on store), but this
+        // must be revisited once a carried slot type can have a different width.
+        let v = b.fresh_value(IrType::Int);
         b.push_instr(Instr::Load(v, ptr));
         stack.push(v);
     }
@@ -150,20 +169,22 @@ pub fn lower_line(
 
     b.lower_terms(terms);
 
-    // Epilogue: store the resulting M slots back to the buffer.
+    // Epilogue: store the resulting M slots back to the buffer. The buffer's
+    // 8-byte slots stay `l`-width regardless of a slot's logical type; a
+    // `Bool`-typed value is widened to `l` at the QBE `storel` (R4).
     let out = mem::take(&mut b.stack);
     let m = out.len();
     for (j, v) in out.iter().enumerate() {
-        let ptr = b.fresh_value();
+        let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (j * 8) as i64));
         b.push_instr(Instr::Store(ptr, *v));
     }
 
     // Return the advanced top; (M - entry_depth) may be negative.
     let delta = (m as i64 - entry_depth as i64) * 8;
-    let delta_val = b.fresh_value();
+    let delta_val = b.fresh_value(IrType::Int);
     b.push_instr(Instr::Const(delta_val, delta));
-    let new_top = b.fresh_value();
+    let new_top = b.fresh_value(IrType::Int);
     b.push_instr(Instr::Bin(new_top, BinOp::Add, top, delta_val));
     b.seal_block(Terminator::Ret(Some(new_top)));
 
@@ -172,6 +193,7 @@ pub fn lower_line(
         params: vec![IrType::Ptr, IrType::Int],
         ret: Some(IrType::Int),
         blocks: b.blocks,
+        value_types: b.value_types,
     };
     (func, m)
 }
@@ -184,18 +206,18 @@ pub(crate) fn lower_word(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
 ) -> IrFunc {
-    let n_inputs = word.effect.inputs.len();
-    let params = vec![IrType::Int; n_inputs];
-    let ret = if word.effect.outputs.is_empty() {
-        None
-    } else {
-        Some(IrType::Int)
-    };
+    let params: Vec<IrType> = word
+        .effect
+        .inputs
+        .iter()
+        .map(|s| ir_type_of(s.ty))
+        .collect();
+    let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
     let mut b = FuncBuilder::new(env, resolve);
 
     // Params occupy the first N value ids; leftmost input is deepest.
-    let mut stack: Vec<Value> = (0..n_inputs).map(|_| b.fresh_value()).collect();
+    let mut stack: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
 
     // Bind `| ... |` locals: pop the top N params, leftmost local = deepest.
     let take = word.locals.len();
@@ -215,6 +237,7 @@ pub(crate) fn lower_word(
         params,
         ret,
         blocks: b.blocks,
+        value_types: b.value_types,
     }
 }
 
@@ -228,6 +251,7 @@ struct FuncBuilder<'a> {
     next_block: u32,
     stack: Vec<Value>,
     locals: HashMap<String, Value>,
+    value_types: Vec<IrType>,
 }
 
 impl<'a> FuncBuilder<'a> {
@@ -242,13 +266,19 @@ impl<'a> FuncBuilder<'a> {
             next_block: 1, // block 0 is the entry, already current
             stack: Vec::new(),
             locals: HashMap::new(),
+            value_types: Vec::new(),
         }
     }
 
-    fn fresh_value(&mut self) -> Value {
+    fn fresh_value(&mut self, ty: IrType) -> Value {
         let v = Value(self.next_value);
         self.next_value += 1;
+        self.value_types.push(ty);
         v
+    }
+
+    fn value_type(&self, v: Value) -> IrType {
+        self.value_types[v.0 as usize]
     }
 
     fn fresh_block(&mut self) -> BlockId {
@@ -285,8 +315,13 @@ impl<'a> FuncBuilder<'a> {
     fn lower_term(&mut self, term: &Term) {
         match &term.kind {
             TermKind::IntLit(n) => {
-                let v = self.fresh_value();
+                let v = self.fresh_value(IrType::Int);
                 self.push_instr(Instr::Const(v, *n));
+                self.stack.push(v);
+            }
+            TermKind::BoolLit(b) => {
+                let v = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
             TermKind::Call(name) => self.lower_call(name),
@@ -299,7 +334,7 @@ impl<'a> FuncBuilder<'a> {
 
     fn lower_call(&mut self, name: &str) {
         if let Some(&value) = self.locals.get(name) {
-            self.stack.push(value); // int is Copy; reuse the value id.
+            self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
         }
         match name {
@@ -335,7 +370,7 @@ impl<'a> FuncBuilder<'a> {
                 };
                 let rhs = self.stack.pop().expect("bin: rhs");
                 let lhs = self.stack.pop().expect("bin: lhs");
-                let v = self.fresh_value();
+                let v = self.fresh_value(IrType::Int);
                 self.push_instr(Instr::Bin(v, op, lhs, rhs));
                 self.stack.push(v);
             }
@@ -347,7 +382,7 @@ impl<'a> FuncBuilder<'a> {
                 };
                 let rhs = self.stack.pop().expect("cmp: rhs");
                 let lhs = self.stack.pop().expect("cmp: lhs");
-                let v = self.fresh_value();
+                let v = self.fresh_value(IrType::Bool);
                 self.push_instr(Instr::Cmp(v, op, lhs, rhs));
                 self.stack.push(v);
             }
@@ -356,11 +391,12 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             _ => {
-                let (in_arity, out_arity) = *self.env.get(name).expect("checked user word exists");
+                let (in_arity, out_arity, ret_ty) =
+                    *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
                 let args = self.stack.split_off(split);
                 let ret = if out_arity == 1 {
-                    Some(self.fresh_value())
+                    Some(self.fresh_value(ret_ty.unwrap_or(IrType::Int)))
                 } else {
                     None
                 };
@@ -402,7 +438,8 @@ impl<'a> FuncBuilder<'a> {
             if t == e {
                 join_stack.push(t);
             } else {
-                let v = self.fresh_value();
+                let ty = self.value_type(t);
+                let v = self.fresh_value(ty);
                 self.push_instr(Instr::Phi(v, vec![(then_pred, t), (else_pred, e)]));
                 join_stack.push(v);
             }
@@ -448,7 +485,7 @@ mod tests {
 
     #[test]
     fn lower_square_has_one_mul() {
-        let ir = lower_src(": sq ( int -- int ) | n | n n * ;");
+        let ir = lower_src(": sq ( i64 -- i64 ) | n | n n * ;");
         let sq = &ir.funcs[0];
         let mul_count = instrs(sq)
             .iter()
@@ -462,7 +499,7 @@ mod tests {
     #[test]
     fn lower_dup_reuses_value_id() {
         // `dup +` squares: both operands must be the same SSA value, dup emits nothing.
-        let ir = lower_src(": w ( int -- int ) dup + ;");
+        let ir = lower_src(": w ( i64 -- i64 ) dup + ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         assert!(is.iter().all(|i| !matches!(i, Instr::Const(..))));
@@ -479,8 +516,8 @@ mod tests {
     #[test]
     fn lower_swap_reorders_without_instr() {
         // `swap -` computes b - a instead of a - b, and swap itself emits no instr.
-        let swapped = lower_src(": w ( int int -- int ) swap - ;");
-        let plain = lower_src(": w ( int int -- int ) - ;");
+        let swapped = lower_src(": w ( i64 i64 -- i64 ) swap - ;");
+        let plain = lower_src(": w ( i64 i64 -- i64 ) - ;");
         let operands = |ir: &IrModule| {
             instrs(&ir.funcs[0])
                 .iter()
@@ -498,7 +535,7 @@ mod tests {
 
     #[test]
     fn lower_drop_pops_without_instr() {
-        let ir = lower_src(": w ( int int -- int ) drop ;");
+        let ir = lower_src(": w ( i64 i64 -- i64 ) drop ;");
         let w = &ir.funcs[0];
         assert!(instrs(w).is_empty());
         let last = w.blocks.last().unwrap();
@@ -507,7 +544,7 @@ mod tests {
 
     #[test]
     fn lower_if_emits_phi_at_join() {
-        let ir = lower_src(": w ( int -- int ) if 1 else 2 then ;");
+        let ir = lower_src(": w ( bool -- i64 ) if 1 else 2 then ;");
         let w = &ir.funcs[0];
         let has_phi = instrs(w).iter().any(|i| matches!(i, Instr::Phi(..)));
         assert!(has_phi);
@@ -564,7 +601,7 @@ mod tests {
     #[test]
     fn lower_call_uses_resolved_generation_symbol() {
         let mut env = HashMap::new();
-        env.insert("sq".to_string(), (1usize, 1usize));
+        env.insert("sq".to_string(), (1usize, 1usize, None));
         let resolve = |name: &str| format!("{name}__gen2");
         let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &env, &resolve);
         let calls: Vec<&str> = instrs(&func)
@@ -578,8 +615,36 @@ mod tests {
     }
 
     #[test]
+    fn lower_bool_literal_is_bool_typed() {
+        let ir = lower_src(": w ( -- bool ) true ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(v, 1) => Some(*v),
+                _ => None,
+            })
+            .expect("a const 1 for `true`");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+    }
+
+    #[test]
+    fn lower_comparison_result_is_bool() {
+        let ir = lower_src(": w ( i64 i64 -- bool ) > ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Cmp(v, CmpOp::Gt, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Gt comparison");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+    }
+
+    #[test]
     fn lower_print_emits_print_instr() {
-        let ir = lower_src(": w ( int -- ) . ;");
+        let ir = lower_src(": w ( i64 -- ) . ;");
         let w = &ir.funcs[0];
         assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
         let last = w.blocks.last().unwrap();
