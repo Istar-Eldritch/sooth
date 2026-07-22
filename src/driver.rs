@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::{backend, check, ir, lexer, parser};
 
@@ -62,7 +63,11 @@ pub fn repl() -> Result<(), String> {
 }
 
 fn tempfile_dir() -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join(format!("sooth-{}", std::process::id()));
+    // Each build gets its own scratch dir so concurrent in-process builds (e.g.
+    // parallel goldens) don't clobber each other's fixed-name intermediates.
+    static N: AtomicU64 = AtomicU64::new(0);
+    let seq = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sooth-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating temp dir {dir:?}: {e}"))?;
     Ok(dir)
 }
