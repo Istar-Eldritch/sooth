@@ -54,7 +54,9 @@ pub fn run(path: &Path) -> Result<ExitStatus, String> {
 }
 
 pub fn repl() -> Result<(), String> {
-    Err("repl: not implemented (Phase 1)".into())
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    crate::repl::run(stdin.lock(), stdout.lock())
 }
 
 /// Compile QBE IL text to a shared object at `out`. Mirrors `build`'s qbe/cc

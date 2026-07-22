@@ -171,7 +171,14 @@ pub fn lower_line(
     }
 }
 
-fn lower_word(word: &WordDef, env: &HashMap<String, Arity>, resolve: Resolver) -> IrFunc {
+/// Lower a single word body against an external env/resolver. The REPL uses
+/// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
+/// so a definition compiles against previously-loaded words.
+pub(crate) fn lower_word(
+    word: &WordDef,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+) -> IrFunc {
     let n_inputs = word.effect.inputs.len();
     let params = vec![IrType::Int; n_inputs];
     let ret = if word.effect.outputs.is_empty() {
