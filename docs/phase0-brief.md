@@ -30,8 +30,9 @@ mismatch produces the expected diagnostic.
 - **Truth is int (derived default):** since Phase 0 has only `int`, there is no `bool`
   type yet. Comparisons yield `1`/`0`, and `if` pops an `int` and treats nonzero as
   true. `bool` arrives in Phase 2. (Forth-idiomatic; keeps Phase 0 to a single type.)
-- **Control flow:** `if ... else ... then`. Consumes one `int`. No `begin/until` in
-  Phase 0 (deferred to Phase 1).
+- **Control flow:** `if ... else ... then`. Consumes one `int`. Sooth has no loop
+  keywords by design (iteration is combinators over quotations, arriving Phase 4);
+  Phase 0 iterates only via shallow recursion.
 - **Recursion:** a word may call itself; the self-call is checked against the word's
   declared effect. No tail-call optimisation in Phase 0 (goldens are shallow; TCO is a
   recorded deferred item, see DESIGN "Open / deferred").
@@ -69,7 +70,8 @@ language").
 ## Out of scope for Phase 0
 
 Heap, structs/enums, types beyond `int`, the `bool` type, affine/move semantics,
-polymorphism, `begin/until`, tail-call optimisation, the REPL, multi-value returns,
+polymorphism, quotations and combinators (iteration; Phase 4), tail-call
+optimisation, the REPL, multi-value returns,
 WASM, and `no_std` packaging. All arrive in later phases.
 
 ## Test plan

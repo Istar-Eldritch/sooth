@@ -182,15 +182,50 @@ return stack is hidden or balance-checked; raw return addresses are never expose
 FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 (same discipline as Rust std over libc), and only exists at the hosted layer.
 
+## Control flow and iteration
+
+Branching is `if ... else ... then`, consuming one condition. That is the only control
+*keyword*. There are deliberately **no loop keywords** (no `begin/until`, `do/loop`);
+dropping them keeps the surface small and matches the Factor/Kitten lineage, where
+iteration is expressed with combinators rather than syntax.
+
+The iteration story, top to bottom:
+
+- **Quotations are the only iteration primitive.** A quotation `[ ... ]` is a
+  first-class code value; `call` invokes it. This is the one piece that must be built
+  into the language (new syntax + a value kind); it cannot be a library.
+- **An internal loop primitive gives constant-stack iteration.** The IR has a
+  loop/back-edge construct (not surface syntax, not user-facing). It is what makes
+  iterating a large collection not overflow, independently of whether the TCO pass
+  exists.
+- **Combinators are library words, not keywords.** `each`, `map`, `filter`, `fold`,
+  `while`, `times` are ordinary higher-order words that take quotations, written in
+  Sooth on top of the loop primitive. A thin floor (one or two intrinsic combinators)
+  bottoms out on the loop primitive; the rest are pure library. Reserving them as
+  keywords would bloat the core for no reason.
+- **Combinators are inlined.** The compiler inlines the common combinators and their
+  quotation arguments at the call site, so `[ ... ] each` lowers to a tight loop with
+  the body inlined, not a higher-order `call` per element. This is what makes "loops
+  are a library" perform as well as loop syntax would have.
+- **Raw recursion is legal but not the idiom.** A word may call itself; it is just a
+  word. But threading the stack across a self-call by hand is fiddly, so combinators
+  are the normal tool. Tail-call optimisation is therefore an optimisation for
+  hand-written recursion, not the lifeline for iteration (see Open / deferred).
+
+Iteration lands with quotations in Phase 4; Phases 0-3 have only shallow recursion,
+which is enough for their goldens.
+
 ## Codegen and backend
 
 Codegen model (unchanged from first principles, it's the good part): don't model
 the data stack at runtime. Simulate it at compile time as an array of typed slots;
 push/pop manipulate the array, and when IR is emitted the slots become ordinary
 SSA/register values. Each word compiles to a function taking N stack args and
-returning M results. `if`/`then`, `begin`/`until`, `do`/`loop` become basic blocks
-and branches. Branch/loop join points unify the virtual-stack state (depth and
-type) across predecessors; mismatched depth or type across arms is a compile error.
+returning M results. `if`/`then` become basic blocks and branches; there are no loop
+keywords (see Control flow and iteration), and iteration lowers to an internal loop
+primitive with a back-edge. Branch and loop join points unify the virtual-stack state
+(depth and type) across predecessors; mismatched depth or type across arms is a
+compile error.
 
 **No LLVM, and not a hand-written backend either. Decided: QBE.** The joy in this
 project is the language and writing programs in it, not emitting machine code, so
@@ -375,6 +410,11 @@ rows, no borrow analysis needed to write the compiler in it.
 - Signature idea: affine by default, `dup` is the explicit copy, drop is a
   statically-known destructor point.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
+- Control flow: `if/else/then` only; no loop keywords. Quotations (`[ ]` + `call`)
+  are the sole iteration primitive; iteration lowers to an internal loop primitive for
+  constant stack; combinators (`each`/`while`/`fold`/`times`/`map`) are library words
+  built on quotations and inlined at call sites. Raw recursion is legal but not the
+  idiom.
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
@@ -405,11 +445,11 @@ rows, no borrow analysis needed to write the compiler in it.
   slot representation, not planned).
 - Immediate-word / defining-word facility (typed, on the comptime interpreter),
   replacing `CREATE`/`DOES>`. Deferred to implementation planning.
-- Tail-call handling. Not needed for Phase 0 (goldens are shallow; `factorial` as
-  written isn't even tail-recursive), but once recursion is the primary loop
-  (`begin/until` deferred), constant-stack tail recursion matters. QBE has no
-  guaranteed tail calls, so it's the frontend's job: compile a *self*-tail-call as a
-  jump to the entry block (recursion-as-loop) for the common case; general/mutual TCO
-  needs a trampoline or backend support QBE lacks, and can be deferred. Interacts with
-  deterministic drop: the transform must run the outgoing frame's destructors before
-  the jump, so affine ownership and TCO have to be co-designed.
+- Tail-call handling. With loops dropped and iteration provided by combinators over an
+  internal loop primitive, constant-stack iteration no longer *depends* on TCO (the
+  loop primitive gives it). TCO is demoted to a pure optimisation for user-written
+  recursive words in tail position: compile a *self*-tail-call as a jump to the entry
+  block. General/mutual TCO needs a trampoline or backend support QBE lacks, and can be
+  deferred indefinitely. Interacts with deterministic drop: the transform must run the
+  outgoing frame's destructors before the jump, so affine ownership and TCO have to be
+  co-designed.

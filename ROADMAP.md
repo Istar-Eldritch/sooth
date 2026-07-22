@@ -33,7 +33,7 @@ it, since LLVM and Z3 were dropped. Free choice.
 
 ### Phase 0 — Codegen spine  `[L]`  `[highest risk: go/no-go on the architecture]`
 Lexer/parser for a minimal concrete-typed core (`: ;`, literals, arithmetic,
-`if/else/then`, `begin/until`, `| locals |`). Compile-time virtual stack → a
+`if/else/then`, `| locals |`). Compile-time virtual stack → a
 backend-neutral IR → **QBE** IL → `qbe` → system assembler + linker → native binary.
 No LLVM, no hand-written native backend. Keep the IR's `Ptr[T]` abstract from the
 start so a WASM sibling lowering can be added later. Static stack-effect (arity)
@@ -57,7 +57,8 @@ primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checke
 pattern matching. Non-null pointers + explicit optional type. The **`Copy` vs
 affine distinction** as a built-in property of types (primitives Copy; anything
 owning a resource affine), so Phase 3 has it to build on. Stack-effect checking now
-unifies **type and arity** at branch/loop join points. Still heap-free: value types
+unifies **type and arity** at branch join points (loops arrive with the loop
+primitive in Phase 4). Still heap-free: value types
 + fixed-size arrays only.
 **Exit:** typed programs with structs/enums/match; type and arity errors are sharp
 compile errors.
@@ -81,13 +82,17 @@ Not full HM inference. Type variables (`'T`) and a row variable (`..s`) so
 `dup`/`swap`/`max` and user words have honest polymorphic signatures; monomorphise
 per concrete stack shape, force-inline the small core words. Required operations
 (e.g. `>` for `max`) resolved at the concrete instantiation, Kitten-style, no formal
-trait system. Quotations and higher-order words (`map`/`filter`/`each`). Escaping
-quotations use the uniform-runtime-stack fallback and depend on the alloc layer
-(Phase 6).
-**Exit:** polymorphic `dup`/`swap`/`max`, generic operations over collections,
-higher-order combinators; monomorphisation verified.
-**Dogfood:** rewrite an earlier program using `map`/`filter` and a couple of
-user-defined polymorphic words.
+trait system. **Quotations** (`[ ... ]` + `call`) as the sole iteration primitive,
+plus the **internal loop primitive** they compile down to for constant-stack
+iteration. Combinators (`each`/`map`/`filter`/`fold`/`while`/`times`) are ordinary
+**library words** written in Sooth on top of quotations, with the compiler inlining
+the common ones and their quotation arguments at the call site so they lower to tight
+loops rather than a `call` per element. Escaping quotations use the uniform-runtime-
+stack fallback and depend on the alloc layer (Phase 6).
+**Exit:** polymorphic `dup`/`swap`/`max`; a constant-stack `each`/`fold` over a
+collection; combinators verified to inline to loops, not per-element calls.
+**Dogfood:** write the combinator library (`each`/`map`/`fold`/`while`) in Sooth
+itself, then rewrite an earlier program to use it.
 
 ### Phase 5 — Errors as values  `[S]`
 Result/Either as an ordinary ADT (mostly free from Phase 2), plus the `?`-style
