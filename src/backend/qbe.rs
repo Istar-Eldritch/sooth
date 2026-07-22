@@ -153,14 +153,14 @@ mod tests {
 
     #[test]
     fn emit_square_contains_mul_and_ret() {
-        let il = emit_src(": sq ( int -- int ) | n | n n * ;");
+        let il = emit_src(": sq ( i64 -- i64 ) | n | n n * ;");
         assert!(il.contains("mul"));
         assert!(il.contains("ret "));
     }
 
     #[test]
     fn emit_print_uses_printf_and_fmt() {
-        let il = emit_src(": w ( int -- ) . ;");
+        let il = emit_src(": w ( i64 -- ) . ;");
         assert!(il.contains("data $fmt = { b \"%ld\\n\", b 0 }"));
         assert!(il.contains("call $printf(l $fmt,"));
         assert!(il.contains(", ...)"));
@@ -168,7 +168,7 @@ mod tests {
 
     #[test]
     fn emit_if_has_jnz_and_phi() {
-        let il = emit_src(": w ( int -- int ) if 1 else 2 then ;");
+        let il = emit_src(": w ( i64 -- i64 ) if 1 else 2 then ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
     }

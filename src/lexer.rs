@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn lex_word_definition_tokenises() {
-        let src = ": sq ( int -- int ) | n | n n * ;";
+        let src = ": sq ( i64 -- i64 ) | n | n n * ;";
         let tokens = lex(src).unwrap();
         assert_eq!(
             words(&tokens),
@@ -111,9 +111,9 @@ mod tests {
                 Token::Colon,
                 Token::Word("sq".into()),
                 Token::LParen,
-                Token::Word("int".into()),
+                Token::Word("i64".into()),
                 Token::Word("--".into()),
-                Token::Word("int".into()),
+                Token::Word("i64".into()),
                 Token::RParen,
                 Token::Pipe,
                 Token::Word("n".into()),

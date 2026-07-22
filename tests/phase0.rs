@@ -43,7 +43,7 @@ fn lerp_compiles_and_runs() {
 
 #[test]
 fn stack_effect_mismatch_reports_diagnostic() {
-    let src = ": oops ( int -- int )\n  | a | a a + + ;\n";
+    let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
@@ -59,14 +59,14 @@ fn stack_effect_mismatch_reports_diagnostic() {
         "error should state the actual depth: {err}"
     );
     assert!(
-        err.contains("( int -- int )"),
+        err.contains("( i64 -- i64 )"),
         "error should include the declared effect: {err}"
     );
 }
 
 #[test]
 fn build_surfaces_checker_error() {
-    let src = ": oops ( int -- int )\n  | a | a a + + ;\n";
+    let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;\n";
     let path = std::env::temp_dir().join(format!("sooth-badsrc-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
 

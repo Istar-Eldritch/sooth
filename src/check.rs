@@ -92,8 +92,8 @@ pub fn infer_line(
 }
 
 fn effect_str(effect: &StackEffect) -> String {
-    let ins: Vec<&str> = effect.inputs.iter().map(|s| s.ty.as_str()).collect();
-    let outs: Vec<&str> = effect.outputs.iter().map(|s| s.ty.as_str()).collect();
+    let ins: Vec<String> = effect.inputs.iter().map(|s| s.ty.to_string()).collect();
+    let outs: Vec<String> = effect.outputs.iter().map(|s| s.ty.to_string()).collect();
     let mut parts = vec!["--".to_string()];
     if !outs.is_empty() {
         parts.push(outs.join(" "));
@@ -252,25 +252,25 @@ mod tests {
 
     #[test]
     fn check_stack_underflow_is_error() {
-        let src = ": oops ( int -- int )\n  | a | a a + + ;";
+        let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("oops"));
         assert!(err.contains("`+`"));
         assert!(err.contains("needs 2 values"));
         assert!(err.contains("holds 1"));
-        assert!(err.contains("( int -- int )"));
+        assert!(err.contains("( i64 -- i64 )"));
     }
 
     #[test]
     fn check_branch_depth_mismatch_is_error() {
-        let src = ": w ( int -- int ) if 1 1 else 1 then ;";
+        let src = ": w ( i64 -- i64 ) if 1 1 else 1 then ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("different stack depths"));
     }
 
     #[test]
     fn check_declared_output_mismatch_is_error() {
-        let src = ": w ( -- int ) 1 1 ;";
+        let src = ": w ( -- i64 ) 1 1 ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("body leaves 2 values"));
         assert!(err.contains("declares 1 outputs"));
@@ -278,7 +278,7 @@ mod tests {
 
     #[test]
     fn check_unknown_word_is_error() {
-        let src = ": w ( int -- int ) frobnicate ;";
+        let src = ": w ( i64 -- i64 ) frobnicate ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("unknown word"));
         assert!(err.contains("frobnicate"));
@@ -286,7 +286,7 @@ mod tests {
 
     #[test]
     fn check_locals_exceed_inputs_is_error() {
-        let src = ": w ( int -- int ) | a b | a ;";
+        let src = ": w ( i64 -- i64 ) | a b | a ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("locals bind"));
     }

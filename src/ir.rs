@@ -299,7 +299,7 @@ impl<'a> FuncBuilder<'a> {
 
     fn lower_call(&mut self, name: &str) {
         if let Some(&value) = self.locals.get(name) {
-            self.stack.push(value); // int is Copy; reuse the value id.
+            self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
         }
         match name {
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn lower_square_has_one_mul() {
-        let ir = lower_src(": sq ( int -- int ) | n | n n * ;");
+        let ir = lower_src(": sq ( i64 -- i64 ) | n | n n * ;");
         let sq = &ir.funcs[0];
         let mul_count = instrs(sq)
             .iter()
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn lower_dup_reuses_value_id() {
         // `dup +` squares: both operands must be the same SSA value, dup emits nothing.
-        let ir = lower_src(": w ( int -- int ) dup + ;");
+        let ir = lower_src(": w ( i64 -- i64 ) dup + ;");
         let w = &ir.funcs[0];
         let is = instrs(w);
         assert!(is.iter().all(|i| !matches!(i, Instr::Const(..))));
@@ -479,8 +479,8 @@ mod tests {
     #[test]
     fn lower_swap_reorders_without_instr() {
         // `swap -` computes b - a instead of a - b, and swap itself emits no instr.
-        let swapped = lower_src(": w ( int int -- int ) swap - ;");
-        let plain = lower_src(": w ( int int -- int ) - ;");
+        let swapped = lower_src(": w ( i64 i64 -- i64 ) swap - ;");
+        let plain = lower_src(": w ( i64 i64 -- i64 ) - ;");
         let operands = |ir: &IrModule| {
             instrs(&ir.funcs[0])
                 .iter()
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn lower_drop_pops_without_instr() {
-        let ir = lower_src(": w ( int int -- int ) drop ;");
+        let ir = lower_src(": w ( i64 i64 -- i64 ) drop ;");
         let w = &ir.funcs[0];
         assert!(instrs(w).is_empty());
         let last = w.blocks.last().unwrap();
@@ -507,7 +507,7 @@ mod tests {
 
     #[test]
     fn lower_if_emits_phi_at_join() {
-        let ir = lower_src(": w ( int -- int ) if 1 else 2 then ;");
+        let ir = lower_src(": w ( i64 -- i64 ) if 1 else 2 then ;");
         let w = &ir.funcs[0];
         let has_phi = instrs(w).iter().any(|i| matches!(i, Instr::Phi(..)));
         assert!(has_phi);
@@ -579,7 +579,7 @@ mod tests {
 
     #[test]
     fn lower_print_emits_print_instr() {
-        let ir = lower_src(": w ( int -- ) . ;");
+        let ir = lower_src(": w ( i64 -- ) . ;");
         let w = &ir.funcs[0];
         assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
         let last = w.blocks.last().unwrap();

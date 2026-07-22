@@ -1,4 +1,4 @@
-: factorial ( int -- int )
+: factorial ( i64 -- i64 )
   dup 0 = if
     drop 1
   else

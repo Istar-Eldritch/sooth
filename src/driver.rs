@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn compile_so_produces_loadable_object() {
-        let src = ": sq ( int -- int ) | n | n n * ;";
+        let src = ": sq ( i64 -- i64 ) | n | n n * ;";
         let tokens = lexer::lex(src).unwrap();
         let module = parser::parse(&tokens).unwrap();
         check::check(&module).unwrap();

@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn compiled_word_is_dlsymable_and_callable() {
-        let src = ": sq ( int -- int ) | n | n n * ;";
+        let src = ": sq ( i64 -- i64 ) | n | n n * ;";
         let tokens = lexer::lex(src).unwrap();
         let module = parser::parse(&tokens).unwrap();
         check::check(&module).unwrap();

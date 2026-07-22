@@ -29,8 +29,8 @@ pub struct WordDef {
     pub body: Vec<Term>,
 }
 
-/// A checked stack effect, e.g. `( int int -- int )`. A slot may carry a name
-/// (`a:int`) as caller-facing documentation, but a slot bound by `| … |` stays a
+/// A checked stack effect, e.g. `( i64 i64 -- i64 )`. A slot may carry a name
+/// (`a:i64`) as caller-facing documentation, but a slot bound by `| … |` stays a
 /// bare type so a name is never written twice.
 #[derive(Debug, Default)]
 pub struct StackEffect {
@@ -41,7 +41,39 @@ pub struct StackEffect {
 #[derive(Debug)]
 pub struct TypedSlot {
     pub name: Option<String>,
-    pub ty: String,
+    pub ty: Type,
+}
+
+/// A frontend type. Slot types are concrete from Phase 2 Slice 1 onward; the
+/// numeric tower, structs, enums, arrays, etc. are later slices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Type {
+    I64,
+    Bool,
+}
+
+impl Type {
+    /// Resolve a source type-name word to a `Type`, or `None` if unknown.
+    pub fn from_name(name: &str) -> Option<Type> {
+        match name {
+            "i64" => Some(Type::I64),
+            "bool" => Some(Type::Bool),
+            _ => None,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Type::I64 => "i64",
+            Type::Bool => "bool",
+        }
+    }
+}
+
+impl std::fmt::Display for Type {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
 }
 
 #[derive(Debug)]

@@ -9,7 +9,7 @@
 //!   term     := Int | Word | if
 //!   if       := 'if' term* ('else' term*)? 'then'
 
-use crate::ast::{Line, Module, Span, StackEffect, Term, TermKind, TypedSlot, WordDef};
+use crate::ast::{Line, Module, Span, StackEffect, Term, TermKind, Type, TypedSlot, WordDef};
 use crate::lexer::Token;
 
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
@@ -150,17 +150,40 @@ impl<'t> Parser<'t> {
         let text = self.expect_word_any()?;
         if matches!(self.peek(), Some((Token::Colon, _))) {
             self.pos += 1;
-            let ty = self.expect_word_any()?;
+            let (ty_name, ty_span) = self.expect_word_any_spanned()?;
+            let ty = self.resolve_type(&ty_name, ty_span)?;
             Ok(TypedSlot {
                 name: Some(text),
                 ty,
             })
         } else {
-            Ok(TypedSlot {
-                name: None,
-                ty: text,
-            })
+            let ty = self.resolve_type(&text, self.tokens[self.pos - 1].1)?;
+            Ok(TypedSlot { name: None, ty })
         }
+    }
+
+    fn expect_word_any_spanned(&mut self) -> Result<(String, Span), String> {
+        match self.peek() {
+            Some((Token::Word(w), span)) => {
+                let (w, span) = (w.clone(), *span);
+                self.pos += 1;
+                Ok((w, span))
+            }
+            Some((tok, span)) => Err(format!(
+                "parse error: expected a word, found {tok:?} at line {}, col {}",
+                span.line, span.col
+            )),
+            None => Err(self.eof_error("a word")),
+        }
+    }
+
+    fn resolve_type(&self, name: &str, span: Span) -> Result<Type, String> {
+        Type::from_name(name).ok_or_else(|| {
+            format!(
+                "error: unknown type `{name}` at line {}, col {}",
+                span.line, span.col
+            )
+        })
     }
 
     fn parse_locals_opt(&mut self) -> Result<Vec<String>, String> {
@@ -313,8 +336,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_slot_resolves_i64_and_bool_expected() {
+        let module = parse_src(": w ( i64 bool -- bool ) drop ;").unwrap();
+        let w = &module.words[0];
+        assert_eq!(w.effect.inputs[0].ty, Type::I64);
+        assert_eq!(w.effect.inputs[1].ty, Type::Bool);
+        assert_eq!(w.effect.outputs[0].ty, Type::Bool);
+    }
+
+    #[test]
+    fn parse_slot_unknown_type_name_is_error() {
+        let result = parse_src(": w ( foo -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("foo"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn parse_if_without_else_has_empty_else_branch() {
-        let module = parse_src(": w ( int -- int ) if 1 then ;").unwrap();
+        let module = parse_src(": w ( i64 -- i64 ) if 1 then ;").unwrap();
         let body = &module.words[0].body;
         match &body[0].kind {
             TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
@@ -367,7 +408,7 @@ mod tests {
 
     #[test]
     fn parse_line_colon_is_def() {
-        match parse_line_src(": sq ( int -- int ) dup * ;").unwrap() {
+        match parse_line_src(": sq ( i64 -- i64 ) dup * ;").unwrap() {
             Line::Def(def) => assert_eq!(def.name, "sq"),
             other => panic!("expected Def, got {other:?}"),
         }
@@ -375,7 +416,7 @@ mod tests {
 
     #[test]
     fn parse_line_trailing_tokens_after_def_is_error() {
-        let result = parse_line_src(": sq ( int -- int ) dup * ; 5 sq");
+        let result = parse_line_src(": sq ( i64 -- i64 ) dup * ; 5 sq");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.contains("after `;`"), "unexpected message: {err}");
@@ -383,7 +424,7 @@ mod tests {
 
     #[test]
     fn parse_line_unterminated_def_is_error() {
-        let result = parse_line_src(": sq ( int -- int ) dup *");
+        let result = parse_line_src(": sq ( i64 -- i64 ) dup *");
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(

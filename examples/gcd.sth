@@ -1,4 +1,4 @@
-: gcd ( int int -- int )
+: gcd ( i64 i64 -- i64 )
   dup 0 = if
     drop
   else
