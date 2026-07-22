@@ -7,7 +7,10 @@
 //! never assumed to be a native `u64`, so QBE (native pointers) and WASM
 //! (linear-memory offsets) can each concretise it.
 
-use crate::ast::Module;
+use std::collections::HashMap;
+use std::mem;
+
+use crate::ast::{Module, Term, TermKind, WordDef};
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -17,13 +20,412 @@ pub struct IrModule {
 #[derive(Debug)]
 pub struct IrFunc {
     pub name: String,
-    // blocks, params, results: filled in during Phase 0.
+    pub params: Vec<IrType>,
+    pub ret: Option<IrType>,
+    pub blocks: Vec<Block>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrType {
+    Int,
+    /// Defined for the backend-neutral-IR invariant; unused in Phase 0.
+    Ptr,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Value(pub u32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockId(pub u32);
+
+#[derive(Debug)]
+pub struct Block {
+    pub id: BlockId,
+    pub instrs: Vec<Instr>,
+    pub term: Terminator,
+}
+
+#[derive(Debug)]
+pub enum Instr {
+    Const(Value, i64),
+    Bin(Value, BinOp, Value, Value),
+    Cmp(Value, CmpOp, Value, Value),
+    Call(Option<Value>, String, Vec<Value>),
+    Print(Value),
+    Phi(Value, Vec<(BlockId, Value)>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Rem,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Lt,
+    Gt,
+}
+
+#[derive(Debug)]
+pub enum Terminator {
+    Ret(Option<Value>),
+    Jnz(Value, BlockId, BlockId),
+    Jmp(BlockId),
 }
 
 /// Opaque pointer handle. Concretised per backend; do not assume a width here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ptr(pub u32);
 
-pub fn lower(_module: &Module) -> Result<IrModule, String> {
-    todo!("Phase 0: lower AST -> backend-neutral IR")
+/// Declared arity of a user word: (inputs, outputs).
+type Arity = (usize, usize);
+
+pub fn lower(module: &Module) -> Result<IrModule, String> {
+    let arities: HashMap<&str, Arity> = module
+        .words
+        .iter()
+        .map(|w| {
+            (
+                w.name.as_str(),
+                (w.effect.inputs.len(), w.effect.outputs.len()),
+            )
+        })
+        .collect();
+
+    let funcs = module
+        .words
+        .iter()
+        .map(|w| lower_word(w, &arities))
+        .collect();
+
+    Ok(IrModule { funcs })
+}
+
+fn lower_word(word: &WordDef, arities: &HashMap<&str, Arity>) -> IrFunc {
+    let n_inputs = word.effect.inputs.len();
+    let params = vec![IrType::Int; n_inputs];
+    let ret = if word.effect.outputs.is_empty() {
+        None
+    } else {
+        Some(IrType::Int)
+    };
+
+    let mut b = FuncBuilder::new(arities);
+
+    // Params occupy the first N value ids; leftmost input is deepest.
+    let mut stack: Vec<Value> = (0..n_inputs).map(|_| b.fresh_value()).collect();
+
+    // Bind `| ... |` locals: pop the top N params, leftmost local = deepest.
+    let take = word.locals.len();
+    let bound = stack.split_off(stack.len() - take);
+    for (name, value) in word.locals.iter().zip(bound) {
+        b.locals.insert(name.clone(), value);
+    }
+    b.stack = stack;
+
+    b.lower_terms(&word.body);
+
+    let result = if ret.is_some() { b.stack.pop() } else { None };
+    b.seal_block(Terminator::Ret(result));
+
+    IrFunc {
+        name: word.name.clone(),
+        params,
+        ret,
+        blocks: b.blocks,
+    }
+}
+
+struct FuncBuilder<'a> {
+    arities: &'a HashMap<&'a str, Arity>,
+    blocks: Vec<Block>,
+    cur_id: BlockId,
+    cur_instrs: Vec<Instr>,
+    next_value: u32,
+    next_block: u32,
+    stack: Vec<Value>,
+    locals: HashMap<String, Value>,
+}
+
+impl<'a> FuncBuilder<'a> {
+    fn new(arities: &'a HashMap<&'a str, Arity>) -> Self {
+        FuncBuilder {
+            arities,
+            blocks: Vec::new(),
+            cur_id: BlockId(0),
+            cur_instrs: Vec::new(),
+            next_value: 0,
+            next_block: 1, // block 0 is the entry, already current
+            stack: Vec::new(),
+            locals: HashMap::new(),
+        }
+    }
+
+    fn fresh_value(&mut self) -> Value {
+        let v = Value(self.next_value);
+        self.next_value += 1;
+        v
+    }
+
+    fn fresh_block(&mut self) -> BlockId {
+        let b = BlockId(self.next_block);
+        self.next_block += 1;
+        b
+    }
+
+    fn push_instr(&mut self, instr: Instr) {
+        self.cur_instrs.push(instr);
+    }
+
+    /// Seal the current block with `term` and append it to the function.
+    fn seal_block(&mut self, term: Terminator) {
+        let instrs = mem::take(&mut self.cur_instrs);
+        self.blocks.push(Block {
+            id: self.cur_id,
+            instrs,
+            term,
+        });
+    }
+
+    /// Begin a fresh (empty) block; `cur_instrs` is already empty after a seal.
+    fn start_block(&mut self, id: BlockId) {
+        self.cur_id = id;
+    }
+
+    fn lower_terms(&mut self, terms: &[Term]) {
+        for term in terms {
+            self.lower_term(term);
+        }
+    }
+
+    fn lower_term(&mut self, term: &Term) {
+        match &term.kind {
+            TermKind::IntLit(n) => {
+                let v = self.fresh_value();
+                self.push_instr(Instr::Const(v, *n));
+                self.stack.push(v);
+            }
+            TermKind::Call(name) => self.lower_call(name),
+            TermKind::If {
+                then_branch,
+                else_branch,
+            } => self.lower_if(then_branch, else_branch),
+        }
+    }
+
+    fn lower_call(&mut self, name: &str) {
+        if let Some(&value) = self.locals.get(name) {
+            self.stack.push(value); // int is Copy; reuse the value id.
+            return;
+        }
+        match name {
+            "dup" => {
+                let top = *self.stack.last().expect("dup: non-empty stack");
+                self.stack.push(top);
+            }
+            "drop" => {
+                self.stack.pop().expect("drop: non-empty stack");
+            }
+            "swap" => {
+                let n = self.stack.len();
+                self.stack.swap(n - 1, n - 2);
+            }
+            "over" => {
+                let below = self.stack[self.stack.len() - 2];
+                self.stack.push(below);
+            }
+            "rot" => {
+                // a b c -> b c a
+                let n = self.stack.len();
+                let a = self.stack[n - 3];
+                self.stack[n - 3] = self.stack[n - 2];
+                self.stack[n - 2] = self.stack[n - 1];
+                self.stack[n - 1] = a;
+            }
+            "+" | "-" | "*" | "mod" => {
+                let op = match name {
+                    "+" => BinOp::Add,
+                    "-" => BinOp::Sub,
+                    "*" => BinOp::Mul,
+                    _ => BinOp::Rem,
+                };
+                let rhs = self.stack.pop().expect("bin: rhs");
+                let lhs = self.stack.pop().expect("bin: lhs");
+                let v = self.fresh_value();
+                self.push_instr(Instr::Bin(v, op, lhs, rhs));
+                self.stack.push(v);
+            }
+            "=" | "<" | ">" => {
+                let op = match name {
+                    "=" => CmpOp::Eq,
+                    "<" => CmpOp::Lt,
+                    _ => CmpOp::Gt,
+                };
+                let rhs = self.stack.pop().expect("cmp: rhs");
+                let lhs = self.stack.pop().expect("cmp: lhs");
+                let v = self.fresh_value();
+                self.push_instr(Instr::Cmp(v, op, lhs, rhs));
+                self.stack.push(v);
+            }
+            "." => {
+                let v = self.stack.pop().expect("print: value");
+                self.push_instr(Instr::Print(v));
+            }
+            _ => {
+                let (in_arity, out_arity) =
+                    *self.arities.get(name).expect("checked user word exists");
+                let split = self.stack.len() - in_arity;
+                let args = self.stack.split_off(split);
+                let ret = if out_arity == 1 {
+                    Some(self.fresh_value())
+                } else {
+                    None
+                };
+                self.push_instr(Instr::Call(ret, name.to_string(), args));
+                if let Some(v) = ret {
+                    self.stack.push(v);
+                }
+            }
+        }
+    }
+
+    fn lower_if(&mut self, then_branch: &[Term], else_branch: &[Term]) {
+        let test = self.stack.pop().expect("if: test value");
+        let then_id = self.fresh_block();
+        let else_id = self.fresh_block();
+        let join_id = self.fresh_block();
+
+        let post_pop = self.stack.clone();
+        self.seal_block(Terminator::Jnz(test, then_id, else_id));
+
+        self.start_block(then_id);
+        self.stack = post_pop.clone();
+        self.lower_terms(then_branch);
+        let then_stack = self.stack.clone();
+        let then_pred = self.cur_id;
+        self.seal_block(Terminator::Jmp(join_id));
+
+        self.start_block(else_id);
+        self.stack = post_pop;
+        self.lower_terms(else_branch);
+        let else_stack = self.stack.clone();
+        let else_pred = self.cur_id;
+        self.seal_block(Terminator::Jmp(join_id));
+
+        self.start_block(join_id);
+        let mut join_stack = Vec::with_capacity(then_stack.len());
+        for (t, e) in then_stack.into_iter().zip(else_stack) {
+            if t == e {
+                join_stack.push(t);
+            } else {
+                let v = self.fresh_value();
+                self.push_instr(Instr::Phi(v, vec![(then_pred, t), (else_pred, e)]));
+                join_stack.push(v);
+            }
+        }
+        self.stack = join_stack;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::check::check;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn lower_src(src: &str) -> IrModule {
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        check(&module).unwrap();
+        lower(&module).unwrap()
+    }
+
+    fn instrs(func: &IrFunc) -> Vec<&Instr> {
+        func.blocks.iter().flat_map(|b| b.instrs.iter()).collect()
+    }
+
+    #[test]
+    fn lower_square_has_one_mul() {
+        let ir = lower_src(": sq ( int -- int ) | n | n n * ;");
+        let sq = &ir.funcs[0];
+        let mul_count = instrs(sq)
+            .iter()
+            .filter(|i| matches!(i, Instr::Bin(_, BinOp::Mul, _, _)))
+            .count();
+        assert_eq!(mul_count, 1);
+        let last = sq.blocks.last().unwrap();
+        assert!(matches!(last.term, Terminator::Ret(Some(_))));
+    }
+
+    #[test]
+    fn lower_dup_reuses_value_id() {
+        // `dup +` squares: both operands must be the same SSA value, dup emits nothing.
+        let ir = lower_src(": w ( int -- int ) dup + ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(is.iter().all(|i| !matches!(i, Instr::Const(..))));
+        let bin = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(_, BinOp::Add, a, b) => Some((*a, *b)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(bin.0, bin.1);
+    }
+
+    #[test]
+    fn lower_swap_reorders_without_instr() {
+        // `swap -` computes b - a instead of a - b, and swap itself emits no instr.
+        let swapped = lower_src(": w ( int int -- int ) swap - ;");
+        let plain = lower_src(": w ( int int -- int ) - ;");
+        let operands = |ir: &IrModule| {
+            instrs(&ir.funcs[0])
+                .iter()
+                .find_map(|i| match i {
+                    Instr::Bin(_, BinOp::Sub, a, b) => Some((*a, *b)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (sa, sb) = operands(&swapped);
+        let (pa, pb) = operands(&plain);
+        assert_eq!((sa, sb), (pb, pa));
+        assert_eq!(instrs(&swapped.funcs[0]).len(), 1);
+    }
+
+    #[test]
+    fn lower_drop_pops_without_instr() {
+        let ir = lower_src(": w ( int int -- int ) drop ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).is_empty());
+        let last = w.blocks.last().unwrap();
+        assert!(matches!(last.term, Terminator::Ret(Some(_))));
+    }
+
+    #[test]
+    fn lower_if_emits_phi_at_join() {
+        let ir = lower_src(": w ( int -- int ) if 1 else 2 then ;");
+        let w = &ir.funcs[0];
+        let has_phi = instrs(w).iter().any(|i| matches!(i, Instr::Phi(..)));
+        assert!(has_phi);
+        assert!(w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+    }
+
+    #[test]
+    fn lower_print_emits_print_instr() {
+        let ir = lower_src(": w ( int -- ) . ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
+        let last = w.blocks.last().unwrap();
+        assert!(matches!(last.term, Terminator::Ret(None)));
+    }
 }
