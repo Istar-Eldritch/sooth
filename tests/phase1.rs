@@ -87,6 +87,7 @@ fn calculator_session_dogfood() {
         "neg",
         "10 +",
         "2 *",
+        ".",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
@@ -98,6 +99,19 @@ fn calculator_session_dogfood() {
             "stack: -9",
             "stack: 1",
             "stack: 2",
+            "2",
+            "stack: (empty)",
         ]
     );
+}
+
+/// Guards the flush-before-call discipline the spec flags as a determinism
+/// risk: the host's stdout buffer and the loaded code's C stdio buffer must
+/// both be flushed so `.` output lands before the next `stack:` line, in
+/// program order, on every run.
+#[test]
+fn dot_output_interleaves_before_stack() {
+    let out = run_session(&["5 .", "2 3 + ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["5", "stack: (empty)", "5", "stack: (empty)"]);
 }
