@@ -12,6 +12,14 @@ pub struct Module {
     pub words: Vec<WordDef>,
 }
 
+/// One REPL input unit: either a word definition or a bare term sequence
+/// evaluated against the carried stack.
+#[derive(Debug)]
+pub enum Line {
+    Def(WordDef),
+    Expr(Vec<Term>),
+}
+
 #[derive(Debug)]
 pub struct WordDef {
     pub name: String,

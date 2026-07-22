@@ -9,7 +9,7 @@
 //!   term     := Int | Word | if
 //!   if       := 'if' term* ('else' term*)? 'then'
 
-use crate::ast::{Module, Span, StackEffect, Term, TermKind, TypedSlot, WordDef};
+use crate::ast::{Line, Module, Span, StackEffect, Term, TermKind, TypedSlot, WordDef};
 use crate::lexer::Token;
 
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
@@ -19,6 +19,21 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         module.words.push(parser.parse_worddef()?);
     }
     Ok(module)
+}
+
+/// Parse a single REPL line: a `:`-led definition, or a bare term sequence run
+/// to end of input. One line is one complete unit (an unterminated def is a
+/// normal parse error).
+pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
+    let mut parser = Parser { tokens, pos: 0 };
+    if matches!(parser.peek(), Some((Token::Colon, _))) {
+        return Ok(Line::Def(parser.parse_worddef()?));
+    }
+    let mut terms = Vec::new();
+    while parser.pos < parser.tokens.len() {
+        terms.push(parser.parse_term()?);
+    }
+    Ok(Line::Expr(terms))
 }
 
 struct Parser<'t> {
@@ -324,5 +339,42 @@ mod tests {
         let result = parse_src(": w ( -- ) if 1");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("unterminated `if`"));
+    }
+
+    fn parse_line_src(src: &str) -> Result<Line, String> {
+        let tokens = lex(src).unwrap();
+        parse_line(&tokens)
+    }
+
+    #[test]
+    fn parse_line_bare_expression_is_expr() {
+        match parse_line_src("2 3 +").unwrap() {
+            Line::Expr(terms) => {
+                assert_eq!(terms.len(), 3);
+                assert!(matches!(terms[0].kind, TermKind::IntLit(2)));
+                assert!(matches!(&terms[2].kind, TermKind::Call(w) if w == "+"));
+            }
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_colon_is_def() {
+        match parse_line_src(": sq ( int -- int ) dup * ;").unwrap() {
+            Line::Def(def) => assert_eq!(def.name, "sq"),
+            other => panic!("expected Def, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_unterminated_def_is_error() {
+        let result = parse_line_src(": sq ( int -- int ) dup *");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("unexpected end of input"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`;`"), "unexpected message: {err}");
     }
 }
