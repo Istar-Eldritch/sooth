@@ -1,5 +1,12 @@
 //! Sooth AST. Skeleton for Phase 0; grows as the language does.
 
+/// A source location, 1-based (line, col).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Span {
+    pub line: u32,
+    pub col: u32,
+}
+
 #[derive(Debug, Default)]
 pub struct Module {
     pub words: Vec<WordDef>,
