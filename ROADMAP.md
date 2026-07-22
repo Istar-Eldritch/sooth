@@ -48,10 +48,13 @@ diagnostic. Proved the virtual-stack → IR → QBE → native path end-to-end.
 
 ### Phase 1 — REPL and liveness  `[M]`
 
-No in-process JIT (that left with LLVM). REPL that compiles each snippet to a temp
-shared object and loads it, or batch-recompiles; word definition, execution, and
-redefinition (name→latest-symbol table). Compile-time / immediate words run in a
-small **interpreter** over the IR, not as native code.
+No in-process JIT (that left with LLVM), and no comptime interpreter (there are no
+immediate words; see DESIGN Declined). The REPL runs on the **backend** via `dlopen`:
+each new word is compiled to a shared object and loaded into the live session, so the
+process holds natively-compiled code it can call at once; redefinition loads a new
+object and swaps the name→symbol entry. Whole-program `run` uses compile-to-binary +
+subprocess. Factor's in-image model minus the sub-millisecond compile, without owning
+a backend.
 **Exit:** define/test words interactively; redefinition works; the first
 throwaway-but-real interactive session exists.
 **Dogfood:** a tiny interactive calculator or turtle-graphics doodle.
@@ -161,7 +164,7 @@ pattern matching, growable collections + strings, words + modules, errors as
 values, a modest C FFI for the hosted layer; no inference, no refinements, no effect
 rows, no borrow analysis). Rewrite the compiler in S, fixpoint-verify
 (bootstrap-compiled == self-compiled), retire/demote the host-language bootstrap.
-Compile-time immediate words run in the same interpreter, no metacircular JIT.
+No metacircular JIT: the self-hosted REPL/build path still runs on the backend.
 **Exit:** the compiler compiles itself; fixpoint reached.
 
 ### Optional (any time after Phase 2) — WASM sibling backend  `[M]`

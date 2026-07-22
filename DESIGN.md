@@ -276,8 +276,9 @@ could actually read) gives arm64/x86_64/riscv64 plus C-ABI struct classification
 free, and can carry essentially the entire design: everything interesting (affine
 analysis, monomorphisation of the small polymorphic core, deterministic drop) is
 frontend/runtime work QBE is agnostic to. A hand-written native backend (own the
-vertical, direct syscalls) was the craft-purist alternative, set aside precisely
-because it optimises for building the compiler, which isn't the point here. LLVM was
+vertical, direct syscalls) was the craft-purist alternative, set aside for
+now, and reconsidered after self-hosting, because it optimises for building the
+compiler, which isn't the point at this stage. LLVM was
 rejected outright: too large and opaque for a hold-in-head project, a perpetual
 dependency tax, and product-grade output the language doesn't need. Wanting LLVM's
 full-service codegen is a tell that the project has drifted back to product-think,
@@ -304,15 +305,22 @@ abstract in the IR (`Ptr[T]` is an opaque handle, not a native `u64`), so the QB
 native-pointer assumption leaking into shared IR is the one thing that makes WASM
 chafe later.
 
-**The one real casualty of dropping LLVM: no in-process JIT.** LLVM's ORC would have
-let the REPL and AOT share one engine and let compile-time immediate words run as
-native code. Without it:
+**Dropping LLVM means no in-process JIT, and it turns out to cost nothing.** LLVM's
+ORC would have let the REPL and a compile-time evaluator share one native engine. Two
+decisions remove the need for it outright:
 
-- Compile-time / immediate words run in a small **interpreter** over the same IR,
-  not JIT-compiled to native. This is a normal choice (most languages interpret
-  macros) and keeps the comptime path simple.
-- The REPL either batch-compiles snippets or compiles to a temp shared object and
-  loads it. Higher latency than a JIT, acceptable for craft.
+- **No compile-time execution.** There is no immediate-word / macro facility (see
+  Declined), so nothing runs Sooth at compile time and there is no comptime
+  interpreter to build.
+- **The REPL runs on the backend, not an interpreter.** Each new word is compiled
+  through the normal pipeline to a shared object and `dlopen`'d into the session, so
+  the process holds live, natively-compiled code it can call at once; redefinition
+  loads a new object and swaps the name→symbol entry. Whole-program `run`/watch takes
+  the simpler compile-to-binary + subprocess path. One execution semantics either way,
+  so the live loop exercises the real backend with nothing to keep in sync. This is
+  Factor's in-image model minus the sub-millisecond per-word compile: an assembler +
+  linker + load round-trip per definition, higher latency than a JIT, acceptable for
+  craft. Sub-millisecond would require owning a backend (see Open / deferred); not now.
 
 ## Concurrency: a library, not a core feature
 
@@ -473,11 +481,13 @@ rows, no borrow analysis needed to write the compiler in it.
   refs (Hylo-style), no borrow checker; non-null pointers; hidden/checked return
   stack.
 - Codegen: compile-time virtual stack to native; words as functions.
-- Backend: QBE (small, legible, multi-arch native + C ABI for free); no LLVM and no
-  hand-written native backend, because the joy is the language, not codegen. WASM is
-  a sibling lowering off the neutral IR via binaryen, not routed through QBE. IR keeps
-  `Ptr[T]` abstract so both lowerings concretise it. No in-process JIT: comptime/
-  immediate words run in an interpreter; REPL batch-compiles or dlopens.
+- Backend: QBE (small, legible, multi-arch native + C ABI for free); no LLVM. Owning a
+  hand-written native backend is deferred, not ruled out (the joy is the language, not
+  codegen; reconsider after self-hosting, see Open / deferred). WASM is a sibling
+  lowering off the neutral IR via binaryen, not routed through QBE. IR keeps `Ptr[T]`
+  abstract so both lowerings concretise it. No in-process JIT and no comptime
+  interpreter: the REPL loads freshly compiled words in-process via `dlopen`;
+  whole-program run uses compile-to-binary + subprocess.
 - Errors as values, no THROW/CATCH, no unwinding.
 - Concurrency: library, not core. Only atomics + spawn are intrinsics; data-race
   freedom is free from affine + non-escaping refs.
@@ -494,8 +504,6 @@ rows, no borrow analysis needed to write the compiler in it.
   above, not settled).
 - Whether to add optional HM inference later (kept possible by the `(value, type)`
   slot representation, not planned).
-- Immediate-word / defining-word facility (typed, on the comptime interpreter),
-  replacing `CREATE`/`DOES>`. Deferred to implementation planning.
 - Tail-call handling. With loops dropped and iteration provided by combinators over an
   internal loop primitive, constant-stack iteration no longer *depends* on TCO (the
   loop primitive gives it). TCO is demoted to a pure optimisation for user-written
@@ -504,3 +512,28 @@ rows, no borrow analysis needed to write the compiler in it.
   deferred indefinitely. Interacts with deterministic drop: the transform must run the
   outgoing frame's destructors before the jump, so affine ownership and TCO have to be
   co-designed.
+- Owning a native backend (a hand-written machine-code emitter replacing QBE's
+  text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
+  `dlopen` cover native output and a live REPL without it. Reconsider after
+  self-hosting, and only if the pull to own the vertical is genuine or a
+  sub-millisecond in-image REPL is something you actually want; if taken, it is its
+  own phase, never welded to the self-hosting rewrite.
+
+## Declined
+
+Recorded so it isn't relitigated. Revisit only against a concrete program that can't
+be written without it, never on principle.
+
+- **Immediate-word / defining-word / macro facility** (would have replaced Forth's
+  `CREATE`/`DOES>`). Declined. Sooth already sent the non-metaprogramming uses of
+  Forth immediate words elsewhere (`if/else/then` is a keyword, then a combinator;
+  iteration is quotations + combinators; comments/strings are lexer-level), leaving
+  only metaprogramming, which splits into two capabilities both covered without a
+  comptime facility: defining new words is a plain nullary word (`: answer 42 ;` is
+  already a constant) plus generics, or an external build-time `.sth` generator for
+  large families; baking a computed value into the binary is external codegen or
+  runtime init. Declining it also keeps one "when does code run" story, with no
+  compile-time phase in the user's model. **Revisit if** a bare-metal / no-allocator
+  target (Phase 8) needs precomputed tables it genuinely can't build at startup; the
+  answer then is a minimal comptime const-eval (a foldable-pure-word evaluator or a
+  build-emitted data section), not a macro system and not an interpreter.

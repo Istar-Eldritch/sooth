@@ -52,10 +52,12 @@ produces it.
 
 ## Load-bearing invariants (do not break silently)
 
-- Backend is **QBE**; no LLVM, no hand-written native backend.
+- Backend is **QBE**; no LLVM. A hand-written native backend is deferred, not ruled
+  out (reconsider after self-hosting); do not start one without that decision.
 - IR stays **backend-neutral**: `Ptr[T]` is an opaque handle, never assumed to be a
   `u64` (a future WASM lowering depends on this).
 - The **affine spine** is the point: `dup` is the explicit copy, drop is a
   statically-known destructor point.
 - `core` is **`no_std`**; layers are `core` / `fixed` / `alloc` / `hosted`.
-- **No in-process JIT**; compile-time/immediate words run in an interpreter.
+- **No in-process JIT** and no comptime interpreter; the REPL loads freshly compiled
+  words in-process via `dlopen` (there are no immediate words).
