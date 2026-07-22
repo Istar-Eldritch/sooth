@@ -28,7 +28,9 @@ pub struct IrFunc {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrType {
     Int,
-    /// Defined for the backend-neutral-IR invariant; unused in Phase 0.
+    /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
+    /// a linear-memory offset under a future WASM lowering. Used by the line
+    /// wrapper's `%stack` parameter.
     Ptr,
 }
 
@@ -53,6 +55,12 @@ pub enum Instr {
     Call(Option<Value>, String, Vec<Value>),
     Print(Value),
     Phi(Value, Vec<(BlockId, Value)>),
+    /// `dst: Ptr = base + bytes`. Keeps `Ptr` opaque (no native-width assumption).
+    PtrOffset(Value, Value, i64),
+    /// `dst: Int = *ptr`.
+    Load(Value, Value),
+    /// `*ptr = val` (Int).
+    Store(Value, Value),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,30 +86,104 @@ pub enum Terminator {
 }
 
 /// Declared arity of a user word: (inputs, outputs).
-type Arity = (usize, usize);
+pub type Arity = (usize, usize);
+
+/// Maps a called user-word name to the symbol it is emitted/linked as. The build
+/// path uses identity; the REPL supplies generation-mangled symbols so a unit
+/// links against the words it was compiled against.
+pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
-    let arities: HashMap<&str, Arity> = module
+    let env: HashMap<String, Arity> = module
         .words
         .iter()
         .map(|w| {
             (
-                w.name.as_str(),
+                w.name.clone(),
                 (w.effect.inputs.len(), w.effect.outputs.len()),
             )
         })
         .collect();
+    let resolve = |name: &str| name.to_string();
 
     let funcs = module
         .words
         .iter()
-        .map(|w| lower_word(w, &arities))
+        .map(|w| lower_word(w, &env, &resolve))
         .collect();
 
     Ok(IrModule { funcs })
 }
 
-fn lower_word(word: &WordDef, arities: &HashMap<&str, Arity>) -> IrFunc {
+/// Lower a bare REPL line to a uniform-signature wrapper `sooth_line_{seq}`
+/// `(Ptr stack, Int top) -> Int`. The prologue loads the whole carried stack
+/// (`entry_depth` slots) from the buffer, the body runs in registers exactly
+/// like a word, the epilogue stores the resulting `M` slots back, and it returns
+/// the advanced top `top + (M - entry_depth) * 8`.
+///
+/// Returns the `IrFunc` alongside the emitted `M`, so the caller sizes its
+/// buffer from the same number the wrapper actually stores, rather than from
+/// a separately-computed depth that could in principle diverge.
+pub fn lower_line(
+    seq: u64,
+    terms: &[Term],
+    entry_depth: usize,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+) -> (IrFunc, usize) {
+    let mut b = FuncBuilder::new(env, resolve);
+
+    // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
+    let base = b.fresh_value();
+    let top = b.fresh_value();
+
+    // Prologue: load slot `i` at byte offset `i*8`, deepest (slot 0) first.
+    let mut stack = Vec::with_capacity(entry_depth);
+    for i in 0..entry_depth {
+        let ptr = b.fresh_value();
+        b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
+        let v = b.fresh_value();
+        b.push_instr(Instr::Load(v, ptr));
+        stack.push(v);
+    }
+    b.stack = stack;
+
+    b.lower_terms(terms);
+
+    // Epilogue: store the resulting M slots back to the buffer.
+    let out = mem::take(&mut b.stack);
+    let m = out.len();
+    for (j, v) in out.iter().enumerate() {
+        let ptr = b.fresh_value();
+        b.push_instr(Instr::PtrOffset(ptr, base, (j * 8) as i64));
+        b.push_instr(Instr::Store(ptr, *v));
+    }
+
+    // Return the advanced top; (M - entry_depth) may be negative.
+    let delta = (m as i64 - entry_depth as i64) * 8;
+    let delta_val = b.fresh_value();
+    b.push_instr(Instr::Const(delta_val, delta));
+    let new_top = b.fresh_value();
+    b.push_instr(Instr::Bin(new_top, BinOp::Add, top, delta_val));
+    b.seal_block(Terminator::Ret(Some(new_top)));
+
+    let func = IrFunc {
+        name: format!("sooth_line_{seq}"),
+        params: vec![IrType::Ptr, IrType::Int],
+        ret: Some(IrType::Int),
+        blocks: b.blocks,
+    };
+    (func, m)
+}
+
+/// Lower a single word body against an external env/resolver. The REPL uses
+/// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
+/// so a definition compiles against previously-loaded words.
+pub(crate) fn lower_word(
+    word: &WordDef,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+) -> IrFunc {
     let n_inputs = word.effect.inputs.len();
     let params = vec![IrType::Int; n_inputs];
     let ret = if word.effect.outputs.is_empty() {
@@ -110,7 +192,7 @@ fn lower_word(word: &WordDef, arities: &HashMap<&str, Arity>) -> IrFunc {
         Some(IrType::Int)
     };
 
-    let mut b = FuncBuilder::new(arities);
+    let mut b = FuncBuilder::new(env, resolve);
 
     // Params occupy the first N value ids; leftmost input is deepest.
     let mut stack: Vec<Value> = (0..n_inputs).map(|_| b.fresh_value()).collect();
@@ -137,7 +219,8 @@ fn lower_word(word: &WordDef, arities: &HashMap<&str, Arity>) -> IrFunc {
 }
 
 struct FuncBuilder<'a> {
-    arities: &'a HashMap<&'a str, Arity>,
+    env: &'a HashMap<String, Arity>,
+    resolve: Resolver<'a>,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -148,9 +231,10 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
-    fn new(arities: &'a HashMap<&'a str, Arity>) -> Self {
+    fn new(env: &'a HashMap<String, Arity>, resolve: Resolver<'a>) -> Self {
         FuncBuilder {
-            arities,
+            env,
+            resolve,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -272,8 +356,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             _ => {
-                let (in_arity, out_arity) =
-                    *self.arities.get(name).expect("checked user word exists");
+                let (in_arity, out_arity) = *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
                 let args = self.stack.split_off(split);
                 let ret = if out_arity == 1 {
@@ -281,7 +364,8 @@ impl<'a> FuncBuilder<'a> {
                 } else {
                     None
                 };
-                self.push_instr(Instr::Call(ret, name.to_string(), args));
+                let sym = (self.resolve)(name);
+                self.push_instr(Instr::Call(ret, sym, args));
                 if let Some(v) = ret {
                     self.stack.push(v);
                 }
@@ -330,9 +414,10 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Line;
     use crate::check::check;
     use crate::lexer::lex;
-    use crate::parser::parse;
+    use crate::parser::{parse, parse_line};
 
     fn lower_src(src: &str) -> IrModule {
         let tokens = lex(src).unwrap();
@@ -343,6 +428,22 @@ mod tests {
 
     fn instrs(func: &IrFunc) -> Vec<&Instr> {
         func.blocks.iter().flat_map(|b| b.instrs.iter()).collect()
+    }
+
+    fn line_terms(src: &str) -> Vec<Term> {
+        let tokens = lex(src).unwrap();
+        match parse_line(&tokens).unwrap() {
+            Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    fn count(func: &IrFunc, pred: impl Fn(&Instr) -> bool) -> usize {
+        func.blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter(|i| pred(i))
+            .count()
     }
 
     #[test]
@@ -414,6 +515,66 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b.term, Terminator::Jnz(..))));
+    }
+
+    #[test]
+    fn lower_line_marshals_all_inputs_and_outputs() {
+        // `+` from a carried depth of 2 loads both slots and stores the single
+        // result: D=2 loads, M=1 store.
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let (func, m) = lower_line(0, &line_terms("+"), 2, &env, &resolve);
+        assert_eq!(m, 1);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 1);
+    }
+
+    #[test]
+    fn lower_line_returns_advanced_top() {
+        // `2 3 +` from D=0 nets +1, so new_top = top + 8.
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let (func, m) = lower_line(0, &line_terms("2 3 +"), 0, &env, &resolve);
+        assert_eq!(m, 1);
+        let last = func.blocks.last().unwrap();
+        let ret = match last.term {
+            Terminator::Ret(Some(v)) => v,
+            ref other => panic!("expected Ret(Some), got {other:?}"),
+        };
+        // The returned value is `top (%v1) + delta` with delta = 8.
+        let is = instrs(&func);
+        let (add_lhs, add_rhs) = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(d, BinOp::Add, a, b) if *d == ret => Some((*a, *b)),
+                _ => None,
+            })
+            .expect("a top-advancing add");
+        assert_eq!(add_lhs, Value(1), "add should read the `top` param %v1");
+        let delta = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(v, n) if *v == add_rhs => Some(*n),
+                _ => None,
+            })
+            .expect("a delta const");
+        assert_eq!(delta, 8);
+    }
+
+    #[test]
+    fn lower_call_uses_resolved_generation_symbol() {
+        let mut env = HashMap::new();
+        env.insert("sq".to_string(), (1usize, 1usize));
+        let resolve = |name: &str| format!("{name}__gen2");
+        let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &env, &resolve);
+        let calls: Vec<&str> = instrs(&func)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(_, sym, _) => Some(sym.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["sq__gen2"]);
     }
 
     #[test]

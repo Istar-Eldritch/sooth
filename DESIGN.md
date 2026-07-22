@@ -322,6 +322,16 @@ decisions remove the need for it outright:
   linker + load round-trip per definition, higher latency than a JIT, acceptable for
   craft. Sub-millisecond would require owning a backend (see Open / deferred); not now.
 
+**The REPL's stack buffer is a driver artifact, not a runtime-stack feature.** Word
+bodies still compute entirely in SSA/registers; the compile-time-virtual-stack
+invariant is untouched. The buffer exists only to bridge separately-compiled `.so`
+units: each bare expression line is a wrapper that loads the whole carried stack from
+a `Vec<i64>`, runs the line's body in registers exactly like a word, and stores the
+result back. This is also a deliberate preview of the **uniform runtime stack**
+reserved for escaping quotations (Phase 4): the same "marshal to/from a byte buffer
+at a compiled boundary" shape, reused there for closures that must cross into `alloc`
+rather than for a REPL line. Neither case puts a runtime stack inside a word body.
+
 ## Concurrency: a library, not a core feature
 
 Only two things must be core intrinsics; everything else is a library.

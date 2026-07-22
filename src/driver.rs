@@ -54,10 +54,37 @@ pub fn run(path: &Path) -> Result<ExitStatus, String> {
 }
 
 pub fn repl() -> Result<(), String> {
-    Err("repl: not implemented (Phase 1)".into())
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    crate::repl::run(stdin.lock(), stdout.lock())
 }
 
-fn tempfile_dir() -> Result<PathBuf, String> {
+/// Compile QBE IL text to a shared object at `out`. Mirrors `build`'s qbe/cc
+/// plumbing but targets a `.so`: no C shim, since a shared object has no `main`.
+pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
+    let dir = tempfile_dir()?;
+    let ssa_path = dir.join("out.ssa");
+    let asm_path = dir.join("out.s");
+    std::fs::write(&ssa_path, ssa).map_err(|e| format!("writing {ssa_path:?}: {e}"))?;
+
+    run_command(Command::new("qbe").arg(&ssa_path).arg("-o").arg(&asm_path))?;
+
+    let mut cc = Command::new("cc");
+    cc.arg("-shared")
+        .arg("-fPIC")
+        .arg(&asm_path)
+        .arg("-o")
+        .arg(out);
+    // macOS's two-level namespace rejects undefined symbols at link time; allow
+    // them (earlier generations, printf) to resolve at load under RTLD_GLOBAL.
+    if cfg!(target_os = "macos") {
+        cc.arg("-Wl,-undefined,dynamic_lookup");
+    }
+    run_command(&mut cc)?;
+    Ok(())
+}
+
+pub(crate) fn tempfile_dir() -> Result<PathBuf, String> {
     // Each build gets its own scratch dir so concurrent in-process builds (e.g.
     // parallel goldens) don't clobber each other's fixed-name intermediates.
     static N: AtomicU64 = AtomicU64::new(0);
@@ -67,7 +94,7 @@ fn tempfile_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-fn run_command(cmd: &mut Command) -> Result<(), String> {
+pub(crate) fn run_command(cmd: &mut Command) -> Result<(), String> {
     let output = cmd
         .output()
         .map_err(|e| format!("running {:?}: {e}", cmd.get_program()))?;
@@ -91,5 +118,20 @@ mod tests {
             binary_path(Path::new("examples/gcd.sth")),
             PathBuf::from("examples/gcd")
         );
+    }
+
+    #[test]
+    fn compile_so_produces_loadable_object() {
+        let src = ": sq ( int -- int ) | n | n n * ;";
+        let tokens = lexer::lex(src).unwrap();
+        let module = parser::parse(&tokens).unwrap();
+        check::check(&module).unwrap();
+        let ir = ir::lower(&module).unwrap();
+        let ssa = backend::qbe::emit(&ir).unwrap();
+
+        let dir = tempfile_dir().unwrap();
+        let so = dir.join("libsq.so");
+        compile_so(&ssa, &so).expect("compile_so should succeed");
+        assert!(so.exists(), "shared object should exist at {so:?}");
     }
 }

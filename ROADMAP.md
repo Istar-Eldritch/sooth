@@ -9,7 +9,10 @@ Design phase complete (see DESIGN.md, Decided section). Backend decided: **QBE**
 (the joy is the language, not codegen). **Phase 0 (codegen spine) is complete** and
 merged to `main`: the core architectural bet held (compile-time virtual stack →
 backend-neutral IR → QBE IL → native binary), with `gcd`/`factorial`/`lerp`
-compiling to native binaries that run. **Next action: Phase 1** (REPL / liveness).
+compiling to native binaries that run. **Phase 1 (REPL / liveness) is complete**:
+`cargo run -- repl` compiles each line to a `.so` and `dlopen`s it into the session,
+with a persistent stack, generation-mangled redefinition, and the golden sessions in
+`tests/phase1.rs`. **Next action: Phase 2** (typed core).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -46,7 +49,7 @@ checking. One concrete int type, no heap.
 and run correctly (`5` / `120` / `30`), plus a negative golden for the stack-effect
 diagnostic. Proved the virtual-stack → IR → QBE → native path end-to-end.
 
-### Phase 1 — REPL and liveness  `[M]`
+### Phase 1 — REPL and liveness  `[M]`  ✅ **done**
 
 No in-process JIT (that left with LLVM), and no comptime interpreter (there are no
 immediate words; see DESIGN Declined). The REPL runs on the **backend** via `dlopen`:
@@ -55,9 +58,10 @@ process holds natively-compiled code it can call at once; redefinition loads a n
 object and swaps the name→symbol entry. Whole-program `run` uses compile-to-binary +
 subprocess. Factor's in-image model minus the sub-millisecond compile, without owning
 a backend.
-**Exit:** define/test words interactively; redefinition works; the first
+**Exit (met):** define/test words interactively; redefinition works; the first
 throwaway-but-real interactive session exists.
-**Dogfood:** a tiny interactive calculator or turtle-graphics doodle.
+**Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
+`calculator_session_dogfood`).
 
 ### Phase 2 — Typed core (monomorphic)  `[L]`
 
