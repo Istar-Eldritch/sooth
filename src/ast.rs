@@ -16,6 +16,8 @@ pub struct Module {
 pub struct WordDef {
     pub name: String,
     pub effect: StackEffect,
+    /// Names bound by `| ... |`, in effect order; empty if absent.
+    pub locals: Vec<String>,
     pub body: Vec<Term>,
 }
 
@@ -33,16 +35,18 @@ pub struct TypedSlot {
 }
 
 #[derive(Debug)]
-pub enum Term {
+pub struct Term {
+    pub kind: TermKind,
+    pub span: Span,
+}
+
+#[derive(Debug)]
+pub enum TermKind {
     IntLit(i64),
     /// A word invocation, or a reference to a named local.
     Call(String),
     If {
         then_branch: Vec<Term>,
         else_branch: Vec<Term>,
-    },
-    /// `begin ... until` (minimal loop form for Phase 0).
-    BeginUntil {
-        body: Vec<Term>,
     },
 }

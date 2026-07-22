@@ -1,0 +1,6 @@
+: lerp ( a:int b:int t:int -- int )
+  | a b t |
+  a b a - t * + ;
+
+: main ( -- )
+  0 10 3 lerp . ;    \ prints 30
