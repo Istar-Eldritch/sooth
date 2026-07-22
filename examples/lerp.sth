@@ -1,0 +1,7 @@
+\ Locals earn their keep here: three live values, `a` reused and reordered.
+\ Point-free this would be a dup/over/rot knot; named, it reads like the formula.
+: lerp ( int int int -- int )   \ a + (b - a) * t  (integer affine combo)
+  | a b t | b a - t * a + ;
+
+: main ( -- )
+  0 10 3 lerp . ;    \ prints 30

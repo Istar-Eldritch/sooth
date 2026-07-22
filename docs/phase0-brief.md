@@ -16,17 +16,27 @@ mismatch produces the expected diagnostic.
 ## Surface subset (Phase 0 only)
 
 - **Word definition:** `: name ( effect ) | locals | body ;`
-- **Stack effect:** `( in... -- out... )`, slots written `name:int`. Phase 0 has one
-  type, `int`; the checker verifies **arity** (slot count), not richer types yet.
-  Slot names are optional but recommended.
+- **Stack effect:** `( in... -- out... )`, slots written as bare types (`int`). Phase 0
+  has one type, `int`; the checker verifies **arity** (slot count), not richer types
+  yet. A slot may carry a name (`a:int`) as caller-facing documentation, but a slot
+  bound by `| … |` stays a bare type so a name is never written twice.
 - **Locals:** `| a b |` binds the top N stack items left-to-right, matching the effect
   order; the items are consumed. Referenced by name in the body. `int` is `Copy`, so a
-  local may be used any number of times.
+  local may be used any number of times. Names live here, not in the effect comment.
 - **Literals:** decimal `i64`, optional leading `-`.
 - **Builtins:**
   - arithmetic `+ - * mod`, each `( int int -- int )`
   - comparison `= < >`, each `( int int -- int )` returning `1`/`0`
+  - stack shuffles `dup ( int -- int int )`, `drop ( int -- )`,
+    `swap ( int int -- int int )`, `over ( int int -- int int int )`,
+    `rot ( int int int -- int int int )`. Monomorphic and int-only here; `dup`/`drop`
+    gain affine meaning in Phase 3 and all of them gain polymorphic signatures in
+    Phase 4. They lower to pure stack juggling (reorder/reuse/discard value ids), no IR
+    op of their own.
   - print `.` `( int -- )`, lowered to a libc `printf("%ld\n", ...)` FFI call
+- **Locals are opt-in:** with the shuffles above, one- and two-value words stay
+  point-free (`square` is `dup *`); reach for `| … |` only when shuffling reads worse
+  than names (roughly three-plus reused values, like `lerp`).
 - **Truth is int (derived default):** since Phase 0 has only `int`, there is no `bool`
   type yet. Comparisons yield `1`/`0`, and `if` pops an `int` and treats nonzero as
   true. `bool` arrives in Phase 2. (Forth-idiomatic; keeps Phase 0 to a single type.)
@@ -58,6 +68,7 @@ mismatch produces the expected diagnostic.
 ## Stack-effect checker (Phase 0: arity only)
 
 Simulate the virtual stack through each word body:
+
 - a literal pushes 1; a local binding pops N; a local reference pushes 1;
 - each builtin/word applies its known `(in, out)` arity;
 - `if/else/then` requires both branches to leave equal net depth, and unifies them;

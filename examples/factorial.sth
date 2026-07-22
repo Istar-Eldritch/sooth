@@ -1,9 +1,8 @@
-: factorial ( n:int -- int )
-  | n |
-  n 0 = if
-    1
+: factorial ( int -- int )
+  dup 0 = if
+    drop 1
   else
-    n  n 1 - factorial  *
+    dup 1 - factorial *
   then ;
 
 : main ( -- )

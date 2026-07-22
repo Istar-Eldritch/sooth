@@ -35,6 +35,10 @@ need, and no abstraction beyond that.
 3. One negative golden: a stack-effect mismatch produces the expected diagnostic
    (the *right* error, tested as behaviour, not merely a non-zero exit).
 
+`examples/lerp.sth` is an additional positive golden (prints `30`) that keeps the
+`| … |` locals path covered now that `gcd`/`factorial` are point-free; it is coverage,
+not a fourth architectural criterion.
+
 Every stage (lex / parse / check / lower / emit) gets `#[cfg(test)] mod tests` beside
 it: happy path plus at least one error/edge case. Naming: `thing_condition_expected`.
 
@@ -43,14 +47,25 @@ it: happy path plus at least one error/edge case. Naming: `thing_condition_expec
 **In (Phase 0 surface, exactly as the brief fixes it):**
 
 - Word defs `: name ( effect ) | locals | body ;`.
-- Stack effect `( in... -- out... )`, slots written `name:int`; the only type is
-  `int`; the checker verifies **arity** (slot count), not types.
+- Stack effect `( in... -- out... )`, slots written as bare types (`int`); the only
+  type is `int`; the checker verifies **arity** (slot count), not types. A slot may
+  carry a name (`a:int`) as caller-facing documentation, but a slot bound by `| … |`
+  stays a bare type: types live in the effect comment, names live in `| … |`, never
+  both for the same slot.
 - Named locals `| a b |`: bind the top N stack items **left-to-right in effect
   order** and consume them; `int` is `Copy`, so a local may be referenced any number
-  of times.
+  of times. This is the only place a bound slot is named.
 - Decimal `i64` literals, optional leading `-`.
 - Builtins: `+ - * mod` and `= < >`, each `( int int -- int )` (comparisons yield
-  `1`/`0`); `.` `( int -- )` printing via libc `printf("%ld\n", …)`.
+  `1`/`0`); `.` `( int -- )` printing via libc `printf("%ld\n", …)`; and the core
+  stack shuffles `dup ( int -- int int )`, `drop ( int -- )`,
+  `swap ( int int -- int int )`, `over ( int int -- int int int )`,
+  `rot ( int int int -- int int int )`. The shuffles are monomorphic here (all `int`);
+  they lower to pure value-stack juggling with **no IR op of their own** (reorder,
+  reuse, or discard SSA value ids), so they add surface without adding a codegen path.
+- Locals are opt-in: with the shuffles above, most one- or two-value words stay
+  point-free; `| … |` is for when shuffling reads worse than names (roughly three-plus
+  reused values, as in `examples/lerp.sth`).
 - Truth-as-int: no `bool`; `if` pops one `int` and treats nonzero as true.
 - Control flow `if ... else ... then` only. No loop keywords.
 - Shallow self-recursion (checked against the word's declared effect). No TCO.
@@ -159,12 +174,13 @@ capable implementer should be able to execute each without re-exploring.
 - Integer: optional leading `-` followed by ASCII digits, parsed to `i64`. A bare `-`
   (not followed by a digit) is the `Word("-")` builtin. `parse::<i64>` overflow ⇒
   lex error.
-- Everything else non-whitespace, non-delimiter is a `Word` (so `+`, `mod`, `gcd`,
-  `=`, `<`, `>`, `.`, `main` are all `Word`). `:` `;` `(` `)` `|` are single-char
+- Everything else non-whitespace, non-delimiter is a `Word` (so `+`, `mod`, `dup`,
+  `swap`, `drop`, `over`, `rot`, `gcd`, `=`, `<`, `>`, `.`, `main` are all `Word`). `:` `;` `(` `)` `|` are single-char
   tokens.
 
 **Unit tests (`thing_condition_expected`):**
-- `lex_word_definition_tokenises` — `: sq ( n:int -- int ) | n | n n * ;` yields the
+
+- `lex_word_definition_tokenises` — `: sq ( int -- int ) | n | n n * ;` yields the
   expected token stream.
 - `lex_negative_integer_is_int` — `-5` ⇒ `Int(-5)`; `-` alone ⇒ `Word("-")`.
 - `lex_backslash_comment_skips_to_eol`.
@@ -182,7 +198,7 @@ Grammar (Phase 0):
 module   := worddef*
 worddef  := ':' Word '(' effect ')' locals? term* ';'
 effect   := slot* '--' slot*
-slot     := Word (':' Word)?          # `name:int` or bare `int`/`name`; ty ignored beyond arity
+slot     := Word (':' Word)?          # bare `int` (default), or `name:int` doc form; ty ignored beyond arity
 locals   := '|' Word* '|'
 term     := Int | Word | if
 if       := 'if' term* ('else' term*)? 'then'
@@ -202,8 +218,11 @@ if       := 'if' term* ('else' term*)? 'then'
   without an open `if`, EOF mid-definition — each an `Err(String)` with a span.
 
 **Unit tests:**
-- `parse_gcd_shape_matches_ast` — parses `examples/gcd.sth` to the expected `Module`
-  (word names, arities, locals, nested `if`).
+
+- `parse_gcd_shape_matches_ast` — parses `examples/gcd.sth` (point-free: shuffle words
+  are plain `Term::Call`s, nested `if`, empty `locals`).
+- `parse_locals_block_populates_locals` — `examples/lerp.sth` parses with
+  `locals == ["a", "b", "t"]`.
 - `parse_if_without_else_has_empty_else_branch`.
 - `parse_missing_semicolon_is_error`.
 - `parse_then_without_if_is_error`.
@@ -223,6 +242,14 @@ seeded with the builtins:
 | `+` `-` `*` `mod` | 2 | 1 |
 | `=` `<` `>` | 2 | 1 |
 | `.` | 1 | 0 |
+| `dup` | 1 | 2 |
+| `over` | 2 | 3 |
+| `swap` | 2 | 2 |
+| `rot` | 3 | 3 |
+| `drop` | 1 | 0 |
+
+The shuffles need no special simulation: the generic `depth += out - in` handles them
+(e.g. `dup` +1, `drop` -1, `swap`/`rot` 0).
 
 Simulation per word body, tracking an integer `depth`:
 
@@ -249,7 +276,9 @@ Simulation per word body, tracking an integer `depth`:
   net-effect mismatch error.
 
 **Unit tests:**
-- `check_gcd_is_ok`, `check_factorial_is_ok`.
+
+- `check_gcd_is_ok`, `check_factorial_is_ok` (both now exercise the shuffle words),
+  `check_lerp_is_ok` (exercises `| … |` locals).
 - `check_stack_underflow_is_error` — the `oops` program (§9.3).
 - `check_branch_depth_mismatch_is_error` — `if` arms leave unequal depth.
 - `check_declared_output_mismatch_is_error` — body leaves 2, declares 1 out.
@@ -276,6 +305,11 @@ Algorithm sketch (see §7 for the emitted shapes):
 - `IntLit(n)` ⇒ emit `Const(v, n)`; push `v`.
 - `Call(name)`:
   - local ⇒ push its mapped `Value` again (int is `Copy`; reuse the same value id);
+  - `dup` ⇒ pop 1, push it twice (reuse the value id; no IR op);
+  - `drop` ⇒ pop 1, discard it (no IR op; the popped id just goes unused);
+  - `swap` ⇒ pop 2, push them in swapped order (no IR op);
+  - `over` ⇒ push a second copy of the value one below the top (reuse its id; no IR op);
+  - `rot` ⇒ rotate the top three (`a b c` → `b c a`; no IR op);
   - `+ - * mod` ⇒ pop 2, emit `Bin`, push result;
   - `= < >` ⇒ pop 2, emit `Cmp`, push result (0/1 as an `Int` value);
   - `.` ⇒ pop 1, emit `Print`;
@@ -289,8 +323,12 @@ Algorithm sketch (see §7 for the emitted shapes):
 - End: terminate with `Ret(Some(top))` or `Ret(None)`.
 
 **Unit tests:**
-- `lower_square_has_one_mul` — `: sq ( n:int -- int ) | n | n n * ;` lowers to a func
-  with one `Bin(Mul)` and `Ret(Some(_))`.
+
+- `lower_square_has_one_mul` — `: sq ( int -- int ) | n | n n * ;` lowers to a func
+  with one `Bin(Mul)` and `Ret(Some(_))` (covers `| … |` local binding + reuse).
+- `lower_dup_reuses_value_id` — `dup` pushes the same `Value` twice, emitting no instr.
+- `lower_swap_reorders_without_instr` — `swap` reverses the top two, emitting no instr.
+- `lower_drop_pops_without_instr` — `drop` shrinks the stack, emitting no instr.
 - `lower_if_emits_phi_at_join` — a word with `if … else … then` that leaves a value
   produces a `Phi` in the join block.
 - `lower_print_emits_print_instr`.
@@ -302,6 +340,7 @@ IL, including the `printf` FFI and `%ld\n` data string. `main` is emitted as a Q
 function named `sooth_main` (the driver supplies the C `main`, §9.2).
 
 **Unit tests:**
+
 - `emit_square_contains_mul_and_ret` — emitted IL contains `mul` and `ret`.
 - `emit_print_uses_printf_and_fmt` — output contains `data $fmt = { b "%ld\n", b 0 }`
   and a `call $printf(...)`.
@@ -346,11 +385,12 @@ Remove the `#[ignore]` attributes once the pipeline lands. These require `qbe` a
 - `gcd_compiles_and_runs` — `driver::build(Path::new("examples/gcd.sth"))`, execute
   the binary, assert stdout == `"5\n"` and exit 0.
 - `factorial_compiles_and_runs` — same for `examples/factorial.sth`, stdout ==
-  `"120\n"`.
+  `"120\n"`. (`gcd`/`factorial` are point-free; the shuffles carry the reuse.)
+- `lerp_compiles_and_runs` — `examples/lerp.sth` (the locals golden), stdout == `"30\n"`.
 - `stack_effect_mismatch_reports_diagnostic` (the negative golden) — parse+check the
   inline `oops` source (§9.3) and assert the returned `Err` message contains the word
   name `oops`, the operator `` `+` ``, `needs 2 values`, `holds 1`, and the declared
-  effect `( a:int -- int )`. Asserting substrings (not an exact column) keeps the
+  effect `( int -- int )`. Asserting substrings (not an exact column) keeps the
   golden robust while still testing the *right* error.
 
 ## 7. IR specification (`src/ir.rs`)
@@ -483,7 +523,7 @@ discrepancy. Format for the stack-effect underflow (the `oops` program from DESI
 Source (`oops`):
 
 ```forth
-: oops ( a:int -- int )
+: oops ( int -- int )
   | a | a a + + ;
 ```
 
@@ -492,7 +532,7 @@ Expected diagnostic (assert on the substrings, not the exact column):
 ```
 error: stack effect mismatch in `oops` (line 2)
   `+` needs 2 values, but the stack holds 1
-  note: declared ( a:int -- int )
+  note: declared ( int -- int )
 ```
 
 Other checker errors follow the same shape, e.g. branch-depth mismatch:
@@ -516,16 +556,21 @@ error: stack effect mismatch in `NAME` (line L)
   per CLAUDE.md).
 - Each stage has its `#[cfg(test)] mod tests` (happy + error), named
   `thing_condition_expected`.
-- `tests/phase0.rs` has the two positive goldens (no longer `#[ignore]`) and the
-  negative golden.
+- `tests/phase0.rs` has the three positive goldens (`gcd`, `factorial`, `lerp`; no
+  longer `#[ignore]`) and the negative golden.
 - No out-of-scope feature was added; `Ptr` remains opaque and unexercised; module
   layout unchanged except the deliberate edits in §5.
 
 ## Phases (JSON)
 
+The `phases` array is what `/implement` parses: each entry needs an integer `phase`
+and a string `focus` (`difficulty` optional, `standard`/`hard`); all other keys are
+ignored by the pipeline and kept here as the per-stage brief the implementer reads.
+The seven Phase 0 stages (P0.1–P0.7) map to `phase` 1–7.
+
 ```json
 {
-  "phase": "0",
+  "roadmapPhase": "0",
   "title": "Codegen spine",
   "pipeline": "source -> lex -> parse -> stack-effect(arity) check -> backend-neutral IR -> QBE IL -> qbe -> cc -> native binary",
   "exitCriteria": [
@@ -541,10 +586,13 @@ error: stack effect mismatch in `NAME` (line L)
     { "file": "src/parser.rs", "change": "attach spans to terms" },
     { "file": "src/ir.rs", "change": "fill IrModule/IrFunc + Block/Instr/Terminator; keep Ptr opaque and unused" }
   ],
-  "subphases": [
+  "phases": [
     {
+      "phase": 1,
+      "focus": "Lexer",
+      "effort": "S",
+      "difficulty": "standard",
       "id": "P0.1",
-      "title": "Lexer",
       "files": ["src/lexer.rs"],
       "deliverables": [
         "lex source -> Vec<(Token, Span)> with 1-based line/col",
@@ -562,30 +610,37 @@ error: stack effect mismatch in `NAME` (line L)
       "dependsOn": []
     },
     {
+      "phase": 2,
+      "focus": "Parser + AST",
+      "effort": "M",
+      "difficulty": "standard",
       "id": "P0.2",
-      "title": "Parser + AST",
       "files": ["src/parser.rs", "src/ast.rs"],
       "deliverables": [
         "apply ast changes 5.1-5.3",
         "parse ': name ( effect ) | locals | body ;'",
         "parse if/else/then (else optional)",
-        "body Word (not if/else/then) -> Term::Call",
+        "body Word (not if/else/then) -> Term::Call (shuffles included)",
         "structural parse errors with spans"
       ],
       "tests": [
         "parse_gcd_shape_matches_ast",
+        "parse_locals_block_populates_locals",
         "parse_if_without_else_has_empty_else_branch",
         "parse_missing_semicolon_is_error",
         "parse_then_without_if_is_error"
       ],
-      "dependsOn": ["P0.1"]
+      "dependsOn": [1]
     },
     {
+      "phase": 3,
+      "focus": "Stack-effect arity checker",
+      "effort": "M",
+      "difficulty": "standard",
       "id": "P0.3",
-      "title": "Stack-effect (arity) checker",
       "files": ["src/check.rs"],
       "deliverables": [
-        "word table seeded with builtins (+ - * mod = < > .)",
+        "word table seeded with builtins (+ - * mod = < > . dup drop swap over rot)",
         "virtual-stack depth simulation per body",
         "local binding pops N; local reference pushes 1",
         "if pops 1; branches must unify to equal depth",
@@ -596,35 +651,46 @@ error: stack effect mismatch in `NAME` (line L)
       "tests": [
         "check_gcd_is_ok",
         "check_factorial_is_ok",
+        "check_lerp_is_ok",
         "check_stack_underflow_is_error",
         "check_branch_depth_mismatch_is_error",
         "check_declared_output_mismatch_is_error",
         "check_unknown_word_is_error"
       ],
-      "dependsOn": ["P0.2"]
+      "dependsOn": [2]
     },
     {
+      "phase": 4,
+      "focus": "IR lowering",
+      "effort": "L",
+      "difficulty": "hard",
       "id": "P0.4",
-      "title": "IR lowering",
       "files": ["src/ir.rs"],
       "deliverables": [
         "fill IR types per section 7",
         "one IrFunc per word; params from inputs; ret Some(Int)/None",
         "virtual stack carrying SSA Values",
         "builtins -> Bin/Cmp/Print; user words -> Call",
+        "shuffles (dup/drop/swap/over/rot) -> value-stack juggling, no IR op",
         "if/else -> Jnz + branch blocks + Phi at join",
         "Ptr stays opaque and unused"
       ],
       "tests": [
         "lower_square_has_one_mul",
+        "lower_dup_reuses_value_id",
+        "lower_swap_reorders_without_instr",
+        "lower_drop_pops_without_instr",
         "lower_if_emits_phi_at_join",
         "lower_print_emits_print_instr"
       ],
-      "dependsOn": ["P0.3"]
+      "dependsOn": [3]
     },
     {
+      "phase": 5,
+      "focus": "QBE emit",
+      "effort": "M",
+      "difficulty": "hard",
       "id": "P0.5",
-      "title": "QBE emit",
       "files": ["src/backend/qbe.rs"],
       "deliverables": [
         "IrModule -> QBE IL text",
@@ -638,11 +704,14 @@ error: stack effect mismatch in `NAME` (line L)
         "emit_print_uses_printf_and_fmt",
         "emit_if_has_jnz_and_phi"
       ],
-      "dependsOn": ["P0.4"]
+      "dependsOn": [4]
     },
     {
+      "phase": 6,
+      "focus": "Driver + linking",
+      "effort": "S",
+      "difficulty": "standard",
       "id": "P0.6",
-      "title": "Driver + linking",
       "files": ["src/driver.rs"],
       "deliverables": [
         "wire lex->parse->check->lower->emit",
@@ -655,24 +724,28 @@ error: stack effect mismatch in `NAME` (line L)
       "tests": [
         "driver_binary_path_from_source_stem"
       ],
-      "dependsOn": ["P0.5"]
+      "dependsOn": [5]
     },
     {
+      "phase": 7,
+      "focus": "Golden integration tests",
+      "effort": "S",
+      "difficulty": "standard",
       "id": "P0.7",
-      "title": "Golden / integration tests",
       "files": ["tests/phase0.rs"],
       "deliverables": [
-        "un-ignore the two goldens",
-        "gcd prints 5; factorial prints 120",
+        "un-ignore the three goldens",
+        "gcd prints 5; factorial prints 120; lerp prints 30",
         "negative golden asserts the stack-effect diagnostic substrings",
         "requires qbe and cc present"
       ],
       "tests": [
         "gcd_compiles_and_runs",
         "factorial_compiles_and_runs",
+        "lerp_compiles_and_runs",
         "stack_effect_mismatch_reports_diagnostic"
       ],
-      "dependsOn": ["P0.6"]
+      "dependsOn": [6]
     }
   ],
   "outOfScope": [

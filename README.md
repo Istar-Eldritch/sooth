@@ -10,12 +10,11 @@ discipline already is move semantics, so affine types drop in for free. `dup` is
 explicit copy, and drop is a statically-known destructor point.
 
 ```forth
-: gcd ( a:int b:int -- int )
-  | a b |
-  b 0 = if
-    a
+: gcd ( int int -- int )
+  dup 0 = if
+    drop
   else
-    b  a b mod  gcd
+    swap over mod gcd
   then ;
 ```
 

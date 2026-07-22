@@ -58,7 +58,7 @@ lacks: statically-checked stack effects and named locals.
 order as the effect comment, and a word calls itself directly (no `recurse`):
 
 ```forth
-: gcd ( a:int b:int -- int )
+: gcd ( int int -- int )
   | a b |
   b 0 = if
     a
@@ -67,28 +67,50 @@ order as the effect comment, and a word calls itself directly (no `recurse`):
   then ;
 ```
 
+Locals are opt-in, not the default. Prefer the stack: with `dup`/`swap`/`drop` most
+one- or two-value words stay point-free (`square`, below, is just `dup *`). Reach for
+`| … |` only when shuffling would read worse than names, typically three-plus live
+values reused out of order, like a formula:
+
+```forth
+: lerp ( int int int -- int )   \ a + (b - a) * t
+  | a b t | b a - t * a + ;
+```
+
+`gcd` above sits on the line: two values, each reused and reordered in the recursive
+call, so names earn their keep. (Phase 0 ships no shuffling words yet, so there a
+local reference is the *only* way to reuse a value at all.)
+
 Checked stack effects are the cheap, high-value feature: Forth's signature failure
 mode (a silent underflow producing a wrong number at runtime) becomes a compile
 error.
 
 ```forth
-: oops ( a:int -- int )
+: oops ( int -- int )
   | a | a a + + ;
 ```
+
 ```
 error: stack effect mismatch in `oops`
-  declared ( a:int -- int ), but body has net effect ( a:int -- ⊥ )
+  declared ( int -- int ), but body has net effect ( int -- ⊥ )
   a a + +
         ^ `+` needs 2 values, stack holds 1 here (one `+` too many)
 ```
+
+Types and names live in different places, never both at once: the effect comment
+carries the boundary **types** (`( int int -- int )`), and `| … |` introduces the
+**names** the body uses. Naming a slot in the effect comment (`( a:int … )`) is an
+alternative to binding it, useful as caller-facing documentation for a word that
+juggles on the stack instead of naming; a slot that is bound by `| … |` stays a bare
+type, so a name is never written twice.
 
 ## The affine spine
 
 Plain data is `Copy`: reuse is free and `dup` is ordinary.
 
 ```forth
-: square ( n:int -- int )
-  | n | n n * ;          \ int is Copy: naming n and using it twice is fine
+: square ( int -- int )
+  dup * ;                \ int is Copy, so `dup` just copies the bits
 ```
 
 A value is *moved* by default, and a resource is affine (not `Copy`). `dup` on
@@ -96,13 +118,14 @@ something that owns a resource is a type error. This is the whole point, and it 
 where Sooth diverges from both Forth and Rust:
 
 ```forth
-: leak ( f:File -- File File )
-  | f | f dup ;
+: leak ( File -- File File )
+  dup ;
 ```
+
 ```
 error: cannot `dup` a value of type File
-  f dup
-    ^^^ File is affine: it owns an OS handle and has no Copy instance
+  dup
+  ^^^ File is affine: it owns an OS handle and has no Copy instance
   note: `dup` on plain data copies bits; there are no bits to copy here.
         thread the File through, or open a second handle explicitly.
 ```
@@ -112,7 +135,7 @@ hand it back, which in a stack language is just normal data flow
 (`size-of ( File -- File int )` returns the File):
 
 ```forth
-: report ( path:str -- )
+: report ( str -- )
   | path |
   path open-read         \ ( -- File )         acquire ownership
   size-of                \ ( File -- File int ) hands the File back
@@ -125,7 +148,7 @@ still correct: the File is still owned at end of scope, so the compiler inserts 
 destructor at that statically-known point.
 
 ```forth
-: report ( path:str -- )
+: report ( str -- )
   | path |
   path open-read
   size-of
@@ -138,6 +161,7 @@ destructor at that statically-known point.
 The value is in a few sharp, cheap features, not in a research-grade type theory.
 
 **In:**
+
 - Checked stack effects (the compile-time virtual-stack pass, needed for codegen
   anyway).
 - Concrete monomorphic types: the numeric tower, `bool`, fixed arrays, slices,
@@ -149,6 +173,7 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
   bit for the memory model and must exist early.
 
 **Out, and why:**
+
 - **Full HM inference**: not required for a craft language. Annotate stack effects
   explicitly (they double as documentation and as the LLM-nothing-to-do-here
   legibility win). Keeping each stack slot as `(value, type)` from day one leaves
@@ -259,7 +284,8 @@ full-service codegen is a tell that the project has drifted back to product-thin
 where the honest answer was "use Rust."
 
 QBE's costs, accepted: it emits assembly text, so you depend on the system assembler
-+ linker (a cross-toolchain + sysroot when cross-compiling the hosted layer);
+
+- linker (a cross-toolchain + sysroot when cross-compiling the hosted layer);
 i128/u128 are synthesised in the frontend (not QBE base types); atomics lower via FFI
 to C11 atomics rather than a QBE primitive. Its modest optimiser is a feature, not a
 bug: more predictable than LLVM's aggressive passes and friendlier to any later WCET
@@ -281,6 +307,7 @@ chafe later.
 **The one real casualty of dropping LLVM: no in-process JIT.** LLVM's ORC would have
 let the REPL and AOT share one engine and let compile-time immediate words run as
 native code. Without it:
+
 - Compile-time / immediate words run in a small **interpreter** over the same IR,
   not JIT-compiled to native. This is a normal choice (most languages interpret
   macros) and keeps the comptime path simple.
@@ -292,6 +319,7 @@ native code. Without it:
 Only two things must be core intrinsics; everything else is a library.
 
 **Core intrinsics (cannot be synthesised from below):**
+
 - **Atomics + memory ordering** (compare-and-swap, acquire/release). Codegen must
   respect them as barriers. On the from-scratch backend, emit LL/SC (arm64) or
   `LOCK`/CAS (x86) directly; on QBE, lean on FFI to C11 atomics or hand-written asm
@@ -313,7 +341,7 @@ channels so nothing needs to be `dup`ed:
 ```forth
 \ intrinsics: spawn ( q -- Thread ), cas ( p a b -- bool ). the rest is library.
 
-: worker ( ch:Recv[Job] -- )
+: worker ( Recv[Job] -- )
   | ch |
   begin
     ch recv            \ ( -- ch Job )  ownership of the Job MOVES to us
@@ -339,6 +367,7 @@ RT properties come for free: no GC (no stop-the-world pauses) and deterministic 
 jitter either.
 
 What was *not* built is the RT *guarantee* machinery:
+
 - **Soft real-time** (audio, games, robotics tolerant of occasional misses) works
   essentially out of the box.
 - **Hard real-time** (deadline miss = failure) is achievable by discipline, not
@@ -416,7 +445,8 @@ subset rather than idiomatic host-language code with no analog.
 
 The self-hosting subset is smaller than before precisely because the language is
 smaller: concrete monomorphic types + ADTs + pattern matching, growable collections
-+ strings, words + modules, errors as values, and a modest C FFI (now only for the
+
+- strings, words + modules, errors as values, and a modest C FFI (now only for the
 OS/hosted layer, not for a solver or LLVM). No inference, no refinements, no effect
 rows, no borrow analysis needed to write the compiler in it.
 

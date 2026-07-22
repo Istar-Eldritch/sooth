@@ -12,7 +12,9 @@ pub struct WordDef {
     pub body: Vec<Term>,
 }
 
-/// A checked stack effect, e.g. `( a:int b:int -- int )`.
+/// A checked stack effect, e.g. `( int int -- int )`. A slot may carry a name
+/// (`a:int`) as caller-facing documentation, but a slot bound by `| … |` stays a
+/// bare type so a name is never written twice.
 #[derive(Debug, Default)]
 pub struct StackEffect {
     pub inputs: Vec<TypedSlot>,

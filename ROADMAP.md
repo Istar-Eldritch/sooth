@@ -32,8 +32,11 @@ it, since LLVM and Z3 were dropped. Free choice.
 ## Phases
 
 ### Phase 0 — Codegen spine  `[L]`  `[highest risk: go/no-go on the architecture]`
+
 Lexer/parser for a minimal concrete-typed core (`: ;`, literals, arithmetic,
-`if/else/then`, `| locals |`). Compile-time virtual stack → a
+comparisons, `if/else/then`, the core stack shuffles `dup`/`drop`/`swap`/`over`/`rot`
+(monomorphic, int-only here; widened later), and `| locals |`). Compile-time virtual
+stack → a
 backend-neutral IR → **QBE** IL → `qbe` → system assembler + linker → native binary.
 No LLVM, no hand-written native backend. Keep the IR's `Ptr[T]` abstract from the
 start so a WASM sibling lowering can be added later. Static stack-effect (arity)
@@ -42,6 +45,7 @@ checking. One concrete int type, no heap.
 correctly. Proves the virtual-stack → IR → QBE → native path end-to-end.
 
 ### Phase 1 — REPL and liveness  `[M]`
+
 No in-process JIT (that left with LLVM). REPL that compiles each snippet to a temp
 shared object and loads it, or batch-recompiles; word definition, execution, and
 redefinition (name→latest-symbol table). Compile-time / immediate words run in a
@@ -51,6 +55,7 @@ throwaway-but-real interactive session exists.
 **Dogfood:** a tiny interactive calculator or turtle-graphics doodle.
 
 ### Phase 2 — Typed core (monomorphic)  `[L]`
+
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; i128/u128 synthesised in the frontend if on QBE; `*/` widening
 primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
@@ -58,15 +63,17 @@ pattern matching. Non-null pointers + explicit optional type. The **`Copy` vs
 affine distinction** as a built-in property of types (primitives Copy; anything
 owning a resource affine), so Phase 3 has it to build on. Stack-effect checking now
 unifies **type and arity** at branch join points (loops arrive with the loop
-primitive in Phase 4). Still heap-free: value types
-+ fixed-size arrays only.
+primitive in Phase 4). Still heap-free: value types and fixed-size arrays only.
 **Exit:** typed programs with structs/enums/match; type and arity errors are sharp
 compile errors.
 **Dogfood:** a small parser or a fixed-size VM for some toy bytecode.
 
 ### Phase 3 — The affine spine  `[XL]`  `[highest novelty: this is the point of the language]`
-Move semantics as the default; `dup` is the explicit copy, gated on `Copy`;
-deterministic drop (destructor at the statically-known end of ownership). Hylo-style
+
+Move semantics as the default; `dup` (a plain int-copy since Phase 0) becomes the
+explicit copy **gated on `Copy`**, and `drop` (a plain discard since Phase 0) becomes
+the statically-known destructor point; deterministic drop (destructor at the
+statically-known end of ownership). Hylo-style
 mutable value semantics: parameter conventions (`let`/`inout`/`sink`/`set`) and
 second-class references (can't be stored, can't escape scope), so no borrow checker
 and no lifetimes. Opt-in RC (`Rc`/`Arc`-equivalent). **Heap arrives here**, under
@@ -78,8 +85,10 @@ affine values that can't be duplicated or leaked.
 with the compiler catching a deliberate double-use.
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
-Not full HM inference. Type variables (`'T`) and a row variable (`..s`) so
-`dup`/`swap`/`max` and user words have honest polymorphic signatures; monomorphise
+
+Not full HM inference. Type variables (`'T`) and a row variable (`..s`) so the
+monomorphic Phase 0 shuffles (`dup`/`swap`/`over`/`rot`/`drop`), plus `max` and user
+words, gain honest polymorphic signatures; monomorphise
 per concrete stack shape, force-inline the small core words. Required operations
 (e.g. `>` for `max`) resolved at the concrete instantiation, Kitten-style, no formal
 trait system. **Quotations** (`[ ... ]` + `call`) as the sole iteration primitive,
@@ -97,6 +106,7 @@ collection; combinators verified to inline to loops, not per-element calls.
 itself, then rewrite an earlier program to use it.
 
 ### Phase 5 — Errors as values  `[S]`
+
 Result/Either as an ordinary ADT (mostly free from Phase 2), plus the `?`-style
 short-circuit sugar and the convention that fallible words return it. Branch-on-
 result codegen, no unwinding. FFI/C error returns map to Result at the (later)
@@ -105,6 +115,7 @@ safe-wrapper layer.
 exists anywhere.
 
 ### Phase 6 — Stdlib and `no_std` layering  `[L]`  `[where it becomes usable for real programs]`
+
 The four layers from DESIGN.md, with boundaries and the allocator *interface* fixed
 now even though hosted is built first: **core** (already accreting), **fixed**
 (allocation-free fixed-capacity vec/map/string/ringbuffer), **alloc** (growable
@@ -117,6 +128,7 @@ library; the `fixed` layer works with no allocator present.
 static-site or markdown thing) written entirely in Sooth.
 
 ### Phase 7 — Concurrency (library)  `[M]`
+
 Core intrinsics only: **atomics + memory ordering** (LL/SC on arm64, or FFI to C11
 atomics on QBE) and a **spawn** primitive (thin FFI to `pthread_create` at the
 hosted layer). Everything else is library: split-endpoint channels, mutexes,
@@ -130,6 +142,7 @@ attempt to alias a sent value is a compile error.
 **Dogfood:** a small worker-pool or a producer/consumer pipeline.
 
 ### Phase 8 — Bare metal  `[M]`  `[the craft milestone: own the vertical to the metal]`
+
 Cross-compile to arm64 (or Cortex-M) bare metal: per-target intrinsics
 (memcpy/memset, integer-divide/soft-float helpers), linker script, entry point,
 `no_std` core + `fixed` layer on-device, soft-float lint. Soft-real-time works out
@@ -140,6 +153,7 @@ blinking an LED or driving a sensor, from your own source language down to the
 machine code you emit.
 
 ### Phase 9 — Self-hosting  `[XL]`
+
 Stabilise the self-hosting subset S (smaller than before: concrete types + ADTs +
 pattern matching, growable collections + strings, words + modules, errors as
 values, a modest C FFI for the hosted layer; no inference, no refinements, no effect
@@ -149,6 +163,7 @@ Compile-time immediate words run in the same interpreter, no metacircular JIT.
 **Exit:** the compiler compiles itself; fixpoint reached.
 
 ### Optional (any time after Phase 2) — WASM sibling backend  `[M]`
+
 A second lowering off the backend-neutral IR, parallel to QBE, not through it: Sooth
 IR → WASM (emit, hand to binaryen for optimisation and any structured-control
 cleanup). No relooper needed, since the IR already carries structured control flow.
@@ -158,6 +173,7 @@ Depends on `Ptr[T]` having been kept abstract since Phase 2.
 **Exit:** a Sooth program runs both as a native QBE binary and as a `.wasm` module.
 
 ## Cross-cutting — Tooling and diagnostics  `[ongoing from Phase 0]`
+
 Not a terminal phase. Good, localised compile errors start at Phase 0, for the
 author's own write-run-fix loop and for legibility, not for any LLM-authorability
 goal (dropped). A formatter and an auto-generated reference doc (word list + stack
