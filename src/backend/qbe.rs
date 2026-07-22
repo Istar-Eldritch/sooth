@@ -147,7 +147,7 @@ mod tests {
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let func = lower_line(0, &terms, entry_depth, &env, &resolve);
+        let (func, _m) = lower_line(0, &terms, entry_depth, &env, &resolve);
         emit(&IrModule { funcs: vec![func] }).unwrap()
     }
 

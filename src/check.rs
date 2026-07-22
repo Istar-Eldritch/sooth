@@ -319,4 +319,11 @@ mod tests {
         assert!(err.contains("needs 2 values"), "unexpected message: {err}");
         assert!(err.contains("holds 1"), "unexpected message: {err}");
     }
+
+    #[test]
+    fn infer_line_unknown_word_is_error() {
+        let err = infer_src("frobnicate", 0).unwrap_err();
+        assert!(err.contains("unknown word"), "unexpected message: {err}");
+        assert!(err.contains("frobnicate"), "unexpected message: {err}");
+    }
 }

@@ -71,11 +71,36 @@ fn bad_line_reports_and_session_survives() {
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "stack: 5");
     assert!(
-        lines[1].starts_with("error"),
-        "unknown word should report a diagnostic: {}",
+        lines[1].contains("unknown word") && lines[1].contains("unknown-word"),
+        "expected an unknown-word diagnostic naming `unknown-word`: {}",
         lines[1]
     );
     assert_eq!(lines[2], "stack: 6");
+}
+
+#[test]
+fn failed_redefinition_keeps_old_generation_resident() {
+    let out = run_session(&[
+        ": sq ( int -- int ) | n | n n * ;",
+        "3 sq",
+        ": sq ( int -- int ) dup dup * ;",
+        "3 sq",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 6, "unexpected output:\n{out}");
+    assert_eq!(lines[0], "defined sq");
+    assert_eq!(lines[1], "stack: 9");
+    assert!(
+        lines[2].contains("stack effect mismatch in `sq`"),
+        "expected a check error for the bad redefinition: {}",
+        lines[2]
+    );
+    assert!(lines[3].contains("body leaves 2 values"));
+    assert!(lines[3].contains("declares 1 outputs"));
+    // The failed redefinition never committed: `sq` still resolves to the
+    // original generation (`n n *`), and the stack from the first `3 sq` is
+    // untouched, so the second `3 sq` appends its own 9.
+    assert_eq!(lines[5], "stack: 9 9");
 }
 
 #[test]

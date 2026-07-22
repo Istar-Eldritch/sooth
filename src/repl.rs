@@ -234,10 +234,19 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let func = {
+        let (func, m) = {
             let resolve = resolver_for(&self.env);
             ir::lower_line(seq, terms, entry_depth, &arity_env, &resolve)
         };
+        // `m` (the wrapper's emitted store count) and `net_depth` (the checker's
+        // independently-inferred net effect) are the same depth simulation and
+        // must always agree; size the buffer from `m`, the number the wrapper
+        // actually writes, and assert the checker agrees rather than trusting
+        // two separately-computed counts to stay in sync as codegen evolves.
+        debug_assert_eq!(
+            m, net_depth,
+            "lowering emitted a different depth than the checker inferred"
+        );
 
         let ssa = backend::qbe::emit(&IrModule { funcs: vec![func] })?;
         let dir = driver::tempfile_dir()?;
@@ -250,7 +259,6 @@ impl Session {
         // matching the `(*mut u8, usize) -> usize` transmute below.
         let wrapper: extern "C" fn(*mut u8, usize) -> usize = unsafe { std::mem::transmute(sym) };
 
-        let m = net_depth;
         if self.buf.len() < m {
             self.buf.resize(m, 0);
         }

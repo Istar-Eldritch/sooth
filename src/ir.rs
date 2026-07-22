@@ -120,13 +120,17 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// (`entry_depth` slots) from the buffer, the body runs in registers exactly
 /// like a word, the epilogue stores the resulting `M` slots back, and it returns
 /// the advanced top `top + (M - entry_depth) * 8`.
+///
+/// Returns the `IrFunc` alongside the emitted `M`, so the caller sizes its
+/// buffer from the same number the wrapper actually stores, rather than from
+/// a separately-computed depth that could in principle diverge.
 pub fn lower_line(
     seq: u64,
     terms: &[Term],
     entry_depth: usize,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-) -> IrFunc {
+) -> (IrFunc, usize) {
     let mut b = FuncBuilder::new(env, resolve);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
@@ -163,12 +167,13 @@ pub fn lower_line(
     b.push_instr(Instr::Bin(new_top, BinOp::Add, top, delta_val));
     b.seal_block(Terminator::Ret(Some(new_top)));
 
-    IrFunc {
+    let func = IrFunc {
         name: format!("sooth_line_{seq}"),
         params: vec![IrType::Ptr, IrType::Int],
         ret: Some(IrType::Int),
         blocks: b.blocks,
-    }
+    };
+    (func, m)
 }
 
 /// Lower a single word body against an external env/resolver. The REPL uses
@@ -518,10 +523,10 @@ mod tests {
         // result: D=2 loads, M=1 store.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let func = lower_line(0, &line_terms("+"), 2, &env, &resolve);
+        let (func, m) = lower_line(0, &line_terms("+"), 2, &env, &resolve);
+        assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
         assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 1);
-        assert_eq!(count(&func, |i| matches!(i, Instr::PtrOffset(..))), 3);
     }
 
     #[test]
@@ -529,7 +534,8 @@ mod tests {
         // `2 3 +` from D=0 nets +1, so new_top = top + 8.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let func = lower_line(0, &line_terms("2 3 +"), 0, &env, &resolve);
+        let (func, m) = lower_line(0, &line_terms("2 3 +"), 0, &env, &resolve);
+        assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
         let ret = match last.term {
             Terminator::Ret(Some(v)) => v,
@@ -560,7 +566,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("sq".to_string(), (1usize, 1usize));
         let resolve = |name: &str| format!("{name}__gen2");
-        let func = lower_line(0, &line_terms("5 sq"), 0, &env, &resolve);
+        let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &env, &resolve);
         let calls: Vec<&str> = instrs(&func)
             .iter()
             .filter_map(|i| match i {

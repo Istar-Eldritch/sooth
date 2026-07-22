@@ -1,4 +1,4 @@
-# Phase 1 — REPL and liveness (condensed)
+# Phase 1: REPL and liveness (condensed)
 
 `cargo run -- repl` starts an interactive `int`-only session: define words, evaluate bare expressions, redefine words, and persist a data stack across lines, all on the real QBE backend via `dlopen` (no interpreter, no JIT). Phase 0 stage functions are reused unchanged for word bodies; only the line surface, a marshalling wrapper, and a compile-load-call driver path are new.
 
@@ -33,7 +33,7 @@ Three instrs keep `Ptr` opaque (WASM depends on it): `PtrOffset` (QBE `add`), `L
 - `parser::parse_line`: leading `Colon` → `parse_worddef`, else a term sequence to EOF. Trailing tokens after a def are rejected; unterminated def is a normal parse error (no multi-line accumulation).
 - `check`: shared depth-simulation helpers reworked to take an arity `env` + light error context (name + optional declared effect) instead of `&WordDef`. `infer_line(terms, entry_depth, env)` returns final depth; carried-stack underflow (`depth < in_arity`) is a reported diagnostic (`error: stack underflow: needs N values, but the stack holds M`). Def path seeds the definee's own arity for self-recursion.
 
-## Redefinition — generation-mangled symbols
+## Redefinition: generation-mangled symbols
 
 Latest-symbol binding: each def of `name` exports `name__gen{K}`. Session keeps `name → { arity, generation, symbol }`. Calls resolve to the callee's **current** mangled symbol; self-reference binds the new generation (recursion). Already-loaded code keeps the callee it was compiled against. Builtins never appear as `Instr::Call`, so never mangled. Distinct generations = distinct symbols, sidestepping `RTLD_GLOBAL` clashes.
 
@@ -58,11 +58,11 @@ New `src/repl.rs` (Session, loop, FFI, mangling/resolution, `format_stack`). `co
 
 ## Delivered in 5 phases
 
-1. **SO compile + dlopen** (`ef23fd7`) — de-risk the mechanism: `compile_so`, `pub(crate)` helpers, raw FFI; compile a word to `.so` and call in-process.
-2. **Line surface parse + check** (`11ab484`, `582965d`) — `Line`, `parse_line`, env-driven simulation + `infer_line`.
-3. **Wrapper IR + QBE** (`b0739e9`) — `Load`/`Store`/`PtrOffset`, `lower_line`, resolver threading, emit arms.
-4. **Session loop + redefinition** (`af7b808`, `b47e91d`, `72a5445`) — Session state, generation mangling, def/expr paths, error recovery, deterministic output.
-5. **Goldens + docs** (`60aa24f`, `a761a3e`) — `tests/phase1.rs` scripted sessions (define/call, persist, redefine, survive bad line, calculator dogfood), DESIGN/ROADMAP/README.
+1. **SO compile + dlopen** (`ef23fd7`), de-risk the mechanism: `compile_so`, `pub(crate)` helpers, raw FFI; compile a word to `.so` and call in-process.
+2. **Line surface parse + check** (`11ab484`, `582965d`), `Line`, `parse_line`, env-driven simulation + `infer_line`.
+3. **Wrapper IR + QBE** (`b0739e9`), `Load`/`Store`/`PtrOffset`, `lower_line`, resolver threading, emit arms.
+4. **Session loop + redefinition** (`af7b808`, `b47e91d`, `72a5445`), Session state, generation mangling, def/expr paths, error recovery, deterministic output.
+5. **Goldens + docs** (`60aa24f`, `a761a3e`), `tests/phase1.rs` scripted sessions (define/call, persist, redefine, survive bad line, calculator dogfood), DESIGN/ROADMAP/README.
 
 ## Test coverage
 
