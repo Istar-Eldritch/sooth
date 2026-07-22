@@ -93,6 +93,11 @@ fn emit_instr(out: &mut String, instr: &Instr) {
             }
         }
         Instr::Print(v) => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
+        Instr::PtrOffset(dst, base, bytes) => {
+            writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
+        }
+        Instr::Load(dst, ptr) => writeln!(out, "\t{} =l loadl {}", val(*dst), val(*ptr)),
+        Instr::Store(ptr, v) => writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr)),
         Instr::Phi(r, arms) => {
             let a: Vec<String> = arms
                 .iter()
@@ -119,10 +124,12 @@ fn emit_term(out: &mut String, term: &Terminator) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::Line;
     use crate::check::check;
-    use crate::ir::lower;
+    use crate::ir::{lower, lower_line, IrModule};
     use crate::lexer::lex;
-    use crate::parser::parse;
+    use crate::parser::{parse, parse_line};
+    use std::collections::HashMap;
 
     fn emit_src(src: &str) -> String {
         let tokens = lex(src).unwrap();
@@ -130,6 +137,18 @@ mod tests {
         check(&module).unwrap();
         let ir = lower(&module).unwrap();
         emit(&ir).unwrap()
+    }
+
+    fn emit_line(src: &str, entry_depth: usize) -> String {
+        let tokens = lex(src).unwrap();
+        let terms = match parse_line(&tokens).unwrap() {
+            Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let func = lower_line(0, &terms, entry_depth, &env, &resolve);
+        emit(&IrModule { funcs: vec![func] }).unwrap()
     }
 
     #[test]
@@ -159,5 +178,22 @@ mod tests {
         let il = emit_src(": main ( -- ) 5 . ;");
         assert!(il.contains("$sooth_main"));
         assert!(!il.contains("$main("));
+    }
+
+    #[test]
+    fn emit_wrapper_signature_takes_stack_and_top() {
+        let il = emit_line("2 3 +", 0);
+        assert!(
+            il.contains("export function l $sooth_line_0(l %v0, l %v1)"),
+            "unexpected signature: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_line_wrapper_has_load_and_store() {
+        // `+` from a carried depth of 2 loads the two slots and stores the result.
+        let il = emit_line("+", 2);
+        assert!(il.contains("loadl "), "expected a load: {il}");
+        assert!(il.contains("storel "), "expected a store: {il}");
     }
 }
