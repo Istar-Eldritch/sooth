@@ -5,6 +5,10 @@ edition = "2021"
 description = "The Sooth compiler (bootstrap): a small, statically-checked concatenative language."
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "sooth"
+path = "src/lib.rs"
+
 [[bin]]
 name = "sooth"
 path = "src/main.rs"

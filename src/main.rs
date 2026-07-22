@@ -1,13 +1,4 @@
-#![allow(dead_code, unused)]
-
-mod ast;
-mod backend;
-mod check;
-mod driver;
-mod ir;
-mod lexer;
-mod parser;
-
+use sooth::driver;
 use std::path::Path;
 use std::process::exit;
 
