@@ -189,6 +189,7 @@ fn check_term(
 ) -> Result<usize, String> {
     match &term.kind {
         TermKind::IntLit(_) => Ok(depth + 1),
+        TermKind::BoolLit(_) => Ok(depth + 1),
         TermKind::Call(name) => {
             if ctx.locals().contains(name) {
                 return Ok(depth + 1);

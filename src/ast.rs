@@ -85,6 +85,7 @@ pub struct Term {
 #[derive(Debug)]
 pub enum TermKind {
     IntLit(i64),
+    BoolLit(bool),
     /// A word invocation, or a reference to a named local.
     Call(String),
     If {

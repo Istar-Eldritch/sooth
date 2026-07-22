@@ -243,6 +243,14 @@ impl<'t> Parser<'t> {
                 kind: TermKind::IntLit(n),
                 span,
             }),
+            Token::Word(w) if w == "true" => Ok(Term {
+                kind: TermKind::BoolLit(true),
+                span,
+            }),
+            Token::Word(w) if w == "false" => Ok(Term {
+                kind: TermKind::BoolLit(false),
+                span,
+            }),
             Token::Word(w) if w == "if" => {
                 let then_branch = self
                     .parse_terms("`else` or `then` (unterminated `if`)", |tok| {
@@ -353,6 +361,14 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("unknown type"), "unexpected message: {err}");
         assert!(err.contains("foo"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_true_false_are_bool_literals() {
+        let module = parse_src(": w ( -- bool bool ) true false ;").unwrap();
+        let body = &module.words[0].body;
+        assert!(matches!(body[0].kind, TermKind::BoolLit(true)));
+        assert!(matches!(body[1].kind, TermKind::BoolLit(false)));
     }
 
     #[test]

@@ -201,9 +201,24 @@ impl Session {
         // whatever generation `env` still holds for `name`. Scoped so the
         // borrow of `self.env` ends before the commit below.
         ir_env.insert(name.clone(), arity);
+        // The checker's arity env carries no `IrType`s yet (a Phase 3 typed-repl
+        // concern); ir only needs the arity, so unknown output types default to
+        // `IrType::Int` except for the word's own declared output.
+        let ret_ty = word
+            .effect
+            .outputs
+            .first()
+            .map(|slot| ir::ir_type_of(slot.ty));
+        let ir_lower_env: HashMap<String, ir::Arity> = ir_env
+            .iter()
+            .map(|(n, &(i, o))| {
+                let ty = if n == &name { ret_ty } else { None };
+                (n.clone(), (i, o, ty))
+            })
+            .collect();
         let mut func = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            ir::lower_word(&word, &ir_env, &resolve)
+            ir::lower_word(&word, &ir_lower_env, &resolve)
         };
         func.name = symbol.clone();
 
@@ -232,11 +247,18 @@ impl Session {
         let entry_depth = self.top / 8;
         let net_depth = check::infer_line(terms, entry_depth, &arity_env)?;
 
+        // Same Phase-3-deferred gap as `eval_def`: no output types are known
+        // here yet, so every call defaults to `IrType::Int`.
+        let ir_lower_env: HashMap<String, ir::Arity> = arity_env
+            .iter()
+            .map(|(n, &(i, o))| (n.clone(), (i, o, None)))
+            .collect();
+
         self.seq += 1;
         let seq = self.seq;
         let (func, m) = {
             let resolve = resolver_for(&self.env);
-            ir::lower_line(seq, terms, entry_depth, &arity_env, &resolve)
+            ir::lower_line(seq, terms, entry_depth, &ir_lower_env, &resolve)
         };
         // `m` (the wrapper's emitted store count) and `net_depth` (the checker's
         // independently-inferred net effect) are the same depth simulation and
