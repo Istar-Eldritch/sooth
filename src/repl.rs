@@ -12,8 +12,8 @@ use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::ast::{Line, Term, WordDef};
-use crate::check::{self, Arity};
+use crate::ast::{Line, Term, Type, WordDef};
+use crate::check::{self, Sig};
 use crate::driver;
 use crate::ir::{self, IrModule};
 use crate::{backend, lexer, parser};
@@ -82,16 +82,27 @@ fn last_dlerror() -> String {
     }
 }
 
-/// A session's knowledge of one user-defined word: its arity, the generation
-/// counter it was last (re)defined at, and the mangled symbol that generation
-/// exports. Redefinition bumps the generation and mints a new symbol; calls
-/// compiled before the redefinition keep resolving to the old symbol (it's
+/// A session's knowledge of one user-defined word: its typed effect, the
+/// generation counter it was last (re)defined at, and the mangled symbol that
+/// generation exports. Redefinition bumps the generation and mints a new symbol;
+/// calls compiled before the redefinition keep resolving to the old symbol (it's
 /// still resident, never `dlclose`d), calls compiled after resolve to the new
 /// one.
 struct WordEntry {
-    arity: Arity,
+    sig: Sig,
     generation: u64,
     symbol: String,
+}
+
+/// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
+/// input/output counts and the output `IrType`, not the full typed effect.
+fn ir_arity_env(env: &HashMap<String, Sig>) -> HashMap<String, ir::Arity> {
+    env.iter()
+        .map(|(name, sig)| {
+            let ret = sig.outputs.first().map(|&ty| ir::ir_type_of(ty));
+            (name.clone(), (sig.inputs.len(), sig.outputs.len(), ret))
+        })
+        .collect()
 }
 
 /// The mangled export symbol for `name` at `generation`.
@@ -151,6 +162,9 @@ pub struct Session {
     env: HashMap<String, WordEntry>,
     buf: Vec<i64>,
     top: usize,
+    /// The `Type` of each carried slot, one per live 8-byte buffer slot
+    /// (`types.len() == top / 8`).
+    types: Vec<Type>,
     libs: Vec<Library>,
     seq: u64,
 }
@@ -161,16 +175,17 @@ impl Session {
             env: HashMap::new(),
             buf: Vec::new(),
             top: 0,
+            types: Vec::new(),
             libs: Vec::new(),
             seq: 0,
         }
     }
 
-    /// The checker's arity env: builtins plus every successfully-defined word.
-    fn arity_env(&self) -> HashMap<String, Arity> {
+    /// The checker's typed env: builtins plus every successfully-defined word.
+    fn typed_env(&self) -> HashMap<String, Sig> {
         let mut env = check::builtin_table();
         for (name, entry) in &self.env {
-            env.insert(name.clone(), entry.arity);
+            env.insert(name.clone(), entry.sig.clone());
         }
         env
     }
@@ -189,33 +204,20 @@ impl Session {
 
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
         let name = word.name.clone();
-        let arity = (word.effect.inputs.len(), word.effect.outputs.len());
+        let sig = check::sig_of(&word.effect);
 
-        let mut ir_env = self.arity_env();
-        check::check_def(&word, &ir_env)?;
+        let mut env = self.typed_env();
+        check::check_def(&word, &env)?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);
 
         // Self-recursive calls in the body must bind this new generation, not
-        // whatever generation `env` still holds for `name`. Scoped so the
-        // borrow of `self.env` ends before the commit below.
-        ir_env.insert(name.clone(), arity);
-        // The checker's arity env carries no `IrType`s yet (a Phase 3 typed-repl
-        // concern); ir only needs the arity, so unknown output types default to
-        // `IrType::Int` except for the word's own declared output.
-        let ret_ty = word
-            .effect
-            .outputs
-            .first()
-            .map(|slot| ir::ir_type_of(slot.ty));
-        let ir_lower_env: HashMap<String, ir::Arity> = ir_env
-            .iter()
-            .map(|(n, &(i, o))| {
-                let ty = if n == &name { ret_ty } else { None };
-                (n.clone(), (i, o, ty))
-            })
-            .collect();
+        // whatever generation `env` still holds for `name`; seed the definee's
+        // own signature so ir derives its return type. The arity map for ir is
+        // derived from the typed env (RK2): ir needs only counts + output type.
+        env.insert(name.clone(), sig.clone());
+        let ir_lower_env = ir_arity_env(&env);
         let mut func = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
             ir::lower_word(&word, &ir_lower_env, &resolve)
@@ -233,7 +235,7 @@ impl Session {
         self.env.insert(
             name.clone(),
             WordEntry {
-                arity,
+                sig,
                 generation,
                 symbol,
             },
@@ -243,16 +245,12 @@ impl Session {
     }
 
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
-        let arity_env = self.arity_env();
+        let env = self.typed_env();
         let entry_depth = self.top / 8;
-        let net_depth = check::infer_line(terms, entry_depth, &arity_env)?;
+        let net_stack = check::infer_line(terms, &self.types, &env)?;
+        let net_depth = net_stack.len();
 
-        // Same Phase-3-deferred gap as `eval_def`: no output types are known
-        // here yet, so every call defaults to `IrType::Int`.
-        let ir_lower_env: HashMap<String, ir::Arity> = arity_env
-            .iter()
-            .map(|(n, &(i, o))| (n.clone(), (i, o, None)))
-            .collect();
+        let ir_lower_env = ir_arity_env(&env);
 
         self.seq += 1;
         let seq = self.seq;
@@ -301,6 +299,7 @@ impl Session {
         // SAFETY: fflush(NULL) flushes all open C streams; always sound.
         unsafe { fflush(std::ptr::null_mut()) };
         self.top = new_top;
+        self.types = net_stack;
         self.libs.push(lib);
 
         let d = self.top / 8;
@@ -378,7 +377,10 @@ mod tests {
 
     fn entry(generation: u64) -> WordEntry {
         WordEntry {
-            arity: (1, 1),
+            sig: Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![Type::I64],
+            },
             generation,
             symbol: mangled_symbol("sq", generation),
         }
