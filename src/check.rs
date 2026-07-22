@@ -1,7 +1,7 @@
 //! Stack-effect checker. Phase 0: arity only; type unification arrives in Phase 2.
 //!
 //! Simulates the compile-time virtual stack through each word body and verifies
-//! the net effect matches the declared signature, unifying branch/loop join points.
+//! the net effect matches the declared signature, unifying branch join points.
 //! Mismatched depth across branches is a compile error (Forth's silent-underflow
 //! failure mode becomes a diagnostic here).
 
@@ -52,9 +52,14 @@ pub fn check(module: &Module) -> Result<(), String> {
 fn effect_str(effect: &StackEffect) -> String {
     let ins: Vec<&str> = effect.inputs.iter().map(|s| s.ty.as_str()).collect();
     let outs: Vec<&str> = effect.outputs.iter().map(|s| s.ty.as_str()).collect();
-    format!("( {} -- {} )", ins.join(" "), outs.join(" "))
-        .replace("(  -- ", "( -- ")
-        .replace(" --  )", " -- )")
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
 }
 
 fn check_word(word: &WordDef, words: &HashMap<String, Arity>) -> Result<(), String> {
