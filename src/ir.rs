@@ -97,8 +97,9 @@ pub enum Terminator {
 }
 
 /// Declared signature of a user word: (input count, output count, output
-/// `IrType` if any). The REPL's arity env (Phase 3 typed rewire pending) fills
-/// the output type as `None`, which callers treat as `IrType::Int`.
+/// `IrType` if any). The build path derives this from declared slot types; the
+/// REPL derives it from the checker's typed env. A `None` output type (e.g. a
+/// word with no output) is treated as `IrType::Int` by callers.
 pub type Arity = (usize, usize, Option<IrType>);
 
 /// Maps a called user-word name to the symbol it is emitted/linked as. The build
