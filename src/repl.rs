@@ -29,6 +29,7 @@ extern "C" {
     fn dlopen(filename: *const c_char, flag: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
     fn dlerror() -> *mut c_char;
+    fn fflush(stream: *mut c_void) -> c_int;
 }
 
 /// A loaded shared object. The session keeps every handle resident (never
@@ -265,6 +266,10 @@ impl Session {
         // `[0, max(self.top, m*8))`.
         let new_top = wrapper(base_ptr, self.top);
 
+        // Flush the loaded code's C stdio buffer so its `.`/printf output lands
+        // on the fd before the host writes the residual-stack line.
+        // SAFETY: fflush(NULL) flushes all open C streams; always sound.
+        unsafe { fflush(std::ptr::null_mut()) };
         self.top = new_top;
         self.libs.push(lib);
 
