@@ -77,10 +77,6 @@ pub enum Terminator {
     Jmp(BlockId),
 }
 
-/// Opaque pointer handle. Concretised per backend; do not assume a width here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ptr(pub u32);
-
 /// Declared arity of a user word: (inputs, outputs).
 type Arity = (usize, usize);
 

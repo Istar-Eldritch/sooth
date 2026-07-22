@@ -23,7 +23,7 @@ Downstream of `phase0-brief.md`, `DESIGN.md` (QBE backend; `Ptr[T]` opaque; affi
 ## Scaffold changes made
 - **§5.1** Removed `Term::BeginUntil` (violated no-loop-keywords invariant).
 - **§5.2** `WordDef.locals: Vec<String>` (names in effect order; empty if absent). Local refs stay `TermKind::Call(name)`; resolution (locals → words/builtins) is the checker's job.
-- **§5.3** Spans: `Span { line, col }` (1-based); `Term { kind: TermKind, span }`; `TermKind = IntLit(i64) | Call(String) | If { then_branch, else_branch }`. `lex` returns `Vec<(Token, Span)>` (Token enum unchanged); parser copies token span onto each term. No gutter/caret renderer — `file:line:col` messages only.
+- **§5.3** Spans: `Span { line, col }` (1-based); `Term { kind: TermKind, span }`; `TermKind = IntLit(i64) | Call(String) | If { then_branch, else_branch }`. `lex` returns `Vec<(Token, Span)>` (Token enum unchanged); parser copies token span onto each term. No gutter/caret renderer — no filename in any message; parser/lexer errors carry `line:col`, checker errors carry `line` only.
 - **§5.4** Filled `IrModule`/`IrFunc`; `Ptr` kept opaque.
 
 ## Stages
@@ -61,7 +61,8 @@ int main(void) { sooth_main(); return 0; }
 `IrModule { funcs }`; `IrFunc { name, params: Vec<IrType>, ret: Option<IrType>, blocks }` (blocks[0] entry). `IrType = Int | Ptr` (Ptr unused). `Value(u32)`, `BlockId(u32)`. `Block { id, instrs, term }`. `Instr = Const | Bin(BinOp: Add Sub Mul Rem) | Cmp(CmpOp: Eq Lt Gt → 0/1) | Call(Option<Value>,String,Vec) | Print | Phi`. `Terminator = Ret(Option) | Jnz(v,t,e) | Jmp(b)`. Invariant: nothing assumes `Ptr` is a native `u64`.
 
 ## Diagnostic format
-One-to-two lines, localised by `file:line:col`. Underflow example:
+One-to-two lines. No filename in any message: parser/lexer errors are localised by
+`line:col`, checker errors by `line` only. Underflow example:
 ```
 error: stack effect mismatch in `oops` (line 2)
   `+` needs 2 values, but the stack holds 1
@@ -69,28 +70,36 @@ error: stack effect mismatch in `oops` (line 2)
 ```
 Branch-depth: `` `if` branches leave different stack depths (then: X, else: Y) ``. Net-effect: `body leaves N values, but ( … ) declares M outputs`.
 
-## Reference gcd IL (verified)
+## Reference gcd IL (real emitter output)
+Captured verbatim from `cargo run -- build examples/gcd.sth` (the driver's temp
+`out.ssa`); names are `%vN`/`@blkN`/`@start`, and the `0` literal is an explicit
+`copy` before the compare — not folded into it. Accepted by `/usr/bin/qbe` unmodified.
 ```
 data $fmt = { b "%ld\n", b 0 }
-export function l $gcd(l %a, l %b) {
+
+export function l $gcd(l %v0, l %v1) {
 @start
-    %c =l ceql %b, 0
-    jnz %c, @then, @else
-@then
-    jmp @join
-@else
-    %m =l rem %a, %b
-    %r =l call $gcd(l %b, l %m)
-    jmp @join
-@join
-    %v =l phi @then %a, @else %r
-    ret %v
+	%v2 =l copy 0
+	%v3 =l ceql %v1, %v2
+	jnz %v3, @blk1, @blk2
+@blk1
+	jmp @blk3
+@blk2
+	%v4 =l rem %v0, %v1
+	%v5 =l call $gcd(l %v1, l %v4)
+	jmp @blk3
+@blk3
+	%v6 =l phi @blk1 %v0, @blk2 %v5
+	ret %v6
 }
+
 export function $sooth_main() {
 @start
-    %g =l call $gcd(l 10, l 15)
-    call $printf(l $fmt, l %g, ...)
-    ret
+	%v0 =l copy 10
+	%v1 =l copy 15
+	%v2 =l call $gcd(l %v0, l %v1)
+	call $printf(l $fmt, l %v2, ...)
+	ret
 }
 ```
 

@@ -304,6 +304,12 @@ mod tests {
     fn parse_missing_semicolon_is_error() {
         let result = parse_src(": w ( -- ) 1");
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("unexpected end of input"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`;`"), "unexpected message: {err}");
     }
 
     #[test]

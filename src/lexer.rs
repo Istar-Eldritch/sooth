@@ -145,7 +145,8 @@ mod tests {
     #[test]
     fn lex_integer_overflow_is_error() {
         let src = "99999999999999999999";
-        assert!(lex(src).is_err());
+        let err = lex(src).unwrap_err();
+        assert!(err.contains("out of range"), "unexpected message: {err}");
     }
 
     #[test]
