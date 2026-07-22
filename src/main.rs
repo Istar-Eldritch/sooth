@@ -15,8 +15,8 @@ fn usage() -> ! {
     eprintln!(
         "sooth — the Sooth compiler (bootstrap)\n\n\
          usage:\n\
-         \x20 sooth build <file.sooth>   compile to a native binary\n\
-         \x20 sooth run   <file.sooth>   compile and run\n\
+         \x20 sooth build <file.sth>   compile to a native binary\n\
+         \x20 sooth run   <file.sth>   compile and run\n\
          \x20 sooth repl                 interactive session (Phase 1)\n"
     );
     exit(2);

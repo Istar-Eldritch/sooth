@@ -32,7 +32,7 @@ build from source). WASM is a planned sibling lowering off the neutral IR.
 
 ```sh
 cargo build
-cargo run -- build examples/gcd.sooth   # not implemented yet: prints Phase 0 status
+cargo run -- build examples/gcd.sth   # not implemented yet: prints Phase 0 status
 ```
 
 ## Layout
