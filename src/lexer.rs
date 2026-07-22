@@ -30,14 +30,14 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
 
     while let Some(&c) = chars.peek() {
         match c {
-            ' ' | '\t' | '\r' => {
+            c if c.is_whitespace() => {
                 chars.next();
-                col += 1;
-            }
-            '\n' => {
-                chars.next();
-                line += 1;
-                col = 1;
+                if c == '\n' {
+                    line += 1;
+                    col = 1;
+                } else {
+                    col += 1;
+                }
             }
             ':' | ';' | '(' | ')' | '|' => {
                 let span = Span { line, col };
@@ -146,5 +146,11 @@ mod tests {
     fn lex_integer_overflow_is_error() {
         let src = "99999999999999999999";
         assert!(lex(src).is_err());
+    }
+
+    #[test]
+    fn lex_nonascii_whitespace_is_skipped() {
+        let tokens = lex("1\u{a0}2").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Int(1), Token::Int(2)]);
     }
 }
