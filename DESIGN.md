@@ -405,3 +405,11 @@ rows, no borrow analysis needed to write the compiler in it.
   slot representation, not planned).
 - Immediate-word / defining-word facility (typed, on the comptime interpreter),
   replacing `CREATE`/`DOES>`. Deferred to implementation planning.
+- Tail-call handling. Not needed for Phase 0 (goldens are shallow; `factorial` as
+  written isn't even tail-recursive), but once recursion is the primary loop
+  (`begin/until` deferred), constant-stack tail recursion matters. QBE has no
+  guaranteed tail calls, so it's the frontend's job: compile a *self*-tail-call as a
+  jump to the entry block (recursion-as-loop) for the common case; general/mutual TCO
+  needs a trampoline or backend support QBE lacks, and can be deferred. Interacts with
+  deterministic drop: the transform must run the outgoing frame's destructors before
+  the jump, so affine ownership and TCO have to be co-designed.
