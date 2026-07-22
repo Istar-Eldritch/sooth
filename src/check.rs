@@ -4,8 +4,9 @@
 //!
 //! Every operand is checked against the type its consumer expects, so a
 //! `bool` where `+` wants an `i64` is a located compile error (Forth's silent
-//! coercion failure mode becomes a diagnostic here). Branch join points still
-//! unify on depth only; per-slot type unification at joins is a later phase.
+//! coercion failure mode becomes a diagnostic here). Branch join points unify
+//! on both depth and per-slot type: the `then` and `else` arms must leave the
+//! same stack shape.
 
 use std::collections::HashMap;
 
@@ -209,6 +210,18 @@ fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) ->
     }
 }
 
+fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
+            name, span.line, t_then, t_else, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: `if` branches leave different types (then: `{t_then}`, else: `{t_else}`)"
+        ),
+    }
+}
+
 fn check_terms(
     terms: &[Term],
     mut stack: Vec<Type>,
@@ -282,6 +295,11 @@ fn check_term(
                     then_stack.len(),
                     else_stack.len(),
                 ));
+            }
+            for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
+                if t_then != t_else {
+                    return Err(branch_type_mismatch_error(ctx, span, *t_then, *t_else));
+                }
             }
             Ok(then_stack)
         }
@@ -387,6 +405,22 @@ mod tests {
         let src = ": w ( bool -- i64 ) if 1 1 else 1 then ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("different stack depths"));
+    }
+
+    #[test]
+    fn check_branch_join_types_agree_ok() {
+        // Both arms leave a single `i64`: the join unifies cleanly.
+        check_src(": w ( bool -- i64 ) if 1 else 2 then ;").unwrap();
+    }
+
+    #[test]
+    fn check_branch_join_type_mismatch_is_error() {
+        // `then` leaves an `i64`, `else` leaves a `bool`: same depth, different type.
+        let src = ": w ( bool -- i64 ) if 1 else true then ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("different types"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
     }
 
     #[test]
