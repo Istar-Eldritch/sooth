@@ -20,18 +20,24 @@ explicit copy, and drop is a statically-known destructor point.
 
 ## Status
 
-**Phase 0** (see ROADMAP.md): codegen spine. Pipeline is scaffolded, not yet
-implemented. The compiler is a Rust bootstrap; the language will later self-host.
+**Phase 0 (codegen spine): complete** (see ROADMAP.md). The pipeline is implemented
+end to end and the goldens (`gcd`, `factorial`, `lerp`) compile to native binaries and
+run. Next is Phase 1 (a REPL / liveness loop). The compiler is a Rust bootstrap; the
+language will later self-host.
 
 Pipeline: `source → lex → parse → stack-effect check → backend-neutral IR → QBE IL
-→ native binary`. Backend is [QBE](https://c9x.me/compile/) (not yet installed here;
-build from source). WASM is a planned sibling lowering off the neutral IR.
+→ native binary`. Backend is [QBE](https://c9x.me/compile/), invoked from `PATH`
+alongside the system `cc`. WASM is a planned sibling lowering off the neutral IR.
 
 ## Build and run
 
+Requires `qbe` and a C compiler (`cc`) on your `PATH`.
+
 ```sh
 cargo build
-cargo run -- build examples/gcd.sth   # not implemented yet: prints Phase 0 status
+cargo test                            # unit tests + the Phase 0 goldens
+cargo run -- run   examples/gcd.sth   # compile and run (prints 5)
+cargo run -- build examples/gcd.sth   # just compile, to examples/gcd
 ```
 
 ## Layout
@@ -43,5 +49,5 @@ src/ir.rs                         backend-neutral IR (Ptr[T] kept abstract)
 src/backend/qbe.rs                QBE IL emission
 src/driver.rs                     pipeline orchestration
 examples/                         Phase 0 target programs
-tests/phase0.rs                   golden tests (ignored until the pipeline lands)
+tests/phase0.rs                   golden tests (gcd / factorial / lerp + a diagnostic)
 ```

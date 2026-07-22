@@ -6,9 +6,10 @@ not a schedule.
 ## Current status / next action
 
 Design phase complete (see DESIGN.md, Decided section). Backend decided: **QBE**
-(the joy is the language, not codegen). **Next action: Phase 0**, prototype the
-codegen spine to pressure-test the core architectural bet: compile-time virtual
-stack → backend-neutral IR → QBE IL → native binary.
+(the joy is the language, not codegen). **Phase 0 (codegen spine) is complete** and
+merged to `main`: the core architectural bet held (compile-time virtual stack →
+backend-neutral IR → QBE IL → native binary), with `gcd`/`factorial`/`lerp`
+compiling to native binaries that run. **Next action: Phase 1** (REPL / liveness).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -31,7 +32,7 @@ it, since LLVM and Z3 were dropped. Free choice.
 
 ## Phases
 
-### Phase 0 — Codegen spine  `[L]`  `[highest risk: go/no-go on the architecture]`
+### Phase 0 — Codegen spine  `[L]`  ✅ **done** (go/no-go on the architecture: **go**)
 
 Lexer/parser for a minimal concrete-typed core (`: ;`, literals, arithmetic,
 comparisons, `if/else/then`, the core stack shuffles `dup`/`drop`/`swap`/`over`/`rot`
@@ -41,8 +42,9 @@ backend-neutral IR → **QBE** IL → `qbe` → system assembler + linker → na
 No LLVM, no hand-written native backend. Keep the IR's `Ptr[T]` abstract from the
 start so a WASM sibling lowering can be added later. Static stack-effect (arity)
 checking. One concrete int type, no heap.
-**Exit:** `gcd` and `factorial` compile to a standalone native binary and run
-correctly. Proves the virtual-stack → IR → QBE → native path end-to-end.
+**Exit (met):** `gcd`, `factorial`, and `lerp` compile to standalone native binaries
+and run correctly (`5` / `120` / `30`), plus a negative golden for the stack-effect
+diagnostic. Proved the virtual-stack → IR → QBE → native path end-to-end.
 
 ### Phase 1 — REPL and liveness  `[M]`
 
@@ -182,10 +184,9 @@ priority for a craft language; add it only if you're using it enough to want it.
 
 ## Shape of the risk
 
-- The mass and the risk are in **Phase 0** (go/no-go on the codegen architecture:
-  does the virtual-stack → IR → QBE path hold, small but decisive) and **Phase 3**
-  (the affine memory model,
-  the most novel work and the reason the language exists). Do both carefully.
+- **Phase 0 is done and the go/no-go came back *go***: the virtual-stack → IR → QBE
+  → native path holds. The remaining mass and risk is **Phase 3** (the affine memory
+  model, the most novel work and the reason the language exists); do it carefully.
   **Phase 9** (self-hosting) is the other large lift but is well understood.
 - Phases 4-8 are more independent than the numbering implies. Errors (5) is nearly
   free once ADTs exist (2). Concurrency (7) needs the affine model (3) but little
