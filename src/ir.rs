@@ -157,6 +157,10 @@ pub fn lower_line(
     for i in 0..entry_depth {
         let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
+        // Every carried slot loads as `IrType::Int` (l-width) regardless of its
+        // logical type. Value-correct in Slice 1 (i64 and bool both fit one
+        // 8-byte slot, and the epilogue zero-extends a bool on store), but this
+        // must be revisited once a carried slot type can have a different width.
         let v = b.fresh_value(IrType::Int);
         b.push_instr(Instr::Load(v, ptr));
         stack.push(v);

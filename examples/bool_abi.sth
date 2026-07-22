@@ -1,0 +1,8 @@
+: pos ( i64 -- bool )
+  0 > ;
+
+: classify ( i64 -- i64 )
+  pos if 1 else 0 then ;
+
+: main ( -- )
+  7 classify . ;    \ prints 1

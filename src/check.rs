@@ -483,6 +483,12 @@ mod tests {
         check_src(": w ( bool -- bool bool ) dup ;").unwrap();
     }
 
+    #[test]
+    fn check_shuffle_swap_mixed_types_is_type_transparent() {
+        // `swap` reorders a mixed `bool`/`i64` pair with no fixed signature.
+        check_src(": w ( bool i64 -- i64 bool ) swap ;").unwrap();
+    }
+
     fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
         let tokens = lex(src).unwrap();
         let terms = match crate::parser::parse_line(&tokens).unwrap() {

@@ -49,6 +49,15 @@ fn sign_compiles_and_runs() {
 }
 
 #[test]
+fn bool_crosses_call_boundary_and_runs() {
+    // `pos` returns a `bool` that `classify` consumes across a call/ret
+    // boundary into `if`, proving a bool survives the word-call ABI.
+    let (stdout, code) = run_and_capture_stdout("examples/bool_abi.sth");
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn if_condition_not_bool_reports_diagnostic() {
     let src = ": oops ( -- i64 )\n  5 if 1 else 2 then ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
