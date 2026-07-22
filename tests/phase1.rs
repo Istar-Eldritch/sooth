@@ -118,6 +118,24 @@ fn failed_redefinition_keeps_old_generation_resident() {
 }
 
 #[test]
+fn sign_definable_and_callable_in_repl() {
+    let out = run_session(&[
+        ": sign ( i64 -- i64 ) 0 > if 1 else 0 then ;",
+        "-7 sign",
+        "7 sign",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["defined sign", "stack: 0", "stack: 0 1"]);
+}
+
+#[test]
+fn bool_residual_displays_as_zero_or_one() {
+    let out = run_session(&["true", "false"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["stack: 1", "stack: 1 0"]);
+}
+
+#[test]
 fn calculator_session_dogfood() {
     let out = run_session(&[
         ": sq ( i64 -- i64 ) | n | n n * ;",
