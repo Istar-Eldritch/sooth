@@ -147,7 +147,7 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_slot(&mut self) -> Result<TypedSlot, String> {
-        let text = self.expect_word_any()?;
+        let (text, span) = self.expect_word_any_spanned()?;
         if matches!(self.peek(), Some((Token::Colon, _))) {
             self.pos += 1;
             let (ty_name, ty_span) = self.expect_word_any_spanned()?;
@@ -157,7 +157,7 @@ impl<'t> Parser<'t> {
                 ty,
             })
         } else {
-            let ty = self.resolve_type(&text, self.tokens[self.pos - 1].1)?;
+            let ty = self.resolve_type(&text, span)?;
             Ok(TypedSlot { name: None, ty })
         }
     }
@@ -178,6 +178,8 @@ impl<'t> Parser<'t> {
     }
 
     fn resolve_type(&self, name: &str, span: Span) -> Result<Type, String> {
+        // Unknown-type is a semantic error, not a syntax error, so it uses the
+        // `error:` prefix (matching check.rs) rather than `parse error:`.
         Type::from_name(name).ok_or_else(|| {
             format!(
                 "error: unknown type `{name}` at line {}, col {}",
