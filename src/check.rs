@@ -1,4 +1,4 @@
-//! Stack-effect checker. Phase 0: arity only; type unification arrives in Phase 2.
+//! Stack-effect checker. Arity only for now; type unification is a later ROADMAP phase.
 //!
 //! Simulates the compile-time virtual stack through each word body and verifies
 //! the net effect matches the declared signature, unifying branch join points.

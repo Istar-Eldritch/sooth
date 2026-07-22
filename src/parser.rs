@@ -27,7 +27,14 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
     let mut parser = Parser { tokens, pos: 0 };
     if matches!(parser.peek(), Some((Token::Colon, _))) {
-        return Ok(Line::Def(parser.parse_worddef()?));
+        let def = parser.parse_worddef()?;
+        if let Some((tok, span)) = parser.peek() {
+            return Err(format!(
+                "parse error: unexpected {tok:?} after `;` at line {}, col {} (one line is one complete unit)",
+                span.line, span.col
+            ));
+        }
+        return Ok(Line::Def(def));
     }
     let mut terms = Vec::new();
     while parser.pos < parser.tokens.len() {
@@ -364,6 +371,14 @@ mod tests {
             Line::Def(def) => assert_eq!(def.name, "sq"),
             other => panic!("expected Def, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_line_trailing_tokens_after_def_is_error() {
+        let result = parse_line_src(": sq ( int -- int ) dup * ; 5 sq");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("after `;`"), "unexpected message: {err}");
     }
 
     #[test]
