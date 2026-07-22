@@ -1,7 +1,7 @@
 //! Pipeline orchestration: the one place that wires the stages together.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use crate::{backend, check, ir, lexer, parser};
 
@@ -48,15 +48,13 @@ pub fn build(path: &Path) -> Result<PathBuf, String> {
     Ok(out_path)
 }
 
-pub fn run(path: &Path) -> Result<(), String> {
+/// Compile and run a source file, returning the child's exit status. The caller
+/// decides how to propagate it (`main` mirrors it as its own exit code).
+pub fn run(path: &Path) -> Result<ExitStatus, String> {
     let binary = build(path)?;
-    let status = Command::new(&binary)
+    Command::new(&binary)
         .status()
-        .map_err(|e| format!("running {binary:?}: {e}"))?;
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
-    Ok(())
+        .map_err(|e| format!("running {binary:?}: {e}"))
 }
 
 pub fn repl() -> Result<(), String> {

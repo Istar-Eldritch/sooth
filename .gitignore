@@ -1,1 +1,5 @@
 /target
+
+# Compiled example binaries land alongside their source (spec §9.2).
+/examples/*
+!/examples/*.sth

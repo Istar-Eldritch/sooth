@@ -28,7 +28,10 @@ fn main() {
         Some("build") => {
             driver::build(Path::new(args.get(2).unwrap_or_else(|| usage()))).map(|_| ())
         }
-        Some("run") => driver::run(Path::new(args.get(2).unwrap_or_else(|| usage()))),
+        Some("run") => match driver::run(Path::new(args.get(2).unwrap_or_else(|| usage()))) {
+            Ok(status) => exit(status.code().unwrap_or(1)),
+            Err(e) => Err(e),
+        },
         Some("repl") => driver::repl(),
         None | Some("-h") | Some("--help") => usage(),
         Some(other) => {
