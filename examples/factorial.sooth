@@ -1,0 +1,7 @@
+: factorial ( n:int -- int )
+  | n |
+  n 0 = if
+    1
+  else
+    n  n 1 - factorial  *
+  then ;
