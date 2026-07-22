@@ -25,7 +25,9 @@ fn usage() -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let result = match args.get(1).map(String::as_str) {
-        Some("build") => driver::build(Path::new(args.get(2).unwrap_or_else(|| usage()))),
+        Some("build") => {
+            driver::build(Path::new(args.get(2).unwrap_or_else(|| usage()))).map(|_| ())
+        }
         Some("run") => driver::run(Path::new(args.get(2).unwrap_or_else(|| usage()))),
         Some("repl") => driver::repl(),
         None | Some("-h") | Some("--help") => usage(),
