@@ -4,16 +4,19 @@
 
 use std::path::Path;
 
-use sooth::{check, lexer, parser};
+use sooth::{check, driver, lexer, parser};
 
 fn run_and_capture_stdout(path: &str) -> (String, i32) {
-    let binary = sooth::driver::build(Path::new(path)).expect("build should succeed");
+    let binary = driver::build(Path::new(path)).expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
-        output.status.code().expect("process should exit normally"),
+        output
+            .status
+            .code()
+            .expect("process should exit normally, not die by signal"),
     )
 }
 
@@ -58,5 +61,20 @@ fn stack_effect_mismatch_reports_diagnostic() {
     assert!(
         err.contains("( int -- int )"),
         "error should include the declared effect: {err}"
+    );
+}
+
+#[test]
+fn build_surfaces_checker_error() {
+    let src = ": oops ( int -- int )\n  | a | a a + + ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-badsrc-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+
+    let err = driver::build(&path).expect_err("build should fail on a bad program");
+    std::fs::remove_file(&path).ok();
+
+    assert!(
+        err.contains("oops") && err.contains("needs 2 values"),
+        "build should propagate the checker diagnostic: {err}"
     );
 }
