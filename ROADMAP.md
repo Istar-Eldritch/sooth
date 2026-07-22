@@ -88,7 +88,9 @@ iteration. Combinators (`each`/`map`/`filter`/`fold`/`while`/`times`) are ordina
 **library words** written in Sooth on top of quotations, with the compiler inlining
 the common ones and their quotation arguments at the call site so they lower to tight
 loops rather than a `call` per element. Escaping quotations use the uniform-runtime-
-stack fallback and depend on the alloc layer (Phase 6).
+stack fallback and depend on the alloc layer (Phase 6). With quotations in hand, `if`
+is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-style) and
+stops being a keyword, and a `cond` multi-way combinator lands alongside the others.
 **Exit:** polymorphic `dup`/`swap`/`max`; a constant-stack `each`/`fold` over a
 collection; combinators verified to inline to loops, not per-element calls.
 **Dogfood:** write the combinator library (`each`/`map`/`fold`/`while`) in Sooth

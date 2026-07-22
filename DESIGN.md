@@ -184,8 +184,8 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 
 ## Control flow and iteration
 
-Branching is `if ... else ... then`, consuming one condition. That is the only control
-*keyword*. There are deliberately **no loop keywords** (no `begin/until`, `do/loop`);
+Boolean branching is `if ... else ... then` (which later becomes a combinator, see
+below); structural dispatch is `match`. There are deliberately **no loop keywords** (no `begin/until`, `do/loop`);
 dropping them keeps the surface small and matches the Factor/Kitten lineage, where
 iteration is expressed with combinators rather than syntax.
 
@@ -214,6 +214,23 @@ The iteration story, top to bottom:
 
 Iteration lands with quotations in Phase 4; Phases 0-3 have only shallow recursion,
 which is enough for their goldens.
+
+**Conditionals and dispatch.** Boolean branching is `if ... else ... then`. Structural
+dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
+error). Multi-way branching is a **`cond` combinator** (a library word taking
+`[ pred ] [ body ]` pairs), not syntax, so nested `if`s aren't the only option.
+Haskell-style clause-based definitions with guards were considered and rejected: they
+fit a stack language badly (Haskell matches named positional arguments, while Sooth's
+inputs are anonymous stack values, the same named-vs-position tension that rules out
+dependent types), and they replace the tiny `if` construct with a larger machine
+(literal patterns + guards + clause sugar) without shrinking the language, since the
+condition still has to be written somewhere.
+
+**`if` becomes a combinator once quotations exist (Phase 4).** Phases 0-3 keep
+`if/else/then` as syntax because they predate quotations. Once quotations land, `if`
+is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-style) and
+stops being a keyword. This shrinks the core the honest way, by making `if` a word
+rather than by replacing it with a bigger feature.
 
 ## Codegen and backend
 
@@ -410,11 +427,15 @@ rows, no borrow analysis needed to write the compiler in it.
 - Signature idea: affine by default, `dup` is the explicit copy, drop is a
   statically-known destructor point.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
-- Control flow: `if/else/then` only; no loop keywords. Quotations (`[ ]` + `call`)
-  are the sole iteration primitive; iteration lowers to an internal loop primitive for
-  constant stack; combinators (`each`/`while`/`fold`/`times`/`map`) are library words
-  built on quotations and inlined at call sites. Raw recursion is legal but not the
-  idiom.
+- Control flow: `if/else/then` for boolean branching (becomes an ordinary combinator,
+  `cond [ then ] [ else ] if`, once quotations land in Phase 4); `match` for exhaustive
+  structural dispatch on ADTs; a `cond` combinator (library word) for multi-way
+  branching. No clause-based definitions (bad fit for a stack language). No loop
+  keywords.
+- Iteration: quotations (`[ ]` + `call`) are the sole primitive; lowers to an internal
+  loop primitive for constant stack; combinators (`each`/`while`/`fold`/`times`/`map`)
+  are library words built on quotations and inlined at call sites. Raw recursion is
+  legal but not the idiom.
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
