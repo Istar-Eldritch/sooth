@@ -95,7 +95,7 @@ impl<'t> Parser<'t> {
         let effect = self.parse_effect()?;
         self.expect(Token::RParen)?;
         let locals = self.parse_locals_opt()?;
-        let body = self.parse_terms(|tok| matches!(tok, Token::Semicolon))?;
+        let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
         self.expect(Token::Semicolon)?;
         Ok(WordDef {
             name,
@@ -169,11 +169,15 @@ impl<'t> Parser<'t> {
         Ok(names)
     }
 
-    fn parse_terms(&mut self, stop: impl Fn(&Token) -> bool) -> Result<Vec<Term>, String> {
+    fn parse_terms(
+        &mut self,
+        expected: &str,
+        stop: impl Fn(&Token) -> bool,
+    ) -> Result<Vec<Term>, String> {
         let mut terms = Vec::new();
         loop {
             match self.peek() {
-                None => return Err(self.eof_error("`;`")),
+                None => return Err(self.eof_error(expected)),
                 Some((tok, _)) if stop(tok) => break,
                 _ => terms.push(self.parse_term()?),
             }
@@ -193,11 +197,15 @@ impl<'t> Parser<'t> {
                 span,
             }),
             Token::Word(w) if w == "if" => {
-                let then_branch =
-                    self.parse_terms(|tok| is_word(tok, "else") || is_word(tok, "then"))?;
+                let then_branch = self
+                    .parse_terms("`else` or `then` (unterminated `if`)", |tok| {
+                        is_word(tok, "else") || is_word(tok, "then")
+                    })?;
                 let else_branch = if matches!(self.peek(), Some((tok, _)) if is_word(tok, "else")) {
                     self.pos += 1;
-                    self.parse_terms(|tok| is_word(tok, "then"))?
+                    self.parse_terms("`then` (unterminated `if`/`else`)", |tok| {
+                        is_word(tok, "then")
+                    })?
                 } else {
                     Vec::new()
                 };
@@ -303,5 +311,12 @@ mod tests {
         let result = parse_src(": w ( -- ) then ;");
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("then"));
+    }
+
+    #[test]
+    fn parse_unterminated_if_reports_if_not_semicolon() {
+        let result = parse_src(": w ( -- ) if 1");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unterminated `if`"));
     }
 }
