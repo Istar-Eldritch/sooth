@@ -30,12 +30,7 @@ pub fn build(path: &Path) -> Result<PathBuf, String> {
     std::fs::write(&ssa_path, &ssa).map_err(|e| format!("writing {ssa_path:?}: {e}"))?;
     std::fs::write(&shim_path, C_SHIM).map_err(|e| format!("writing {shim_path:?}: {e}"))?;
 
-    run_command(
-        Command::new("/usr/bin/qbe")
-            .arg(&ssa_path)
-            .arg("-o")
-            .arg(&asm_path),
-    )?;
+    run_command(Command::new("qbe").arg(&ssa_path).arg("-o").arg(&asm_path))?;
 
     let out_path = binary_path(path);
     run_command(

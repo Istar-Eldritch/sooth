@@ -47,9 +47,9 @@ Simulate integer `depth` per body: entry `depth = inputs.len() - locals.len()` (
 
 **P0.4 IR lowering** (`src/ir.rs`) — `Module` → `IrModule`, one `IrFunc` per word; assumes checked input. Re-runs the sim with each slot carrying an SSA `Value`. Params = one `Int` per input; ret `Some(Int)` if 1 output else `None`. Locals popped into name→Value map (leftmost = deepest). `IntLit` ⇒ `Const`; shuffles ⇒ reorder/reuse/discard value ids (no instr); `+ - * mod` ⇒ `Bin`; `= < >` ⇒ `Cmp`; `.` ⇒ `Print`; user word ⇒ `Call`. `If` ⇒ `Jnz(test, then, else)`, lower each branch over a cloned stack, `Jmp(join)`, emit `Phi` at join for differing positions. End ⇒ `Ret`.
 
-**P0.5 QBE emit** (`src/backend/qbe.rs`) — `IrModule` → IL string. One function per `IrFunc`; `Int` = `l`. Once-per-module `data $fmt = { b "%ld\n", b 0 }`. Header `export function [l] $NAME(l %p0,…)`; `main` → `$sooth_main` (no ret). Blocks `@blkN`, entry `@start`. `Const`→`copy`; `Bin`→`add/sub/mul/rem`; `Cmp`→`ceql/csltl/csgtl` into `l` (no `extuw`); `Call`→`call $f(...)`; `Print`→`call $printf(l $fmt, l %v, ...)` (**`...` marker goes last**); `Phi`→`phi @b1 %v1, @b2 %v2`; `Ret`/`Jnz`/`Jmp` direct. Verified against `/usr/bin/qbe`.
+**P0.5 QBE emit** (`src/backend/qbe.rs`) — `IrModule` → IL string. One function per `IrFunc`; `Int` = `l`. Once-per-module `data $fmt = { b "%ld\n", b 0 }`. Header `export function [l] $NAME(l %p0,…)`; `main` → `$sooth_main` (no ret). Blocks `@blkN`, entry `@start`. `Const`→`copy`; `Bin`→`add/sub/mul/rem`; `Cmp`→`ceql/csltl/csgtl` into `l` (no `extuw`); `Call`→`call $f(...)`; `Print`→`call $printf(l $fmt, l %v, ...)` (**`...` marker goes last**); `Phi`→`phi @b1 %v1, @b2 %v2`; `Ret`/`Jnz`/`Jmp` direct. Verified against `qbe`.
 
-**P0.6 Driver** (`src/driver.rs`, `src/main.rs`, `src/lib.rs`) — `build`: read → lex → parse → check → lower → emit → write `.ssa` → `/usr/bin/qbe in.ssa -o out.s` → write C shim → `cc out.s shim.c -o binary` (named from source stem). `run`: build then exec inheriting stdio, propagate exit status (returns status, does not call `exit()`). Temp dirs unique per build. Non-zero from `qbe`/`cc` ⇒ `Err` with captured stderr. C shim:
+**P0.6 Driver** (`src/driver.rs`, `src/main.rs`, `src/lib.rs`) — `build`: read → lex → parse → check → lower → emit → write `.ssa` → `qbe in.ssa -o out.s` (resolved via `PATH`, as with `cc`) → write C shim → `cc out.s shim.c -o binary` (named from source stem). `run`: build then exec inheriting stdio, propagate exit status (returns status, does not call `exit()`). Temp dirs unique per build. Non-zero from `qbe`/`cc` ⇒ `Err` with captured stderr. C shim:
 ```c
 extern void sooth_main(void);
 int main(void) { sooth_main(); return 0; }
@@ -73,7 +73,7 @@ Branch-depth: `` `if` branches leave different stack depths (then: X, else: Y) `
 ## Reference gcd IL (real emitter output)
 Captured verbatim from `cargo run -- build examples/gcd.sth` (the driver's temp
 `out.ssa`); names are `%vN`/`@blkN`/`@start`, and the `0` literal is an explicit
-`copy` before the compare — not folded into it. Accepted by `/usr/bin/qbe` unmodified.
+`copy` before the compare — not folded into it. Accepted by `qbe` unmodified.
 ```
 data $fmt = { b "%ld\n", b 0 }
 
