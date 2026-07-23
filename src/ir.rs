@@ -122,6 +122,16 @@ pub enum BinOp {
     /// integer `/`, checker-guaranteed, R16).
     Div,
     Rem,
+    And,
+    Or,
+    Xor,
+    /// Left shift; the rhs is always an `i64` shift count regardless of the
+    /// lhs's integer width (checker-guaranteed).
+    Shl,
+    /// Right shift; the backend derives logical vs arithmetic from the
+    /// result's signedness, same pattern as `CmpOp` deriving signed vs
+    /// unsigned from the operand type. The rhs is always an `i64` count.
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -439,21 +449,40 @@ impl<'a> FuncBuilder<'a> {
                 self.stack[n - 2] = self.stack[n - 1];
                 self.stack[n - 1] = a;
             }
-            "+" | "-" | "*" | "/" | "mod" => {
+            "+" | "-" | "*" | "/" | "mod" | "and" | "or" | "xor" | "shl" | "shr" => {
                 let op = match name {
                     "+" => BinOp::Add,
                     "-" => BinOp::Sub,
                     "*" => BinOp::Mul,
                     "/" => BinOp::Div,
-                    _ => BinOp::Rem,
+                    "mod" => BinOp::Rem,
+                    "and" => BinOp::And,
+                    "or" => BinOp::Or,
+                    "xor" => BinOp::Xor,
+                    "shl" => BinOp::Shl,
+                    _ => BinOp::Shr,
                 };
                 let rhs = self.stack.pop().expect("bin: rhs");
                 let lhs = self.stack.pop().expect("bin: lhs");
-                // Arithmetic is homogeneous (checker-guaranteed): the result
-                // carries the operand type, so the backend picks its width.
+                // Arithmetic/bitwise ops are homogeneous in their result
+                // (checker-guaranteed): the result carries the lhs's type, so
+                // the backend picks its width. `shl`/`shr`'s rhs is always an
+                // `i64` count, not the lhs's type.
                 let ty = self.value_type(lhs);
                 let v = self.fresh_value(ty);
                 self.push_instr(Instr::Bin(v, op, lhs, rhs));
+                self.stack.push(v);
+            }
+            "not" => {
+                // No unary QBE op: complement is `xor operand, -1` at the
+                // operand's own width (`-1` is all-ones at any width in two's
+                // complement, so it works whether the register is `w` or `l`).
+                let operand = self.stack.pop().expect("not: operand");
+                let ty = self.value_type(operand);
+                let neg1 = self.fresh_value(ty);
+                self.push_instr(Instr::Const(neg1, -1));
+                let v = self.fresh_value(ty);
+                self.push_instr(Instr::Bin(v, BinOp::Xor, operand, neg1));
                 self.stack.push(v);
             }
             "=" | "<" | ">" => {
@@ -909,6 +938,74 @@ mod tests {
                 signed: false
             }
         );
+    }
+
+    #[test]
+    fn lower_bitwise_and_or_xor_route_to_matching_binop() {
+        let ir = lower_src(": w ( -- i32 ) 1 >i32 2 >i32 and 3 >i32 or 4 >i32 xor ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::And, _, _))));
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::Or, _, _))));
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::Xor, _, _))));
+    }
+
+    #[test]
+    fn lower_not_emits_xor_with_neg1_const() {
+        let ir = lower_src(": w ( -- u8 ) 5 >u8 not ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        let neg1 = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(v, -1) => Some(*v),
+                _ => None,
+            })
+            .expect("a -1 const");
+        let xor = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Xor, _, b) if *b == neg1 => Some(*v),
+                _ => None,
+            })
+            .expect("a xor against the -1 const");
+        assert_eq!(
+            w.value_types[xor.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
+    }
+
+    #[test]
+    fn lower_shl_shr_route_to_matching_binop_with_lhs_type() {
+        let ir = lower_src(": w ( -- u8 ) 200 >u8 3 shl 3 shr ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        let shl_ty = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Shl, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Shl bin op");
+        assert_eq!(
+            w.value_types[shl_ty.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::Shr, _, _))));
     }
 
     #[test]
