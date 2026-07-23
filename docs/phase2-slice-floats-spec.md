@@ -1,5 +1,11 @@
 # Phase 2 Floats slice — condensed spec (delivered)
 
+> **Superseded in part:** D6 below (a distinct `f.` print word; `.` kept monomorphic
+> `( i64 -- )`) was later reversed. `.` is now type-directed over every scalar (all integer
+> widths, both floats, and `bool`), unsigned printed as unsigned, and `f.` was removed. This
+> document is retained as the historical floats-slice record; read D6 and the `f.` references
+> with that in mind.
+
 `f32`/`f64` with IEEE-754 arithmetic, ordered comparison, float literals, `f.`
 printing, and numeric-generalised int↔float conversions, width-correct in emitted QBE.
 Mirrors the Slice-2 shape: table-driven, special-cased operator/conversion rules; **no**
@@ -18,7 +24,8 @@ polymorphism or promotion (that is Phase 4). Built on the `bool`+integer-tower c
 - **D5.** Float literals `<digits>.<digits>` + optional exponent, default `f64`; digits
   required both sides of the dot so a literal can't collide with the `.` print word.
 - **D6.** Distinct `f.` `( f64 -- )`; `.` stays `( i64 -- )`, not overloaded. Print an
-  `f32` via `>f64 f.`.
+  `f32` via `>f64 f.`. *(Superseded, see banner: `.` is now type-directed over all scalars
+  and `f.` was removed.)*
 - **D7.** Conversions generalise target-only family to numeric: new `>f32`/`>f64`;
   `>iN`/`>uN` now accept a float source. Source must be numeric; `bool` source is an error.
 - **D8.** IR carries float width (`IrType::Float { bits }`); backend derives register

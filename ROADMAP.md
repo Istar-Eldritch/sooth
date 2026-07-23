@@ -20,7 +20,7 @@ complete** and merged to `main`: the fixed-width integer tower (`i8`..`i64`, `u8
 target-only conversion words (`>i8`..`>u64`), homogeneous no-implicit-promotion arithmetic
 and comparison, and width/signedness-correct QBE codegen. The **floats axis** (`f32`/`f64`,
 carved out of the tower) has also **landed** and merged to `main`: IEEE `+ - * /`, ordered
-comparison, `<digits>.<digits>` literals, `f.` printing, and int<->float conversions.
+comparison, `<digits>.<digits>` literals, type-aware `.` printing, and int<->float conversions.
 **Next action: Phase 2 Slice 3** (structs/records).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -81,7 +81,7 @@ conversions) is done**: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`)
 conversion words, homogeneous arithmetic/comparison, and width/signedness-correct codegen
 with single-point sub-word canonicalization. The **floats axis is done** too: `f32`/`f64`
 with IEEE arithmetic (including float `/`), ordered NaN-correct comparison, float literals,
-`f.` printing, and numeric-generalised int<->float conversions. The **bitwise axis is done**:
+type-aware `.` printing, and numeric-generalised int<->float conversions. The **bitwise axis is done**:
 `and`/`or`/`xor`/`not` plus `shl`/`shr` with a single type-directed right shift (arithmetic
 `sar` for signed, logical `shr` for unsigned), i64 shift count masked mod the operand's bit
 width. The **boolean/comparison surface is complete** too: `and`/`or`/`xor`/`not` are
@@ -124,8 +124,9 @@ type.
 `mod`); IEEE-754 with **silent NaN/inf propagation** (no trapping, no static rejection:
 NaN/inf are inherently runtime and Sooth's compile-error lever cannot reach them); float
 literals `<digits>.<digits>` (digits required both sides so they cannot collide with the `.`
-print word), defaulting to `f64`; a distinct `f.` print word `( f64 -- )` rather than
-overloading `.`; the target-only conversion family generalised to numeric (`>f32`/`>f64`, and
+print word), defaulting to `f64`; **printing is the type-directed `.`** (a later slice removed
+the originally-planned distinct `f.` word and made `.` print every scalar, unsigned included);
+the target-only conversion family generalised to numeric (`>f32`/`>f64`, and
 float->int truncating toward zero, out-of-range/NaN unspecified). Comparison `< > =` are
 plain IEEE ordered compares: `=` is **exact** bit equality (a documented footgun), never
 epsilon. NaN is user-detectable via `x = x`; `isinf` and any epsilon/approximate comparison
