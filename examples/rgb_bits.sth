@@ -2,16 +2,16 @@
 \ (the bitwise analogue of `rgb.sth`'s arithmetic pack), then unpack the green
 \ channel back out via `shr` + `and`.
 
-: pack ( i64 i64 i64 -- i32 )
+: pack ( u8 u8 u8 -- i32 )
   | r g b |
-  r >u8 >i32 16 shl
-  g >u8 >i32 8 shl or
-  b >u8 >i32 or ;
+  r >i32 16 shl
+  g >i32 8 shl or
+  b >i32 or ;
 
 : green ( i32 -- u8 )
   8 shr 255 >i32 and >u8 ;
 
 : main ( -- )
-  10 20 30 pack
+  10 >u8 20 >u8 30 >u8 pack
   dup >i64 .          \ prints 660510
   green >i64 . ;      \ prints 20
