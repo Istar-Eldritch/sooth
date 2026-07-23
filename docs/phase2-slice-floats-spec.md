@@ -1,13 +1,7 @@
 # Phase 2 Floats slice — condensed spec (delivered)
 
-> **Superseded in part:** D6 below (a distinct `f.` print word; `.` kept monomorphic
-> `( i64 -- )`) was later reversed. `.` is now type-directed over every scalar (all integer
-> widths, both floats, and `bool`), unsigned printed as unsigned, and `f.` was removed. This
-> document is retained as the historical floats-slice record; read D6 and the `f.` references
-> with that in mind.
-
-`f32`/`f64` with IEEE-754 arithmetic, ordered comparison, float literals, `f.`
-printing, and numeric-generalised int↔float conversions, width-correct in emitted QBE.
+`f32`/`f64` with IEEE-754 arithmetic, ordered comparison, float literals, printing via the
+type-directed `.`, and numeric-generalised int↔float conversions, width-correct in emitted QBE.
 Mirrors the Slice-2 shape: table-driven, special-cased operator/conversion rules; **no**
 polymorphism or promotion (that is Phase 4). Built on the `bool`+integer-tower compiler
 (lexer → parser → checker → IR → QBE-emit → driver/REPL).
@@ -23,8 +17,8 @@ polymorphism or promotion (that is Phase 4). Built on the `bool`+integer-tower c
   `x = x`; **no `isnan` primitive**.
 - **D5.** Float literals `<digits>.<digits>` + optional exponent, default `f64`; digits
   required both sides of the dot so a literal can't collide with the `.` print word.
-- **D6.** Distinct `f.` `( f64 -- )`; `.` stays `( i64 -- )`, not overloaded. Print an
-  `f32` via `>f64 f.`. *(Superseded, see banner: `.` is now type-directed over all scalars
+- **D6.** `.` is type-directed over every scalar and prints `f32`/`f64` via `%g`; there is
+  no separate float-print word. *(Superseded, see banner: `.` is now type-directed over all scalars
   and `f.` was removed.)*
 - **D7.** Conversions generalise target-only family to numeric: new `>f32`/`>f64`;
   `>iN`/`>uN` now accept a float source. Source must be numeric; `bool` source is an error.
@@ -45,7 +39,7 @@ parsing of this grammar never failing). Parser routes
 **Checker (R6–R12).** `check_operator` arithmetic arm: `+ - *` require equal + numeric;
 `/` new, requires same float type; `mod` unchanged (same integer type). `= < >`
 generalise to same-numeric → `bool`. Conversion recogniser adds `f32`/`f64` to
-known-type set; source must be numeric. `f.` added to `builtin_table`. `if` requires
+known-type set; source must be numeric. `.` prints floats (type-directed). `if` requires
 `bool`; branch joins unify over float types. Shuffles stay type-transparent. Six sharp
 located diagnostics naming the type(s) + rule: **X1** mixed int/float arith, **X2**
 mixed float-width, **X3** `/` on ints, **X4** `mod` on floats, **X5** non-numeric
@@ -61,7 +55,7 @@ never runs for floats. `Conv` extends to full numeric matrix: int→float
 up, `truncd` down); float→int truncating toward zero (`stosi`/`dtosi`, then existing
 narrow/canonicalize). Out-of-range/NaN→int unspecified (no checked/saturating).
 
-**Print + REPL (R19–R21).** `f.` backed by a `"%g\n"` data string + `printf` passing a
+**Print + REPL (R19–R21).** float printing via `.`, backed by a `"%g\n"` data string + `printf` passing a
 `d`. `Instr::Load`/`Store` made width-aware (`loadd/stored`, `loads/stores` by
 `IrType`) instead of hard-coded `loadl`/`storel`; `lower_line` prologue/epilogue
 loads/stores float slots via the float op selected from the carried `Type` (no integer
@@ -93,7 +87,7 @@ loads/stores float slots via the float op selected from the carried `Type` (no i
 - **S6.** Carried float survives a REPL line boundary and displays as its value.
 - **S7.** Six diagnostics X1–X6 with message text + type names.
 - **S8 (dogfood).** `examples/mean.sth` (mean of two ints as `f64`: `>f64`, float `/`,
-  `f.`; mean of 10 and 4 → `2.5`), native + REPL; plus the X1 headline negative.
+  `.`; mean of 10 and 4 → `2.5`), native + REPL; plus the X1 headline negative.
 
 ## Scope
 
@@ -110,14 +104,14 @@ or move semantics (Phase 3).
    `is_float`/`is_numeric`; `Token::Float`+`is_float_literal`; `TermKind::FloatLit`.
    (Typing/lowering deferred to later phases.)
 2. **Checker operator/conversion rules (R5–R12).** Numeric arith/compare, float-only
-   `/`, int-only `mod`, numeric conversion source/target, `f.` builtin, `FloatLit`
+   `/`, int-only `mod`, numeric conversion source/target, float printing via `.`, `FloatLit`
    typing, diagnostics X1–X6.
 3. **Typed IR + float codegen (R13–R17).** `IrType::Float`, `Instr::ConstF`,
    `BinOp::Div`; `width()` `s`/`d`; float `Bin`/`Cmp` ordered compares; float const emit.
 4. **Conversion-op lowering, full numeric matrix (R18).** int↔float / float↔float /
    float→int-truncate, reusing integer path as sub-step; per-cell IL tests + float→int
    truncation golden.
-5. **`f.` printing + REPL carried float (R19–R21).** `%g\n` printf; width-aware
+5. **Float printing via `.` + REPL carried float (R19–R21).** `%g\n` printf; width-aware
    load/store; `format_stack` `from_bits` display; carried-float REPL golden.
 6. **Dogfood + goldens (S1–S8).** `examples/mean.sth`; positive goldens (both widths,
    inf/NaN, ordered+NaN compare, all conversion cells, truncation, mean binary); six
@@ -141,5 +135,5 @@ or move semantics (Phase 3).
 `is_float_literal`), `src/parser.rs` (`FloatLit` routing), `src/check.rs`
 (operator/conversion/builtin/diagnostics), `src/ir.rs` (`IrType::Float`, `ConstF`,
 `BinOp::Div`, `lower_line`/`lower_call`), `src/backend/qbe.rs` (`width`, `Bin`, `Cmp`,
-`Conv`, `ConstF`, width-aware `Load`/`Store`, `f.` format), `src/repl.rs`
+`Conv`, `ConstF`, width-aware `Load`/`Store`, float print format), `src/repl.rs`
 (`format_stack` display), `examples/mean.sth`, `tests/phase0.rs`, `tests/phase1.rs`.

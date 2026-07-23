@@ -124,9 +124,8 @@ type.
 `mod`); IEEE-754 with **silent NaN/inf propagation** (no trapping, no static rejection:
 NaN/inf are inherently runtime and Sooth's compile-error lever cannot reach them); float
 literals `<digits>.<digits>` (digits required both sides so they cannot collide with the `.`
-print word), defaulting to `f64`; **printing is the type-directed `.`** (a later slice removed
-the originally-planned distinct `f.` word and made `.` print every scalar, unsigned included);
-the target-only conversion family generalised to numeric (`>f32`/`>f64`, and
+print word), defaulting to `f64`; printing is the type-directed `.` (every scalar, unsigned
+printed as unsigned); the target-only conversion family generalised to numeric (`>f32`/`>f64`, and
 float->int truncating toward zero, out-of-range/NaN unspecified). Comparison `< > =` are
 plain IEEE ordered compares: `=` is **exact** bit equality (a documented footgun), never
 epsilon. NaN is user-detectable via `x = x`; `isinf` and any epsilon/approximate comparison
