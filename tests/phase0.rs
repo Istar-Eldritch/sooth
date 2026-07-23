@@ -318,3 +318,181 @@ fn build_surfaces_checker_error() {
         "build should propagate the checker diagnostic: {err}"
     );
 }
+
+// Phase 6: floats dogfood + goldens (S1-S8).
+
+#[test]
+fn mean_dogfood_compiles_and_runs() {
+    // S8: `examples/mean.sth` converts two integer inputs to `f64`, divides,
+    // and prints via `f.`; mean of 10 and 4 prints 2.5.
+    let (stdout, code) = run_and_capture_stdout("examples/mean.sth");
+    assert_eq!(stdout, "2.5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn float_arithmetic_runs_on_both_widths_end_to_end() {
+    // S1/S3: `+ - *` run correctly on `f64` and on `f32` (converted back to
+    // `f64` for `f.`, since `f.` is `f64`-only, D6).
+    let src = ": main ( -- )\n  1.0 2.0 + f.\n  5.0 2.0 - f.\n  3.0 4.0 * f.\n  \
+1.5 >f32 2.5 >f32 + >f64 f. ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-float-arith-both-widths-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "3\n3\n12\n4\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
+    // S3: `1.0 0.0 /` is inf, `0.0 0.0 /` is NaN, with no trap, and NaN is
+    // detectable via `x = x` (false only for NaN, D4). `fdiv` runs the
+    // division through a real call boundary so QBE cannot constant-fold the
+    // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
+    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
+: main ( -- )\n  1.0 0.0 fdiv f.\n  0.0 0.0 fdiv f.\n  \
+0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-float-div-inf-nan-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "unexpected output:\n{stdout}");
+    assert_eq!(lines[0], "inf");
+    assert!(
+        lines[1].to_lowercase().contains("nan"),
+        "expected a NaN rendering: {}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "0", "NaN = NaN must be false");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn float_comparison_is_ieee_ordered_and_false_for_nan() {
+    // S4: an ordered comparison gives the expected boolean, and every
+    // comparison involving a NaN produced by `0.0 0.0 /` is false, including
+    // `<` and `>` against a NaN (not just `=`, RISK 1).
+    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
+: main ( -- )\n  1.0 2.0 < if 1 else 0 then .\n  2.0 1.0 < if 1 else 0 then .\n  \
+0.0 0.0 fdiv dup < if 1 else 0 then .\n  0.0 0.0 fdiv dup > if 1 else 0 then . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-float-cmp-ordered-nan-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1\n0\n0\n0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn int_to_float_and_float_to_float_conversions_run_end_to_end() {
+    // S5: int->float and float->float in both directions (`f32`<->`f64`),
+    // each printed via `>f64 f.` where the source is `f32` (D6).
+    let src = ": main ( -- )\n  10 >f64 f.\n  3 >f32 >f64 f.\n  3.5 >f32 >f64 f.\n  \
+10 >f32 >f64 f. ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-int-float-conv-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "10\n3\n3.5\n10\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mixed_int_float_arithmetic_reports_diagnostic() {
+    // X1 (headline negative, S8): `+` fed an `i64` and an `f64` names both
+    // differing types via the operand-pair-mismatch diagnostic.
+    let src = ": f ( -- f64 ) 1 3.0 + ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(
+        err.contains("same numeric type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+    assert!(err.contains("`f64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn mixed_float_width_comparison_reports_diagnostic() {
+    // X2: `f32` and `f64` fed to `<` names both differing operand types.
+    let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(
+        err.contains("same numeric type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`f32`"), "unexpected message: {err}");
+    assert!(err.contains("`f64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn integer_division_reports_diagnostic() {
+    // X3: `/` requires floats; two `i64` operands is an error.
+    let src = ": f ( -- i64 ) 6 2 / ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains('/'), "unexpected message: {err}");
+    assert!(err.contains("float"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn float_mod_reports_diagnostic() {
+    // X4: `mod` stays integer-only; two `f64` operands is an error.
+    let src = ": f ( -- f64 ) 6.0 2.0 mod ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("mod"), "unexpected message: {err}");
+    assert!(err.contains("integer"), "unexpected message: {err}");
+    assert!(err.contains("`f64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn bool_to_float_conversion_reports_diagnostic() {
+    // X5: `>f64` applied to a `bool` names the source and states it must be
+    // numeric.
+    let src = ": w ( -- f64 ) true >f64 ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("numeric"), "unexpected message: {err}");
+    assert!(err.contains("`bool`"), "unexpected message: {err}");
+}
+
+#[test]
+fn unknown_float_conversion_target_reports_diagnostic() {
+    // X6: `>f128` is an unknown conversion target.
+    let src = ": w ( -- f64 ) 5.0 >f128 ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("unknown type"), "unexpected message: {err}");
+    assert!(err.contains("f128"), "unexpected message: {err}");
+}

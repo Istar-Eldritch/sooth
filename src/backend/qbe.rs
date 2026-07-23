@@ -328,18 +328,38 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             let ow = width(operand);
             let is_float = matches!(operand, IrType::Float { .. });
             let signed = matches!(operand, IrType::Int { signed: true, .. });
-            // Float compares are the ordered forms (`clt`/`cgt`/`ceq` + `s`/`d`),
-            // false against NaN, so `x = x` is a valid NaN test (R17, RISK 1).
+            let w = width(ty_of(value_types, *v));
+            // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}` straight to
+            // `comis{s,d}` + `sete`/`setb`, but x86's unordered (NaN) result
+            // sets both ZF and CF, so those two mnemonics report *true* for a
+            // NaN operand instead of the required IEEE-false (`cgt{s,d}`/
+            // `cge{s,d}` use `seta`/`setae`, which x86 clears on unordered, so
+            // those stay correct as-is; verified against emitted assembly).
+            // Work around it here rather than in QBE: `a < b` swaps operands
+            // and reuses the correct `cgt` form (`b > a`); `a = b` ANDs `ceq`
+            // with the ordered predicate `cod`/`cos` (false on NaN) to mask
+            // the false positive (R17, RISK 1).
+            if is_float && matches!(op, CmpOp::Lt) {
+                return writeln!(out, "\t{} ={w} cgt{ow} {}, {}", val(*v), val(*b), val(*a))
+                    .unwrap();
+            }
+            if is_float && matches!(op, CmpOp::Eq) {
+                let eq = format!("%cmp{ext_id}");
+                *ext_id += 1;
+                let ord = format!("%cmp{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{eq} ={w} ceq{ow} {}, {}", val(*a), val(*b)).unwrap();
+                writeln!(out, "\t{ord} ={w} co{ow} {}, {}", val(*a), val(*b)).unwrap();
+                return writeln!(out, "\t{} ={w} and {eq}, {ord}", val(*v)).unwrap();
+            }
             let m = match op {
                 CmpOp::Eq => "ceq",
-                CmpOp::Lt if is_float => "clt",
                 CmpOp::Lt if signed => "cslt",
                 CmpOp::Lt => "cult",
                 CmpOp::Gt if is_float => "cgt",
                 CmpOp::Gt if signed => "csgt",
                 CmpOp::Gt => "cugt",
             };
-            let w = width(ty_of(value_types, *v));
             writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
         Instr::Call(ret, f, args) => {
@@ -627,27 +647,38 @@ mod tests {
     }
 
     #[test]
-    fn emit_float_compare_uses_ordered_mnemonic() {
-        // `<` on `f64` operands lowers to `cltd` (ordered, false against NaN),
-        // producing a `w`-width `bool` (R17, RISK 1).
+    fn emit_float_lt_swaps_to_ordered_gt() {
+        // `<` on `f64` operands does NOT emit `cltd`: QBE's amd64 backend
+        // lowers `cltd` to `comisd`+`setb`, which x86 sets on an unordered
+        // (NaN) operand too, so it would report `NaN < x` as true. Swapping
+        // operands and reusing `cgtd` (`comisd`+`seta`, which x86 clears on
+        // unordered) keeps the compare false against NaN (R17, RISK 1).
         let il = emit_binary(
             IrType::Float { bits: 64 },
             IrType::Bool,
             Instr::Cmp(Value(2), CmpOp::Lt, Value(0), Value(1)),
         );
-        assert!(il.contains("=w cltd"), "expected an ordered compare: {il}");
+        assert!(
+            il.contains("=w cgtd %v1, %v0"),
+            "expected a swapped ordered compare: {il}"
+        );
     }
 
     #[test]
-    fn emit_float_eq_is_ordered_ceq() {
-        // `=` on floats is the ordered `ceqd`, so a NaN compares false to
-        // itself and `x = x` is a valid NaN test (R17/D3).
+    fn emit_float_eq_masks_unordered_with_cod() {
+        // `=` on floats does NOT rely on a bare `ceqd`: QBE's amd64 backend
+        // lowers `ceqd` to `comisd`+`sete`, which x86 also sets on an
+        // unordered (NaN) operand, so it would report `NaN = NaN` as true.
+        // ANDing with `cod` (ordered, false on NaN) masks that false positive
+        // so `x = x` is a valid NaN test (R17/D3, RISK 1).
         let il = emit_binary(
             IrType::Float { bits: 64 },
             IrType::Bool,
             Instr::Cmp(Value(2), CmpOp::Eq, Value(0), Value(1)),
         );
-        assert!(il.contains("ceqd"), "expected an ordered eq: {il}");
+        assert!(il.contains("ceqd"), "expected an eq compare: {il}");
+        assert!(il.contains("cod"), "expected an ordered mask: {il}");
+        assert!(il.contains("and"), "expected the eq/ordered AND: {il}");
     }
 
     #[test]

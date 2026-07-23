@@ -1,0 +1,7 @@
+\ Dogfood: the mean of two integer inputs as an f64, exercising int->float
+\ conversion, float division, and float printing in one honest program.
+: mean ( i64 i64 -- f64 )
+  | a b | a >f64 b >f64 / ;
+
+: main ( -- )
+  10 4 mean f. ;    \ prints 2.5
