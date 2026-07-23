@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Module, Span, StackEffect, Term, TermKind, Type, WordDef};
+use crate::ast::{Module, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type, WordDef};
 
 /// A word's typed stack effect: the concrete input and output slot types,
 /// deepest-first (leftmost in `( … )` is deepest on the stack).
@@ -59,10 +59,10 @@ impl Ctx<'_> {
 }
 
 pub fn check(module: &Module) -> Result<(), String> {
-    check_structs(module)?;
+    check_structs(&module.structs)?;
 
     let mut env = builtin_table();
-    for (name, sig) in struct_generated_sigs(module) {
+    for (name, sig) in struct_generated_sigs(&module.structs) {
         env.insert(name, sig);
     }
     for word in &module.words {
@@ -79,16 +79,16 @@ pub fn check(module: &Module) -> Result<(), String> {
 /// word body is type-checked (R5, R6): no two `type:` declarations share a
 /// name (X2), and no struct contains itself by value, directly or
 /// transitively (X3, M5).
-fn check_structs(module: &Module) -> Result<(), String> {
-    check_duplicate_struct_names(module)?;
-    check_struct_recursion(module)?;
+pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
+    check_duplicate_struct_names(structs)?;
+    check_struct_recursion(structs)?;
     Ok(())
 }
 
 /// A duplicate `type:` name is a sharp located error naming the type (X2).
-fn check_duplicate_struct_names(module: &Module) -> Result<(), String> {
+fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
     let mut seen: HashMap<&str, ()> = HashMap::new();
-    for decl in &module.structs {
+    for decl in structs {
         if seen.insert(decl.name.as_str(), ()).is_some() {
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
@@ -114,37 +114,37 @@ enum VisitState {
 
 /// Detect a struct that contains itself by value, directly or transitively
 /// (D9), via cycle detection over the field-type graph (X3, M5).
-fn check_struct_recursion(module: &Module) -> Result<(), String> {
-    let mut state = vec![VisitState::Unvisited; module.structs.len()];
-    for start in 0..module.structs.len() {
+fn check_struct_recursion(structs: &[StructDecl]) -> Result<(), String> {
+    let mut state = vec![VisitState::Unvisited; structs.len()];
+    for start in 0..structs.len() {
         if state[start] == VisitState::Unvisited {
             let mut path = Vec::new();
-            visit_struct_recursion(module, start, &mut state, &mut path)?;
+            visit_struct_recursion(structs, start, &mut state, &mut path)?;
         }
     }
     Ok(())
 }
 
 fn visit_struct_recursion(
-    module: &Module,
+    structs: &[StructDecl],
     idx: usize,
     state: &mut [VisitState],
     path: &mut Vec<usize>,
 ) -> Result<(), String> {
     state[idx] = VisitState::InProgress;
     path.push(idx);
-    for (_, field_ty) in &module.structs[idx].fields {
+    for (_, field_ty) in &structs[idx].fields {
         if let Type::Struct(id, _) = field_ty {
             let j = id.index();
             match state[j] {
-                VisitState::Unvisited => visit_struct_recursion(module, j, state, path)?,
+                VisitState::Unvisited => visit_struct_recursion(structs, j, state, path)?,
                 VisitState::InProgress => {
                     let cycle_start = path.iter().position(|&x| x == j).unwrap();
                     let mut names: Vec<&str> = path[cycle_start..]
                         .iter()
-                        .map(|&i| module.structs[i].name.as_str())
+                        .map(|&i| structs[i].name.as_str())
                         .collect();
-                    names.push(module.structs[j].name.as_str());
+                    names.push(structs[j].name.as_str());
                     return Err(format!(
                         "error: recursive struct definition (infinite size): {}",
                         names.join(" -> ")
@@ -167,12 +167,10 @@ fn visit_struct_recursion(
 /// join the env alongside user words, so applying one to the wrong arity or
 /// operand type (X4, X5) is caught by the same arity/type-mismatch path as
 /// any other word call.
-fn struct_generated_sigs(module: &Module) -> Vec<(String, Sig)> {
+pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
     let mut sigs = Vec::new();
-    for decl in &module.structs {
-        let struct_ty = module
-            .resolve_type_name(&decl.name)
-            .expect("every registered struct name resolves to itself");
+    for (idx, decl) in structs.iter().enumerate() {
+        let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
         let field_types: Vec<Type> = decl.fields.iter().map(|(_, ty)| *ty).collect();
 
         sigs.push((

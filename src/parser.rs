@@ -78,10 +78,21 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 /// to end of input. One line is one complete unit (an unterminated def is a
 /// normal parse error).
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
+    parse_line_with_structs(tokens, &[])
+}
+
+/// Parse a REPL line resolving struct type names in a `:` definition's effect
+/// against `structs` (the session's registry, R3), so a word may take or
+/// return a previously-declared struct. A bare expression carries no type
+/// names, so `structs` is unused there.
+pub fn parse_line_with_structs(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+) -> Result<Line, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
-        structs: &[],
+        structs,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -98,6 +109,30 @@ pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
         terms.push(parser.parse_term()?);
     }
     Ok(Line::Expr(terms))
+}
+
+/// Parse a single REPL `type:` line into its ordered `(field-name, Type)`
+/// list, resolving field types against `structs` (the session's accumulated
+/// registry, with the just-declared name already appended so a self-reference
+/// resolves, which the checker then rejects as recursion, X3). Trailing
+/// tokens after `;` are a located error (one line is one complete unit).
+pub fn parse_typedef_line(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+) -> Result<Vec<(String, Type)>, String> {
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        structs,
+    };
+    let fields = parser.parse_typedef()?;
+    if let Some((tok, span)) = parser.peek() {
+        return Err(format!(
+            "parse error: unexpected {tok:?} after `;` at line {}, col {} (one line is one complete unit)",
+            span.line, span.col
+        ));
+    }
+    Ok(fields)
 }
 
 struct Parser<'t> {

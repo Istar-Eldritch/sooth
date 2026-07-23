@@ -739,7 +739,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let entry_types = vec![Type::I64; entry_depth];
-        let (func, _m) = lower_line(
+        let (func, _m, _) = lower_line(
             0,
             &terms,
             entry_depth,
@@ -871,7 +871,8 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
+        let (func, _m, _) =
+            lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
         let il = emit(&IrModule {
             funcs: vec![func],
             ..Default::default()

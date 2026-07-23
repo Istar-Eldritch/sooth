@@ -195,6 +195,67 @@ fn carried_float_survives_line_boundary_and_displays_as_float() {
     );
 }
 
+/// S5/R16-R18: a struct value survives a REPL line boundary on the size-aware
+/// carried stack, is used (a field read) on the next line, and displays as its
+/// `<TypeName>` placeholder (M4) rather than field bytes.
+#[test]
+fn carried_struct_survives_line_boundary() {
+    let out = run_session(&["type: Vec2 x i64 y i64 ;", "5 6 Vec2", "Vec2>x ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Vec2", "stack: <Vec2>", "5", "stack: (empty)"]
+    );
+}
+
+/// R18: a scalar slot sitting past a struct slot on the carried stack keeps a
+/// correct byte offset (the struct spans two 8-byte cells, so the `99` is read
+/// from the cell after it, not `index * 8`). The struct's field is still
+/// readable on the following line after the scalar is dropped.
+#[test]
+fn carried_struct_and_scalar_offsets_stay_correct() {
+    let out = run_session(&["type: Vec2 x i64 y i64 ;", "5 6 Vec2 99", "drop Vec2>y ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Vec2",
+            "stack: <Vec2> 99",
+            "6",
+            "stack: (empty)",
+        ]
+    );
+}
+
+/// A duplicate `type:` in the REPL is a located error (X2) and rolls back:
+/// the original struct stays usable, and a recursive `type:` is reported
+/// rather than hanging (X3, M5). Both leave the session intact.
+#[test]
+fn struct_declaration_errors_report_and_session_survives() {
+    let out = run_session(&[
+        "type: Vec2 x i64 y i64 ;",
+        "type: Vec2 a i64 ;",
+        "type: Loop next Loop ;",
+        "5 6 Vec2 Vec2>y .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "defined type Vec2");
+    assert!(
+        lines[1].contains("duplicate type `Vec2`"),
+        "expected a duplicate-type diagnostic naming `Vec2`: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("recursive struct definition") && lines[2].contains("Loop"),
+        "expected a recursive-struct diagnostic naming the cycle: {}",
+        lines[2]
+    );
+    // The rolled-back duplicate never shadowed the original: `Vec2>y` of
+    // `(5, 6)` still yields 6.
+    assert_eq!(lines[3], "6");
+    assert_eq!(lines[4], "stack: (empty)");
+}
+
 /// Guards the flush-before-call discipline the spec flags as a determinism
 /// risk: the host's stdout buffer and the loaded code's C stdio buffer must
 /// both be flushed so `.` output lands before the next `stack:` line, in
