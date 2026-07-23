@@ -99,7 +99,12 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    conversions, homogeneous arithmetic/comparison, width/signedness codegen. ✅ done.
 3. **Structs / records**: aggregate value types.
 4. **Enums / ADTs + `match`**: exhaustiveness-checked pattern matching (Result/Either fall
-   out mostly free).
+   out mostly free). Also lands **generalized mid-body `| … |` locals** (bind top-of-stack to
+   names anywhere in a body, not just once at entry), motivated by destructuring a variant's
+   payload and reordering/reusing it in a `match` arm; sequence it before/with `match` so arms
+   can bind. Semantics to pin: scope extent, shadowing, branch-join (arm-local bindings that
+   don't escape `then`), and affine liveness (Copy ref copies, affine ref moves, use-after-move
+   is an error). Prefer-the-stack stays the culture; locals stay opt-in.
 5. **Fixed-size arrays** (still heap-free). Introduce **`usize`** (and likely **`isize`** for
    pointer differences) here, as the target-width index/length type, so array indices are
    `usize` from the first use rather than a hardcoded `i64` retrofitted later. Its defining
