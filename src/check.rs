@@ -59,7 +59,12 @@ impl Ctx<'_> {
 }
 
 pub fn check(module: &Module) -> Result<(), String> {
+    check_structs(module)?;
+
     let mut env = builtin_table();
+    for (name, sig) in struct_generated_sigs(module) {
+        env.insert(name, sig);
+    }
     for word in &module.words {
         env.insert(word.name.clone(), sig_of(&word.effect));
     }
@@ -68,6 +73,140 @@ pub fn check(module: &Module) -> Result<(), String> {
         check_word(word, &env)?;
     }
     Ok(())
+}
+
+/// Struct-level checks that must pass before any generated-word signature or
+/// word body is type-checked (R5, R6): no two `type:` declarations share a
+/// name (X2), and no struct contains itself by value, directly or
+/// transitively (X3, M5).
+fn check_structs(module: &Module) -> Result<(), String> {
+    check_duplicate_struct_names(module)?;
+    check_struct_recursion(module)?;
+    Ok(())
+}
+
+/// A duplicate `type:` name is a sharp located error naming the type (X2).
+fn check_duplicate_struct_names(module: &Module) -> Result<(), String> {
+    let mut seen: HashMap<&str, ()> = HashMap::new();
+    for decl in &module.structs {
+        if seen.insert(decl.name.as_str(), ()).is_some() {
+            return Err(format!(
+                "error: duplicate type `{}` (line {}, col {})",
+                decl.name, decl.span.line, decl.span.col
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether a struct's field-type graph node has been visited by
+/// `check_struct_recursion`'s DFS: `InProgress` marks an ancestor on the
+/// current path (finding one again is a cycle), `Done` marks a node already
+/// proven acyclic. Every node is visited at most once each way, so the DFS
+/// always terminates (M5): it never loops on a self- or mutually-recursive
+/// `type:`.
+#[derive(Clone, Copy, PartialEq)]
+enum VisitState {
+    Unvisited,
+    InProgress,
+    Done,
+}
+
+/// Detect a struct that contains itself by value, directly or transitively
+/// (D9), via cycle detection over the field-type graph (X3, M5).
+fn check_struct_recursion(module: &Module) -> Result<(), String> {
+    let mut state = vec![VisitState::Unvisited; module.structs.len()];
+    for start in 0..module.structs.len() {
+        if state[start] == VisitState::Unvisited {
+            let mut path = Vec::new();
+            visit_struct_recursion(module, start, &mut state, &mut path)?;
+        }
+    }
+    Ok(())
+}
+
+fn visit_struct_recursion(
+    module: &Module,
+    idx: usize,
+    state: &mut [VisitState],
+    path: &mut Vec<usize>,
+) -> Result<(), String> {
+    state[idx] = VisitState::InProgress;
+    path.push(idx);
+    for (_, field_ty) in &module.structs[idx].fields {
+        if let Type::Struct(id, _) = field_ty {
+            let j = id.index();
+            match state[j] {
+                VisitState::Unvisited => visit_struct_recursion(module, j, state, path)?,
+                VisitState::InProgress => {
+                    let cycle_start = path.iter().position(|&x| x == j).unwrap();
+                    let mut names: Vec<&str> = path[cycle_start..]
+                        .iter()
+                        .map(|&i| module.structs[i].name.as_str())
+                        .collect();
+                    names.push(module.structs[j].name.as_str());
+                    return Err(format!(
+                        "error: recursive struct definition (infinite size): {}",
+                        names.join(" -> ")
+                    ));
+                }
+                VisitState::Done => {}
+            }
+        }
+    }
+    path.pop();
+    state[idx] = VisitState::Done;
+    Ok(())
+}
+
+/// Synthesize the generated-word `Sig`s for every registered struct (D8, M1,
+/// M3), in declared field order (first field deepest): a constructor
+/// `S ( T1 … Tn -- S )`, a destructure `S> ( S -- T1 … Tn )`, and per field a
+/// getter `S>fi ( S -- Ti )` and a functional setter `S<fi ( S Ti -- S )`. A
+/// zero-field struct registers only the constructor and destructure. These
+/// join the env alongside user words, so applying one to the wrong arity or
+/// operand type (X4, X5) is caught by the same arity/type-mismatch path as
+/// any other word call.
+fn struct_generated_sigs(module: &Module) -> Vec<(String, Sig)> {
+    let mut sigs = Vec::new();
+    for decl in &module.structs {
+        let struct_ty = module
+            .resolve_type_name(&decl.name)
+            .expect("every registered struct name resolves to itself");
+        let field_types: Vec<Type> = decl.fields.iter().map(|(_, ty)| *ty).collect();
+
+        sigs.push((
+            decl.name.clone(),
+            Sig {
+                inputs: field_types.clone(),
+                outputs: vec![struct_ty],
+            },
+        ));
+        sigs.push((
+            format!("{}>", decl.name),
+            Sig {
+                inputs: vec![struct_ty],
+                outputs: field_types.clone(),
+            },
+        ));
+        for (field_name, field_ty) in &decl.fields {
+            sigs.push((
+                format!("{}>{}", decl.name, field_name),
+                Sig {
+                    inputs: vec![struct_ty],
+                    outputs: vec![*field_ty],
+                },
+            ));
+            sigs.push((
+                format!("{}<{}", decl.name, field_name),
+                Sig {
+                    inputs: vec![struct_ty, *field_ty],
+                    outputs: vec![struct_ty],
+                },
+            ));
+        }
+    }
+    sigs
 }
 
 /// Check a single word definition against an external env, seeding the env with
@@ -1128,5 +1267,159 @@ mod tests {
         let err = infer_src("frobnicate", &[]).unwrap_err();
         assert!(err.contains("unknown word"), "unexpected message: {err}");
         assert!(err.contains("frobnicate"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_generated_words_flat_struct_ok() {
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             : main ( -- ) 1 2 Vec2 dup Vec2>x drop Vec2>y drop ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_struct_generated_words_nested_struct_ok() {
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             type: Segment from Vec2 to Vec2 ;
+             : main ( -- ) 1 2 Vec2 3 4 Vec2 Segment dup Segment>from Vec2>x drop Segment> drop drop ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_struct_zero_field_registers_only_ctor_and_destructure() {
+        check_src("type: Unit ; : main ( -- ) Unit Unit> ;").unwrap();
+    }
+
+    #[test]
+    fn check_struct_setter_returns_updated_struct_ok() {
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 3 Vec2<x ;").unwrap();
+    }
+
+    #[test]
+    fn check_struct_duplicate_type_name_is_error() {
+        // X2: two `type:` declarations sharing a name name that type.
+        let err = check_src("type: Vec2 x i64 ; type: Vec2 y i64 ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_direct_recursion_is_error_not_hang() {
+        // X3/M5: a directly self-referential struct is a located error, and
+        // this test itself is proof the checker terminated rather than hung.
+        let err = check_src("type: Loop next Loop ;").unwrap_err();
+        assert!(
+            err.contains("recursive struct"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("Loop"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_mutual_recursion_is_error_not_hang() {
+        // X3/M5: a mutually-recursive pair of structs, names both in the cycle.
+        let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
+        assert!(
+            err.contains("recursive struct"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains('A'), "unexpected message: {err}");
+        assert!(err.contains('B'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_constructor_arity_mismatch_is_error() {
+        // X4: too few values fed to the constructor, naming the struct.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 Vec2 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+        assert!(err.contains("needs 2 values"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_constructor_field_type_mismatch_is_error() {
+        // X4: a `bool` where an `i64` field is expected, naming struct+field type.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 true Vec2 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_accessor_on_wrong_type_is_error() {
+        // X5: `Vec2>x` applied to a bare `i64` names the accessor and both types.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2>x ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_accessor_on_other_struct_is_error() {
+        // X5: a `Vec2` accessor applied to a `Segment` names both struct types.
+        let src = "type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;
+            : main ( -- i64 ) 1 2 Vec2 3 4 Vec2 Segment Vec2>x ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`Segment`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_print_is_error() {
+        // X6: `.` on a struct reaches `print_requires_printable`, naming it.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 . ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("printable"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_equality_operator_is_error() {
+        // X7: `=` on two structs is scalar-only, naming the struct type.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- bool ) 1 2 Vec2 1 2 Vec2 = ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_arithmetic_operator_is_error() {
+        // X7: `+` on two structs is scalar-only, naming the struct type.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 1 2 Vec2 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_unifies_through_if_else_join_ok() {
+        // R10: a struct type flows through an `if`/`else` join like any Type.
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             : pick ( bool -- Vec2 ) if 1 2 Vec2 else 3 4 Vec2 then ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_struct_moves_through_shuffles_ok() {
+        // R10: dup/drop/swap/over move a struct value with no special case.
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             : main ( -- Vec2 ) 1 2 Vec2 3 4 Vec2 swap drop dup drop ;",
+        )
+        .unwrap();
     }
 }
