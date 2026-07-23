@@ -78,7 +78,7 @@ const INT_TYPES: [(&str, u8, bool); 8] = [
     ("u64", 64, false),
 ];
 
-/// `(bits, signed)` pair for a float type, mirroring `IntType`. Fields are
+/// The `bits` width for a float type, mirroring `IntType`. Fields are
 /// private so a `Type::Float` can only be built via `Type::from_name`, which
 /// draws from `FLOAT_TYPES`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

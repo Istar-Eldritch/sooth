@@ -104,9 +104,10 @@ Numbered, independently verifiable, traceable to D1–D8 and the six diagnostics
   `Token::Float(f64)`, tried before the `Word` fallthrough. **Digits are required on
   both sides of the dot**: `3.` and `.5` are **not** float literals (they fall through
   to `Word` and error later as unknown words), so no literal can collide with the `.`
-  print word. An integer with no dot still lexes as `Token::Int`. An out-of-range or
-  unparseable float literal is a located lex error (mirroring the integer-overflow
-  message).
+  print word. An integer with no dot still lexes as `Token::Int`. A magnitude beyond
+  `f64` range parses to `inf`/`0.0` (Rust's `f64::from_str` never errors on this
+  grammar) rather than a lex error; this matches the language's own
+  silent-inf-propagation semantics (D4) instead of fighting them.
 - **R4 (D5).** The parser routes `Token::Float(v)` to a new `TermKind::FloatLit(f64)`
   (analogous to `IntLit`). No other grammar change: `>f32`/`>f64`/`f.` are ordinary
   whitespace-delimited words already tokenised as `Word`.

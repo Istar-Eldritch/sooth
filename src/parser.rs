@@ -439,6 +439,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_line_float_lit_is_float_lit() {
+        match parse_line_src("3.14").unwrap() {
+            Line::Expr(terms) => {
+                assert_eq!(terms.len(), 1);
+                assert!(matches!(terms[0].kind, TermKind::FloatLit(v) if v == 3.14));
+            }
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_line_colon_is_def() {
         match parse_line_src(": sq ( i64 -- i64 ) dup * ;").unwrap() {
             Line::Def(def) => assert_eq!(def.name, "sq"),

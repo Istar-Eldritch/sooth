@@ -26,6 +26,9 @@ fn is_int_literal(text: &str) -> bool {
 /// A float literal is `<digits>.<digits>` with an optional `[eE][+-]?<digits>`
 /// exponent. Digits are required on both sides of the dot (`3.` and `.5` are
 /// not float literals) so a literal can never collide with the `.` print word.
+/// A magnitude beyond `f64` range parses to `inf`/`0.0` rather than erroring
+/// (Rust's `f64::from_str` never fails on this grammar), which matches the
+/// language's own silent-inf-propagation semantics rather than fighting them.
 fn is_float_literal(text: &str) -> bool {
     let text = text.strip_prefix('-').unwrap_or(text);
     let Some(dot) = text.find('.') else {
@@ -112,12 +115,9 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                     })?;
                     tokens.push((Token::Int(n), start));
                 } else if is_float_literal(&text) {
-                    let v = text.parse::<f64>().map_err(|_| {
-                        format!(
-                            "lex error: float literal '{text}' out of range at line {}, col {}",
-                            start.line, start.col
-                        )
-                    })?;
+                    let v = text.parse::<f64>().expect(
+                        "is_float_literal validates a grammar f64::from_str always accepts",
+                    );
                     tokens.push((Token::Float(v), start));
                 } else {
                     tokens.push((Token::Word(text), start));
@@ -203,6 +203,12 @@ mod tests {
                 Token::Float(1.0e9),
             ]
         );
+    }
+
+    #[test]
+    fn lex_float_overflow_saturates_to_inf() {
+        let tokens = lex("1.0e999").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Float(f64::INFINITY)]);
     }
 
     #[test]
