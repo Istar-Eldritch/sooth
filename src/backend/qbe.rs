@@ -39,12 +39,57 @@ fn label(id: BlockId) -> String {
     }
 }
 
-/// The QBE base-type letter for an `IrType`: `Bool` is a 4-byte `w` (0/1);
-/// `Int`/`Ptr` are the 8-byte `l` used by the buffer and C ABI.
+/// The QBE base-type letter for an `IrType`, derived here (not in the IR, R14):
+/// `Bool` is a 4-byte `w` (0/1); an integer is `w` for `bits <= 32` and `l` for
+/// `64`; `Ptr` is the 8-byte `l` used by the buffer and C ABI.
 fn width(ty: IrType) -> &'static str {
     match ty {
         IrType::Bool => "w",
-        IrType::Int | IrType::Ptr => "l",
+        IrType::Int { bits, .. } => {
+            if bits <= 32 {
+                "w"
+            } else {
+                "l"
+            }
+        }
+        IrType::Ptr => "l",
+    }
+}
+
+/// A sub-word integer type (`bits < 32`, i.e. `i8`/`i16`/`u8`/`u16`) whose value
+/// can carry dirty high bits in its `w` register after a width-overflowing op.
+/// `i32`/`u32` fill the `w` register exactly and need no canonicalization.
+fn sub_word(ty: IrType) -> Option<(u8, bool)> {
+    match ty {
+        IrType::Int { bits, signed } if bits < 32 => Some((bits, signed)),
+        _ => None,
+    }
+}
+
+/// The single sub-word canonicalization point (R15): normalize `src`'s
+/// out-of-width bits into `dst` at register width `w`. A signed type
+/// sign-extends from its low `bits` (`extsb`/`extsh`); an unsigned type masks
+/// off everything above `bits`. Every dirtying op (sub-word arithmetic here,
+/// narrowing conversion in the conversion lowering) routes through this so no
+/// two code paths disagree on a value's high bits.
+fn emit_canonicalize(
+    out: &mut String,
+    dst: &str,
+    src: &str,
+    w: &str,
+    bits: u8,
+    signed: bool,
+) -> std::fmt::Result {
+    if signed {
+        let ext = match bits {
+            8 => "extsb",
+            16 => "extsh",
+            _ => unreachable!("sub_word only yields bits 8/16"),
+        };
+        writeln!(out, "\t{dst} ={w} {ext} {src}")
+    } else {
+        let mask = (1u32 << bits) - 1;
+        writeln!(out, "\t{dst} ={w} and {src}, {mask}")
     }
 }
 
@@ -94,19 +139,37 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 BinOp::Mul => "mul",
                 BinOp::Rem => "rem",
             };
-            writeln!(out, "\t{} =l {m} {}, {}", val(*v), val(*a), val(*b))
+            // The op runs at the result's register width; a sub-word result can
+            // overflow its width, so canonicalize it (R15) via the shared point.
+            let ty = ty_of(value_types, *v);
+            let w = width(ty);
+            if let Some((bits, signed)) = sub_word(ty) {
+                let tmp = format!("%bin{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{tmp} ={w} {m} {}, {}", val(*a), val(*b)).unwrap();
+                emit_canonicalize(out, &val(*v), &tmp, w, bits, signed)
+            } else {
+                writeln!(out, "\t{} ={w} {m} {}, {}", val(*v), val(*a), val(*b))
+            }
         }
         Instr::Cmp(v, op, a, b) => {
+            // Signedness and operand width come from the operand type (R10),
+            // not the result (always `Bool`/`w`): `<`/`>` pick signed
+            // (`cslt`/`csgt`) vs unsigned (`cult`/`cugt`); `=` is
+            // signedness-agnostic (`ceq`). The mnemonic's width suffix is the
+            // operand width.
+            let operand = ty_of(value_types, *a);
+            let ow = width(operand);
+            let signed = matches!(operand, IrType::Int { signed: true, .. });
             let m = match op {
-                CmpOp::Eq => "ceql",
-                CmpOp::Lt => "csltl",
-                CmpOp::Gt => "csgtl",
+                CmpOp::Eq => "ceq",
+                CmpOp::Lt if signed => "cslt",
+                CmpOp::Lt => "cult",
+                CmpOp::Gt if signed => "csgt",
+                CmpOp::Gt => "cugt",
             };
-            // The comparison result is always `Bool`-tagged (`w`); the operand
-            // width encoded in the mnemonic (`l`) stays fixed since `= < >`
-            // only ever compare `i64` operands (D2/D6).
             let w = width(ty_of(value_types, *v));
-            writeln!(out, "\t{} ={w} {m} {}, {}", val(*v), val(*a), val(*b))
+            writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
         Instr::Call(ret, f, args) => {
             let a: Vec<String> = args
@@ -258,5 +321,77 @@ mod tests {
         let il = emit_line("+", 2);
         assert!(il.contains("loadl "), "expected a load: {il}");
         assert!(il.contains("storel "), "expected a store: {il}");
+    }
+
+    fn int(bits: u8, signed: bool) -> IrType {
+        IrType::Int { bits, signed }
+    }
+
+    /// Emit a single-block function over hand-built value types and instrs,
+    /// returning `v2` (the result of a binary/compare op). Lets Phase 3 exercise
+    /// sub-word/unsigned codegen with no source path to produce those types yet.
+    fn emit_binary(operand: IrType, result: IrType, instr: Instr) -> String {
+        let func = IrFunc {
+            name: "t".to_string(),
+            params: vec![],
+            ret: Some(result),
+            blocks: vec![crate::ir::Block {
+                id: crate::ir::BlockId(0),
+                instrs: vec![Instr::Const(Value(0), 5), Instr::Const(Value(1), 3), instr],
+                term: Terminator::Ret(Some(Value(2))),
+            }],
+            value_types: vec![operand, operand, result],
+        };
+        emit(&IrModule { funcs: vec![func] }).unwrap()
+    }
+
+    #[test]
+    fn qbe_width_u8_is_w_expected() {
+        assert_eq!(width(int(8, false)), "w");
+        assert_eq!(width(int(16, true)), "w");
+        assert_eq!(width(int(32, false)), "w");
+    }
+
+    #[test]
+    fn qbe_width_i64_is_l_expected() {
+        assert_eq!(width(int(64, true)), "l");
+        assert_eq!(width(int(64, false)), "l");
+    }
+
+    #[test]
+    fn emit_cmp_signed_uses_cslt() {
+        let il = emit_binary(
+            int(32, true),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Lt, Value(0), Value(1)),
+        );
+        assert!(il.contains("csltw"), "expected a signed compare: {il}");
+    }
+
+    #[test]
+    fn emit_cmp_unsigned_uses_cult() {
+        let il = emit_binary(
+            int(32, false),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Lt, Value(0), Value(1)),
+        );
+        assert!(il.contains("cultw"), "expected an unsigned compare: {il}");
+    }
+
+    #[test]
+    fn emit_subword_arith_canonicalizes() {
+        // An unsigned sub-word add masks its result to the low `bits`.
+        let u8 = int(8, false);
+        let il = emit_binary(u8, u8, Instr::Bin(Value(2), BinOp::Add, Value(0), Value(1)));
+        assert!(il.contains("add"), "expected the add: {il}");
+        assert!(
+            il.contains("and") && il.contains("255"),
+            "expected a mask: {il}"
+        );
+
+        // A signed sub-word add sign-extends its result from `bits`.
+        let i8 = int(8, true);
+        let il = emit_binary(i8, i8, Instr::Bin(Value(2), BinOp::Add, Value(0), Value(1)));
+        assert!(il.contains("extsb"), "expected a sign-extend: {il}");
     }
 }

@@ -29,7 +29,14 @@ pub struct IrFunc {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrType {
-    Int,
+    /// A fixed-width integer carrying its `bits` and `signed`. The backend
+    /// derives the QBE register class (`w`/`l`) and signed-vs-unsigned op from
+    /// these; the IR itself stays backend-neutral (a WASM lowering reads
+    /// `bits`/`signed`, never `w`/`l`).
+    Int {
+        bits: u8,
+        signed: bool,
+    },
     Bool,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
@@ -37,10 +44,21 @@ pub enum IrType {
     Ptr,
 }
 
+impl IrType {
+    /// The `i64` integer type; the literal type and the carried-slot width.
+    pub const I64: IrType = IrType::Int {
+        bits: 64,
+        signed: true,
+    };
+}
+
 /// Map a frontend `Type` to its `IrType`.
 pub fn ir_type_of(ty: Type) -> IrType {
     match ty {
-        Type::Int(_) => IrType::Int,
+        Type::Int(it) => IrType::Int {
+            bits: it.bits(),
+            signed: it.signed(),
+        },
         Type::Bool => IrType::Bool,
     }
 }
@@ -150,18 +168,20 @@ pub fn lower_line(
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
-    let top = b.fresh_value(IrType::Int);
+    let top = b.fresh_value(IrType::I64);
 
     // Prologue: load slot `i` at byte offset `i*8`, deepest (slot 0) first.
     let mut stack = Vec::with_capacity(entry_depth);
     for i in 0..entry_depth {
         let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
-        // Every carried slot loads as `IrType::Int` (l-width) regardless of its
-        // logical type. Value-correct in Slice 1 (i64 and bool both fit one
-        // 8-byte slot, and the epilogue zero-extends a bool on store), but this
-        // must be revisited once a carried slot type can have a different width.
-        let v = b.fresh_value(IrType::Int);
+        // Q2 (Slice 2): a carried slot stays an 8-byte `l`-width slot and loads
+        // as `IrType::I64`, even when the checker's carried `Type` is narrower
+        // or unsigned. This is value-correct because canonicalization keeps the
+        // stored slot's low `bits` authoritative (R15), so reinterpreting them
+        // as `l` on the next line reads the right value; the checker still
+        // tracks the true `Type` for type-checking, and `.` widens via `>i64`.
+        let v = b.fresh_value(IrType::I64);
         b.push_instr(Instr::Load(v, ptr));
         stack.push(v);
     }
@@ -182,16 +202,16 @@ pub fn lower_line(
 
     // Return the advanced top; (M - entry_depth) may be negative.
     let delta = (m as i64 - entry_depth as i64) * 8;
-    let delta_val = b.fresh_value(IrType::Int);
+    let delta_val = b.fresh_value(IrType::I64);
     b.push_instr(Instr::Const(delta_val, delta));
-    let new_top = b.fresh_value(IrType::Int);
+    let new_top = b.fresh_value(IrType::I64);
     b.push_instr(Instr::Bin(new_top, BinOp::Add, top, delta_val));
     b.seal_block(Terminator::Ret(Some(new_top)));
 
     let func = IrFunc {
         name: format!("sooth_line_{seq}"),
-        params: vec![IrType::Ptr, IrType::Int],
-        ret: Some(IrType::Int),
+        params: vec![IrType::Ptr, IrType::I64],
+        ret: Some(IrType::I64),
         blocks: b.blocks,
         value_types: b.value_types,
     };
@@ -315,7 +335,7 @@ impl<'a> FuncBuilder<'a> {
     fn lower_term(&mut self, term: &Term) {
         match &term.kind {
             TermKind::IntLit(n) => {
-                let v = self.fresh_value(IrType::Int);
+                let v = self.fresh_value(IrType::I64);
                 self.push_instr(Instr::Const(v, *n));
                 self.stack.push(v);
             }
@@ -370,7 +390,10 @@ impl<'a> FuncBuilder<'a> {
                 };
                 let rhs = self.stack.pop().expect("bin: rhs");
                 let lhs = self.stack.pop().expect("bin: lhs");
-                let v = self.fresh_value(IrType::Int);
+                // Arithmetic is homogeneous (checker-guaranteed): the result
+                // carries the operand type, so the backend picks its width.
+                let ty = self.value_type(lhs);
+                let v = self.fresh_value(ty);
                 self.push_instr(Instr::Bin(v, op, lhs, rhs));
                 self.stack.push(v);
             }
@@ -396,7 +419,7 @@ impl<'a> FuncBuilder<'a> {
                 let split = self.stack.len() - in_arity;
                 let args = self.stack.split_off(split);
                 let ret = if out_arity == 1 {
-                    Some(self.fresh_value(ret_ty.unwrap_or(IrType::Int)))
+                    Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
                 } else {
                     None
                 };
@@ -649,5 +672,51 @@ mod tests {
         assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
         let last = w.blocks.last().unwrap();
         assert!(matches!(last.term, Terminator::Ret(None)));
+    }
+
+    #[test]
+    fn ir_type_of_each_width_expected() {
+        let cases: &[(&str, u8, bool)] = &[
+            ("i8", 8, true),
+            ("i16", 16, true),
+            ("i32", 32, true),
+            ("i64", 64, true),
+            ("u8", 8, false),
+            ("u16", 16, false),
+            ("u32", 32, false),
+            ("u64", 64, false),
+        ];
+        for (name, bits, signed) in cases {
+            let ty = Type::from_name(name).unwrap();
+            assert_eq!(
+                ir_type_of(ty),
+                IrType::Int {
+                    bits: *bits,
+                    signed: *signed
+                },
+                "mapping {name}"
+            );
+        }
+        assert_eq!(ir_type_of(Type::Bool), IrType::Bool);
+    }
+
+    #[test]
+    fn lower_add_u8_result_is_u8_typed() {
+        // No source path produces a `u8` yet (conversions land in Phase 4), so
+        // drive `lower_call`'s arithmetic arm with hand-typed u8 operands and
+        // assert the result carries the operand type through to its `IrType`.
+        let u8 = IrType::Int {
+            bits: 8,
+            signed: false,
+        };
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let mut b = FuncBuilder::new(&env, &resolve);
+        let x = b.fresh_value(u8);
+        let y = b.fresh_value(u8);
+        b.stack = vec![x, y];
+        b.lower_call("+");
+        let top = *b.stack.last().unwrap();
+        assert_eq!(b.value_type(top), u8);
     }
 }

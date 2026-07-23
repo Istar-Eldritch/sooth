@@ -118,6 +118,18 @@ impl Type {
     }
 }
 
+impl IntType {
+    /// The width in bits (`8`/`16`/`32`/`64`).
+    pub fn bits(&self) -> u8 {
+        self.bits
+    }
+
+    /// Whether the type is signed.
+    pub fn signed(&self) -> bool {
+        self.signed
+    }
+}
+
 impl std::fmt::Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
