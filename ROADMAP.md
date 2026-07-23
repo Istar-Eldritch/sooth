@@ -102,6 +102,24 @@ double-word synthesis), and **bitwise operators** (`and`/`or`/`xor`/`shl`/`shr`/
 signed-vs-unsigned right-shift is the natural headline). The `*/` widening primitive is also
 still deferred. So the real remaining count is a bit more than five.
 
+**Floats slice, decided semantics** (brief not yet written): `f32`+`f64`; homogeneous
+`+ - * /` (float `/` is in, no `mod`); IEEE-754 with **silent NaN/inf propagation** (no
+trapping, no static rejection: NaN/inf are inherently runtime and Sooth's compile-error
+lever cannot reach them); float literals `<digits>.<digits>` (digits required both sides so
+they cannot collide with the `.` print word), defaulting to `f64`; a distinct `f.` print
+word `( f64 -- )` rather than overloading `.`; the target-only conversion family generalised
+to numeric (`>f32`/`>f64`, and float->int truncating toward zero, out-of-range/NaN
+unspecified). Comparison `< > =` are plain IEEE ordered compares: `=` is **exact** bit
+equality (a documented footgun), never epsilon. NaN is user-detectable via `x = x`; `isinf`
+and any epsilon/approximate comparison are deferred to the stdlib.
+
+Float ordering is **partial** (NaN compares false to everything, so there is no total
+order). This slice ships no generic `sort`/`Ord` bound to attach that to, so nothing is
+owed now; when generics land (Phase 4) and a `>`-requiring polymorphic word or a
+sortable/hashable collection needs a total order over floats, revisit then (Rust's model:
+expose the partialness at the sort/key site, e.g. a `total_cmp`, rather than silently
+lying). Tracked so it is not lost.
+
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; i128/u128 synthesised in the frontend if on QBE; `*/` widening
 primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
@@ -137,7 +155,10 @@ monomorphic Phase 0 shuffles (`dup`/`swap`/`over`/`rot`/`drop`), plus `max` and 
 words, gain honest polymorphic signatures; monomorphise
 per concrete stack shape, force-inline the small core words. Required operations
 (e.g. `>` for `max`) resolved at the concrete instantiation, Kitten-style, no formal
-trait system. **Quotations** (`[ ... ]` + `call`) as the sole iteration primitive,
+trait system. When such a required operation is a total order over **floats**, this is the
+point to decide the float total-ordering story deferred from the floats slice (float `<`/`=`
+are IEEE-partial; a `max`/sort over floats needs an explicit total order, Rust-`total_cmp`
+style, surfaced at the call site rather than pretending IEEE ordering is total). **Quotations** (`[ ... ]` + `call`) as the sole iteration primitive,
 plus the **internal loop primitive** they compile down to for constant-stack
 iteration. Combinators (`each`/`map`/`filter`/`fold`/`while`/`times`) are ordinary
 **library words** written in Sooth on top of quotations, with the compiler inlining
