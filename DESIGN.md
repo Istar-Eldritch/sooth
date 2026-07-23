@@ -295,8 +295,7 @@ next).
 QBE's costs, accepted: it emits assembly text, so you depend on the system assembler
 
 - linker (a cross-toolchain + sysroot when cross-compiling the hosted layer);
-i128/u128 are synthesised in the frontend (not QBE base types); atomics lower via FFI
-to C11 atomics rather than a QBE primitive. Its modest optimiser is a feature, not a
+atomics lower via FFI to C11 atomics rather than a QBE primitive. Its modest optimiser is a feature, not a
 bug: more predictable than LLVM's aggressive passes and friendlier to any later WCET
 work.
 
@@ -316,8 +315,8 @@ chafe later.
 The same rule extends to integer width: **the IR never assumes a 64-bit machine word.**
 Word, pointer, and `usize`/`isize` width are a target parameter, not a constant, exactly as
 `Ptr[T]` is opaque. This is not abstract tidiness: the committed rv32 target (above) has
-32-bit pointers and makes `i64`/`u64` double-word (the same frontend synthesis deferred for
-`i128`/`u128`, one level down), so `usize` is genuinely 32-bit there. `usize`/`isize` are
+32-bit pointers and makes `i64`/`u64` double-word there (synthesised as register pairs in
+the frontend), so `usize` is genuinely 32-bit there. `usize`/`isize` are
 target-width types introduced with fixed-size arrays (Phase 2, Slice 5), where indexing is
 their first real consumer; they resolve to 64-bit on current targets but must never be
 *assumed* 64-bit in shared IR. A corollary worth revisiting under a 32-bit target: the

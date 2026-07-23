@@ -105,11 +105,13 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    built-in type property (so Phase 3 has it to build on), plus explicit optional and
    non-null pointer types.
 
-Three numeric axes were deliberately carved out of Slice 2. **Floats have now landed** (see
-below); the two still needing homes (their own slices, or folded into one) are
-**`i128`/`u128`** (frontend double-word synthesis) and **bitwise operators**
-(`and`/`or`/`xor`/`shl`/`shr`/`sar`, where signed-vs-unsigned right-shift is the natural
-headline). The `*/` widening primitive is also still deferred.
+Numeric axes carved out of Slice 2: **floats have landed** (see below), and **bitwise
+operators** (`and`/`or`/`xor`/`shl`/`shr`, with type-directed right shift) are the remaining
+carved-out axis. The `*/` widening primitive is still deferred. **`i128`/`u128` are not
+planned:** a first-class 128-bit type is completeness-think for a craft language, and the one
+real need behind it (a 64x64->128 widening multiply, e.g. for hashing or `*/`) is better
+served by a narrow widening-multiply primitive if a concrete consumer ever appears, not by a
+type.
 
 **Floats axis, delivered** (brief + spec: `docs/phase2-slice-floats-brief.md`,
 `docs/phase2-slice-floats-spec.md`): `f32`+`f64`; homogeneous `+ - * /` (float `/` is in, no
@@ -133,8 +135,7 @@ expose the partialness at the sort/key site, e.g. a `total_cmp`, rather than sil
 lying). Tracked so it is not lost.
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
-u8..u64, f32/f64; i128/u128 synthesised in the frontend if on QBE; `*/` widening
-primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
+u8..u64, f32/f64; `*/` widening primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
 pattern matching. Non-null pointers + explicit optional type. The **`Copy` vs
 affine distinction** as a built-in property of types (primitives Copy; anything
 owning a resource affine), so Phase 3 has it to build on. Stack-effect checking now
