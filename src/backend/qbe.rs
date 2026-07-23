@@ -133,16 +133,17 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             writeln!(out, "\t{} ={w} copy {n}", val(*v))
         }
         Instr::Bin(v, op, a, b) => {
-            let m = match op {
-                BinOp::Add => "add",
-                BinOp::Sub => "sub",
-                BinOp::Mul => "mul",
-                BinOp::Rem => "rem",
-            };
             // The op runs at the result's register width; a sub-word result can
             // overflow its width, so canonicalize it (R15) via the shared point.
             let ty = ty_of(value_types, *v);
             let w = width(ty);
+            let m = match op {
+                BinOp::Add => "add",
+                BinOp::Sub => "sub",
+                BinOp::Mul => "mul",
+                BinOp::Rem if matches!(ty, IrType::Int { signed: false, .. }) => "urem",
+                BinOp::Rem => "rem",
+            };
             if let Some((bits, signed)) = sub_word(ty) {
                 let tmp = format!("%bin{ext_id}");
                 *ext_id += 1;
@@ -376,6 +377,29 @@ mod tests {
             Instr::Cmp(Value(2), CmpOp::Lt, Value(0), Value(1)),
         );
         assert!(il.contains("cultw"), "expected an unsigned compare: {il}");
+    }
+
+    #[test]
+    fn emit_unsigned_mod_uses_urem() {
+        let u32_ty = int(32, false);
+        let il = emit_binary(
+            u32_ty,
+            u32_ty,
+            Instr::Bin(Value(2), BinOp::Rem, Value(0), Value(1)),
+        );
+        assert!(il.contains("urem"), "expected an unsigned rem: {il}");
+    }
+
+    #[test]
+    fn emit_signed_mod_uses_rem() {
+        let i32_ty = int(32, true);
+        let il = emit_binary(
+            i32_ty,
+            i32_ty,
+            Instr::Bin(Value(2), BinOp::Rem, Value(0), Value(1)),
+        );
+        assert!(il.contains(" rem "), "expected a signed rem: {il}");
+        assert!(!il.contains("urem"), "unexpected urem: {il}");
     }
 
     #[test]
