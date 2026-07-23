@@ -149,7 +149,10 @@ fn resolver_with_override<'a>(
 /// Format the carried stack, bottom to top, for the session's per-expression
 /// output line. A float slot is reinterpreted from its stored bits via
 /// `from_bits` (R21): displaying its `i64` bit pattern would be meaningless. An
-/// `f32` slot reads only the low 32 bits (it was stored 4-wide, Q2).
+/// `f32` slot reads only the low 32 bits (it was stored 4-wide, Q2). A `bool`
+/// slot displays as `true`/`false` (matching `.`, not the raw 0/1). An
+/// unsigned slot displays as its unsigned value: the raw `i64` bit pattern of
+/// a high-bit-set `u64` is negative and would otherwise misprint as such.
 pub fn format_stack(stack: &[i64], types: &[Type]) -> String {
     if stack.is_empty() {
         return "stack: (empty)".to_string();
@@ -160,6 +163,8 @@ pub fn format_stack(stack: &[i64], types: &[Type]) -> String {
         .map(|(&v, ty)| match ty {
             Type::Float(ft) if ft.bits() == 32 => f32::from_bits(v as u64 as u32).to_string(),
             Type::Float(_) => f64::from_bits(v as u64).to_string(),
+            Type::Bool => if v != 0 { "true" } else { "false" }.to_string(),
+            Type::Int(it) if !it.signed() => (v as u64).to_string(),
             _ => v.to_string(),
         })
         .collect();
@@ -406,6 +411,26 @@ mod tests {
         let bits = 1.5f32.to_bits() as u64 as i64;
         let f32_ty = Type::from_name("f32").unwrap();
         assert_eq!(format_stack(&[bits], &[f32_ty]), "stack: 1.5");
+    }
+
+    #[test]
+    fn format_stack_bool_slot_displays_as_true_or_false() {
+        // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
+        assert_eq!(
+            format_stack(&[1, 0], &[Type::Bool, Type::Bool]),
+            "stack: true false"
+        );
+    }
+
+    #[test]
+    fn format_stack_unsigned_slot_displays_unsigned_not_negative() {
+        // A `u64` with the high bit set stores a negative `i64` bit pattern;
+        // display must render its unsigned value, not that negative number.
+        let u64_ty = Type::from_name("u64").unwrap();
+        assert_eq!(
+            format_stack(&[-1], &[u64_ty]),
+            "stack: 18446744073709551615"
+        );
     }
 
     fn entry(generation: u64) -> WordEntry {
