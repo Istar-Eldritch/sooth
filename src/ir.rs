@@ -1225,12 +1225,12 @@ mod tests {
 
     #[test]
     fn lower_float_literal_is_constf_f64_typed() {
-        let ir = lower_src(": w ( -- f64 ) 3.14 ;");
+        let ir = lower_src(": w ( -- f64 ) 2.5 ;");
         let w = &ir.funcs[0];
         let v = instrs(w)
             .iter()
             .find_map(|i| match i {
-                Instr::ConstF(v, x) if *x == 3.14 => Some(*v),
+                Instr::ConstF(v, x) if *x == 2.5 => Some(*v),
                 _ => None,
             })
             .expect("a ConstF for the float literal");

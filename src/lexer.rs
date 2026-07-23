@@ -212,11 +212,11 @@ mod tests {
 
     #[test]
     fn lex_float_literal_is_float() {
-        let tokens = lex("3.14 0.5 1.5e-3 1.0e9").unwrap();
+        let tokens = lex("2.5 0.5 1.5e-3 1.0e9").unwrap();
         assert_eq!(
             words(&tokens),
             vec![
-                Token::Float(3.14),
+                Token::Float(2.5),
                 Token::Float(0.5),
                 Token::Float(1.5e-3),
                 Token::Float(1.0e9),
