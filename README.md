@@ -20,11 +20,16 @@ explicit copy, and drop is a statically-known destructor point.
 
 ## Status
 
-**Phase 0 (codegen spine): complete** and **Phase 1 (REPL / liveness): complete**
-(see ROADMAP.md). The pipeline is implemented end to end and the goldens (`gcd`,
-`factorial`, `lerp`) compile to native binaries and run; `cargo run -- repl` gives an
-interactive session where words are compiled to shared objects and `dlopen`'d in as
-you define them. Next is Phase 2 (a typed core). The compiler is a Rust bootstrap; the
+**Phases 0 and 1 complete; Phase 2 (typed core) in progress** (see ROADMAP.md). The
+pipeline is implemented end to end: `gcd`/`factorial`/`lerp` and the newer examples
+compile to native binaries and run, and `cargo run -- repl` gives an interactive session
+where words are compiled to shared objects and `dlopen`'d in as you define them. Phase 2
+has landed its full **scalar core**: a `Type` per stack slot, unified at branch joins; the
+fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit target-only conversions
+(`>i8`..`>u64`); floating point (`f32`/`f64`) with IEEE arithmetic and comparison; bitwise
+operators (`and`/`or`/`xor`/`not`/`shl`/`shr`); and boolean logic with the full comparison
+set (`= < > <= >= <>`). What remains in Phase 2 are the aggregates: structs, enums/`match`,
+fixed-size arrays, then the bytecode-VM exit dogfood. The compiler is a Rust bootstrap; the
 language will later self-host.
 
 Pipeline: `source → lex → parse → stack-effect check → backend-neutral IR → QBE IL
@@ -66,7 +71,7 @@ src/ir.rs                         backend-neutral IR (Ptr[T] kept abstract)
 src/backend/qbe.rs                QBE IL emission
 src/driver.rs                     pipeline orchestration
 src/repl.rs                       REPL session: dlopen loop, generation mangling
-examples/                         Phase 0 target programs
-tests/phase0.rs                   golden tests (gcd / factorial / lerp + a diagnostic)
+examples/                         target programs (gcd, factorial, lerp, rgb, mean, leap, ...)
+tests/phase0.rs                   golden tests: build+run + diagnostics across the scalar core
 tests/phase1.rs                   golden REPL sessions (define/redefine/recover)
 ```

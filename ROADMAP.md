@@ -72,7 +72,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slices 1-2 + floats & bitwise axes done)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core done: Slices 1-2 + floats/bitwise/bool)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -84,7 +84,11 @@ with IEEE arithmetic (including float `/`), ordered NaN-correct comparison, floa
 `f.` printing, and numeric-generalised int<->float conversions. The **bitwise axis is done**:
 `and`/`or`/`xor`/`not` plus `shl`/`shr` with a single type-directed right shift (arithmetic
 `sar` for signed, logical `shr` for unsigned), i64 shift count masked mod the operand's bit
-width.
+width. The **boolean/comparison surface is complete** too: `and`/`or`/`xor`/`not` are
+type-directed over `bool` (logical) as well as integers (bitwise), and the comparison set is
+filled out with `<= >= <>` (numeric, signedness- and NaN-correct), making `bool` a
+first-class operand type rather than an `if`-only token. With this the Phase 2 **scalar core**
+is complete; what remains are the aggregates (Slices 3-7).
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
