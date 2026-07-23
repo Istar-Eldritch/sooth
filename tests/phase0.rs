@@ -609,9 +609,8 @@ fn bitwise_and_or_xor_not_produce_known_values() {
 
 #[test]
 fn shr_is_type_directed_arithmetic_for_signed_logical_for_unsigned() {
-    // The headline of this slice: the same bit pattern (200), shifted right
-    // by 1, gives different results as `i8` (arithmetic, sign-preserving)
-    // vs `u8` (logical).
+    // The same bit pattern (200), shifted right by 1, gives different
+    // results as `i8` (arithmetic, sign-preserving) vs `u8` (logical).
     let src = ": main ( -- )\n  200 >i8 1 shr >i64 .\n  200 >u8 1 shr >i64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-shr-type-directed-{}.sth",
@@ -649,5 +648,58 @@ fn subword_shift_masks_overshift_count_to_type_width() {
 fn rgb_bits_dogfood_compiles_and_runs() {
     let (stdout, code) = run_and_capture_stdout("examples/rgb_bits.sth");
     assert_eq!(stdout, "660510\n20\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn unsigned_subword_not_canonicalizes_to_type_width() {
+    // `not` on a `u8` must re-mask to 8 bits: bitwise-not of 5 is 0xFA (250)
+    // in a `u8`, not the i64 all-ones complement (-6).
+    let src = ": main ( -- )\n  5 >u8 not >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-unsigned-subword-not-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "250\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn signed_subword_shift_high_bits_are_canonical_for_comparison() {
+    // `1 << 7` in an `i8` is -128 (0x80), which must compare as `< 0`. If the
+    // high bits weren't kept canonical within the `i8` width, the comparison
+    // could see stale bits instead of the correct sign.
+    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < if 1 . else 0 . then ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-signed-subword-shift-compare-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn negative_shift_count_masks_to_type_width() {
+    // A negative runtime shift count must mask to the type width rather than
+    // trap or invoke UB: -6 mod 8 = 2, so shifting a `u8` by -6 shifts by 2,
+    // giving 4.
+    let src = ": main ( -- )\n  1 >u8  0 6 -  shl >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-negative-shift-count-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "4\n");
     assert_eq!(code, 0);
 }

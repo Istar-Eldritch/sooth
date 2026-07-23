@@ -882,6 +882,8 @@ mod tests {
     fn check_not_on_bool_is_error() {
         let src = ": w ( -- bool ) true not ;";
         let err = check_src(src).unwrap_err();
+        assert!(err.contains("`not`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
         assert!(err.contains("`bool`"), "unexpected message: {err}");
     }
 
