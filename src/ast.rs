@@ -105,9 +105,6 @@ impl Type {
         signed: true,
     });
 
-    /// Sugar for the default float-literal type (`f64`).
-    pub const F64: Type = Type::Float(FloatType { bits: 64 });
-
     /// Resolve a source type-name word to a `Type`, or `None` if unknown.
     pub fn from_name(name: &str) -> Option<Type> {
         if name == "bool" {

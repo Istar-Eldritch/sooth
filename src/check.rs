@@ -280,10 +280,7 @@ fn check_term(
             stack.push(Type::I64);
             Ok(stack)
         }
-        TermKind::FloatLit(_) => {
-            stack.push(Type::F64);
-            Ok(stack)
-        }
+        TermKind::FloatLit(_) => todo!("float-literal checker typing lands in Phase 2 (R5)"),
         TermKind::BoolLit(_) => {
             stack.push(Type::Bool);
             Ok(stack)

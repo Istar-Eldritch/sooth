@@ -41,8 +41,7 @@ fn label(id: BlockId) -> String {
 
 /// The QBE base-type letter for an `IrType`, derived here (not in the IR, R14):
 /// `Bool` is a 4-byte `w` (0/1); an integer is `w` for `bits <= 32` and `l` for
-/// `64`; a float is `s` for `32` bits and `d` for `64` (R15); `Ptr` is the
-/// 8-byte `l` used by the buffer and C ABI.
+/// `64`; `Ptr` is the 8-byte `l` used by the buffer and C ABI.
 fn width(ty: IrType) -> &'static str {
     match ty {
         IrType::Bool => "w",
@@ -51,13 +50,6 @@ fn width(ty: IrType) -> &'static str {
                 "w"
             } else {
                 "l"
-            }
-        }
-        IrType::Float { bits } => {
-            if bits == 32 {
-                "s"
-            } else {
-                "d"
             }
         }
         IrType::Ptr => "l",
@@ -199,10 +191,6 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
         Instr::Const(v, n) => {
             let w = width(ty_of(value_types, *v));
             writeln!(out, "\t{} ={w} copy {n}", val(*v))
-        }
-        Instr::ConstF(v, n) => {
-            let w = width(ty_of(value_types, *v));
-            writeln!(out, "\t{} ={w} copy {w}_{n}", val(*v))
         }
         Instr::Bin(v, op, a, b) => {
             // The op runs at the result's register width; a sub-word result can
