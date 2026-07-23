@@ -51,6 +51,7 @@ pub struct TypedSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int(IntType),
+    Float(FloatType),
     Bool,
 }
 
@@ -77,6 +78,25 @@ const INT_TYPES: [(&str, u8, bool); 8] = [
     ("u64", 64, false),
 ];
 
+/// The `bits` width for a float type, mirroring `IntType`. Fields are
+/// private so a `Type::Float` can only be built via `Type::from_name`, which
+/// draws from `FLOAT_TYPES`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FloatType {
+    bits: u8,
+}
+
+impl FloatType {
+    /// The width in bits (`32`/`64`).
+    pub fn bits(&self) -> u8 {
+        self.bits
+    }
+}
+
+/// `(name, bits)` rows for the two float types, driving
+/// `Type::from_name`/`Type::name`.
+const FLOAT_TYPES: [(&str, u8); 2] = [("f32", 32), ("f64", 64)];
+
 impl Type {
     /// Sugar for the literal type (`i64`); kept to cut churn at call sites
     /// that only ever meant plain `i64`.
@@ -85,10 +105,16 @@ impl Type {
         signed: true,
     });
 
+    /// Sugar for the default float-literal type (`f64`, D5).
+    pub const F64: Type = Type::Float(FloatType { bits: 64 });
+
     /// Resolve a source type-name word to a `Type`, or `None` if unknown.
     pub fn from_name(name: &str) -> Option<Type> {
         if name == "bool" {
             return Some(Type::Bool);
+        }
+        if let Some((_, bits)) = FLOAT_TYPES.iter().find(|(n, _)| *n == name) {
+            return Some(Type::Float(FloatType { bits: *bits }));
         }
         INT_TYPES
             .iter()
@@ -106,6 +132,16 @@ impl Type {
         matches!(self, Type::Int(_))
     }
 
+    /// Whether this type is one of the two float types.
+    pub fn is_float(&self) -> bool {
+        matches!(self, Type::Float(_))
+    }
+
+    /// Whether this type is numeric (int or float, not `bool`).
+    pub fn is_numeric(&self) -> bool {
+        self.is_int() || self.is_float()
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Type::Bool => "bool",
@@ -114,6 +150,11 @@ impl Type {
                 .find(|(_, b, s)| b == bits && s == signed)
                 .map(|(n, _, _)| *n)
                 .expect("Type::Int is always constructed from an INT_TYPES row"),
+            Type::Float(FloatType { bits }) => FLOAT_TYPES
+                .iter()
+                .find(|(_, b)| b == bits)
+                .map(|(n, _)| *n)
+                .expect("Type::Float is always constructed from a FLOAT_TYPES row"),
         }
     }
 }
@@ -145,6 +186,7 @@ pub struct Term {
 #[derive(Debug)]
 pub enum TermKind {
     IntLit(i64),
+    FloatLit(f64),
     BoolLit(bool),
     /// A word invocation, or a reference to a named local.
     Call(String),
@@ -187,17 +229,40 @@ mod tests {
     fn type_unknown_name_none_expected() {
         assert_eq!(Type::from_name("i128"), None);
         assert_eq!(Type::from_name("u128"), None);
-        assert_eq!(Type::from_name("f32"), None);
+        assert_eq!(Type::from_name("f128"), None);
         assert_eq!(Type::from_name("foo"), None);
     }
 
     #[test]
     fn type_display_roundtrip_expected() {
-        let names = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "bool"];
+        let names = [
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
+        ];
         for name in names {
             let ty = Type::from_name(name).unwrap();
             assert_eq!(ty.name(), name);
             assert_eq!(ty.to_string(), name);
         }
+    }
+
+    #[test]
+    fn type_from_name_float_widths_expected() {
+        let cases: &[(&str, u8)] = &[("f32", 32), ("f64", 64)];
+        for (name, bits) in cases {
+            assert_eq!(
+                Type::from_name(name),
+                Some(Type::Float(FloatType { bits: *bits })),
+                "resolving {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn type_is_float_and_is_numeric_expected() {
+        assert!(Type::from_name("f32").unwrap().is_float());
+        assert!(Type::from_name("f64").unwrap().is_numeric());
+        assert!(Type::from_name("i64").unwrap().is_numeric());
+        assert!(!Type::from_name("i64").unwrap().is_float());
+        assert!(!Type::Bool.is_numeric());
     }
 }

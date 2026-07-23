@@ -11,6 +11,7 @@ use crate::ir::{BinOp, BlockId, CmpOp, Instr, IrFunc, IrModule, IrType, Terminat
 pub fn emit(ir: &IrModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
+    out.push_str("data $ffmt = { b \"%g\\n\", b 0 }\n");
     for func in &ir.funcs {
         out.push('\n');
         emit_func(&mut out, func);
@@ -39,9 +40,11 @@ fn label(id: BlockId) -> String {
     }
 }
 
-/// The QBE base-type letter for an `IrType`, derived here (not in the IR, R14):
+/// The QBE base-type letter for an `IrType`, derived here (not in the IR, R15):
 /// `Bool` is a 4-byte `w` (0/1); an integer is `w` for `bits <= 32` and `l` for
-/// `64`; `Ptr` is the 8-byte `l` used by the buffer and C ABI.
+/// `64`; a float is `s` (32) or `d` (64); `Ptr` is the 8-byte `l` used by the
+/// buffer and C ABI. This is the only place the `s`/`d` register class is
+/// spelled (NF2).
 fn width(ty: IrType) -> &'static str {
     match ty {
         IrType::Bool => "w",
@@ -50,6 +53,13 @@ fn width(ty: IrType) -> &'static str {
                 "w"
             } else {
                 "l"
+            }
+        }
+        IrType::Float { bits } => {
+            if bits == 32 {
+                "s"
+            } else {
+                "d"
             }
         }
         IrType::Ptr => "l",
@@ -93,20 +103,100 @@ fn emit_canonicalize(
     }
 }
 
-/// Lower an integer conversion `dst = convert(src)` (R6). Widening extends by
-/// the *source* signedness (`exts*` signed, `extu*` unsigned) from the source
-/// width; if the *target* is sub-word, that extend is re-canonicalized to the
-/// target's own convention (R15), because the source-signed extend is only
-/// accidentally canonical for the target: a signed source widened to an
-/// unsigned sub-word target (e.g. `i8 >u16`) sign-extends into bits the target
-/// requires to be zero, which a later in-register unsigned compare would read
-/// as dirty. Narrowing keeps the low `dst` bits: for a sub-word target that
-/// routes through the shared canonicalization point (R15), otherwise a
-/// `w`-width `copy` truncates a `64 -> 32` step. Same-width is a relabel: a
-/// plain `copy` when the target fills its register, but a sub-word signedness
-/// flip (`u8 >i8`, `i8 >u8`) still re-canonicalizes to the new convention so a
-/// later widen/compare reads the right high bits (Q5).
+/// Lower a numeric conversion `dst = convert(src)` (R18), dispatching on the
+/// source/target `IrType` classes: int->int (the Slice-2 path, unchanged),
+/// int->float, float->float, float->int. The frontend never spells the QBE op;
+/// the register class (`s`/`d`) is derived here (NF2).
 fn emit_conv(
+    out: &mut String,
+    dst: Value,
+    src: Value,
+    value_types: &[IrType],
+    ext_id: &mut u32,
+) -> std::fmt::Result {
+    let src_ty = ty_of(value_types, src);
+    let dst_ty = ty_of(value_types, dst);
+    match (src_ty, dst_ty) {
+        (IrType::Int { .. }, IrType::Int { .. }) => {
+            emit_conv_int(out, dst, src, value_types, ext_id)
+        }
+        (
+            IrType::Int {
+                bits: sb,
+                signed: ss,
+            },
+            IrType::Float { .. },
+        ) => {
+            // int -> float: the mnemonic picks source width (`w` for bits <= 32,
+            // `l` for 64) and source signedness; the result letter (`s`/`d`)
+            // selects the target float width. A sub-word source is already
+            // canonical in its `w` carrier (R15), so `swtof`/`uwtof` read it
+            // directly. Exact when representable, else round to nearest.
+            let dw = width(dst_ty);
+            let op = match (sb <= 32, ss) {
+                (true, true) => "swtof",
+                (true, false) => "uwtof",
+                (false, true) => "sltof",
+                (false, false) => "ultof",
+            };
+            writeln!(out, "\t{} ={dw} {op} {}", val(dst), val(src))
+        }
+        (IrType::Float { bits: sb }, IrType::Float { bits: db }) => {
+            // float -> float: widen is exact (`exts`), narrow rounds to nearest
+            // (`truncd`); a same-width `>fN` on its own type is a bit relabel.
+            let dw = width(dst_ty);
+            let m = if db > sb {
+                "exts"
+            } else if db < sb {
+                "truncd"
+            } else {
+                "copy"
+            };
+            writeln!(out, "\t{} ={dw} {m} {}", val(dst), val(src))
+        }
+        (IrType::Float { bits: sb }, IrType::Int { .. }) => {
+            // float -> int: truncate toward zero to the 32/64 integer carrier
+            // (`stosi`/`dtosi` signed, `stoui`/`dtoui` unsigned), then the
+            // shared canonicalization point (R15) for a sub-word target.
+            // Out-of-range/NaN is unspecified this slice (D7).
+            let ds = matches!(dst_ty, IrType::Int { signed: true, .. });
+            let op = match (sb == 32, ds) {
+                (true, true) => "stosi",
+                (true, false) => "stoui",
+                (false, true) => "dtosi",
+                (false, false) => "dtoui",
+            };
+            match sub_word(dst_ty) {
+                Some((bits, signed)) => {
+                    let tmp = format!("%conv{ext_id}");
+                    *ext_id += 1;
+                    writeln!(out, "\t{tmp} =w {op} {}", val(src))?;
+                    emit_canonicalize(out, &val(dst), &tmp, "w", bits, signed)
+                }
+                None => {
+                    let dw = width(dst_ty);
+                    writeln!(out, "\t{} ={dw} {op} {}", val(dst), val(src))
+                }
+            }
+        }
+        (s, d) => unreachable!("conversion endpoints are numeric, got {s:?} -> {d:?}"),
+    }
+}
+
+/// Lower an integer conversion `dst = convert(src)` (R6), the Slice-2 path
+/// unchanged. Widening extends by the *source* signedness (`exts*` signed,
+/// `extu*` unsigned) from the source width; if the *target* is sub-word, that
+/// extend is re-canonicalized to the target's own convention (R15), because the
+/// source-signed extend is only accidentally canonical for the target: a signed
+/// source widened to an unsigned sub-word target (e.g. `i8 >u16`) sign-extends
+/// into bits the target requires to be zero, which a later in-register unsigned
+/// compare would read as dirty. Narrowing keeps the low `dst` bits: for a
+/// sub-word target that routes through the shared canonicalization point (R15),
+/// otherwise a `w`-width `copy` truncates a `64 -> 32` step. Same-width is a
+/// relabel: a plain `copy` when the target fills its register, but a sub-word
+/// signedness flip (`u8 >i8`, `i8 >u8`) still re-canonicalizes to the new
+/// convention so a later widen/compare reads the right high bits (Q5).
+fn emit_conv_int(
     out: &mut String,
     dst: Value,
     src: Value,
@@ -192,6 +282,18 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             let w = width(ty_of(value_types, *v));
             writeln!(out, "\t{} ={w} copy {n}", val(*v))
         }
+        Instr::ConstF(v, x) => {
+            // QBE float constants carry an `s_`/`d_` prefix; Rust's `f64`
+            // `Display` renders round-trippable text QBE parses (R14).
+            let ty = ty_of(value_types, *v);
+            let w = width(ty);
+            let prefix = if matches!(ty, IrType::Float { bits: 32 }) {
+                "s_"
+            } else {
+                "d_"
+            };
+            writeln!(out, "\t{} ={w} copy {prefix}{x}", val(*v))
+        }
         Instr::Bin(v, op, a, b) => {
             // The op runs at the result's register width; a sub-word result can
             // overflow its width, so canonicalize it (R15) via the shared point.
@@ -201,6 +303,9 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
                 BinOp::Mul => "mul",
+                // `div` is emitted only for floats (no integer `/`, R16); it
+                // runs at the operand's `s`/`d` width like the other arms.
+                BinOp::Div => "div",
                 BinOp::Rem if matches!(ty, IrType::Int { signed: false, .. }) => "urem",
                 BinOp::Rem => "rem",
             };
@@ -221,15 +326,40 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             // operand width.
             let operand = ty_of(value_types, *a);
             let ow = width(operand);
+            let is_float = matches!(operand, IrType::Float { .. });
             let signed = matches!(operand, IrType::Int { signed: true, .. });
+            let w = width(ty_of(value_types, *v));
+            // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}` straight to
+            // `comis{s,d}` + `sete`/`setb`, but x86's unordered (NaN) result
+            // sets both ZF and CF, so those two mnemonics report *true* for a
+            // NaN operand instead of the required IEEE-false (`cgt{s,d}`/
+            // `cge{s,d}` use `seta`/`setae`, which x86 clears on unordered, so
+            // those stay correct as-is; verified against emitted assembly).
+            // Work around it here rather than in QBE: `a < b` swaps operands
+            // and reuses the correct `cgt` form (`b > a`); `a = b` ANDs `ceq`
+            // with the ordered predicate `cod`/`cos` (false on NaN) to mask
+            // the false positive (R17, RISK 1).
+            if is_float && matches!(op, CmpOp::Lt) {
+                return writeln!(out, "\t{} ={w} cgt{ow} {}, {}", val(*v), val(*b), val(*a))
+                    .unwrap();
+            }
+            if is_float && matches!(op, CmpOp::Eq) {
+                let eq = format!("%cmp{ext_id}");
+                *ext_id += 1;
+                let ord = format!("%cmp{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{eq} ={w} ceq{ow} {}, {}", val(*a), val(*b)).unwrap();
+                writeln!(out, "\t{ord} ={w} co{ow} {}, {}", val(*a), val(*b)).unwrap();
+                return writeln!(out, "\t{} ={w} and {eq}, {ord}", val(*v)).unwrap();
+            }
             let m = match op {
                 CmpOp::Eq => "ceq",
                 CmpOp::Lt if signed => "cslt",
                 CmpOp::Lt => "cult",
+                CmpOp::Gt if is_float => "cgt",
                 CmpOp::Gt if signed => "csgt",
                 CmpOp::Gt => "cugt",
             };
-            let w = width(ty_of(value_types, *v));
             writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
         Instr::Call(ret, f, args) => {
@@ -252,26 +382,43 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             }
         }
         Instr::Print(v) => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
+        // `f.` passes the value as a `d` to `printf` with the `%g` float format
+        // (R19); an `f32` reaches `f.` only via `>f64`, so this is always a `d`.
+        Instr::PrintF(v) => writeln!(out, "\tcall $printf(l $ffmt, d {}, ...)", val(*v)),
         Instr::PtrOffset(dst, base, bytes) => {
             writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
         }
-        Instr::Load(dst, ptr) => writeln!(out, "\t{} =l loadl {}", val(*dst), val(*ptr)),
+        Instr::Load(dst, ptr) => {
+            // The load width follows the destination's `IrType` (R20): a float
+            // slot loads at its `s`/`d` width so its bits re-enter as a true
+            // float; every other slot loads the full 8-byte `l`.
+            let (w, op) = match ty_of(value_types, *dst) {
+                IrType::Float { bits: 32 } => ("s", "loads"),
+                IrType::Float { .. } => ("d", "loadd"),
+                _ => ("l", "loadl"),
+            };
+            writeln!(out, "\t{} ={w} {op} {}", val(*dst), val(*ptr))
+        }
         Instr::Store(ptr, v) => {
-            // The 8-byte buffer slot is always an `l` sink (R4); any `w`-width
-            // value (`Bool`, or an integer with `bits <= 32`) must be widened to
-            // `l` before it lands there. A signed integer sign-extends (its `w`
-            // register already holds canonical, correctly-signed bits, R15);
-            // `Bool` and an unsigned integer zero-extend.
+            // A float slot stores at its `s`/`d` width (R20), symmetric with the
+            // float load; an `f32` writes 4 of the 8 slot bytes (Q2). Otherwise
+            // the 8-byte buffer slot is an `l` sink (R4): any `w`-width value
+            // (`Bool`, or an integer with `bits <= 32`) is widened to `l` first.
+            // A signed integer sign-extends (its `w` register already holds
+            // canonical bits, R15); `Bool`/unsigned zero-extend.
             let ty = ty_of(value_types, *v);
-            if width(ty) == "w" {
-                let signed = matches!(ty, IrType::Int { signed: true, .. });
-                let ext_op = if signed { "extsw" } else { "extuw" };
-                let ext = format!("%ext{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{ext} =l {ext_op} {}", val(*v)).unwrap();
-                writeln!(out, "\tstorel {}, {}", ext, val(*ptr))
-            } else {
-                writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr))
+            match ty {
+                IrType::Float { bits: 32 } => writeln!(out, "\tstores {}, {}", val(*v), val(*ptr)),
+                IrType::Float { .. } => writeln!(out, "\tstored {}, {}", val(*v), val(*ptr)),
+                _ if width(ty) == "w" => {
+                    let signed = matches!(ty, IrType::Int { signed: true, .. });
+                    let ext_op = if signed { "extsw" } else { "extuw" };
+                    let ext = format!("%ext{ext_id}");
+                    *ext_id += 1;
+                    writeln!(out, "\t{ext} =l {ext_op} {}", val(*v)).unwrap();
+                    writeln!(out, "\tstorel {}, {}", ext, val(*ptr))
+                }
+                _ => writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr)),
             }
         }
         Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types, ext_id),
@@ -344,6 +491,42 @@ mod tests {
         assert!(il.contains("data $fmt = { b \"%ld\\n\", b 0 }"));
         assert!(il.contains("call $printf(l $fmt,"));
         assert!(il.contains(", ...)"));
+    }
+
+    #[test]
+    fn emit_fprint_uses_ffmt_and_d_arg() {
+        // `f.` prints via the `%g` float format, passing the value as a `d` (R19).
+        let il = emit_src(": w ( f64 -- ) f. ;");
+        assert!(
+            il.contains("data $ffmt = { b \"%g\\n\", b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("call $printf(l $ffmt, d "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_float_slot_round_trips_with_float_load_store() {
+        // A carried `f64` slot loads/stores with the float ops (R20), so its
+        // bits re-enter as a true float rather than a stale `i64`.
+        let tokens = lex("dup").unwrap();
+        let terms = match parse_line(&tokens).unwrap() {
+            Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let f64_ty = Type::from_name("f64").unwrap();
+        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
+        let il = emit(&IrModule { funcs: vec![func] }).unwrap();
+        assert!(il.contains("loadd "), "expected a float load: {il}");
+        assert!(il.contains("stored "), "expected a float store: {il}");
+        assert!(
+            !il.contains("loadl "),
+            "a float slot never uses loadl: {il}"
+        );
     }
 
     #[test]
@@ -429,6 +612,76 @@ mod tests {
     }
 
     #[test]
+    fn qbe_width_float_is_s_and_d_expected() {
+        assert_eq!(width(IrType::Float { bits: 32 }), "s");
+        assert_eq!(width(IrType::Float { bits: 64 }), "d");
+    }
+
+    #[test]
+    fn emit_float_literal_uses_d_prefix() {
+        let il = emit_src(": w ( -- f64 ) 3.14 ;");
+        assert!(il.contains("=d copy d_3.14"), "unexpected IL: {il}");
+    }
+
+    #[test]
+    fn emit_float_add_runs_at_d_width() {
+        let f64_ty = IrType::Float { bits: 64 };
+        let il = emit_binary(
+            f64_ty,
+            f64_ty,
+            Instr::Bin(Value(2), BinOp::Add, Value(0), Value(1)),
+        );
+        assert!(il.contains("=d add"), "expected a d-width add: {il}");
+        assert!(!il.contains("and"), "floats never canonicalize: {il}");
+    }
+
+    #[test]
+    fn emit_float_div_emits_div() {
+        let f32_ty = IrType::Float { bits: 32 };
+        let il = emit_binary(
+            f32_ty,
+            f32_ty,
+            Instr::Bin(Value(2), BinOp::Div, Value(0), Value(1)),
+        );
+        assert!(il.contains("=s div"), "expected an s-width div: {il}");
+    }
+
+    #[test]
+    fn emit_float_lt_swaps_to_ordered_gt() {
+        // `<` on `f64` operands does NOT emit `cltd`: QBE's amd64 backend
+        // lowers `cltd` to `comisd`+`setb`, which x86 sets on an unordered
+        // (NaN) operand too, so it would report `NaN < x` as true. Swapping
+        // operands and reusing `cgtd` (`comisd`+`seta`, which x86 clears on
+        // unordered) keeps the compare false against NaN (R17, RISK 1).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Lt, Value(0), Value(1)),
+        );
+        assert!(
+            il.contains("=w cgtd %v1, %v0"),
+            "expected a swapped ordered compare: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_float_eq_masks_unordered_with_cod() {
+        // `=` on floats does NOT rely on a bare `ceqd`: QBE's amd64 backend
+        // lowers `ceqd` to `comisd`+`sete`, which x86 also sets on an
+        // unordered (NaN) operand, so it would report `NaN = NaN` as true.
+        // ANDing with `cod` (ordered, false on NaN) masks that false positive
+        // so `x = x` is a valid NaN test (R17/D3, RISK 1).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Eq, Value(0), Value(1)),
+        );
+        assert!(il.contains("ceqd"), "expected an eq compare: {il}");
+        assert!(il.contains("cod"), "expected an ordered mask: {il}");
+        assert!(il.contains("and"), "expected the eq/ordered AND: {il}");
+    }
+
+    #[test]
     fn emit_cmp_signed_uses_cslt() {
         let il = emit_binary(
             int(32, true),
@@ -475,18 +728,106 @@ mod tests {
     /// Hand-built types isolate the bare conversion codegen path per cell,
     /// rather than needing a matching Sooth program for every width/sign pair.
     fn emit_conv_il(src_ty: IrType, dst_ty: IrType) -> String {
+        let src_const = if matches!(src_ty, IrType::Float { .. }) {
+            Instr::ConstF(Value(0), 5.0)
+        } else {
+            Instr::Const(Value(0), 5)
+        };
         let func = IrFunc {
             name: "t".to_string(),
             params: vec![],
             ret: Some(dst_ty),
             blocks: vec![crate::ir::Block {
                 id: crate::ir::BlockId(0),
-                instrs: vec![Instr::Const(Value(0), 5), Instr::Conv(Value(1), Value(0))],
+                instrs: vec![src_const, Instr::Conv(Value(1), Value(0))],
                 term: Terminator::Ret(Some(Value(1))),
             }],
             value_types: vec![src_ty, dst_ty],
         };
         emit(&IrModule { funcs: vec![func] }).unwrap()
+    }
+
+    fn f32() -> IrType {
+        IrType::Float { bits: 32 }
+    }
+
+    fn f64() -> IrType {
+        IrType::Float { bits: 64 }
+    }
+
+    #[test]
+    fn emit_conv_signed_int_to_float_uses_swtof_sltof() {
+        // i32 -> f64 reads the `w` source as signed; i64 -> f32 reads `l`.
+        assert!(
+            emit_conv_il(int(32, true), f64()).contains("=d swtof"),
+            "expected swtof to double"
+        );
+        assert!(
+            emit_conv_il(int(64, true), f32()).contains("=s sltof"),
+            "expected sltof to single"
+        );
+    }
+
+    #[test]
+    fn emit_conv_unsigned_int_to_float_uses_uwtof_ultof() {
+        // A sub-word unsigned source rides its canonical `w` carrier (uwtof).
+        assert!(
+            emit_conv_il(int(8, false), f64()).contains("=d uwtof"),
+            "expected uwtof to double"
+        );
+        assert!(
+            emit_conv_il(int(64, false), f32()).contains("=s ultof"),
+            "expected ultof to single"
+        );
+    }
+
+    #[test]
+    fn emit_conv_float_widen_is_exts() {
+        // f32 >f64 is the exact single->double extend.
+        let il = emit_conv_il(f32(), f64());
+        assert!(il.contains("=d exts"), "expected an exts: {il}");
+    }
+
+    #[test]
+    fn emit_conv_float_narrow_is_truncd() {
+        // f64 >f32 rounds to nearest via truncd.
+        let il = emit_conv_il(f64(), f32());
+        assert!(il.contains("=s truncd"), "expected a truncd: {il}");
+    }
+
+    #[test]
+    fn emit_conv_float_to_int_truncates_toward_zero() {
+        // f64 >i64 truncates toward zero (dtosi to the `l` carrier); f32 >i32
+        // uses stosi to the `w` carrier.
+        assert!(
+            emit_conv_il(f64(), int(64, true)).contains("=l dtosi"),
+            "expected dtosi to long"
+        );
+        assert!(
+            emit_conv_il(f32(), int(32, true)).contains("=w stosi"),
+            "expected stosi to word"
+        );
+    }
+
+    #[test]
+    fn emit_conv_float_to_unsigned_int_uses_toui() {
+        // An unsigned int target selects the `*toui` mnemonic.
+        let il = emit_conv_il(f64(), int(64, false));
+        assert!(il.contains("=l dtoui"), "expected dtoui: {il}");
+    }
+
+    #[test]
+    fn emit_conv_float_to_subword_int_canonicalizes() {
+        // f64 >u8 truncates to the `w` carrier then masks to the low byte (R15).
+        let il = emit_conv_il(f64(), int(8, false));
+        assert!(
+            il.contains("dtoui") || il.contains("dtosi"),
+            "expected a float->int trunc: {il}"
+        );
+        assert!(
+            il.contains("and") && il.contains("255"),
+            "expected a u8 mask after the trunc: {il}"
+        );
     }
 
     #[test]

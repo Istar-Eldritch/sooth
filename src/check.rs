@@ -36,13 +36,22 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 /// fixed signatures. `.` alone stays fixed: it is always `( i64 -- )` (D6),
 /// with no per-width or unsigned variant.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    [(
-        ".",
-        Sig {
-            inputs: vec![Type::I64],
-            outputs: vec![],
-        },
-    )]
+    [
+        (
+            ".",
+            Sig {
+                inputs: vec![Type::I64],
+                outputs: vec![],
+            },
+        ),
+        (
+            "f.",
+            Sig {
+                inputs: vec![Type::F64],
+                outputs: vec![],
+            },
+        ),
+    ]
     .into_iter()
     .map(|(k, v): (&str, Sig)| (k.to_string(), v))
     .collect()
@@ -193,35 +202,64 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
     }
 }
 
-/// Both-operand type mismatch for a homogeneous operator (`+ - * mod = < >`):
-/// mixed integer widths/signs, or a `bool` operand, name both operand types
-/// (X1, X2).
+/// Both-operand type mismatch for a homogeneous operator (`+ - * = < >`):
+/// mixed int/float, mixed integer widths/signs, mixed float widths, or a
+/// `bool` operand, name both operand types (X1, X2).
 fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
         Ctx::Line => format!(
-            "error: type mismatch: `{op}` requires two operands of the same integer type, found `{a}` and `{b}`"
+            "error: type mismatch: `{op}` requires two operands of the same numeric type, found `{a}` and `{b}`"
         ),
     }
 }
 
-/// A conversion word (`>iN`/`>uN`) applied to a non-integer source (X4).
+/// `/` applied to a non-float or mixed-float-type pair (X3): `/` is
+/// float-only, integer division is unsupported.
+fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `/` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
+            name, span.line, a, b, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: type mismatch: `/` requires two operands of the same float type (integer division is unsupported), found `{a}` and `{b}`"
+        ),
+    }
+}
+
+/// `mod` applied to a non-integer or mixed-integer-type pair (X4): `mod`
+/// stays integer-only.
+fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `mod` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
+            name, span.line, a, b, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: type mismatch: `mod` requires two operands of the same integer type, found `{a}` and `{b}`"
+        ),
+    }
+}
+
+/// A conversion word (`>iN`/`>uN`/`>f32`/`>f64`) applied to a non-numeric
+/// (`bool`) source (X5).
 fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires an integer source, found `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
         Ctx::Line => {
-            format!("error: type mismatch: `{op}` requires an integer source, found `{found}`")
+            format!("error: type mismatch: `{op}` requires a numeric source, found `{found}`")
         }
     }
 }
 
-/// An unknown type name in a conversion word (X5), e.g. `>i128`.
+/// An unknown type name in a conversion word (X6), e.g. `>i128`.
 fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
     match ctx {
         Ctx::Word { name: wname, .. } => format!(
@@ -278,6 +316,10 @@ fn check_term(
     match &term.kind {
         TermKind::IntLit(_) => {
             stack.push(Type::I64);
+            Ok(stack)
+        }
+        TermKind::FloatLit(_) => {
+            stack.push(Type::F64);
             Ok(stack)
         }
         TermKind::BoolLit(_) => {
@@ -345,12 +387,15 @@ fn check_term(
 
 /// Apply an arithmetic/comparison/conversion operator if `name` is one,
 /// returning `Some(stack)`; `None` if the name is none of those (the caller
-/// then looks it up in the env). `+ - * mod` and `= < >` are homogeneous over
-/// the integer tower: both operands must be the *same* integer type (`bool`
-/// is not in the tower), producing that type (arithmetic) or `bool`
-/// (comparison); no implicit promotion (R8-R10). A conversion word is `>`
-/// followed by a known integer type name (`>i8`..`>u64`): pop one integer
-/// value, push the named target (R5-R7).
+/// then looks it up in the env). `+ - *` are homogeneous over the numeric
+/// types (int or float, `bool` is never numeric): both operands must be the
+/// *same* type, producing that type; no implicit promotion (R6). `/` is
+/// float-only: both operands must be the same float type (R7). `mod` stays
+/// integer-only: both operands must be the same integer type (R8). `= < >`
+/// generalise the same way as `+ - *` but always produce `bool` (R9). A
+/// conversion word is `>` followed by a known numeric type name
+/// (`>i8`..`>u64`, `>f32`, `>f64`): pop one numeric value, push the named
+/// target (R10).
 fn check_operator(
     name: &str,
     span: Span,
@@ -359,14 +404,38 @@ fn check_operator(
 ) -> Result<Option<Vec<Type>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
-        "+" | "-" | "*" | "mod" => {
+        "+" | "-" | "*" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.is_numeric() || !b.is_numeric() || a != b {
+                return Err(operand_pair_mismatch_error(ctx, span, name, a, b));
+            }
+            stack.truncate(n - 2);
+            stack.push(a);
+        }
+        "/" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.is_float() || !b.is_float() || a != b {
+                return Err(div_requires_float_error(ctx, span, a, b));
+            }
+            stack.truncate(n - 2);
+            stack.push(a);
+        }
+        "mod" => {
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
             }
             let (a, b) = (stack[n - 2], stack[n - 1]);
             if !a.is_int() || !b.is_int() || a != b {
-                return Err(operand_pair_mismatch_error(ctx, span, name, a, b));
+                return Err(mod_requires_int_error(ctx, span, a, b));
             }
             stack.truncate(n - 2);
             stack.push(a);
@@ -377,7 +446,7 @@ fn check_operator(
                 return Err(need(name, 2, n));
             }
             let (a, b) = (stack[n - 2], stack[n - 1]);
-            if !a.is_int() || !b.is_int() || a != b {
+            if !a.is_numeric() || !b.is_numeric() || a != b {
                 return Err(operand_pair_mismatch_error(ctx, span, name, a, b));
             }
             stack.truncate(n - 2);
@@ -388,11 +457,11 @@ fn check_operator(
                 return Ok(None);
             };
             let target = match Type::from_name(rest) {
-                Some(ty) if ty.is_int() => ty,
+                Some(ty) if ty.is_numeric() => ty,
                 _ => return Err(conversion_unknown_type_error(ctx, span, rest)),
             };
             let source = *stack.last().ok_or_else(|| need(name, 1, stack.len()))?;
-            if !source.is_int() {
+            if !source.is_numeric() {
                 return Err(conversion_source_error(ctx, span, name, source));
             }
             stack.pop();
@@ -586,13 +655,13 @@ mod tests {
 
     #[test]
     fn check_arith_mixed_width_is_error() {
-        // X1: an `i32` and an `i64` fed to `+` names both differing types, via
+        // An `i32` and an `i64` fed to `+` names both differing types, via
         // the operand-pair-mismatch diagnostic specifically (not just any error
         // that happens to mention both type names).
         let src = ": f ( -- i32 ) 1 >i32 5 + ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same integer type"),
+            err.contains("same numeric type"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -601,16 +670,125 @@ mod tests {
 
     #[test]
     fn check_cmp_mixed_sign_is_error() {
-        // X2: `u8` and `i8` fed to `<` names both differing operand types, via
-        // the same operand-pair-mismatch diagnostic as X1.
+        // `u8` and `i8` fed to `<` names both differing operand types, via
+        // the same operand-pair-mismatch diagnostic.
         let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same integer type"),
+            err.contains("same numeric type"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`u8`"), "unexpected message: {err}");
         assert!(err.contains("`i8`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_arith_mixed_int_float_is_error() {
+        // X1: mixed int/float arithmetic names both operand types.
+        let src = ": f ( -- f64 ) 1 >i32 5.0 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_cmp_mixed_float_width_is_error() {
+        // X2: mixed float-width comparison names both operand types.
+        let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`f32`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_div_same_float_type_ok() {
+        check_src(": w ( -- f64 ) 1.0 2.0 / ;").unwrap();
+    }
+
+    #[test]
+    fn check_div_on_ints_is_error() {
+        // X3: `/` requires floats; integer operands are a sharp error.
+        let src = ": w ( -- i64 ) 4 2 / ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`/`"), "unexpected message: {err}");
+        assert!(err.contains("float"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_mod_same_int_type_ok() {
+        check_src(": w ( -- i64 ) 5 2 mod ;").unwrap();
+    }
+
+    #[test]
+    fn check_mod_on_floats_is_error() {
+        // X4: `mod` requires integers; float operands are a sharp error.
+        let src = ": w ( -- f64 ) 5.0 2.0 mod ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`mod`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_conv_int_to_float_ok() {
+        check_src(": w ( -- f64 ) 5 >f64 ;").unwrap();
+    }
+
+    #[test]
+    fn check_conv_float_to_int_ok() {
+        check_src(": w ( -- i64 ) 5.0 >i64 ;").unwrap();
+    }
+
+    #[test]
+    fn check_conv_float_target_of_bool_is_error() {
+        // X5: a conversion to a float target applied to a `bool` source.
+        let src = ": w ( -- f64 ) true >f64 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_conv_unknown_float_target_is_error() {
+        // X6: `>f128` reads as an unknown conversion target.
+        let src = ": w ( -- f64 ) 5.0 >f128 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("f128"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_float_lit_types_as_f64() {
+        check_src(": w ( -- f64 ) 3.14 ;").unwrap();
+    }
+
+    #[test]
+    fn check_branch_join_float_widths_mismatch_is_error() {
+        // `if` branches leaving `f32` vs `f64` disagree at the join (R12).
+        let src = ": w ( bool -- f64 ) if 1.0 >f32 else 2.0 then ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("different types"), "unexpected message: {err}");
+        assert!(err.contains("`f32`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_branch_join_float_types_agree_ok() {
+        check_src(": w ( bool -- f64 ) if 1.0 else 2.0 then ;").unwrap();
+    }
+
+    #[test]
+    fn check_shuffle_dup_float_is_type_transparent() {
+        check_src(": w ( -- f64 f64 ) 1.0 dup ;").unwrap();
     }
 
     #[test]
@@ -620,10 +798,10 @@ mod tests {
 
     #[test]
     fn check_conv_of_bool_is_error() {
-        // X4: a conversion applied to `bool` is a type error.
+        // A conversion applied to `bool` is a type error (X5).
         let src = ": w ( -- i32 ) true >i32 ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("numeric"), "unexpected message: {err}");
         assert!(err.contains("`bool`"), "unexpected message: {err}");
     }
 
@@ -638,7 +816,8 @@ mod tests {
 
     #[test]
     fn check_conv_unknown_target_is_error() {
-        // X5: `>i128` reads as an unknown conversion target.
+        // X6: `>i128` reads as an unknown conversion target.
+        // (this test predates R10's float target; kept for the integer case)
         let src = ": w ( -- i64 ) 5 >i128 ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("unknown type"), "unexpected message: {err}");

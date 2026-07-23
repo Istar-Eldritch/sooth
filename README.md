@@ -33,7 +33,10 @@ alongside the system `cc`. WASM is a planned sibling lowering off the neutral IR
 
 ## Build and run
 
-Requires `qbe` and a C compiler (`cc`) on your `PATH`.
+Requires `qbe` and a C compiler (`cc`) on your `PATH`. Needs a reasonably modern QBE:
+Debian's packaged `qbe` (1.2) predates the unsigned int/float conversion ops
+(`uwtof`/`ultof`/`stoui`/`dtoui`) and fails with `unknown keyword` on those; build
+from [c9x.me/git/qbe.git](https://c9x.me/git/qbe.git) if so.
 
 ```sh
 cargo build

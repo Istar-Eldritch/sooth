@@ -37,6 +37,13 @@ pub enum IrType {
         bits: u8,
         signed: bool,
     },
+    /// A float carrying its `bits` (32/64). The backend derives the QBE
+    /// register class (`s`/`d`); the IR itself never spells it (a WASM lowering
+    /// reads `bits`, R13/NF2). Floats fill their register exactly, so no
+    /// sub-word canonicalization ever applies.
+    Float {
+        bits: u8,
+    },
     Bool,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
@@ -59,6 +66,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
             bits: it.bits(),
             signed: it.signed(),
         },
+        Type::Float(ft) => IrType::Float { bits: ft.bits() },
         Type::Bool => IrType::Bool,
     }
 }
@@ -79,10 +87,18 @@ pub struct Block {
 #[derive(Debug)]
 pub enum Instr {
     Const(Value, i64),
+    /// A float constant carrying its `f64` value (R14). Distinct from `Const`
+    /// so the backend emits a QBE float constant rather than reinterpreting an
+    /// integer bit-payload; the `Value`'s `IrType` picks the `s`/`d` register.
+    ConstF(Value, f64),
     Bin(Value, BinOp, Value, Value),
     Cmp(Value, CmpOp, Value, Value),
     Call(Option<Value>, String, Vec<Value>),
     Print(Value),
+    /// Print an `f64` via a `%g`-style readable rendering (R19). Distinct from
+    /// `Print` so the backend passes the value as a `d` to `printf` with the
+    /// float format string; `f.` is checker-guaranteed `( f64 -- )`.
+    PrintF(Value),
     Phi(Value, Vec<(BlockId, Value)>),
     /// `dst: Ptr = base + bytes`. Keeps `Ptr` opaque (no native-width assumption).
     PtrOffset(Value, Value, i64),
@@ -102,6 +118,9 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// Float division (`/`); present only for float operands (there is no
+    /// integer `/`, checker-guaranteed, R16).
+    Div,
     Rem,
 }
 
@@ -191,29 +210,41 @@ pub fn lower_line(
     for (i, ty) in entry_types.iter().enumerate() {
         let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
-        let v = b.fresh_value(IrType::I64);
-        b.push_instr(Instr::Load(v, ptr));
-        // Only an integer slot narrower/differently-signed than `i64` needs a
-        // relabel: `Conv` is integer-only (its dst/src are always `Int`), and a
-        // `Bool` slot needs none anyway (`jnz` reads any register, and its
-        // stored 0/1 is already valid `l`-content with no dirty high bits).
+        // A float slot loads directly at its `s`/`d` width (R20): the backend
+        // picks `loadd`/`loads` from the value's float `IrType`, so the bits
+        // re-enter as a true float and need no integer `Conv`-relabel (that
+        // path is integer-only). An integer slot narrower/differently-signed
+        // than `i64` still relabels via `Conv`; a `Bool` slot needs none (`jnz`
+        // reads any register, and its stored 0/1 is valid `l`-content).
         let slot_ty = ir_type_of(*ty);
         match slot_ty {
+            IrType::Float { .. } => {
+                let v = b.fresh_value(slot_ty);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
             IrType::Int { .. } if slot_ty != IrType::I64 => {
+                let v = b.fresh_value(IrType::I64);
+                b.push_instr(Instr::Load(v, ptr));
                 let relabeled = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Conv(relabeled, v));
                 stack.push(relabeled);
             }
-            _ => stack.push(v),
+            _ => {
+                let v = b.fresh_value(IrType::I64);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
         }
     }
     b.stack = stack;
 
     b.lower_terms(terms);
 
-    // Epilogue: store the resulting M slots back to the buffer. The buffer's
-    // 8-byte slots stay `l`-width regardless of a slot's logical type; a
-    // `Bool`-typed value is widened to `l` at the QBE `storel` (R4).
+    // Epilogue: store the resulting M slots back to the buffer. Each 8-byte
+    // slot is written at the value's own width (R20): a float stores via
+    // `stores`/`stored`, an integer or `Bool` via `storel` (a `Bool` widening
+    // to `l`, its stored 0/1 valid `l`-content) (R4).
     let out = mem::take(&mut b.stack);
     let m = out.len();
     for (j, v) in out.iter().enumerate() {
@@ -361,6 +392,11 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, *n));
                 self.stack.push(v);
             }
+            TermKind::FloatLit(x) => {
+                let v = self.fresh_value(IrType::Float { bits: 64 });
+                self.push_instr(Instr::ConstF(v, *x));
+                self.stack.push(v);
+            }
             TermKind::BoolLit(b) => {
                 let v = self.fresh_value(IrType::Bool);
                 self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
@@ -403,11 +439,12 @@ impl<'a> FuncBuilder<'a> {
                 self.stack[n - 2] = self.stack[n - 1];
                 self.stack[n - 1] = a;
             }
-            "+" | "-" | "*" | "mod" => {
+            "+" | "-" | "*" | "/" | "mod" => {
                 let op = match name {
                     "+" => BinOp::Add,
                     "-" => BinOp::Sub,
                     "*" => BinOp::Mul,
+                    "/" => BinOp::Div,
                     _ => BinOp::Rem,
                 };
                 let rhs = self.stack.pop().expect("bin: rhs");
@@ -435,15 +472,20 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
+            "f." => {
+                let v = self.stack.pop().expect("fprint: value");
+                self.push_instr(Instr::PrintF(v));
+            }
             _ => {
-                // A conversion word `>iN`/`>uN` (checker-guaranteed integer
-                // source): pop one, push the target-typed result. The backend
-                // reads the two `IrType`s to pick extend/truncate/relabel (R6).
+                // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
+                // (checker-guaranteed numeric source): pop one, push the
+                // target-typed result. The backend reads the two `IrType`s to
+                // pick the int/float conversion op (R18).
                 if let Some(target) = name
                     .strip_prefix('>')
                     .filter(|r| !r.is_empty())
                     .and_then(Type::from_name)
-                    .filter(Type::is_int)
+                    .filter(Type::is_numeric)
                 {
                     let src = self.stack.pop().expect("conv: source");
                     let dst = self.fresh_value(ir_type_of(target));
@@ -745,6 +787,43 @@ mod tests {
     }
 
     #[test]
+    fn lower_fprint_emits_printf_instr() {
+        // `f.` lowers to the distinct float-print instruction (R19), not the
+        // integer `Print`.
+        let ir = lower_src(": w ( f64 -- ) f. ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).iter().any(|i| matches!(i, Instr::PrintF(_))));
+        assert!(!instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
+    }
+
+    #[test]
+    fn lower_line_carried_float_slot_loads_as_float() {
+        // A carried `f64` slot loads at its float `IrType` (R20), so the value
+        // re-enters as a true float rather than a stale `i64`; no `Conv`
+        // relabel is needed (that path is integer-only).
+        let terms = line_terms("dup");
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let f64_ty = Type::from_name("f64").unwrap();
+        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
+        let loaded = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .find_map(|i| match i {
+                Instr::Load(v, _) => Some(*v),
+                _ => None,
+            });
+        let v = loaded.expect("a load in the prologue");
+        assert_eq!(func.value_types[v.0 as usize], IrType::Float { bits: 64 });
+        assert!(!func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, Instr::Conv(..))));
+    }
+
+    #[test]
     fn ir_type_of_each_width_expected() {
         let cases: &[(&str, u8, bool)] = &[
             ("i8", 8, true),
@@ -768,6 +847,47 @@ mod tests {
             );
         }
         assert_eq!(ir_type_of(Type::Bool), IrType::Bool);
+    }
+
+    #[test]
+    fn ir_type_of_float_widths_expected() {
+        assert_eq!(
+            ir_type_of(Type::from_name("f32").unwrap()),
+            IrType::Float { bits: 32 }
+        );
+        assert_eq!(
+            ir_type_of(Type::from_name("f64").unwrap()),
+            IrType::Float { bits: 64 }
+        );
+    }
+
+    #[test]
+    fn lower_float_literal_is_constf_f64_typed() {
+        let ir = lower_src(": w ( -- f64 ) 3.14 ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::ConstF(v, x) if *x == 3.14 => Some(*v),
+                _ => None,
+            })
+            .expect("a ConstF for the float literal");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Float { bits: 64 });
+    }
+
+    #[test]
+    fn lower_float_div_routes_to_div_op() {
+        // `/` lowers to `BinOp::Div` whose result carries the float operand type.
+        let ir = lower_src(": w ( -- f64 ) 1.0 2.0 / ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Div, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Div bin op");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Float { bits: 64 });
     }
 
     #[test]

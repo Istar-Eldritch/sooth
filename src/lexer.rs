@@ -10,6 +10,7 @@ pub enum Token {
     RParen,
     Pipe,
     Int(i64),
+    Float(f64),
     Word(String),
 }
 
@@ -20,6 +21,36 @@ fn is_delimiter(c: char) -> bool {
 fn is_int_literal(text: &str) -> bool {
     let digits = text.strip_prefix('-').unwrap_or(text);
     !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
+/// A float literal is `<digits>.<digits>` with an optional `[eE][+-]?<digits>`
+/// exponent. Digits are required on both sides of the dot (`3.` and `.5` are
+/// not float literals) so a literal can never collide with the `.` print word.
+/// A magnitude beyond `f64` range parses to `inf`/`0.0` rather than erroring
+/// (Rust's `f64::from_str` never fails on this grammar), which matches the
+/// language's own silent-inf-propagation semantics rather than fighting them.
+fn is_float_literal(text: &str) -> bool {
+    let text = text.strip_prefix('-').unwrap_or(text);
+    let Some(dot) = text.find('.') else {
+        return false;
+    };
+    let (int_part, rest) = text.split_at(dot);
+    let frac_and_exp = &rest[1..];
+    if int_part.is_empty() || !int_part.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let frac_end = frac_and_exp.find(['e', 'E']).unwrap_or(frac_and_exp.len());
+    let (frac_part, exp_part) = frac_and_exp.split_at(frac_end);
+    if frac_part.is_empty() || !frac_part.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if exp_part.is_empty() {
+        return true;
+    }
+    let exp_digits = exp_part[1..]
+        .strip_prefix(['+', '-'])
+        .unwrap_or(&exp_part[1..]);
+    !exp_digits.is_empty() && exp_digits.chars().all(|c| c.is_ascii_digit())
 }
 
 pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
@@ -83,6 +114,11 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                         )
                     })?;
                     tokens.push((Token::Int(n), start));
+                } else if is_float_literal(&text) {
+                    let v = text.parse::<f64>().expect(
+                        "is_float_literal validates a grammar f64::from_str always accepts",
+                    );
+                    tokens.push((Token::Float(v), start));
                 } else {
                     tokens.push((Token::Word(text), start));
                 }
@@ -153,5 +189,46 @@ mod tests {
     fn lex_nonascii_whitespace_is_skipped() {
         let tokens = lex("1\u{a0}2").unwrap();
         assert_eq!(words(&tokens), vec![Token::Int(1), Token::Int(2)]);
+    }
+
+    #[test]
+    fn lex_float_literal_is_float() {
+        let tokens = lex("3.14 0.5 1.5e-3 1.0e9").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::Float(3.14),
+                Token::Float(0.5),
+                Token::Float(1.5e-3),
+                Token::Float(1.0e9),
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_float_overflow_saturates_to_inf() {
+        let tokens = lex("1.0e999").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Float(f64::INFINITY)]);
+    }
+
+    #[test]
+    fn lex_dangling_dot_not_float() {
+        let tokens = lex("3. .5").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![Token::Word("3.".into()), Token::Word(".5".into())]
+        );
+    }
+
+    #[test]
+    fn lex_plain_integer_still_int() {
+        let tokens = lex("42").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Int(42)]);
+    }
+
+    #[test]
+    fn lex_int_then_print_word_expected() {
+        let tokens = lex("5 .").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Int(5), Token::Word(".".into())]);
     }
 }

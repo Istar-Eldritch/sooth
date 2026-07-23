@@ -243,6 +243,10 @@ impl<'t> Parser<'t> {
                 kind: TermKind::IntLit(n),
                 span,
             }),
+            Token::Float(v) => Ok(Term {
+                kind: TermKind::FloatLit(v),
+                span,
+            }),
             Token::Word(w) if w == "true" => Ok(Term {
                 kind: TermKind::BoolLit(true),
                 span,
@@ -429,6 +433,17 @@ mod tests {
                 assert_eq!(terms.len(), 3);
                 assert!(matches!(terms[0].kind, TermKind::IntLit(2)));
                 assert!(matches!(&terms[2].kind, TermKind::Call(w) if w == "+"));
+            }
+            other => panic!("expected Expr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_line_float_lit_is_float_lit() {
+        match parse_line_src("3.14").unwrap() {
+            Line::Expr(terms) => {
+                assert_eq!(terms.len(), 1);
+                assert!(matches!(terms[0].kind, TermKind::FloatLit(v) if v == 3.14));
             }
             other => panic!("expected Expr, got {other:?}"),
         }

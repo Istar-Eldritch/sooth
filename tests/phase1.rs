@@ -179,6 +179,21 @@ fn subword_carried_value_survives_line_boundary() {
     );
 }
 
+/// S6: a carried `f64` survives a line boundary and is used correctly on the
+/// next line (R20 marshalling), and displays as its float value rather than
+/// its `i64` bit pattern (R21). The mid-session `stack: 3.5` / `stack: 4.5`
+/// lines prove the display path; the second line consuming the carried 3.5
+/// proves the float re-enters as a true float, not a stale integer.
+#[test]
+fn carried_float_survives_line_boundary_and_displays_as_float() {
+    let out = run_session(&["1.5 2.0 +", "1.0 +", "f."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 3.5", "stack: 4.5", "4.5", "stack: (empty)"]
+    );
+}
+
 /// Guards the flush-before-call discipline the spec flags as a determinism
 /// risk: the host's stdout buffer and the loaded code's C stdio buffer must
 /// both be flushed so `.` output lands before the next `stack:` line, in
