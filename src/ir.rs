@@ -94,11 +94,11 @@ pub enum Instr {
     Bin(Value, BinOp, Value, Value),
     Cmp(Value, CmpOp, Value, Value),
     Call(Option<Value>, String, Vec<Value>),
+    /// `.`: print one value followed by a newline. Type-directed at the
+    /// backend (not here, IR stays neutral): the value's own `IrType` (looked
+    /// up via `value_types`) picks signed/unsigned decimal, `%g` float, or
+    /// `true`/`false`, the same way `Cmp`/`Shr` dispatch on operand type.
     Print(Value),
-    /// Print an `f64` via a `%g`-style readable rendering (R19). Distinct from
-    /// `Print` so the backend passes the value as a `d` to `printf` with the
-    /// float format string; `f.` is checker-guaranteed `( f64 -- )`.
-    PrintF(Value),
     Phi(Value, Vec<(BlockId, Value)>),
     /// `dst: Ptr = base + bytes`. Keeps `Ptr` opaque (no native-width assumption).
     PtrOffset(Value, Value, i64),
@@ -512,10 +512,6 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
-            "f." => {
-                let v = self.stack.pop().expect("fprint: value");
-                self.push_instr(Instr::PrintF(v));
-            }
             _ => {
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
@@ -827,13 +823,17 @@ mod tests {
     }
 
     #[test]
-    fn lower_fprint_emits_printf_instr() {
-        // `f.` lowers to the distinct float-print instruction (R19), not the
-        // integer `Print`.
-        let ir = lower_src(": w ( f64 -- ) f. ;");
-        let w = &ir.funcs[0];
-        assert!(instrs(w).iter().any(|i| matches!(i, Instr::PrintF(_))));
-        assert!(!instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
+    fn lower_print_on_bool_and_float_emits_same_print_instr() {
+        // `.` lowers to one `Print` regardless of operand type: the IR stays
+        // neutral and the backend dispatches on the value's own `IrType`.
+        let bool_ir = lower_src(": w ( bool -- ) . ;");
+        assert!(instrs(&bool_ir.funcs[0])
+            .iter()
+            .any(|i| matches!(i, Instr::Print(_))));
+        let float_ir = lower_src(": w ( f64 -- ) . ;");
+        assert!(instrs(&float_ir.funcs[0])
+            .iter()
+            .any(|i| matches!(i, Instr::Print(_))));
     }
 
     #[test]
