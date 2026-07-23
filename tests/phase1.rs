@@ -129,10 +129,11 @@ fn sign_definable_and_callable_in_repl() {
 }
 
 #[test]
-fn bool_residual_displays_as_zero_or_one() {
+fn bool_residual_displays_as_true_or_false() {
+    // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
     let out = run_session(&["true", "false"]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines, vec!["stack: 1", "stack: 1 0"]);
+    assert_eq!(lines, vec!["stack: true", "stack: true false"]);
 }
 
 #[test]
@@ -186,7 +187,7 @@ fn subword_carried_value_survives_line_boundary() {
 /// proves the float re-enters as a true float, not a stale integer.
 #[test]
 fn carried_float_survives_line_boundary_and_displays_as_float() {
-    let out = run_session(&["1.5 2.0 +", "1.0 +", "f."]);
+    let out = run_session(&["1.5 2.0 +", "1.0 +", "."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,

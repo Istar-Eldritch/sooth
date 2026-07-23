@@ -28,33 +28,14 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
     }
 }
 
-/// The builtin word -> typed-effect table, as the seed of a checking env. The
-/// stack shuffles (`dup`/`drop`/`swap`/`over`/`rot`) are deliberately absent,
-/// as are the arithmetic/comparison/conversion operators: all are structural
-/// and either type-transparent or homogeneity-checked over the integer tower,
-/// handled directly in `check_term` (`check_shuffle`/`check_operator`), not as
-/// fixed signatures. `.` alone stays fixed: it is always `( i64 -- )` (D6),
-/// with no per-width or unsigned variant.
+/// The builtin word -> typed-effect table, as the seed of a checking env.
+/// Every builtin word is structural and handled directly in `check_term`
+/// (`check_shuffle`/`check_operator`): the stack shuffles, the numeric-tower
+/// operators, and `.` (type-directed over any printable scalar, not a fixed
+/// `( i64 -- )`) all dispatch on the concrete operand type rather than a
+/// fixed signature, so this table is currently empty.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    [
-        (
-            ".",
-            Sig {
-                inputs: vec![Type::I64],
-                outputs: vec![],
-            },
-        ),
-        (
-            "f.",
-            Sig {
-                inputs: vec![Type::F64],
-                outputs: vec![],
-            },
-        ),
-    ]
-    .into_iter()
-    .map(|(k, v): (&str, Sig)| (k.to_string(), v))
-    .collect()
+    HashMap::new()
 }
 
 /// Error context for the shared stack simulation: a full word (with its
@@ -313,6 +294,22 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
     }
 }
 
+/// `.` applied to a non-printable value. Every current frontend `Type` (the
+/// integer tower, the float tower, `bool`) is printable, so this path has no
+/// reachable golden yet; it exists for the day a non-printable scalar (e.g. a
+/// future `Ptr`) enters the type system.
+fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `.` requires a printable scalar, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line => {
+            format!("error: type mismatch: `.` requires a printable scalar, found `{found}`")
+        }
+    }
+}
+
 /// An unknown type name in a conversion word (X6), e.g. `>i128`.
 fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
     match ctx {
@@ -457,7 +454,12 @@ fn check_term(
 /// negation; the difference is only in how `lower_call` codegens it).
 /// `shl`/`shr` take an integer value and always an `i64` shift count,
 /// producing the value's type. `<= >= <>` generalise the same way as `= < >`:
-/// numeric-only (never `bool`), same type, producing `bool`.
+/// numeric-only (never `bool`), same type, producing `bool`. `.` is
+/// type-directed over any printable scalar (every integer width, either
+/// float width, or `bool`): pops one, produces nothing; the concrete type
+/// picks the print codegen (signed/unsigned decimal, `%g` float, or
+/// `true`/`false`) at the call site, same dispatch shape as the rest of this
+/// function.
 fn check_operator(
     name: &str,
     span: Span,
@@ -550,6 +552,17 @@ fn check_operator(
             }
             stack.truncate(n - 2);
             stack.push(Type::Bool);
+        }
+        "." => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need(".", 1, n));
+            }
+            let a = stack[n - 1];
+            if !a.is_numeric() && !a.is_bool() {
+                return Err(print_requires_printable_error(ctx, span, a));
+            }
+            stack.truncate(n - 1);
         }
         _ => {
             let Some(rest) = name.strip_prefix('>').filter(|r| !r.is_empty()) else {
@@ -1052,6 +1065,27 @@ mod tests {
     fn check_shuffle_swap_mixed_types_is_type_transparent() {
         // `swap` reorders a mixed `bool`/`i64` pair with no fixed signature.
         check_src(": w ( bool i64 -- i64 bool ) swap ;").unwrap();
+    }
+
+    #[test]
+    fn check_print_accepts_every_printable_scalar() {
+        // `.` is type-directed over the whole integer tower, both float
+        // widths, and `bool`, not just `i64`.
+        check_src(": w ( -- ) 5 . ;").unwrap();
+        check_src(": w ( -- ) 5 >u8 . ;").unwrap();
+        check_src(": w ( -- ) 5 >i32 . ;").unwrap();
+        check_src(": w ( -- ) -1 >u64 . ;").unwrap();
+        check_src(": w ( -- ) 3.14 . ;").unwrap();
+        check_src(": w ( -- ) 3.14 >f32 . ;").unwrap();
+        check_src(": w ( -- ) true . ;").unwrap();
+    }
+
+    #[test]
+    fn check_print_on_empty_stack_is_underflow_error() {
+        let src = ": w ( -- ) . ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`.`"), "unexpected message: {err}");
+        assert!(err.contains("needs 1 values"), "unexpected message: {err}");
     }
 
     fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {

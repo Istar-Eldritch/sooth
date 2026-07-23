@@ -11,7 +11,15 @@ use crate::ir::{BinOp, BlockId, CmpOp, Instr, IrFunc, IrModule, IrType, Terminat
 pub fn emit(ir: &IrModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
+    out.push_str("data $ufmt = { b \"%lu\\n\", b 0 }\n");
     out.push_str("data $ffmt = { b \"%g\\n\", b 0 }\n");
+    // Bool prints via a 2-entry pointer table indexed by the canonical 0/1
+    // value (no branch needed): `$boolstrs[v]` selects `$true_str`/`$false_str`,
+    // printed through `%s` (`$sfmt`).
+    out.push_str("data $sfmt = { b \"%s\", b 0 }\n");
+    out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
+    out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
+    out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
     for func in &ir.funcs {
         out.push('\n');
         emit_func(&mut out, func);
@@ -450,10 +458,60 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 None => writeln!(out, "\tcall ${}({})", qbe_name(f), a.join(", ")),
             }
         }
-        Instr::Print(v) => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
-        // `f.` passes the value as a `d` to `printf` with the `%g` float format
-        // (R19); an `f32` reaches `f.` only via `>f64`, so this is always a `d`.
-        Instr::PrintF(v) => writeln!(out, "\tcall $printf(l $ffmt, d {}, ...)", val(*v)),
+        // `.` is type-directed on the operand's own `IrType` (same dispatch
+        // shape as `Cmp`/`Shr`): signed decimal, unsigned decimal, `%g` float,
+        // or `true`/`false` for `Bool`.
+        Instr::Print(v) => match ty_of(value_types, *v) {
+            IrType::Bool => {
+                // No branch needed: widen the canonical 0/1 to an index into
+                // the 2-entry `$boolstrs` pointer table and print the
+                // selected string via `%s`.
+                let idx = format!("%pidx{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{idx} =l extuw {}", val(*v)).unwrap();
+                let off = format!("%poff{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{off} =l mul {idx}, 8").unwrap();
+                let addr = format!("%paddr{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{addr} =l add $boolstrs, {off}").unwrap();
+                let ptr = format!("%pptr{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{ptr} =l loadl {addr}").unwrap();
+                writeln!(out, "\tcall $printf(l $sfmt, l {ptr}, ...)")
+            }
+            // A float always prints as a `d`: an `f32` widens first (`exts`)
+            // since a variadic C call needs the explicit promotion QBE never
+            // does implicitly.
+            IrType::Float { bits: 32 } => {
+                let d = format!("%pf{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{d} =d exts {}", val(*v)).unwrap();
+                writeln!(out, "\tcall $printf(l $ffmt, d {d}, ...)")
+            }
+            IrType::Float { .. } => writeln!(out, "\tcall $printf(l $ffmt, d {}, ...)", val(*v)),
+            // Signed prints `%ld`, unsigned prints `%lu` (the unsigned-decimal
+            // fix: a high-bit `u64` must render as its unsigned value, not
+            // reinterpreted negative). `printf`'s variadic ABI expects a full
+            // 8-byte slot regardless of the value's own width, so a sub-64-bit
+            // operand widens first, by its own signedness (the sign-extend
+            // reads its already-canonical `w` bits, R15; the zero-extend is
+            // exact since sub-word unsigned canonicalization already zeroed
+            // the high bits).
+            IrType::Int { bits: 64, signed } => {
+                let fmt = if signed { "$fmt" } else { "$ufmt" };
+                writeln!(out, "\tcall $printf(l {fmt}, l {}, ...)", val(*v))
+            }
+            IrType::Int { signed, .. } => {
+                let fmt = if signed { "$fmt" } else { "$ufmt" };
+                let ext = if signed { "extsw" } else { "extuw" };
+                let w64 = format!("%pw{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{w64} =l {ext} {}", val(*v)).unwrap();
+                writeln!(out, "\tcall $printf(l {fmt}, l {w64}, ...)")
+            }
+            IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
+        },
         Instr::PtrOffset(dst, base, bytes) => {
             writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
         }
@@ -563,15 +621,90 @@ mod tests {
     }
 
     #[test]
-    fn emit_fprint_uses_ffmt_and_d_arg() {
-        // `f.` prints via the `%g` float format, passing the value as a `d` (R19).
-        let il = emit_src(": w ( f64 -- ) f. ;");
+    fn emit_print_on_float_uses_ffmt_and_d_arg() {
+        // `.` on an `f64` prints via the `%g` float format, passing the value
+        // as a `d`.
+        let il = emit_src(": w ( f64 -- ) . ;");
         assert!(
             il.contains("data $ffmt = { b \"%g\\n\", b 0 }"),
             "unexpected IL: {il}"
         );
         assert!(
             il.contains("call $printf(l $ffmt, d "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_on_f32_widens_before_calling_printf() {
+        // `.` on an `f32` widens to `d` (`exts`) before the call, since a
+        // variadic C call needs the explicit promotion QBE never does
+        // implicitly.
+        let il = emit_src(": w ( -- ) 1.5 >f32 . ;");
+        assert!(il.contains("=d exts"), "unexpected IL: {il}");
+        assert!(
+            il.contains("call $printf(l $ffmt, d "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_on_unsigned_uses_ufmt() {
+        // `.` on a `u64` prints unsigned decimal (`$ufmt`/`%lu`), the fix for
+        // the high-bit-set misprint-as-negative gap.
+        let il = emit_src(": w ( -- ) 1 >u64 . ;");
+        assert!(
+            il.contains("data $ufmt = { b \"%lu\\n\", b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("call $printf(l $ufmt, l "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_on_subword_unsigned_widens_via_extuw() {
+        // A sub-64-bit unsigned operand (`u8`) must zero-extend to a full
+        // 8-byte slot before the variadic call, reusing `$ufmt`.
+        let il = emit_src(": w ( -- ) 200 >u8 . ;");
+        assert!(il.contains("=l extuw"), "unexpected IL: {il}");
+        assert!(
+            il.contains("call $printf(l $ufmt, l "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_on_subword_signed_widens_via_extsw() {
+        let il = emit_src(": w ( -- ) 5 >i32 . ;");
+        assert!(il.contains("=l extsw"), "unexpected IL: {il}");
+        assert!(
+            il.contains("call $printf(l $fmt, l "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_on_bool_indexes_boolstrs_via_sfmt() {
+        // `.` on a `bool` selects `$true_str`/`$false_str` through the
+        // 2-entry `$boolstrs` pointer table, no branch, printed via `%s`.
+        let il = emit_src(": w ( -- ) true . ;");
+        assert!(
+            il.contains("data $boolstrs = { l $false_str, l $true_str }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("data $true_str = { b \"true\\n\", b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("data $false_str = { b \"false\\n\", b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(il.contains("add $boolstrs,"), "unexpected IL: {il}");
+        assert!(
+            il.contains("call $printf(l $sfmt, l "),
             "unexpected IL: {il}"
         );
     }
