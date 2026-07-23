@@ -238,12 +238,18 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
         }
         Instr::Load(dst, ptr) => writeln!(out, "\t{} =l loadl {}", val(*dst), val(*ptr)),
         Instr::Store(ptr, v) => {
-            // The 8-byte buffer slot is always an `l` sink (R4); a `Bool` (`w`)
-            // value is zero-extended before it lands there (RK1).
-            if ty_of(value_types, *v) == IrType::Bool {
+            // The 8-byte buffer slot is always an `l` sink (R4); any `w`-width
+            // value (`Bool`, or an integer with `bits <= 32`) must be widened to
+            // `l` before it lands there. A signed integer sign-extends (its `w`
+            // register already holds canonical, correctly-signed bits, R15);
+            // `Bool` and an unsigned integer zero-extend.
+            let ty = ty_of(value_types, *v);
+            if width(ty) == "w" {
+                let signed = matches!(ty, IrType::Int { signed: true, .. });
+                let ext_op = if signed { "extsw" } else { "extuw" };
                 let ext = format!("%ext{ext_id}");
                 *ext_id += 1;
-                writeln!(out, "\t{ext} =l extuw {}", val(*v)).unwrap();
+                writeln!(out, "\t{ext} =l {ext_op} {}", val(*v)).unwrap();
                 writeln!(out, "\tstorel {}, {}", ext, val(*ptr))
             } else {
                 writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr))
@@ -278,6 +284,7 @@ fn emit_term(out: &mut String, term: &Terminator) {
 mod tests {
     use super::*;
     use crate::ast::Line;
+    use crate::ast::Type;
     use crate::check::check;
     use crate::ir::{lower, lower_line, IrModule};
     use crate::lexer::lex;
@@ -300,7 +307,8 @@ mod tests {
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, _m) = lower_line(0, &terms, entry_depth, &env, &resolve);
+        let entry_types = vec![Type::I64; entry_depth];
+        let (func, _m) = lower_line(0, &terms, entry_depth, &entry_types, &env, &resolve);
         emit(&IrModule { funcs: vec![func] }).unwrap()
     }
 

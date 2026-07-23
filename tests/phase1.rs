@@ -162,6 +162,19 @@ fn calculator_session_dogfood() {
     );
 }
 
+/// S5: a sub-word (`u8`) value survives a line boundary on the carried stack
+/// and is used correctly on the next line, proving Q2 (the carried buffer
+/// slot stays 8 bytes wide and is canonicalized/relabeled on use).
+#[test]
+fn subword_carried_value_survives_line_boundary() {
+    let out = run_session(&["100 >u8", "50 >u8 +", ">i64 ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 100", "stack: 150", "150", "stack: (empty)"]
+    );
+}
+
 /// Guards the flush-before-call discipline the spec flags as a determinism
 /// risk: the host's stdout buffer and the loaded code's C stdio buffer must
 /// both be flushed so `.` output lands before the next `stack:` line, in

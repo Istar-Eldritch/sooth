@@ -159,6 +159,15 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// like a word, the epilogue stores the resulting `M` slots back, and it returns
 /// the advanced top `top + (M - entry_depth) * 8`.
 ///
+/// `entry_types` names each carried slot's true frontend `Type` (one per
+/// `entry_depth` slot). Q2 (Slice 2): the buffer slot itself always stays an
+/// 8-byte `l`-width store (canonicalization, R15, keeps its low `bits`
+/// authoritative), but a slot narrower or differently-signed than `i64` is
+/// relabeled to its real `IrType` right after the load, via the same `Conv`
+/// the conversion words use, so a later op in this line sees the correct
+/// operand type (e.g. homogeneous `+` against another `u8`) instead of a
+/// stale `i64`.
+///
 /// Returns the `IrFunc` alongside the emitted `M`, so the caller sizes its
 /// buffer from the same number the wrapper actually stores, rather than from
 /// a separately-computed depth that could in principle diverge.
@@ -166,9 +175,11 @@ pub fn lower_line(
     seq: u64,
     terms: &[Term],
     entry_depth: usize,
+    entry_types: &[Type],
     env: &HashMap<String, Arity>,
     resolve: Resolver,
 ) -> (IrFunc, usize) {
+    debug_assert_eq!(entry_types.len(), entry_depth);
     let mut b = FuncBuilder::new(env, resolve);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
@@ -177,18 +188,24 @@ pub fn lower_line(
 
     // Prologue: load slot `i` at byte offset `i*8`, deepest (slot 0) first.
     let mut stack = Vec::with_capacity(entry_depth);
-    for i in 0..entry_depth {
+    for (i, ty) in entry_types.iter().enumerate() {
         let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
-        // Q2 (Slice 2): a carried slot stays an 8-byte `l`-width slot and loads
-        // as `IrType::I64`, even when the checker's carried `Type` is narrower
-        // or unsigned. This is value-correct because canonicalization keeps the
-        // stored slot's low `bits` authoritative (R15), so reinterpreting them
-        // as `l` on the next line reads the right value; the checker still
-        // tracks the true `Type` for type-checking, and `.` widens via `>i64`.
         let v = b.fresh_value(IrType::I64);
         b.push_instr(Instr::Load(v, ptr));
-        stack.push(v);
+        // Only an integer slot narrower/differently-signed than `i64` needs a
+        // relabel: `Conv` is integer-only (its dst/src are always `Int`), and a
+        // `Bool` slot needs none anyway (`jnz` reads any register, and its
+        // stored 0/1 is already valid `l`-content with no dirty high bits).
+        let slot_ty = ir_type_of(*ty);
+        match slot_ty {
+            IrType::Int { .. } if slot_ty != IrType::I64 => {
+                let relabeled = b.fresh_value(slot_ty);
+                b.push_instr(Instr::Conv(relabeled, v));
+                stack.push(relabeled);
+            }
+            _ => stack.push(v),
+        }
     }
     b.stack = stack;
 
@@ -603,7 +620,14 @@ mod tests {
         // result: D=2 loads, M=1 store.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m) = lower_line(0, &line_terms("+"), 2, &env, &resolve);
+        let (func, m) = lower_line(
+            0,
+            &line_terms("+"),
+            2,
+            &[Type::I64, Type::I64],
+            &env,
+            &resolve,
+        );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
         assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 1);
@@ -614,7 +638,7 @@ mod tests {
         // `2 3 +` from D=0 nets +1, so new_top = top + 8.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m) = lower_line(0, &line_terms("2 3 +"), 0, &env, &resolve);
+        let (func, m) = lower_line(0, &line_terms("2 3 +"), 0, &[], &env, &resolve);
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
         let ret = match last.term {
@@ -642,11 +666,37 @@ mod tests {
     }
 
     #[test]
+    fn lower_line_carried_narrow_slot_relabels_after_load() {
+        // Q2/R16: a `u8` carried slot loads as `l`-width `i64` from the buffer
+        // (canonicalization keeps its low bits authoritative), then must be
+        // relabeled to `IrType::Int { bits: 8, signed: false }` via `Conv` so a
+        // later homogeneous op in the same line sees the real operand type.
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let u8_ty = Type::from_name("u8").unwrap();
+        let (func, _m) = lower_line(0, &line_terms("1 >u8 +"), 1, &[u8_ty], &env, &resolve);
+        let conv_dst = instrs(&func)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Conv(dst, _) => Some(*dst),
+                _ => None,
+            })
+            .expect("a Conv relabeling the loaded slot");
+        assert_eq!(
+            func.value_types[conv_dst.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
+    }
+
+    #[test]
     fn lower_call_uses_resolved_generation_symbol() {
         let mut env = HashMap::new();
         env.insert("sq".to_string(), (1usize, 1usize, None));
         let resolve = |name: &str| format!("{name}__gen2");
-        let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &env, &resolve);
+        let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &[], &env, &resolve);
         let calls: Vec<&str> = instrs(&func)
             .iter()
             .filter_map(|i| match i {
