@@ -139,6 +139,9 @@ pub enum CmpOp {
     Eq,
     Lt,
     Gt,
+    Le,
+    Ge,
+    Ne,
 }
 
 #[derive(Debug)]
@@ -474,22 +477,30 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(v);
             }
             "not" => {
-                // No unary QBE op: complement is `xor operand, -1` at the
-                // operand's own width (`-1` is all-ones at any width in two's
-                // complement, so it works whether the register is `w` or `l`).
+                // No unary QBE op: `not` is `xor operand, mask`. On an integer,
+                // complement is `xor operand, -1` at the operand's own width
+                // (`-1` is all-ones at any width in two's complement, so it
+                // works whether the register is `w` or `l`). On a `bool`,
+                // `not` is logical negation of a canonical 0/1 value, which
+                // flips only the low bit (`xor operand, 1`); `xor -1` would
+                // give -1/-2, not 0/1.
                 let operand = self.stack.pop().expect("not: operand");
                 let ty = self.value_type(operand);
-                let neg1 = self.fresh_value(ty);
-                self.push_instr(Instr::Const(neg1, -1));
+                let mask: i64 = if ty == IrType::Bool { 1 } else { -1 };
+                let mask_v = self.fresh_value(ty);
+                self.push_instr(Instr::Const(mask_v, mask));
                 let v = self.fresh_value(ty);
-                self.push_instr(Instr::Bin(v, BinOp::Xor, operand, neg1));
+                self.push_instr(Instr::Bin(v, BinOp::Xor, operand, mask_v));
                 self.stack.push(v);
             }
-            "=" | "<" | ">" => {
+            "=" | "<" | ">" | "<=" | ">=" | "<>" => {
                 let op = match name {
                     "=" => CmpOp::Eq,
                     "<" => CmpOp::Lt,
-                    _ => CmpOp::Gt,
+                    ">" => CmpOp::Gt,
+                    "<=" => CmpOp::Le,
+                    ">=" => CmpOp::Ge,
+                    _ => CmpOp::Ne,
                 };
                 let rhs = self.stack.pop().expect("cmp: rhs");
                 let lhs = self.stack.pop().expect("cmp: lhs");
@@ -982,6 +993,65 @@ mod tests {
                 signed: false
             }
         );
+    }
+
+    #[test]
+    fn lower_not_on_bool_emits_xor_with_1_const_not_neg1() {
+        // Type-directed `not`: on a `bool` it must flip the low bit
+        // (`xor operand, 1`), not the integer-complement `xor operand, -1`,
+        // since `-1`/`-2` are not valid canonical `bool` values.
+        let ir = lower_src(": w ( -- bool ) true not ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(
+            !is.iter().any(|i| matches!(i, Instr::Const(_, -1))),
+            "bool `not` must not use a -1 mask"
+        );
+        let (xor_v, mask_operand) = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Xor, _, b) => Some((*v, *b)),
+                _ => None,
+            })
+            .expect("a xor bin op");
+        assert_eq!(w.value_types[xor_v.0 as usize], IrType::Bool);
+        let mask_const = is.iter().find_map(|i| match i {
+            Instr::Const(v, n) if *v == mask_operand => Some(*n),
+            _ => None,
+        });
+        assert_eq!(mask_const, Some(1));
+    }
+
+    #[test]
+    fn lower_bitwise_and_or_xor_accept_bool_operands() {
+        let ir =
+            lower_src(": w ( -- bool ) true false and true false or drop true false xor drop ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        for op in [BinOp::And, BinOp::Or, BinOp::Xor] {
+            let v = is
+                .iter()
+                .find_map(|i| match i {
+                    Instr::Bin(v, o, ..) if *o == op => Some(*v),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a {op:?} bin op"));
+            assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+        }
+    }
+
+    #[test]
+    fn lower_le_ge_ne_route_to_matching_cmpop() {
+        let ir = lower_src(": w ( -- bool bool bool ) 1 2 <= 1 2 >= 1 2 <> ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        for op in [CmpOp::Le, CmpOp::Ge, CmpOp::Ne] {
+            assert!(
+                is.iter()
+                    .any(|i| matches!(i, Instr::Cmp(_, o, _, _) if *o == op)),
+                "expected a {op:?} comparison"
+            );
+        }
     }
 
     #[test]

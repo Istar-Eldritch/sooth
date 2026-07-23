@@ -555,14 +555,28 @@ fn bitwise_op_on_float_reports_diagnostic() {
 }
 
 #[test]
-fn bitwise_op_on_bool_reports_diagnostic() {
+fn bitwise_op_on_bool_is_now_accepted() {
+    // `and`/`or`/`xor` are type-directed: `bool` is now a valid homogeneous
+    // operand class, not just the integer tower.
     let src = ": w ( -- bool ) true false and ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&module).expect("check should succeed");
+}
+
+#[test]
+fn mixed_bool_int_and_reports_both_types() {
+    let src = ": w ( -- bool ) true 5 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
 
-    assert!(err.contains("integer"), "unexpected message: {err}");
+    assert!(
+        err.contains("same integer or bool type"),
+        "unexpected message: {err}"
+    );
     assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -573,7 +587,7 @@ fn mixed_type_and_reports_both_types() {
     let err = check::check(&module).expect_err("check should fail");
 
     assert!(
-        err.contains("same integer type"),
+        err.contains("same integer or bool type"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`i32`"), "unexpected message: {err}");
