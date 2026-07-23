@@ -414,6 +414,50 @@ fn int_to_float_and_float_to_float_conversions_run_end_to_end() {
 }
 
 #[test]
+fn unsigned_int_to_float_conversions_run_end_to_end() {
+    // Review cycle 2 (B1): unsigned->float conversions emit `uwtof`/`ultof`,
+    // which an old installed QBE rejected as an unknown keyword (a
+    // checker-accepted feature that crashed at build, uncaught because the
+    // prior unit tests only string-matched the emitted IL). This golden
+    // actually builds and runs. `4000000000` exceeds `i32::MAX`, so `uwtof`
+    // (not a signed `swtof`) is load-bearing for a correct, non-negative
+    // result. `-1 >u64` bit-reinterprets to `u64::MAX`; `ultof` renders it as
+    // a huge positive float, where a signed `sltof` would render `-1`.
+    let src = ": main ( -- )\n  4000000000 >u32 >f64 f.\n  -1 >u64 >f64 f. ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-unsigned-int-to-float-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "4e+09\n1.84467e+19\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn float_to_unsigned_int_conversions_run_end_to_end() {
+    // Review cycle 2 (B1): float->unsigned conversions emit `stoui`/`dtoui`,
+    // the other half of the same previously-uncrossed keyword gap. Covers
+    // both `dtoui` code paths: a sub-word target (`>u8`) that routes through
+    // the shared canonicalization point and wraps (`300.0 -> 300 mod 256 =
+    // 44`), and a 64-bit target (`>u64`) that writes `dtoui` directly with no
+    // canonicalization, truncating toward zero (`100.7 -> 100`).
+    let src = ": main ( -- )\n  300.0 >u8 >i64 .\n  100.7 >u64 >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-float-to-unsigned-int-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "44\n100\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn mixed_int_float_arithmetic_reports_diagnostic() {
     // X1 (headline negative, S8): `+` fed an `i64` and an `f64` names both
     // differing types via the operand-pair-mismatch diagnostic.

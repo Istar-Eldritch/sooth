@@ -30,7 +30,9 @@ polymorphism or promotion (that is Phase 4). Built on the `bool`+integer-tower c
 `FLOAT_TYPES` table beside `INT_TYPES`; `from_name`/`name`/`Display` round-trip,
 `f128`→None; add `is_float`/`is_numeric`. Lexer recognises `Token::Float(f64)` (digits
 both sides, optional `[eE][+-]?digits`), tried before the `Word` fallthrough; `3.`/`.5`
-fall through to `Word`; out-of-range float is a located lex error. Parser routes
+fall through to `Word`; an out-of-range float literal saturates to infinity rather
+than erroring (consistent with the slice's silent-inf semantics, D4, and with `f64`
+parsing of this grammar never failing). Parser routes
 `Token::Float` → `TermKind::FloatLit(f64)`. A `FloatLit` types as `Float { bits: 64 }`.
 
 **Checker (R6–R12).** `check_operator` arithmetic arm: `+ - *` require equal + numeric;
