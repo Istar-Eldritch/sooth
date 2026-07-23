@@ -540,3 +540,114 @@ fn unknown_float_conversion_target_reports_diagnostic() {
     assert!(err.contains("unknown type"), "unexpected message: {err}");
     assert!(err.contains("f128"), "unexpected message: {err}");
 }
+
+// Bitwise operators (`and`/`or`/`xor`/`not`/`shl`/`shr`) diagnostics + goldens.
+
+#[test]
+fn bitwise_op_on_float_reports_diagnostic() {
+    let src = ": w ( -- f64 ) 3.0 5.0 and ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("integer"), "unexpected message: {err}");
+    assert!(err.contains("`f64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn bitwise_op_on_bool_reports_diagnostic() {
+    let src = ": w ( -- bool ) true false and ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("integer"), "unexpected message: {err}");
+    assert!(err.contains("`bool`"), "unexpected message: {err}");
+}
+
+#[test]
+fn mixed_type_and_reports_both_types() {
+    let src = ": w ( -- i64 ) 1 >i32 2 and ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(
+        err.contains("same integer type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`i32`"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn shift_with_non_i64_count_reports_diagnostic() {
+    let src = ": w ( -- u8 ) 1 >u8 3 >i32 shl ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(err.contains("`shl`"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+    assert!(err.contains("`i32`"), "unexpected message: {err}");
+}
+
+#[test]
+fn bitwise_and_or_xor_not_produce_known_values() {
+    let src = ": main ( -- )\n  12 10 and .\n  12 10 or .\n  12 10 xor .\n  0 not . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-bitwise-and-or-xor-not-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "8\n14\n6\n-1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn shr_is_type_directed_arithmetic_for_signed_logical_for_unsigned() {
+    // The headline of this slice: the same bit pattern (200), shifted right
+    // by 1, gives different results as `i8` (arithmetic, sign-preserving)
+    // vs `u8` (logical).
+    let src = ": main ( -- )\n  200 >i8 1 shr >i64 .\n  200 >u8 1 shr >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-shr-type-directed-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "-28\n100\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn subword_shift_masks_overshift_count_to_type_width() {
+    // A `u8` shifted by a runtime count >= 8 wraps mod 8 (Rust
+    // `wrapping_shl`/`shr` semantics), not mod 32 (the `w` register width):
+    // `1 shl 10` shifts by `10 mod 8 = 2`, and `255 shl 8` shifts by `0`
+    // (no-op). Routed through a real word call so the shift isn't folded away
+    // at compile time.
+    let src = ": shl8 ( i64 i64 -- i64 )\n  | v c | v >u8 c shl >i64 ;\n\n: shr8 ( i64 i64 -- i64 )\n  | v c | v >u8 c shr >i64 ;\n\n: main ( -- )\n  1 10 shl8 .\n  255 8 shl8 .\n  128 9 shr8 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-subword-shift-overshift-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "4\n255\n64\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn rgb_bits_dogfood_compiles_and_runs() {
+    let (stdout, code) = run_and_capture_stdout("examples/rgb_bits.sth");
+    assert_eq!(stdout, "660510\n20\n");
+    assert_eq!(code, 0);
+}
