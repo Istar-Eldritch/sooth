@@ -15,8 +15,11 @@ with a persistent stack, generation-mangled redefinition, and the golden session
 `tests/phase1.rs`. **Phase 2 is in progress**, sliced into vertical increments: **Slice 1
 (typed-core spine) is complete** and merged to `main`, carrying a `Type` per stack slot
 (`i64` and `bool`), checking operand/condition/output types, unifying types at branch
-joins, and lowering `bool` to QBE `w`. **Next action: Phase 2 Slice 2** (numeric tower +
-explicit conversions).
+joins, and lowering `bool` to QBE `w`. **Slice 2 (integer tower + conversions) is
+complete** and merged to `main`: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`),
+target-only conversion words (`>i8`..`>u64`), homogeneous no-implicit-promotion arithmetic
+and comparison, and width/signedness-correct QBE codegen. **Next action: Phase 2 Slice 3**
+(structs/records).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -67,12 +70,15 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slice 1 done)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slices 1-2 done)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
-and arity at branch joins, and `bool` lowered to QBE `w`. Slices 2+ (numeric tower,
-structs, enums/match, fixed arrays, optional/pointer, the `Copy` marker) remain.
+and arity at branch joins, and `bool` lowered to QBE `w`. **Slice 2 (integer tower +
+conversions) is done**: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`), target-only
+conversion words, homogeneous arithmetic/comparison, and width/signedness-correct codegen
+with single-point sub-word canonicalization. Slices 3+ (structs, enums/match, fixed arrays,
+optional/pointer, the `Copy` marker; and separately floats, `i128`/`u128`, bitwise) remain.
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; i128/u128 synthesised in the frontend if on QBE; `*/` widening
