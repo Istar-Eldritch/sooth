@@ -1,10 +1,12 @@
 //! Tokeniser. Phase 0: `: ;`, integers, words, `( ... )` stack effects, `| ... |`.
+//! `:` is not a delimiter (Slice 3, R1): `:` and `type:` lex as whole word
+//! tokens on surrounding whitespace, so the parser keys on `Word(":")` /
+//! `Word("type:")` rather than a dedicated token.
 
 use crate::ast::Span;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    Colon,
     Semicolon,
     LParen,
     RParen,
@@ -15,7 +17,7 @@ pub enum Token {
 }
 
 fn is_delimiter(c: char) -> bool {
-    matches!(c, ':' | ';' | '(' | ')' | '|')
+    matches!(c, ';' | '(' | ')' | '|')
 }
 
 fn is_int_literal(text: &str) -> bool {
@@ -70,10 +72,9 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                     col += 1;
                 }
             }
-            ':' | ';' | '(' | ')' | '|' => {
+            ';' | '(' | ')' | '|' => {
                 let span = Span { line, col };
                 let tok = match c {
-                    ':' => Token::Colon,
                     ';' => Token::Semicolon,
                     '(' => Token::LParen,
                     ')' => Token::RParen,
@@ -144,7 +145,7 @@ mod tests {
         assert_eq!(
             words(&tokens),
             vec![
-                Token::Colon,
+                Token::Word(":".into()),
                 Token::Word("sq".into()),
                 Token::LParen,
                 Token::Word("i64".into()),
@@ -157,6 +158,24 @@ mod tests {
                 Token::Word("n".into()),
                 Token::Word("n".into()),
                 Token::Word("*".into()),
+                Token::Semicolon,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_typedef_tokenises_as_single_word() {
+        let src = "type: Vec2 x i64 y i64 ;";
+        let tokens = lex(src).unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::Word("type:".into()),
+                Token::Word("Vec2".into()),
+                Token::Word("x".into()),
+                Token::Word("i64".into()),
+                Token::Word("y".into()),
+                Token::Word("i64".into()),
                 Token::Semicolon,
             ]
         );

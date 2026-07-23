@@ -68,6 +68,12 @@ pub fn ir_type_of(ty: Type) -> IrType {
         },
         Type::Float(ft) => IrType::Float { bits: ft.bits() },
         Type::Bool => IrType::Bool,
+        // `IrType::Struct` + the layout registry land in Slice 3 phase 3 (R11);
+        // no code path constructs a `Type::Struct` yet (the checker/IR aren't
+        // wired to the struct registry until later phases of this slice).
+        Type::Struct(..) => {
+            unimplemented!("struct IrType lowering lands in Slice 3 phase 3 (R11)")
+        }
     }
 }
 
