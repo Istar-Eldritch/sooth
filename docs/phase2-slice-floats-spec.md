@@ -18,8 +18,7 @@ polymorphism or promotion (that is Phase 4). Built on the `bool`+integer-tower c
 - **D5.** Float literals `<digits>.<digits>` + optional exponent, default `f64`; digits
   required both sides of the dot so a literal can't collide with the `.` print word.
 - **D6.** `.` is type-directed over every scalar and prints `f32`/`f64` via `%g`; there is
-  no separate float-print word. *(Superseded, see banner: `.` is now type-directed over all scalars
-  and `f.` was removed.)*
+  no separate float-print word.
 - **D7.** Conversions generalise target-only family to numeric: new `>f32`/`>f64`;
   `>iN`/`>uN` now accept a float source. Source must be numeric; `bool` source is an error.
 - **D8.** IR carries float width (`IrType::Float { bits }`); backend derives register

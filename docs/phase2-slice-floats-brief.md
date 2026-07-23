@@ -80,11 +80,10 @@ existing type table), mirroring the integer tower's `INT_TYPES` discipline, so `
    the widest, `i64`); get an `f32` via `>f32`. **Digits are required on both sides of the
    dot** (`3.0` and `0.5` are legal; `3.` and `.5` are not) so a float literal cannot collide
    with the `.` print word. A new `TermKind::FloatLit(f64)` and a lexer change carry this.
-6. **A distinct `f.` print word `( f64 -- )`; `.` stays `( i64 -- )`.** Do not overload `.`
-   to accept `i64` or `f64` (that would make it polymorphic, which the language avoids
-   everywhere). Print an `f32` via `>f64 f.`. `f.` needs a float print intrinsic in the
-   runtime alongside the existing integer print; format is a readable `%g`-style rendering
-   (shortest-round-trip / Ryu is deferred).
+6. **Printing is the type-directed `.`.** `.` dispatches on the concrete top-of-stack type
+   (like comparisons and `shr`) and prints every scalar: integers (signed/unsigned),
+   `f32`/`f64` in a readable `%g`-style rendering, and `bool`. There is no separate
+   float-print word. Shortest-round-trip / Ryu is deferred.
 7. **Conversions generalise the target-only family to numeric.** New `>f32`/`>f64`; the
    existing `>iN`/`>uN` now also accept a float source. Semantics:
    - **int -> float:** exact when representable, else round to nearest (`swtof`/`sltof`/
@@ -121,7 +120,7 @@ general polymorphism system) to numerics:
 - **Shuffles `dup drop swap over rot`:** unchanged, structural and type-transparent; they
   move floats for free.
 
-`f.` is a new fixed-type builtin `( f64 -- )`; `.` stays `( i64 -- )`.
+`.` is type-directed and prints every scalar; there is no separate float-print word.
 
 ## Type checking behaviour (new or changed vs Slice 2)
 
@@ -167,7 +166,7 @@ following the existing diagnostic style.)
 ## Goal and exit criteria
 
 Deliver `f32`/`f64` with IEEE arithmetic (`+ - * /`), IEEE ordered comparison, float literals,
-`f.` printing, and numeric-generalised conversions, all width-correct in the emitted QBE.
+type-directed `.` printing, and numeric-generalised conversions, all width-correct in the emitted QBE.
 
 **Exit:**
 
@@ -187,7 +186,7 @@ Deliver `f32`/`f64` with IEEE arithmetic (`+ - * /`), IEEE ordered comparison, f
 6. A carried float survives a REPL line boundary correctly (carried-stack float marshalling).
 7. Homogeneous-operand enforcement is a sharp error: the six diagnostics above.
 8. **Dogfood: float mean.** A small program that computes the mean of integer inputs as an
-   `f64` (converting via `>f64`, dividing with float `/`) and prints it with `f.`, exercising
+   `f64` (converting via `>f64`, dividing with float `/`) and prints it with `.`, exercising
    int->float conversion, float division, and float printing in one honest program. Compiled
    to a native binary producing a known value (e.g. mean of `10` and `4` prints `2.5`), and
    runnable in the REPL. Plus the headline negative golden (mixed int/float arithmetic).
@@ -214,12 +213,12 @@ any heap or move semantics (Phase 3).
 - `src/lexer.rs`: integer-literal lexing. Add float-literal lexing (`<digits>.<digits>` +
   optional exponent, digits required both sides). This is the main lexer change.
 - `src/parser.rs`: routes literals/operators/conversions to terms. Route `FloatLit`; confirm
-  `>f32`/`>f64` and `f.` are recognised (whitespace-delimited words, no grammar change beyond
+  `>f32`/`>f64` are recognised (whitespace-delimited words, no grammar change beyond
   the literal).
 - `src/check.rs`: `check_operator` (the Slice 2 structural operator/conversion rule modelled
   on `check_shuffle`) is where `/` (float-only), `mod` (int-only), the numeric-generalised
-  `+ - *` / comparison, and the numeric-source conversion recogniser extend; the fixed
-  builtin table gains `f.` `( f64 -- )`; literal typing pushes `Type::Float { bits: 64 }` for
+  `+ - *` / comparison, and the numeric-source conversion recogniser extend; the print word
+  `.` becomes type-directed over floats; literal typing pushes `Type::Float { bits: 64 }` for
   a `FloatLit`.
 - `src/ir.rs`: `IrType` is `{ Int { bits, signed }, Bool, Ptr }` with `ir_type_of`; add
   `Float { bits }`. `lower_line` (carried-slot marshalling, with the Slice-1/2 relabel logic)
@@ -229,10 +228,10 @@ any heap or move semantics (Phase 3).
   Arithmetic emits float add/sub/mul/div (and `/` only exists for floats); comparison emits
   the float compare mnemonics for float operands; `emit_conv` gains the int<->float and
   float<->float ops (`swtof`/`sltof`/`uwtof`/`ultof`/`stosi`/`dtosi`/`exts`/`truncd`);
-  sub-word canonicalization is untouched (floats fill their register). A float print intrinsic
-  backs `f.`.
-- `src/driver.rs` / runtime print path: the integer `.` print intrinsic gains a float sibling
-  for `f.` (readable `%g`-style).
+  sub-word canonicalization is untouched (floats fill their register). The type-directed `.`
+  gains a float print path.
+- `src/driver.rs` / runtime print path: the `.` print intrinsic becomes type-directed,
+  printing floats in a readable `%g`-style.
 - `examples/`: add `examples/mean.sth` (the dogfood). Existing examples unchanged.
 - `tests/phase0.rs`, `tests/phase1.rs`: existing goldens unchanged (still green); new positive
   goldens (float arithmetic incl. inf/NaN, comparison, conversions both directions, the mean
@@ -256,6 +255,6 @@ any heap or move semantics (Phase 3).
     rejects a `bool`; unknown float target name; branch-join over float types.
   - ir/backend: `Type -> IrType` for `f32`/`f64`; float arithmetic and `/` emit the float ops;
     a float compare emits the float compare mnemonic; each conversion cell (int<->float,
-    float<->float, float->int truncate) emits the right QBE op; `f.` emits the float print.
+    float<->float, float->int truncate) emits the right QBE op; `.` emits the float print.
 - Diagnostics are behaviour: every negative asserts the *right* message and the type names,
   not merely that it failed.
