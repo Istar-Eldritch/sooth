@@ -37,6 +37,13 @@ pub enum IrType {
         bits: u8,
         signed: bool,
     },
+    /// A float carrying its `bits` (32/64). The backend derives the QBE
+    /// register class (`s`/`d`); the IR itself never spells it (a WASM lowering
+    /// reads `bits`, R13/NF2). Floats fill their register exactly, so no
+    /// sub-word canonicalization ever applies.
+    Float {
+        bits: u8,
+    },
     Bool,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
@@ -59,7 +66,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
             bits: it.bits(),
             signed: it.signed(),
         },
-        Type::Float(_) => todo!("float IR lowering lands in Phase 3 (R13)"),
+        Type::Float(ft) => IrType::Float { bits: ft.bits() },
         Type::Bool => IrType::Bool,
     }
 }
@@ -80,6 +87,10 @@ pub struct Block {
 #[derive(Debug)]
 pub enum Instr {
     Const(Value, i64),
+    /// A float constant carrying its `f64` value (R14). Distinct from `Const`
+    /// so the backend emits a QBE float constant rather than reinterpreting an
+    /// integer bit-payload; the `Value`'s `IrType` picks the `s`/`d` register.
+    ConstF(Value, f64),
     Bin(Value, BinOp, Value, Value),
     Cmp(Value, CmpOp, Value, Value),
     Call(Option<Value>, String, Vec<Value>),
@@ -103,6 +114,9 @@ pub enum BinOp {
     Add,
     Sub,
     Mul,
+    /// Float division (`/`); present only for float operands (there is no
+    /// integer `/`, checker-guaranteed, R16).
+    Div,
     Rem,
 }
 
@@ -362,7 +376,11 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, *n));
                 self.stack.push(v);
             }
-            TermKind::FloatLit(_) => todo!("float IR lowering lands in Phase 3 (R14)"),
+            TermKind::FloatLit(x) => {
+                let v = self.fresh_value(IrType::Float { bits: 64 });
+                self.push_instr(Instr::ConstF(v, *x));
+                self.stack.push(v);
+            }
             TermKind::BoolLit(b) => {
                 let v = self.fresh_value(IrType::Bool);
                 self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
@@ -405,11 +423,12 @@ impl<'a> FuncBuilder<'a> {
                 self.stack[n - 2] = self.stack[n - 1];
                 self.stack[n - 1] = a;
             }
-            "+" | "-" | "*" | "mod" => {
+            "+" | "-" | "*" | "/" | "mod" => {
                 let op = match name {
                     "+" => BinOp::Add,
                     "-" => BinOp::Sub,
                     "*" => BinOp::Mul,
+                    "/" => BinOp::Div,
                     _ => BinOp::Rem,
                 };
                 let rhs = self.stack.pop().expect("bin: rhs");
@@ -770,6 +789,47 @@ mod tests {
             );
         }
         assert_eq!(ir_type_of(Type::Bool), IrType::Bool);
+    }
+
+    #[test]
+    fn ir_type_of_float_widths_expected() {
+        assert_eq!(
+            ir_type_of(Type::from_name("f32").unwrap()),
+            IrType::Float { bits: 32 }
+        );
+        assert_eq!(
+            ir_type_of(Type::from_name("f64").unwrap()),
+            IrType::Float { bits: 64 }
+        );
+    }
+
+    #[test]
+    fn lower_float_literal_is_constf_f64_typed() {
+        let ir = lower_src(": w ( -- f64 ) 3.14 ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::ConstF(v, x) if *x == 3.14 => Some(*v),
+                _ => None,
+            })
+            .expect("a ConstF for the float literal");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Float { bits: 64 });
+    }
+
+    #[test]
+    fn lower_float_div_routes_to_div_op() {
+        // `/` lowers to `BinOp::Div` whose result carries the float operand type.
+        let ir = lower_src(": w ( -- f64 ) 1.0 2.0 / ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Div, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Div bin op");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Float { bits: 64 });
     }
 
     #[test]

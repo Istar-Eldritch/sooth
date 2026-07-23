@@ -39,9 +39,11 @@ fn label(id: BlockId) -> String {
     }
 }
 
-/// The QBE base-type letter for an `IrType`, derived here (not in the IR, R14):
+/// The QBE base-type letter for an `IrType`, derived here (not in the IR, R15):
 /// `Bool` is a 4-byte `w` (0/1); an integer is `w` for `bits <= 32` and `l` for
-/// `64`; `Ptr` is the 8-byte `l` used by the buffer and C ABI.
+/// `64`; a float is `s` (32) or `d` (64); `Ptr` is the 8-byte `l` used by the
+/// buffer and C ABI. This is the only place the `s`/`d` register class is
+/// spelled (NF2).
 fn width(ty: IrType) -> &'static str {
     match ty {
         IrType::Bool => "w",
@@ -50,6 +52,13 @@ fn width(ty: IrType) -> &'static str {
                 "w"
             } else {
                 "l"
+            }
+        }
+        IrType::Float { bits } => {
+            if bits == 32 {
+                "s"
+            } else {
+                "d"
             }
         }
         IrType::Ptr => "l",
@@ -192,6 +201,18 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             let w = width(ty_of(value_types, *v));
             writeln!(out, "\t{} ={w} copy {n}", val(*v))
         }
+        Instr::ConstF(v, x) => {
+            // QBE float constants carry an `s_`/`d_` prefix; Rust's `f64`
+            // `Display` renders round-trippable text QBE parses (R14).
+            let ty = ty_of(value_types, *v);
+            let w = width(ty);
+            let prefix = if matches!(ty, IrType::Float { bits: 32 }) {
+                "s_"
+            } else {
+                "d_"
+            };
+            writeln!(out, "\t{} ={w} copy {prefix}{x}", val(*v))
+        }
         Instr::Bin(v, op, a, b) => {
             // The op runs at the result's register width; a sub-word result can
             // overflow its width, so canonicalize it (R15) via the shared point.
@@ -201,6 +222,9 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
                 BinOp::Mul => "mul",
+                // `div` is emitted only for floats (no integer `/`, R16); it
+                // runs at the operand's `s`/`d` width like the other arms.
+                BinOp::Div => "div",
                 BinOp::Rem if matches!(ty, IrType::Int { signed: false, .. }) => "urem",
                 BinOp::Rem => "rem",
             };
@@ -221,11 +245,16 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             // operand width.
             let operand = ty_of(value_types, *a);
             let ow = width(operand);
+            let is_float = matches!(operand, IrType::Float { .. });
             let signed = matches!(operand, IrType::Int { signed: true, .. });
+            // Float compares are the ordered forms (`clt`/`cgt`/`ceq` + `s`/`d`),
+            // false against NaN, so `x = x` is a valid NaN test (R17, RISK 1).
             let m = match op {
                 CmpOp::Eq => "ceq",
+                CmpOp::Lt if is_float => "clt",
                 CmpOp::Lt if signed => "cslt",
                 CmpOp::Lt => "cult",
+                CmpOp::Gt if is_float => "cgt",
                 CmpOp::Gt if signed => "csgt",
                 CmpOp::Gt => "cugt",
             };
@@ -426,6 +455,65 @@ mod tests {
     fn qbe_width_i64_is_l_expected() {
         assert_eq!(width(int(64, true)), "l");
         assert_eq!(width(int(64, false)), "l");
+    }
+
+    #[test]
+    fn qbe_width_float_is_s_and_d_expected() {
+        assert_eq!(width(IrType::Float { bits: 32 }), "s");
+        assert_eq!(width(IrType::Float { bits: 64 }), "d");
+    }
+
+    #[test]
+    fn emit_float_literal_uses_d_prefix() {
+        let il = emit_src(": w ( -- f64 ) 3.14 ;");
+        assert!(il.contains("=d copy d_3.14"), "unexpected IL: {il}");
+    }
+
+    #[test]
+    fn emit_float_add_runs_at_d_width() {
+        let f64_ty = IrType::Float { bits: 64 };
+        let il = emit_binary(
+            f64_ty,
+            f64_ty,
+            Instr::Bin(Value(2), BinOp::Add, Value(0), Value(1)),
+        );
+        assert!(il.contains("=d add"), "expected a d-width add: {il}");
+        assert!(!il.contains("and"), "floats never canonicalize: {il}");
+    }
+
+    #[test]
+    fn emit_float_div_emits_div() {
+        let f32_ty = IrType::Float { bits: 32 };
+        let il = emit_binary(
+            f32_ty,
+            f32_ty,
+            Instr::Bin(Value(2), BinOp::Div, Value(0), Value(1)),
+        );
+        assert!(il.contains("=s div"), "expected an s-width div: {il}");
+    }
+
+    #[test]
+    fn emit_float_compare_uses_ordered_mnemonic() {
+        // `<` on `f64` operands lowers to `cltd` (ordered, false against NaN),
+        // producing a `w`-width `bool` (R17, RISK 1).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Lt, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w cltd"), "expected an ordered compare: {il}");
+    }
+
+    #[test]
+    fn emit_float_eq_is_ordered_ceq() {
+        // `=` on floats is the ordered `ceqd`, so a NaN compares false to
+        // itself and `x = x` is a valid NaN test (R17/D3).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Eq, Value(0), Value(1)),
+        );
+        assert!(il.contains("ceqd"), "expected an ordered eq: {il}");
     }
 
     #[test]
