@@ -77,8 +77,30 @@ is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifi
 and arity at branch joins, and `bool` lowered to QBE `w`. **Slice 2 (integer tower +
 conversions) is done**: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`), target-only
 conversion words, homogeneous arithmetic/comparison, and width/signedness-correct codegen
-with single-point sub-word canonicalization. Slices 3+ (structs, enums/match, fixed arrays,
-optional/pointer, the `Copy` marker; and separately floats, `i128`/`u128`, bitwise) remain.
+with single-point sub-word canonicalization.
+
+**Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
+cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
+
+1. **Typed-core spine** (`i64` + `bool`): a `Type` per stack slot, unifying type (not just
+   depth) through bodies and at branch joins. ✅ done.
+2. **Integer tower + conversions**: `i8`..`i64` / `u8`..`u64`, target-only `>iN`/`>uN`
+   conversions, homogeneous arithmetic/comparison, width/signedness codegen. ✅ done.
+3. **Structs / records**: aggregate value types.
+4. **Enums / ADTs + `match`**: exhaustiveness-checked pattern matching (Result/Either fall
+   out mostly free).
+5. **Fixed-size arrays** (still heap-free).
+6. **Bytecode-VM dogfood**: the Phase 2 exit dogfood, a small fixed-size VM for a toy
+   bytecode, exercising the whole typed core.
+7. **`Copy` marker + optional / non-null pointer**: the `Copy`-vs-affine distinction as a
+   built-in type property (so Phase 3 has it to build on), plus explicit optional and
+   non-null pointer types.
+
+Three numeric axes were deliberately carved out of Slice 2 and still need homes (their own
+slices, or folded into one): **floats** (`f32`/`f64`), **`i128`/`u128`** (frontend
+double-word synthesis), and **bitwise operators** (`and`/`or`/`xor`/`shl`/`shr`/`sar`, where
+signed-vs-unsigned right-shift is the natural headline). The `*/` widening primitive is also
+still deferred. So the real remaining count is a bit more than five.
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; i128/u128 synthesised in the frontend if on QBE; `*/` widening
