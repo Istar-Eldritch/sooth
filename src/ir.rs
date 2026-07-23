@@ -457,14 +457,15 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             _ => {
-                // A conversion word `>iN`/`>uN` (checker-guaranteed integer
-                // source): pop one, push the target-typed result. The backend
-                // reads the two `IrType`s to pick extend/truncate/relabel (R6).
+                // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
+                // (checker-guaranteed numeric source): pop one, push the
+                // target-typed result. The backend reads the two `IrType`s to
+                // pick the int/float conversion op (R18).
                 if let Some(target) = name
                     .strip_prefix('>')
                     .filter(|r| !r.is_empty())
                     .and_then(Type::from_name)
-                    .filter(Type::is_int)
+                    .filter(Type::is_numeric)
                 {
                     let src = self.stack.pop().expect("conv: source");
                     let dst = self.fresh_value(ir_type_of(target));

@@ -102,20 +102,100 @@ fn emit_canonicalize(
     }
 }
 
-/// Lower an integer conversion `dst = convert(src)` (R6). Widening extends by
-/// the *source* signedness (`exts*` signed, `extu*` unsigned) from the source
-/// width; if the *target* is sub-word, that extend is re-canonicalized to the
-/// target's own convention (R15), because the source-signed extend is only
-/// accidentally canonical for the target: a signed source widened to an
-/// unsigned sub-word target (e.g. `i8 >u16`) sign-extends into bits the target
-/// requires to be zero, which a later in-register unsigned compare would read
-/// as dirty. Narrowing keeps the low `dst` bits: for a sub-word target that
-/// routes through the shared canonicalization point (R15), otherwise a
-/// `w`-width `copy` truncates a `64 -> 32` step. Same-width is a relabel: a
-/// plain `copy` when the target fills its register, but a sub-word signedness
-/// flip (`u8 >i8`, `i8 >u8`) still re-canonicalizes to the new convention so a
-/// later widen/compare reads the right high bits (Q5).
+/// Lower a numeric conversion `dst = convert(src)` (R18), dispatching on the
+/// source/target `IrType` classes: int->int (the Slice-2 path, unchanged),
+/// int->float, float->float, float->int. The frontend never spells the QBE op;
+/// the register class (`s`/`d`) is derived here (NF2).
 fn emit_conv(
+    out: &mut String,
+    dst: Value,
+    src: Value,
+    value_types: &[IrType],
+    ext_id: &mut u32,
+) -> std::fmt::Result {
+    let src_ty = ty_of(value_types, src);
+    let dst_ty = ty_of(value_types, dst);
+    match (src_ty, dst_ty) {
+        (IrType::Int { .. }, IrType::Int { .. }) => {
+            emit_conv_int(out, dst, src, value_types, ext_id)
+        }
+        (
+            IrType::Int {
+                bits: sb,
+                signed: ss,
+            },
+            IrType::Float { .. },
+        ) => {
+            // int -> float: the mnemonic picks source width (`w` for bits <= 32,
+            // `l` for 64) and source signedness; the result letter (`s`/`d`)
+            // selects the target float width. A sub-word source is already
+            // canonical in its `w` carrier (R15), so `swtof`/`uwtof` read it
+            // directly. Exact when representable, else round to nearest.
+            let dw = width(dst_ty);
+            let op = match (sb <= 32, ss) {
+                (true, true) => "swtof",
+                (true, false) => "uwtof",
+                (false, true) => "sltof",
+                (false, false) => "ultof",
+            };
+            writeln!(out, "\t{} ={dw} {op} {}", val(dst), val(src))
+        }
+        (IrType::Float { bits: sb }, IrType::Float { bits: db }) => {
+            // float -> float: widen is exact (`exts`), narrow rounds to nearest
+            // (`truncd`); a same-width `>fN` on its own type is a bit relabel.
+            let dw = width(dst_ty);
+            let m = if db > sb {
+                "exts"
+            } else if db < sb {
+                "truncd"
+            } else {
+                "copy"
+            };
+            writeln!(out, "\t{} ={dw} {m} {}", val(dst), val(src))
+        }
+        (IrType::Float { bits: sb }, IrType::Int { .. }) => {
+            // float -> int: truncate toward zero to the 32/64 integer carrier
+            // (`stosi`/`dtosi` signed, `stoui`/`dtoui` unsigned), then the
+            // shared canonicalization point (R15) for a sub-word target.
+            // Out-of-range/NaN is unspecified this slice (D7).
+            let ds = matches!(dst_ty, IrType::Int { signed: true, .. });
+            let op = match (sb == 32, ds) {
+                (true, true) => "stosi",
+                (true, false) => "stoui",
+                (false, true) => "dtosi",
+                (false, false) => "dtoui",
+            };
+            match sub_word(dst_ty) {
+                Some((bits, signed)) => {
+                    let tmp = format!("%conv{ext_id}");
+                    *ext_id += 1;
+                    writeln!(out, "\t{tmp} =w {op} {}", val(src))?;
+                    emit_canonicalize(out, &val(dst), &tmp, "w", bits, signed)
+                }
+                None => {
+                    let dw = width(dst_ty);
+                    writeln!(out, "\t{} ={dw} {op} {}", val(dst), val(src))
+                }
+            }
+        }
+        (s, d) => unreachable!("conversion endpoints are numeric, got {s:?} -> {d:?}"),
+    }
+}
+
+/// Lower an integer conversion `dst = convert(src)` (R6), the Slice-2 path
+/// unchanged. Widening extends by the *source* signedness (`exts*` signed,
+/// `extu*` unsigned) from the source width; if the *target* is sub-word, that
+/// extend is re-canonicalized to the target's own convention (R15), because the
+/// source-signed extend is only accidentally canonical for the target: a signed
+/// source widened to an unsigned sub-word target (e.g. `i8 >u16`) sign-extends
+/// into bits the target requires to be zero, which a later in-register unsigned
+/// compare would read as dirty. Narrowing keeps the low `dst` bits: for a
+/// sub-word target that routes through the shared canonicalization point (R15),
+/// otherwise a `w`-width `copy` truncates a `64 -> 32` step. Same-width is a
+/// relabel: a plain `copy` when the target fills its register, but a sub-word
+/// signedness flip (`u8 >i8`, `i8 >u8`) still re-canonicalizes to the new
+/// convention so a later widen/compare reads the right high bits (Q5).
+fn emit_conv_int(
     out: &mut String,
     dst: Value,
     src: Value,
@@ -563,18 +643,106 @@ mod tests {
     /// Hand-built types isolate the bare conversion codegen path per cell,
     /// rather than needing a matching Sooth program for every width/sign pair.
     fn emit_conv_il(src_ty: IrType, dst_ty: IrType) -> String {
+        let src_const = if matches!(src_ty, IrType::Float { .. }) {
+            Instr::ConstF(Value(0), 5.0)
+        } else {
+            Instr::Const(Value(0), 5)
+        };
         let func = IrFunc {
             name: "t".to_string(),
             params: vec![],
             ret: Some(dst_ty),
             blocks: vec![crate::ir::Block {
                 id: crate::ir::BlockId(0),
-                instrs: vec![Instr::Const(Value(0), 5), Instr::Conv(Value(1), Value(0))],
+                instrs: vec![src_const, Instr::Conv(Value(1), Value(0))],
                 term: Terminator::Ret(Some(Value(1))),
             }],
             value_types: vec![src_ty, dst_ty],
         };
         emit(&IrModule { funcs: vec![func] }).unwrap()
+    }
+
+    fn f32() -> IrType {
+        IrType::Float { bits: 32 }
+    }
+
+    fn f64() -> IrType {
+        IrType::Float { bits: 64 }
+    }
+
+    #[test]
+    fn emit_conv_signed_int_to_float_uses_swtof_sltof() {
+        // i32 -> f64 reads the `w` source as signed; i64 -> f32 reads `l`.
+        assert!(
+            emit_conv_il(int(32, true), f64()).contains("=d swtof"),
+            "expected swtof to double"
+        );
+        assert!(
+            emit_conv_il(int(64, true), f32()).contains("=s sltof"),
+            "expected sltof to single"
+        );
+    }
+
+    #[test]
+    fn emit_conv_unsigned_int_to_float_uses_uwtof_ultof() {
+        // A sub-word unsigned source rides its canonical `w` carrier (uwtof).
+        assert!(
+            emit_conv_il(int(8, false), f64()).contains("=d uwtof"),
+            "expected uwtof to double"
+        );
+        assert!(
+            emit_conv_il(int(64, false), f32()).contains("=s ultof"),
+            "expected ultof to single"
+        );
+    }
+
+    #[test]
+    fn emit_conv_float_widen_is_exts() {
+        // f32 >f64 is the exact single->double extend.
+        let il = emit_conv_il(f32(), f64());
+        assert!(il.contains("=d exts"), "expected an exts: {il}");
+    }
+
+    #[test]
+    fn emit_conv_float_narrow_is_truncd() {
+        // f64 >f32 rounds to nearest via truncd.
+        let il = emit_conv_il(f64(), f32());
+        assert!(il.contains("=s truncd"), "expected a truncd: {il}");
+    }
+
+    #[test]
+    fn emit_conv_float_to_int_truncates_toward_zero() {
+        // f64 >i64 truncates toward zero (dtosi to the `l` carrier); f32 >i32
+        // uses stosi to the `w` carrier.
+        assert!(
+            emit_conv_il(f64(), int(64, true)).contains("=l dtosi"),
+            "expected dtosi to long"
+        );
+        assert!(
+            emit_conv_il(f32(), int(32, true)).contains("=w stosi"),
+            "expected stosi to word"
+        );
+    }
+
+    #[test]
+    fn emit_conv_float_to_unsigned_int_uses_toui() {
+        // An unsigned int target selects the `*toui` mnemonic.
+        let il = emit_conv_il(f64(), int(64, false));
+        assert!(il.contains("=l dtoui"), "expected dtoui: {il}");
+    }
+
+    #[test]
+    fn emit_conv_float_to_subword_int_canonicalizes() {
+        // f64 >u8 truncates to the `w` carrier then masks to the low byte (R15).
+        let il = emit_conv_il(f64(), int(8, false));
+        assert!(
+            il.contains("dtoui") || il.contains("dtosi"),
+            "expected a float->int trunc: {il}"
+        );
+        assert!(
+            il.contains("and") && il.contains("255"),
+            "expected a u8 mask after the trunc: {il}"
+        );
     }
 
     #[test]

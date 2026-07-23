@@ -100,6 +100,24 @@ fn narrowing_conversion_truncates_and_widens_back_correctly() {
 }
 
 #[test]
+fn float_to_int_truncates_toward_zero_end_to_end() {
+    // R18/S5: float->int truncates toward zero, not floor. `3.9 >i64` is `3`
+    // and `-3.9 >i64` is `-3` (floor would give `-4`), proving `dtosi` runs in
+    // a native binary.
+    let src = ": main ( -- )\n  3.9 >i64 .\n  -3.9 >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-float-to-int-trunc-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "3\n-3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn signed_widen_surfaces_negative_end_to_end() {
     // FIX 4a: `200 >i8 >i64 .` widens a signed sub-word value and prints the
     // sign-extended result (`200` wraps to `-56` as `i8`), proving a signed
