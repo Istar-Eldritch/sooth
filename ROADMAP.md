@@ -18,8 +18,10 @@ with a persistent stack, generation-mangled redefinition, and the golden session
 joins, and lowering `bool` to QBE `w`. **Slice 2 (integer tower + conversions) is
 complete** and merged to `main`: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`),
 target-only conversion words (`>i8`..`>u64`), homogeneous no-implicit-promotion arithmetic
-and comparison, and width/signedness-correct QBE codegen. **Next action: Phase 2 Slice 3**
-(structs/records).
+and comparison, and width/signedness-correct QBE codegen. The **floats axis** (`f32`/`f64`,
+carved out of the tower) has also **landed** and merged to `main`: IEEE `+ - * /`, ordered
+comparison, `<digits>.<digits>` literals, `f.` printing, and int<->float conversions.
+**Next action: Phase 2 Slice 3** (structs/records).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -70,14 +72,16 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slices 1-2 done)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slices 1-2 + floats axis done)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
 and arity at branch joins, and `bool` lowered to QBE `w`. **Slice 2 (integer tower +
 conversions) is done**: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`), target-only
 conversion words, homogeneous arithmetic/comparison, and width/signedness-correct codegen
-with single-point sub-word canonicalization.
+with single-point sub-word canonicalization. The **floats axis is done** too: `f32`/`f64`
+with IEEE arithmetic (including float `/`), ordered NaN-correct comparison, float literals,
+`f.` printing, and numeric-generalised int<->float conversions.
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -96,22 +100,25 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    built-in type property (so Phase 3 has it to build on), plus explicit optional and
    non-null pointer types.
 
-Three numeric axes were deliberately carved out of Slice 2 and still need homes (their own
-slices, or folded into one): **floats** (`f32`/`f64`), **`i128`/`u128`** (frontend
-double-word synthesis), and **bitwise operators** (`and`/`or`/`xor`/`shl`/`shr`/`sar`, where
-signed-vs-unsigned right-shift is the natural headline). The `*/` widening primitive is also
-still deferred. So the real remaining count is a bit more than five.
+Three numeric axes were deliberately carved out of Slice 2. **Floats have now landed** (see
+below); the two still needing homes (their own slices, or folded into one) are
+**`i128`/`u128`** (frontend double-word synthesis) and **bitwise operators**
+(`and`/`or`/`xor`/`shl`/`shr`/`sar`, where signed-vs-unsigned right-shift is the natural
+headline). The `*/` widening primitive is also still deferred.
 
-**Floats slice, decided semantics** (brief not yet written): `f32`+`f64`; homogeneous
-`+ - * /` (float `/` is in, no `mod`); IEEE-754 with **silent NaN/inf propagation** (no
-trapping, no static rejection: NaN/inf are inherently runtime and Sooth's compile-error
-lever cannot reach them); float literals `<digits>.<digits>` (digits required both sides so
-they cannot collide with the `.` print word), defaulting to `f64`; a distinct `f.` print
-word `( f64 -- )` rather than overloading `.`; the target-only conversion family generalised
-to numeric (`>f32`/`>f64`, and float->int truncating toward zero, out-of-range/NaN
-unspecified). Comparison `< > =` are plain IEEE ordered compares: `=` is **exact** bit
-equality (a documented footgun), never epsilon. NaN is user-detectable via `x = x`; `isinf`
-and any epsilon/approximate comparison are deferred to the stdlib.
+**Floats axis, delivered** (brief + spec: `docs/phase2-slice-floats-brief.md`,
+`docs/phase2-slice-floats-spec.md`): `f32`+`f64`; homogeneous `+ - * /` (float `/` is in, no
+`mod`); IEEE-754 with **silent NaN/inf propagation** (no trapping, no static rejection:
+NaN/inf are inherently runtime and Sooth's compile-error lever cannot reach them); float
+literals `<digits>.<digits>` (digits required both sides so they cannot collide with the `.`
+print word), defaulting to `f64`; a distinct `f.` print word `( f64 -- )` rather than
+overloading `.`; the target-only conversion family generalised to numeric (`>f32`/`>f64`, and
+float->int truncating toward zero, out-of-range/NaN unspecified). Comparison `< > =` are
+plain IEEE ordered compares: `=` is **exact** bit equality (a documented footgun), never
+epsilon. NaN is user-detectable via `x = x`; `isinf` and any epsilon/approximate comparison
+are deferred to the stdlib. **Note:** the unsigned int<->float conversions emit QBE ops
+(`uwtof`/`ultof`/`stoui`/`dtoui`) that need a reasonably modern QBE; Debian's packaged 1.2 is
+too old (see README build note).
 
 Float ordering is **partial** (NaN compares false to everything, so there is no total
 order). This slice ships no generic `sort`/`Ord` bound to attach that to, so nothing is
