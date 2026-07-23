@@ -44,29 +44,89 @@ pub struct TypedSlot {
     pub ty: Type,
 }
 
-/// A frontend type. Slot types are concrete from Phase 2 Slice 1 onward; the
-/// numeric tower, structs, enums, arrays, etc. are later slices.
+/// A frontend type: the fixed-width integer tower (`i8..i64`, `u8..u64`) plus
+/// `bool`. The eight integer cases are table-generated (`INT_TYPES` below), not
+/// eight hand-written variants, so a further width is one table row. Structs,
+/// enums, arrays, etc. are later slices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
-    I64,
+    Int(IntType),
     Bool,
 }
 
+/// The `(bits, signed)` pair for an integer type. Fields are private so a
+/// `Type::Int` can only be built via `Type::from_name`/`Type::I64`, both of
+/// which draw from `INT_TYPES`; an off-table width is then unconstructable
+/// rather than merely a documented invariant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntType {
+    bits: u8,
+    signed: bool,
+}
+
+/// `(name, bits, signed)` rows for the eight integer types, driving
+/// `Type::from_name`/`Type::name`.
+const INT_TYPES: [(&str, u8, bool); 8] = [
+    ("i8", 8, true),
+    ("i16", 16, true),
+    ("i32", 32, true),
+    ("i64", 64, true),
+    ("u8", 8, false),
+    ("u16", 16, false),
+    ("u32", 32, false),
+    ("u64", 64, false),
+];
+
 impl Type {
+    /// Sugar for the literal type (`i64`); kept to cut churn at call sites
+    /// that only ever meant plain `i64`.
+    pub const I64: Type = Type::Int(IntType {
+        bits: 64,
+        signed: true,
+    });
+
     /// Resolve a source type-name word to a `Type`, or `None` if unknown.
     pub fn from_name(name: &str) -> Option<Type> {
-        match name {
-            "i64" => Some(Type::I64),
-            "bool" => Some(Type::Bool),
-            _ => None,
+        if name == "bool" {
+            return Some(Type::Bool);
         }
+        INT_TYPES
+            .iter()
+            .find(|(n, _, _)| *n == name)
+            .map(|(_, bits, signed)| {
+                Type::Int(IntType {
+                    bits: *bits,
+                    signed: *signed,
+                })
+            })
+    }
+
+    /// Whether this type is one of the eight integer types (not `bool`).
+    pub fn is_int(&self) -> bool {
+        matches!(self, Type::Int(_))
     }
 
     pub fn name(&self) -> &'static str {
         match self {
-            Type::I64 => "i64",
             Type::Bool => "bool",
+            Type::Int(IntType { bits, signed }) => INT_TYPES
+                .iter()
+                .find(|(_, b, s)| b == bits && s == signed)
+                .map(|(n, _, _)| *n)
+                .expect("Type::Int is always constructed from an INT_TYPES row"),
         }
+    }
+}
+
+impl IntType {
+    /// The width in bits (`8`/`16`/`32`/`64`).
+    pub fn bits(&self) -> u8 {
+        self.bits
+    }
+
+    /// Whether the type is signed.
+    pub fn signed(&self) -> bool {
+        self.signed
     }
 }
 
@@ -92,4 +152,52 @@ pub enum TermKind {
         then_branch: Vec<Term>,
         else_branch: Vec<Term>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn type_from_name_each_width_expected() {
+        let cases: &[(&str, u8, bool)] = &[
+            ("i8", 8, true),
+            ("i16", 16, true),
+            ("i32", 32, true),
+            ("i64", 64, true),
+            ("u8", 8, false),
+            ("u16", 16, false),
+            ("u32", 32, false),
+            ("u64", 64, false),
+        ];
+        for (name, bits, signed) in cases {
+            assert_eq!(
+                Type::from_name(name),
+                Some(Type::Int(IntType {
+                    bits: *bits,
+                    signed: *signed
+                })),
+                "resolving {name}"
+            );
+        }
+        assert_eq!(Type::from_name("bool"), Some(Type::Bool));
+    }
+
+    #[test]
+    fn type_unknown_name_none_expected() {
+        assert_eq!(Type::from_name("i128"), None);
+        assert_eq!(Type::from_name("u128"), None);
+        assert_eq!(Type::from_name("f32"), None);
+        assert_eq!(Type::from_name("foo"), None);
+    }
+
+    #[test]
+    fn type_display_roundtrip_expected() {
+        let names = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "bool"];
+        for name in names {
+            let ty = Type::from_name(name).unwrap();
+            assert_eq!(ty.name(), name);
+            assert_eq!(ty.to_string(), name);
+        }
+    }
 }

@@ -1,0 +1,19 @@
+\ Slice 2 dogfood: pack three `u8` channels into an `i32` via homogeneous
+\ `i32` arithmetic, then unpack the lowest channel (blue) back to a `u8` via
+\ narrowing. No `/`: unpack only isolates blue, per the slice's Q3 resolution.
+
+: pack ( i64 i64 i64 -- i32 )
+  | r g b |
+  r >i32 65536 >i32 *
+  g >i32 256 >i32 *
+  +
+  b >i32
+  + ;
+
+: blue ( i32 -- u8 )
+  256 >i32 mod >u8 ;
+
+: main ( -- )
+  10 20 30 pack
+  dup >i64 .          \ prints 660510
+  blue >i64 . ;       \ prints 30

@@ -256,7 +256,14 @@ impl Session {
         let seq = self.seq;
         let (func, m) = {
             let resolve = resolver_for(&self.env);
-            ir::lower_line(seq, terms, entry_depth, &ir_lower_env, &resolve)
+            ir::lower_line(
+                seq,
+                terms,
+                entry_depth,
+                &self.types,
+                &ir_lower_env,
+                &resolve,
+            )
         };
         // `m` (the wrapper's emitted store count) and `net_depth` (the checker's
         // independently-inferred net effect) are the same depth simulation and

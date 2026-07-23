@@ -85,7 +85,7 @@ fn type_error_line_reports_and_session_survives() {
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "stack: 5");
     assert!(
-        lines[1].contains("expected `i64`") && lines[1].contains("found `bool`"),
+        lines[1].contains("`i64`") && lines[1].contains("`bool`"),
         "expected a type-mismatch diagnostic: {}",
         lines[1]
     );
@@ -159,6 +159,23 @@ fn calculator_session_dogfood() {
             "2",
             "stack: (empty)",
         ]
+    );
+}
+
+/// S5: a sub-word (`u8`) value survives a line boundary on the carried stack
+/// and is used correctly on the next line, proving Q2 (the carried buffer
+/// slot stays 8 bytes wide and is canonicalized/relabeled on use).
+#[test]
+fn subword_carried_value_survives_line_boundary() {
+    // Wraps (200 + 100 = 300, mod 256 = 44): an in-range case would pass even
+    // if the carried slot were never canonicalized on reload, so this pins the
+    // actual point of R16/Q2, that the carried `u8` is relabeled/canonicalized
+    // across the line boundary, not just carried as an opaque 8-byte value.
+    let out = run_session(&["200 >u8", "100 >u8 +", ">i64 ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 200", "stack: 44", "44", "stack: (empty)"]
     );
 }
 
