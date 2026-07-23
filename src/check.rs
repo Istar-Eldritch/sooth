@@ -33,20 +33,21 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 /// they are structural and type-transparent (they move whatever slot types are
 /// present), handled directly in `check_term`, not as fixed signatures.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    use Type::{Bool, I64};
+    let i64_ty = Type::I64;
+    let bool_ty = Type::Bool;
     let sig = |inputs: &[Type], outputs: &[Type]| Sig {
         inputs: inputs.to_vec(),
         outputs: outputs.to_vec(),
     };
     [
-        ("+", sig(&[I64, I64], &[I64])),
-        ("-", sig(&[I64, I64], &[I64])),
-        ("*", sig(&[I64, I64], &[I64])),
-        ("mod", sig(&[I64, I64], &[I64])),
-        ("=", sig(&[I64, I64], &[Bool])),
-        ("<", sig(&[I64, I64], &[Bool])),
-        (">", sig(&[I64, I64], &[Bool])),
-        (".", sig(&[I64], &[])),
+        ("+", sig(&[i64_ty, i64_ty], &[i64_ty])),
+        ("-", sig(&[i64_ty, i64_ty], &[i64_ty])),
+        ("*", sig(&[i64_ty, i64_ty], &[i64_ty])),
+        ("mod", sig(&[i64_ty, i64_ty], &[i64_ty])),
+        ("=", sig(&[i64_ty, i64_ty], &[bool_ty])),
+        ("<", sig(&[i64_ty, i64_ty], &[bool_ty])),
+        (">", sig(&[i64_ty, i64_ty], &[bool_ty])),
+        (".", sig(&[i64_ty], &[])),
     ]
     .into_iter()
     .map(|(k, v)| (k.to_string(), v))

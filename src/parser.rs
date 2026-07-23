@@ -355,6 +355,16 @@ mod tests {
     }
 
     #[test]
+    fn parse_slot_resolves_new_int_widths_expected() {
+        let module = parse_src(": w ( u8 i16 -- i32 u64 ) drop drop 0 0 ;").unwrap();
+        let w = &module.words[0];
+        assert_eq!(w.effect.inputs[0].ty, Type::from_name("u8").unwrap());
+        assert_eq!(w.effect.inputs[1].ty, Type::from_name("i16").unwrap());
+        assert_eq!(w.effect.outputs[0].ty, Type::from_name("i32").unwrap());
+        assert_eq!(w.effect.outputs[1].ty, Type::from_name("u64").unwrap());
+    }
+
+    #[test]
     fn parse_slot_unknown_type_name_is_error() {
         let result = parse_src(": w ( foo -- ) drop ;");
         assert!(result.is_err());

@@ -40,7 +40,7 @@ pub enum IrType {
 /// Map a frontend `Type` to its `IrType`.
 pub fn ir_type_of(ty: Type) -> IrType {
     match ty {
-        Type::I64 => IrType::Int,
+        Type::Int(_) => IrType::Int,
         Type::Bool => IrType::Bool,
     }
 }
