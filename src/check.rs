@@ -245,30 +245,31 @@ fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     }
 }
 
-/// `and`/`or`/`xor` applied to a non-integer or mixed-integer-type pair:
-/// bitwise ops stay integer-only, same shape as `mod_requires_int_error`.
+/// `and`/`or`/`xor` applied to a non-integer/non-bool or mixed-type pair:
+/// bitwise ops are homogeneous over the integer types and `bool`, same shape
+/// as `mod_requires_int_error`.
 fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or bool type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
         Ctx::Line => format!(
-            "error: type mismatch: `{op}` requires two operands of the same integer type, found `{a}` and `{b}`"
+            "error: type mismatch: `{op}` requires two operands of the same integer or bool type, found `{a}` and `{b}`"
         ),
     }
 }
 
-/// `not` applied to a non-integer operand.
+/// `not` applied to a non-integer, non-bool operand.
 fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `not` requires an integer operand, found `{}`\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  `not` requires an integer or bool operand, found `{}`\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => {
-            format!("error: type mismatch: `not` requires an integer operand, found `{found}`")
-        }
+        Ctx::Line => format!(
+            "error: type mismatch: `not` requires an integer or bool operand, found `{found}`"
+        ),
     }
 }
 
@@ -448,10 +449,15 @@ fn check_term(
 /// generalise the same way as `+ - *` but always produce `bool` (R9). A
 /// conversion word is `>` followed by a known numeric type name
 /// (`>i8`..`>u64`, `>f32`, `>f64`): pop one numeric value, push the named
-/// target (R10). `and`/`or`/`xor` are homogeneous over the integer types only
-/// (`bool` and float are rejected), same shape as `mod`. `not` is unary:
-/// integer in, same type out. `shl`/`shr` take an integer value and always an
-/// `i64` shift count, producing the value's type.
+/// target (R10). `and`/`or`/`xor` are homogeneous over the integer types and
+/// `bool` (float is rejected), same shape as `mod`; on two `bool`s they *are*
+/// logical and/or/xor, since a stack language evaluates both operands eagerly
+/// so bitwise-on-0/1 and logical coincide. `not` is unary: integer or `bool`
+/// in, same type out (int stays bitwise complement, `bool` is logical
+/// negation; the difference is only in how `lower_call` codegens it).
+/// `shl`/`shr` take an integer value and always an `i64` shift count,
+/// producing the value's type. `<= >= <>` generalise the same way as `= < >`:
+/// numeric-only (never `bool`), same type, producing `bool`.
 fn check_operator(
     name: &str,
     span: Span,
@@ -502,7 +508,7 @@ fn check_operator(
                 return Err(need(name, 2, n));
             }
             let (a, b) = (stack[n - 2], stack[n - 1]);
-            if !a.is_int() || !b.is_int() || a != b {
+            if !(a.is_int() || a.is_bool()) || !(b.is_int() || b.is_bool()) || a != b {
                 return Err(bitwise_pair_mismatch_error(ctx, span, name, a, b));
             }
             stack.truncate(n - 2);
@@ -514,7 +520,7 @@ fn check_operator(
                 return Err(need(name, 1, n));
             }
             let a = stack[n - 1];
-            if !a.is_int() {
+            if !(a.is_int() || a.is_bool()) {
                 return Err(bitwise_not_requires_int_error(ctx, span, a));
             }
         }
@@ -533,7 +539,7 @@ fn check_operator(
             stack.truncate(n - 2);
             stack.push(a);
         }
-        "=" | "<" | ">" => {
+        "=" | "<" | ">" | "<=" | ">=" | "<>" => {
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
@@ -841,7 +847,7 @@ mod tests {
         let src = ": w ( -- i64 ) 1 >i32 2 and ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same integer type"),
+            err.contains("same integer or bool type"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -849,11 +855,23 @@ mod tests {
     }
 
     #[test]
-    fn check_bitwise_and_on_bool_is_error() {
-        let src = ": w ( -- bool ) true false and ;";
+    fn check_bitwise_and_or_xor_on_bool_is_ok() {
+        // Bool is now an accepted homogeneous operand class for `and`/`or`/`xor`
+        // (logical-and on two 0/1 bools coincides with bitwise-and).
+        check_src(": w ( -- bool ) true false and true false or drop true false xor drop ;")
+            .unwrap();
+    }
+
+    #[test]
+    fn check_bitwise_and_mixed_bool_int_is_error() {
+        let src = ": w ( -- bool ) true 5 and ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(
+            err.contains("same integer or bool type"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -879,12 +897,40 @@ mod tests {
     }
 
     #[test]
-    fn check_not_on_bool_is_error() {
-        let src = ": w ( -- bool ) true not ;";
+    fn check_not_on_bool_is_ok() {
+        // `not` is type-directed: on a `bool` it is logical negation, not
+        // the integer bitwise complement (R9-ext).
+        check_src(": w ( -- bool ) true not ;").unwrap();
+    }
+
+    #[test]
+    fn check_cmp_le_ge_ne_numeric_same_type_ok() {
+        check_src(": w ( -- bool bool bool ) 1 2 <= 1 2 >= 1 2 <> ;").unwrap();
+    }
+
+    #[test]
+    fn check_cmp_le_ge_ne_on_bool_is_error() {
+        // Comparisons stay numeric-only: `bool` is never accepted, even
+        // though it now is for `and`/`or`/`xor`.
+        let src = ": w ( -- bool ) true false <= ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("`not`"), "unexpected message: {err}");
-        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_cmp_ne_mixed_type_is_error() {
+        let src = ": w ( -- bool ) 1 >i32 2 <> ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
 
     #[test]

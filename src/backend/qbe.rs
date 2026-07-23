@@ -374,18 +374,27 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             let is_float = matches!(operand, IrType::Float { .. });
             let signed = matches!(operand, IrType::Int { signed: true, .. });
             let w = width(ty_of(value_types, *v));
-            // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}` straight to
-            // `comis{s,d}` + `sete`/`setb`, but x86's unordered (NaN) result
-            // sets both ZF and CF, so those two mnemonics report *true* for a
-            // NaN operand instead of the required IEEE-false (`cgt{s,d}`/
-            // `cge{s,d}` use `seta`/`setae`, which x86 clears on unordered, so
-            // those stay correct as-is; verified against emitted assembly).
-            // Work around it here rather than in QBE: `a < b` swaps operands
-            // and reuses the correct `cgt` form (`b > a`); `a = b` ANDs `ceq`
-            // with the ordered predicate `cod`/`cos` (false on NaN) to mask
-            // the false positive (R17, RISK 1).
+            // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}`/`cle{s,d}`/
+            // `cne{s,d}` straight to `comis{s,d}` + `sete`/`setb`/`setbe`/
+            // `setne`, but x86's unordered (NaN) result sets both ZF and CF,
+            // so `eq`/`lt`/`le` report *true* for a NaN operand (wrong, an
+            // ordered compare must be false on NaN) while `ne` reports
+            // *false* (also wrong, `!=` must be true on NaN) instead of the
+            // required IEEE result (`cgt{s,d}`/`cge{s,d}` use `seta`/`setae`,
+            // which x86 clears on unordered, so those two stay correct as-is;
+            // verified against emitted assembly). Work around it here rather
+            // than in QBE: `a < b` and `a <= b` swap operands and reuse the
+            // correct `cgt`/`cge` forms (`b > a`, `b >= a`); `a = b` ANDs
+            // `ceq` with the ordered predicate `cod`/`cos` (false on NaN) to
+            // mask the false positive; `a <> b` ORs `cne` with the unordered
+            // predicate `cuo{s,d}` (true on NaN) to add the missing true
+            // (R17, R21, RISK 1).
             if is_float && matches!(op, CmpOp::Lt) {
                 return writeln!(out, "\t{} ={w} cgt{ow} {}, {}", val(*v), val(*b), val(*a))
+                    .unwrap();
+            }
+            if is_float && matches!(op, CmpOp::Le) {
+                return writeln!(out, "\t{} ={w} cge{ow} {}, {}", val(*v), val(*b), val(*a))
                     .unwrap();
             }
             if is_float && matches!(op, CmpOp::Eq) {
@@ -397,13 +406,28 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 writeln!(out, "\t{ord} ={w} co{ow} {}, {}", val(*a), val(*b)).unwrap();
                 return writeln!(out, "\t{} ={w} and {eq}, {ord}", val(*v)).unwrap();
             }
+            if is_float && matches!(op, CmpOp::Ne) {
+                let ne = format!("%cmp{ext_id}");
+                *ext_id += 1;
+                let uo = format!("%cmp{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{ne} ={w} cne{ow} {}, {}", val(*a), val(*b)).unwrap();
+                writeln!(out, "\t{uo} ={w} cuo{ow} {}, {}", val(*a), val(*b)).unwrap();
+                return writeln!(out, "\t{} ={w} or {ne}, {uo}", val(*v)).unwrap();
+            }
             let m = match op {
                 CmpOp::Eq => "ceq",
+                CmpOp::Ne => "cne",
                 CmpOp::Lt if signed => "cslt",
                 CmpOp::Lt => "cult",
                 CmpOp::Gt if is_float => "cgt",
                 CmpOp::Gt if signed => "csgt",
                 CmpOp::Gt => "cugt",
+                CmpOp::Le if signed => "csle",
+                CmpOp::Le => "cule",
+                CmpOp::Ge if is_float => "cge",
+                CmpOp::Ge if signed => "csge",
+                CmpOp::Ge => "cuge",
             };
             writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
@@ -724,6 +748,103 @@ mod tests {
         assert!(il.contains("ceqd"), "expected an eq compare: {il}");
         assert!(il.contains("cod"), "expected an ordered mask: {il}");
         assert!(il.contains("and"), "expected the eq/ordered AND: {il}");
+    }
+
+    #[test]
+    fn emit_float_le_swaps_to_ordered_ge() {
+        // `<=` on floats reuses the already-NaN-correct `cge` form (`a <= b`
+        // === `b >= a`), the same swap trick as `<` reusing `cgt` (R21).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Le, Value(0), Value(1)),
+        );
+        assert!(
+            il.contains("=w cged %v1, %v0"),
+            "expected a swapped ordered compare: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_float_ge_uses_direct_cge_no_fix_needed() {
+        // `>=` needs no NaN workaround: x86's `setae` (used by `cge{s,d}`)
+        // already clears on an unordered operand (R21).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Ge, Value(0), Value(1)),
+        );
+        assert!(
+            il.contains("=w cged %v0, %v1"),
+            "expected a direct compare: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_float_ne_ors_unordered_with_cuo() {
+        // `<>` on floats does NOT rely on a bare `cned`: x86's `setne` (used
+        // by `cne{s,d}`) is *false* on an unordered operand, but IEEE `!=`
+        // must be *true* when either operand is NaN. ORing with `cuod`
+        // (unordered, true on NaN) adds the missing true (R21, RISK 1).
+        let il = emit_binary(
+            IrType::Float { bits: 64 },
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Ne, Value(0), Value(1)),
+        );
+        assert!(il.contains("cned"), "expected a ne compare: {il}");
+        assert!(il.contains("cuod"), "expected an unordered mask: {il}");
+        assert!(il.contains(" or "), "expected the ne/unordered OR: {il}");
+    }
+
+    #[test]
+    fn emit_cmp_le_signed_uses_csle() {
+        let il = emit_binary(
+            int(32, true),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Le, Value(0), Value(1)),
+        );
+        assert!(il.contains("cslew"), "expected a signed compare: {il}");
+    }
+
+    #[test]
+    fn emit_cmp_le_unsigned_uses_cule() {
+        let il = emit_binary(
+            int(32, false),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Le, Value(0), Value(1)),
+        );
+        assert!(il.contains("culew"), "expected an unsigned compare: {il}");
+    }
+
+    #[test]
+    fn emit_cmp_ge_signed_uses_csge() {
+        let il = emit_binary(
+            int(32, true),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Ge, Value(0), Value(1)),
+        );
+        assert!(il.contains("csgew"), "expected a signed compare: {il}");
+    }
+
+    #[test]
+    fn emit_cmp_ge_unsigned_uses_cuge() {
+        let il = emit_binary(
+            int(32, false),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Ge, Value(0), Value(1)),
+        );
+        assert!(il.contains("cugew"), "expected an unsigned compare: {il}");
+    }
+
+    #[test]
+    fn emit_cmp_ne_is_sign_agnostic() {
+        // `<>` on integers is sign-agnostic, same as `=` (R21).
+        let il = emit_binary(
+            int(32, true),
+            IrType::Bool,
+            Instr::Cmp(Value(2), CmpOp::Ne, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w cnew"), "expected a ne compare: {il}");
     }
 
     #[test]

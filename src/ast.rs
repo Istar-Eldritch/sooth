@@ -142,6 +142,11 @@ impl Type {
         self.is_int() || self.is_float()
     }
 
+    /// Whether this type is `bool`.
+    pub fn is_bool(&self) -> bool {
+        matches!(self, Type::Bool)
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Type::Bool => "bool",

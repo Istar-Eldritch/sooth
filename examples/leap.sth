@@ -1,0 +1,14 @@
+\ Leap-year predicate: compound boolean logic dogfood for `and`/`or`/`not` on
+\ `bool`. A year is leap if divisible by 4 and not by 100, or divisible by 400.
+
+: leap ( i64 -- bool )
+  dup 4 mod 0 =
+  over 100 mod 0 = not
+  and
+  swap 400 mod 0 =
+  or ;
+
+: main ( -- )
+  2000 leap if 1 else 0 then .    \ prints 1 (divisible by 400)
+  1900 leap if 1 else 0 then .    \ prints 0 (divisible by 100, not 400)
+  2024 leap if 1 else 0 then . ;  \ prints 1 (divisible by 4, not 100)

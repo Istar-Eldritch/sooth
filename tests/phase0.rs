@@ -555,14 +555,28 @@ fn bitwise_op_on_float_reports_diagnostic() {
 }
 
 #[test]
-fn bitwise_op_on_bool_reports_diagnostic() {
+fn bitwise_op_on_bool_is_now_accepted() {
+    // `and`/`or`/`xor` are type-directed: `bool` is now a valid homogeneous
+    // operand class, not just the integer tower.
     let src = ": w ( -- bool ) true false and ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&module).expect("check should succeed");
+}
+
+#[test]
+fn mixed_bool_int_and_reports_both_types() {
+    let src = ": w ( -- bool ) true 5 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
 
-    assert!(err.contains("integer"), "unexpected message: {err}");
+    assert!(
+        err.contains("same integer or bool type"),
+        "unexpected message: {err}"
+    );
     assert!(err.contains("`bool`"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -573,7 +587,7 @@ fn mixed_type_and_reports_both_types() {
     let err = check::check(&module).expect_err("check should fail");
 
     assert!(
-        err.contains("same integer type"),
+        err.contains("same integer or bool type"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -701,5 +715,120 @@ fn negative_shift_count_masks_to_type_width() {
     std::fs::remove_file(&path).ok();
 
     assert_eq!(stdout, "4\n");
+    assert_eq!(code, 0);
+}
+
+// Boolean logical ops (`and`/`or`/`xor`/`not` on `bool`) + the `<= >= <>`
+// comparison completion: diagnostics + goldens.
+
+#[test]
+fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
+    let src = ": w ( -- bool ) true false <= ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail");
+
+    assert!(
+        err.contains("same numeric type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`bool`"), "unexpected message: {err}");
+}
+
+#[test]
+fn logical_and_or_xor_truth_table_on_bools() {
+    // `and`/`or`/`xor` on `bool` operands ARE logical and/or/xor (an eager
+    // stack language already evaluates both operands, so bitwise-on-0/1 and
+    // logical coincide): T and T = T, T and F = F, T or F = T, F or F = F,
+    // T xor F = T, T xor T = F.
+    let src = ": main ( -- )\n  \
+  true true and if 1 else 0 then .\n  \
+  true false and if 1 else 0 then .\n  \
+  true false or if 1 else 0 then .\n  \
+  false false or if 1 else 0 then .\n  \
+  true false xor if 1 else 0 then .\n  \
+  true true xor if 1 else 0 then . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-logical-and-or-xor-truth-table-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1\n0\n1\n0\n1\n0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
+    // `not` is type-directed: on a `bool` it is logical negation
+    // (`true not` -> false), giving a DIFFERENT result than the integer
+    // bitwise complement on the same underlying bit pattern (`0 >u8 not` ->
+    // 255, not 1).
+    let src = ": main ( -- )\n  \
+  true not if 1 else 0 then .\n  \
+  0 >u8 not >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-not-type-directed-bool-vs-int-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "0\n255\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
+    // The same bit pattern (200) compares differently as `i8` (-56, negative)
+    // vs `u8` (200, positive) against 5: `<=`/`>=` flip with the sign, while
+    // `<>` stays true either way (not-equal is sign-agnostic like `=`).
+    let src = ": main ( -- )\n  \
+  200 >i8 5 >i8 <= if 1 else 0 then .\n  \
+  200 >u8 5 >u8 <= if 1 else 0 then .\n  \
+  200 >i8 5 >i8 >= if 1 else 0 then .\n  \
+  200 >u8 5 >u8 >= if 1 else 0 then .\n  \
+  200 >i8 5 >i8 <> if 1 else 0 then .\n  \
+  200 >u8 5 >u8 <> if 1 else 0 then . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-le-ge-ne-signed-unsigned-edge-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1\n0\n0\n1\n1\n1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
+    // A real NaN (`0.0 0.0 /`, routed through a call so it isn't
+    // constant-folded away) must report false for the ordered comparisons
+    // `<=`/`>=`/`=`, and true for `<>` (RISK 1): `<>` is the one comparison
+    // where "NaN involved" flips the answer relative to `=`.
+    let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
+: main ( -- )\n  \
+  0.0 0.0 fdiv dup <= if 1 else 0 then .\n  \
+  0.0 0.0 fdiv dup >= if 1 else 0 then .\n  \
+  0.0 0.0 fdiv dup <> if 1 else 0 then .\n  \
+  0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "0\n0\n1\n0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn leap_year_dogfood_compiles_and_runs() {
+    let (stdout, code) = run_and_capture_stdout("examples/leap.sth");
+    assert_eq!(stdout, "1\n0\n1\n");
     assert_eq!(code, 0);
 }
