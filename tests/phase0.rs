@@ -324,7 +324,7 @@ fn build_surfaces_checker_error() {
 #[test]
 fn mean_dogfood_compiles_and_runs() {
     // S8: `examples/mean.sth` converts two integer inputs to `f64`, divides,
-    // and prints via `f.`; mean of 10 and 4 prints 2.5.
+    // and prints via `.`; mean of 10 and 4 prints 2.5.
     let (stdout, code) = run_and_capture_stdout("examples/mean.sth");
     assert_eq!(stdout, "2.5\n");
     assert_eq!(code, 0);
@@ -333,9 +333,9 @@ fn mean_dogfood_compiles_and_runs() {
 #[test]
 fn float_arithmetic_runs_on_both_widths_end_to_end() {
     // S1/S3: `+ - *` run correctly on `f64` and on `f32` (converted back to
-    // `f64` for `f.`, since `f.` is `f64`-only, D6).
-    let src = ": main ( -- )\n  1.0 2.0 + f.\n  5.0 2.0 - f.\n  3.0 4.0 * f.\n  \
-1.5 >f32 2.5 >f32 + >f64 f. ;\n";
+    // `f64` for `.`, since `.` prints an `f32` by widening to `f64`).
+    let src = ": main ( -- )\n  1.0 2.0 + .\n  5.0 2.0 - .\n  3.0 4.0 * .\n  \
+1.5 >f32 2.5 >f32 + >f64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-arith-both-widths-{}.sth",
         std::process::id()
@@ -355,7 +355,7 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
     // division through a real call boundary so QBE cannot constant-fold the
     // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
-: main ( -- )\n  1.0 0.0 fdiv f.\n  0.0 0.0 fdiv f.\n  \
+: main ( -- )\n  1.0 0.0 fdiv .\n  0.0 0.0 fdiv .\n  \
 0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-div-inf-nan-{}.sth",
@@ -400,9 +400,9 @@ fn float_comparison_is_ieee_ordered_and_false_for_nan() {
 #[test]
 fn int_to_float_and_float_to_float_conversions_run_end_to_end() {
     // S5: int->float and float->float in both directions (`f32`<->`f64`),
-    // each printed via `>f64 f.` where the source is `f32` (D6).
-    let src = ": main ( -- )\n  10 >f64 f.\n  3 >f32 >f64 f.\n  3.5 >f32 >f64 f.\n  \
-10 >f32 >f64 f. ;\n";
+    // each printed via `.` (an `f32` source widens to `f64` first).
+    let src = ": main ( -- )\n  10 >f64 .\n  3 >f32 >f64 .\n  3.5 >f32 >f64 .\n  \
+10 >f32 >f64 . ;\n";
     let path =
         std::env::temp_dir().join(format!("sooth-int-float-conv-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -423,7 +423,7 @@ fn unsigned_int_to_float_conversions_run_end_to_end() {
     // (not a signed `swtof`) is load-bearing for a correct, non-negative
     // result. `-1 >u64` bit-reinterprets to `u64::MAX`; `ultof` renders it as
     // a huge positive float, where a signed `sltof` would render `-1`.
-    let src = ": main ( -- )\n  4000000000 >u32 >f64 f.\n  -1 >u64 >f64 f. ;\n";
+    let src = ": main ( -- )\n  4000000000 >u32 >f64 .\n  -1 >u64 >f64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-unsigned-int-to-float-{}.sth",
         std::process::id()
@@ -829,6 +829,101 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
 #[test]
 fn leap_year_dogfood_compiles_and_runs() {
     let (stdout, code) = run_and_capture_stdout("examples/leap.sth");
-    assert_eq!(stdout, "1\n0\n1\n");
+    assert_eq!(stdout, "true\nfalse\ntrue\n");
     assert_eq!(code, 0);
+}
+
+// Phase 2: `.` becomes type-directed over every printable scalar; `f.` is gone.
+
+#[test]
+fn print_signed_negative_i64_prints_signed_decimal() {
+    let src = ": main ( -- )\n  -42 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-print-signed-negative-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "-42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn print_unsigned_u64_high_bit_set_prints_unsigned_decimal() {
+    // The headline gap-closer: a `u64` with the high bit set (`-1 >u64`) must
+    // print its full unsigned value, not `-1` reinterpreted as signed.
+    let src = ": main ( -- )\n  -1 >u64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-print-unsigned-u64-high-bit-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "18446744073709551615\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn print_unsigned_subword_widths_print_unsigned_decimal() {
+    // `u8` in range, and a `u32` with its high bit set (also negative if
+    // misread as signed): both must print unsigned.
+    let src = ": main ( -- )\n  255 >u8 .\n  4000000000 >u32 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-print-unsigned-subword-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "255\n4000000000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn print_float_f64_and_f32_via_dot() {
+    // `f.` is gone; `.` prints both float widths (an `f32` widens to `f64`
+    // first).
+    let src = ": main ( -- )\n  2.5 .\n  1.5 >f32 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-print-float-widths-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "2.5\n1.5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn print_bool_prints_true_or_false_not_zero_or_one() {
+    let src = ": main ( -- )\n  2 3 < .\n  3 2 < . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-print-bool-true-false-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "true\nfalse\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn f_dot_is_now_an_unknown_word() {
+    // `f.` is removed entirely: it reads as any other unknown word.
+    let src = ": w ( f64 -- ) f. ;";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&module).expect_err("check should fail: `f.` no longer exists");
+
+    assert!(err.contains("unknown word"), "unexpected message: {err}");
+    assert!(err.contains("f."), "unexpected message: {err}");
 }
