@@ -29,28 +29,22 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 }
 
 /// The builtin word -> typed-effect table, as the seed of a checking env. The
-/// stack shuffles (`dup`/`drop`/`swap`/`over`/`rot`) are deliberately absent:
-/// they are structural and type-transparent (they move whatever slot types are
-/// present), handled directly in `check_term`, not as fixed signatures.
+/// stack shuffles (`dup`/`drop`/`swap`/`over`/`rot`) are deliberately absent,
+/// as are the arithmetic/comparison/conversion operators: all are structural
+/// and either type-transparent or homogeneity-checked over the integer tower,
+/// handled directly in `check_term` (`check_shuffle`/`check_operator`), not as
+/// fixed signatures. `.` alone stays fixed: it is always `( i64 -- )` (D6),
+/// with no per-width or unsigned variant.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    let i64_ty = Type::I64;
-    let bool_ty = Type::Bool;
-    let sig = |inputs: &[Type], outputs: &[Type]| Sig {
-        inputs: inputs.to_vec(),
-        outputs: outputs.to_vec(),
-    };
-    [
-        ("+", sig(&[i64_ty, i64_ty], &[i64_ty])),
-        ("-", sig(&[i64_ty, i64_ty], &[i64_ty])),
-        ("*", sig(&[i64_ty, i64_ty], &[i64_ty])),
-        ("mod", sig(&[i64_ty, i64_ty], &[i64_ty])),
-        ("=", sig(&[i64_ty, i64_ty], &[bool_ty])),
-        ("<", sig(&[i64_ty, i64_ty], &[bool_ty])),
-        (">", sig(&[i64_ty, i64_ty], &[bool_ty])),
-        (".", sig(&[i64_ty], &[])),
-    ]
+    [(
+        ".",
+        Sig {
+            inputs: vec![Type::I64],
+            outputs: vec![],
+        },
+    )]
     .into_iter()
-    .map(|(k, v)| (k.to_string(), v))
+    .map(|(k, v): (&str, Sig)| (k.to_string(), v))
     .collect()
 }
 
@@ -199,6 +193,45 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
     }
 }
 
+/// Both-operand type mismatch for a homogeneous operator (`+ - * mod = < >`):
+/// mixed integer widths/signs, or a `bool` operand, name both operand types
+/// (X1, X2).
+fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
+            name, span.line, op, a, b, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: type mismatch: `{op}` requires two operands of the same integer type, found `{a}` and `{b}`"
+        ),
+    }
+}
+
+/// A conversion word (`>iN`/`>uN`) applied to a non-integer source (X4).
+fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an integer source, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line => {
+            format!("error: type mismatch: `{op}` requires an integer source, found `{found}`")
+        }
+    }
+}
+
+/// An unknown type name in a conversion word (X5), e.g. `>i128`.
+fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: unknown type `{name}` in `{wname}` (line {})",
+            span.line
+        ),
+        Ctx::Line => format!("error: unknown type `{name}`"),
+    }
+}
+
 fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
@@ -259,6 +292,9 @@ fn check_term(
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
+            if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
+                return Ok(stack);
+            }
             let sig = env
                 .get(name)
                 .ok_or_else(|| unknown_word_error(ctx, span, name))?;
@@ -305,6 +341,65 @@ fn check_term(
             Ok(then_stack)
         }
     }
+}
+
+/// Apply an arithmetic/comparison/conversion operator if `name` is one,
+/// returning `Some(stack)`; `None` if the name is none of those (the caller
+/// then looks it up in the env). `+ - * mod` and `= < >` are homogeneous over
+/// the integer tower: both operands must be the *same* integer type (`bool`
+/// is not in the tower), producing that type (arithmetic) or `bool`
+/// (comparison); no implicit promotion (R8-R10). A conversion word is `>`
+/// followed by a known integer type name (`>i8`..`>u64`): pop one integer
+/// value, push the named target (R5-R7).
+fn check_operator(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Type>,
+    ctx: &Ctx,
+) -> Result<Option<Vec<Type>>, String> {
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+    match name {
+        "+" | "-" | "*" | "mod" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.is_int() || !b.is_int() || a != b {
+                return Err(operand_pair_mismatch_error(ctx, span, name, a, b));
+            }
+            stack.truncate(n - 2);
+            stack.push(a);
+        }
+        "=" | "<" | ">" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.is_int() || !b.is_int() || a != b {
+                return Err(operand_pair_mismatch_error(ctx, span, name, a, b));
+            }
+            stack.truncate(n - 2);
+            stack.push(Type::Bool);
+        }
+        _ => {
+            let Some(rest) = name.strip_prefix('>').filter(|r| !r.is_empty()) else {
+                return Ok(None);
+            };
+            let target = match Type::from_name(rest) {
+                Some(ty) if ty.is_int() => ty,
+                _ => return Err(conversion_unknown_type_error(ctx, span, rest)),
+            };
+            let source = *stack.last().ok_or_else(|| need(name, 1, stack.len()))?;
+            if !source.is_int() {
+                return Err(conversion_source_error(ctx, span, name, source));
+            }
+            stack.pop();
+            stack.push(target);
+        }
+    }
+    Ok(Some(std::mem::take(stack)))
 }
 
 /// Apply a stack shuffle if `name` is one, returning `Some(stack)`; `None` if
@@ -465,8 +560,8 @@ mod tests {
     fn check_operand_type_mismatch_is_error() {
         let src = ": w ( -- i64 ) true 1 + ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("expected `i64`"), "unexpected message: {err}");
-        assert!(err.contains("found `bool`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -482,6 +577,66 @@ mod tests {
     fn check_shuffle_dup_bool_is_type_transparent() {
         // `dup` of a `bool` yields two `bool`s and satisfies the declaration.
         check_src(": w ( bool -- bool bool ) dup ;").unwrap();
+    }
+
+    #[test]
+    fn check_arith_same_width_ok() {
+        check_src(": w ( -- i32 ) 1 >i32 2 >i32 + ;").unwrap();
+    }
+
+    #[test]
+    fn check_arith_mixed_width_is_error() {
+        // X1: an `i32` and an `i64` fed to `+` names both differing types.
+        let src = ": f ( -- i32 ) 1 >i32 5 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_cmp_mixed_sign_is_error() {
+        // X2: `u8` and `i8` fed to `<` names both differing operand types.
+        let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`u8`"), "unexpected message: {err}");
+        assert!(err.contains("`i8`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_conv_from_any_int_ok() {
+        check_src(": w ( -- u8 ) 5 >i32 >u8 ;").unwrap();
+    }
+
+    #[test]
+    fn check_conv_of_bool_is_error() {
+        // X4: a conversion applied to `bool` is a type error.
+        let src = ": w ( -- i32 ) true >i32 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_declared_output_needs_conversion_is_error() {
+        // X3: the literal is `i64`, the declared output is `u8`.
+        let src = ": f ( -- u8 ) 5 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`u8`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_conv_unknown_target_is_error() {
+        // X5: `>i128` reads as an unknown conversion target.
+        let src = ": w ( -- i64 ) 5 >i128 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("i128"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_shuffle_dup_u8_is_transparent() {
+        check_src(": w ( -- u8 u8 ) 5 >u8 dup ;").unwrap();
     }
 
     #[test]

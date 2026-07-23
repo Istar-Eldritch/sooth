@@ -75,8 +75,8 @@ fn operand_type_mismatch_reports_diagnostic() {
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
 
-    assert!(err.contains("expected `i64`"), "unexpected message: {err}");
-    assert!(err.contains("found `bool`"), "unexpected message: {err}");
+    assert!(err.contains("`i64`"), "unexpected message: {err}");
+    assert!(err.contains("`bool`"), "unexpected message: {err}");
 }
 
 #[test]

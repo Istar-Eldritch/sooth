@@ -101,6 +101,11 @@ impl Type {
             })
     }
 
+    /// Whether this type is one of the eight integer types (not `bool`).
+    pub fn is_int(&self) -> bool {
+        matches!(self, Type::Int(_))
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Type::Bool => "bool",

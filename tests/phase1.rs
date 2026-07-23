@@ -85,7 +85,7 @@ fn type_error_line_reports_and_session_survives() {
     assert_eq!(lines.len(), 3);
     assert_eq!(lines[0], "stack: 5");
     assert!(
-        lines[1].contains("expected `i64`") && lines[1].contains("found `bool`"),
+        lines[1].contains("`i64`") && lines[1].contains("`bool`"),
         "expected a type-mismatch diagnostic: {}",
         lines[1]
     );
