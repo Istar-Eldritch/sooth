@@ -95,6 +95,10 @@ pub enum Instr {
     Cmp(Value, CmpOp, Value, Value),
     Call(Option<Value>, String, Vec<Value>),
     Print(Value),
+    /// Print an `f64` via a `%g`-style readable rendering (R19). Distinct from
+    /// `Print` so the backend passes the value as a `d` to `printf` with the
+    /// float format string; `f.` is checker-guaranteed `( f64 -- )`.
+    PrintF(Value),
     Phi(Value, Vec<(BlockId, Value)>),
     /// `dst: Ptr = base + bytes`. Keeps `Ptr` opaque (no native-width assumption).
     PtrOffset(Value, Value, i64),
@@ -206,20 +210,31 @@ pub fn lower_line(
     for (i, ty) in entry_types.iter().enumerate() {
         let ptr = b.fresh_value(IrType::Ptr);
         b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
-        let v = b.fresh_value(IrType::I64);
-        b.push_instr(Instr::Load(v, ptr));
-        // Only an integer slot narrower/differently-signed than `i64` needs a
-        // relabel: `Conv` is integer-only (its dst/src are always `Int`), and a
-        // `Bool` slot needs none anyway (`jnz` reads any register, and its
-        // stored 0/1 is already valid `l`-content with no dirty high bits).
+        // A float slot loads directly at its `s`/`d` width (R20): the backend
+        // picks `loadd`/`loads` from the value's float `IrType`, so the bits
+        // re-enter as a true float and need no integer `Conv`-relabel (that
+        // path is integer-only). An integer slot narrower/differently-signed
+        // than `i64` still relabels via `Conv`; a `Bool` slot needs none (`jnz`
+        // reads any register, and its stored 0/1 is valid `l`-content).
         let slot_ty = ir_type_of(*ty);
         match slot_ty {
+            IrType::Float { .. } => {
+                let v = b.fresh_value(slot_ty);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
             IrType::Int { .. } if slot_ty != IrType::I64 => {
+                let v = b.fresh_value(IrType::I64);
+                b.push_instr(Instr::Load(v, ptr));
                 let relabeled = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Conv(relabeled, v));
                 stack.push(relabeled);
             }
-            _ => stack.push(v),
+            _ => {
+                let v = b.fresh_value(IrType::I64);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
         }
     }
     b.stack = stack;
@@ -455,6 +470,10 @@ impl<'a> FuncBuilder<'a> {
             "." => {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
+            }
+            "f." => {
+                let v = self.stack.pop().expect("fprint: value");
+                self.push_instr(Instr::PrintF(v));
             }
             _ => {
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
@@ -764,6 +783,43 @@ mod tests {
         assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
         let last = w.blocks.last().unwrap();
         assert!(matches!(last.term, Terminator::Ret(None)));
+    }
+
+    #[test]
+    fn lower_fprint_emits_printf_instr() {
+        // `f.` lowers to the distinct float-print instruction (R19), not the
+        // integer `Print`.
+        let ir = lower_src(": w ( f64 -- ) f. ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).iter().any(|i| matches!(i, Instr::PrintF(_))));
+        assert!(!instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
+    }
+
+    #[test]
+    fn lower_line_carried_float_slot_loads_as_float() {
+        // A carried `f64` slot loads at its float `IrType` (R20), so the value
+        // re-enters as a true float rather than a stale `i64`; no `Conv`
+        // relabel is needed (that path is integer-only).
+        let terms = line_terms("dup");
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let f64_ty = Type::from_name("f64").unwrap();
+        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
+        let loaded = func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .find_map(|i| match i {
+                Instr::Load(v, _) => Some(*v),
+                _ => None,
+            });
+        let v = loaded.expect("a load in the prologue");
+        assert_eq!(func.value_types[v.0 as usize], IrType::Float { bits: 64 });
+        assert!(!func
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .any(|i| matches!(i, Instr::Conv(..))));
     }
 
     #[test]

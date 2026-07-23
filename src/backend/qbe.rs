@@ -11,6 +11,7 @@ use crate::ir::{BinOp, BlockId, CmpOp, Instr, IrFunc, IrModule, IrType, Terminat
 pub fn emit(ir: &IrModule) -> Result<String, String> {
     let mut out = String::new();
     out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
+    out.push_str("data $ffmt = { b \"%g\\n\", b 0 }\n");
     for func in &ir.funcs {
         out.push('\n');
         emit_func(&mut out, func);
@@ -361,26 +362,43 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             }
         }
         Instr::Print(v) => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
+        // `f.` passes the value as a `d` to `printf` with the `%g` float format
+        // (R19); an `f32` reaches `f.` only via `>f64`, so this is always a `d`.
+        Instr::PrintF(v) => writeln!(out, "\tcall $printf(l $ffmt, d {}, ...)", val(*v)),
         Instr::PtrOffset(dst, base, bytes) => {
             writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
         }
-        Instr::Load(dst, ptr) => writeln!(out, "\t{} =l loadl {}", val(*dst), val(*ptr)),
+        Instr::Load(dst, ptr) => {
+            // The load width follows the destination's `IrType` (R20): a float
+            // slot loads at its `s`/`d` width so its bits re-enter as a true
+            // float; every other slot loads the full 8-byte `l`.
+            let (w, op) = match ty_of(value_types, *dst) {
+                IrType::Float { bits: 32 } => ("s", "loads"),
+                IrType::Float { .. } => ("d", "loadd"),
+                _ => ("l", "loadl"),
+            };
+            writeln!(out, "\t{} ={w} {op} {}", val(*dst), val(*ptr))
+        }
         Instr::Store(ptr, v) => {
-            // The 8-byte buffer slot is always an `l` sink (R4); any `w`-width
-            // value (`Bool`, or an integer with `bits <= 32`) must be widened to
-            // `l` before it lands there. A signed integer sign-extends (its `w`
-            // register already holds canonical, correctly-signed bits, R15);
-            // `Bool` and an unsigned integer zero-extend.
+            // A float slot stores at its `s`/`d` width (R20), symmetric with the
+            // float load; an `f32` writes 4 of the 8 slot bytes (Q2). Otherwise
+            // the 8-byte buffer slot is an `l` sink (R4): any `w`-width value
+            // (`Bool`, or an integer with `bits <= 32`) is widened to `l` first.
+            // A signed integer sign-extends (its `w` register already holds
+            // canonical bits, R15); `Bool`/unsigned zero-extend.
             let ty = ty_of(value_types, *v);
-            if width(ty) == "w" {
-                let signed = matches!(ty, IrType::Int { signed: true, .. });
-                let ext_op = if signed { "extsw" } else { "extuw" };
-                let ext = format!("%ext{ext_id}");
-                *ext_id += 1;
-                writeln!(out, "\t{ext} =l {ext_op} {}", val(*v)).unwrap();
-                writeln!(out, "\tstorel {}, {}", ext, val(*ptr))
-            } else {
-                writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr))
+            match ty {
+                IrType::Float { bits: 32 } => writeln!(out, "\tstores {}, {}", val(*v), val(*ptr)),
+                IrType::Float { .. } => writeln!(out, "\tstored {}, {}", val(*v), val(*ptr)),
+                _ if width(ty) == "w" => {
+                    let signed = matches!(ty, IrType::Int { signed: true, .. });
+                    let ext_op = if signed { "extsw" } else { "extuw" };
+                    let ext = format!("%ext{ext_id}");
+                    *ext_id += 1;
+                    writeln!(out, "\t{ext} =l {ext_op} {}", val(*v)).unwrap();
+                    writeln!(out, "\tstorel {}, {}", ext, val(*ptr))
+                }
+                _ => writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr)),
             }
         }
         Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types, ext_id),
@@ -453,6 +471,42 @@ mod tests {
         assert!(il.contains("data $fmt = { b \"%ld\\n\", b 0 }"));
         assert!(il.contains("call $printf(l $fmt,"));
         assert!(il.contains(", ...)"));
+    }
+
+    #[test]
+    fn emit_fprint_uses_ffmt_and_d_arg() {
+        // `f.` prints via the `%g` float format, passing the value as a `d` (R19).
+        let il = emit_src(": w ( f64 -- ) f. ;");
+        assert!(
+            il.contains("data $ffmt = { b \"%g\\n\", b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("call $printf(l $ffmt, d "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_float_slot_round_trips_with_float_load_store() {
+        // A carried `f64` slot loads/stores with the float ops (R20), so its
+        // bits re-enter as a true float rather than a stale `i64`.
+        let tokens = lex("dup").unwrap();
+        let terms = match parse_line(&tokens).unwrap() {
+            Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let f64_ty = Type::from_name("f64").unwrap();
+        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
+        let il = emit(&IrModule { funcs: vec![func] }).unwrap();
+        assert!(il.contains("loadd "), "expected a float load: {il}");
+        assert!(il.contains("stored "), "expected a float store: {il}");
+        assert!(
+            !il.contains("loadl "),
+            "a float slot never uses loadl: {il}"
+        );
     }
 
     #[test]

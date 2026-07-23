@@ -147,12 +147,22 @@ fn resolver_with_override<'a>(
 }
 
 /// Format the carried stack, bottom to top, for the session's per-expression
-/// output line.
-pub fn format_stack(stack: &[i64]) -> String {
+/// output line. A float slot is reinterpreted from its stored bits via
+/// `from_bits` (R21): displaying its `i64` bit pattern would be meaningless. An
+/// `f32` slot reads only the low 32 bits (it was stored 4-wide, Q2).
+pub fn format_stack(stack: &[i64], types: &[Type]) -> String {
     if stack.is_empty() {
         return "stack: (empty)".to_string();
     }
-    let vals: Vec<String> = stack.iter().map(|v| v.to_string()).collect();
+    let vals: Vec<String> = stack
+        .iter()
+        .zip(types)
+        .map(|(&v, ty)| match ty {
+            Type::Float(ft) if ft.bits() == 32 => f32::from_bits(v as u64 as u32).to_string(),
+            Type::Float(_) => f64::from_bits(v as u64).to_string(),
+            _ => v.to_string(),
+        })
+        .collect();
     format!("stack: {}", vals.join(" "))
 }
 
@@ -310,7 +320,7 @@ impl Session {
         self.libs.push(lib);
 
         let d = self.top / 8;
-        writeln!(writer, "{}", format_stack(&self.buf[..d]))
+        writeln!(writer, "{}", format_stack(&self.buf[..d], &self.types))
             .map_err(|e| format!("writing stdout: {e}"))?;
         Ok(())
     }
@@ -374,12 +384,28 @@ mod tests {
 
     #[test]
     fn format_stack_bottom_to_top() {
-        assert_eq!(format_stack(&[1, 2, 3]), "stack: 1 2 3");
+        let types = vec![Type::I64, Type::I64, Type::I64];
+        assert_eq!(format_stack(&[1, 2, 3], &types), "stack: 1 2 3");
     }
 
     #[test]
     fn format_stack_empty_is_marker() {
-        assert_eq!(format_stack(&[]), "stack: (empty)");
+        assert_eq!(format_stack(&[], &[]), "stack: (empty)");
+    }
+
+    #[test]
+    fn format_stack_f64_slot_renders_float_not_bits() {
+        // A carried `f64` displays its value, not the `i64` bit pattern (R21).
+        let bits = 2.5f64.to_bits() as i64;
+        assert_eq!(format_stack(&[bits], &[Type::F64]), "stack: 2.5");
+    }
+
+    #[test]
+    fn format_stack_f32_slot_reads_low_32_bits() {
+        // An `f32` slot stores 4 bytes; display reads the low 32 bits (Q2/R21).
+        let bits = 1.5f32.to_bits() as u64 as i64;
+        let f32_ty = Type::from_name("f32").unwrap();
+        assert_eq!(format_stack(&[bits], &[f32_ty]), "stack: 1.5");
     }
 
     fn entry(generation: u64) -> WordEntry {
