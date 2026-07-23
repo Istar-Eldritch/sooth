@@ -90,6 +90,11 @@ pub enum Instr {
     Load(Value, Value),
     /// `*ptr = val` (Int).
     Store(Value, Value),
+    /// `dst = convert(src)` between two integer types (`>iN`/`>uN`). The two
+    /// `IrType`s carry the widths and signedness the backend needs to pick
+    /// sign/zero-extend (widen), truncate-and-canonicalize (narrow), or relabel
+    /// (same width); the frontend never spells the QBE op (R14).
+    Conv(Value, Value),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -414,6 +419,21 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             _ => {
+                // A conversion word `>iN`/`>uN` (checker-guaranteed integer
+                // source): pop one, push the target-typed result. The backend
+                // reads the two `IrType`s to pick extend/truncate/relabel (R6).
+                if let Some(target) = name
+                    .strip_prefix('>')
+                    .filter(|r| !r.is_empty())
+                    .and_then(Type::from_name)
+                    .filter(Type::is_int)
+                {
+                    let src = self.stack.pop().expect("conv: source");
+                    let dst = self.fresh_value(ir_type_of(target));
+                    self.push_instr(Instr::Conv(dst, src));
+                    self.stack.push(dst);
+                    return;
+                }
                 let (in_arity, out_arity, ret_ty) =
                     *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
@@ -698,6 +718,27 @@ mod tests {
             );
         }
         assert_eq!(ir_type_of(Type::Bool), IrType::Bool);
+    }
+
+    #[test]
+    fn lower_conv_pushes_target_typed_value() {
+        // `5 >u8` lowers the literal, then a `Conv` whose dst carries the u8 type.
+        let ir = lower_src(": w ( -- u8 ) 5 >u8 ;");
+        let w = &ir.funcs[0];
+        let dst = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Conv(dst, _) => Some(*dst),
+                _ => None,
+            })
+            .expect("a Conv instr");
+        assert_eq!(
+            w.value_types[dst.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
     }
 
     #[test]
