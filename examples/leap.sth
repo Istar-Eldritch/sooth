@@ -9,6 +9,6 @@
   or ;
 
 : main ( -- )
-  2000 leap if 1 else 0 then .    \ prints 1 (divisible by 400)
-  1900 leap if 1 else 0 then .    \ prints 0 (divisible by 100, not 400)
-  2024 leap if 1 else 0 then . ;  \ prints 1 (divisible by 4, not 100)
+  2000 leap .    \ prints true (divisible by 400)
+  1900 leap .    \ prints false (divisible by 100, not 400)
+  2024 leap . ;  \ prints true (divisible by 4, not 100)
