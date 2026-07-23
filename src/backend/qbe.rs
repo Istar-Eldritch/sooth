@@ -294,6 +294,47 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             };
             writeln!(out, "\t{} ={w} copy {prefix}{x}", val(*v))
         }
+        Instr::Bin(v, op @ (BinOp::Shl | BinOp::Shr), a, b) => {
+            // Type-directed like the comparison codegen: the result's own
+            // signedness picks logical (`shr`) vs arithmetic (`sar`) right
+            // shift; `shl` has one form. The hardware already masks the shift
+            // count mod the register width (32 for `w`, 64 for `l`), which
+            // only matches the *type* width for `w`/`l`-filling types (32/64
+            // bits); a sub-word type (bits < 32) needs the count explicitly
+            // masked to its own width first, or an over-shift would wrap at 32
+            // instead of at the type's bit width (Rust `wrapping_shl`/`shr`
+            // semantics for both literal and runtime counts).
+            let ty = ty_of(value_types, *v);
+            let w = width(ty);
+            let signed = matches!(ty, IrType::Int { signed: true, .. });
+            let m = match op {
+                BinOp::Shl => "shl",
+                BinOp::Shr if signed => "sar",
+                BinOp::Shr => "shr",
+                _ => unreachable!("matched only Shl/Shr"),
+            };
+            let sub = sub_word(ty);
+            let count = match sub {
+                Some((bits, _)) => {
+                    let masked = format!("%shamt{ext_id}");
+                    *ext_id += 1;
+                    // Mask the count mod the type's bit width, not the value
+                    // mask used for canonicalization: e.g. a `u8`'s count
+                    // masks to `bits - 1 = 7` (mod 8), not `255`.
+                    writeln!(out, "\t{masked} =l and {}, {}", val(*b), bits - 1).unwrap();
+                    masked
+                }
+                None => val(*b),
+            };
+            if let Some((bits, signed)) = sub {
+                let tmp = format!("%bin{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{tmp} ={w} {m} {}, {count}", val(*a)).unwrap();
+                emit_canonicalize(out, &val(*v), &tmp, w, bits, signed)
+            } else {
+                writeln!(out, "\t{} ={w} {m} {}, {count}", val(*v), val(*a))
+            }
+        }
         Instr::Bin(v, op, a, b) => {
             // The op runs at the result's register width; a sub-word result can
             // overflow its width, so canonicalize it (R15) via the shared point.
@@ -308,6 +349,10 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 BinOp::Div => "div",
                 BinOp::Rem if matches!(ty, IrType::Int { signed: false, .. }) => "urem",
                 BinOp::Rem => "rem",
+                BinOp::And => "and",
+                BinOp::Or => "or",
+                BinOp::Xor => "xor",
+                BinOp::Shl | BinOp::Shr => unreachable!("handled in the arm above"),
             };
             if let Some((bits, signed)) = sub_word(ty) {
                 let tmp = format!("%bin{ext_id}");
@@ -878,6 +923,134 @@ mod tests {
         assert!(
             !il.contains("ext"),
             "a same-width relabel extends nothing: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_bitwise_and_or_xor_use_matching_qbe_mnemonics() {
+        let i32_ty = int(32, true);
+        let il = emit_binary(
+            i32_ty,
+            i32_ty,
+            Instr::Bin(Value(2), BinOp::And, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w and"), "expected an and: {il}");
+
+        let il = emit_binary(
+            i32_ty,
+            i32_ty,
+            Instr::Bin(Value(2), BinOp::Or, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w or"), "expected an or: {il}");
+
+        let il = emit_binary(
+            i32_ty,
+            i32_ty,
+            Instr::Bin(Value(2), BinOp::Xor, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w xor"), "expected a xor: {il}");
+    }
+
+    #[test]
+    fn emit_bitwise_subword_and_or_xor_do_not_dirty_canonical_form() {
+        // Two already-canonical sub-word operands stay canonical through
+        // `and`/`or`/`xor` (bitwise ops preserve consistent high bits); the
+        // shared canonicalization mask is a no-op here but still applied
+        // uniformly through the same single point as every other sub-word Bin.
+        let u8 = int(8, false);
+        let il = emit_binary(u8, u8, Instr::Bin(Value(2), BinOp::And, Value(0), Value(1)));
+        assert!(il.contains("and"), "expected the and: {il}");
+        assert!(
+            il.contains("255"),
+            "expected the shared u8 canonicalization mask: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_not_xors_with_neg1_and_canonicalizes_unsigned() {
+        let u8 = int(8, false);
+        let func = IrFunc {
+            name: "t".to_string(),
+            params: vec![],
+            ret: Some(u8),
+            blocks: vec![crate::ir::Block {
+                id: crate::ir::BlockId(0),
+                instrs: vec![
+                    Instr::Const(Value(0), 5),
+                    Instr::Const(Value(1), -1),
+                    Instr::Bin(Value(2), BinOp::Xor, Value(0), Value(1)),
+                ],
+                term: Terminator::Ret(Some(Value(2))),
+            }],
+            value_types: vec![u8, u8, u8],
+        };
+        let il = emit(&IrModule { funcs: vec![func] }).unwrap();
+        assert!(il.contains("copy -1"), "expected the -1 const: {il}");
+        assert!(il.contains("xor"), "expected the xor: {il}");
+        assert!(
+            il.contains("and") && il.contains("255"),
+            "expected the u8 canonicalization mask after xor-with-neg1: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_shr_signed_uses_sar_unsigned_uses_shr() {
+        let il = emit_binary(
+            int(32, true),
+            int(32, true),
+            Instr::Bin(Value(2), BinOp::Shr, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w sar"), "expected sar for signed: {il}");
+
+        let il = emit_binary(
+            int(32, false),
+            int(32, false),
+            Instr::Bin(Value(2), BinOp::Shr, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w shr"), "expected shr for unsigned: {il}");
+    }
+
+    #[test]
+    fn emit_shl_uses_shl_mnemonic() {
+        let il = emit_binary(
+            int(32, true),
+            int(32, true),
+            Instr::Bin(Value(2), BinOp::Shl, Value(0), Value(1)),
+        );
+        assert!(il.contains("=w shl"), "expected shl: {il}");
+    }
+
+    #[test]
+    fn emit_subword_shift_masks_count_to_type_width() {
+        // A u8 shift must mask its (always-i64) count to mod 8, not rely on
+        // the hardware's mod-32 masking of the `w` register, or an over-shift
+        // (e.g. by 10) would diverge from Rust's `wrapping_shl` semantics.
+        let u8 = int(8, false);
+        let il = emit_binary(u8, u8, Instr::Bin(Value(2), BinOp::Shl, Value(0), Value(1)));
+        assert!(
+            il.contains("and") && il.contains(" 7"),
+            "expected a mod-8 count mask: {il}"
+        );
+        assert!(il.contains("shl"), "expected the shl: {il}");
+        assert!(
+            il.contains("255"),
+            "expected the u8 canonicalization mask on the result: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_word_width_shift_does_not_mask_count() {
+        // i32/u32 fill the `w` register exactly, so the hardware's mod-32
+        // masking already matches the type width; no explicit count mask.
+        let i32_ty = int(32, true);
+        let il = emit_binary(
+            i32_ty,
+            i32_ty,
+            Instr::Bin(Value(2), BinOp::Shl, Value(0), Value(1)),
+        );
+        assert!(
+            !il.contains("shamt"),
+            "a word-width shift should not mask its count: {il}"
         );
     }
 
