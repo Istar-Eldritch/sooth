@@ -93,7 +93,12 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
 3. **Structs / records**: aggregate value types.
 4. **Enums / ADTs + `match`**: exhaustiveness-checked pattern matching (Result/Either fall
    out mostly free).
-5. **Fixed-size arrays** (still heap-free).
+5. **Fixed-size arrays** (still heap-free). Introduce **`usize`** (and likely **`isize`** for
+   pointer differences) here, as the target-width index/length type, so array indices are
+   `usize` from the first use rather than a hardcoded `i64` retrofitted later. Its defining
+   property (target-defined width, consistent with the opaque `Ptr[T]` invariant) only
+   becomes load-bearing and testable once a real consumer (indexing) or a non-64-bit backend
+   exists, which is why it waits until now rather than landing with the integer tower.
 6. **Bytecode-VM dogfood**: the Phase 2 exit dogfood, a small fixed-size VM for a toy
    bytecode, exercising the whole typed core.
 7. **`Copy` marker + optional / non-null pointer**: the `Copy`-vs-affine distinction as a
