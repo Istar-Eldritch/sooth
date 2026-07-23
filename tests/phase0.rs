@@ -147,7 +147,7 @@ fn mixed_width_arithmetic_reports_both_types() {
     let err = check::check(&module).expect_err("check should fail");
 
     assert!(
-        err.contains("same integer type"),
+        err.contains("same numeric type"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -164,7 +164,7 @@ fn mixed_sign_comparison_reports_both_types() {
     let err = check::check(&module).expect_err("check should fail");
 
     assert!(
-        err.contains("same integer type"),
+        err.contains("same numeric type"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`u8`"), "unexpected message: {err}");
@@ -191,7 +191,7 @@ fn conversion_of_bool_reports_diagnostic() {
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
 
-    assert!(err.contains("integer"), "unexpected message: {err}");
+    assert!(err.contains("numeric"), "unexpected message: {err}");
     assert!(err.contains("`bool`"), "unexpected message: {err}");
 }
 
