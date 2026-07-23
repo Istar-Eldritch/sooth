@@ -245,6 +245,59 @@ fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     }
 }
 
+/// `and`/`or`/`xor` applied to a non-integer or mixed-integer-type pair:
+/// bitwise ops stay integer-only, same shape as `mod_requires_int_error`.
+fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
+            name, span.line, op, a, b, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: type mismatch: `{op}` requires two operands of the same integer type, found `{a}` and `{b}`"
+        ),
+    }
+}
+
+/// `not` applied to a non-integer operand.
+fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `not` requires an integer operand, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line => {
+            format!("error: type mismatch: `not` requires an integer operand, found `{found}`")
+        }
+    }
+}
+
+/// `shl`/`shr` applied to a non-integer value operand.
+fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: type mismatch: `{op}` requires an integer value operand, found `{found}`"
+        ),
+    }
+}
+
+/// `shl`/`shr` applied to a shift count that is not `i64`.
+fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an `i64` shift count, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: type mismatch: `{op}` requires an `i64` shift count, found `{found}`"
+        ),
+    }
+}
+
 /// A conversion word (`>iN`/`>uN`/`>f32`/`>f64`) applied to a non-numeric
 /// (`bool`) source (X5).
 fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
@@ -395,7 +448,10 @@ fn check_term(
 /// generalise the same way as `+ - *` but always produce `bool` (R9). A
 /// conversion word is `>` followed by a known numeric type name
 /// (`>i8`..`>u64`, `>f32`, `>f64`): pop one numeric value, push the named
-/// target (R10).
+/// target (R10). `and`/`or`/`xor` are homogeneous over the integer types only
+/// (`bool` and float are rejected), same shape as `mod`. `not` is unary:
+/// integer in, same type out. `shl`/`shr` take an integer value and always an
+/// `i64` shift count, producing the value's type.
 fn check_operator(
     name: &str,
     span: Span,
@@ -436,6 +492,43 @@ fn check_operator(
             let (a, b) = (stack[n - 2], stack[n - 1]);
             if !a.is_int() || !b.is_int() || a != b {
                 return Err(mod_requires_int_error(ctx, span, a, b));
+            }
+            stack.truncate(n - 2);
+            stack.push(a);
+        }
+        "and" | "or" | "xor" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.is_int() || !b.is_int() || a != b {
+                return Err(bitwise_pair_mismatch_error(ctx, span, name, a, b));
+            }
+            stack.truncate(n - 2);
+            stack.push(a);
+        }
+        "not" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need(name, 1, n));
+            }
+            let a = stack[n - 1];
+            if !a.is_int() {
+                return Err(bitwise_not_requires_int_error(ctx, span, a));
+            }
+        }
+        "shl" | "shr" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.is_int() {
+                return Err(shift_value_requires_int_error(ctx, span, name, a));
+            }
+            if b != Type::I64 {
+                return Err(shift_count_requires_i64_error(ctx, span, name, b));
             }
             stack.truncate(n - 2);
             stack.push(a);
@@ -734,6 +827,86 @@ mod tests {
         let src = ": w ( -- f64 ) 5.0 2.0 mod ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("`mod`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_bitwise_and_or_xor_same_type_ok() {
+        check_src(": w ( -- i32 ) 1 >i32 2 >i32 and 3 >i32 or 4 >i32 xor ;").unwrap();
+    }
+
+    #[test]
+    fn check_bitwise_and_mixed_width_is_error() {
+        let src = ": w ( -- i64 ) 1 >i32 2 and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same integer type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_bitwise_and_on_bool_is_error() {
+        let src = ": w ( -- bool ) true false and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_bitwise_and_on_float_is_error() {
+        let src = ": w ( -- f64 ) 3.0 5.0 and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_not_same_type_ok() {
+        check_src(": w ( -- u8 ) 5 >u8 not ;").unwrap();
+    }
+
+    #[test]
+    fn check_not_on_float_is_error() {
+        let src = ": w ( -- f64 ) 3.0 not ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`not`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_not_on_bool_is_error() {
+        let src = ": w ( -- bool ) true not ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`not`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_shl_shr_i64_count_ok() {
+        check_src(": w ( -- u8 ) 1 >u8 3 shl ;").unwrap();
+        check_src(": w ( -- u8 ) 200 >u8 3 shr ;").unwrap();
+    }
+
+    #[test]
+    fn check_shl_count_not_i64_is_error() {
+        let src = ": w ( -- u8 ) 1 >u8 3 >i32 shl ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`shl`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_shr_value_not_int_is_error() {
+        let src = ": w ( -- f64 ) 3.0 2 shr ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`shr`"), "unexpected message: {err}");
         assert!(err.contains("integer"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
     }
