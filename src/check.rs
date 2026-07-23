@@ -280,6 +280,10 @@ fn check_term(
             stack.push(Type::I64);
             Ok(stack)
         }
+        TermKind::FloatLit(_) => {
+            stack.push(Type::F64);
+            Ok(stack)
+        }
         TermKind::BoolLit(_) => {
             stack.push(Type::Bool);
             Ok(stack)

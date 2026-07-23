@@ -38,6 +38,11 @@ pub enum IrType {
         signed: bool,
     },
     Bool,
+    /// A float, carrying its `bits` (`32`/`64`). The backend derives the QBE
+    /// register class (`s`/`d`) from `bits`; the IR itself never spells `s`/`d`.
+    Float {
+        bits: u8,
+    },
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -59,6 +64,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
             bits: it.bits(),
             signed: it.signed(),
         },
+        Type::Float(ft) => IrType::Float { bits: ft.bits() },
         Type::Bool => IrType::Bool,
     }
 }
@@ -79,6 +85,10 @@ pub struct Block {
 #[derive(Debug)]
 pub enum Instr {
     Const(Value, i64),
+    /// A float constant, carrying its `f64` value (R14). `Instr::Const`'s `i64`
+    /// payload is an integer bit-pattern, not reinterpretable as a float, so a
+    /// float literal gets its own constant path rather than overloading `Const`.
+    ConstF(Value, f64),
     Bin(Value, BinOp, Value, Value),
     Cmp(Value, CmpOp, Value, Value),
     Call(Option<Value>, String, Vec<Value>),
@@ -359,6 +369,11 @@ impl<'a> FuncBuilder<'a> {
             TermKind::IntLit(n) => {
                 let v = self.fresh_value(IrType::I64);
                 self.push_instr(Instr::Const(v, *n));
+                self.stack.push(v);
+            }
+            TermKind::FloatLit(n) => {
+                let v = self.fresh_value(IrType::Float { bits: 64 });
+                self.push_instr(Instr::ConstF(v, *n));
                 self.stack.push(v);
             }
             TermKind::BoolLit(b) => {
