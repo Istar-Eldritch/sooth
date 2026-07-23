@@ -100,25 +100,73 @@ fn narrowing_conversion_truncates_and_widens_back_correctly() {
 }
 
 #[test]
+fn signed_widen_surfaces_negative_end_to_end() {
+    // FIX 4a: `200 >i8 >i64 .` widens a signed sub-word value and prints the
+    // sign-extended result (`200` wraps to `-56` as `i8`), proving a signed
+    // widen is correct in a running binary, not just at the IL level.
+    let src = ": main ( -- )\n  200 >i8 >i64 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-signed-widen-golden-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "-56\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn signed_widen_to_unsigned_subword_compares_correctly() {
+    // FIX 1 (review cycle 2 blocker): widening a signed sub-word source to an
+    // unsigned sub-word target must canonicalize to the target's convention.
+    // `200 >u8 >i8` is `-56` as `i8`; widened to `u16` it must read as the
+    // logical unsigned value `65480`, not the sign-extended bit pattern, so
+    // comparing it against a clean `u16` `65535` must be `true`.
+    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < if 1 else 0 then . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-widen-subword-cmp-golden-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn mixed_width_arithmetic_reports_both_types() {
-    // X1: an `i32` and an `i64` fed to `+` names both differing types.
+    // X1: an `i32` and an `i64` fed to `+` names both differing types, via the
+    // operand-pair-mismatch diagnostic specifically.
     let src = ": f ( -- i32 ) 1 >i32 5 + ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
 
+    assert!(
+        err.contains("same integer type"),
+        "unexpected message: {err}"
+    );
     assert!(err.contains("`i32`"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
 }
 
 #[test]
 fn mixed_sign_comparison_reports_both_types() {
-    // X2: `u8` and `i8` fed to `<` names both differing operand types.
+    // X2: `u8` and `i8` fed to `<` names both differing operand types, via the
+    // same operand-pair-mismatch diagnostic as X1.
     let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
 
+    assert!(
+        err.contains("same integer type"),
+        "unexpected message: {err}"
+    );
     assert!(err.contains("`u8`"), "unexpected message: {err}");
     assert!(err.contains("`i8`"), "unexpected message: {err}");
 }

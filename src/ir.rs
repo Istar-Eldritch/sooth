@@ -793,9 +793,9 @@ mod tests {
 
     #[test]
     fn lower_add_u8_result_is_u8_typed() {
-        // No source path produces a `u8` yet (conversions land in Phase 4), so
-        // drive `lower_call`'s arithmetic arm with hand-typed u8 operands and
-        // assert the result carries the operand type through to its `IrType`.
+        // Drive `lower_call`'s arithmetic arm with hand-typed u8 operands
+        // directly, isolating the arm from parsing/checking, and assert the
+        // result carries the operand type through to its `IrType`.
         let u8 = IrType::Int {
             bits: 8,
             signed: false,

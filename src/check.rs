@@ -586,18 +586,29 @@ mod tests {
 
     #[test]
     fn check_arith_mixed_width_is_error() {
-        // X1: an `i32` and an `i64` fed to `+` names both differing types.
+        // X1: an `i32` and an `i64` fed to `+` names both differing types, via
+        // the operand-pair-mismatch diagnostic specifically (not just any error
+        // that happens to mention both type names).
         let src = ": f ( -- i32 ) 1 >i32 5 + ;";
         let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same integer type"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`i32`"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_cmp_mixed_sign_is_error() {
-        // X2: `u8` and `i8` fed to `<` names both differing operand types.
+        // X2: `u8` and `i8` fed to `<` names both differing operand types, via
+        // the same operand-pair-mismatch diagnostic as X1.
         let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
         let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same integer type"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`u8`"), "unexpected message: {err}");
         assert!(err.contains("`i8`"), "unexpected message: {err}");
     }

@@ -95,13 +95,24 @@ fn emit_canonicalize(
 
 /// Lower an integer conversion `dst = convert(src)` (R6). Widening extends by
 /// the *source* signedness (`exts*` signed, `extu*` unsigned) from the source
-/// width. Narrowing keeps the low `dst` bits: for a sub-word target that routes
-/// through the shared canonicalization point (R15), otherwise a `w`-width `copy`
-/// truncates a `64 -> 32` step. Same-width is a relabel: a plain `copy` when the
-/// target fills its register, but a sub-word signedness flip (`u8 >i8`, `i8 >u8`)
-/// still re-canonicalizes to the new convention so a later widen/compare reads
-/// the right high bits (Q5).
-fn emit_conv(out: &mut String, dst: Value, src: Value, value_types: &[IrType]) -> std::fmt::Result {
+/// width; if the *target* is sub-word, that extend is re-canonicalized to the
+/// target's own convention (R15), because the source-signed extend is only
+/// accidentally canonical for the target: a signed source widened to an
+/// unsigned sub-word target (e.g. `i8 >u16`) sign-extends into bits the target
+/// requires to be zero, which a later in-register unsigned compare would read
+/// as dirty. Narrowing keeps the low `dst` bits: for a sub-word target that
+/// routes through the shared canonicalization point (R15), otherwise a
+/// `w`-width `copy` truncates a `64 -> 32` step. Same-width is a relabel: a
+/// plain `copy` when the target fills its register, but a sub-word signedness
+/// flip (`u8 >i8`, `i8 >u8`) still re-canonicalizes to the new convention so a
+/// later widen/compare reads the right high bits (Q5).
+fn emit_conv(
+    out: &mut String,
+    dst: Value,
+    src: Value,
+    value_types: &[IrType],
+    ext_id: &mut u32,
+) -> std::fmt::Result {
     let db = match ty_of(value_types, dst) {
         IrType::Int { bits, .. } => bits,
         other => unreachable!("conversion target is always an integer, got {other:?}"),
@@ -122,7 +133,15 @@ fn emit_conv(out: &mut String, dst: Value, src: Value, value_types: &[IrType]) -
             (32, false) => "extuw",
             _ => unreachable!("widening source is 8/16/32 bits, got {sb}"),
         };
-        writeln!(out, "\t{} ={dw} {ext} {}", val(dst), val(src))
+        match sub_word(ty_of(value_types, dst)) {
+            Some((bits, signed)) => {
+                let tmp = format!("%widen{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{tmp} ={dw} {ext} {}", val(src))?;
+                emit_canonicalize(out, &val(dst), &tmp, dw, bits, signed)
+            }
+            None => writeln!(out, "\t{} ={dw} {ext} {}", val(dst), val(src)),
+        }
     } else {
         // Narrow or same-width: the value already sits in `src`'s low `db` bits.
         // Canonicalize a sub-word target; otherwise a `copy` fills (and, for a
@@ -255,7 +274,7 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr))
             }
         }
-        Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types),
+        Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types, ext_id),
         Instr::Phi(r, arms) => {
             let a: Vec<String> = arms
                 .iter()
@@ -379,8 +398,8 @@ mod tests {
     }
 
     /// Emit a single-block function over hand-built value types and instrs,
-    /// returning `v2` (the result of a binary/compare op). Lets Phase 3 exercise
-    /// sub-word/unsigned codegen with no source path to produce those types yet.
+    /// returning `v2` (the result of a binary/compare op). Hand-built types
+    /// isolate the bare sub-word/unsigned codegen path per operand pairing.
     fn emit_binary(operand: IrType, result: IrType, instr: Instr) -> String {
         let func = IrFunc {
             name: "t".to_string(),
@@ -453,8 +472,8 @@ mod tests {
     }
 
     /// Emit a single-block function `src (v0) -> Conv -> v1`, returning the IL.
-    /// No source path produces most of these conversions yet, so drive the
-    /// backend from hand-built types directly.
+    /// Hand-built types isolate the bare conversion codegen path per cell,
+    /// rather than needing a matching Sooth program for every width/sign pair.
     fn emit_conv_il(src_ty: IrType, dst_ty: IrType) -> String {
         let func = IrFunc {
             name: "t".to_string(),
@@ -492,6 +511,22 @@ mod tests {
         // u8 -> u32 zero-extends by the (unsigned) source signedness.
         let il = emit_conv_il(int(8, false), int(32, false));
         assert!(il.contains("=w extub"), "expected a zero-extend: {il}");
+    }
+
+    #[test]
+    fn emit_conv_signed_widen_to_unsigned_subword_canonicalizes() {
+        // i8 -> u16: extsb sign-extends into bits the target (u16) requires to
+        // be zero, so the widen must be re-canonicalized to an unsigned mask
+        // rather than trusted as-is (this is the dirty-high-bits cell).
+        let il = emit_conv_il(int(8, true), int(16, false));
+        assert!(
+            il.contains("extsb"),
+            "expected the source-signed extend: {il}"
+        );
+        assert!(
+            il.contains("and") && il.contains("65535"),
+            "expected a u16 mask after the extend: {il}"
+        );
     }
 
     #[test]

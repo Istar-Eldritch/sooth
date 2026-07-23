@@ -167,11 +167,15 @@ fn calculator_session_dogfood() {
 /// slot stays 8 bytes wide and is canonicalized/relabeled on use).
 #[test]
 fn subword_carried_value_survives_line_boundary() {
-    let out = run_session(&["100 >u8", "50 >u8 +", ">i64 ."]);
+    // Wraps (200 + 100 = 300, mod 256 = 44): an in-range case would pass even
+    // if the carried slot were never canonicalized on reload, so this pins the
+    // actual point of R16/Q2, that the carried `u8` is relabeled/canonicalized
+    // across the line boundary, not just carried as an opaque 8-byte value.
+    let out = run_session(&["200 >u8", "100 >u8 +", ">i64 ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["stack: 100", "stack: 150", "150", "stack: (empty)"]
+        vec!["stack: 200", "stack: 44", "44", "stack: (empty)"]
     );
 }
 
