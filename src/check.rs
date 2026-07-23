@@ -259,7 +259,7 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
     }
 }
 
-/// An unknown type name in a conversion word (X5), e.g. `>i128`.
+/// An unknown type name in a conversion word (X6), e.g. `>i128`.
 fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
     match ctx {
         Ctx::Word { name: wname, .. } => format!(
