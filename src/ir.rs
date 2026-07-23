@@ -241,9 +241,10 @@ pub fn lower_line(
 
     b.lower_terms(terms);
 
-    // Epilogue: store the resulting M slots back to the buffer. The buffer's
-    // 8-byte slots stay `l`-width regardless of a slot's logical type; a
-    // `Bool`-typed value is widened to `l` at the QBE `storel` (R4).
+    // Epilogue: store the resulting M slots back to the buffer. Each 8-byte
+    // slot is written at the value's own width (R20): a float stores via
+    // `stores`/`stored`, an integer or `Bool` via `storel` (a `Bool` widening
+    // to `l`, its stored 0/1 valid `l`-content) (R4).
     let out = mem::take(&mut b.stack);
     let m = out.len();
     for (j, v) in out.iter().enumerate() {
