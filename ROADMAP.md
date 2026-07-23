@@ -72,7 +72,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slices 1-2 + floats axis done)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (Slices 1-2 + floats & bitwise axes done)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -81,7 +81,10 @@ conversions) is done**: the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`)
 conversion words, homogeneous arithmetic/comparison, and width/signedness-correct codegen
 with single-point sub-word canonicalization. The **floats axis is done** too: `f32`/`f64`
 with IEEE arithmetic (including float `/`), ordered NaN-correct comparison, float literals,
-`f.` printing, and numeric-generalised int<->float conversions.
+`f.` printing, and numeric-generalised int<->float conversions. The **bitwise axis is done**:
+`and`/`or`/`xor`/`not` plus `shl`/`shr` with a single type-directed right shift (arithmetic
+`sar` for signed, logical `shr` for unsigned), i64 shift count masked mod the operand's bit
+width.
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -105,10 +108,9 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    built-in type property (so Phase 3 has it to build on), plus explicit optional and
    non-null pointer types.
 
-Numeric axes carved out of Slice 2: **floats have landed** (see below), and **bitwise
-operators** (`and`/`or`/`xor`/`shl`/`shr`, with type-directed right shift) are the remaining
-carved-out axis. The `*/` widening primitive is still deferred. **`i128`/`u128` are not
-planned:** a first-class 128-bit type is completeness-think for a craft language, and the one
+Numeric axes carved out of Slice 2 have all landed: **floats** and **bitwise operators**
+(`and`/`or`/`xor`/`not`/`shl`/`shr`, type-directed right shift), both merged to `main`. The
+`*/` widening primitive is still deferred. **`i128`/`u128` are not planned:** a first-class 128-bit type is completeness-think for a craft language, and the one
 real need behind it (a 64x64->128 widening multiply, e.g. for hashing or `*/`) is better
 served by a narrow widening-multiply primitive if a concrete consumer ever appears, not by a
 type.
