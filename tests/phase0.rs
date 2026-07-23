@@ -1002,3 +1002,14 @@ fn struct_zero_field_unit_end_to_end_native() {
 : main ( -- )\n  Unit Unit>\n  42 . ;\n";
     assert_eq!(run_struct_golden("unit", src), "42\n");
 }
+
+#[test]
+fn vectors_dogfood_compiles_and_runs() {
+    // S8: `examples/vectors.sth` — a flat `Vec2` and a nested `Segment`, a
+    // reusable componentwise `sub`, `len2`, `span` (= `Segment> swap sub`),
+    // and a functional-setter `shift-x` demo. Builds segment (0,0)-(3,4),
+    // prints `span len2 .` (25) and `5 6 Vec2 1 shift-x Vec2>x .` (6).
+    let (stdout, code) = run_and_capture_stdout("examples/vectors.sth");
+    assert_eq!(stdout, "25\n6\n");
+    assert_eq!(code, 0);
+}

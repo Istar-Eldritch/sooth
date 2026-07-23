@@ -256,6 +256,40 @@ fn struct_declaration_errors_report_and_session_survives() {
     assert_eq!(lines[4], "stack: (empty)");
 }
 
+/// S8: the `examples/vectors.sth` dogfood, defined and run across REPL lines
+/// (word definitions carrying struct types across the line boundary, then
+/// two calls exercising the nested `Segment>`/`sub`/`len2` span and the
+/// `shift-x` functional setter).
+#[test]
+fn vectors_dogfood_runs_in_repl() {
+    let out = run_session(&[
+        "type: Vec2 x i64 y i64 ;",
+        "type: Segment from Vec2 to Vec2 ;",
+        ": sub ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x - a Vec2>y b Vec2>y - Vec2 ;",
+        ": len2 ( Vec2 -- i64 ) | v | v Vec2>x v Vec2>x * v Vec2>y v Vec2>y * + ;",
+        ": span ( Segment -- Vec2 ) Segment> swap sub ;",
+        ": shift-x ( Vec2 i64 -- Vec2 ) | v dx | v v Vec2>x dx + Vec2<x ;",
+        "0 0 Vec2 3 4 Vec2 Segment span len2 .",
+        "5 6 Vec2 1 shift-x Vec2>x .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Vec2",
+            "defined type Segment",
+            "defined sub",
+            "defined len2",
+            "defined span",
+            "defined shift-x",
+            "25",
+            "stack: (empty)",
+            "6",
+            "stack: (empty)",
+        ]
+    );
+}
+
 /// Guards the flush-before-call discipline the spec flags as a determinism
 /// risk: the host's stdout buffer and the loaded code's C stdio buffer must
 /// both be flushed so `.` output lands before the next `stack:` line, in

@@ -1,0 +1,31 @@
+\ Dogfood: Slice 3 structs. A flat `Vec2` and a nested `Segment`, exercising
+\ the generated constructor/getter/setter/destructure words, componentwise
+\ arithmetic over fields, nested juxtaposition access, and a functional
+\ setter, all through user-defined words.
+
+type: Vec2 x i64 y i64 ;
+type: Segment from Vec2 to Vec2 ;
+
+: sub ( Vec2 Vec2 -- Vec2 )
+  | a b |
+  a Vec2>x b Vec2>x -
+  a Vec2>y b Vec2>y -
+  Vec2 ;
+
+: len2 ( Vec2 -- i64 )
+  | v |
+  v Vec2>x v Vec2>x *
+  v Vec2>y v Vec2>y *
+  + ;
+
+: span ( Segment -- Vec2 )
+  Segment> swap sub ;
+
+: shift-x ( Vec2 i64 -- Vec2 )
+  | v dx |
+  v v Vec2>x dx + Vec2<x ;
+
+: main ( -- )
+  0 0 Vec2 3 4 Vec2 Segment
+  span len2 .            \ prints 25
+  5 6 Vec2 1 shift-x Vec2>x . ;    \ prints 6

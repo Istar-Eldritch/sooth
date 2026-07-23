@@ -47,11 +47,32 @@ fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: &[StructLa
 }
 
 /// The Sooth `main` word is emitted as `sooth_main`; the C shim owns `main`.
-fn qbe_name(name: &str) -> &str {
+/// Sooth word names may contain characters (`-`, `<`, `>`, etc., identifier-
+/// continuation characters in the lexer) that are not valid in a QBE global
+/// symbol, so any such character is replaced with `_`; applied identically at
+/// both the function definition and every call site, so it never causes a
+/// collision within a single compilation unit's word names.
+fn qbe_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name == "main" {
-        "sooth_main"
+        return std::borrow::Cow::Borrowed("sooth_main");
+    }
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        std::borrow::Cow::Borrowed(name)
     } else {
-        name
+        std::borrow::Cow::Owned(
+            name.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
@@ -753,6 +774,20 @@ mod tests {
             ..Default::default()
         })
         .unwrap()
+    }
+
+    #[test]
+    fn emit_word_name_with_hyphen_sanitizes_qbe_symbol() {
+        // A word name containing `-` (a legal identifier-continuation
+        // character in the lexer, e.g. the S8 dogfood's `shift-x`) is not a
+        // valid QBE global symbol; it is sanitized identically at the
+        // function definition and its call site.
+        let il = emit_src(
+            ": shift-x ( i64 -- i64 ) | n | n 1 + ;
+            : main ( -- ) 5 shift-x . ;",
+        );
+        assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
+        assert!(il.contains("$shift_x"), "expected sanitized symbol: {il}");
     }
 
     #[test]
