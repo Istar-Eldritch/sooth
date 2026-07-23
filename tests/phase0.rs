@@ -927,3 +927,78 @@ fn f_dot_is_now_an_unknown_word() {
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("f."), "unexpected message: {err}");
 }
+
+// Slice 3 (structs): running-binary goldens for the aggregate codegen (S2-S7,
+// NF5). Each builds a struct program to a native binary and checks stdout.
+
+fn run_struct_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-struct-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "struct golden `{tag}` should exit 0");
+    stdout
+}
+
+#[test]
+fn struct_flat_construct_get_destructure_native() {
+    // S2: construct a flat struct, read each field, and destructure it.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: main ( -- )\n  3 4 Vec2 dup Vec2>x . Vec2>y .\n  5 6 Vec2 Vec2> . . ;\n";
+    // destructure pushes x then y (first deepest); `. .` prints top-first: 6 then 5.
+    assert_eq!(run_struct_golden("flat", src), "3\n4\n6\n5\n");
+}
+
+#[test]
+fn struct_functional_setter_leaves_duped_original_intact_native() {
+    // S4: `dup` copies the aggregate; a functional setter on the copy returns a
+    // new value while the original is unchanged.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: main ( -- )\n  1 2 Vec2 dup 99 Vec2<x Vec2>x . Vec2>x . ;\n";
+    assert_eq!(run_struct_golden("setter-intact", src), "99\n1\n");
+}
+
+#[test]
+fn struct_mixed_i64_f64_field_readback_native() {
+    // S3: offset-correct read-back for mixed-width fields (an i64 and an f64).
+    let src = "type: Mix a i64 b f64 ;\n\
+: main ( -- )\n  7 2.5 Mix dup Mix>a . Mix>b . ;\n";
+    assert_eq!(run_struct_golden("mixed", src), "7\n2.5\n");
+}
+
+#[test]
+fn struct_adjacent_subword_fields_do_not_clobber_native() {
+    // RISK 3: two adjacent `i8` fields then an `i64` must each read back their
+    // own value; a width-exact field store never clobbers its neighbour.
+    let src = "type: P p i8 q i8 r i64 ;\n\
+: main ( -- )\n  1 >i8 2 >i8 300 P dup P>p >i64 . dup P>q >i64 . P>r . ;\n";
+    assert_eq!(run_struct_golden("packed", src), "1\n2\n300\n");
+}
+
+#[test]
+fn struct_nested_juxtaposition_access_native() {
+    // S3: a nested struct field accessed by juxtaposition (`Segment>to Vec2>x`),
+    // read back per-field.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+type: Segment from Vec2 to Vec2 ;\n\
+: main ( -- )\n  1 2 Vec2 3 4 Vec2 Segment\n  dup Segment>from Vec2>x .\n  Segment>to Vec2>y . ;\n";
+    assert_eq!(run_struct_golden("nested", src), "1\n4\n");
+}
+
+#[test]
+fn struct_survives_word_call_boundary_native() {
+    // S5: a struct argument and a struct return cross a word-call boundary
+    // (by-value QBE C-ABI), then the returned struct's field is read back.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: shift ( Vec2 i64 -- Vec2 ) | v d |\n  v Vec2>x d + v Vec2>y Vec2 ;\n\
+: main ( -- )\n  10 20 Vec2 5 shift dup Vec2>x . Vec2>y . ;\n";
+    assert_eq!(run_struct_golden("call-boundary", src), "15\n20\n");
+}
+
+#[test]
+fn struct_zero_field_unit_end_to_end_native() {
+    // S7/M3: a zero-field struct constructs and destructures with no crash.
+    let src = "type: Unit ;\n\
+: main ( -- )\n  Unit Unit>\n  42 . ;\n";
+    assert_eq!(run_struct_golden("unit", src), "42\n");
+}

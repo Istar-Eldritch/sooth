@@ -55,6 +55,12 @@ pub struct StructDecl {
 pub struct StructId(pub(crate) usize);
 
 impl StructId {
+    /// Mint a `StructId` for a registry position; crate-internal so an id is
+    /// always tied to a real `Module::structs` entry.
+    pub(crate) fn from_index(idx: usize) -> StructId {
+        StructId(idx)
+    }
+
     pub fn index(&self) -> usize {
         self.0
     }

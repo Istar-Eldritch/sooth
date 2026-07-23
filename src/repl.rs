@@ -235,11 +235,14 @@ impl Session {
         let ir_lower_env = ir_arity_env(&env);
         let mut func = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            ir::lower_word(&word, &ir_lower_env, &resolve)
+            ir::lower_word(&word, &ir_lower_env, &resolve, &ir::Structs::default())
         };
         func.name = symbol.clone();
 
-        let ssa = backend::qbe::emit(&IrModule { funcs: vec![func] })?;
+        let ssa = backend::qbe::emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
         driver::compile_so(&ssa, &so_path)?;
@@ -278,6 +281,7 @@ impl Session {
                 &self.types,
                 &ir_lower_env,
                 &resolve,
+                &ir::Structs::default(),
             )
         };
         // `m` (the wrapper's emitted store count) and `net_depth` (the checker's
@@ -290,7 +294,10 @@ impl Session {
             "lowering emitted a different depth than the checker inferred"
         );
 
-        let ssa = backend::qbe::emit(&IrModule { funcs: vec![func] })?;
+        let ssa = backend::qbe::emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
         driver::compile_so(&ssa, &so_path)?;

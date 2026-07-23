@@ -10,11 +10,15 @@
 use std::collections::HashMap;
 use std::mem;
 
-use crate::ast::{Module, Term, TermKind, Type, WordDef};
+use crate::ast::{Module, StructId, Term, TermKind, Type, WordDef};
 
 #[derive(Debug, Default)]
 pub struct IrModule {
     pub funcs: Vec<IrFunc>,
+    /// Per-struct memory layout (R11), indexed by `StructId`. The backend emits
+    /// a `type :S = { … }` per entry and reads field offsets/widths from it;
+    /// empty for a struct-free module (or a single-func REPL emit).
+    pub structs: Vec<StructLayout>,
 }
 
 #[derive(Debug)]
@@ -45,6 +49,13 @@ pub enum IrType {
         bits: u8,
     },
     Bool,
+    /// A user-declared struct (R11), keyed by a small `Copy` `StructId` into the
+    /// module's `StructLayout` registry; the layout (offsets/size/align) lives
+    /// there, not inlined, so `IrType` stays `Copy`. At runtime a struct value
+    /// is a pointer to its aggregate storage; the backend spells it `:S` in
+    /// ABI positions (params/returns/call args) and `l` (a pointer) in a
+    /// register.
+    Struct(StructId),
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -68,13 +79,137 @@ pub fn ir_type_of(ty: Type) -> IrType {
         },
         Type::Float(ft) => IrType::Float { bits: ft.bits() },
         Type::Bool => IrType::Bool,
-        // `IrType::Struct` + the layout registry land in Slice 3 phase 3 (R11);
-        // no code path constructs a `Type::Struct` yet (the checker/IR aren't
-        // wired to the struct registry until later phases of this slice).
-        Type::Struct(..) => {
-            unimplemented!("struct IrType lowering lands in Slice 3 phase 3 (R11)")
-        }
+        // The layout lives in the module's `StructLayout` registry (R11); the
+        // `IrType` carries only the `StructId` so it stays `Copy`.
+        Type::Struct(id, _) => IrType::Struct(id),
     }
+}
+
+/// The computed memory layout of one struct (R11), word-width-neutral: every
+/// offset/size/align is derived from field widths, never a hardcoded machine
+/// word. `name` is the leaked `&'static str` the backend emits as `:name`.
+#[derive(Debug, Clone)]
+pub struct StructLayout {
+    pub name: &'static str,
+    pub size: u32,
+    pub align: u32,
+    pub fields: Vec<FieldLayout>,
+}
+
+/// One field's placement within its owning struct: its byte offset and its own
+/// `IrType`/size/align (a nested struct contributes its whole size/align).
+#[derive(Debug, Clone, Copy)]
+pub struct FieldLayout {
+    pub offset: u32,
+    pub ty: IrType,
+    pub size: u32,
+    pub align: u32,
+}
+
+/// How a generated struct-word name lowers (R13): the four kinds keyed off the
+/// struct registry, distinguishing a struct-op call from a normal user-word
+/// call in `lower_call`.
+#[derive(Debug, Clone, Copy)]
+pub enum StructWord {
+    Construct(StructId),
+    Get(StructId, usize),
+    Set(StructId, usize),
+    Destructure(StructId),
+}
+
+/// The IR's view of a program's structs: the per-`StructId` layout registry and
+/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi` → `StructWord`). Built
+/// once from the module and threaded into lowering; empty for a struct-free
+/// program (the scalar paths never consult it).
+#[derive(Debug, Default)]
+pub struct Structs {
+    pub layouts: Vec<StructLayout>,
+    pub words: HashMap<String, StructWord>,
+}
+
+fn round_up(offset: u32, align: u32) -> u32 {
+    offset.div_ceil(align) * align
+}
+
+/// The size/align of a scalar `IrType` (R11): `i8`/`u8`/`bool` = 1, `i16`/`u16`
+/// = 2, `i32`/`u32`/`f32` = 4, `i64`/`u64`/`f64` = 8. A `Ptr` is 8 (unused as a
+/// field this slice). Never called on a `Struct` (nested fields resolve through
+/// the layout registry).
+fn scalar_size_align(ty: IrType) -> (u32, u32) {
+    let bytes = match ty {
+        IrType::Bool => 1,
+        IrType::Int { bits, .. } => (bits / 8) as u32,
+        IrType::Float { bits } => (bits / 8) as u32,
+        IrType::Ptr => 8,
+        IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
+    };
+    (bytes, bytes)
+}
+
+impl Structs {
+    /// Build the layout + generated-word registry from a module's struct
+    /// declarations. Recursion is already rejected by the checker (X3), so the
+    /// memoized layout recursion terminates.
+    pub fn from_module(module: &Module) -> Structs {
+        let mut memo: Vec<Option<StructLayout>> = vec![None; module.structs.len()];
+        for i in 0..module.structs.len() {
+            compute_layout(module, i, &mut memo);
+        }
+        let layouts: Vec<StructLayout> = memo.into_iter().map(|l| l.expect("layout")).collect();
+
+        let mut words = HashMap::new();
+        for (idx, decl) in module.structs.iter().enumerate() {
+            let id = StructId::from_index(idx);
+            words.insert(decl.name.clone(), StructWord::Construct(id));
+            words.insert(format!("{}>", decl.name), StructWord::Destructure(id));
+            for (fi, (fname, _)) in decl.fields.iter().enumerate() {
+                words.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
+                words.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
+            }
+        }
+        Structs { layouts, words }
+    }
+}
+
+/// Fill `memo[idx]` with the natural-alignment layout of struct `idx`, recursing
+/// into nested-struct fields first (D9). Each field is placed at the next offset
+/// aligned to its own alignment; struct align = max field align (min 1); struct
+/// size = final offset rounded up to struct align (R11).
+fn compute_layout(module: &Module, idx: usize, memo: &mut Vec<Option<StructLayout>>) {
+    if memo[idx].is_some() {
+        return;
+    }
+    let decl = &module.structs[idx];
+    let mut offset = 0u32;
+    let mut align = 1u32;
+    let mut fields = Vec::with_capacity(decl.fields.len());
+    for (_, field_ty) in &decl.fields {
+        let ir_ty = ir_type_of(*field_ty);
+        let (size, falign) = match ir_ty {
+            IrType::Struct(id) => {
+                compute_layout(module, id.index(), memo);
+                let inner = memo[id.index()].as_ref().expect("inner layout computed");
+                (inner.size, inner.align)
+            }
+            _ => scalar_size_align(ir_ty),
+        };
+        let off = round_up(offset, falign);
+        fields.push(FieldLayout {
+            offset: off,
+            ty: ir_ty,
+            size,
+            align: falign,
+        });
+        offset = off + size;
+        align = align.max(falign);
+    }
+    let size = round_up(offset, align);
+    memo[idx] = Some(StructLayout {
+        name: decl.name_static,
+        size,
+        align,
+        fields,
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,6 +247,23 @@ pub enum Instr {
     Load(Value, Value),
     /// `*ptr = val` (Int).
     Store(Value, Value),
+    /// `dst: Struct = alloc(size, align)`: a frame-local aggregate slot (R13).
+    /// The two operands are the whole-struct byte size and alignment from the
+    /// layout registry.
+    Alloc(Value, u32, u32),
+    /// `blit src -> dst, size`: copy `size` bytes between two aggregate
+    /// pointers (R14/R13) — the byte-copy `dup`, the setter's copy-all, and a
+    /// nested-struct field store.
+    Blit(Value, Value, u32),
+    /// `dst = *ptr` at the field's exact width (R15), the load op picked from
+    /// `dst`'s scalar `IrType` (`loadsb`/`loadub`/`loadsh`/…). Distinct from the
+    /// 8-byte-slot `Load` so a field read never over-reads its neighbour.
+    FieldLoad(Value, Value),
+    /// `*ptr = val` at `val`'s exact width (R15), the store op picked from
+    /// `val`'s scalar `IrType` (`storeb`/`storeh`/`storew`/`storel`/…).
+    /// Distinct from the 8-byte-slot `Store` so a field write never clobbers
+    /// its neighbour.
+    FieldStore(Value, Value),
     /// `dst = convert(src)` between two integer types (`>iN`/`>uN`). The two
     /// `IrType`s carry the widths and signedness the backend needs to pick
     /// sign/zero-extend (widen), truncate-and-canonicalize (narrow), or relabel
@@ -169,6 +321,7 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
+    let structs = Structs::from_module(module);
     let env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -185,10 +338,13 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let funcs = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve))
+        .map(|w| lower_word(w, &env, &resolve, &structs))
         .collect();
 
-    Ok(IrModule { funcs })
+    Ok(IrModule {
+        funcs,
+        structs: structs.layouts,
+    })
 }
 
 /// Lower a bare REPL line to a uniform-signature wrapper `sooth_line_{seq}`
@@ -216,9 +372,10 @@ pub fn lower_line(
     entry_types: &[Type],
     env: &HashMap<String, Arity>,
     resolve: Resolver,
+    structs: &Structs,
 ) -> (IrFunc, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
-    let mut b = FuncBuilder::new(env, resolve);
+    let mut b = FuncBuilder::new(env, resolve, structs);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -297,6 +454,7 @@ pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
+    structs: &Structs,
 ) -> IrFunc {
     let params: Vec<IrType> = word
         .effect
@@ -306,7 +464,7 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(env, resolve);
+    let mut b = FuncBuilder::new(env, resolve, structs);
 
     // Params occupy the first N value ids; leftmost input is deepest.
     let mut stack: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
@@ -336,6 +494,7 @@ pub(crate) fn lower_word(
 struct FuncBuilder<'a> {
     env: &'a HashMap<String, Arity>,
     resolve: Resolver<'a>,
+    structs: &'a Structs,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -347,10 +506,11 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
-    fn new(env: &'a HashMap<String, Arity>, resolve: Resolver<'a>) -> Self {
+    fn new(env: &'a HashMap<String, Arity>, resolve: Resolver<'a>, structs: &'a Structs) -> Self {
         FuncBuilder {
             env,
             resolve,
+            structs,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -437,7 +597,20 @@ impl<'a> FuncBuilder<'a> {
         match name {
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
-                self.stack.push(top);
+                // A scalar is `Copy`: reuse the value id (dup emits nothing). A
+                // struct is copied by value (R14): alloc a fresh slot and blit
+                // the bytes, so a functional setter on the copy leaves the
+                // original intact.
+                if let IrType::Struct(id) = self.value_type(top) {
+                    let copy = self.alloc_struct(id);
+                    let size = self.structs.layouts[id.index()].size;
+                    if size > 0 {
+                        self.push_instr(Instr::Blit(top, copy, size));
+                    }
+                    self.stack.push(copy);
+                } else {
+                    self.stack.push(top);
+                }
             }
             "drop" => {
                 self.stack.pop().expect("drop: non-empty stack");
@@ -535,6 +708,12 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.push(dst);
                     return;
                 }
+                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`) lowers to
+                // alloc/blit/field-load-store inline (R13), not a normal call.
+                if let Some(&sw) = self.structs.words.get(name) {
+                    self.lower_struct_word(sw);
+                    return;
+                }
                 let (in_arity, out_arity, ret_ty) =
                     *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
@@ -548,6 +727,107 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Call(ret, sym, args));
                 if let Some(v) = ret {
                     self.stack.push(v);
+                }
+            }
+        }
+    }
+
+    /// Alloc a fresh frame slot for struct `id`'s aggregate and yield it as a
+    /// `Struct`-typed value (a pointer to the storage) (R13).
+    fn alloc_struct(&mut self, id: StructId) -> Value {
+        let (size, align) = {
+            let l = &self.structs.layouts[id.index()];
+            (l.size, l.align)
+        };
+        let v = self.fresh_value(IrType::Struct(id));
+        self.push_instr(Instr::Alloc(v, size, align));
+        v
+    }
+
+    /// A `Ptr`-typed value for `base + offset` (a scalar field's address).
+    fn field_ptr(&mut self, base: Value, offset: u32) -> Value {
+        let p = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::PtrOffset(p, base, offset as i64));
+        p
+    }
+
+    /// A nested-struct field's value: its interior address, typed as the inner
+    /// struct (R13/R15). No copy — the owning struct is consumed by the
+    /// getter/destructure, so aliasing its storage is sound; a later `dup` or
+    /// word-return copies the bytes.
+    fn field_struct_value(&mut self, base: Value, offset: u32, inner: StructId) -> Value {
+        let v = self.fresh_value(IrType::Struct(inner));
+        self.push_instr(Instr::PtrOffset(v, base, offset as i64));
+        v
+    }
+
+    /// Store `val` into field `field` at `fptr`: a width-exact scalar store, or
+    /// an aggregate blit for a nested-struct field (R15).
+    fn store_field(&mut self, fptr: Value, val: Value, field: FieldLayout) {
+        match field.ty {
+            IrType::Struct(_) => {
+                if field.size > 0 {
+                    self.push_instr(Instr::Blit(val, fptr, field.size));
+                }
+            }
+            _ => self.push_instr(Instr::FieldStore(fptr, val)),
+        }
+    }
+
+    /// Load field `field` at `fptr` onto the stack: a width-exact scalar load,
+    /// or the interior pointer as a nested-struct value (R13/R15).
+    fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
+        let v = match field.ty {
+            IrType::Struct(inner) => self.field_struct_value(base, field.offset, inner),
+            _ => {
+                let fptr = self.field_ptr(base, field.offset);
+                let v = self.fresh_value(field.ty);
+                self.push_instr(Instr::FieldLoad(v, fptr));
+                v
+            }
+        };
+        self.stack.push(v);
+    }
+
+    /// Lower a generated struct word inline (R13, M1: first field deepest).
+    fn lower_struct_word(&mut self, sw: StructWord) {
+        match sw {
+            StructWord::Construct(id) => {
+                let n = self.structs.layouts[id.index()].fields.len();
+                let split = self.stack.len() - n;
+                let args = self.stack.split_off(split);
+                let dst = self.alloc_struct(id);
+                for (fi, arg) in args.into_iter().enumerate() {
+                    let field = self.structs.layouts[id.index()].fields[fi];
+                    let fptr = self.field_ptr(dst, field.offset);
+                    self.store_field(fptr, arg, field);
+                }
+                self.stack.push(dst);
+            }
+            StructWord::Get(id, fi) => {
+                let s = self.stack.pop().expect("getter: struct operand");
+                let field = self.structs.layouts[id.index()].fields[fi];
+                self.load_field_onto_stack(s, field);
+            }
+            StructWord::Set(id, fi) => {
+                let newval = self.stack.pop().expect("setter: new field value");
+                let s = self.stack.pop().expect("setter: struct operand");
+                let dst = self.alloc_struct(id);
+                let size = self.structs.layouts[id.index()].size;
+                if size > 0 {
+                    self.push_instr(Instr::Blit(s, dst, size));
+                }
+                let field = self.structs.layouts[id.index()].fields[fi];
+                let fptr = self.field_ptr(dst, field.offset);
+                self.store_field(fptr, newval, field);
+                self.stack.push(dst);
+            }
+            StructWord::Destructure(id) => {
+                let s = self.stack.pop().expect("destructure: struct operand");
+                let n = self.structs.layouts[id.index()].fields.len();
+                for fi in 0..n {
+                    let field = self.structs.layouts[id.index()].fields[fi];
+                    self.load_field_onto_stack(s, field);
                 }
             }
         }
@@ -605,6 +885,17 @@ mod tests {
         let module = parse(&tokens).unwrap();
         check(&module).unwrap();
         lower(&module).unwrap()
+    }
+
+    fn structs_of(src: &str) -> Structs {
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        check(&module).unwrap();
+        Structs::from_module(&module)
+    }
+
+    fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
+        s.layouts.iter().find(|l| l.name == name).expect("layout")
     }
 
     fn instrs(func: &IrFunc) -> Vec<&Instr> {
@@ -711,6 +1002,7 @@ mod tests {
             &[Type::I64, Type::I64],
             &env,
             &resolve,
+            &Structs::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -722,7 +1014,15 @@ mod tests {
         // `2 3 +` from D=0 nets +1, so new_top = top + 8.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m) = lower_line(0, &line_terms("2 3 +"), 0, &[], &env, &resolve);
+        let (func, m) = lower_line(
+            0,
+            &line_terms("2 3 +"),
+            0,
+            &[],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
         let ret = match last.term {
@@ -758,7 +1058,15 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let u8_ty = Type::from_name("u8").unwrap();
-        let (func, _m) = lower_line(0, &line_terms("1 >u8 +"), 1, &[u8_ty], &env, &resolve);
+        let (func, _m) = lower_line(
+            0,
+            &line_terms("1 >u8 +"),
+            1,
+            &[u8_ty],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
         let conv_dst = instrs(&func)
             .iter()
             .find_map(|i| match i {
@@ -780,7 +1088,15 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("sq".to_string(), (1usize, 1usize, None));
         let resolve = |name: &str| format!("{name}__gen2");
-        let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &[], &env, &resolve);
+        let (func, _m) = lower_line(
+            0,
+            &line_terms("5 sq"),
+            0,
+            &[],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
         let calls: Vec<&str> = instrs(&func)
             .iter()
             .filter_map(|i| match i {
@@ -851,7 +1167,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
+        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
         let loaded = func
             .blocks
             .iter()
@@ -1095,12 +1411,115 @@ mod tests {
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let mut b = FuncBuilder::new(&env, &resolve);
+        let structs = Structs::default();
+        let mut b = FuncBuilder::new(&env, &resolve, &structs);
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
         b.lower_call("+");
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
+    }
+
+    #[test]
+    fn struct_layout_flat_i64_fields_offsets_and_size() {
+        let s = structs_of("type: Vec2 x i64 y i64 ;");
+        let v = layout(&s, "Vec2");
+        assert_eq!(v.size, 16);
+        assert_eq!(v.align, 8);
+        assert_eq!(v.fields[0].offset, 0);
+        assert_eq!(v.fields[1].offset, 8);
+    }
+
+    #[test]
+    fn struct_layout_packed_subword_fields_natural_alignment() {
+        // Two `i8`s pack at 0 and 1; the `i64` aligns to 8; whole size 16.
+        let s = structs_of("type: Packed p i8 q i8 r i64 ;");
+        let p = layout(&s, "Packed");
+        assert_eq!(
+            (p.fields[0].offset, p.fields[1].offset, p.fields[2].offset),
+            (0, 1, 8)
+        );
+        assert_eq!((p.size, p.align), (16, 8));
+    }
+
+    #[test]
+    fn struct_layout_nested_uses_inner_size_and_align() {
+        let s = structs_of("type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;");
+        let seg = layout(&s, "Segment");
+        assert_eq!((seg.fields[0].offset, seg.fields[1].offset), (0, 16));
+        assert_eq!((seg.size, seg.align), (32, 8));
+    }
+
+    #[test]
+    fn struct_layout_zero_field_is_size_0_align_1() {
+        let s = structs_of("type: Unit ;");
+        let u = layout(&s, "Unit");
+        assert_eq!((u.size, u.align), (0, 1));
+        assert!(u.fields.is_empty());
+    }
+
+    #[test]
+    fn lower_constructor_allocs_and_stores_each_field() {
+        // The constructor allocs one aggregate slot and width-exact-stores both
+        // fields (R13); no aggregate copy for a flat struct.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : mk ( i64 i64 -- Vec2 ) Vec2 ;");
+        let mk = ir.funcs.iter().find(|f| f.name == "mk").unwrap();
+        assert_eq!(count(mk, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(mk, |i| matches!(i, Instr::FieldStore(..))), 2);
+    }
+
+    #[test]
+    fn lower_getter_is_single_field_load_no_copy() {
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : gx ( Vec2 -- i64 ) Vec2>x ;");
+        let gx = ir.funcs.iter().find(|f| f.name == "gx").unwrap();
+        assert_eq!(count(gx, |i| matches!(i, Instr::FieldLoad(..))), 1);
+        assert_eq!(count(gx, |i| matches!(i, Instr::Blit(..))), 0);
+        assert_eq!(count(gx, |i| matches!(i, Instr::Alloc(..))), 0);
+    }
+
+    #[test]
+    fn lower_setter_allocs_new_blits_all_and_overwrites_one_field() {
+        // Functional update: alloc a fresh aggregate, blit all bytes, then a
+        // single width-exact store of the replaced field (R13).
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : sx ( Vec2 i64 -- Vec2 ) Vec2<x ;");
+        let sx = ir.funcs.iter().find(|f| f.name == "sx").unwrap();
+        assert_eq!(count(sx, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::FieldStore(..))), 1);
+    }
+
+    #[test]
+    fn lower_dup_of_struct_allocs_and_blits() {
+        // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
+        // blit), unlike a scalar `dup` which reuses the value id.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 Vec2 ) dup ;");
+        let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+    }
+
+    #[test]
+    fn lower_destructure_loads_every_field() {
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : ex ( Vec2 -- i64 i64 ) Vec2> ;");
+        let ex = ir.funcs.iter().find(|f| f.name == "ex").unwrap();
+        assert_eq!(count(ex, |i| matches!(i, Instr::FieldLoad(..))), 2);
+    }
+
+    #[test]
+    fn lower_zero_field_constructor_allocs_destructure_emits_nothing() {
+        let ir = lower_src("type: Unit ; : u ( -- ) Unit Unit> ;");
+        let u = ir.funcs.iter().find(|f| f.name == "u").unwrap();
+        assert_eq!(count(u, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(u, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(u, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn ir_type_of_struct_maps_to_struct_irtype() {
+        let tokens = lex("type: Vec2 x i64 y i64 ;").unwrap();
+        let module = parse(&tokens).unwrap();
+        let ty = module.resolve_type_name("Vec2").unwrap();
+        assert!(matches!(ir_type_of(ty), IrType::Struct(_)));
     }
 }
