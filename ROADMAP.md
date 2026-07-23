@@ -251,6 +251,15 @@ nearly for free. AOT-to-native via `wasm2c` when a native artifact is wanted.
 Depends on `Ptr[T]` having been kept abstract since Phase 2.
 **Exit:** a Sooth program runs both as a native QBE binary and as a `.wasm` module.
 
+### Committed future target — RISC-V 32
+
+rv32 is a committed eventual target (embedded). QBE gives arm64/x86_64/riscv64 but has no
+rv32, so reaching it means patching rv32 into QBE or the hand-written backend, a decision
+deferred to **post-bootstrap** (consistent with "reconsider the backend after self-hosting").
+Nothing is built for it now; the only present-tense obligation is that the frontend stays
+word-width-neutral: the IR never assumes a 64-bit machine word, and `usize`/`isize` arrive as
+target-width types with arrays (Slice 5). See DESIGN.md, Codegen and backend.
+
 ## Cross-cutting — Tooling and diagnostics  `[ongoing from Phase 0]`
 
 Not a terminal phase. Good, localised compile errors start at Phase 0, for the

@@ -284,6 +284,14 @@ dependency tax, and product-grade output the language doesn't need. Wanting LLVM
 full-service codegen is a tell that the project has drifted back to product-think,
 where the honest answer was "use Rust."
 
+**RISC-V 32 is a committed eventual target; the backend to reach it is deferred to
+post-bootstrap.** QBE gives arm64/x86_64/riscv64, but has no rv32 target (and assumes a
+64-bit machine word in places), so emitting rv32 will mean either patching an rv32 target
+into QBE or the hand-written backend, a call taken after the language self-hosts, consistent
+with the "reconsidered after self-hosting" stance above. The commitment is recorded now not
+to build anything, but so the frontend stops accruing 64-bit assumptions before then (see
+next).
+
 QBE's costs, accepted: it emits assembly text, so you depend on the system assembler
 
 - linker (a cross-toolchain + sysroot when cross-compiling the hosted layer);
@@ -304,6 +312,17 @@ abstract in the IR (`Ptr[T]` is an opaque handle, not a native `u64`), so the QB
 (native pointers) and WASM (linear-memory offsets) lowerings each concretise it. A
 native-pointer assumption leaking into shared IR is the one thing that makes WASM
 chafe later.
+
+The same rule extends to integer width: **the IR never assumes a 64-bit machine word.**
+Word, pointer, and `usize`/`isize` width are a target parameter, not a constant, exactly as
+`Ptr[T]` is opaque. This is not abstract tidiness: the committed rv32 target (above) has
+32-bit pointers and makes `i64`/`u64` double-word (the same frontend synthesis deferred for
+`i128`/`u128`, one level down), so `usize` is genuinely 32-bit there. `usize`/`isize` are
+target-width types introduced with fixed-size arrays (Phase 2, Slice 5), where indexing is
+their first real consumer; they resolve to 64-bit on current targets but must never be
+*assumed* 64-bit in shared IR. A corollary worth revisiting under a 32-bit target: the
+current "integer literals default to `i64`" stance is 64-bit-centric, since on rv32 the
+natural machine word is 32-bit, not `i64`.
 
 **Dropping LLVM means no in-process JIT, and it turns out to cost nothing.** LLVM's
 ORC would have let the REPL and a compile-time evaluator share one native engine. Two
