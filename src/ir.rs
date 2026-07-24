@@ -718,7 +718,8 @@ pub fn lower_line(
     arrays: &Arrays,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays);
+    // A REPL line has no word name to self-tail-call against.
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -862,9 +863,10 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays);
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, word.name.clone());
 
     // Params occupy the first N value ids; leftmost input is deepest.
+    // (b.cur_word_name is set above for R7's self-tail-call detection.)
     let params_values: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
 
     match &word.body {
@@ -900,6 +902,11 @@ struct FuncBuilder<'a> {
     structs: &'a Structs,
     enums: &'a Enums,
     arrays: &'a Arrays,
+    /// Name of the word currently being lowered, used by the tail-call ->
+    /// back-edge transform (R7, next phase) to recognize a self-call; not yet
+    /// read outside tests.
+    #[allow(dead_code)]
+    cur_word_name: String,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -922,6 +929,7 @@ impl<'a> FuncBuilder<'a> {
         structs: &'a Structs,
         enums: &'a Enums,
         arrays: &'a Arrays,
+        cur_word_name: String,
     ) -> Self {
         FuncBuilder {
             env,
@@ -929,6 +937,7 @@ impl<'a> FuncBuilder<'a> {
             structs,
             enums,
             arrays,
+            cur_word_name,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -1713,6 +1722,27 @@ mod tests {
             .flat_map(|b| b.instrs.iter())
             .filter(|i| pred(i))
             .count()
+    }
+
+    #[test]
+    fn func_builder_new_threads_current_word_name() {
+        // R5: FuncBuilder carries the word being lowered, set from `word.name`
+        // in `lower_word`; the REPL path calls the same `lower_word` (no
+        // REPL-specific plumbing), so this covers both callers.
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let b = FuncBuilder::new(
+            &env,
+            resolve,
+            &structs,
+            &enums,
+            &arrays,
+            "loop-word".to_string(),
+        );
+        assert_eq!(b.cur_word_name, "loop-word");
     }
 
     #[test]
@@ -2502,7 +2532,7 @@ mod tests {
         let structs = Structs::default();
         let enums = Enums::default();
         let arrays = Arrays::default();
-        let mut b = FuncBuilder::new(&env, &resolve, &structs, &enums, &arrays);
+        let mut b = FuncBuilder::new(&env, &resolve, &structs, &enums, &arrays, "w".to_string());
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
