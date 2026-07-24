@@ -1018,6 +1018,31 @@ fn struct_zero_field_unit_end_to_end_native() {
 }
 
 #[test]
+fn enum_crosses_word_call_boundary_with_scalar_underneath_native() {
+    // Slice 4 (criterion 7, native half): an enum value passes through a
+    // word-call boundary by value (QBE aggregate C-ABI) and back, with a
+    // scalar sitting *underneath* it on the caller's stack. A mis-sized
+    // aggregate slot in the ABI classification would clobber that scalar, so
+    // recovering `42` intact proves the by-value enum ABI. A three-`i64`
+    // large-payload variant (exceeding one 8-byte cell) makes the boundary
+    // non-trivial. The enum itself can't be read back until the clause
+    // eliminator lands (Phase 4), so it is dropped after the round-trip.
+    let src = "type: Big | B a i64 b i64 c i64 ;\n\
+: id ( Big -- Big ) ;\n\
+: main ( -- )\n  42 1 2 3 B id drop . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-enum-call-boundary-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn vectors_dogfood_compiles_and_runs() {
     // S8: `examples/vectors.sth` — a flat `Vec2` and a nested `Segment`, a
     // reusable componentwise `sub`, `len2`, `span` (= `Segment> swap sub`),
