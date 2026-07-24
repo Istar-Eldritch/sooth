@@ -3,7 +3,7 @@
     drop
   else
     swap over mod gcd
-  then ;
+  end ;
 
 : main ( -- )
   10 15 gcd . ;    \ prints 5

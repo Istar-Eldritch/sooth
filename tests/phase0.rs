@@ -68,8 +68,8 @@ fn rgb_pack_compiles_and_runs() {
 fn signed_vs_unsigned_compare_differ_on_same_bit_pattern() {
     // Same bit pattern (200), compared as `i8` (negative) vs `u8` (positive)
     // against `5`, must give differing results (proves R10 codegen, S4).
-    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < if 1 else 0 then ;\n\n\
-: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < if 1 else 0 then ;\n\n\
+    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < if 1 else 0 end ;\n\n\
+: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < if 1 else 0 end ;\n\n\
 : main ( -- )\n  signed_lt .\n  unsigned_lt . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-vs-unsigned-cmp-{}.sth",
@@ -142,7 +142,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
     // `200 >u8 >i8` is `-56` as `i8`; widened to `u16` it must read as the
     // logical unsigned value `65480`, not the sign-extended bit pattern, so
     // comparing it against a clean `u16` `65535` must be `true`.
-    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < if 1 else 0 then . ;\n";
+    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-widen-subword-cmp-golden-{}.sth",
         std::process::id()
@@ -227,7 +227,7 @@ fn conversion_unknown_target_reports_diagnostic() {
 
 #[test]
 fn if_condition_not_bool_reports_diagnostic() {
-    let src = ": oops ( -- i64 )\n  5 if 1 else 2 then ;\n";
+    let src = ": oops ( -- i64 )\n  5 if 1 else 2 end ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
@@ -249,7 +249,7 @@ fn operand_type_mismatch_reports_diagnostic() {
 
 #[test]
 fn branch_join_type_mismatch_reports_diagnostic() {
-    let src = ": oops ( bool -- i64 )\n  if 1 else true then ;\n";
+    let src = ": oops ( bool -- i64 )\n  if 1 else true end ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
@@ -356,7 +356,7 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
     // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
 : main ( -- )\n  1.0 0.0 fdiv .\n  0.0 0.0 fdiv .\n  \
-0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
+0.0 0.0 fdiv dup = if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-div-inf-nan-{}.sth",
         std::process::id()
@@ -383,8 +383,8 @@ fn float_comparison_is_ieee_ordered_and_false_for_nan() {
     // comparison involving a NaN produced by `0.0 0.0 /` is false, including
     // `<` and `>` against a NaN (not just `=`, RISK 1).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
-: main ( -- )\n  1.0 2.0 < if 1 else 0 then .\n  2.0 1.0 < if 1 else 0 then .\n  \
-0.0 0.0 fdiv dup < if 1 else 0 then .\n  0.0 0.0 fdiv dup > if 1 else 0 then . ;\n";
+: main ( -- )\n  1.0 2.0 < if 1 else 0 end .\n  2.0 1.0 < if 1 else 0 end .\n  \
+0.0 0.0 fdiv dup < if 1 else 0 end .\n  0.0 0.0 fdiv dup > if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-cmp-ordered-nan-{}.sth",
         std::process::id()
@@ -687,7 +687,7 @@ fn signed_subword_shift_high_bits_are_canonical_for_comparison() {
     // `1 << 7` in an `i8` is -128 (0x80), which must compare as `< 0`. If the
     // high bits weren't kept canonical within the `i8` width, the comparison
     // could see stale bits instead of the correct sign.
-    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < if 1 . else 0 . then ;\n";
+    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < if 1 . else 0 . end ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-subword-shift-compare-{}.sth",
         std::process::id()
@@ -742,12 +742,12 @@ fn logical_and_or_xor_truth_table_on_bools() {
     // logical coincide): T and T = T, T and F = F, T or F = T, F or F = F,
     // T xor F = T, T xor T = F.
     let src = ": main ( -- )\n  \
-  true true and if 1 else 0 then .\n  \
-  true false and if 1 else 0 then .\n  \
-  true false or if 1 else 0 then .\n  \
-  false false or if 1 else 0 then .\n  \
-  true false xor if 1 else 0 then .\n  \
-  true true xor if 1 else 0 then . ;\n";
+  true true and if 1 else 0 end .\n  \
+  true false and if 1 else 0 end .\n  \
+  true false or if 1 else 0 end .\n  \
+  false false or if 1 else 0 end .\n  \
+  true false xor if 1 else 0 end .\n  \
+  true true xor if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-logical-and-or-xor-truth-table-{}.sth",
         std::process::id()
@@ -767,7 +767,7 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
     // bitwise complement on the same underlying bit pattern (`0 >u8 not` ->
     // 255, not 1).
     let src = ": main ( -- )\n  \
-  true not if 1 else 0 then .\n  \
+  true not if 1 else 0 end .\n  \
   0 >u8 not >i64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-not-type-directed-bool-vs-int-{}.sth",
@@ -787,12 +787,12 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
     // vs `u8` (200, positive) against 5: `<=`/`>=` flip with the sign, while
     // `<>` stays true either way (not-equal is sign-agnostic like `=`).
     let src = ": main ( -- )\n  \
-  200 >i8 5 >i8 <= if 1 else 0 then .\n  \
-  200 >u8 5 >u8 <= if 1 else 0 then .\n  \
-  200 >i8 5 >i8 >= if 1 else 0 then .\n  \
-  200 >u8 5 >u8 >= if 1 else 0 then .\n  \
-  200 >i8 5 >i8 <> if 1 else 0 then .\n  \
-  200 >u8 5 >u8 <> if 1 else 0 then . ;\n";
+  200 >i8 5 >i8 <= if 1 else 0 end .\n  \
+  200 >u8 5 >u8 <= if 1 else 0 end .\n  \
+  200 >i8 5 >i8 >= if 1 else 0 end .\n  \
+  200 >u8 5 >u8 >= if 1 else 0 end .\n  \
+  200 >i8 5 >i8 <> if 1 else 0 end .\n  \
+  200 >u8 5 >u8 <> if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-le-ge-ne-signed-unsigned-edge-{}.sth",
         std::process::id()
@@ -813,10 +813,10 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
     // where "NaN involved" flips the answer relative to `=`.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
 : main ( -- )\n  \
-  0.0 0.0 fdiv dup <= if 1 else 0 then .\n  \
-  0.0 0.0 fdiv dup >= if 1 else 0 then .\n  \
-  0.0 0.0 fdiv dup <> if 1 else 0 then .\n  \
-  0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
+  0.0 0.0 fdiv dup <= if 1 else 0 end .\n  \
+  0.0 0.0 fdiv dup >= if 1 else 0 end .\n  \
+  0.0 0.0 fdiv dup <> if 1 else 0 end .\n  \
+  0.0 0.0 fdiv dup = if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
@@ -1018,6 +1018,31 @@ fn struct_zero_field_unit_end_to_end_native() {
 }
 
 #[test]
+fn enum_crosses_word_call_boundary_with_scalar_underneath_native() {
+    // Slice 4 (criterion 7, native half): an enum value passes through a
+    // word-call boundary by value (QBE aggregate C-ABI) and back, with a
+    // scalar sitting *underneath* it on the caller's stack. A mis-sized
+    // aggregate slot in the ABI classification would clobber that scalar, so
+    // recovering `42` intact proves the by-value enum ABI. A three-`i64`
+    // large-payload variant (exceeding one 8-byte cell) makes the boundary
+    // non-trivial. The enum itself can't be read back until the clause
+    // eliminator lands (Phase 4), so it is dropped after the round-trip.
+    let src = "type: Big | B a i64 b i64 c i64 ;\n\
+: id ( Big -- Big ) ;\n\
+: main ( -- )\n  42 1 2 3 B id drop . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-enum-call-boundary-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn vectors_dogfood_compiles_and_runs() {
     // S8: `examples/vectors.sth` — a flat `Vec2` and a nested `Segment`, a
     // reusable componentwise `sub`, `len2`, `span` (= `Segment> swap sub`),
@@ -1025,5 +1050,110 @@ fn vectors_dogfood_compiles_and_runs() {
     // prints `span len2 .` (25) and `5 6 Vec2 1 shift-x Vec2>x .` (6).
     let (stdout, code) = run_and_capture_stdout("examples/vectors.sth");
     assert_eq!(stdout, "25\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn shapes_dogfood_compiles_and_runs() {
+    // Slice 4 (criteria 3, 6): the clause-style eliminator end-to-end.
+    // `area` dispatches over a multi-field-variant `Shape` (a `Rect | w h |`
+    // clause-body-locals arm and a `Circle` arm reading its payload
+    // first-deepest); `unwrap-or` dispatches over a zero-field `None` (an
+    // empty clause yielding the default flowing *underneath* the scrutinee)
+    // and a one-field `Some`. All run in one native binary.
+    let (stdout, code) = run_and_capture_stdout("examples/shapes.sth");
+    assert_eq!(stdout, "12.5664\n12\n5\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn clause_word_over_three_plus_variant_enum_dispatches_correctly() {
+    // R16 key risk: an N-way (here 4-way) `Cmp(Eq)`-tag compare-chain must
+    // land on each variant's own clause, not a two-way miscompile. Each of
+    // the four commands drives a distinct arm; verified at runtime, not by
+    // reading IL.
+    let src = "type: Cmd | Halt | Push v i64 | Add | Dbl ;\n\
+: run ( i64 Cmd -- i64 )\n\
+| Halt   drop 0\n\
+| Push   swap drop\n\
+| Add    1 +\n\
+| Dbl    2 *\n\
+;\n\
+: main ( -- )\n  99 Halt run .\n  1 20 Push run .\n  10 Add run .\n  10 Dbl run . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-nway-clause-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "0\n20\n11\n20\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn nested_aggregate_clause_word_reads_back_through_registries_native() {
+    // Slice 4 (criterion 3, D9): a variant carrying a struct payload (`Dot p
+    // Vec2`) constructs, passes through a clause word, and its nested field
+    // reads back; and an enum used as a struct field (`Wrap s Shape`) is
+    // unwrapped through the getter into the same clause word — guarding the
+    // combined-registry field sizing in both directions.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+type: Shape | Dot p Vec2 | Nothing ;\n\
+type: Wrap s Shape ;\n\
+: px ( Shape -- i64 )\n\
+| Dot      Vec2>x\n\
+| Nothing  0\n\
+;\n\
+: main ( -- )\n  3 4 Vec2 Dot px .\n  Nothing px .\n  5 6 Vec2 Dot Wrap Wrap>s px . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-nested-clause-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "3\n0\n5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn single_variant_clause_word_returns_payload_native() {
+    // 9ed63d9 discriminant-skip: a single-variant enum has nothing to
+    // disambiguate, so its clause word jumps straight to the sole clause with
+    // no `Cmp`/`Jnz`. The IR-shape test asserts zero compares; this proves the
+    // no-compare path still returns the right payload value at runtime.
+    let src = "type: Id | Wrap v i64 ;\n\
+: unwrap ( Id -- i64 )\n\
+| Wrap\n\
+;\n\
+: main ( -- )\n  42 Wrap unwrap . ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-single-variant-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn clause_body_containing_if_else_end_joins_correctly() {
+    // M6: a clause body may itself use `if/else/end`. The clause-dispatch
+    // join's phi predecessor must be the *if's* merged block (captured via
+    // `cur_id` after lowering the clause body), not the clause's dispatch
+    // block — otherwise the join would read a stale/wrong value. `Zero`
+    // exercises a plain clause alongside `NonZero`'s internal branch, so the
+    // two clause styles share one dispatch and one join correctly.
+    let src = "type: Item | Zero | NonZero v i64 ;\n\
+: classify ( Item -- i64 )\n\
+| Zero       0\n\
+| NonZero    0 > if 1 else -1 end\n\
+;\n\
+: main ( -- )\n  Zero classify .\n  5 NonZero classify .\n  -5 NonZero classify . ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-clause-if-else-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "0\n1\n-1\n");
     assert_eq!(code, 0);
 }

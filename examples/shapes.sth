@@ -1,0 +1,22 @@
+type: Shape
+| Circle r f64
+| Rect   w f64 h f64
+;
+
+type: MaybeInt | None | Some v i64 ;
+
+: area ( Shape -- f64 )
+| Circle   dup * 3.14159 *
+| Rect     | w h |  w h *
+;
+
+: unwrap-or ( i64 MaybeInt -- i64 )
+| None
+| Some   swap drop
+;
+
+: main ( -- )
+  2.0 Circle area .          \ ~12.56636
+  3.0 4.0 Rect area .        \ 12
+  5 None unwrap-or .         \ 5   (empty None clause yields the default underneath)
+  5 7 Some unwrap-or . ;     \ 7

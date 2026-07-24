@@ -1,5 +1,5 @@
 : sign ( i64 -- i64 )
-  0 > if 1 else 0 then ;
+  0 > if 1 else 0 end ;
 
 : main ( -- )
   -7 sign . ;    \ prints 0

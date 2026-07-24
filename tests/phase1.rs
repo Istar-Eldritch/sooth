@@ -120,7 +120,7 @@ fn failed_redefinition_keeps_old_generation_resident() {
 #[test]
 fn sign_definable_and_callable_in_repl() {
     let out = run_session(&[
-        ": sign ( i64 -- i64 ) 0 > if 1 else 0 then ;",
+        ": sign ( i64 -- i64 ) 0 > if 1 else 0 end ;",
         "-7 sign",
         "7 sign",
     ]);
@@ -323,4 +323,141 @@ fn dot_output_interleaves_before_stack() {
     let out = run_session(&["5 .", "2 3 + ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["5", "stack: (empty)", "5", "stack: (empty)"]);
+}
+
+/// Slice 4 (criterion 7, Phase 3 slice): an enum value is constructed at REPL
+/// scope, marshalled into the carried buffer, and displayed as its
+/// `<TypeName>` placeholder (M4). A multi-field float variant, a zero-field
+/// variant, and a one-field variant all construct; the `<Shape>` slot then
+/// survives a later line's boundary (a scalar pushed on top reads the cell
+/// *past* the enum's multi-cell slot, so a mis-sized marshalling would
+/// corrupt it).
+#[test]
+fn enum_constructs_and_displays_placeholder_across_lines() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        "type: MaybeInt | None | Some v i64 ;",
+        "2.0 Circle",
+        "3.0 4.0 Rect",
+        "None",
+        "7 Some",
+        "99",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Shape",
+            "defined type MaybeInt",
+            "stack: <Shape>",
+            "stack: <Shape> <Shape>",
+            "stack: <Shape> <Shape> <MaybeInt>",
+            "stack: <Shape> <Shape> <MaybeInt> <MaybeInt>",
+            "stack: <Shape> <Shape> <MaybeInt> <MaybeInt> 99",
+        ]
+    );
+}
+
+/// Criterion 7: an enum is declared on one line, then a clause-style word is
+/// defined over it on a *later* line (R18's D8 variant-set seeding from
+/// `Session.enums`, since the parser pre-pass alone only scans the current
+/// unit). A value constructs and displays `<Shape>`, then a further line
+/// eliminates it through the clause word.
+#[test]
+fn enum_declared_then_clause_word_defined_and_eliminated_on_later_lines() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        ": area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;",
+        "2.0 Circle",
+        "area .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Shape",
+            "defined area",
+            "stack: <Shape>",
+            "12.5664",
+            "stack: (empty)",
+        ]
+    );
+}
+
+/// Criterion 8: `examples/shapes.sth` runs correctly end-to-end *in the REPL*,
+/// not just natively. Each definition collapses to one REPL line (multi-line
+/// input isn't the point of this golden; exercising every clause arm from the
+/// dogfood file is), and all four `main` operations run, hitting the exact
+/// native golden's output (`12.5664 / 12 / 5 / 7`) through the REPL path.
+#[test]
+fn shapes_dogfood_runs_full_program_in_repl() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        "type: MaybeInt | None | Some v i64 ;",
+        ": area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;",
+        ": unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
+        "2.0 Circle area .",
+        "3.0 4.0 Rect area .",
+        "5 None unwrap-or .",
+        "5 7 Some unwrap-or .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Shape",
+            "defined type MaybeInt",
+            "defined area",
+            "defined unwrap-or",
+            "12.5664",
+            "stack: (empty)",
+            "12",
+            "stack: (empty)",
+            "5",
+            "stack: (empty)",
+            "7",
+            "stack: (empty)",
+        ]
+    );
+}
+
+/// A large-payload variant (three `i64` fields, exceeding one 8-byte carried
+/// cell) survives a REPL line boundary intact: its multi-cell slot is blitted
+/// out of and back into the buffer, and a scalar pushed afterward still reads
+/// its own cell rather than the enum's payload.
+#[test]
+fn enum_large_payload_survives_line_boundary() {
+    let out = run_session(&["type: Big | B a i64 b i64 c i64 ;", "1 2 3 B", "42"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Big", "stack: <Big>", "stack: <Big> 42"]
+    );
+}
+
+/// A duplicate enum name (X2) and a recursive enum (X3, M5) are located
+/// errors that roll back, leaving the session usable; the recursive case
+/// reports rather than hanging.
+#[test]
+fn enum_declaration_errors_report_and_session_survives() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        "type: Shape | A ;",
+        "type: Loop | Wrap next Loop ;",
+        "2.0 Circle",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "defined type Shape");
+    assert!(
+        lines[1].contains("duplicate type `Shape`"),
+        "expected a duplicate-type diagnostic naming `Shape`: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("recursive enum definition") && lines[2].contains("Loop"),
+        "expected a recursive-enum diagnostic naming the cycle: {}",
+        lines[2]
+    );
+    // The rolled-back duplicate never shadowed the original Shape.
+    assert_eq!(lines[3], "stack: <Shape>");
 }

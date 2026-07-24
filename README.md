@@ -15,7 +15,7 @@ explicit copy, and drop is a statically-known destructor point.
     drop
   else
     swap over mod gcd
-  then ;
+  end ;
 ```
 
 ## Status
@@ -28,9 +28,12 @@ has landed its full **scalar core**: a `Type` per stack slot, unified at branch 
 fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit target-only conversions
 (`>i8`..`>u64`); floating point (`f32`/`f64`) with IEEE arithmetic and comparison; bitwise
 operators (`and`/`or`/`xor`/`not`/`shl`/`shr`); and boolean logic with the full comparison
-set (`= < > <= >= <>`). What remains in Phase 2 are the aggregates: structs, enums/`match`,
-fixed-size arrays, then the bytecode-VM exit dogfood. The compiler is a Rust bootstrap; the
-language will later self-host.
+set (`= < > <= >= <>`). Phase 2 has also landed **structs** (the `type:` declaration form,
+inline-aggregate layout, generated constructor/accessor words) and **enums/ADTs** (`type:`
+with `|`-separated variants, a tagged inline-aggregate representation, and
+exhaustiveness-checked clause-style word definition as the eliminator, no inline `match`).
+What remains in Phase 2 are fixed-size arrays, then the bytecode-VM exit dogfood. The
+compiler is a Rust bootstrap; the language will later self-host.
 
 Pipeline: `source → lex → parse → stack-effect check → backend-neutral IR → QBE IL
 → native binary`. Backend is [QBE](https://c9x.me/compile/), invoked from `PATH`

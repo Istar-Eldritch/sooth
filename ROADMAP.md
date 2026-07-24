@@ -26,8 +26,13 @@ declaration form, a user-extensible type namespace, an inline-aggregate layout m
 (offsets/size/alignment computed from field widths, word-width-neutral) backed by QBE
 aggregate types, generated constructor/getter/setter/destructure words, nesting, and
 size-aware carried-stack marshalling across word and REPL boundaries.
-**Next action: Phase 2 Slice 4** (enums/ADTs + clause-style pattern matching). Design
-is locked (`docs/phase2-slice4-brief.md`); spec next.
+**Slice 4 (enums/ADTs + clause-style pattern matching) is complete** and merged to
+`main`: the `type:` form extended with `|`-separated variants, a separate enum registry
+sharing the Slice 3 layout machinery, a tagged inline-aggregate representation,
+exhaustiveness-checked clause-style elimination (no inline `match`), the `then` -> `end`
+control-flow-closer rename, clause-body locals, and enum values crossing word-call and
+REPL boundaries; `examples/shapes.sth` dogfoods it natively and in the REPL.
+**Next action: Phase 2 Slice 5** (fixed-size arrays). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -53,7 +58,8 @@ it, since LLVM and Z3 were dropped. Free choice.
 ### Phase 0 — Codegen spine  `[L]`  ✅ **done** (go/no-go on the architecture: **go**)
 
 Lexer/parser for a minimal concrete-typed core (`: ;`, literals, arithmetic,
-comparisons, `if/else/then` (the closer is renamed to `end` in Slice 4), the core stack
+comparisons, `if/else/end` (originally `if/else/then`; the closer was renamed to `end`
+in Slice 4), the core stack
 shuffles `dup`/`drop`/`swap`/`over`/`rot`
 (monomorphic, int-only here; widened later), and `| locals |`). Compile-time virtual
 stack → a
@@ -79,7 +85,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs done: Slices 1-3 + floats/bitwise/bool)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs + enums done: Slices 1-4 + floats/bitwise/bool)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -97,7 +103,10 @@ filled out with `<= >= <>` (numeric, signedness- and NaN-correct), making `bool`
 first-class operand type rather than an `if`-only token. With this the Phase 2 **scalar core**
 is complete. **Slice 3 (structs/records) is also done**: user-declared struct value types,
 an inline-aggregate layout model, and generated construction/field-read/functional-update/
-destructure words. What remains are enums/arrays/the VM dogfood/`Copy` (Slices 4-7).
+destructure words. **Slice 4 (enums/ADTs + clause-style pattern matching) is also done**:
+sum types via the `type:` form, a tagged inline-aggregate representation sharing the Slice 3
+layout machinery, exhaustiveness-checked clause-style elimination, the `then` -> `end`
+rename, and clause-body locals. What remains are arrays/the VM dogfood/`Copy` (Slices 5-7).
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -119,6 +128,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    clause bodies (bind names at the top of a word body or a clause body, extent = that scope;
    no mid-body binding, no closer: factor a word instead). Design locked in
    `docs/phase2-slice4-brief.md`. Prefer-the-stack stays the culture; locals stay opt-in.
+   ✅ done.
 5. **Fixed-size arrays** (still heap-free). Introduce **`usize`** (and likely **`isize`** for
    pointer differences) here, as the target-width index/length type, so array indices are
    `usize` from the first use rather than a hardcoded `i64` retrofitted later. Its defining
@@ -175,6 +185,28 @@ arity/type mismatch, an accessor applied to the wrong type, `.`/`=`/arithmetic o
 struct, and a malformed declaration; a zero-field unit struct; and the
 `examples/vectors.sth` dogfood (`Vec2`/`Segment`, `sub`/`len2`/`span`/`shift-x`),
 running both as a native binary and in the REPL.
+
+**Enums axis, delivered** (brief + spec: `docs/phase2-slice4-brief.md`,
+`docs/phase2-slice4-spec.md`): the `type:` form extended with `|`-separated variants
+(each a name plus zero or more `name type` field pairs); a separate enum registry
+(`Type::Enum` + `EnumId`) sharing the Slice 3 layout machinery rather than merging with
+the struct registry; a tagged inline-aggregate representation (a fixed-width `i32`
+discriminant plus a max-variant payload, word-width-neutral); generated per-variant
+constructor words; exhaustiveness-checked clause-style word definition as the sole
+eliminator (`| Variant … | Variant … ;`, no inline `match`, exact one-clause-per-variant
+coverage folded into the word's single declared output effect); clause-body `| names |`
+locals (extent = the clause); the control-flow closer rename **`then` -> `end`**
+(behaviour-preserving, migrated across every live example/test/doc); a D8 variant-name
+pre-pass disambiguating `|` as clause-marker vs. locals-delimiter, with a variant-named
+local/parameter rejected as a sharp error; combined struct+enum recursion detection (a
+struct field may be an enum and vice versa, but a value-cycle is a located compile
+error, never a hang); `.`/`=`/arithmetic on an enum are sharp located errors; a REPL
+`<TypeName>` placeholder display; and size-aware carried-stack marshalling generalized
+to enum slots across both the word-call and REPL-line boundary. The `examples/shapes.sth`
+dogfood (`Shape`'s `Circle`/`Rect` via `area`, `MaybeInt`'s `None`/`Some` via
+`unwrap-or`) runs both as a native binary and in the REPL. Generics, `Option<T>`/
+`Result<T,E>`, open multimethods, the `_` wildcard, inline `match`, and recursive/heap
+data are deferred (Phase 4 / Slice 7 / Phase 3).
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; `*/` widening primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
