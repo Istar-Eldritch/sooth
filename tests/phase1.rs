@@ -324,3 +324,77 @@ fn dot_output_interleaves_before_stack() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["5", "stack: (empty)", "5", "stack: (empty)"]);
 }
+
+/// Slice 4 (criterion 7, Phase 3 slice): an enum value is constructed at REPL
+/// scope, marshalled into the carried buffer, and displayed as its
+/// `<TypeName>` placeholder (M4). A multi-field float variant, a zero-field
+/// variant, and a one-field variant all construct; the `<Shape>` slot then
+/// survives a later line's boundary (a scalar pushed on top reads the cell
+/// *past* the enum's multi-cell slot, so a mis-sized marshalling would
+/// corrupt it).
+#[test]
+fn enum_constructs_and_displays_placeholder_across_lines() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        "type: MaybeInt | None | Some v i64 ;",
+        "2.0 Circle",
+        "3.0 4.0 Rect",
+        "None",
+        "7 Some",
+        "99",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Shape",
+            "defined type MaybeInt",
+            "stack: <Shape>",
+            "stack: <Shape> <Shape>",
+            "stack: <Shape> <Shape> <MaybeInt>",
+            "stack: <Shape> <Shape> <MaybeInt> <MaybeInt>",
+            "stack: <Shape> <Shape> <MaybeInt> <MaybeInt> 99",
+        ]
+    );
+}
+
+/// A large-payload variant (three `i64` fields, exceeding one 8-byte carried
+/// cell) survives a REPL line boundary intact: its multi-cell slot is blitted
+/// out of and back into the buffer, and a scalar pushed afterward still reads
+/// its own cell rather than the enum's payload.
+#[test]
+fn enum_large_payload_survives_line_boundary() {
+    let out = run_session(&["type: Big | B a i64 b i64 c i64 ;", "1 2 3 B", "42"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Big", "stack: <Big>", "stack: <Big> 42"]
+    );
+}
+
+/// A duplicate enum name (X2) and a recursive enum (X3, M5) are located
+/// errors that roll back, leaving the session usable; the recursive case
+/// reports rather than hanging.
+#[test]
+fn enum_declaration_errors_report_and_session_survives() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        "type: Shape | A ;",
+        "type: Loop | Wrap next Loop ;",
+        "2.0 Circle",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "defined type Shape");
+    assert!(
+        lines[1].contains("duplicate type `Shape`"),
+        "expected a duplicate-type diagnostic naming `Shape`: {}",
+        lines[1]
+    );
+    assert!(
+        lines[2].contains("recursive enum definition") && lines[2].contains("Loop"),
+        "expected a recursive-enum diagnostic naming the cycle: {}",
+        lines[2]
+    );
+    // The rolled-back duplicate never shadowed the original Shape.
+    assert_eq!(lines[3], "stack: <Shape>");
+}

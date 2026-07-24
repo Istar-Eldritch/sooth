@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::mem;
 
-use crate::ast::{Module, StructDecl, StructId, Term, TermKind, Type, WordDef};
+use crate::ast::{EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind, Type, WordDef};
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -19,6 +19,10 @@ pub struct IrModule {
     /// a `type :S = { … }` per entry and reads field offsets/widths from it;
     /// empty for a struct-free module (or a single-func REPL emit).
     pub structs: Vec<StructLayout>,
+    /// Per-enum tagged layout, indexed by `EnumId`. The backend emits an
+    /// opaque byte-blob `type :E = align A { b N }` per entry (D3, R15) and
+    /// reads tag/payload offsets from it; empty for an enum-free module.
+    pub enums: Vec<EnumLayout>,
 }
 
 #[derive(Debug)]
@@ -56,6 +60,13 @@ pub enum IrType {
     /// ABI positions (params/returns/call args) and `l` (a pointer) in a
     /// register.
     Struct(StructId),
+    /// A user-declared enum (sum type), keyed by a small `Copy` `EnumId` into
+    /// the module's `EnumLayout` registry; the tagged layout lives there, not
+    /// inlined, so `IrType` stays `Copy`. At runtime an enum value is a
+    /// pointer to its aggregate storage (a tag + a max-variant payload); the
+    /// backend spells it `:E` in ABI positions and `l` (a pointer) in a
+    /// register, exactly like `Struct`.
+    Enum(EnumId),
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -82,9 +93,9 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The layout lives in the module's `StructLayout` registry; the
         // `IrType` carries only the `StructId` so it stays `Copy`.
         Type::Struct(id, _) => IrType::Struct(id),
-        // Enum lowering (`IrType::Enum`, tagged layout) lands in Phase 3
-        // (R13); no enum-typed word reaches lowering before then.
-        Type::Enum(_, _) => unimplemented!("enum lowering lands in Phase 3 (R13)"),
+        // The tagged layout lives in the module's `EnumLayout` registry; the
+        // `IrType` carries only the `EnumId` so it stays `Copy`.
+        Type::Enum(id, _) => IrType::Enum(id),
     }
 }
 
@@ -130,6 +141,51 @@ pub struct Structs {
     pub words: HashMap<String, StructWord>,
 }
 
+/// The computed tagged layout of one enum (D3, M1), word-width-neutral: a
+/// fixed `i32` discriminant tag placed first, then a payload region sized and
+/// aligned to the largest variant. Each variant's fields are laid out within
+/// the payload region (offsets relative to `payload_offset`) by the same
+/// natural-alignment placement as struct fields; per-variant payloads overlay
+/// the one region. `name` is the leaked `&'static str` the backend emits as
+/// `:name`.
+#[derive(Debug, Clone)]
+pub struct EnumLayout {
+    pub name: &'static str,
+    pub tag_offset: u32,
+    pub tag_ty: IrType,
+    pub payload_offset: u32,
+    pub size: u32,
+    pub align: u32,
+    pub variants: Vec<VariantLayout>,
+}
+
+/// One variant's payload placement: its fields laid out (first field deepest)
+/// within the enum's shared payload region, each `FieldLayout::offset`
+/// relative to `EnumLayout::payload_offset`.
+#[derive(Debug, Clone)]
+pub struct VariantLayout {
+    pub fields: Vec<FieldLayout>,
+}
+
+/// How a generated enum-word name lowers, keyed off the enum registry
+/// (parallel to `StructWord`, D10): a variant constructor naming its enum and
+/// the variant's declaration index. Enums have no getter/setter/destructure
+/// (D2: elimination is clause-style, Phase 4).
+#[derive(Debug, Clone, Copy)]
+pub enum EnumWord {
+    Construct(EnumId, usize),
+}
+
+/// The IR's view of a program's enums: the per-`EnumId` tagged-layout registry
+/// and the variant-constructor name map (variant name → `EnumWord`). A
+/// logically distinct registry from `Structs` (D10), built alongside it by
+/// `build_registries`; empty for an enum-free program.
+#[derive(Debug, Default)]
+pub struct Enums {
+    pub layouts: Vec<EnumLayout>,
+    pub words: HashMap<String, EnumWord>,
+}
+
 fn round_up(offset: u32, align: u32) -> u32 {
     offset.div_ceil(align) * align
 }
@@ -145,87 +201,199 @@ fn scalar_size_align(ty: IrType) -> (u32, u32) {
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Ptr => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
+        IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
     };
     (bytes, bytes)
 }
 
 /// The carried-stack bytes a slot of `ty` occupies. A scalar stays a
 /// byte-identical 8-byte cell, so every scalar-only line marshals exactly as
-/// before; a struct occupies its aggregate size rounded up to a multiple of 8
-/// so the next slot stays 8-aligned (struct alignment is at most 8 this slice).
-/// Cumulative sums give each carried slot's byte offset in the buffer.
-pub fn carried_slot_bytes(ty: IrType, structs: &Structs) -> u32 {
+/// before; a struct or enum occupies its aggregate size rounded up to a
+/// multiple of 8 so the next slot stays 8-aligned. Cumulative sums give each
+/// carried slot's byte offset in the buffer.
+pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums) -> u32 {
     match ty {
         IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
+        IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
         _ => 8,
     }
 }
 
 impl Structs {
-    /// Build the layout + generated-word registry from a program's struct
-    /// declarations (the build path passes `&module.structs`, the REPL passes
-    /// its accumulated registry). Recursion is already rejected by the checker,
-    /// so the memoized layout recursion terminates.
+    /// Build just the struct registry (no enums). A thin wrapper over
+    /// `build_registries` for struct-only callers; a struct with an enum field
+    /// needs the full `build_registries` (its enums must be present to size
+    /// the field, D9).
     pub fn from_structs(structs: &[StructDecl]) -> Structs {
-        let mut memo: Vec<Option<StructLayout>> = vec![None; structs.len()];
-        for i in 0..structs.len() {
-            compute_layout(structs, i, &mut memo);
-        }
-        let layouts: Vec<StructLayout> = memo.into_iter().map(|l| l.expect("layout")).collect();
-
-        let mut words = HashMap::new();
-        for (idx, decl) in structs.iter().enumerate() {
-            let id = StructId::from_index(idx);
-            words.insert(decl.name.clone(), StructWord::Construct(id));
-            words.insert(format!("{}>", decl.name), StructWord::Destructure(id));
-            for (fi, (fname, _)) in decl.fields.iter().enumerate() {
-                words.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
-                words.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
-            }
-        }
-        Structs { layouts, words }
+        build_registries(structs, &[]).0
     }
 }
 
-/// Fill `memo[idx]` with the natural-alignment layout of struct `idx`, recursing
-/// into nested-struct fields first. Each field is placed at the next offset
-/// aligned to its own alignment; struct align = max field align (min 1); struct
-/// size = final offset rounded up to struct align.
-fn compute_layout(structs: &[StructDecl], idx: usize, memo: &mut Vec<Option<StructLayout>>) {
-    if memo[idx].is_some() {
-        return;
+/// Build the struct and enum layout + generated-word registries from a
+/// program's declarations (the build path passes `&module.structs` /
+/// `&module.enums`, the REPL passes its accumulated registries). The layout
+/// pass is a single combined DFS so a struct field of enum type and a variant
+/// field of struct/enum type are sized via the peer registry (D9); the
+/// registries themselves stay logically separate (D10). Recursion is already
+/// rejected by the checker, so the memoized layout recursion terminates.
+pub fn build_registries(structs: &[StructDecl], enums: &[EnumDecl]) -> (Structs, Enums) {
+    let mut lb = LayoutBuilder {
+        structs,
+        enums,
+        struct_memo: vec![None; structs.len()],
+        enum_memo: vec![None; enums.len()],
+    };
+    for i in 0..structs.len() {
+        lb.ensure_struct(i);
     }
-    let decl = &structs[idx];
-    let mut offset = 0u32;
-    let mut align = 1u32;
-    let mut fields = Vec::with_capacity(decl.fields.len());
-    for (_, field_ty) in &decl.fields {
-        let ir_ty = ir_type_of(*field_ty);
-        let (size, falign) = match ir_ty {
-            IrType::Struct(id) => {
-                compute_layout(structs, id.index(), memo);
-                let inner = memo[id.index()].as_ref().expect("inner layout computed");
-                (inner.size, inner.align)
+    for i in 0..enums.len() {
+        lb.ensure_enum(i);
+    }
+    let struct_layouts: Vec<StructLayout> = lb
+        .struct_memo
+        .into_iter()
+        .map(|l| l.expect("layout"))
+        .collect();
+    let enum_layouts: Vec<EnumLayout> = lb
+        .enum_memo
+        .into_iter()
+        .map(|l| l.expect("layout"))
+        .collect();
+
+    let mut swords = HashMap::new();
+    for (idx, decl) in structs.iter().enumerate() {
+        let id = StructId::from_index(idx);
+        swords.insert(decl.name.clone(), StructWord::Construct(id));
+        swords.insert(format!("{}>", decl.name), StructWord::Destructure(id));
+        for (fi, (fname, _)) in decl.fields.iter().enumerate() {
+            swords.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
+            swords.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
+        }
+    }
+
+    let mut ewords = HashMap::new();
+    for (idx, decl) in enums.iter().enumerate() {
+        let id = EnumId::from_index(idx);
+        for (vi, variant) in decl.variants.iter().enumerate() {
+            ewords.insert(variant.name.clone(), EnumWord::Construct(id, vi));
+        }
+    }
+
+    (
+        Structs {
+            layouts: struct_layouts,
+            words: swords,
+        },
+        Enums {
+            layouts: enum_layouts,
+            words: ewords,
+        },
+    )
+}
+
+/// The shared field-placement + memoized layout core over the combined
+/// struct+enum type graph. `ensure_struct`/`ensure_enum` fill their memo slot,
+/// recursing into nested-aggregate fields first via `size_align`; `place_fields`
+/// is the natural-alignment placement reused by both a struct body and each
+/// variant's payload.
+struct LayoutBuilder<'a> {
+    structs: &'a [StructDecl],
+    enums: &'a [EnumDecl],
+    struct_memo: Vec<Option<StructLayout>>,
+    enum_memo: Vec<Option<EnumLayout>>,
+}
+
+impl LayoutBuilder<'_> {
+    /// The size/align of a field of frontend type `ty`, sizing a nested struct
+    /// or enum via its layout (computed on demand) and a scalar via its width.
+    fn size_align(&mut self, ty: Type) -> (u32, u32) {
+        match ty {
+            Type::Struct(id, _) => {
+                self.ensure_struct(id.index());
+                let l = self.struct_memo[id.index()].as_ref().expect("inner layout");
+                (l.size, l.align)
             }
-            _ => scalar_size_align(ir_ty),
-        };
-        let off = round_up(offset, falign);
-        fields.push(FieldLayout {
-            offset: off,
-            ty: ir_ty,
-            size,
-            align: falign,
-        });
-        offset = off + size;
-        align = align.max(falign);
+            Type::Enum(id, _) => {
+                self.ensure_enum(id.index());
+                let l = self.enum_memo[id.index()].as_ref().expect("inner layout");
+                (l.size, l.align)
+            }
+            _ => scalar_size_align(ir_type_of(ty)),
+        }
     }
-    let size = round_up(offset, align);
-    memo[idx] = Some(StructLayout {
-        name: decl.name_static,
-        size,
-        align,
-        fields,
-    });
+
+    /// Place `fields` at natural alignment (first field deepest), returning the
+    /// per-field layouts, the total size (rounded up to the aggregate align),
+    /// and that align (min 1).
+    fn place_fields(&mut self, fields: &[(String, Type)]) -> (Vec<FieldLayout>, u32, u32) {
+        let mut offset = 0u32;
+        let mut align = 1u32;
+        let mut out = Vec::with_capacity(fields.len());
+        for (_, field_ty) in fields {
+            let ir_ty = ir_type_of(*field_ty);
+            let (size, falign) = self.size_align(*field_ty);
+            let off = round_up(offset, falign);
+            out.push(FieldLayout {
+                offset: off,
+                ty: ir_ty,
+                size,
+                align: falign,
+            });
+            offset = off + size;
+            align = align.max(falign);
+        }
+        (out, round_up(offset, align), align)
+    }
+
+    fn ensure_struct(&mut self, idx: usize) {
+        if self.struct_memo[idx].is_some() {
+            return;
+        }
+        let structs = self.structs;
+        let (fields, size, align) = self.place_fields(&structs[idx].fields);
+        self.struct_memo[idx] = Some(StructLayout {
+            name: structs[idx].name_static,
+            size,
+            align,
+            fields,
+        });
+    }
+
+    fn ensure_enum(&mut self, idx: usize) {
+        if self.enum_memo[idx].is_some() {
+            return;
+        }
+        let enums = self.enums;
+        // The tag is a fixed i32 (M1), placed first; the payload follows at the
+        // largest variant's alignment, so a tag narrower than that align gets
+        // padded up to `payload_offset` (the round-up criterion 2 exercises).
+        let tag_ty = IrType::Int {
+            bits: 32,
+            signed: true,
+        };
+        let (tag_size, tag_align) = scalar_size_align(tag_ty);
+        let mut variants = Vec::with_capacity(enums[idx].variants.len());
+        let mut payload_align = 1u32;
+        let mut max_payload = 0u32;
+        for variant in &enums[idx].variants {
+            let (fields, vsize, valign) = self.place_fields(&variant.fields);
+            payload_align = payload_align.max(valign);
+            max_payload = max_payload.max(vsize);
+            variants.push(VariantLayout { fields });
+        }
+        let payload_offset = round_up(tag_size, payload_align);
+        let align = tag_align.max(payload_align);
+        let size = round_up(payload_offset + max_payload, align);
+        self.enum_memo[idx] = Some(EnumLayout {
+            name: enums[idx].name_static,
+            tag_offset: 0,
+            tag_ty,
+            payload_offset,
+            size,
+            align,
+            variants,
+        });
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,7 +505,7 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
-    let structs = Structs::from_structs(&module.structs);
+    let (structs, enums) = build_registries(&module.structs, &module.enums);
     let env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -354,12 +522,13 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let funcs = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve, &structs))
+        .map(|w| lower_word(w, &env, &resolve, &structs, &enums))
         .collect();
 
     Ok(IrModule {
         funcs,
         structs: structs.layouts,
+        enums: enums.layouts,
     })
 }
 
@@ -390,6 +559,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// (the number of buffer bytes the epilogue actually wrote), so the caller
 /// sizes its buffer from the same numbers the wrapper uses rather than from a
 /// separately-computed depth that could in principle diverge.
+#[allow(clippy::too_many_arguments)] // one wrapper's marshalling inputs; a bundle would obscure them
 pub fn lower_line(
     seq: u64,
     terms: &[Term],
@@ -398,9 +568,10 @@ pub fn lower_line(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     structs: &Structs,
+    enums: &Enums,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
-    let mut b = FuncBuilder::new(env, resolve, structs);
+    let mut b = FuncBuilder::new(env, resolve, structs, enums);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -430,6 +601,14 @@ pub fn lower_line(
                 }
                 stack.push(dst);
             }
+            IrType::Enum(id) => {
+                let dst = b.alloc_enum(id);
+                let size = b.enums.layouts[id.index()].size;
+                if size > 0 {
+                    b.push_instr(Instr::Blit(ptr, dst, size));
+                }
+                stack.push(dst);
+            }
             IrType::Float { .. } => {
                 let v = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Load(v, ptr));
@@ -448,7 +627,7 @@ pub fn lower_line(
                 stack.push(v);
             }
         }
-        in_bytes += carried_slot_bytes(slot_ty, b.structs);
+        in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums);
     }
     b.stack = stack;
 
@@ -473,9 +652,15 @@ pub fn lower_line(
                     b.push_instr(Instr::Blit(*v, ptr, size));
                 }
             }
+            IrType::Enum(id) => {
+                let size = b.enums.layouts[id.index()].size;
+                if size > 0 {
+                    b.push_instr(Instr::Blit(*v, ptr, size));
+                }
+            }
             _ => b.push_instr(Instr::Store(ptr, *v)),
         }
-        out_bytes += carried_slot_bytes(vty, b.structs);
+        out_bytes += carried_slot_bytes(vty, b.structs, b.enums);
     }
 
     // Return the advanced top as a byte delta; (out_bytes - in_bytes) may be
@@ -505,6 +690,7 @@ pub(crate) fn lower_word(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     structs: &Structs,
+    enums: &Enums,
 ) -> IrFunc {
     let params: Vec<IrType> = word
         .effect
@@ -514,7 +700,7 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(env, resolve, structs);
+    let mut b = FuncBuilder::new(env, resolve, structs, enums);
 
     // Params occupy the first N value ids; leftmost input is deepest.
     let mut stack: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
@@ -545,6 +731,7 @@ struct FuncBuilder<'a> {
     env: &'a HashMap<String, Arity>,
     resolve: Resolver<'a>,
     structs: &'a Structs,
+    enums: &'a Enums,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -556,11 +743,17 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
-    fn new(env: &'a HashMap<String, Arity>, resolve: Resolver<'a>, structs: &'a Structs) -> Self {
+    fn new(
+        env: &'a HashMap<String, Arity>,
+        resolve: Resolver<'a>,
+        structs: &'a Structs,
+        enums: &'a Enums,
+    ) -> Self {
         FuncBuilder {
             env,
             resolve,
             structs,
+            enums,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -648,18 +841,27 @@ impl<'a> FuncBuilder<'a> {
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
                 // A scalar is `Copy`: reuse the value id (dup emits nothing). A
-                // struct is copied by value: alloc a fresh slot and blit the
-                // bytes, so a functional setter on the copy leaves the
-                // original intact.
-                if let IrType::Struct(id) = self.value_type(top) {
-                    let copy = self.alloc_struct(id);
-                    let size = self.structs.layouts[id.index()].size;
-                    if size > 0 {
-                        self.push_instr(Instr::Blit(top, copy, size));
+                // struct or enum is copied by value: alloc a fresh slot and
+                // blit the bytes, so mutating the copy leaves the original
+                // intact (an enum is all-Copy too, D3).
+                match self.value_type(top) {
+                    IrType::Struct(id) => {
+                        let copy = self.alloc_struct(id);
+                        let size = self.structs.layouts[id.index()].size;
+                        if size > 0 {
+                            self.push_instr(Instr::Blit(top, copy, size));
+                        }
+                        self.stack.push(copy);
                     }
-                    self.stack.push(copy);
-                } else {
-                    self.stack.push(top);
+                    IrType::Enum(id) => {
+                        let copy = self.alloc_enum(id);
+                        let size = self.enums.layouts[id.index()].size;
+                        if size > 0 {
+                            self.push_instr(Instr::Blit(top, copy, size));
+                        }
+                        self.stack.push(copy);
+                    }
+                    _ => self.stack.push(top),
                 }
             }
             "drop" => {
@@ -764,6 +966,12 @@ impl<'a> FuncBuilder<'a> {
                     self.lower_struct_word(sw);
                     return;
                 }
+                // A variant constructor lowers to alloc + tag store + field
+                // stores inline, parallel to a struct constructor (R14/R15).
+                if let Some(&ew) = self.enums.words.get(name) {
+                    self.lower_enum_word(ew);
+                    return;
+                }
                 let (in_arity, out_arity, ret_ty) =
                     *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
@@ -794,6 +1002,19 @@ impl<'a> FuncBuilder<'a> {
         v
     }
 
+    /// Alloc a fresh frame slot for enum `id`'s tagged aggregate and yield it
+    /// as an `Enum`-typed value (a pointer to the storage), mirroring
+    /// `alloc_struct`.
+    fn alloc_enum(&mut self, id: EnumId) -> Value {
+        let (size, align) = {
+            let l = &self.enums.layouts[id.index()];
+            (l.size, l.align)
+        };
+        let v = self.fresh_value(IrType::Enum(id));
+        self.push_instr(Instr::Alloc(v, size, align));
+        v
+    }
+
     /// A `Ptr`-typed value for `base + offset` (a scalar field's address).
     fn field_ptr(&mut self, base: Value, offset: u32) -> Value {
         let p = self.fresh_value(IrType::Ptr);
@@ -801,21 +1022,21 @@ impl<'a> FuncBuilder<'a> {
         p
     }
 
-    /// A nested-struct field's value: its interior address, typed as the inner
-    /// struct. No copy — the owning struct is consumed by the
-    /// getter/destructure, so aliasing its storage is sound; a later `dup` or
-    /// word-return copies the bytes.
-    fn field_struct_value(&mut self, base: Value, offset: u32, inner: StructId) -> Value {
-        let v = self.fresh_value(IrType::Struct(inner));
+    /// A nested-aggregate field's value: its interior address, typed as the
+    /// inner struct/enum. No copy — the owning aggregate is consumed by the
+    /// getter/destructure/clause, so aliasing its storage is sound; a later
+    /// `dup` or word-return copies the bytes.
+    fn field_aggregate_value(&mut self, base: Value, offset: u32, inner: IrType) -> Value {
+        let v = self.fresh_value(inner);
         self.push_instr(Instr::PtrOffset(v, base, offset as i64));
         v
     }
 
     /// Store `val` into field `field` at `fptr`: a width-exact scalar store, or
-    /// an aggregate blit for a nested-struct field.
+    /// an aggregate blit for a nested struct/enum field.
     fn store_field(&mut self, fptr: Value, val: Value, field: FieldLayout) {
         match field.ty {
-            IrType::Struct(_) => {
+            IrType::Struct(_) | IrType::Enum(_) => {
                 if field.size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, field.size));
                 }
@@ -825,10 +1046,12 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Load field `field` at `fptr` onto the stack: a width-exact scalar load,
-    /// or the interior pointer as a nested-struct value.
+    /// or the interior pointer as a nested struct/enum value.
     fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
         let v = match field.ty {
-            IrType::Struct(inner) => self.field_struct_value(base, field.offset, inner),
+            IrType::Struct(_) | IrType::Enum(_) => {
+                self.field_aggregate_value(base, field.offset, field.ty)
+            }
             _ => {
                 let fptr = self.field_ptr(base, field.offset);
                 let v = self.fresh_value(field.ty);
@@ -879,6 +1102,38 @@ impl<'a> FuncBuilder<'a> {
                     let field = self.structs.layouts[id.index()].fields[fi];
                     self.load_field_onto_stack(s, field);
                 }
+            }
+        }
+    }
+
+    /// Lower a variant constructor inline (R15): alloc the enum's tagged
+    /// aggregate, store the discriminant (the variant's declaration index) as
+    /// an `i32` at `tag_offset`, then store each field at `payload_offset +
+    /// field.offset` (first field deepest, reusing `store_field`).
+    fn lower_enum_word(&mut self, ew: EnumWord) {
+        match ew {
+            EnumWord::Construct(id, variant_idx) => {
+                let (tag_ty, tag_offset, payload_offset, fields) = {
+                    let layout = &self.enums.layouts[id.index()];
+                    (
+                        layout.tag_ty,
+                        layout.tag_offset,
+                        layout.payload_offset,
+                        layout.variants[variant_idx].fields.clone(),
+                    )
+                };
+                let split = self.stack.len() - fields.len();
+                let args = self.stack.split_off(split);
+                let dst = self.alloc_enum(id);
+                let tag = self.fresh_value(tag_ty);
+                self.push_instr(Instr::Const(tag, variant_idx as i64));
+                let tag_ptr = self.field_ptr(dst, tag_offset);
+                self.push_instr(Instr::FieldStore(tag_ptr, tag));
+                for (arg, field) in args.into_iter().zip(fields) {
+                    let fptr = self.field_ptr(dst, payload_offset + field.offset);
+                    self.store_field(fptr, arg, field);
+                }
+                self.stack.push(dst);
             }
         }
     }
@@ -944,8 +1199,19 @@ mod tests {
         Structs::from_structs(&module.structs)
     }
 
+    fn enums_of(src: &str) -> Enums {
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        check(&module).unwrap();
+        build_registries(&module.structs, &module.enums).1
+    }
+
     fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
         s.layouts.iter().find(|l| l.name == name).expect("layout")
+    }
+
+    fn enum_layout<'a>(e: &'a Enums, name: &str) -> &'a EnumLayout {
+        e.layouts.iter().find(|l| l.name == name).expect("layout")
     }
 
     fn instrs(func: &IrFunc) -> Vec<&Instr> {
@@ -1053,6 +1319,7 @@ mod tests {
             &env,
             &resolve,
             &Structs::default(),
+            &Enums::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -1072,6 +1339,7 @@ mod tests {
             &env,
             &resolve,
             &Structs::default(),
+            &Enums::default(),
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -1105,16 +1373,24 @@ mod tests {
         // every scalar-only line marshals unchanged); a struct occupies its
         // aggregate size rounded up to a multiple of 8.
         let s = structs_of("type: Pair a i8 b i8 ;\ntype: Vec2 x i64 y i64 ;");
-        assert_eq!(carried_slot_bytes(IrType::I64, &s), 8);
-        assert_eq!(carried_slot_bytes(IrType::Bool, &s), 8);
+        assert_eq!(carried_slot_bytes(IrType::I64, &s, &Enums::default()), 8);
+        assert_eq!(carried_slot_bytes(IrType::Bool, &s, &Enums::default()), 8);
         // Pair is two i8s = 2 bytes, rounded up to one 8-byte cell.
         assert_eq!(
-            carried_slot_bytes(IrType::Struct(StructId::from_index(0)), &s),
+            carried_slot_bytes(
+                IrType::Struct(StructId::from_index(0)),
+                &s,
+                &Enums::default()
+            ),
             8
         );
         // Vec2 is two i64s = 16 bytes, already a multiple of 8.
         assert_eq!(
-            carried_slot_bytes(IrType::Struct(StructId::from_index(1)), &s),
+            carried_slot_bytes(
+                IrType::Struct(StructId::from_index(1)),
+                &s,
+                &Enums::default()
+            ),
             16
         );
     }
@@ -1129,7 +1405,16 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
-        let (func, m, out_bytes) = lower_line(0, &line_terms(""), 1, &[vec2], &env, &resolve, &s);
+        let (func, m, out_bytes) = lower_line(
+            0,
+            &line_terms(""),
+            1,
+            &[vec2],
+            &env,
+            &resolve,
+            &s,
+            &Enums::default(),
+        );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
         assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
@@ -1154,6 +1439,7 @@ mod tests {
             &env,
             &resolve,
             &Structs::default(),
+            &Enums::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -1189,6 +1475,7 @@ mod tests {
             &env,
             &resolve,
             &Structs::default(),
+            &Enums::default(),
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -1219,6 +1506,7 @@ mod tests {
             &env,
             &resolve,
             &Structs::default(),
+            &Enums::default(),
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -1290,8 +1578,16 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m, _) =
-            lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
+        let (func, _m, _) = lower_line(
+            0,
+            &terms,
+            1,
+            &[f64_ty],
+            &env,
+            &resolve,
+            &Structs::default(),
+            &Enums::default(),
+        );
         let loaded = func
             .blocks
             .iter()
@@ -1536,7 +1832,8 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let structs = Structs::default();
-        let mut b = FuncBuilder::new(&env, &resolve, &structs);
+        let enums = Enums::default();
+        let mut b = FuncBuilder::new(&env, &resolve, &structs, &enums);
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
@@ -1645,5 +1942,200 @@ mod tests {
         let module = parse(&tokens).unwrap();
         let ty = module.resolve_type_name("Vec2").unwrap();
         assert!(matches!(ir_type_of(ty), IrType::Struct(_)));
+    }
+
+    #[test]
+    fn ir_type_of_enum_maps_to_enum_irtype() {
+        let tokens = lex("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
+        let module = parse(&tokens).unwrap();
+        let ty = module.resolve_type_name("Shape").unwrap();
+        assert!(matches!(ir_type_of(ty), IrType::Enum(_)));
+    }
+
+    #[test]
+    fn enum_layout_tag_first_payload_at_max_variant_align() {
+        // R13/M1: an i32 tag at offset 0, the payload rounded up to the
+        // largest variant's align (8, for the f64 fields), so the tag's 4
+        // trailing bytes are padding; size = payload_offset(8) + max payload
+        // (Rect's two f64s = 16) = 24; align 8.
+        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ;");
+        let s = enum_layout(&e, "Shape");
+        assert_eq!(s.tag_offset, 0);
+        assert_eq!(
+            s.tag_ty,
+            IrType::Int {
+                bits: 32,
+                signed: true
+            }
+        );
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+        // Circle: one f64 at payload-relative 0; Rect: two f64s at 0 and 8.
+        assert_eq!(s.variants[0].fields[0].offset, 0);
+        assert_eq!(
+            (
+                s.variants[1].fields[0].offset,
+                s.variants[1].fields[1].offset
+            ),
+            (0, 8)
+        );
+    }
+
+    #[test]
+    fn enum_layout_all_zero_field_variants_is_tag_only() {
+        // Every variant zero-field: payload align 1, payload_offset 4, no
+        // payload, so size = 4, align = 4 (the tag's).
+        let e = enums_of("type: Dir | N | E | S | W ;");
+        let d = enum_layout(&e, "Dir");
+        assert_eq!(d.payload_offset, 4);
+        assert_eq!((d.size, d.align), (4, 4));
+        assert_eq!(d.variants.len(), 4);
+        assert!(d.variants.iter().all(|v| v.fields.is_empty()));
+    }
+
+    #[test]
+    fn enum_layout_mixed_variant_field_widths_pack_within_payload() {
+        // A variant with sub-word + i64 fields packs at natural alignment
+        // within the payload; the largest variant sizes the payload.
+        let e = enums_of("type: E | A x i8 y i64 | B v i16 ;");
+        let s = enum_layout(&e, "E");
+        // A: i8 at 0, i64 aligned to 8 -> offset 8, variant size 16, align 8.
+        assert_eq!(
+            (
+                s.variants[0].fields[0].offset,
+                s.variants[0].fields[1].offset
+            ),
+            (0, 8)
+        );
+        // payload align 8 (A's i64), payload_offset 8, max payload 16, size 24.
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+    }
+
+    #[test]
+    fn enum_layout_nested_struct_payload_sized_via_combined_registry() {
+        // D9: a variant field of struct type is sized via its layout (16 for a
+        // two-f64 Vec2), not `scalar_size_align`.
+        let (structs, enums) = {
+            let src = "type: Vec2 x f64 y f64 ; type: Shape | Dot p Vec2 | Unit ;";
+            let tokens = lex(src).unwrap();
+            let module = parse(&tokens).unwrap();
+            check(&module).unwrap();
+            build_registries(&module.structs, &module.enums)
+        };
+        let _ = structs;
+        let s = enum_layout(&enums, "Shape");
+        // Dot's Vec2 payload: 16 bytes at payload-relative 0; payload align 8.
+        assert_eq!(s.variants[0].fields[0].size, 16);
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+    }
+
+    #[test]
+    fn struct_field_of_enum_type_sized_via_combined_registry() {
+        // D9: a struct field of enum type is sized via the enum's layout, not
+        // `scalar_size_align`; the struct places the next field past it.
+        let (structs, _enums) = {
+            let src =
+                "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ;";
+            let tokens = lex(src).unwrap();
+            let module = parse(&tokens).unwrap();
+            check(&module).unwrap();
+            build_registries(&module.structs, &module.enums)
+        };
+        let t = layout(&structs, "Tagged");
+        // Shape is 24 bytes align 8: k at 0 (size 24), n (i64) at 24; size 32.
+        assert_eq!((t.fields[0].offset, t.fields[0].size), (0, 24));
+        assert_eq!(t.fields[1].offset, 24);
+        assert_eq!((t.size, t.align), (32, 8));
+    }
+
+    #[test]
+    fn lower_constructor_allocs_stores_tag_and_each_field() {
+        // R15: a variant constructor allocs the tagged aggregate, stores the
+        // discriminant as a `Const`, then width-exact-stores each field. Rect
+        // has two fields, so: one Alloc, one tag Const, three FieldStores
+        // (tag + two fields).
+        let ir = lower_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ; : mk ( f64 f64 -- Shape ) Rect ;",
+        );
+        let mk = ir.funcs.iter().find(|f| f.name == "mk").unwrap();
+        assert_eq!(count(mk, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(mk, |i| matches!(i, Instr::FieldStore(..))), 3);
+        // The tag store writes the variant index (Rect = 1).
+        assert!(instrs(mk).iter().any(|i| matches!(i, Instr::Const(_, 1))));
+    }
+
+    #[test]
+    fn lower_zero_field_constructor_stores_only_the_tag() {
+        // A zero-field variant constructs with just the tag store: one Alloc,
+        // one FieldStore (the tag), no payload store.
+        let ir = lower_src("type: MaybeInt | None | Some v i64 ; : n ( -- MaybeInt ) None ;");
+        let n = ir.funcs.iter().find(|f| f.name == "n").unwrap();
+        assert_eq!(count(n, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(n, |i| matches!(i, Instr::FieldStore(..))), 1);
+        // None is variant index 0.
+        assert!(instrs(n).iter().any(|i| matches!(i, Instr::Const(_, 0))));
+    }
+
+    #[test]
+    fn lower_dup_of_enum_allocs_and_blits() {
+        // R15: `dup` of an enum copies the aggregate bytes (fresh alloc +
+        // blit), like a struct and unlike a scalar.
+        let ir = lower_src(
+            "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt MaybeInt ) dup ;",
+        );
+        let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+    }
+
+    #[test]
+    fn carried_slot_bytes_enum_is_aligned_aggregate() {
+        // R17: a carried enum slot occupies its size rounded up to a multiple
+        // of 8. Shape is 24 bytes (already a multiple of 8); a tag-only enum
+        // (4 bytes) rounds up to one 8-byte cell.
+        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Dir | N | S ;");
+        assert_eq!(
+            carried_slot_bytes(IrType::Enum(EnumId::from_index(0)), &Structs::default(), &e),
+            24
+        );
+        assert_eq!(
+            carried_slot_bytes(IrType::Enum(EnumId::from_index(1)), &Structs::default(), &e),
+            8
+        );
+    }
+
+    #[test]
+    fn lower_line_enum_slot_blits_in_and_out() {
+        // R17: a carried enum slot is copied out of the buffer on entry and
+        // back on exit by aggregate blits, and the returned top advances by
+        // the enum's aligned carried size. An empty line carries the one Shape
+        // straight through: one prologue blit, one epilogue blit.
+        let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;";
+        let (structs, enums) = {
+            let tokens = lex(src).unwrap();
+            let module = parse(&tokens).unwrap();
+            check(&module).unwrap();
+            build_registries(&module.structs, &module.enums)
+        };
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let shape = Type::Enum(EnumId::from_index(0), "Shape");
+        let (func, m, out_bytes) = lower_line(
+            0,
+            &line_terms(""),
+            1,
+            &[shape],
+            &env,
+            &resolve,
+            &structs,
+            &enums,
+        );
+        assert_eq!(m, 1);
+        assert_eq!(out_bytes, 24);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 0);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 0);
     }
 }

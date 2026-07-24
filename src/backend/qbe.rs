@@ -7,11 +7,26 @@
 use std::fmt::Write;
 
 use crate::ir::{
-    BinOp, BlockId, CmpOp, Instr, IrFunc, IrModule, IrType, StructLayout, Terminator, Value,
+    BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout, Terminator,
+    Value,
 };
+
+/// The backend's view of a program's aggregate layouts: the struct and enum
+/// registries, threaded as one `Copy` handle so a nested-aggregate member/ABI
+/// spelling can consult either (a struct field of enum type, D9). The
+/// registries stay separate (D10); this only co-locates two `&[...]`.
+#[derive(Clone, Copy)]
+struct Layouts<'a> {
+    structs: &'a [StructLayout],
+    enums: &'a [EnumLayout],
+}
 
 pub fn emit(ir: &IrModule) -> Result<String, String> {
     let mut out = String::new();
+    let layouts = Layouts {
+        structs: &ir.structs,
+        enums: &ir.enums,
+    };
     out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
     out.push_str("data $ufmt = { b \"%lu\\n\", b 0 }\n");
     out.push_str("data $ffmt = { b \"%g\\n\", b 0 }\n");
@@ -22,12 +37,17 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
     out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
     out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
+    // Enum aggregates are self-contained opaque byte blobs, emitted first so a
+    // struct member of enum type (D9) references an already-declared `:E`.
+    for layout in &ir.enums {
+        emit_enum_type(&mut out, layout);
+    }
     for layout in &ir.structs {
-        emit_struct_type(&mut out, layout, &ir.structs);
+        emit_struct_type(&mut out, layout, layouts);
     }
     for func in &ir.funcs {
         out.push('\n');
-        emit_func(&mut out, func, &ir.structs);
+        emit_func(&mut out, func, layouts);
     }
     Ok(out)
 }
@@ -37,13 +57,30 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
 /// list with natural alignment, which agrees with the hand-computed layout,
 /// the load-bearing ABI-agreement property. A zero-field struct emits an
 /// empty aggregate `{ }`.
-fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: &[StructLayout]) {
+fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: Layouts) {
     let members: Vec<String> = layout
         .fields
         .iter()
         .map(|f| member_ty(f.ty, layouts))
         .collect();
     writeln!(out, "type :{} = {{ {} }}", layout.name, members.join(", ")).unwrap();
+}
+
+/// Emit an enum's QBE aggregate type as an alignment-annotated opaque byte
+/// blob `type :Name = align A { b N }` (R15): the payload has no single member
+/// layout across variants, so the aggregate is sized/aligned only, and every
+/// access is offset-driven (explicit `PtrOffset` + width-exact field ops +
+/// `Blit`). Caller and callee agree because they share `:Name`. A zero-size
+/// enum still emits at least one byte so the type is non-empty.
+fn emit_enum_type(out: &mut String, layout: &EnumLayout) {
+    writeln!(
+        out,
+        "type :{} = align {} {{ b {} }}",
+        layout.name,
+        layout.align,
+        layout.size.max(1)
+    )
+    .unwrap();
 }
 
 /// The Sooth `main` word is emitted as `sooth_main`; the C shim owns `main`.
@@ -111,25 +148,26 @@ fn width(ty: IrType) -> &'static str {
             }
         }
         IrType::Ptr => "l",
-        // A struct value is a pointer in a register (`l`); its aggregate `:S`
-        // type is only spelled in ABI positions (`qbe_abi_ty`).
-        IrType::Struct(_) => "l",
+        // A struct/enum value is a pointer in a register (`l`); its aggregate
+        // `:S`/`:E` type is only spelled in ABI positions (`qbe_abi_ty`).
+        IrType::Struct(_) | IrType::Enum(_) => "l",
     }
 }
 
 /// The QBE type spelled in an ABI position (a function param/return or a call
 /// argument): a struct is its aggregate `:Name` (so QBE applies its C-ABI
 /// by-value classification); every scalar is its register `width`.
-fn qbe_abi_ty(ty: IrType, layouts: &[StructLayout]) -> String {
+fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
     match ty {
-        IrType::Struct(id) => format!(":{}", layouts[id.index()].name),
+        IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
+        IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         _ => width(ty).to_string(),
     }
 }
 
 /// The QBE member letter for a struct field: `b`/`h`/`w`/`l` by integer width,
 /// `s`/`d` by float width, `:Inner` for a nested struct.
-fn member_ty(ty: IrType, layouts: &[StructLayout]) -> String {
+fn member_ty(ty: IrType, layouts: Layouts) -> String {
     match ty {
         IrType::Bool => "b".to_string(),
         IrType::Int { bits: 8, .. } => "b".to_string(),
@@ -139,7 +177,8 @@ fn member_ty(ty: IrType, layouts: &[StructLayout]) -> String {
         IrType::Float { bits: 32 } => "s".to_string(),
         IrType::Float { .. } => "d".to_string(),
         IrType::Ptr => "l".to_string(),
-        IrType::Struct(id) => format!(":{}", layouts[id.index()].name),
+        IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
+        IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
     }
 }
 
@@ -161,7 +200,9 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Float { bits: 32 } => ("s", "loads"),
         IrType::Float { .. } => ("d", "loadd"),
         IrType::Ptr => ("l", "loadl"),
-        IrType::Struct(_) => unreachable!("a struct field is copied by blit, not scalar-loaded"),
+        IrType::Struct(_) | IrType::Enum(_) => {
+            unreachable!("an aggregate field is copied by blit, not scalar-loaded")
+        }
     }
 }
 
@@ -175,7 +216,9 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Float { bits: 32 } => "stores",
         IrType::Float { .. } => "stored",
         IrType::Ptr => "storel",
-        IrType::Struct(_) => unreachable!("a struct field is copied by blit, not scalar-stored"),
+        IrType::Struct(_) | IrType::Enum(_) => {
+            unreachable!("an aggregate field is copied by blit, not scalar-stored")
+        }
     }
 }
 
@@ -370,7 +413,7 @@ fn ty_of(value_types: &[IrType], v: Value) -> IrType {
     value_types[v.0 as usize]
 }
 
-fn emit_func(out: &mut String, func: &IrFunc, layouts: &[StructLayout]) {
+fn emit_func(out: &mut String, func: &IrFunc, layouts: Layouts) {
     let ret_ty = match func.ret {
         Some(ty) => format!("{} ", qbe_abi_ty(ty, layouts)),
         None => String::new(),
@@ -403,7 +446,7 @@ fn emit_instr(
     out: &mut String,
     instr: &Instr,
     value_types: &[IrType],
-    layouts: &[StructLayout],
+    layouts: Layouts,
     ext_id: &mut u32,
 ) {
     match instr {
@@ -641,8 +684,8 @@ fn emit_instr(
                 writeln!(out, "\tcall $printf(l {fmt}, l {w64}, ...)")
             }
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
-            IrType::Struct(_) => {
-                unreachable!("a struct is not a printable scalar; checker rejects it (X6)")
+            IrType::Struct(_) | IrType::Enum(_) => {
+                unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
             }
         },
         Instr::PtrOffset(dst, base, bytes) => {
@@ -731,7 +774,7 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, IrModule, Structs};
+    use crate::ir::{lower, lower_line, Enums, IrModule, Structs};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
@@ -761,6 +804,7 @@ mod tests {
             &env,
             &resolve,
             &Structs::default(),
+            &Enums::default(),
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -899,8 +943,16 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m, _) =
-            lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
+        let (func, _m, _) = lower_line(
+            0,
+            &terms,
+            1,
+            &[f64_ty],
+            &env,
+            &resolve,
+            &Structs::default(),
+            &Enums::default(),
+        );
         let il = emit(&IrModule {
             funcs: vec![func],
             ..Default::default()
@@ -1571,6 +1623,52 @@ mod tests {
         assert!(
             il.contains("type :Segment = { :Vec2, :Vec2 }"),
             "expected nested aggregate members: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_enum_declares_opaque_aligned_blob() {
+        // R15: the enum aggregate is an alignment-annotated opaque byte blob
+        // sized to the whole enum (tag + max payload), not a member list.
+        // Shape = i32 tag (padded to 8) + max payload 16 = 24 bytes, align 8.
+        let il = emit_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ; : mk ( f64 -- Shape ) Circle ;",
+        );
+        assert!(
+            il.contains("type :Shape = align 8 { b 24 }"),
+            "expected an opaque aligned blob: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_enum_param_and_return_use_aggregate_abi() {
+        // A word taking/returning an enum spells `:Shape` in ABI positions, so
+        // QBE copies the tagged aggregate by value across the boundary.
+        let il =
+            emit_src("type: Shape | Circle r f64 | Rect w f64 h f64 ; : id ( Shape -- Shape ) ;");
+        assert!(
+            il.contains("export function :Shape $id(:Shape"),
+            "expected an aggregate param + return: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_struct_field_of_enum_references_enum_aggregate() {
+        // D9: a struct member of enum type references the enum's `:E`
+        // aggregate, and the enum type is declared before the struct that
+        // uses it.
+        let il = emit_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ; : mk ( Shape i64 -- Tagged ) Tagged ;",
+        );
+        assert!(
+            il.contains("type :Tagged = { :Shape, l }"),
+            "expected a struct member of enum type: {il}"
+        );
+        let enum_pos = il.find("type :Shape").expect("enum type emitted");
+        let struct_pos = il.find("type :Tagged").expect("struct type emitted");
+        assert!(
+            enum_pos < struct_pos,
+            "the enum type must be declared before the struct that references it: {il}"
         );
     }
 }

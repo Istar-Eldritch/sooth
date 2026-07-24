@@ -62,8 +62,7 @@ impl Ctx<'_> {
 }
 
 pub fn check(module: &Module) -> Result<(), String> {
-    check_structs(&module.structs)?;
-    check_duplicate_type_names(&module.structs, &module.enums)?;
+    check_types(&module.structs, &module.enums)?;
 
     let mut env = builtin_table();
     for (name, sig) in struct_generated_sigs(&module.structs) {
@@ -82,13 +81,21 @@ pub fn check(module: &Module) -> Result<(), String> {
     Ok(())
 }
 
-/// Struct-level checks that must pass before any generated-word signature or
-/// word body is type-checked: no two `type:` declarations share a name, and
-/// no struct contains itself by value, directly or transitively.
-pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
-    check_duplicate_struct_names(structs)?;
-    check_struct_recursion(structs)?;
+/// Type-level checks that must pass before any generated-word signature or
+/// word body is type-checked: no two `type:` declarations share a name across
+/// the combined struct+enum registries, and no struct or enum contains itself
+/// by value, directly or transitively, through the combined type graph (D9,
+/// D10, R8, R10).
+pub fn check_types(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
+    check_duplicate_type_names(structs, enums)?;
+    check_recursion(structs, enums)?;
     Ok(())
+}
+
+/// The struct-only projection of `check_types` (no enums), for callers that
+/// don't yet declare enums.
+pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
+    check_types(structs, &[])
 }
 
 /// A duplicate `type:` name is a sharp located error naming the type.
@@ -141,50 +148,132 @@ enum VisitState {
     Done,
 }
 
-/// Detect a struct that contains itself by value, directly or transitively,
-/// via cycle detection over the field-type graph.
-fn check_struct_recursion(structs: &[StructDecl]) -> Result<(), String> {
-    let mut state = vec![VisitState::Unvisited; structs.len()];
+/// A node in the combined struct+enum value-containment graph (D9, R10): a
+/// struct or an enum, by registry index.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeNode {
+    Struct(usize),
+    Enum(usize),
+}
+
+/// Detect a struct or enum that contains itself by value, directly or
+/// transitively, via cycle detection over the *combined* type graph (D9): a
+/// struct's field types and an enum's variant field types are edges, so a
+/// struct-of-enum-of-struct cycle is caught the same as a pure-struct one.
+fn check_recursion(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
+    let mut sstate = vec![VisitState::Unvisited; structs.len()];
+    let mut estate = vec![VisitState::Unvisited; enums.len()];
+    let mut path = Vec::new();
     for start in 0..structs.len() {
-        if state[start] == VisitState::Unvisited {
-            let mut path = Vec::new();
-            visit_struct_recursion(structs, start, &mut state, &mut path)?;
+        if sstate[start] == VisitState::Unvisited {
+            visit_recursion(
+                TypeNode::Struct(start),
+                structs,
+                enums,
+                &mut sstate,
+                &mut estate,
+                &mut path,
+            )?;
+        }
+    }
+    for start in 0..enums.len() {
+        if estate[start] == VisitState::Unvisited {
+            visit_recursion(
+                TypeNode::Enum(start),
+                structs,
+                enums,
+                &mut sstate,
+                &mut estate,
+                &mut path,
+            )?;
         }
     }
     Ok(())
 }
 
-fn visit_struct_recursion(
+/// The frontend `Type` of a field, mapped to a graph node (a scalar has no
+/// edge).
+fn type_node(ty: &Type) -> Option<TypeNode> {
+    match ty {
+        Type::Struct(id, _) => Some(TypeNode::Struct(id.index())),
+        Type::Enum(id, _) => Some(TypeNode::Enum(id.index())),
+        _ => None,
+    }
+}
+
+/// The value-containment edges out of a node: a struct's field types, or every
+/// variant field type of an enum.
+fn node_edges(node: TypeNode, structs: &[StructDecl], enums: &[EnumDecl]) -> Vec<TypeNode> {
+    match node {
+        TypeNode::Struct(i) => structs[i]
+            .fields
+            .iter()
+            .filter_map(|(_, ty)| type_node(ty))
+            .collect(),
+        TypeNode::Enum(i) => enums[i]
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .filter_map(|(_, ty)| type_node(ty))
+            .collect(),
+    }
+}
+
+fn node_state<'a>(
+    node: TypeNode,
+    sstate: &'a mut [VisitState],
+    estate: &'a mut [VisitState],
+) -> &'a mut VisitState {
+    match node {
+        TypeNode::Struct(i) => &mut sstate[i],
+        TypeNode::Enum(i) => &mut estate[i],
+    }
+}
+
+fn node_name<'a>(node: TypeNode, structs: &'a [StructDecl], enums: &'a [EnumDecl]) -> &'a str {
+    match node {
+        TypeNode::Struct(i) => structs[i].name.as_str(),
+        TypeNode::Enum(i) => enums[i].name.as_str(),
+    }
+}
+
+fn visit_recursion(
+    node: TypeNode,
     structs: &[StructDecl],
-    idx: usize,
-    state: &mut [VisitState],
-    path: &mut Vec<usize>,
+    enums: &[EnumDecl],
+    sstate: &mut [VisitState],
+    estate: &mut [VisitState],
+    path: &mut Vec<TypeNode>,
 ) -> Result<(), String> {
-    state[idx] = VisitState::InProgress;
-    path.push(idx);
-    for (_, field_ty) in &structs[idx].fields {
-        if let Type::Struct(id, _) = field_ty {
-            let j = id.index();
-            match state[j] {
-                VisitState::Unvisited => visit_struct_recursion(structs, j, state, path)?,
-                VisitState::InProgress => {
-                    let cycle_start = path.iter().position(|&x| x == j).unwrap();
-                    let mut names: Vec<&str> = path[cycle_start..]
-                        .iter()
-                        .map(|&i| structs[i].name.as_str())
-                        .collect();
-                    names.push(structs[j].name.as_str());
-                    return Err(format!(
-                        "error: recursive struct definition (infinite size): {}",
-                        names.join(" -> ")
-                    ));
-                }
-                VisitState::Done => {}
+    *node_state(node, sstate, estate) = VisitState::InProgress;
+    path.push(node);
+    for child in node_edges(node, structs, enums) {
+        match *node_state(child, sstate, estate) {
+            VisitState::Unvisited => visit_recursion(child, structs, enums, sstate, estate, path)?,
+            VisitState::InProgress => {
+                let cycle_start = path.iter().position(|&x| x == child).unwrap();
+                let mut names: Vec<&str> = path[cycle_start..]
+                    .iter()
+                    .map(|&n| node_name(n, structs, enums))
+                    .collect();
+                names.push(node_name(child, structs, enums));
+                // Key the wording on the repeated node's kind so a pure-struct
+                // cycle keeps its Slice 3 message and an enum cycle names an
+                // enum (X3).
+                let kind = match child {
+                    TypeNode::Struct(_) => "struct",
+                    TypeNode::Enum(_) => "enum",
+                };
+                return Err(format!(
+                    "error: recursive {kind} definition (infinite size): {}",
+                    names.join(" -> ")
+                ));
             }
+            VisitState::Done => {}
         }
     }
     path.pop();
-    state[idx] = VisitState::Done;
+    *node_state(node, sstate, estate) = VisitState::Done;
     Ok(())
 }
 
@@ -1381,6 +1470,55 @@ mod tests {
         );
         assert!(err.contains('A'), "unexpected message: {err}");
         assert!(err.contains('B'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_direct_recursion_is_error_not_hang() {
+        // X3/M5: a directly self-referential enum (a variant field of its own
+        // type) is a located error naming the cycle, and this test's return
+        // is proof the DFS terminated rather than hung.
+        let err = check_src("type: Loop | Wrap next Loop | End ;").unwrap_err();
+        assert!(err.contains("recursive enum"), "unexpected message: {err}");
+        assert!(err.contains("Loop"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_mutual_recursion_is_error_not_hang() {
+        // X3/M5: a mutually-recursive pair of enums, names both in the cycle.
+        let err = check_src("type: A | Ta x B ; type: B | Tb y A ;").unwrap_err();
+        assert!(err.contains("recursive enum"), "unexpected message: {err}");
+        assert!(err.contains('A'), "unexpected message: {err}");
+        assert!(err.contains('B'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_enum_mixed_recursion_is_error_not_hang() {
+        // D9/X3: a struct field of enum type closing a cycle back to the
+        // struct is caught by the combined-graph DFS.
+        let err = check_src("type: S f E ; type: E | V g S ;").unwrap_err();
+        assert!(err.contains("recursive"), "unexpected message: {err}");
+        assert!(err.contains('S'), "unexpected message: {err}");
+        assert!(err.contains('E'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_and_enum_duplicate_name_across_registries_is_error() {
+        // X2: a name used by one struct and one enum names that type.
+        let err = check_src("type: Dup x i64 ; type: Dup | V ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Dup"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_nested_aggregate_fields_ok() {
+        // D9: a variant may carry a struct, and a struct may carry an enum,
+        // acyclically — no recursion error.
+        check_src(
+            "type: Vec2 x f64 y f64 ;
+             type: Shape | Dot p Vec2 | Empty ;
+             type: Tagged k Shape n i64 ;",
+        )
+        .unwrap();
     }
 
     #[test]

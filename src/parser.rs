@@ -176,22 +176,23 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 /// to end of input. One line is one complete unit (an unterminated def is a
 /// normal parse error).
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
-    parse_line_with_structs(tokens, &[])
+    parse_line_with_structs(tokens, &[], &[])
 }
 
-/// Parse a REPL line resolving struct type names in a `:` definition's effect
-/// against `structs` (the session's registry), so a word may take or
-/// return a previously-declared struct. A bare expression carries no type
-/// names, so `structs` is unused there.
+/// Parse a REPL line resolving struct and enum type names in a `:`
+/// definition's effect against the session's registries, so a word may take
+/// or return a previously-declared struct or enum. A bare expression carries
+/// no type names, so the registries are unused there.
 pub fn parse_line_with_structs(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
+    enums: &[EnumDecl],
 ) -> Result<Line, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
-        enums: &[],
+        enums,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -218,12 +219,13 @@ pub fn parse_line_with_structs(
 pub fn parse_typedef_line(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
+    enums: &[EnumDecl],
 ) -> Result<Vec<(String, Type)>, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
-        enums: &[],
+        enums,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -233,6 +235,47 @@ pub fn parse_typedef_line(
         ));
     }
     Ok(fields)
+}
+
+/// Whether a `type:` line is an enum declaration (a `|`-bearing body, D1), so
+/// the REPL routes it to the enum registry rather than the struct one.
+/// `tokens` must start at `type:`.
+pub fn typedef_line_is_enum(tokens: &[(Token, Span)]) -> bool {
+    body_has_pipe_before_semicolon(tokens, 2)
+}
+
+/// The `(name, span)` of every variant in a `type:` enum line, in source
+/// order (D8's variant pre-pass at REPL scope), so the REPL can register the
+/// variant-name skeleton before parsing variant fields. `tokens` must start
+/// at `type:`.
+pub fn enum_variant_names(tokens: &[(Token, Span)]) -> Vec<(String, Span)> {
+    scan_variant_names(tokens, 2)
+}
+
+/// Parse a single REPL `type:` enum line into its ordered per-variant
+/// `(field-name, Type)` lists, resolving field types against the session's
+/// registries (the just-declared enum already appended so a self-reference
+/// resolves, which the checker then rejects as recursion). Trailing tokens
+/// after `;` are a located error.
+pub fn parse_enum_typedef_line(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+) -> Result<Vec<Vec<(String, Type)>>, String> {
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
+        structs,
+        enums,
+    };
+    let variant_fields = parser.parse_enum_typedef()?;
+    if let Some((tok, span)) = parser.peek() {
+        return Err(format!(
+            "parse error: unexpected {tok:?} after `;` at line {}, col {} (one line is one complete unit)",
+            span.line, span.col
+        ));
+    }
+    Ok(variant_fields)
 }
 
 struct Parser<'t> {
