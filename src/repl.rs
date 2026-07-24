@@ -151,10 +151,10 @@ fn resolver_with_override<'a>(
 /// output line. `buf` holds the live carried bytes as 8-byte `i64` cells;
 /// each slot's cell offset is computed from the per-slot sizes (a scalar is
 /// one cell, a struct spans `ceil(size/8)` cells), so a scalar slot past a
-/// struct still reads the right cell (R17, R18).
+/// struct still reads the right cell.
 ///
 /// A struct slot renders as its type-name placeholder `<TypeName>`, reading no
-/// field bytes (M4). A float slot is reinterpreted from its stored bits via
+/// field bytes. A float slot is reinterpreted from its stored bits via
 /// `from_bits` (R21): displaying its `i64` bit pattern would be meaningless. An
 /// `f32` slot reads only the low 32 bits (it was stored 4-wide, Q2). A `bool`
 /// slot displays as `true`/`false` (matching `.`, not the raw 0/1). An
@@ -198,12 +198,12 @@ pub struct Session {
     /// The struct registry, one entry per `type:` line, in declaration order
     /// so `StructId` = index stays stable (a carried `Type::Struct` keeps
     /// referring to the same struct across lines). Field types resolve against
-    /// earlier entries plus the entry being declared (R3).
+    /// earlier entries plus the entry being declared.
     structs: Vec<StructDecl>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct), so the buffer is
     /// byte-addressable and slot offsets are computed from `types`, never
-    /// `index * 8` (R17).
+    /// `index * 8`.
     buf: Vec<i64>,
     top: usize,
     /// The `Type` of each carried slot, in stack order (deepest first). Slot
@@ -227,7 +227,7 @@ impl Session {
         }
     }
 
-    /// The checker's typed env: builtins, the generated struct words (R7), plus
+    /// The checker's typed env: builtins, the generated struct words, plus
     /// every successfully-defined user word.
     fn typed_env(&self) -> HashMap<String, Sig> {
         let mut env = check::builtin_table();
@@ -255,11 +255,11 @@ impl Session {
         }
     }
 
-    /// Register a `type:` struct declaration (R3/R5). The new name is appended
-    /// to the registry first (so a self-reference in its own fields resolves,
-    /// and is then rejected as recursion, X3); fields resolve against the whole
-    /// registry. On any error the appended entry is rolled back, leaving the
-    /// session untouched.
+    /// Register a `type:` struct declaration. The new name is appended to the
+    /// registry first (so a self-reference in its own fields resolves, and is
+    /// then rejected as recursion); fields resolve against the whole registry.
+    /// On any error the appended entry is rolled back, leaving the session
+    /// untouched.
     fn eval_typedef(
         &mut self,
         tokens: &[(Token, Span)],
@@ -517,8 +517,8 @@ mod tests {
         use crate::ast::StructId;
         // A 16-byte struct (two 8-byte cells) at StructId 0, then a scalar
         // slot. The struct renders as its `<Vec2>` placeholder reading no
-        // field bytes (M4), and the trailing scalar reads the cell *past* the
-        // struct's two cells, not `index * 8` (R18).
+        // field bytes, and the trailing scalar reads the cell *past* the
+        // struct's two cells, not `index * 8`.
         let layouts = vec![StructLayout {
             name: "Vec2",
             size: 16,

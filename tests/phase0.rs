@@ -996,6 +996,20 @@ fn struct_survives_word_call_boundary_native() {
 }
 
 #[test]
+fn struct_nested_struct_crosses_word_call_boundary_native() {
+    // A struct with a nested-struct field (Segment, holding two Vec2s) passed
+    // directly as a word argument and returned directly as the word's result,
+    // isolating the nested-aggregate ABI rather than only exercising it
+    // transitively through the `vectors` dogfood's `span`.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+type: Segment from Vec2 to Vec2 ;\n\
+: swap-ends ( Segment -- Segment )\n  Segment> swap Segment ;\n\
+: main ( -- )\n  1 2 Vec2 3 4 Vec2 Segment\n  swap-ends\n  dup Segment>from Vec2>x .\n  Segment>to Vec2>y . ;\n";
+    // from=(1,2) to=(3,4) swapped -> from=(3,4) to=(1,2): from.x=3, to.y=2.
+    assert_eq!(run_struct_golden("nested-call-boundary", src), "3\n2\n");
+}
+
+#[test]
 fn struct_zero_field_unit_end_to_end_native() {
     // S7/M3: a zero-field struct constructs and destructures with no crash.
     let src = "type: Unit ;\n\

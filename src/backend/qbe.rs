@@ -32,11 +32,11 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     Ok(out)
 }
 
-/// Emit a struct's QBE aggregate type `type :Name = { members }` (R12), one
+/// Emit a struct's QBE aggregate type `type :Name = { members }`, one
 /// member per field in layout order. QBE re-derives offsets from the member
-/// list with natural alignment, which agrees with the hand-computed layout
-/// (R11) — the load-bearing ABI-agreement property (RISK 2). A zero-field
-/// struct emits an empty aggregate `{ }` (Q2).
+/// list with natural alignment, which agrees with the hand-computed layout,
+/// the load-bearing ABI-agreement property. A zero-field struct emits an
+/// empty aggregate `{ }`.
 fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: &[StructLayout]) {
     let members: Vec<String> = layout
         .fields
@@ -119,7 +119,7 @@ fn width(ty: IrType) -> &'static str {
 
 /// The QBE type spelled in an ABI position (a function param/return or a call
 /// argument): a struct is its aggregate `:Name` (so QBE applies its C-ABI
-/// by-value classification, R12); every scalar is its register `width`.
+/// by-value classification); every scalar is its register `width`.
 fn qbe_abi_ty(ty: IrType, layouts: &[StructLayout]) -> String {
     match ty {
         IrType::Struct(id) => format!(":{}", layouts[id.index()].name),
@@ -128,7 +128,7 @@ fn qbe_abi_ty(ty: IrType, layouts: &[StructLayout]) -> String {
 }
 
 /// The QBE member letter for a struct field: `b`/`h`/`w`/`l` by integer width,
-/// `s`/`d` by float width, `:Inner` for a nested struct (R12).
+/// `s`/`d` by float width, `:Inner` for a nested struct.
 fn member_ty(ty: IrType, layouts: &[StructLayout]) -> String {
     match ty {
         IrType::Bool => "b".to_string(),
@@ -143,9 +143,6 @@ fn member_ty(ty: IrType, layouts: &[StructLayout]) -> String {
     }
 }
 
-/// The width-exact field load op + register class picked from the field's own
-/// scalar `IrType` (R15): sub-word loads sign-/zero-extend into a `w` register
-/// (canonical, R15), 32-bit fills `w`, 64-bit fills `l`, floats load `s`/`d`.
 fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
     match ty {
         IrType::Bool => ("w", "loadub"),
@@ -168,10 +165,6 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
     }
 }
 
-/// The width-exact field store op picked from the value's own scalar `IrType`
-/// (R15): `storeb`/`storeh`/`storew`/`storel` by integer width, `stores`/
-/// `stored` by float width. Writes exactly the field's bytes, never widening
-/// to an 8-byte cell (that is the marshalling `Store`).
 fn field_store_op(ty: IrType) -> &'static str {
     match ty {
         IrType::Bool => "storeb",
@@ -569,8 +562,8 @@ fn emit_instr(
         }
         Instr::Call(ret, f, args) => {
             // A struct argument/return is spelled `:S` so QBE applies its
-            // by-value C-ABI classification (R12); the temporary is a pointer
-            // to the aggregate on both sides.
+            // by-value C-ABI classification; the temporary is a pointer to
+            // the aggregate on both sides.
             let a: Vec<String> = args
                 .iter()
                 .map(|x| {
@@ -657,7 +650,7 @@ fn emit_instr(
         }
         Instr::Alloc(dst, size, align) => {
             // A frame-local aggregate slot; QBE only offers alloc4/8/16, so a
-            // size-0 (zero-field) struct still allocs a minimal slot (Q2).
+            // size-0 (zero-field) struct still allocs a minimal slot.
             let op = alloc_op(*align);
             writeln!(out, "\t{} =l {op} {}", val(*dst), (*size).max(1))
         }
@@ -1540,7 +1533,7 @@ mod tests {
     #[test]
     fn emit_struct_return_uses_aggregate_abi() {
         // A struct-returning word declares its return as `:Vec2`, not `l`, so
-        // QBE copies the aggregate by value across the boundary (R12).
+        // QBE copies the aggregate by value across the boundary.
         let il = emit_src("type: Vec2 x i64 y i64 ; : mk ( i64 i64 -- Vec2 ) Vec2 ;");
         assert!(
             il.contains("export function :Vec2 $mk("),

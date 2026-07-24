@@ -227,6 +227,30 @@ fn carried_struct_and_scalar_offsets_stay_correct() {
     );
 }
 
+/// A struct whose aggregate size is not a multiple of 8 (`Pair`, two `i8`
+/// fields, 2 bytes) still round-trips across a REPL line boundary: the
+/// carried cell count rounds up to one 8-byte cell, exercised here at
+/// runtime rather than only by the `carried_slot_bytes` unit test.
+#[test]
+fn carried_struct_with_non_eight_multiple_size_survives_line_boundary() {
+    let out = run_session(&[
+        "type: Pair a i8 b i8 ;",
+        "1 >i8 2 >i8 Pair",
+        "dup Pair>a . Pair>b .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Pair",
+            "stack: <Pair>",
+            "1",
+            "2",
+            "stack: (empty)"
+        ]
+    );
+}
+
 /// A duplicate `type:` in the REPL is a located error (X2) and rolls back:
 /// the original struct stays usable, and a recursive `type:` is reported
 /// rather than hanging (X3, M5). Both leave the session intact.

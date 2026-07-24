@@ -15,8 +15,8 @@ use crate::ast::{
 };
 use crate::lexer::Token;
 
-/// Pre-pass (R3): scan the whole token stream for every `type: Name` and
-/// return its name and span, in source order. Malformed occurrences (a
+/// Pre-pass: scan the whole token stream for every `type: Name` and return
+/// its name and span, in source order. Malformed occurrences (a
 /// missing/non-word name) are left for the real `type:` production to report;
 /// this pass only needs to register the names so forward/self references
 /// resolve regardless of declaration order, so it never errors itself.
@@ -36,7 +36,7 @@ fn prepass_struct_names(tokens: &[(Token, Span)]) -> Vec<(String, Span)> {
 
 /// Build the initial struct registry (names only, fields filled in once the
 /// real `type:` bodies are parsed) from the pre-pass names, leaking each name
-/// once (Q1) so every `Type::Struct` naming it renders without a registry.
+/// once so every `Type::Struct` naming it renders without a registry.
 fn build_struct_registry(names: &[(String, Span)]) -> Vec<StructDecl> {
     names
         .iter()
@@ -82,7 +82,7 @@ pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
 }
 
 /// Parse a REPL line resolving struct type names in a `:` definition's effect
-/// against `structs` (the session's registry, R3), so a word may take or
+/// against `structs` (the session's registry), so a word may take or
 /// return a previously-declared struct. A bare expression carries no type
 /// names, so `structs` is unused there.
 pub fn parse_line_with_structs(
@@ -114,7 +114,7 @@ pub fn parse_line_with_structs(
 /// Parse a single REPL `type:` line into its ordered `(field-name, Type)`
 /// list, resolving field types against `structs` (the session's accumulated
 /// registry, with the just-declared name already appended so a self-reference
-/// resolves, which the checker then rejects as recursion, X3). Trailing
+/// resolves, which the checker then rejects as recursion). Trailing
 /// tokens after `;` are a located error (one line is one complete unit).
 pub fn parse_typedef_line(
     tokens: &[(Token, Span)],
@@ -141,7 +141,7 @@ struct Parser<'t> {
     /// The struct registry (names always populated by the pre-pass, fields
     /// populated for the `type:` bodies already parsed at the point of
     /// lookup, but resolution only needs the id/name so declaration order
-    /// among structs doesn't matter, R3). Empty for a REPL line (struct
+    /// among structs doesn't matter). Empty for a REPL line (struct
     /// declarations are not yet supported at REPL scope).
     structs: &'t [StructDecl],
 }
@@ -260,11 +260,10 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// The `type:` production (D1, D2, D3): `type: Name (field-name
-    /// field-type)* ;`. The name was already registered by the pre-pass; this
-    /// parses and returns the ordered field list. An odd field-token count, a
-    /// delimiter/defining-word field type, or a missing `;` is a located
-    /// parse error (X8).
+    /// The `type:` production: `type: Name (field-name field-type)* ;`. The
+    /// name was already registered by the pre-pass; this parses and returns
+    /// the ordered field list. An odd field-token count, a delimiter/
+    /// defining-word field type, or a missing `;` is a located parse error.
     fn parse_typedef(&mut self) -> Result<Vec<(String, Type)>, String> {
         self.expect_word("type:")?;
         self.expect_word_any()?; // the struct name; already registered by the pre-pass
@@ -291,7 +290,7 @@ impl<'t> Parser<'t> {
         Ok(fields)
     }
 
-    /// A field-type token: a plain word, but not `type:`/`:` (X8, a malformed
+    /// A field-type token: a plain word, but not `type:`/`:` (a malformed
     /// declaration naming a defining word where a type belongs). A delimiter
     /// (`(`/`)`/`|`) is rejected by the existing "expected a word" path.
     fn expect_field_type_token(&mut self) -> Result<(String, Span), String> {
@@ -325,25 +324,12 @@ impl<'t> Parser<'t> {
     fn resolve_type(&self, name: &str, span: Span) -> Result<Type, String> {
         // Unknown-type is a semantic error, not a syntax error, so it uses the
         // `error:` prefix (matching check.rs) rather than `parse error:`.
-        // Resolves against the scalar table first, then the struct registry
-        // (R3), so a struct name in an effect or a `type:` field body resolves
-        // through the same path.
-        self.resolve_type_name(name).ok_or_else(|| {
+        crate::ast::resolve_type_name(self.structs, name).ok_or_else(|| {
             format!(
                 "error: unknown type `{name}` at line {}, col {}",
                 span.line, span.col
             )
         })
-    }
-
-    fn resolve_type_name(&self, name: &str) -> Option<Type> {
-        if let Some(ty) = Type::from_name(name) {
-            return Some(ty);
-        }
-        self.structs
-            .iter()
-            .position(|s| s.name == name)
-            .map(|idx| Type::Struct(crate::ast::StructId(idx), self.structs[idx].name_static))
     }
 
     fn parse_locals_opt(&mut self) -> Result<Vec<String>, String> {

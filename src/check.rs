@@ -76,16 +76,15 @@ pub fn check(module: &Module) -> Result<(), String> {
 }
 
 /// Struct-level checks that must pass before any generated-word signature or
-/// word body is type-checked (R5, R6): no two `type:` declarations share a
-/// name (X2), and no struct contains itself by value, directly or
-/// transitively (X3, M5).
+/// word body is type-checked: no two `type:` declarations share a name, and
+/// no struct contains itself by value, directly or transitively.
 pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
     check_duplicate_struct_names(structs)?;
     check_struct_recursion(structs)?;
     Ok(())
 }
 
-/// A duplicate `type:` name is a sharp located error naming the type (X2).
+/// A duplicate `type:` name is a sharp located error naming the type.
 fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
     let mut seen: HashMap<&str, ()> = HashMap::new();
     for decl in structs {
@@ -103,7 +102,7 @@ fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
 /// `check_struct_recursion`'s DFS: `InProgress` marks an ancestor on the
 /// current path (finding one again is a cycle), `Done` marks a node already
 /// proven acyclic. Every node is visited at most once each way, so the DFS
-/// always terminates (M5): it never loops on a self- or mutually-recursive
+/// always terminates: it never loops on a self- or mutually-recursive
 /// `type:`.
 #[derive(Clone, Copy, PartialEq)]
 enum VisitState {
@@ -112,8 +111,8 @@ enum VisitState {
     Done,
 }
 
-/// Detect a struct that contains itself by value, directly or transitively
-/// (D9), via cycle detection over the field-type graph (X3, M5).
+/// Detect a struct that contains itself by value, directly or transitively,
+/// via cycle detection over the field-type graph.
 fn check_struct_recursion(structs: &[StructDecl]) -> Result<(), String> {
     let mut state = vec![VisitState::Unvisited; structs.len()];
     for start in 0..structs.len() {
@@ -159,14 +158,14 @@ fn visit_struct_recursion(
     Ok(())
 }
 
-/// Synthesize the generated-word `Sig`s for every registered struct (D8, M1,
-/// M3), in declared field order (first field deepest): a constructor
+/// Synthesize the generated-word `Sig`s for every registered struct, in
+/// declared field order (first field deepest): a constructor
 /// `S ( T1 … Tn -- S )`, a destructure `S> ( S -- T1 … Tn )`, and per field a
 /// getter `S>fi ( S -- Ti )` and a functional setter `S<fi ( S Ti -- S )`. A
 /// zero-field struct registers only the constructor and destructure. These
 /// join the env alongside user words, so applying one to the wrong arity or
-/// operand type (X4, X5) is caught by the same arity/type-mismatch path as
-/// any other word call.
+/// operand type is caught by the same arity/type-mismatch path as any other
+/// word call.
 pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in structs.iter().enumerate() {
