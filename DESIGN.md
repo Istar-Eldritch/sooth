@@ -234,11 +234,18 @@ The iteration story, top to bottom:
   are a library" perform as well as loop syntax would have.
 - **Raw recursion is legal but not the idiom.** A word may call itself; it is just a
   word. But threading the stack across a self-call by hand is fiddly, so combinators
-  are the normal tool. Tail-call optimisation is therefore an optimisation for
-  hand-written recursion, not the lifeline for iteration (see Open / deferred).
+  are the normal tool. Tail-call handling is therefore a convenience for hand-written
+  recursion, not the lifeline for iteration (combinators over the loop primitive are
+  that). Where it does apply it is a **guarantee, not a best-effort optimisation**: a
+  self-call in tail position is compiled to a jump, so self-tail-recursion runs in
+  constant stack (Scheme-style), and code may rely on it not overflowing.
 
-Iteration lands with quotations in Phase 4; Phases 0-3 have only shallow recursion,
-which is enough for their goldens.
+Quotations and the combinator library land in Phase 4; but the internal loop/back-edge
+primitive and the self-tail-call transform that sits on it are **brought forward to
+Phase 2**, because the bytecode-VM dogfood (the Phase 2 exit) needs an overflow-free
+dispatch loop and pulling quotations forward would be the larger change. Phases 0-1 and
+the scalar/aggregate slices need only shallow recursion; the VM is the first golden that
+needs real iteration.
 
 **Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
@@ -502,7 +509,9 @@ rows, no borrow analysis needed to write the compiler in it.
 - Iteration: quotations (`[ ]` + `call`) are the sole primitive; lowers to an internal
   loop primitive for constant stack; combinators (`each`/`while`/`fold`/`times`/`map`)
   are library words built on quotations and inlined at call sites. Raw recursion is
-  legal but not the idiom.
+  legal but not the idiom. Self-tail-recursion is a guaranteed constant-stack transform
+  (tail self-call → jump), implemented in Phase 2; mutual TCO is deferred (SCC
+  contraction, not a trampoline).
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
@@ -533,14 +542,24 @@ rows, no borrow analysis needed to write the compiler in it.
   above, not settled).
 - Whether to add optional HM inference later (kept possible by the `(value, type)`
   slot representation, not planned).
-- Tail-call handling. With loops dropped and iteration provided by combinators over an
-  internal loop primitive, constant-stack iteration no longer *depends* on TCO (the
-  loop primitive gives it). TCO is demoted to a pure optimisation for user-written
-  recursive words in tail position: compile a *self*-tail-call as a jump to the entry
-  block. General/mutual TCO needs a trampoline or backend support QBE lacks, and can be
-  deferred indefinitely. Interacts with deterministic drop: the transform must run the
-  outgoing frame's destructors before the jump, so affine ownership and TCO have to be
-  co-designed.
+- **Mutual tail-call elimination (tier 2).** Self-tail-call → loop lands in Phase 2
+  (see Control flow and iteration); *mutual* tail recursion (a tail-call cycle A→B→A)
+  stays deferred. When taken, the mechanism is **not a trampoline** (a real trampoline
+  needs first-class function values / quotations, which are Phase 4) and **not** QBE
+  backend tail calls (QBE has none, and adding them forks the backend we chose not to
+  fork). It is **strongly-connected-component contraction**: detect the SCC of the
+  tail-call graph, merge its members into one function carrying a state tag (which
+  member we are in, an ordinary enum discriminant) plus the union of their live values,
+  lower every intra-SCC tail call as a back-edge jump, and keep thin public wrappers so
+  members stay callable from outside. Constrained to SCCs whose members share a return
+  signature (a divergent return type would want a result union, i.e. generics, Phase 4).
+  Until then, mutual tail recursion is a located compile error, not a silent overflow.
+- **Drop at the back-edge (co-design with deterministic drop).** The self-tail-call
+  transform is the point where the outgoing iteration's affine values that are *not*
+  forwarded must have their destructors run before the jump. In Phase 2 every type is
+  `Copy`, so that drop set is empty and the concern is vacuous; but the back-edge is the
+  **defined insertion point**, so Phase 3's destructors have a home rather than being
+  retrofitted.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

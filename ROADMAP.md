@@ -38,9 +38,11 @@ stays `Copy`, reusing the Slice 3/4 layout machinery), the target-width `usize` 
 type (width from a single threaded `WORD_WIDTH` parameter, never a hardcoded 8),
 `fill`/`get`/`set`/`len` words (non-consuming `get`, functional `set`), and dynamic indexing
 with a runtime bounds trap (Sooth's first runtime failure path) via a backend-neutral
-`ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Slice 7 (its only
+`ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Slice 8 (its only
 motivation, pointer differences, arrives with pointers).
-**Next action: Phase 2 Slice 6** (bytecode-VM dogfood). Not yet locked.
+**Next action: Phase 2 Slice 6** (self-tail-call → loop lowering; guaranteed
+constant-stack self-tail-recursion, precedes the VM dogfood). Not yet locked.
+(The bytecode-VM dogfood and `Copy`/pointer slices renumber to 7 and 8.)
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -117,7 +119,8 @@ layout machinery, exhaustiveness-checked clause-style elimination, the `then` ->
 rename, and clause-body locals. **Slice 5 (fixed-size arrays + `usize`) is also done**:
 heap-free value arrays `[T N]` (interned `ArrayId`, reused layout machinery), target-width
 `usize`, `fill`/`get`/`set`/`len`, and dynamic indexing with a runtime bounds trap. What
-remains are the VM dogfood and `Copy`/pointers (Slices 6-7).
+remains are self-tail-call loop lowering, the VM dogfood, and `Copy`/pointers
+(Slices 6-8).
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -134,7 +137,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    not standalone types (a variant constructor yields the enum); a clause consumes the
    scrutinee and pushes the variant's fields onto the stack (affine destructor dispatch);
    exhaustive-only, no `_` wildcard yet; no recursive enums (infinite size is a located error,
-   since recursion needs a pointer, Slice 7). Also **renames the control-flow closer `then` ->
+   since recursion needs a pointer, Slice 8). Also **renames the control-flow closer `then` ->
    `end`** (`if … else … end`), unifying it, and extends **top-of-scope `| … |` locals** to
    clause bodies (bind names at the top of a word body or a clause body, extent = that scope;
    no mid-body binding, no closer: factor a word instead). Design locked in
@@ -146,12 +149,27 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    property (target-defined width, consistent with the opaque `Ptr[T]` invariant) only
    becomes load-bearing and testable once a real consumer (indexing) or a non-64-bit backend
    exists, which is why it waits until now rather than landing with the integer tower. `isize`
-   deferred to Slice 7 (no consumer until pointer differences exist). Arrays are inline `Copy`
+   deferred to Slice 8 (no consumer until pointer differences exist). Arrays are inline `Copy`
    value aggregates, `get` non-consuming, `set` functional; dynamic indexing has a runtime
    bounds trap. ✅ done.
-6. **Bytecode-VM dogfood**: the Phase 2 exit dogfood, a small fixed-size VM for a toy
-   bytecode, exercising the whole typed core.
-7. **`Copy` marker + optional / non-null pointer**: the `Copy`-vs-affine distinction as a
+6. **Self-tail-call → loop lowering** (mandatory TCO for self-recursion). A word whose
+   body (or any clause body) ends in a tail call to *itself* is compiled to a back-edge
+   jump to a phi'd entry header instead of a `Call`, so self-tail-recursion runs in
+   constant stack and cannot overflow. No new surface syntax: existing recursive words
+   simply stop growing the stack in tail position. It's a **guarantee**, not a
+   best-effort optimisation (code may rely on it), which is why it precedes the VM: the
+   dispatch loop is self-recursive and would otherwise overflow, and pulling quotations
+   (Phase 4) forward to get a loop is the larger change. Reuses the IR's blocks / `Phi`
+   / back-edge-capable `Jmp` (already emitted for `if`/clause dispatch). **Mutual** tail
+   recursion (a tail-call cycle A→B→A) is **out of scope this iteration** and rejected
+   with a located error; tier 2 (SCC contraction into one tagged loop, explicitly not a
+   trampoline and not QBE backend TCO) is a planned follow-on, see DESIGN.md. Drop-at-
+   back-edge is vacuous in Phase 2 (all-`Copy`) but the back-edge is the defined drop-
+   insertion point for Phase 3.
+7. **Bytecode-VM dogfood**: the Phase 2 exit dogfood, a small fixed-size VM for a toy
+   bytecode, exercising the whole typed core (arrays, `usize`, enums/clauses, structs,
+   and the self-tail-call dispatch loop from Slice 6).
+8. **`Copy` marker + optional / non-null pointer**: the `Copy`-vs-affine distinction as a
    built-in type property (so Phase 3 has it to build on), plus explicit optional and
    non-null pointer types.
 
@@ -220,7 +238,7 @@ to enum slots across both the word-call and REPL-line boundary. The `examples/sh
 dogfood (`Shape`'s `Circle`/`Rect` via `area`, `MaybeInt`'s `None`/`Some` via
 `unwrap-or`) runs both as a native binary and in the REPL. Generics, `Option<T>`/
 `Result<T,E>`, open multimethods, the `_` wildcard, inline `match`, and recursive/heap
-data are deferred (Phase 4 / Slice 7 / Phase 3).
+data are deferred (Phase 4 / Slice 8 / Phase 3).
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; `*/` widening primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
