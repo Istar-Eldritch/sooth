@@ -12,10 +12,11 @@ use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::ast::{Line, Term, Type, WordDef};
+use crate::ast::{Line, Span, StructDecl, Term, Type, WordDef};
 use crate::check::{self, Sig};
 use crate::driver;
-use crate::ir::{self, IrModule};
+use crate::ir::{self, IrModule, StructLayout};
+use crate::lexer::Token;
 use crate::{backend, lexer, parser};
 
 // RTLD_NOW is 2 on both Linux and macOS; RTLD_GLOBAL's value differs.
@@ -147,27 +148,46 @@ fn resolver_with_override<'a>(
 }
 
 /// Format the carried stack, bottom to top, for the session's per-expression
-/// output line. A float slot is reinterpreted from its stored bits via
+/// output line. `buf` holds the live carried bytes as 8-byte `i64` cells;
+/// each slot's cell offset is computed from the per-slot sizes (a scalar is
+/// one cell, a struct spans `ceil(size/8)` cells), so a scalar slot past a
+/// struct still reads the right cell.
+///
+/// A struct slot renders as its type-name placeholder `<TypeName>`, reading no
+/// field bytes. A float slot is reinterpreted from its stored bits via
 /// `from_bits` (R21): displaying its `i64` bit pattern would be meaningless. An
 /// `f32` slot reads only the low 32 bits (it was stored 4-wide, Q2). A `bool`
 /// slot displays as `true`/`false` (matching `.`, not the raw 0/1). An
 /// unsigned slot displays as its unsigned value: the raw `i64` bit pattern of
 /// a high-bit-set `u64` is negative and would otherwise misprint as such.
-pub fn format_stack(stack: &[i64], types: &[Type]) -> String {
-    if stack.is_empty() {
+pub fn format_stack(buf: &[i64], types: &[Type], layouts: &[StructLayout]) -> String {
+    if types.is_empty() {
         return "stack: (empty)".to_string();
     }
-    let vals: Vec<String> = stack
-        .iter()
-        .zip(types)
-        .map(|(&v, ty)| match ty {
-            Type::Float(ft) if ft.bits() == 32 => f32::from_bits(v as u64 as u32).to_string(),
-            Type::Float(_) => f64::from_bits(v as u64).to_string(),
-            Type::Bool => if v != 0 { "true" } else { "false" }.to_string(),
-            Type::Int(it) if !it.signed() => (v as u64).to_string(),
-            _ => v.to_string(),
-        })
-        .collect();
+    let mut cell = 0usize;
+    let mut vals = Vec::with_capacity(types.len());
+    for ty in types {
+        match ty {
+            Type::Struct(id, name) => {
+                vals.push(format!("<{name}>"));
+                let size = layouts[id.index()].size as usize;
+                cell += size.div_ceil(8);
+            }
+            _ => {
+                let v = buf[cell];
+                vals.push(match ty {
+                    Type::Float(ft) if ft.bits() == 32 => {
+                        f32::from_bits(v as u64 as u32).to_string()
+                    }
+                    Type::Float(_) => f64::from_bits(v as u64).to_string(),
+                    Type::Bool => if v != 0 { "true" } else { "false" }.to_string(),
+                    Type::Int(it) if !it.signed() => (v as u64).to_string(),
+                    _ => v.to_string(),
+                });
+                cell += 1;
+            }
+        }
+    }
     format!("stack: {}", vals.join(" "))
 }
 
@@ -175,10 +195,20 @@ pub fn format_stack(stack: &[i64], types: &[Type]) -> String {
 /// every loaded shared object (kept resident for the session's lifetime).
 pub struct Session {
     env: HashMap<String, WordEntry>,
+    /// The struct registry, one entry per `type:` line, in declaration order
+    /// so `StructId` = index stays stable (a carried `Type::Struct` keeps
+    /// referring to the same struct across lines). Field types resolve against
+    /// earlier entries plus the entry being declared.
+    structs: Vec<StructDecl>,
+    /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
+    /// length; a slot may span more than one cell (a struct), so the buffer is
+    /// byte-addressable and slot offsets are computed from `types`, never
+    /// `index * 8`.
     buf: Vec<i64>,
     top: usize,
-    /// The `Type` of each carried slot, one per live 8-byte buffer slot
-    /// (`types.len() == top / 8`).
+    /// The `Type` of each carried slot, in stack order (deepest first). Slot
+    /// byte sizes vary (a struct spans its aggregate size), so
+    /// `types.len() != top / 8` in general.
     types: Vec<Type>,
     libs: Vec<Library>,
     seq: u64,
@@ -188,6 +218,7 @@ impl Session {
     pub fn new() -> Session {
         Session {
             env: HashMap::new(),
+            structs: Vec::new(),
             buf: Vec::new(),
             top: 0,
             types: Vec::new(),
@@ -196,9 +227,13 @@ impl Session {
         }
     }
 
-    /// The checker's typed env: builtins plus every successfully-defined word.
+    /// The checker's typed env: builtins, the generated struct words, plus
+    /// every successfully-defined user word.
     fn typed_env(&self) -> HashMap<String, Sig> {
         let mut env = check::builtin_table();
+        for (name, sig) in check::struct_generated_sigs(&self.structs) {
+            env.insert(name, sig);
+        }
         for (name, entry) in &self.env {
             env.insert(name.clone(), entry.sig.clone());
         }
@@ -210,11 +245,47 @@ impl Session {
     /// prints the returned diagnostic.
     fn eval_line(&mut self, src: &str, writer: &mut impl Write) -> Result<(), String> {
         let tokens = lexer::lex(src)?;
-        let line = parser::parse_line(&tokens)?;
+        if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
+            return self.eval_typedef(&tokens, writer);
+        }
+        let line = parser::parse_line_with_structs(&tokens, &self.structs)?;
         match line {
             Line::Def(word) => self.eval_def(word, writer),
             Line::Expr(terms) => self.eval_expr(&terms, writer),
         }
+    }
+
+    /// Register a `type:` struct declaration. The new name is appended to the
+    /// registry first (so a self-reference in its own fields resolves, and is
+    /// then rejected as recursion); fields resolve against the whole registry.
+    /// On any error the appended entry is rolled back, leaving the session
+    /// untouched.
+    fn eval_typedef(
+        &mut self,
+        tokens: &[(Token, Span)],
+        writer: &mut impl Write,
+    ) -> Result<(), String> {
+        let (name, span) = match tokens.get(1) {
+            Some((Token::Word(w), span)) => (w.clone(), *span),
+            _ => return Err("parse error: `type:` must be followed by a struct name".to_string()),
+        };
+        let idx = self.structs.len();
+        self.structs.push(StructDecl {
+            name: name.clone(),
+            name_static: Box::leak(name.clone().into_boxed_str()),
+            fields: Vec::new(),
+            span,
+        });
+        let result = parser::parse_typedef_line(tokens, &self.structs).and_then(|fields| {
+            self.structs[idx].fields = fields;
+            check::check_structs(&self.structs)
+        });
+        if let Err(e) = result {
+            self.structs.pop();
+            return Err(e);
+        }
+        writeln!(writer, "defined type {name}").map_err(|e| format!("writing stdout: {e}"))?;
+        Ok(())
     }
 
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
@@ -233,13 +304,17 @@ impl Session {
         // derived from the typed env (RK2): ir needs only counts + output type.
         env.insert(name.clone(), sig.clone());
         let ir_lower_env = ir_arity_env(&env);
+        let structs = ir::Structs::from_structs(&self.structs);
         let mut func = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            ir::lower_word(&word, &ir_lower_env, &resolve)
+            ir::lower_word(&word, &ir_lower_env, &resolve, &structs)
         };
         func.name = symbol.clone();
 
-        let ssa = backend::qbe::emit(&IrModule { funcs: vec![func] })?;
+        let ssa = backend::qbe::emit(&IrModule {
+            funcs: vec![func],
+            structs: structs.layouts,
+        })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
         driver::compile_so(&ssa, &so_path)?;
@@ -261,7 +336,7 @@ impl Session {
 
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
         let env = self.typed_env();
-        let entry_depth = self.top / 8;
+        let entry_depth = self.types.len();
         let net_stack = check::infer_line(terms, &self.types, &env)?;
         let net_depth = net_stack.len();
 
@@ -269,7 +344,8 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let (func, m) = {
+        let structs = ir::Structs::from_structs(&self.structs);
+        let (func, m, out_bytes) = {
             let resolve = resolver_for(&self.env);
             ir::lower_line(
                 seq,
@@ -278,19 +354,24 @@ impl Session {
                 &self.types,
                 &ir_lower_env,
                 &resolve,
+                &structs,
             )
         };
-        // `m` (the wrapper's emitted store count) and `net_depth` (the checker's
-        // independently-inferred net effect) are the same depth simulation and
-        // must always agree; size the buffer from `m`, the number the wrapper
-        // actually writes, and assert the checker agrees rather than trusting
-        // two separately-computed counts to stay in sync as codegen evolves.
+        // `m` (the wrapper's emitted output slot count) and `net_depth` (the
+        // checker's independently-inferred net effect) are the same depth
+        // simulation and must always agree; `out_bytes` is what the wrapper
+        // actually writes and sizes the buffer. Assert the checker agrees
+        // rather than trusting two separately-computed counts to stay in sync
+        // as codegen evolves.
         debug_assert_eq!(
             m, net_depth,
             "lowering emitted a different depth than the checker inferred"
         );
 
-        let ssa = backend::qbe::emit(&IrModule { funcs: vec![func] })?;
+        let ssa = backend::qbe::emit(&IrModule {
+            funcs: vec![func],
+            structs: structs.layouts.clone(),
+        })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
         driver::compile_so(&ssa, &so_path)?;
@@ -301,8 +382,13 @@ impl Session {
         // matching the `(*mut u8, usize) -> usize` transmute below.
         let wrapper: extern "C" fn(*mut u8, usize) -> usize = unsafe { std::mem::transmute(sym) };
 
-        if self.buf.len() < m {
-            self.buf.resize(m, 0);
+        // Size the buffer (in 8-byte cells) to cover the wrapper's output
+        // bytes; it already covers the entry bytes (`self.top`) from the line
+        // that produced them. `out_bytes` is always a multiple of 8
+        // (`carried_slot_bytes` rounds each slot up), so `div_ceil` is exact.
+        let out_cells = out_bytes.div_ceil(8);
+        if self.buf.len() < out_cells {
+            self.buf.resize(out_cells, 0);
         }
         // Flush any host-buffered stdout first so it interleaves deterministically
         // with the loaded code's own `printf` (a separate C stdio buffer).
@@ -310,10 +396,10 @@ impl Session {
             .flush()
             .map_err(|e| format!("flushing stdout: {e}"))?;
         let base_ptr = self.buf.as_mut_ptr() as *mut u8;
-        // SAFETY: `base_ptr` points into a `Vec<i64>` grown to at least `m` slots
-        // (`m*8` bytes); `self.top` is the live byte length on entry, a multiple
-        // of 8 and `<= self.buf.len() * 8`. The wrapper only reads/writes within
-        // `[0, max(self.top, m*8))`.
+        // SAFETY: `base_ptr` points into a `Vec<i64>` grown to at least
+        // `out_cells` cells (`out_bytes` bytes); `self.top` is the live byte
+        // length on entry, a multiple of 8 and `<= self.buf.len() * 8`. The
+        // wrapper only reads/writes within `[0, max(self.top, out_bytes))`.
         let new_top = wrapper(base_ptr, self.top);
 
         // Flush the loaded code's C stdio buffer so its `.`/printf output lands
@@ -324,9 +410,13 @@ impl Session {
         self.types = net_stack;
         self.libs.push(lib);
 
-        let d = self.top / 8;
-        writeln!(writer, "{}", format_stack(&self.buf[..d], &self.types))
-            .map_err(|e| format!("writing stdout: {e}"))?;
+        let cells = self.top / 8;
+        writeln!(
+            writer,
+            "{}",
+            format_stack(&self.buf[..cells], &self.types, &structs.layouts)
+        )
+        .map_err(|e| format!("writing stdout: {e}"))?;
         Ok(())
     }
 }
@@ -390,19 +480,19 @@ mod tests {
     #[test]
     fn format_stack_bottom_to_top() {
         let types = vec![Type::I64, Type::I64, Type::I64];
-        assert_eq!(format_stack(&[1, 2, 3], &types), "stack: 1 2 3");
+        assert_eq!(format_stack(&[1, 2, 3], &types, &[]), "stack: 1 2 3");
     }
 
     #[test]
     fn format_stack_empty_is_marker() {
-        assert_eq!(format_stack(&[], &[]), "stack: (empty)");
+        assert_eq!(format_stack(&[], &[], &[]), "stack: (empty)");
     }
 
     #[test]
     fn format_stack_f64_slot_renders_float_not_bits() {
         // A carried `f64` displays its value, not the `i64` bit pattern (R21).
         let bits = 2.5f64.to_bits() as i64;
-        assert_eq!(format_stack(&[bits], &[Type::F64]), "stack: 2.5");
+        assert_eq!(format_stack(&[bits], &[Type::F64], &[]), "stack: 2.5");
     }
 
     #[test]
@@ -410,15 +500,35 @@ mod tests {
         // An `f32` slot stores 4 bytes; display reads the low 32 bits (Q2/R21).
         let bits = 1.5f32.to_bits() as u64 as i64;
         let f32_ty = Type::from_name("f32").unwrap();
-        assert_eq!(format_stack(&[bits], &[f32_ty]), "stack: 1.5");
+        assert_eq!(format_stack(&[bits], &[f32_ty], &[]), "stack: 1.5");
     }
 
     #[test]
     fn format_stack_bool_slot_displays_as_true_or_false() {
         // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
         assert_eq!(
-            format_stack(&[1, 0], &[Type::Bool, Type::Bool]),
+            format_stack(&[1, 0], &[Type::Bool, Type::Bool], &[]),
             "stack: true false"
+        );
+    }
+
+    #[test]
+    fn format_stack_struct_slot_shows_placeholder_and_offsets_past_it() {
+        use crate::ast::StructId;
+        // A 16-byte struct (two 8-byte cells) at StructId 0, then a scalar
+        // slot. The struct renders as its `<Vec2>` placeholder reading no
+        // field bytes, and the trailing scalar reads the cell *past* the
+        // struct's two cells, not `index * 8`.
+        let layouts = vec![StructLayout {
+            name: "Vec2",
+            size: 16,
+            align: 8,
+            fields: vec![],
+        }];
+        let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
+        assert_eq!(
+            format_stack(&[5, 6, 99], &[vec2, Type::I64], &layouts),
+            "stack: <Vec2> 99"
         );
     }
 
@@ -428,7 +538,7 @@ mod tests {
         // display must render its unsigned value, not that negative number.
         let u64_ty = Type::from_name("u64").unwrap();
         assert_eq!(
-            format_stack(&[-1], &[u64_ty]),
+            format_stack(&[-1], &[u64_ty], &[]),
             "stack: 18446744073709551615"
         );
     }

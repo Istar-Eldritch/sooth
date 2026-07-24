@@ -21,7 +21,12 @@ target-only conversion words (`>i8`..`>u64`), homogeneous no-implicit-promotion 
 and comparison, and width/signedness-correct QBE codegen. The **floats axis** (`f32`/`f64`,
 carved out of the tower) has also **landed** and merged to `main`: IEEE `+ - * /`, ordered
 comparison, `<digits>.<digits>` literals, type-aware `.` printing, and int<->float conversions.
-**Next action: Phase 2 Slice 3** (structs/records).
+**Slice 3 (structs/records) is complete** and merged to `main`: the `type:` struct
+declaration form, a user-extensible type namespace, an inline-aggregate layout model
+(offsets/size/alignment computed from field widths, word-width-neutral) backed by QBE
+aggregate types, generated constructor/getter/setter/destructure words, nesting, and
+size-aware carried-stack marshalling across word and REPL boundaries.
+**Next action: Phase 2 Slice 4** (enums/ADTs + `match`).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -72,7 +77,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core done: Slices 1-2 + floats/bitwise/bool)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs done: Slices 1-3 + floats/bitwise/bool)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -88,7 +93,9 @@ width. The **boolean/comparison surface is complete** too: `and`/`or`/`xor`/`not
 type-directed over `bool` (logical) as well as integers (bitwise), and the comparison set is
 filled out with `<= >= <>` (numeric, signedness- and NaN-correct), making `bool` a
 first-class operand type rather than an `if`-only token. With this the Phase 2 **scalar core**
-is complete; what remains are the aggregates (Slices 3-7).
+is complete. **Slice 3 (structs/records) is also done**: user-declared struct value types,
+an inline-aggregate layout model, and generated construction/field-read/functional-update/
+destructure words. What remains are enums/arrays/the VM dogfood/`Copy` (Slices 4-7).
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -97,7 +104,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    depth) through bodies and at branch joins. ✅ done.
 2. **Integer tower + conversions**: `i8`..`i64` / `u8`..`u64`, target-only `>iN`/`>uN`
    conversions, homogeneous arithmetic/comparison, width/signedness codegen. ✅ done.
-3. **Structs / records**: aggregate value types.
+3. **Structs / records**: aggregate value types. ✅ done.
 4. **Enums / ADTs + `match`**: exhaustiveness-checked pattern matching (Result/Either fall
    out mostly free). Also lands **generalized mid-body `| … |` locals** (bind top-of-stack to
    names anywhere in a body, not just once at entry), motivated by destructuring a variant's
@@ -144,6 +151,23 @@ owed now; when generics land (Phase 4) and a `>`-requiring polymorphic word or a
 sortable/hashable collection needs a total order over floats, revisit then (Rust's model:
 expose the partialness at the sort/key site, e.g. a `total_cmp`, rather than silently
 lying). Tracked so it is not lost.
+
+**Structs axis, delivered** (brief + spec: `docs/phase2-slice3-brief.md`,
+`docs/phase2-slice3-spec.md`): the `type:` struct declaration form (bare `name type`
+field pairs, `;`-terminated); a user-extensible type namespace (`Type::Struct` +
+a per-program registry); an inline-aggregate value model (one typed stack slot per
+struct, backed by QBE aggregate types and frame-local `alloc`, heap-free); layout
+(offsets/size/alignment) computed from field sizes/alignments, never a hardcoded
+machine word; generated constructor/getter/setter(functional)/destructure words per
+struct; nesting via juxtaposed accessor calls; all structs trivially `Copy` (byte-copy
+`dup`, no-op `drop`); size-aware carried-stack marshalling generalized to per-slot
+byte sizes across both the word-call boundary and the REPL line boundary; a REPL
+struct-placeholder display (`<TypeName>`); sharp located diagnostics for an unknown
+field type, a duplicate type name, a recursive (infinite-size) struct, constructor
+arity/type mismatch, an accessor applied to the wrong type, `.`/`=`/arithmetic on a
+struct, and a malformed declaration; a zero-field unit struct; and the
+`examples/vectors.sth` dogfood (`Vec2`/`Segment`, `sub`/`len2`/`span`/`shift-x`),
+running both as a native binary and in the REPL.
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; `*/` widening primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked

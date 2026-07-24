@@ -10,11 +10,15 @@
 use std::collections::HashMap;
 use std::mem;
 
-use crate::ast::{Module, Term, TermKind, Type, WordDef};
+use crate::ast::{Module, StructDecl, StructId, Term, TermKind, Type, WordDef};
 
 #[derive(Debug, Default)]
 pub struct IrModule {
     pub funcs: Vec<IrFunc>,
+    /// Per-struct memory layout, indexed by `StructId`. The backend emits
+    /// a `type :S = { … }` per entry and reads field offsets/widths from it;
+    /// empty for a struct-free module (or a single-func REPL emit).
+    pub structs: Vec<StructLayout>,
 }
 
 #[derive(Debug)]
@@ -45,6 +49,13 @@ pub enum IrType {
         bits: u8,
     },
     Bool,
+    /// A user-declared struct, keyed by a small `Copy` `StructId` into the
+    /// module's `StructLayout` registry; the layout (offsets/size/align) lives
+    /// there, not inlined, so `IrType` stays `Copy`. At runtime a struct value
+    /// is a pointer to its aggregate storage; the backend spells it `:S` in
+    /// ABI positions (params/returns/call args) and `l` (a pointer) in a
+    /// register.
+    Struct(StructId),
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -68,7 +79,150 @@ pub fn ir_type_of(ty: Type) -> IrType {
         },
         Type::Float(ft) => IrType::Float { bits: ft.bits() },
         Type::Bool => IrType::Bool,
+        // The layout lives in the module's `StructLayout` registry; the
+        // `IrType` carries only the `StructId` so it stays `Copy`.
+        Type::Struct(id, _) => IrType::Struct(id),
     }
+}
+
+/// The computed memory layout of one struct, word-width-neutral: every
+/// offset/size/align is derived from field widths, never a hardcoded machine
+/// word. `name` is the leaked `&'static str` the backend emits as `:name`.
+#[derive(Debug, Clone)]
+pub struct StructLayout {
+    pub name: &'static str,
+    pub size: u32,
+    pub align: u32,
+    pub fields: Vec<FieldLayout>,
+}
+
+/// One field's placement within its owning struct: its byte offset and its own
+/// `IrType`/size/align (a nested struct contributes its whole size/align).
+#[derive(Debug, Clone, Copy)]
+pub struct FieldLayout {
+    pub offset: u32,
+    pub ty: IrType,
+    pub size: u32,
+    pub align: u32,
+}
+
+/// How a generated struct-word name lowers: the four kinds keyed off the
+/// struct registry, distinguishing a struct-op call from a normal user-word
+/// call in `lower_call`.
+#[derive(Debug, Clone, Copy)]
+pub enum StructWord {
+    Construct(StructId),
+    Get(StructId, usize),
+    Set(StructId, usize),
+    Destructure(StructId),
+}
+
+/// The IR's view of a program's structs: the per-`StructId` layout registry and
+/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi` → `StructWord`). Built
+/// once from the module and threaded into lowering; empty for a struct-free
+/// program (the scalar paths never consult it).
+#[derive(Debug, Default)]
+pub struct Structs {
+    pub layouts: Vec<StructLayout>,
+    pub words: HashMap<String, StructWord>,
+}
+
+fn round_up(offset: u32, align: u32) -> u32 {
+    offset.div_ceil(align) * align
+}
+
+/// The size/align of a scalar `IrType`: `i8`/`u8`/`bool` = 1, `i16`/`u16`
+/// = 2, `i32`/`u32`/`f32` = 4, `i64`/`u64`/`f64` = 8. A `Ptr` is 8 (unused as a
+/// field this slice). Never called on a `Struct` (nested fields resolve through
+/// the layout registry).
+fn scalar_size_align(ty: IrType) -> (u32, u32) {
+    let bytes = match ty {
+        IrType::Bool => 1,
+        IrType::Int { bits, .. } => (bits / 8) as u32,
+        IrType::Float { bits } => (bits / 8) as u32,
+        IrType::Ptr => 8,
+        IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
+    };
+    (bytes, bytes)
+}
+
+/// The carried-stack bytes a slot of `ty` occupies. A scalar stays a
+/// byte-identical 8-byte cell, so every scalar-only line marshals exactly as
+/// before; a struct occupies its aggregate size rounded up to a multiple of 8
+/// so the next slot stays 8-aligned (struct alignment is at most 8 this slice).
+/// Cumulative sums give each carried slot's byte offset in the buffer.
+pub fn carried_slot_bytes(ty: IrType, structs: &Structs) -> u32 {
+    match ty {
+        IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
+        _ => 8,
+    }
+}
+
+impl Structs {
+    /// Build the layout + generated-word registry from a program's struct
+    /// declarations (the build path passes `&module.structs`, the REPL passes
+    /// its accumulated registry). Recursion is already rejected by the checker,
+    /// so the memoized layout recursion terminates.
+    pub fn from_structs(structs: &[StructDecl]) -> Structs {
+        let mut memo: Vec<Option<StructLayout>> = vec![None; structs.len()];
+        for i in 0..structs.len() {
+            compute_layout(structs, i, &mut memo);
+        }
+        let layouts: Vec<StructLayout> = memo.into_iter().map(|l| l.expect("layout")).collect();
+
+        let mut words = HashMap::new();
+        for (idx, decl) in structs.iter().enumerate() {
+            let id = StructId::from_index(idx);
+            words.insert(decl.name.clone(), StructWord::Construct(id));
+            words.insert(format!("{}>", decl.name), StructWord::Destructure(id));
+            for (fi, (fname, _)) in decl.fields.iter().enumerate() {
+                words.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
+                words.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
+            }
+        }
+        Structs { layouts, words }
+    }
+}
+
+/// Fill `memo[idx]` with the natural-alignment layout of struct `idx`, recursing
+/// into nested-struct fields first. Each field is placed at the next offset
+/// aligned to its own alignment; struct align = max field align (min 1); struct
+/// size = final offset rounded up to struct align.
+fn compute_layout(structs: &[StructDecl], idx: usize, memo: &mut Vec<Option<StructLayout>>) {
+    if memo[idx].is_some() {
+        return;
+    }
+    let decl = &structs[idx];
+    let mut offset = 0u32;
+    let mut align = 1u32;
+    let mut fields = Vec::with_capacity(decl.fields.len());
+    for (_, field_ty) in &decl.fields {
+        let ir_ty = ir_type_of(*field_ty);
+        let (size, falign) = match ir_ty {
+            IrType::Struct(id) => {
+                compute_layout(structs, id.index(), memo);
+                let inner = memo[id.index()].as_ref().expect("inner layout computed");
+                (inner.size, inner.align)
+            }
+            _ => scalar_size_align(ir_ty),
+        };
+        let off = round_up(offset, falign);
+        fields.push(FieldLayout {
+            offset: off,
+            ty: ir_ty,
+            size,
+            align: falign,
+        });
+        offset = off + size;
+        align = align.max(falign);
+    }
+    let size = round_up(offset, align);
+    memo[idx] = Some(StructLayout {
+        name: decl.name_static,
+        size,
+        align,
+        fields,
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +241,7 @@ pub struct Block {
 #[derive(Debug)]
 pub enum Instr {
     Const(Value, i64),
-    /// A float constant carrying its `f64` value (R14). Distinct from `Const`
+    /// A float constant carrying its `f64` value. Distinct from `Const`
     /// so the backend emits a QBE float constant rather than reinterpreting an
     /// integer bit-payload; the `Value`'s `IrType` picks the `s`/`d` register.
     ConstF(Value, f64),
@@ -106,6 +260,23 @@ pub enum Instr {
     Load(Value, Value),
     /// `*ptr = val` (Int).
     Store(Value, Value),
+    /// `dst: Struct = alloc(size, align)`: a frame-local aggregate slot.
+    /// The two operands are the whole-struct byte size and alignment from the
+    /// layout registry.
+    Alloc(Value, u32, u32),
+    /// `blit src -> dst, size`: copy `size` bytes between two aggregate
+    /// pointers — the byte-copy `dup`, the setter's copy-all, and a
+    /// nested-struct field store.
+    Blit(Value, Value, u32),
+    /// `dst = *ptr` at the field's exact width, the load op picked from
+    /// `dst`'s scalar `IrType` (`loadsb`/`loadub`/`loadsh`/…). Distinct from the
+    /// 8-byte-slot `Load` so a field read never over-reads its neighbour.
+    FieldLoad(Value, Value),
+    /// `*ptr = val` at `val`'s exact width, the store op picked from
+    /// `val`'s scalar `IrType` (`storeb`/`storeh`/`storew`/`storel`/…).
+    /// Distinct from the 8-byte-slot `Store` so a field write never clobbers
+    /// its neighbour.
+    FieldStore(Value, Value),
     /// `dst = convert(src)` between two integer types (`>iN`/`>uN`). The two
     /// `IrType`s carry the widths and signedness the backend needs to pick
     /// sign/zero-extend (widen), truncate-and-canonicalize (narrow), or relabel
@@ -163,6 +334,7 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
+    let structs = Structs::from_structs(&module.structs);
     let env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -179,30 +351,42 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let funcs = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve))
+        .map(|w| lower_word(w, &env, &resolve, &structs))
         .collect();
 
-    Ok(IrModule { funcs })
+    Ok(IrModule {
+        funcs,
+        structs: structs.layouts,
+    })
 }
 
 /// Lower a bare REPL line to a uniform-signature wrapper `sooth_line_{seq}`
 /// `(Ptr stack, Int top) -> Int`. The prologue loads the whole carried stack
 /// (`entry_depth` slots) from the buffer, the body runs in registers exactly
-/// like a word, the epilogue stores the resulting `M` slots back, and it returns
-/// the advanced top `top + (M - entry_depth) * 8`.
+/// like a word, the epilogue stores the resulting output slots back, and it
+/// returns the advanced top `top + (out_bytes - in_bytes)`.
+///
+/// Carried slots are size-aware per slot: a scalar occupies a
+/// byte-identical 8-byte cell (so every scalar-only line marshals exactly as
+/// before), a struct occupies its aggregate size (`carried_slot_bytes`); each
+/// slot sits at the cumulative byte offset of the slots below it. A struct
+/// slot is copied by an aggregate `blit` out of the buffer into a fresh frame
+/// slot on entry and back into the buffer on exit, so the line body owns the
+/// value independently of the persistent buffer.
 ///
 /// `entry_types` names each carried slot's true frontend `Type` (one per
-/// `entry_depth` slot). Q2 (Slice 2): the buffer slot itself always stays an
+/// `entry_depth` slot). Q2 (Slice 2): a scalar buffer slot always stays an
 /// 8-byte `l`-width store (canonicalization, R15, keeps its low `bits`
-/// authoritative), but a slot narrower or differently-signed than `i64` is
-/// relabeled to its real `IrType` right after the load, via the same `Conv`
-/// the conversion words use, so a later op in this line sees the correct
-/// operand type (e.g. homogeneous `+` against another `u8`) instead of a
-/// stale `i64`.
+/// authoritative), but a scalar slot narrower or differently-signed than
+/// `i64` is relabeled to its real `IrType` right after the load, via the same
+/// `Conv` the conversion words use, so a later op in this line sees the
+/// correct operand type (e.g. homogeneous `+` against another `u8`) instead
+/// of a stale `i64`.
 ///
-/// Returns the `IrFunc` alongside the emitted `M`, so the caller sizes its
-/// buffer from the same number the wrapper actually stores, rather than from
-/// a separately-computed depth that could in principle diverge.
+/// Returns the `IrFunc`, the emitted output slot count `M`, and `out_bytes`
+/// (the number of buffer bytes the epilogue actually wrote), so the caller
+/// sizes its buffer from the same numbers the wrapper uses rather than from a
+/// separately-computed depth that could in principle diverge.
 pub fn lower_line(
     seq: u64,
     terms: &[Term],
@@ -210,27 +394,39 @@ pub fn lower_line(
     entry_types: &[Type],
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-) -> (IrFunc, usize) {
+    structs: &Structs,
+) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
-    let mut b = FuncBuilder::new(env, resolve);
+    let mut b = FuncBuilder::new(env, resolve, structs);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
     let top = b.fresh_value(IrType::I64);
 
-    // Prologue: load slot `i` at byte offset `i*8`, deepest (slot 0) first.
+    // Prologue: load each carried slot from its cumulative byte offset, deepest
+    // (slot 0) first. A struct is copied out of the buffer into a fresh frame
+    // slot; a scalar loads its 8-byte cell exactly as before.
     let mut stack = Vec::with_capacity(entry_depth);
-    for (i, ty) in entry_types.iter().enumerate() {
+    let mut in_bytes = 0u32;
+    for ty in entry_types {
+        let slot_ty = ir_type_of(*ty);
         let ptr = b.fresh_value(IrType::Ptr);
-        b.push_instr(Instr::PtrOffset(ptr, base, (i * 8) as i64));
+        b.push_instr(Instr::PtrOffset(ptr, base, in_bytes as i64));
         // A float slot loads directly at its `s`/`d` width (R20): the backend
         // picks `loadd`/`loads` from the value's float `IrType`, so the bits
         // re-enter as a true float and need no integer `Conv`-relabel (that
         // path is integer-only). An integer slot narrower/differently-signed
         // than `i64` still relabels via `Conv`; a `Bool` slot needs none (`jnz`
         // reads any register, and its stored 0/1 is valid `l`-content).
-        let slot_ty = ir_type_of(*ty);
         match slot_ty {
+            IrType::Struct(id) => {
+                let dst = b.alloc_struct(id);
+                let size = b.structs.layouts[id.index()].size;
+                if size > 0 {
+                    b.push_instr(Instr::Blit(ptr, dst, size));
+                }
+                stack.push(dst);
+            }
             IrType::Float { .. } => {
                 let v = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Load(v, ptr));
@@ -249,25 +445,39 @@ pub fn lower_line(
                 stack.push(v);
             }
         }
+        in_bytes += carried_slot_bytes(slot_ty, b.structs);
     }
     b.stack = stack;
 
     b.lower_terms(terms);
 
-    // Epilogue: store the resulting M slots back to the buffer. Each 8-byte
-    // slot is written at the value's own width (R20): a float stores via
-    // `stores`/`stored`, an integer or `Bool` via `storel` (a `Bool` widening
-    // to `l`, its stored 0/1 valid `l`-content) (R4).
+    // Epilogue: store each result slot back to the buffer at its cumulative
+    // byte offset. A scalar 8-byte cell is written at the value's own width: a
+    // float via `stores`/`stored`, an integer or `Bool` via `storel` (a `Bool`
+    // widening to `l`, its stored 0/1 valid `l`-content). A struct is copied
+    // back into the buffer by an aggregate `blit`.
     let out = mem::take(&mut b.stack);
     let m = out.len();
-    for (j, v) in out.iter().enumerate() {
+    let mut out_bytes = 0u32;
+    for v in &out {
+        let vty = b.value_type(*v);
         let ptr = b.fresh_value(IrType::Ptr);
-        b.push_instr(Instr::PtrOffset(ptr, base, (j * 8) as i64));
-        b.push_instr(Instr::Store(ptr, *v));
+        b.push_instr(Instr::PtrOffset(ptr, base, out_bytes as i64));
+        match vty {
+            IrType::Struct(id) => {
+                let size = b.structs.layouts[id.index()].size;
+                if size > 0 {
+                    b.push_instr(Instr::Blit(*v, ptr, size));
+                }
+            }
+            _ => b.push_instr(Instr::Store(ptr, *v)),
+        }
+        out_bytes += carried_slot_bytes(vty, b.structs);
     }
 
-    // Return the advanced top; (M - entry_depth) may be negative.
-    let delta = (m as i64 - entry_depth as i64) * 8;
+    // Return the advanced top as a byte delta; (out_bytes - in_bytes) may be
+    // negative.
+    let delta = out_bytes as i64 - in_bytes as i64;
     let delta_val = b.fresh_value(IrType::I64);
     b.push_instr(Instr::Const(delta_val, delta));
     let new_top = b.fresh_value(IrType::I64);
@@ -281,7 +491,7 @@ pub fn lower_line(
         blocks: b.blocks,
         value_types: b.value_types,
     };
-    (func, m)
+    (func, m, out_bytes as usize)
 }
 
 /// Lower a single word body against an external env/resolver. The REPL uses
@@ -291,6 +501,7 @@ pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
+    structs: &Structs,
 ) -> IrFunc {
     let params: Vec<IrType> = word
         .effect
@@ -300,7 +511,7 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(env, resolve);
+    let mut b = FuncBuilder::new(env, resolve, structs);
 
     // Params occupy the first N value ids; leftmost input is deepest.
     let mut stack: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
@@ -330,6 +541,7 @@ pub(crate) fn lower_word(
 struct FuncBuilder<'a> {
     env: &'a HashMap<String, Arity>,
     resolve: Resolver<'a>,
+    structs: &'a Structs,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -341,10 +553,11 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
-    fn new(env: &'a HashMap<String, Arity>, resolve: Resolver<'a>) -> Self {
+    fn new(env: &'a HashMap<String, Arity>, resolve: Resolver<'a>, structs: &'a Structs) -> Self {
         FuncBuilder {
             env,
             resolve,
+            structs,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -431,7 +644,20 @@ impl<'a> FuncBuilder<'a> {
         match name {
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
-                self.stack.push(top);
+                // A scalar is `Copy`: reuse the value id (dup emits nothing). A
+                // struct is copied by value: alloc a fresh slot and blit the
+                // bytes, so a functional setter on the copy leaves the
+                // original intact.
+                if let IrType::Struct(id) = self.value_type(top) {
+                    let copy = self.alloc_struct(id);
+                    let size = self.structs.layouts[id.index()].size;
+                    if size > 0 {
+                        self.push_instr(Instr::Blit(top, copy, size));
+                    }
+                    self.stack.push(copy);
+                } else {
+                    self.stack.push(top);
+                }
             }
             "drop" => {
                 self.stack.pop().expect("drop: non-empty stack");
@@ -529,6 +755,12 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.push(dst);
                     return;
                 }
+                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`) lowers to
+                // alloc/blit/field-load-store inline, not a normal call.
+                if let Some(&sw) = self.structs.words.get(name) {
+                    self.lower_struct_word(sw);
+                    return;
+                }
                 let (in_arity, out_arity, ret_ty) =
                     *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
@@ -542,6 +774,107 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Call(ret, sym, args));
                 if let Some(v) = ret {
                     self.stack.push(v);
+                }
+            }
+        }
+    }
+
+    /// Alloc a fresh frame slot for struct `id`'s aggregate and yield it as a
+    /// `Struct`-typed value (a pointer to the storage).
+    fn alloc_struct(&mut self, id: StructId) -> Value {
+        let (size, align) = {
+            let l = &self.structs.layouts[id.index()];
+            (l.size, l.align)
+        };
+        let v = self.fresh_value(IrType::Struct(id));
+        self.push_instr(Instr::Alloc(v, size, align));
+        v
+    }
+
+    /// A `Ptr`-typed value for `base + offset` (a scalar field's address).
+    fn field_ptr(&mut self, base: Value, offset: u32) -> Value {
+        let p = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::PtrOffset(p, base, offset as i64));
+        p
+    }
+
+    /// A nested-struct field's value: its interior address, typed as the inner
+    /// struct. No copy — the owning struct is consumed by the
+    /// getter/destructure, so aliasing its storage is sound; a later `dup` or
+    /// word-return copies the bytes.
+    fn field_struct_value(&mut self, base: Value, offset: u32, inner: StructId) -> Value {
+        let v = self.fresh_value(IrType::Struct(inner));
+        self.push_instr(Instr::PtrOffset(v, base, offset as i64));
+        v
+    }
+
+    /// Store `val` into field `field` at `fptr`: a width-exact scalar store, or
+    /// an aggregate blit for a nested-struct field.
+    fn store_field(&mut self, fptr: Value, val: Value, field: FieldLayout) {
+        match field.ty {
+            IrType::Struct(_) => {
+                if field.size > 0 {
+                    self.push_instr(Instr::Blit(val, fptr, field.size));
+                }
+            }
+            _ => self.push_instr(Instr::FieldStore(fptr, val)),
+        }
+    }
+
+    /// Load field `field` at `fptr` onto the stack: a width-exact scalar load,
+    /// or the interior pointer as a nested-struct value.
+    fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
+        let v = match field.ty {
+            IrType::Struct(inner) => self.field_struct_value(base, field.offset, inner),
+            _ => {
+                let fptr = self.field_ptr(base, field.offset);
+                let v = self.fresh_value(field.ty);
+                self.push_instr(Instr::FieldLoad(v, fptr));
+                v
+            }
+        };
+        self.stack.push(v);
+    }
+
+    /// Lower a generated struct word inline, first field deepest.
+    fn lower_struct_word(&mut self, sw: StructWord) {
+        match sw {
+            StructWord::Construct(id) => {
+                let n = self.structs.layouts[id.index()].fields.len();
+                let split = self.stack.len() - n;
+                let args = self.stack.split_off(split);
+                let dst = self.alloc_struct(id);
+                for (fi, arg) in args.into_iter().enumerate() {
+                    let field = self.structs.layouts[id.index()].fields[fi];
+                    let fptr = self.field_ptr(dst, field.offset);
+                    self.store_field(fptr, arg, field);
+                }
+                self.stack.push(dst);
+            }
+            StructWord::Get(id, fi) => {
+                let s = self.stack.pop().expect("getter: struct operand");
+                let field = self.structs.layouts[id.index()].fields[fi];
+                self.load_field_onto_stack(s, field);
+            }
+            StructWord::Set(id, fi) => {
+                let newval = self.stack.pop().expect("setter: new field value");
+                let s = self.stack.pop().expect("setter: struct operand");
+                let dst = self.alloc_struct(id);
+                let size = self.structs.layouts[id.index()].size;
+                if size > 0 {
+                    self.push_instr(Instr::Blit(s, dst, size));
+                }
+                let field = self.structs.layouts[id.index()].fields[fi];
+                let fptr = self.field_ptr(dst, field.offset);
+                self.store_field(fptr, newval, field);
+                self.stack.push(dst);
+            }
+            StructWord::Destructure(id) => {
+                let s = self.stack.pop().expect("destructure: struct operand");
+                let n = self.structs.layouts[id.index()].fields.len();
+                for fi in 0..n {
+                    let field = self.structs.layouts[id.index()].fields[fi];
+                    self.load_field_onto_stack(s, field);
                 }
             }
         }
@@ -599,6 +932,17 @@ mod tests {
         let module = parse(&tokens).unwrap();
         check(&module).unwrap();
         lower(&module).unwrap()
+    }
+
+    fn structs_of(src: &str) -> Structs {
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        check(&module).unwrap();
+        Structs::from_structs(&module.structs)
+    }
+
+    fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
+        s.layouts.iter().find(|l| l.name == name).expect("layout")
     }
 
     fn instrs(func: &IrFunc) -> Vec<&Instr> {
@@ -698,13 +1042,14 @@ mod tests {
         // result: D=2 loads, M=1 store.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m) = lower_line(
+        let (func, m, _) = lower_line(
             0,
             &line_terms("+"),
             2,
             &[Type::I64, Type::I64],
             &env,
             &resolve,
+            &Structs::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -716,7 +1061,15 @@ mod tests {
         // `2 3 +` from D=0 nets +1, so new_top = top + 8.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m) = lower_line(0, &line_terms("2 3 +"), 0, &[], &env, &resolve);
+        let (func, m, _) = lower_line(
+            0,
+            &line_terms("2 3 +"),
+            0,
+            &[],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
         let ret = match last.term {
@@ -744,6 +1097,79 @@ mod tests {
     }
 
     #[test]
+    fn carried_slot_bytes_scalar_is_eight_struct_is_aligned_aggregate() {
+        // A scalar always occupies a byte-identical 8-byte carried cell (so
+        // every scalar-only line marshals unchanged); a struct occupies its
+        // aggregate size rounded up to a multiple of 8.
+        let s = structs_of("type: Pair a i8 b i8 ;\ntype: Vec2 x i64 y i64 ;");
+        assert_eq!(carried_slot_bytes(IrType::I64, &s), 8);
+        assert_eq!(carried_slot_bytes(IrType::Bool, &s), 8);
+        // Pair is two i8s = 2 bytes, rounded up to one 8-byte cell.
+        assert_eq!(
+            carried_slot_bytes(IrType::Struct(StructId::from_index(0)), &s),
+            8
+        );
+        // Vec2 is two i64s = 16 bytes, already a multiple of 8.
+        assert_eq!(
+            carried_slot_bytes(IrType::Struct(StructId::from_index(1)), &s),
+            16
+        );
+    }
+
+    #[test]
+    fn lower_line_struct_slot_blits_in_and_out() {
+        // A carried struct slot is copied out of the buffer on entry and back
+        // on exit by aggregate blits, and the returned top advances by the
+        // struct's aligned carried size. An empty line carries the one
+        // Vec2 straight through: one prologue blit, one epilogue blit.
+        let s = structs_of("type: Vec2 x i64 y i64 ;");
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
+        let (func, m, out_bytes) = lower_line(0, &line_terms(""), 1, &[vec2], &env, &resolve, &s);
+        assert_eq!(m, 1);
+        assert_eq!(out_bytes, 16);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
+        // No scalar 8-byte-cell Load/Store touches a struct slot.
+        assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 0);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 0);
+    }
+
+    #[test]
+    fn lower_line_scalar_only_uses_eight_byte_cells_and_no_blit() {
+        // R16/NF3: a scalar-only line marshals exactly as before — 8-byte-cell
+        // stores, `PtrOffset`s at multiples of 8, and never an aggregate
+        // `Blit`. `+` from a carried depth of 2 reads cells 0/8 and writes the
+        // single result at 0.
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let (func, m, out_bytes) = lower_line(
+            0,
+            &line_terms("+"),
+            2,
+            &[Type::I64, Type::I64],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
+        assert_eq!(m, 1);
+        assert_eq!(out_bytes, 8);
+        assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 0);
+        let offsets: Vec<i64> = instrs(&func)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::PtrOffset(_, _, off) => Some(*off),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offsets,
+            vec![0, 8, 0],
+            "two input cells at 0/8, one output cell at 0"
+        );
+    }
+
+    #[test]
     fn lower_line_carried_narrow_slot_relabels_after_load() {
         // Q2/R16: a `u8` carried slot loads as `l`-width `i64` from the buffer
         // (canonicalization keeps its low bits authoritative), then must be
@@ -752,7 +1178,15 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let u8_ty = Type::from_name("u8").unwrap();
-        let (func, _m) = lower_line(0, &line_terms("1 >u8 +"), 1, &[u8_ty], &env, &resolve);
+        let (func, _m, _) = lower_line(
+            0,
+            &line_terms("1 >u8 +"),
+            1,
+            &[u8_ty],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
         let conv_dst = instrs(&func)
             .iter()
             .find_map(|i| match i {
@@ -774,7 +1208,15 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("sq".to_string(), (1usize, 1usize, None));
         let resolve = |name: &str| format!("{name}__gen2");
-        let (func, _m) = lower_line(0, &line_terms("5 sq"), 0, &[], &env, &resolve);
+        let (func, _m, _) = lower_line(
+            0,
+            &line_terms("5 sq"),
+            0,
+            &[],
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
         let calls: Vec<&str> = instrs(&func)
             .iter()
             .filter_map(|i| match i {
@@ -845,7 +1287,8 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
+        let (func, _m, _) =
+            lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
         let loaded = func
             .blocks
             .iter()
@@ -903,12 +1346,12 @@ mod tests {
 
     #[test]
     fn lower_float_literal_is_constf_f64_typed() {
-        let ir = lower_src(": w ( -- f64 ) 3.14 ;");
+        let ir = lower_src(": w ( -- f64 ) 2.5 ;");
         let w = &ir.funcs[0];
         let v = instrs(w)
             .iter()
             .find_map(|i| match i {
-                Instr::ConstF(v, x) if *x == 3.14 => Some(*v),
+                Instr::ConstF(v, x) if *x == 2.5 => Some(*v),
                 _ => None,
             })
             .expect("a ConstF for the float literal");
@@ -1089,12 +1532,115 @@ mod tests {
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let mut b = FuncBuilder::new(&env, &resolve);
+        let structs = Structs::default();
+        let mut b = FuncBuilder::new(&env, &resolve, &structs);
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
         b.lower_call("+");
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
+    }
+
+    #[test]
+    fn struct_layout_flat_i64_fields_offsets_and_size() {
+        let s = structs_of("type: Vec2 x i64 y i64 ;");
+        let v = layout(&s, "Vec2");
+        assert_eq!(v.size, 16);
+        assert_eq!(v.align, 8);
+        assert_eq!(v.fields[0].offset, 0);
+        assert_eq!(v.fields[1].offset, 8);
+    }
+
+    #[test]
+    fn struct_layout_packed_subword_fields_natural_alignment() {
+        // Two `i8`s pack at 0 and 1; the `i64` aligns to 8; whole size 16.
+        let s = structs_of("type: Packed p i8 q i8 r i64 ;");
+        let p = layout(&s, "Packed");
+        assert_eq!(
+            (p.fields[0].offset, p.fields[1].offset, p.fields[2].offset),
+            (0, 1, 8)
+        );
+        assert_eq!((p.size, p.align), (16, 8));
+    }
+
+    #[test]
+    fn struct_layout_nested_uses_inner_size_and_align() {
+        let s = structs_of("type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;");
+        let seg = layout(&s, "Segment");
+        assert_eq!((seg.fields[0].offset, seg.fields[1].offset), (0, 16));
+        assert_eq!((seg.size, seg.align), (32, 8));
+    }
+
+    #[test]
+    fn struct_layout_zero_field_is_size_0_align_1() {
+        let s = structs_of("type: Unit ;");
+        let u = layout(&s, "Unit");
+        assert_eq!((u.size, u.align), (0, 1));
+        assert!(u.fields.is_empty());
+    }
+
+    #[test]
+    fn lower_constructor_allocs_and_stores_each_field() {
+        // The constructor allocs one aggregate slot and width-exact-stores both
+        // fields; no aggregate copy for a flat struct.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : mk ( i64 i64 -- Vec2 ) Vec2 ;");
+        let mk = ir.funcs.iter().find(|f| f.name == "mk").unwrap();
+        assert_eq!(count(mk, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(mk, |i| matches!(i, Instr::FieldStore(..))), 2);
+    }
+
+    #[test]
+    fn lower_getter_is_single_field_load_no_copy() {
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : gx ( Vec2 -- i64 ) Vec2>x ;");
+        let gx = ir.funcs.iter().find(|f| f.name == "gx").unwrap();
+        assert_eq!(count(gx, |i| matches!(i, Instr::FieldLoad(..))), 1);
+        assert_eq!(count(gx, |i| matches!(i, Instr::Blit(..))), 0);
+        assert_eq!(count(gx, |i| matches!(i, Instr::Alloc(..))), 0);
+    }
+
+    #[test]
+    fn lower_setter_allocs_new_blits_all_and_overwrites_one_field() {
+        // Functional update: alloc a fresh aggregate, blit all bytes, then a
+        // single width-exact store of the replaced field.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : sx ( Vec2 i64 -- Vec2 ) Vec2<x ;");
+        let sx = ir.funcs.iter().find(|f| f.name == "sx").unwrap();
+        assert_eq!(count(sx, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::FieldStore(..))), 1);
+    }
+
+    #[test]
+    fn lower_dup_of_struct_allocs_and_blits() {
+        // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
+        // blit), unlike a scalar `dup` which reuses the value id.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 Vec2 ) dup ;");
+        let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+    }
+
+    #[test]
+    fn lower_destructure_loads_every_field() {
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : ex ( Vec2 -- i64 i64 ) Vec2> ;");
+        let ex = ir.funcs.iter().find(|f| f.name == "ex").unwrap();
+        assert_eq!(count(ex, |i| matches!(i, Instr::FieldLoad(..))), 2);
+    }
+
+    #[test]
+    fn lower_zero_field_constructor_allocs_destructure_emits_nothing() {
+        let ir = lower_src("type: Unit ; : u ( -- ) Unit Unit> ;");
+        let u = ir.funcs.iter().find(|f| f.name == "u").unwrap();
+        assert_eq!(count(u, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(u, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(u, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn ir_type_of_struct_maps_to_struct_irtype() {
+        let tokens = lex("type: Vec2 x i64 y i64 ;").unwrap();
+        let module = parse(&tokens).unwrap();
+        let ty = module.resolve_type_name("Vec2").unwrap();
+        assert!(matches!(ir_type_of(ty), IrType::Struct(_)));
     }
 }

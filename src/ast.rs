@@ -10,6 +10,63 @@ pub struct Span {
 #[derive(Debug, Default)]
 pub struct Module {
     pub words: Vec<WordDef>,
+    /// The per-program struct registry: one entry per `type:` declaration,
+    /// indexed by `StructId`. Populated by the parser pre-pass (names) and
+    /// then by the `type:` production (fields).
+    pub structs: Vec<StructDecl>,
+}
+
+impl Module {
+    /// Resolve a source type-name word to a `Type` against this module's
+    /// struct registry. Thin wrapper over the free `resolve_type_name`, the
+    /// one resolver shared with the parser so effect-slot and
+    /// struct-field-type resolution can't drift apart.
+    pub fn resolve_type_name(&self, name: &str) -> Option<Type> {
+        resolve_type_name(&self.structs, name)
+    }
+}
+
+/// Resolve a source type-name word to a `Type`: the scalar table first, then
+/// `structs` (a struct registry, in `Module` or mid-parse). The single
+/// implementation both `Module::resolve_type_name` and the parser call.
+pub fn resolve_type_name(structs: &[StructDecl], name: &str) -> Option<Type> {
+    Type::from_name(name).or_else(|| {
+        structs
+            .iter()
+            .position(|s| s.name == name)
+            .map(|idx| Type::Struct(StructId(idx), structs[idx].name_static))
+    })
+}
+
+/// A registered struct: its declared name, an ordered `(field-name, Type)`
+/// list, and the leaked `&'static str` copy of its name every `Type::Struct`
+/// naming it carries directly, so a struct name renders without threading
+/// the registry through every diagnostic-formatting call site.
+#[derive(Debug)]
+pub struct StructDecl {
+    pub name: String,
+    pub name_static: &'static str,
+    pub fields: Vec<(String, Type)>,
+    pub span: Span,
+}
+
+/// A small `Copy` index into `Module::structs`. Two `Type::Struct` values are
+/// equal iff they name the same registered struct; the field is
+/// `pub(crate)` so only frontend/IR code within this crate can mint one, tied
+/// to a real registry entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StructId(pub(crate) usize);
+
+impl StructId {
+    /// Mint a `StructId` for a registry position; crate-internal so an id is
+    /// always tied to a real `Module::structs` entry.
+    pub(crate) fn from_index(idx: usize) -> StructId {
+        StructId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
 }
 
 /// One REPL input unit: either a word definition or a bare term sequence
@@ -45,14 +102,18 @@ pub struct TypedSlot {
 }
 
 /// A frontend type: the fixed-width integer tower (`i8..i64`, `u8..u64`) plus
-/// `bool`. The eight integer cases are table-generated (`INT_TYPES` below), not
-/// eight hand-written variants, so a further width is one table row. Structs,
-/// enums, arrays, etc. are later slices.
+/// `bool`, plus a user-declared `struct`. The eight integer
+/// cases are table-generated (`INT_TYPES` below), not eight hand-written
+/// variants, so a further width is one table row. `Type::Struct` carries a
+/// `StructId` and the struct's leaked `&'static str` name so `Type` stays
+/// `Copy` and self-renders without a registry (see `StructDecl::name_static`).
+/// Enums, arrays, etc. are later slices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int(IntType),
     Float(FloatType),
     Bool,
+    Struct(StructId, &'static str),
 }
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
@@ -160,6 +221,7 @@ impl Type {
                 .find(|(_, b)| b == bits)
                 .map(|(n, _)| *n)
                 .expect("Type::Float is always constructed from a FLOAT_TYPES row"),
+            Type::Struct(_, name) => name,
         }
     }
 }
@@ -269,5 +331,57 @@ mod tests {
         assert!(Type::from_name("i64").unwrap().is_numeric());
         assert!(!Type::from_name("i64").unwrap().is_float());
         assert!(!Type::Bool.is_numeric());
+    }
+
+    fn module_with_struct(name: &str, fields: Vec<(String, Type)>) -> Module {
+        let name_static: &'static str = Box::leak(name.to_string().into_boxed_str());
+        Module {
+            words: Vec::new(),
+            structs: vec![StructDecl {
+                name: name.to_string(),
+                name_static,
+                fields,
+                span: Span::default(),
+            }],
+        }
+    }
+
+    #[test]
+    fn module_resolve_type_name_finds_registered_struct() {
+        let module = module_with_struct("Vec2", vec![("x".to_string(), Type::I64)]);
+        let ty = module.resolve_type_name("Vec2").unwrap();
+        match ty {
+            Type::Struct(id, name) => {
+                assert_eq!(id, StructId(0));
+                assert_eq!(name, "Vec2");
+            }
+            other => panic!("expected Type::Struct, got {other:?}"),
+        }
+        assert_eq!(ty.name(), "Vec2");
+        assert_eq!(ty.to_string(), "Vec2");
+    }
+
+    #[test]
+    fn module_resolve_type_name_prefers_scalar_table() {
+        // A struct named like a scalar can't shadow it: `from_name` is tried
+        // first, so `i64` always resolves to the scalar even if a
+        // (nonsensical) struct of that name were registered.
+        let module = module_with_struct("i64", vec![]);
+        assert_eq!(module.resolve_type_name("i64"), Some(Type::I64));
+    }
+
+    #[test]
+    fn module_resolve_type_name_unknown_is_none() {
+        let module = Module::default();
+        assert_eq!(module.resolve_type_name("Nope"), None);
+    }
+
+    #[test]
+    fn type_struct_equality_is_by_struct_id() {
+        let a = Type::Struct(StructId(0), "Vec2");
+        let b = Type::Struct(StructId(0), "Vec2");
+        let c = Type::Struct(StructId(1), "Segment");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

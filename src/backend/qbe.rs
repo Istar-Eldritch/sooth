@@ -6,7 +6,9 @@
 
 use std::fmt::Write;
 
-use crate::ir::{BinOp, BlockId, CmpOp, Instr, IrFunc, IrModule, IrType, Terminator, Value};
+use crate::ir::{
+    BinOp, BlockId, CmpOp, Instr, IrFunc, IrModule, IrType, StructLayout, Terminator, Value,
+};
 
 pub fn emit(ir: &IrModule) -> Result<String, String> {
     let mut out = String::new();
@@ -20,19 +22,57 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
     out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
     out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
+    for layout in &ir.structs {
+        emit_struct_type(&mut out, layout, &ir.structs);
+    }
     for func in &ir.funcs {
         out.push('\n');
-        emit_func(&mut out, func);
+        emit_func(&mut out, func, &ir.structs);
     }
     Ok(out)
 }
 
+/// Emit a struct's QBE aggregate type `type :Name = { members }`, one
+/// member per field in layout order. QBE re-derives offsets from the member
+/// list with natural alignment, which agrees with the hand-computed layout,
+/// the load-bearing ABI-agreement property. A zero-field struct emits an
+/// empty aggregate `{ }`.
+fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: &[StructLayout]) {
+    let members: Vec<String> = layout
+        .fields
+        .iter()
+        .map(|f| member_ty(f.ty, layouts))
+        .collect();
+    writeln!(out, "type :{} = {{ {} }}", layout.name, members.join(", ")).unwrap();
+}
+
 /// The Sooth `main` word is emitted as `sooth_main`; the C shim owns `main`.
-fn qbe_name(name: &str) -> &str {
+/// Sooth word names may contain characters (`-`, `<`, `>`, etc., identifier-
+/// continuation characters in the lexer) that are not valid in a QBE global
+/// symbol, so any such character is replaced with `_`; applied identically at
+/// both the function definition and every call site, so it never causes a
+/// collision within a single compilation unit's word names.
+fn qbe_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name == "main" {
-        "sooth_main"
+        return std::borrow::Cow::Borrowed("sooth_main");
+    }
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+    {
+        std::borrow::Cow::Borrowed(name)
     } else {
-        name
+        std::borrow::Cow::Owned(
+            name.chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect(),
+        )
     }
 }
 
@@ -71,6 +111,81 @@ fn width(ty: IrType) -> &'static str {
             }
         }
         IrType::Ptr => "l",
+        // A struct value is a pointer in a register (`l`); its aggregate `:S`
+        // type is only spelled in ABI positions (`qbe_abi_ty`).
+        IrType::Struct(_) => "l",
+    }
+}
+
+/// The QBE type spelled in an ABI position (a function param/return or a call
+/// argument): a struct is its aggregate `:Name` (so QBE applies its C-ABI
+/// by-value classification); every scalar is its register `width`.
+fn qbe_abi_ty(ty: IrType, layouts: &[StructLayout]) -> String {
+    match ty {
+        IrType::Struct(id) => format!(":{}", layouts[id.index()].name),
+        _ => width(ty).to_string(),
+    }
+}
+
+/// The QBE member letter for a struct field: `b`/`h`/`w`/`l` by integer width,
+/// `s`/`d` by float width, `:Inner` for a nested struct.
+fn member_ty(ty: IrType, layouts: &[StructLayout]) -> String {
+    match ty {
+        IrType::Bool => "b".to_string(),
+        IrType::Int { bits: 8, .. } => "b".to_string(),
+        IrType::Int { bits: 16, .. } => "h".to_string(),
+        IrType::Int { bits: 32, .. } => "w".to_string(),
+        IrType::Int { .. } => "l".to_string(),
+        IrType::Float { bits: 32 } => "s".to_string(),
+        IrType::Float { .. } => "d".to_string(),
+        IrType::Ptr => "l".to_string(),
+        IrType::Struct(id) => format!(":{}", layouts[id.index()].name),
+    }
+}
+
+fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
+    match ty {
+        IrType::Bool => ("w", "loadub"),
+        IrType::Int {
+            bits: 8,
+            signed: true,
+        } => ("w", "loadsb"),
+        IrType::Int { bits: 8, .. } => ("w", "loadub"),
+        IrType::Int {
+            bits: 16,
+            signed: true,
+        } => ("w", "loadsh"),
+        IrType::Int { bits: 16, .. } => ("w", "loaduh"),
+        IrType::Int { bits: 32, .. } => ("w", "loadw"),
+        IrType::Int { .. } => ("l", "loadl"),
+        IrType::Float { bits: 32 } => ("s", "loads"),
+        IrType::Float { .. } => ("d", "loadd"),
+        IrType::Ptr => ("l", "loadl"),
+        IrType::Struct(_) => unreachable!("a struct field is copied by blit, not scalar-loaded"),
+    }
+}
+
+fn field_store_op(ty: IrType) -> &'static str {
+    match ty {
+        IrType::Bool => "storeb",
+        IrType::Int { bits: 8, .. } => "storeb",
+        IrType::Int { bits: 16, .. } => "storeh",
+        IrType::Int { bits: 32, .. } => "storew",
+        IrType::Int { .. } => "storel",
+        IrType::Float { bits: 32 } => "stores",
+        IrType::Float { .. } => "stored",
+        IrType::Ptr => "storel",
+        IrType::Struct(_) => unreachable!("a struct field is copied by blit, not scalar-stored"),
+    }
+}
+
+/// The `alloc` mnemonic for a struct alignment: QBE offers `alloc4`/`alloc8`/
+/// `alloc16`; an align of 1/2 rounds up to `alloc4` (over-alignment is sound).
+fn alloc_op(align: u32) -> &'static str {
+    match align {
+        a if a <= 4 => "alloc4",
+        8 => "alloc8",
+        _ => "alloc16",
     }
 }
 
@@ -255,16 +370,16 @@ fn ty_of(value_types: &[IrType], v: Value) -> IrType {
     value_types[v.0 as usize]
 }
 
-fn emit_func(out: &mut String, func: &IrFunc) {
+fn emit_func(out: &mut String, func: &IrFunc, layouts: &[StructLayout]) {
     let ret_ty = match func.ret {
-        Some(ty) => format!("{} ", width(ty)),
+        Some(ty) => format!("{} ", qbe_abi_ty(ty, layouts)),
         None => String::new(),
     };
     let params: Vec<String> = func
         .params
         .iter()
         .enumerate()
-        .map(|(i, ty)| format!("{} %v{i}", width(*ty)))
+        .map(|(i, ty)| format!("{} %v{i}", qbe_abi_ty(*ty, layouts)))
         .collect();
     writeln!(
         out,
@@ -277,14 +392,20 @@ fn emit_func(out: &mut String, func: &IrFunc) {
     for block in &func.blocks {
         writeln!(out, "{}", label(block.id)).unwrap();
         for instr in &block.instrs {
-            emit_instr(out, instr, &func.value_types, &mut ext_id);
+            emit_instr(out, instr, &func.value_types, layouts, &mut ext_id);
         }
         emit_term(out, &block.term);
     }
     out.push_str("}\n");
 }
 
-fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &mut u32) {
+fn emit_instr(
+    out: &mut String,
+    instr: &Instr,
+    value_types: &[IrType],
+    layouts: &[StructLayout],
+    ext_id: &mut u32,
+) {
     match instr {
         Instr::Const(v, n) => {
             let w = width(ty_of(value_types, *v));
@@ -440,13 +561,22 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
             writeln!(out, "\t{} ={w} {m}{ow} {}, {}", val(*v), val(*a), val(*b))
         }
         Instr::Call(ret, f, args) => {
+            // A struct argument/return is spelled `:S` so QBE applies its
+            // by-value C-ABI classification; the temporary is a pointer to
+            // the aggregate on both sides.
             let a: Vec<String> = args
                 .iter()
-                .map(|x| format!("{} {}", width(ty_of(value_types, *x)), val(*x)))
+                .map(|x| {
+                    format!(
+                        "{} {}",
+                        qbe_abi_ty(ty_of(value_types, *x), layouts),
+                        val(*x)
+                    )
+                })
                 .collect();
             match ret {
                 Some(r) => {
-                    let w = width(ty_of(value_types, *r));
+                    let w = qbe_abi_ty(ty_of(value_types, *r), layouts);
                     writeln!(
                         out,
                         "\t{} ={w} call ${}({})",
@@ -511,9 +641,31 @@ fn emit_instr(out: &mut String, instr: &Instr, value_types: &[IrType], ext_id: &
                 writeln!(out, "\tcall $printf(l {fmt}, l {w64}, ...)")
             }
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
+            IrType::Struct(_) => {
+                unreachable!("a struct is not a printable scalar; checker rejects it (X6)")
+            }
         },
         Instr::PtrOffset(dst, base, bytes) => {
             writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
+        }
+        Instr::Alloc(dst, size, align) => {
+            // A frame-local aggregate slot; QBE only offers alloc4/8/16, so a
+            // size-0 (zero-field) struct still allocs a minimal slot.
+            let op = alloc_op(*align);
+            writeln!(out, "\t{} =l {op} {}", val(*dst), (*size).max(1))
+        }
+        Instr::Blit(src, dst, size) => {
+            // QBE `blit src, dst, n` copies n bytes src -> dst (verified). A
+            // zero-field struct never emits a blit (guarded in the frontend).
+            writeln!(out, "\tblit {}, {}, {size}", val(*src), val(*dst))
+        }
+        Instr::FieldLoad(dst, ptr) => {
+            let (w, op) = field_load_op(ty_of(value_types, *dst));
+            writeln!(out, "\t{} ={w} {op} {}", val(*dst), val(*ptr))
+        }
+        Instr::FieldStore(ptr, v) => {
+            let op = field_store_op(ty_of(value_types, *v));
+            writeln!(out, "\t{op} {}, {}", val(*v), val(*ptr))
         }
         Instr::Load(dst, ptr) => {
             // The load width follows the destination's `IrType` (R20): a float
@@ -579,7 +731,7 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, IrModule};
+    use crate::ir::{lower, lower_line, IrModule, Structs};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
@@ -601,8 +753,34 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let entry_types = vec![Type::I64; entry_depth];
-        let (func, _m) = lower_line(0, &terms, entry_depth, &entry_types, &env, &resolve);
-        emit(&IrModule { funcs: vec![func] }).unwrap()
+        let (func, _m, _) = lower_line(
+            0,
+            &terms,
+            entry_depth,
+            &entry_types,
+            &env,
+            &resolve,
+            &Structs::default(),
+        );
+        emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn emit_word_name_with_hyphen_sanitizes_qbe_symbol() {
+        // A word name containing `-` (a legal identifier-continuation
+        // character in the lexer, e.g. the S8 dogfood's `shift-x`) is not a
+        // valid QBE global symbol; it is sanitized identically at the
+        // function definition and its call site.
+        let il = emit_src(
+            ": shift-x ( i64 -- i64 ) | n | n 1 + ;
+            : main ( -- ) 5 shift-x . ;",
+        );
+        assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
+        assert!(il.contains("$shift_x"), "expected sanitized symbol: {il}");
     }
 
     #[test]
@@ -721,8 +899,13 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m) = lower_line(0, &terms, 1, &[f64_ty], &env, &resolve);
-        let il = emit(&IrModule { funcs: vec![func] }).unwrap();
+        let (func, _m, _) =
+            lower_line(0, &terms, 1, &[f64_ty], &env, &resolve, &Structs::default());
+        let il = emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap();
         assert!(il.contains("loadd "), "expected a float load: {il}");
         assert!(il.contains("stored "), "expected a float store: {il}");
         assert!(
@@ -797,7 +980,11 @@ mod tests {
             }],
             value_types: vec![operand, operand, result],
         };
-        emit(&IrModule { funcs: vec![func] }).unwrap()
+        emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     #[test]
@@ -1043,7 +1230,11 @@ mod tests {
             }],
             value_types: vec![src_ty, dst_ty],
         };
-        emit(&IrModule { funcs: vec![func] }).unwrap()
+        emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap()
     }
 
     fn f32() -> IrType {
@@ -1238,7 +1429,11 @@ mod tests {
             }],
             value_types: vec![u8, u8, u8],
         };
-        let il = emit(&IrModule { funcs: vec![func] }).unwrap();
+        let il = emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap();
         assert!(il.contains("copy -1"), "expected the -1 const: {il}");
         assert!(il.contains("xor"), "expected the xor: {il}");
         assert!(
@@ -1323,5 +1518,59 @@ mod tests {
         let i8 = int(8, true);
         let il = emit_binary(i8, i8, Instr::Bin(Value(2), BinOp::Add, Value(0), Value(1)));
         assert!(il.contains("extsb"), "expected a sign-extend: {il}");
+    }
+
+    #[test]
+    fn emit_struct_declares_aggregate_type() {
+        // R12: a `type :Vec2 = { l, l }` is emitted for the struct.
+        let il = emit_src("type: Vec2 x i64 y i64 ; : mk ( i64 i64 -- Vec2 ) Vec2 ;");
+        assert!(
+            il.contains("type :Vec2 = { l, l }"),
+            "expected the aggregate type decl: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_struct_return_uses_aggregate_abi() {
+        // A struct-returning word declares its return as `:Vec2`, not `l`, so
+        // QBE copies the aggregate by value across the boundary.
+        let il = emit_src("type: Vec2 x i64 y i64 ; : mk ( i64 i64 -- Vec2 ) Vec2 ;");
+        assert!(
+            il.contains("export function :Vec2 $mk("),
+            "expected an aggregate return type: {il}"
+        );
+        assert!(il.contains("alloc8 16"), "expected a 16-byte alloc: {il}");
+    }
+
+    #[test]
+    fn emit_packed_subword_fields_use_width_exact_stores() {
+        // R15/RISK 3: adjacent `i8` fields store 1 byte each (`storeb`), never
+        // the 8-byte marshalling `storel`, so neither clobbers its neighbour.
+        let il = emit_src("type: P p i8 q i8 r i64 ; : mk ( i8 i8 i64 -- P ) P ;");
+        assert!(il.contains("type :P = { b, b, l }"), "unexpected IL: {il}");
+        assert_eq!(
+            il.matches("storeb").count(),
+            2,
+            "two 1-byte field stores: {il}"
+        );
+        assert!(il.contains("storel"), "the i64 field stores 8 bytes: {il}");
+    }
+
+    #[test]
+    fn emit_getter_i8_field_sign_extends_via_loadsb() {
+        let il = emit_src("type: P p i8 q i8 r i64 ; : g ( P -- i8 ) P>p ;");
+        assert!(
+            il.contains("loadsb"),
+            "expected a width-exact i8 load: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_nested_struct_member_references_inner_aggregate() {
+        let il = emit_src("type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;");
+        assert!(
+            il.contains("type :Segment = { :Vec2, :Vec2 }"),
+            "expected nested aggregate members: {il}"
+        );
     }
 }
