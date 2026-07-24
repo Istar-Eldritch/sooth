@@ -107,20 +107,16 @@ fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
 
 /// A duplicate type name across the *combined* struct + enum registries
 /// (D10, X2) is a sharp located error naming the type: a name used by two
-/// structs, two enums, or one of each. Generalizes
-/// `check_duplicate_struct_names` to the full type namespace; struct-only
-/// callers (e.g. the REPL, which doesn't yet declare enums) keep using that
-/// narrower check.
+/// structs, two enums, or one of each. Delegates the struct-only pass to
+/// `check_duplicate_struct_names` (also called directly by struct-only
+/// callers, e.g. the REPL, which doesn't yet declare enums) rather than
+/// re-scanning `structs` twice.
 fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
-    let mut seen: HashMap<&str, ()> = HashMap::new();
-    for decl in structs {
-        if seen.insert(decl.name.as_str(), ()).is_some() {
-            return Err(format!(
-                "error: duplicate type `{}` (line {}, col {})",
-                decl.name, decl.span.line, decl.span.col
-            ));
-        }
-    }
+    check_duplicate_struct_names(structs)?;
+    let mut seen: HashMap<&str, ()> = structs
+        .iter()
+        .map(|decl| (decl.name.as_str(), ()))
+        .collect();
     for decl in enums {
         if seen.insert(decl.name.as_str(), ()).is_some() {
             return Err(format!(
