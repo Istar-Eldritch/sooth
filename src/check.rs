@@ -165,6 +165,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         env.insert(word.name.clone(), sig_of(&word.effect));
     }
 
+    // Reject mutual tail-recursion cycles (D3, X1) on the whole-module
+    // tail-call graph, after signature registration and before body checking.
+    check_tail_call_cycles(&module.words)?;
+
     // Split the borrow so a word body can intern into `arrays` while reading
     // `words`/`enums`.
     let Module {
@@ -577,6 +581,150 @@ fn check_outputs(
         }
     }
     Ok(())
+}
+
+/// R1 (D2, D7): the callee names of every tail-position call in a word body.
+///
+/// Tail position is a purely *syntactic* property: a call is in tail position
+/// iff it is the final term of a terms body, the final term of a clause body,
+/// or the final term of an arm of a *terminal* `if` (an `if` that is itself
+/// the final term hands tail position to the last term of both arms,
+/// recursively). Any term after a call, arithmetic, a shuffle, a consumer, or
+/// another call, breaks tail position, and a call inside a non-terminal `if`
+/// is not tail. Output-equality with the declared outputs is a *consequence*
+/// of this rule for a well-typed final call, not a second check.
+///
+/// Shared by the checker (R2 predicate, R3 tail-call graph) and, later, the
+/// lowerer, so tail position has a single definition.
+pub fn tail_position_calls(body: &WordBody) -> Vec<&str> {
+    let mut out = Vec::new();
+    match body {
+        WordBody::Terms { terms, .. } => collect_tail_calls(terms, &mut out),
+        WordBody::Clauses(clauses) => {
+            for clause in clauses {
+                collect_tail_calls(&clause.body, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
+    let Some(last) = terms.last() else {
+        return;
+    };
+    match &last.kind {
+        TermKind::Call(name) => out.push(name.as_str()),
+        TermKind::If {
+            then_branch,
+            else_branch,
+        } => {
+            collect_tail_calls(then_branch, out);
+            collect_tail_calls(else_branch, out);
+        }
+        _ => {}
+    }
+}
+
+/// R2 (M1): whether a word contains at least one tail-position call to itself.
+/// The lowerer uses this to decide whether to build the loop shape at all.
+pub fn has_self_tail_call(word: &WordDef) -> bool {
+    tail_position_calls(&word.body)
+        .iter()
+        .any(|&callee| callee == word.name)
+}
+
+/// A word's location, derived from the first term (or clause) of its body,
+/// for locating a whole-word diagnostic like X1.
+fn word_span(word: &WordDef) -> Span {
+    match &word.body {
+        WordBody::Terms { terms, .. } => terms.first().map(|t| t.span).unwrap_or_default(),
+        WordBody::Clauses(clauses) => clauses.first().map(|c| c.span).unwrap_or_default(),
+    }
+}
+
+/// R3/R4 (D3, X1): build the whole-module tail-call graph (an edge `A -> B`
+/// iff `A` has a tail-position call to user word `B`) and reject any cycle of
+/// length >= 2. A self-loop (`A -> A`) is tier-1 self-tail-recursion and
+/// allowed; only mutual cycles are the error. Builtins, generated words, and
+/// non-tail calls contribute no edge, so a pair of words that mutually call
+/// each other in non-tail position never false-positives.
+fn check_tail_call_cycles(words: &[WordDef]) -> Result<(), String> {
+    let name_to_idx: HashMap<&str, usize> = words
+        .iter()
+        .enumerate()
+        .map(|(i, w)| (w.name.as_str(), i))
+        .collect();
+
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); words.len()];
+    for (i, word) in words.iter().enumerate() {
+        for callee in tail_position_calls(&word.body) {
+            if let Some(&j) = name_to_idx.get(callee) {
+                if !adj[i].contains(&j) {
+                    adj[i].push(j);
+                }
+            }
+        }
+    }
+
+    let mut color = vec![0u8; words.len()];
+    let mut path: Vec<usize> = Vec::new();
+    for start in 0..words.len() {
+        if color[start] == 0 {
+            if let Some(cycle) = find_tail_cycle(start, &adj, &mut color, &mut path) {
+                return Err(mutual_tail_recursion_error(words, &cycle));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// DFS from `u` over the tail-call graph, returning the members (in order) of
+/// the first cycle of length >= 2 reached. A self-edge (`v == u`) is skipped:
+/// tier-1 self-tail-recursion is allowed. `color`: 0 unvisited, 1 on the
+/// current path, 2 finished.
+fn find_tail_cycle(
+    u: usize,
+    adj: &[Vec<usize>],
+    color: &mut [u8],
+    path: &mut Vec<usize>,
+) -> Option<Vec<usize>> {
+    color[u] = 1;
+    path.push(u);
+    for &v in &adj[u] {
+        if v == u {
+            continue;
+        }
+        if color[v] == 1 {
+            let start = path.iter().position(|&x| x == v).unwrap();
+            return Some(path[start..].to_vec());
+        }
+        if color[v] == 0 {
+            if let Some(cycle) = find_tail_cycle(v, adj, color, path) {
+                return Some(cycle);
+            }
+        }
+    }
+    path.pop();
+    color[u] = 2;
+    None
+}
+
+/// X1: a located mutual-tail-recursion error naming the cycle members in
+/// order, closing the loop back to the first (e.g. `` `a` -> `b` -> `a` ``).
+fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
+    let mut chain: Vec<&str> = cycle.iter().map(|&i| words[i].name.as_str()).collect();
+    chain.push(chain[0]);
+    let rendered = chain
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let span = word_span(&words[cycle[0]]);
+    format!(
+        "error: mutual tail recursion {} (line {}, col {})",
+        rendered, span.line, span.col
+    )
 }
 
 fn check_word(
@@ -2693,5 +2841,95 @@ mod tests {
             check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Shape ) + ;").unwrap_err();
         assert!(err.contains("numeric"), "unexpected message: {err}");
         assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+
+    fn first_word(src: &str) -> WordDef {
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        module.words.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn tail_position_final_self_call_is_tail() {
+        let w = first_word(": rec ( i64 -- i64 ) rec ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["rec"]);
+        assert!(has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_trailing_arithmetic_is_not_tail() {
+        // `rec *`: the final term is `*`, so the self-call is not in tail
+        // position (classic non-tail recursion).
+        let w = first_word(": rec ( i64 -- i64 ) rec * ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["*"]);
+        assert!(!has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_trailing_swap_is_not_tail() {
+        let w = first_word(": rec ( i64 -- i64 ) rec swap ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["swap"]);
+        assert!(!has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_trailing_drop_is_not_tail() {
+        let w = first_word(": rec ( i64 -- i64 ) rec drop ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["drop"]);
+        assert!(!has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_both_terminal_if_arms_are_tail() {
+        // A terminal `if` hands tail position to the last term of both arms.
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else rec end ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["rec", "rec"]);
+        assert!(has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_non_terminal_if_self_call_is_not_tail() {
+        // The `if` is followed by more terms, so it is non-terminal and its
+        // arms are not in tail position.
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else 0 end drop 5 ;");
+        assert!(!has_self_tail_call(&w));
+        assert!(!tail_position_calls(&w.body).contains(&"rec"));
+    }
+
+    #[test]
+    fn tail_position_clause_body_final_self_call_is_tail() {
+        let w = first_word("type: E | A | B ; : w ( E -- E ) | A w | B w ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["w", "w"]);
+        assert!(has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn check_mutual_tail_recursion_is_error() {
+        // X1: A tail-calls B, B tail-calls A -> located error naming the cycle.
+        let err = check_src(": a ( i64 -- i64 ) b ; : b ( i64 -- i64 ) a ;").unwrap_err();
+        assert!(
+            err.contains("mutual tail recursion"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`b`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_non_tail_mutual_recursion_is_ok() {
+        // Both words call each other only in non-tail position (`x 1 +`), so no
+        // tail-call edge exists and X1 must not fire (R4 no-false-positive).
+        check_src(
+            ": a ( i64 -- i64 ) dup 0 > if b 1 + else drop 0 end ; \
+             : b ( i64 -- i64 ) dup 0 > if a 1 + else drop 0 end ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_self_tail_recursion_is_allowed() {
+        // A self-loop (`gcd -> gcd`) is tier-1 and must not be flagged as a
+        // mutual cycle.
+        check_src(&std::fs::read_to_string("examples/gcd.sth").unwrap()).unwrap();
     }
 }
