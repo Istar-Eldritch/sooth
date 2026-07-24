@@ -84,16 +84,25 @@ behavioural test each, asserting the message text **and** the named identifiers)
 
 ### Checker (`src/check.rs`)
 
-+ **R1 — Tail-position analysis helper** (D2, M1). A pure helper over a `WordBody` and
-  the word's declared output arity that yields, for a body, its tail-position call sites.
-  Rules: the final term of a `Terms` body is a candidate; a candidate `TermKind::Call`
-  is in tail position iff its outputs are exactly the word's declared outputs and nothing
-  follows; a terminal `TermKind::If` **hands tail position to the final term of both
-  arms** (recurse into `then_branch` and `else_branch`); a `Clauses` body applies the
-  rule to each clause's `body` (D7). A call followed by any further term is not tail. The
-  helper is placed so both the checker (R3) and the lowerer (R7) can call it (shared,
-  single source of truth for the classification), so the lowerer re-derives tail position
-  rather than the checker threading a site list across stages.
++ **R1 — Tail-position analysis helper** (D2, M1). A pure helper over a `WordBody` that
+  yields, for a body, its tail-position call sites. The operative condition is
+  **syntactic position**, not an effect comparison: a `TermKind::Call` is in tail
+  position iff it is the **final term** of a `Terms` body (nothing follows it), or the
+  final term of a clause `body` (D7), or the final term of an arm of a **terminal**
+  `TermKind::If` (an `If` that is itself the final term hands tail position to the final
+  term of both `then_branch` and `else_branch`, recursively). A call with **any** further
+  term after it — arithmetic, a stack shuffle (`swap`/`drop`/`rot`/`over`), a consumer,
+  or another call — is **not** tail. A self-call inside a **non-terminal** `if` (an `if`
+  followed by more terms) is **not** tail. Do **not** build a separate
+  outputs-equal-declared-outputs check: for a well-typed final self-call the net stack
+  already equals the declared outputs (the checker enforces it upstream), so
+  output-equality is a *consequence* of syntactic tail position, not a second gate to
+  implement. The helper is placed so both the checker (R3) and the lowerer (R7) call it
+  (single source of truth), so the lowerer re-derives tail position rather than the
+  checker threading a site list across stages. Unit tests cover the boundaries: final
+  self-call = tail; `rec *` (trailing arithmetic) = not tail; `rec swap` and `rec drop`
+  (trailing pure shuffle) = not tail; both arms of a terminal `if` = tail; a self-call in
+  a non-terminal `if` = not tail; a clause-body final self-call = tail.
 + **R2 — Self-tail-recursion predicate** (M1). Using R1, expose per word whether it
   contains ≥ 1 tail-position self-call (name equals the word's own name). The lowerer
   uses this to decide whether to build the loop shape (R6) at all.
@@ -122,6 +131,15 @@ behavioural test each, asserting the message text **and** the named identifiers)
   lowers from the header reading the **phi output values**, not the raw params.
   `| … |` locals and clause payloads bind from the header phi outputs (D6, D7). When the
   word has no tail self-call, lower exactly as today (no header, no phi) (R10, M5).
+  **Loop-carried slot count = the word's input arity** (the entry stack), *not* its
+  output arity: e.g. `sum-to ( acc n -- acc' )` carries 2 slots (`acc`, `n`) though it
+  outputs 1. The header therefore has one phi per input slot, the entry arm seeds each
+  from the corresponding param, and each back-edge arm supplies the self-call's popped
+  args (R7). Arity invariant: back-edge arg count == header phi count == the word's input
+  arity, always, because a self-call's input arity *is* the word's own signature — a
+  mismatch is impossible for a checker-typed call. A word whose input arity is 0 yields a
+  header with **zero** phis (just a block reached by a back-edge `Jmp`); handle that empty
+  case without special-casing (an empty phi set is valid).
 + **R7 — Lower a tail self-call as a back-edge** (D4). Reached in the user-call default
   arm of `lower_call` (`src/ir.rs:1170`–`1171`), and inside terminal `if` arms via
   `lower_if` (`src/ir.rs:1515`) and inside clause bodies via `lower_clauses`
@@ -183,20 +201,34 @@ criterion 2, the single sanctioned structural unit test.
    self-call lowers to a `Jmp` back to the header with **no** `Instr::Call` to self, and
    the header carries a `Phi` per loop-carried value.
 3. **Clause-style multiple tails** (D7, R9) → native golden: a `|`-clause self-tail-
-   recursive word runs in constant stack over large N; each clause tail is a back-edge
-   into one header.
+   recursive word runs in constant stack over N ≥ 1_000_000; each clause tail is a
+   back-edge into one header. Plus a **mixed-clause** golden where some clauses back-edge
+   and at least one clause is a base case that `Ret`s (the R9 / risk-5 case: the loop
+   header phi and the Slice-4 clause **join** phi must keep disjoint predecessor sets —
+   dispatch-join preds = non-tail clause ends, header preds = entry + tail clause ends).
 4. **Tail position through a terminal `if/else/end`** (D2, R1) → native golden: recursive
-   case in one arm, base case in the other, constant stack over large N.
+   case in one arm, base case in the other, constant stack over N ≥ 1_000_000. Plus a
+   **both-arms-tail** golden (a self-tail-call in each arm of a terminal `if`), which
+   produces **two back-edges from the `if` path** into the header and so exercises R8
+   multi-arm back-patch through `lower_if` (distinct from the clause back-edge path of
+   criterion 3).
 5. **Non-tail self-call preserved** (M5, R10) → native golden: a classic non-tail
    factorial (self-call followed by `*`) still computes correctly at small N (still a
-   real `Call`, deliberately not eliminated).
+   real `Call`, deliberately not eliminated). A companion negative unit test: a self-call
+   inside a **non-terminal** `if` still lowers to `Instr::Call`, not a back-edge (the
+   over-eager-miscompile boundary, risk 3).
 6. **Mutual tail recursion rejected** (D3, X1) → negative golden: A tail-calls B, B
    tail-calls A, located error naming the cycle. Plus a positive test that non-tail
    mutual recursion is accepted (R4 no-false-positive).
 7. **Locals rebind per iteration** (D6, R6) → native golden: a self-tail-recursive word
-   using `| … |` locals produces correct results across iterations.
+   using `| … |` locals produces correct results across iterations, run over
+   N ≥ 1_000_000 (both correct *and* constant-stack).
 8. **REPL parity** (M6, R5) → scripted REPL golden: a self-tail-recursive word defined
-   and run at the REPL completes in constant stack over large N.
+   and run at the REPL completes in constant stack over N ≥ 1_000_000.
+
+Throughout, "constant stack over N ≥ 1_000_000" is deliberate: the N must be large enough
+that the naive (un-transformed) recursion overflows the host stack, so a regression that
+silently disables the transform turns the golden **red** rather than passing at a small N.
 
 ## Dogfood — `examples/countdown.sth`
 
@@ -281,9 +313,9 @@ error belong); `check_word` dispatches `WordBody::Terms` → `check_terms_word` 
       "focus": "checker-tail-position-analysis-and-mutual-cycle-detection",
       "effort": "M",
       "difficulty": "hard",
-      "summary": "R1 tail-position analysis helper over WordBody (terminal-if propagation, clause bodies, outputs-equal-declared-outputs); R2 self-tail-recursion predicate; R3 whole-module tail-call graph; R4 mutual-cycle detection producing located error X1 naming the cycle, with no false-positive on non-tail mutual calls.",
+      "summary": "R1 tail-position analysis helper over WordBody (syntactic final-term rule, terminal-if propagation to both arms, clause bodies; output-equality is a consequence not a separate check); R2 self-tail-recursion predicate; R3 whole-module tail-call graph; R4 mutual-cycle detection producing located error X1 naming the cycle, with no false-positive on non-tail mutual calls.",
       "changes": ["src/check.rs"],
-      "tests": ["tail-position helper unit tests (tail vs non-tail, terminal-if arms, trailing consumer)", "X1 mutual-cycle negative test asserting message + named words", "positive test that non-tail mutual recursion is accepted"],
+      "tests": ["tail-position helper unit tests: final self-call = tail; trailing arithmetic (rec *) = not tail; trailing pure shuffle (rec swap / rec drop) = not tail; both arms of a terminal if = tail; self-call in a NON-terminal if = not tail; clause-body final self-call = tail", "X1 mutual-cycle negative test asserting message + named words", "positive test that non-tail mutual recursion is accepted"],
       "exit": "criterion 6 negative golden passes; tail-position helper covered happy + edge; no regressions."
     },
     {
@@ -302,16 +334,16 @@ error belong); `check_word` dispatches `WordBody::Terms` → `check_terms_word` 
       "difficulty": "hard",
       "summary": "R6 header-with-phi setup in lower_word (params to loop-carried phis, body reads phi outputs, locals/clauses bind from phis); R7 lower a tail self-call as a back-edge Jmp(header) instead of Instr::Call, inside lower_call/lower_if/lower_clauses; R8 SSA back-edge / incomplete-phi back-patching (lower body, collect back-edge inputs, finalize header phis); R9 clause tails into one shared header without predecessor collision; R10 non-tail self-calls and everything else unchanged; R11 vacuous drop-at-back-edge comment anchor.",
       "changes": ["src/ir.rs"],
-      "tests": ["criterion 2 IR unit test: tail self-call -> Jmp to header, no Instr::Call to self, header Phi per carried value", "unit test that a non-tail self-call still lowers to Instr::Call (R10)", "unit test for clause-tail back-edge into one header (R9)"],
-      "exit": "criterion 2 unit test passes; IR shape correct for terms/if/clause tails and non-tail preserved; green."
+      "tests": ["criterion 2 IR unit test: tail self-call -> Jmp to header, no Instr::Call to self, header Phi per carried value (input-arity many)", "unit test that a non-tail self-call still lowers to Instr::Call (R10)", "unit test that a self-call in a NON-terminal if lowers to Instr::Call (R10, over-eager boundary)", "unit test for clause-tail back-edge into one header (R9)", "unit test for both-arms-tail terminal if = two back-edges via lower_if (R8 multi-arm back-patch)", "unit test for mixed-clause word (some clauses back-edge, one Rets) = header phi and clause-join phi predecessors stay disjoint (R9)"],
+      "exit": "criterion 2 unit test passes; IR shape correct for terms/if/clause tails, multi-back-edge, mixed-clause, and non-tail preserved; green."
     },
     {
       "phase": 4,
       "focus": "backend-verification-goldens-dogfood-and-repl-parity",
       "effort": "M",
-      "summary": "R12 QBE structural verification test (header Phi with back-edge predecessor + back-edge Jmp renders valid QBE); examples/countdown.sth dogfood; native goldens for criteria 1, 3, 4, 5, 7; scripted REPL golden for criterion 8; full suite green.",
+      "summary": "R12 QBE structural verification test (header Phi with back-edge predecessor + back-edge Jmp renders valid QBE); examples/countdown.sth dogfood; native goldens for criteria 1, 3 (incl. mixed-clause), 4 (incl. both-arms-tail), 5, 7, all at N >= 1_000_000 so a no-op transform would overflow; scripted REPL golden for criterion 8; full suite green.",
       "changes": ["src/backend/qbe.rs", "examples/countdown.sth", "tests/phase0.rs", "tests/phase1.rs"],
-      "tests": ["criterion 1 large-N native golden (constant stack)", "criterion 3 clause multi-tail native golden", "criterion 4 terminal-if tail native golden", "criterion 5 non-tail factorial native golden", "criterion 7 locals-rebind native golden", "criterion 8 REPL constant-stack golden", "R12 backend structural test"],
+      "tests": ["criterion 1 large-N (>=1_000_000) native golden (constant stack)", "criterion 3 clause multi-tail native golden + mixed-clause (some back-edge, one Rets) golden", "criterion 4 terminal-if tail native golden + both-arms-tail golden (two back-edges via lower_if)", "criterion 5 non-tail factorial native golden", "criterion 7 locals-rebind native golden at >=1_000_000", "criterion 8 REPL constant-stack golden at >=1_000_000", "R12 backend structural test"],
       "exit": "all 8 success criteria pass as runnable goldens; countdown.sth native + REPL; full suite green (fmt + clippy -D warnings + test)."
     }
   ]
