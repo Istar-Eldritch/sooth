@@ -1114,6 +1114,27 @@ type: Wrap s Shape ;\n\
 }
 
 #[test]
+fn single_variant_clause_word_returns_payload_native() {
+    // 9ed63d9 discriminant-skip: a single-variant enum has nothing to
+    // disambiguate, so its clause word jumps straight to the sole clause with
+    // no `Cmp`/`Jnz`. The IR-shape test asserts zero compares; this proves the
+    // no-compare path still returns the right payload value at runtime.
+    let src = "type: Id | Wrap v i64 ;\n\
+: unwrap ( Id -- i64 )\n\
+| Wrap\n\
+;\n\
+: main ( -- )\n  42 Wrap unwrap . ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-single-variant-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn clause_body_containing_if_else_end_joins_correctly() {
     // M6: a clause body may itself use `if/else/end`. The clause-dispatch
     // join's phi predecessor must be the *if's* merged block (captured via

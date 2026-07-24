@@ -560,7 +560,7 @@ impl<'t> Parser<'t> {
     /// variant at all) is a located malformed-declaration error (M3).
     fn parse_enum_typedef(&mut self) -> Result<Vec<Vec<(String, Type)>>, String> {
         let type_span = self.expect_word("type:")?;
-        self.expect_word_any()?; // the enum name; already registered by the pre-pass
+        let name = self.expect_word_any()?; // the enum name; already registered by the pre-pass
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.pos += 1;
         }
@@ -588,7 +588,7 @@ impl<'t> Parser<'t> {
         self.expect(Token::Semicolon)?;
         if variants.is_empty() {
             return Err(format!(
-                "error: malformed `type:` declaration (zero variants) at line {}, col {}",
+                "error: malformed `type:` declaration `{name}` (zero variants) at line {}, col {}",
                 type_span.line, type_span.col
             ));
         }
@@ -1084,6 +1084,10 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("malformed"), "unexpected message: {err}");
         assert!(err.contains("zero variants"), "unexpected message: {err}");
+        assert!(
+            err.contains("Empty"),
+            "diagnostic should name the type: {err}"
+        );
     }
 
     #[test]
