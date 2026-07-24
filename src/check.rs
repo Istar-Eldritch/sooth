@@ -1016,12 +1016,21 @@ fn check_term(
                     else_stack.len(),
                 ));
             }
+            let mut merged = Vec::with_capacity(then_stack.len());
             for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
                 if t_then.ty != t_else.ty {
                     return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
                 }
+                // A merged slot is a coercible literal only if *both* arms
+                // leave a literal there: a value computed on either runtime
+                // path is computed after the merge, so it can't silently fill
+                // a `usize` position without `>usize` (D8/X10).
+                merged.push(Slot {
+                    ty: t_then.ty,
+                    literal: t_then.literal && t_else.literal,
+                });
             }
-            Ok(then_stack)
+            Ok(merged)
         }
     }
 }
@@ -1665,6 +1674,28 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("usize"), "unexpected message: {err}");
         assert!(err.contains(">usize"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_usize_branch_merge_keeps_computed_arm_non_coercible_is_error() {
+        // A literal in one arm and a computed value in the other must NOT
+        // merge to a coercible literal: on the computed arm's runtime path a
+        // computed `i64` would fill the `usize` output without `>usize` (X10).
+        for src in [
+            ": w ( bool -- usize ) if 5 else 1 1 + end ;",
+            ": w ( bool -- usize ) if 1 1 + else 5 end ;",
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(err.contains("usize"), "unexpected message: {err}");
+            assert!(err.contains(">usize"), "unexpected message: {err}");
+        }
+    }
+
+    #[test]
+    fn check_usize_branch_merge_both_literals_coerces_ok() {
+        // Both arms leave a literal, so the merged slot stays a coercible
+        // literal and fills the `usize` output.
+        check_src(": w ( bool -- usize ) if 5 else 6 end ;").unwrap();
     }
 
     #[test]
