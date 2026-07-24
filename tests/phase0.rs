@@ -1157,3 +1157,150 @@ fn clause_body_containing_if_else_end_joins_correctly() {
     assert_eq!(stdout, "0\n1\n-1\n");
     assert_eq!(code, 0);
 }
+
+// Slice 5 (fixed-size arrays + `usize`): success criteria 3-7.
+
+#[test]
+fn fill_constructs_and_get_reads_every_element_back_native() {
+    // Criterion 3: `fill` an `[i64 N]`, then read every element back via
+    // `get` and print it; the values match the fill value (unrolled stores +
+    // dynamic element addressing, R17/R18).
+    let src = ": main ( -- )\n\
+  9 4 fill\n\
+  dup 0 get . drop\n\
+  dup 1 get . drop\n\
+  dup 2 get . drop\n\
+  3 get . drop ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-array-fill-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "9\n9\n9\n9\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn set_at_runtime_index_yields_new_array_original_untouched_native() {
+    // Criterion 4: `set` at a *runtime* index (computed, not a literal) on a
+    // duped array yields a new array with exactly one element changed; the
+    // original (kept alongside) is untouched (D5 value semantics). `get`
+    // leaves the array on the stack afterwards (non-consuming, R12/M4), so
+    // the same array is read from twice in a row without redoing `get`'s
+    // array operand.
+    let src = ": main ( -- )\n\
+  0 4 fill dup\n\
+  1 1 + >usize 99 set\n\
+  2 >usize get .\n\
+  0 >usize get .\n\
+  swap\n\
+  2 >usize get .\n\
+  0 >usize get .\n\
+  drop drop ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-array-set-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    // New array: index 2 changed to 99, index 0 unchanged (0); original
+    // array: both indices still 0.
+    assert_eq!(stdout, "99\n0\n0\n0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn constant_out_of_range_array_index_is_compile_error() {
+    // Criterion 5(a), X4: a literal index >= N is a sharp, located compile
+    // error naming the length and the index.
+    let src = ": w ( -- i64 )\n  0 4 fill 9 get drop ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
+
+    assert!(err.contains("out of range"), "unexpected message: {err}");
+    assert!(err.contains('9'), "should name the index: {err}");
+    assert!(err.contains('4'), "should name the length: {err}");
+}
+
+#[test]
+fn runtime_out_of_range_array_index_traps_and_aborts_native() {
+    // Criterion 5(b): a runtime out-of-range index traps rather than
+    // corrupting. Exit code is nonzero, the located message names the length
+    // and index, and a sentinel `.` placed *before* the access prints while a
+    // sentinel placed *after* it does not, proving the trap fired (aborted)
+    // rather than falling through.
+    let src = ": main ( -- )\n\
+  1 .\n\
+  0 4 fill\n\
+  2 2 + >usize get drop drop\n\
+  99 . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-array-trap-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    let code = output
+        .status
+        .code()
+        .expect("process should exit normally, not die by signal");
+
+    assert_eq!(stdout, "1\n", "sentinel before the trap should print");
+    assert!(
+        !stdout.contains("99"),
+        "sentinel after the trap must not print: {stdout}"
+    );
+    assert_ne!(code, 0, "an out-of-bounds access must exit nonzero");
+    assert!(
+        stderr.contains("out of range") && stderr.contains('4'),
+        "trap message should name the length: {stderr}"
+    );
+}
+
+#[test]
+fn stack_dogfood_compiles_and_runs() {
+    // Criterion 6: `examples/stack.sth`, a bounded `i64` stack embedding a
+    // `[i64 16]` field with a runtime `usize` cursor. Exercises
+    // array-as-struct-field, `push`/`pop`/`peek`, non-consuming `get`,
+    // functional `set`, and the compile-time-constant `len`.
+    let (stdout, code) = run_and_capture_stdout("examples/stack.sth");
+    assert_eq!(stdout, "3\n3\n2\n1\n16\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn nested_array_shapes_construct_and_read_back_native() {
+    // Criterion 7: nesting both directions in one binary — array-of-struct
+    // (`[Vec2 2]`), array-of-array (`[[i64 2] 2]`), and struct-with-an-
+    // array-field (`Box { arr: [i64 3] }`) each construct via `fill` and read
+    // back correctly through the combined struct/array registry (R16, M3).
+    let src = "type: Vec2 x i64 y i64 ;\n\
+type: Box arr [i64 3] ;\n\
+: vx ( [Vec2 2] usize -- i64 )\n\
+| a i | a i get Vec2>x swap drop ;\n\
+: inner-at ( [[i64 2] 2] usize usize -- i64 )\n\
+| a i j | a i get swap drop j get swap drop ;\n\
+: box-at ( Box usize -- i64 )\n\
+| b i | b Box>arr i get swap drop ;\n\
+: main ( -- )\n\
+  1 2 Vec2 2 fill\n\
+  dup 0 vx .\n\
+  1 vx .\n\
+  9 2 fill 2 fill\n\
+  dup 0 0 inner-at .\n\
+  1 1 inner-at .\n\
+  0 3 fill Box\n\
+  dup 0 box-at .\n\
+  2 box-at . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-array-nesting-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1\n1\n9\n9\n0\n0\n");
+    assert_eq!(code, 0);
+}

@@ -285,7 +285,8 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
-        let line = parser::parse_line_with_structs(&tokens, &self.structs, &self.enums)?;
+        let line =
+            parser::parse_line_with_structs(&tokens, &self.structs, &self.enums, &mut self.arrays)?;
         match line {
             Line::Def(word) => self.eval_def(word, writer),
             Line::Expr(terms) => self.eval_expr(&terms, writer),
@@ -329,10 +330,11 @@ impl Session {
             span,
         });
         let result =
-            parser::parse_typedef_line(tokens, &self.structs, &self.enums).and_then(|fields| {
-                self.structs[idx].fields = fields;
-                check::check_types(&self.structs, &self.enums, &self.arrays)
-            });
+            parser::parse_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
+                .and_then(|fields| {
+                    self.structs[idx].fields = fields;
+                    check::check_types(&self.structs, &self.enums, &self.arrays)
+                });
         if let Err(e) = result {
             self.structs.pop();
             return Err(e);
@@ -367,14 +369,14 @@ impl Session {
             variants,
             span,
         });
-        let result = parser::parse_enum_typedef_line(tokens, &self.structs, &self.enums).and_then(
-            |variant_fields| {
-                for (vidx, fields) in variant_fields.into_iter().enumerate() {
-                    self.enums[idx].variants[vidx].fields = fields;
-                }
-                check::check_types(&self.structs, &self.enums, &self.arrays)
-            },
-        );
+        let result =
+            parser::parse_enum_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
+                .and_then(|variant_fields| {
+                    for (vidx, fields) in variant_fields.into_iter().enumerate() {
+                        self.enums[idx].variants[vidx].fields = fields;
+                    }
+                    check::check_types(&self.structs, &self.enums, &self.arrays)
+                });
         if let Err(e) = result {
             self.enums.pop();
             return Err(e);

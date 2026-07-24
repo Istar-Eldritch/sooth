@@ -138,14 +138,14 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut words = Vec::new();
     let mut struct_fields_by_decl = Vec::new();
     let mut enum_fields_by_decl = Vec::new();
-    let arrays;
+    let mut arrays = Vec::new();
     {
         let mut parser = Parser {
             tokens,
             pos: 0,
             structs: &structs,
             enums: &enums,
-            arrays: Vec::new(),
+            arrays: &mut arrays,
         };
         while parser.pos < parser.tokens.len() {
             if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
@@ -158,7 +158,6 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
                 words.push(parser.parse_worddef()?);
             }
         }
-        arrays = parser.arrays;
     }
     for (idx, fields) in struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
@@ -180,24 +179,29 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 /// to end of input. One line is one complete unit (an unterminated def is a
 /// normal parse error).
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
-    parse_line_with_structs(tokens, &[], &[])
+    let mut arrays = Vec::new();
+    parse_line_with_structs(tokens, &[], &[], &mut arrays)
 }
 
 /// Parse a REPL line resolving struct and enum type names in a `:`
 /// definition's effect against the session's registries, so a word may take
 /// or return a previously-declared struct or enum. A bare expression carries
-/// no type names, so the registries are unused there.
+/// no type names, so the registries are unused there. `arrays` is the
+/// session's interned array-type registry (R22/R23): a `[T N]` in a word
+/// effect interns into it in place, so the `ArrayId` it returns stays valid
+/// for later lines in the same session.
 pub fn parse_line_with_structs(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Line, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
         enums,
-        arrays: Vec::new(),
+        arrays,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -225,13 +229,14 @@ pub fn parse_typedef_line(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<(String, Type)>, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
         enums,
-        arrays: Vec::new(),
+        arrays,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -267,13 +272,14 @@ pub fn parse_enum_typedef_line(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
         enums,
-        arrays: Vec::new(),
+        arrays,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -298,12 +304,14 @@ struct Parser<'t> {
     /// variant names, always populated by the pre-pass; empty for a REPL
     /// line, enum declarations are not yet supported at REPL scope).
     enums: &'t [EnumDecl],
-    /// The per-parse-call interned array-type registry (D3, M1): unlike
-    /// `structs`/`enums`, an array shape has no declared name a pre-pass
-    /// could register ahead of time, so this grows during type-expression
-    /// resolution rather than being pre-populated. A REPL line's array
-    /// interning does not yet persist across lines (R22/R23 land later).
-    arrays: Vec<ArrayDecl>,
+    /// The interned array-type registry (D3, M1): unlike `structs`/`enums`,
+    /// an array shape has no declared name a pre-pass could register ahead
+    /// of time, so this grows during type-expression resolution rather than
+    /// being pre-populated. A mutable borrow of the caller's registry (the
+    /// whole-module `Module.arrays` for a native build, the session's
+    /// `arrays` for a REPL line), so interning persists across REPL lines
+    /// (R22/R23).
+    arrays: &'t mut Vec<ArrayDecl>,
 }
 
 impl<'t> Parser<'t> {
@@ -514,11 +522,7 @@ impl<'t> Parser<'t> {
         let element = self.parse_type_expr()?;
         let count = self.parse_array_count(element)?;
         self.expect(Token::RBracket)?;
-        Ok(crate::ast::intern_array_type(
-            &mut self.arrays,
-            element,
-            count,
-        ))
+        Ok(crate::ast::intern_array_type(self.arrays, element, count))
     }
 
     /// The array count token: a decimal literal `>= 1` and `<= u32::MAX`
