@@ -358,6 +358,32 @@ fn enum_constructs_and_displays_placeholder_across_lines() {
     );
 }
 
+/// Criterion 7: an enum is declared on one line, then a clause-style word is
+/// defined over it on a *later* line (R18's D8 variant-set seeding from
+/// `Session.enums`, since the parser pre-pass alone only scans the current
+/// unit). A value constructs and displays `<Shape>`, then a further line
+/// eliminates it through the clause word.
+#[test]
+fn enum_declared_then_clause_word_defined_and_eliminated_on_later_lines() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        ": area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;",
+        "2.0 Circle",
+        "area .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Shape",
+            "defined area",
+            "stack: <Shape>",
+            "12.5664",
+            "stack: (empty)",
+        ]
+    );
+}
+
 /// A large-payload variant (three `i64` fields, exceeding one 8-byte carried
 /// cell) survives a REPL line boundary intact: its multi-cell slot is blitted
 /// out of and back into the buffer, and a scalar pushed afterward still reads
