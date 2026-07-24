@@ -15,7 +15,7 @@ explicit copy, and drop is a statically-known destructor point.
     drop
   else
     swap over mod gcd
-  then ;
+  end ;
 ```
 
 ## Status

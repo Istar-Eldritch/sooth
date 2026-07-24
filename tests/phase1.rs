@@ -120,7 +120,7 @@ fn failed_redefinition_keeps_old_generation_resident() {
 #[test]
 fn sign_definable_and_callable_in_repl() {
     let out = run_session(&[
-        ": sign ( i64 -- i64 ) 0 > if 1 else 0 then ;",
+        ": sign ( i64 -- i64 ) 0 > if 1 else 0 end ;",
         "-7 sign",
         "7 sign",
     ]);

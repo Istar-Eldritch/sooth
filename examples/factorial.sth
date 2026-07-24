@@ -3,7 +3,7 @@
     drop 1
   else
     dup 1 - factorial *
-  then ;
+  end ;
 
 : main ( -- )
   5 factorial . ;    \ prints 120

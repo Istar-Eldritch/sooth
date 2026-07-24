@@ -8,7 +8,7 @@
 //!   slot     := Word (':' Word)?
 //!   locals   := '|' Word* '|'
 //!   term     := Int | Word | if
-//!   if       := 'if' term* ('else' term*)? 'then'
+//!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
     Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, WordDef,
@@ -401,18 +401,18 @@ impl<'t> Parser<'t> {
             }),
             Token::Word(w) if w == "if" => {
                 let then_branch = self
-                    .parse_terms("`else` or `then` (unterminated `if`)", |tok| {
-                        is_word(tok, "else") || is_word(tok, "then")
+                    .parse_terms("`else` or `end` (unterminated `if`)", |tok| {
+                        is_word(tok, "else") || is_word(tok, "end")
                     })?;
                 let else_branch = if matches!(self.peek(), Some((tok, _)) if is_word(tok, "else")) {
                     self.pos += 1;
-                    self.parse_terms("`then` (unterminated `if`/`else`)", |tok| {
-                        is_word(tok, "then")
+                    self.parse_terms("`end` (unterminated `if`/`else`)", |tok| {
+                        is_word(tok, "end")
                     })?
                 } else {
                     Vec::new()
                 };
-                self.expect_word("then")?;
+                self.expect_word("end")?;
                 Ok(Term {
                     kind: TermKind::If {
                         then_branch,
@@ -421,7 +421,7 @@ impl<'t> Parser<'t> {
                     span,
                 })
             }
-            Token::Word(w) if w == "then" || w == "else" => Err(format!(
+            Token::Word(w) if w == "end" || w == "else" => Err(format!(
                 "parse error: `{w}` without a matching `if` at line {}, col {}",
                 span.line, span.col
             )),
@@ -463,7 +463,7 @@ mod tests {
         assert_eq!(gcd.effect.inputs.len(), 2);
         assert_eq!(gcd.effect.outputs.len(), 1);
 
-        // dup 0 = if drop else swap over mod gcd then
+        // dup 0 = if drop else swap over mod gcd end
         assert_eq!(gcd.body.len(), 4);
         assert!(matches!(&gcd.body[0].kind, TermKind::Call(w) if w == "dup"));
         assert!(matches!(gcd.body[1].kind, TermKind::IntLit(0)));
@@ -531,7 +531,7 @@ mod tests {
 
     #[test]
     fn parse_if_without_else_has_empty_else_branch() {
-        let module = parse_src(": w ( i64 -- i64 ) if 1 then ;").unwrap();
+        let module = parse_src(": w ( i64 -- i64 ) if 1 end ;").unwrap();
         let body = &module.words[0].body;
         match &body[0].kind {
             TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
@@ -552,10 +552,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_then_without_if_is_error() {
-        let result = parse_src(": w ( -- ) then ;");
+    fn parse_end_without_if_is_error() {
+        let result = parse_src(": w ( -- ) end ;");
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("then"));
+        assert!(result.unwrap_err().contains("end"));
+    }
+
+    #[test]
+    fn parse_then_no_longer_closes_if() {
+        let result = parse_src(": w ( i64 -- i64 ) if 1 then ;");
+        assert!(
+            result.is_err(),
+            "`then` must no longer close `if`; got {result:?}"
+        );
     }
 
     #[test]

@@ -64,7 +64,7 @@ order as the effect comment, and a word calls itself directly (no `recurse`):
     a
   else
     b  a b mod  gcd
-  then ;
+  end ;
 ```
 
 Locals are opt-in, not the default. Prefer the stack: with `dup`/`swap`/`drop` most
@@ -209,7 +209,7 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 
 ## Control flow and iteration
 
-Boolean branching is `if ... else ... then` (which later becomes a combinator, see
+Boolean branching is `if ... else ... end` (which later becomes a combinator, see
 below); structural dispatch is `match`. There are deliberately **no loop keywords** (no `begin/until`, `do/loop`);
 dropping them keeps the surface small and matches the Factor/Kitten lineage, where
 iteration is expressed with combinators rather than syntax.
@@ -240,7 +240,7 @@ The iteration story, top to bottom:
 Iteration lands with quotations in Phase 4; Phases 0-3 have only shallow recursion,
 which is enough for their goldens.
 
-**Conditionals and dispatch.** Boolean branching is `if ... else ... then`. Structural
+**Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
 error). Multi-way branching is a **`cond` combinator** (a library word taking
 `[ pred ] [ body ]` pairs), not syntax, so nested `if`s aren't the only option.
@@ -251,8 +251,9 @@ dependent types), and they replace the tiny `if` construct with a larger machine
 (literal patterns + guards + clause sugar) without shrinking the language, since the
 condition still has to be written somewhere.
 
-**`if` becomes a combinator once quotations exist (Phase 4).** Phases 0-3 keep
-`if/else/then` as syntax because they predate quotations. Once quotations land, `if`
+**`if` becomes a combinator once quotations exist (Phase 4).** Phases 0 through
+Slice 3 keep `if/else/then` as syntax (renamed `if/else/end` from Slice 4 onward)
+because they predate quotations. Once quotations land, `if`
 is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-style) and
 stops being a keyword. This shrinks the core the honest way, by making `if` a word
 rather than by replacing it with a bigger feature.
@@ -263,7 +264,7 @@ Codegen model (unchanged from first principles, it's the good part): don't model
 the data stack at runtime. Simulate it at compile time as an array of typed slots;
 push/pop manipulate the array, and when IR is emitted the slots become ordinary
 SSA/register values. Each word compiles to a function taking N stack args and
-returning M results. `if`/`then` become basic blocks and branches; there are no loop
+returning M results. `if`/`end` become basic blocks and branches; there are no loop
 keywords (see Control flow and iteration), and iteration lowers to an internal loop
 primitive with a back-edge. Branch and loop join points unify the virtual-stack state
 (depth and type) across predecessors; mismatched depth or type across arms is a
@@ -493,7 +494,7 @@ rows, no borrow analysis needed to write the compiler in it.
 - Signature idea: affine by default, `dup` is the explicit copy, drop is a
   statically-known destructor point.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
-- Control flow: `if/else/then` for boolean branching (becomes an ordinary combinator,
+- Control flow: `if/else/end` for boolean branching (becomes an ordinary combinator,
   `cond [ then ] [ else ] if`, once quotations land in Phase 4); `match` for exhaustive
   structural dispatch on ADTs; a `cond` combinator (library word) for multi-way
   branching. No clause-based definitions (bad fit for a stack language). No loop
@@ -554,7 +555,7 @@ be written without it, never on principle.
 
 - **Immediate-word / defining-word / macro facility** (would have replaced Forth's
   `CREATE`/`DOES>`). Declined. Sooth already sent the non-metaprogramming uses of
-  Forth immediate words elsewhere (`if/else/then` is a keyword, then a combinator;
+  Forth immediate words elsewhere (`if/else/end` is a keyword, then a combinator;
   iteration is quotations + combinators; comments/strings are lexer-level), leaving
   only metaprogramming, which splits into two capabilities both covered without a
   comptime facility: defining new words is a plain nullary word (`: answer 42 ;` is

@@ -916,7 +916,7 @@ mod tests {
 
     #[test]
     fn emit_if_has_jnz_and_phi() {
-        let il = emit_src(": w ( bool -- i64 ) if 1 else 2 then ;");
+        let il = emit_src(": w ( bool -- i64 ) if 1 else 2 end ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
     }

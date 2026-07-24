@@ -68,8 +68,8 @@ fn rgb_pack_compiles_and_runs() {
 fn signed_vs_unsigned_compare_differ_on_same_bit_pattern() {
     // Same bit pattern (200), compared as `i8` (negative) vs `u8` (positive)
     // against `5`, must give differing results (proves R10 codegen, S4).
-    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < if 1 else 0 then ;\n\n\
-: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < if 1 else 0 then ;\n\n\
+    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < if 1 else 0 end ;\n\n\
+: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < if 1 else 0 end ;\n\n\
 : main ( -- )\n  signed_lt .\n  unsigned_lt . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-vs-unsigned-cmp-{}.sth",
@@ -142,7 +142,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
     // `200 >u8 >i8` is `-56` as `i8`; widened to `u16` it must read as the
     // logical unsigned value `65480`, not the sign-extended bit pattern, so
     // comparing it against a clean `u16` `65535` must be `true`.
-    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < if 1 else 0 then . ;\n";
+    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-widen-subword-cmp-golden-{}.sth",
         std::process::id()
@@ -227,7 +227,7 @@ fn conversion_unknown_target_reports_diagnostic() {
 
 #[test]
 fn if_condition_not_bool_reports_diagnostic() {
-    let src = ": oops ( -- i64 )\n  5 if 1 else 2 then ;\n";
+    let src = ": oops ( -- i64 )\n  5 if 1 else 2 end ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
@@ -249,7 +249,7 @@ fn operand_type_mismatch_reports_diagnostic() {
 
 #[test]
 fn branch_join_type_mismatch_reports_diagnostic() {
-    let src = ": oops ( bool -- i64 )\n  if 1 else true then ;\n";
+    let src = ": oops ( bool -- i64 )\n  if 1 else true end ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&module).expect_err("check should fail");
@@ -356,7 +356,7 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
     // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
 : main ( -- )\n  1.0 0.0 fdiv .\n  0.0 0.0 fdiv .\n  \
-0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
+0.0 0.0 fdiv dup = if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-div-inf-nan-{}.sth",
         std::process::id()
@@ -383,8 +383,8 @@ fn float_comparison_is_ieee_ordered_and_false_for_nan() {
     // comparison involving a NaN produced by `0.0 0.0 /` is false, including
     // `<` and `>` against a NaN (not just `=`, RISK 1).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
-: main ( -- )\n  1.0 2.0 < if 1 else 0 then .\n  2.0 1.0 < if 1 else 0 then .\n  \
-0.0 0.0 fdiv dup < if 1 else 0 then .\n  0.0 0.0 fdiv dup > if 1 else 0 then . ;\n";
+: main ( -- )\n  1.0 2.0 < if 1 else 0 end .\n  2.0 1.0 < if 1 else 0 end .\n  \
+0.0 0.0 fdiv dup < if 1 else 0 end .\n  0.0 0.0 fdiv dup > if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-cmp-ordered-nan-{}.sth",
         std::process::id()
@@ -687,7 +687,7 @@ fn signed_subword_shift_high_bits_are_canonical_for_comparison() {
     // `1 << 7` in an `i8` is -128 (0x80), which must compare as `< 0`. If the
     // high bits weren't kept canonical within the `i8` width, the comparison
     // could see stale bits instead of the correct sign.
-    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < if 1 . else 0 . then ;\n";
+    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < if 1 . else 0 . end ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-subword-shift-compare-{}.sth",
         std::process::id()
@@ -742,12 +742,12 @@ fn logical_and_or_xor_truth_table_on_bools() {
     // logical coincide): T and T = T, T and F = F, T or F = T, F or F = F,
     // T xor F = T, T xor T = F.
     let src = ": main ( -- )\n  \
-  true true and if 1 else 0 then .\n  \
-  true false and if 1 else 0 then .\n  \
-  true false or if 1 else 0 then .\n  \
-  false false or if 1 else 0 then .\n  \
-  true false xor if 1 else 0 then .\n  \
-  true true xor if 1 else 0 then . ;\n";
+  true true and if 1 else 0 end .\n  \
+  true false and if 1 else 0 end .\n  \
+  true false or if 1 else 0 end .\n  \
+  false false or if 1 else 0 end .\n  \
+  true false xor if 1 else 0 end .\n  \
+  true true xor if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-logical-and-or-xor-truth-table-{}.sth",
         std::process::id()
@@ -767,7 +767,7 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
     // bitwise complement on the same underlying bit pattern (`0 >u8 not` ->
     // 255, not 1).
     let src = ": main ( -- )\n  \
-  true not if 1 else 0 then .\n  \
+  true not if 1 else 0 end .\n  \
   0 >u8 not >i64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-not-type-directed-bool-vs-int-{}.sth",
@@ -787,12 +787,12 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
     // vs `u8` (200, positive) against 5: `<=`/`>=` flip with the sign, while
     // `<>` stays true either way (not-equal is sign-agnostic like `=`).
     let src = ": main ( -- )\n  \
-  200 >i8 5 >i8 <= if 1 else 0 then .\n  \
-  200 >u8 5 >u8 <= if 1 else 0 then .\n  \
-  200 >i8 5 >i8 >= if 1 else 0 then .\n  \
-  200 >u8 5 >u8 >= if 1 else 0 then .\n  \
-  200 >i8 5 >i8 <> if 1 else 0 then .\n  \
-  200 >u8 5 >u8 <> if 1 else 0 then . ;\n";
+  200 >i8 5 >i8 <= if 1 else 0 end .\n  \
+  200 >u8 5 >u8 <= if 1 else 0 end .\n  \
+  200 >i8 5 >i8 >= if 1 else 0 end .\n  \
+  200 >u8 5 >u8 >= if 1 else 0 end .\n  \
+  200 >i8 5 >i8 <> if 1 else 0 end .\n  \
+  200 >u8 5 >u8 <> if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-le-ge-ne-signed-unsigned-edge-{}.sth",
         std::process::id()
@@ -813,10 +813,10 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
     // where "NaN involved" flips the answer relative to `=`.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
 : main ( -- )\n  \
-  0.0 0.0 fdiv dup <= if 1 else 0 then .\n  \
-  0.0 0.0 fdiv dup >= if 1 else 0 then .\n  \
-  0.0 0.0 fdiv dup <> if 1 else 0 then .\n  \
-  0.0 0.0 fdiv dup = if 1 else 0 then . ;\n";
+  0.0 0.0 fdiv dup <= if 1 else 0 end .\n  \
+  0.0 0.0 fdiv dup >= if 1 else 0 end .\n  \
+  0.0 0.0 fdiv dup <> if 1 else 0 end .\n  \
+  0.0 0.0 fdiv dup = if 1 else 0 end . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());

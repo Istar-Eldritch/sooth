@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn check_branch_depth_mismatch_is_error() {
-        let src = ": w ( bool -- i64 ) if 1 1 else 1 then ;";
+        let src = ": w ( bool -- i64 ) if 1 1 else 1 end ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("different stack depths"));
     }
@@ -823,13 +823,13 @@ mod tests {
     #[test]
     fn check_branch_join_types_agree_ok() {
         // Both arms leave a single `i64`: the join unifies cleanly.
-        check_src(": w ( bool -- i64 ) if 1 else 2 then ;").unwrap();
+        check_src(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap();
     }
 
     #[test]
     fn check_branch_join_type_mismatch_is_error() {
         // `then` leaves an `i64`, `else` leaves a `bool`: same depth, different type.
-        let src = ": w ( bool -- i64 ) if 1 else true then ;";
+        let src = ": w ( bool -- i64 ) if 1 else true end ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("different types"), "unexpected message: {err}");
         assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -862,12 +862,12 @@ mod tests {
     #[test]
     fn check_type_propagates_through_body_expected() {
         // `0 >` yields a bool that `if` consumes; both arms leave an i64.
-        check_src(": sign ( i64 -- i64 ) 0 > if 1 else 0 then ;").unwrap();
+        check_src(": sign ( i64 -- i64 ) 0 > if 1 else 0 end ;").unwrap();
     }
 
     #[test]
     fn check_if_condition_not_bool_is_error() {
-        let src = ": w ( -- i64 ) 5 if 1 else 2 then ;";
+        let src = ": w ( -- i64 ) 5 if 1 else 2 end ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("expected `bool`"), "unexpected message: {err}");
         assert!(err.contains("found `i64`"), "unexpected message: {err}");
@@ -1142,7 +1142,7 @@ mod tests {
     #[test]
     fn check_branch_join_float_widths_mismatch_is_error() {
         // `if` branches leaving `f32` vs `f64` disagree at the join (R12).
-        let src = ": w ( bool -- f64 ) if 1.0 >f32 else 2.0 then ;";
+        let src = ": w ( bool -- f64 ) if 1.0 >f32 else 2.0 end ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("different types"), "unexpected message: {err}");
         assert!(err.contains("`f32`"), "unexpected message: {err}");
@@ -1151,7 +1151,7 @@ mod tests {
 
     #[test]
     fn check_branch_join_float_types_agree_ok() {
-        check_src(": w ( bool -- f64 ) if 1.0 else 2.0 then ;").unwrap();
+        check_src(": w ( bool -- f64 ) if 1.0 else 2.0 end ;").unwrap();
     }
 
     #[test]
@@ -1405,7 +1405,7 @@ mod tests {
         // R10: a struct type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Vec2 x i64 y i64 ;
-             : pick ( bool -- Vec2 ) if 1 2 Vec2 else 3 4 Vec2 then ;",
+             : pick ( bool -- Vec2 ) if 1 2 Vec2 else 3 4 Vec2 end ;",
         )
         .unwrap();
     }
