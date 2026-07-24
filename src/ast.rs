@@ -257,6 +257,15 @@ pub enum Type {
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
     Array(ArrayId, &'static str),
+    /// The target-width unsigned integer (D7): distinct from every fixed-width
+    /// `uN` in `INT_TYPES`, its size/align comes from the target word-width
+    /// parameter (IR-side, Phase 3), never a hardcoded width here. The
+    /// integer-tower operators (`+ - * mod and or xor not shl shr = < > <= >=
+    /// <> .`, plus conversions) extend to it via `is_int`/`is_numeric`; the
+    /// checker's D8 literal-coercion carve-out (a bare integer literal fills a
+    /// `usize` position without an explicit `>usize`) lives in `check.rs`, not
+    /// here, since `Type` carries no notion of "fresh literal".
+    Usize,
 }
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
@@ -317,6 +326,9 @@ impl Type {
         if name == "bool" {
             return Some(Type::Bool);
         }
+        if name == "usize" {
+            return Some(Type::Usize);
+        }
         if let Some((_, bits)) = FLOAT_TYPES.iter().find(|(n, _)| *n == name) {
             return Some(Type::Float(FloatType { bits: *bits }));
         }
@@ -331,9 +343,11 @@ impl Type {
             })
     }
 
-    /// Whether this type is one of the eight integer types (not `bool`).
+    /// Whether this type is one of the eight integer types, or `usize` (not
+    /// `bool`): every integer-tower operator (`mod`/`and`/`or`/`xor`/`not`/
+    /// `shl`/`shr`) admits `usize` alongside the fixed widths (D7).
     pub fn is_int(&self) -> bool {
-        matches!(self, Type::Int(_))
+        matches!(self, Type::Int(_) | Type::Usize)
     }
 
     /// Whether this type is one of the two float types.
@@ -367,6 +381,7 @@ impl Type {
             Type::Struct(_, name) => name,
             Type::Enum(_, name) => name,
             Type::Array(_, name) => name,
+            Type::Usize => "usize",
         }
     }
 }
@@ -448,12 +463,32 @@ mod tests {
     #[test]
     fn type_display_roundtrip_expected() {
         let names = [
-            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "usize",
         ];
         for name in names {
             let ty = Type::from_name(name).unwrap();
             assert_eq!(ty.name(), name);
             assert_eq!(ty.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn type_from_name_usize_expected() {
+        assert_eq!(Type::from_name("usize"), Some(Type::Usize));
+    }
+
+    #[test]
+    fn type_usize_is_int_and_numeric_not_float() {
+        assert!(Type::Usize.is_int());
+        assert!(Type::Usize.is_numeric());
+        assert!(!Type::Usize.is_float());
+        assert!(!Type::Usize.is_bool());
+    }
+
+    #[test]
+    fn type_usize_distinct_from_every_int_width() {
+        for name in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+            assert_ne!(Type::Usize, Type::from_name(name).unwrap());
         }
     }
 

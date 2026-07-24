@@ -101,6 +101,11 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // Array layout/codegen (`IrType::Array`) lands in Phase 3; Phase 1
         // only needs the frontend `Type::Array` to exist and resolve.
         Type::Array(..) => unimplemented!("array IR lowering lands in Phase 3"),
+        // `usize` sizing (`IrType::Usize`) derives from the target word-width
+        // parameter (R15); that parameter, and the IR-side type, land in
+        // Phase 3. Phase 2 only needs the frontend `Type::Usize` to exist,
+        // resolve, and type-check.
+        Type::Usize => unimplemented!("usize IR lowering lands in Phase 3"),
     }
 }
 
