@@ -1250,11 +1250,13 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
     // corrupting. Exit code is nonzero, the located message names the length
     // and index, and a sentinel `.` placed *before* the access prints while a
     // sentinel placed *after* it does not, proving the trap fired (aborted)
-    // rather than falling through.
+    // rather than falling through. Length (4) and index (7) are deliberately
+    // distinct: the trap format string takes separate `%ld` args for each, so
+    // a swapped or duplicated arg would still pass a same-valued assertion.
     let src = ": main ( -- )\n\
   1 .\n\
   0 4 fill\n\
-  2 2 + >usize get drop drop\n\
+  3 4 + >usize get drop drop\n\
   99 . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-trap-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -1278,8 +1280,16 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
     );
     assert_ne!(code, 0, "an out-of-bounds access must exit nonzero");
     assert!(
-        stderr.contains("out of range") && stderr.contains('4'),
-        "trap message should name the length: {stderr}"
+        stderr.contains("out of range"),
+        "trap message should say it's out of range: {stderr}"
+    );
+    assert!(
+        stderr.contains("index 7"),
+        "trap message should name the distinct index (7): {stderr}"
+    );
+    assert!(
+        stderr.contains("length 4"),
+        "trap message should name the distinct length (4): {stderr}"
     );
 }
 

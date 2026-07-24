@@ -1978,9 +1978,30 @@ mod tests {
 
     #[test]
     fn check_set_wrong_element_type_is_error() {
-        // X8: `set` with a value not matching the element type errors.
+        // X8: `set` with a value not matching the element type errors, naming
+        // both the expected element type and the offending found type.
         let err = check_src(": w ( -- ) 0 4 fill 0 true set drop ;").unwrap_err();
         assert!(err.contains("type mismatch"), "unexpected message: {err}");
+        assert!(
+            err.contains("expected `i64`"),
+            "should name the element type: {err}"
+        );
+        assert!(
+            err.contains("found `bool`"),
+            "should name the offending type: {err}"
+        );
+    }
+
+    #[test]
+    fn check_get_wrong_arity_is_error() {
+        // X8: too few operands to `get` is a located underflow error naming
+        // the array word.
+        let err = check_src(": w ( -- i64 ) 5 get ;").unwrap_err();
+        assert!(err.contains("`get`"), "should name the word: {err}");
+        assert!(
+            err.contains("needs 2 values, but the stack holds 1"),
+            "should name the arity mismatch: {err}"
+        );
     }
 
     #[test]
@@ -1991,9 +2012,17 @@ mod tests {
     }
 
     #[test]
-    fn check_arithmetic_on_array_is_error() {
+    fn check_equality_on_array_is_error() {
         // X7/R13: `=` on arrays reaches the operand guard naming the type.
         let err = check_src(": w ( -- bool ) 0 4 fill 0 4 fill = ;").unwrap_err();
+        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+    }
+
+    #[test]
+    fn check_arithmetic_on_array_is_error() {
+        // X7/R13: `+` on arrays reaches the operand guard naming the type
+        // (the diagnostic covers `=` *and* arithmetic; both are exercised).
+        let err = check_src(": w ( -- [i64 4] ) 0 4 fill 0 4 fill + ;").unwrap_err();
         assert!(err.contains("[i64 4]"), "should name the array type: {err}");
     }
 
