@@ -161,8 +161,8 @@ fn mixed_width_arithmetic_reports_both_types() {
     // operand-pair-mismatch diagnostic specifically.
     let src = ": f ( -- i32 ) 1 >i32 5 + ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same numeric type"),
@@ -178,8 +178,8 @@ fn mixed_sign_comparison_reports_both_types() {
     // same operand-pair-mismatch diagnostic as X1.
     let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same numeric type"),
@@ -194,8 +194,8 @@ fn declared_output_needs_conversion_reports_diagnostic() {
     // X3: literal is `i64`, declared output is `u8`; requires an explicit conversion.
     let src = ": f ( -- u8 ) 5 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`i64`"), "unexpected message: {err}");
     assert!(err.contains("`u8`"), "unexpected message: {err}");
@@ -206,8 +206,8 @@ fn conversion_of_bool_reports_diagnostic() {
     // X4: `>i32` applied to a `bool` is a type error naming the source is not an integer.
     let src = ": w ( -- i32 ) true >i32 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("numeric"), "unexpected message: {err}");
     assert!(err.contains("`bool`"), "unexpected message: {err}");
@@ -218,8 +218,8 @@ fn conversion_unknown_target_reports_diagnostic() {
     // X5: `>i128` reads as an unknown conversion target.
     let src = ": w ( -- i64 ) 5 >i128 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("unknown type"), "unexpected message: {err}");
     assert!(err.contains("i128"), "unexpected message: {err}");
@@ -229,8 +229,8 @@ fn conversion_unknown_target_reports_diagnostic() {
 fn if_condition_not_bool_reports_diagnostic() {
     let src = ": oops ( -- i64 )\n  5 if 1 else 2 end ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("expected `bool`"), "unexpected message: {err}");
     assert!(err.contains("found `i64`"), "unexpected message: {err}");
@@ -240,8 +240,8 @@ fn if_condition_not_bool_reports_diagnostic() {
 fn operand_type_mismatch_reports_diagnostic() {
     let src = ": oops ( -- i64 )\n  true 1 + ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`i64`"), "unexpected message: {err}");
     assert!(err.contains("`bool`"), "unexpected message: {err}");
@@ -251,8 +251,8 @@ fn operand_type_mismatch_reports_diagnostic() {
 fn branch_join_type_mismatch_reports_diagnostic() {
     let src = ": oops ( bool -- i64 )\n  if 1 else true end ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("different types"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -263,8 +263,8 @@ fn branch_join_type_mismatch_reports_diagnostic() {
 fn declared_output_type_mismatch_reports_diagnostic() {
     let src = ": oops ( i64 -- bool )\n  1 + ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("type mismatch"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -285,8 +285,8 @@ fn unknown_type_name_reports_diagnostic() {
 fn stack_effect_mismatch_reports_diagnostic() {
     let src = ": oops ( i64 -- i64 )\n  | a | a a + + ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("oops"), "error should name the word: {err}");
     assert!(err.contains('+'), "error should name the operator: {err}");
@@ -463,8 +463,8 @@ fn mixed_int_float_arithmetic_reports_diagnostic() {
     // differing types via the operand-pair-mismatch diagnostic.
     let src = ": f ( -- f64 ) 1 3.0 + ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same numeric type"),
@@ -479,8 +479,8 @@ fn mixed_float_width_comparison_reports_diagnostic() {
     // X2: `f32` and `f64` fed to `<` names both differing operand types.
     let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same numeric type"),
@@ -495,8 +495,8 @@ fn integer_division_reports_diagnostic() {
     // X3: `/` requires floats; two `i64` operands is an error.
     let src = ": f ( -- i64 ) 6 2 / ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains('/'), "unexpected message: {err}");
     assert!(err.contains("float"), "unexpected message: {err}");
@@ -508,8 +508,8 @@ fn float_mod_reports_diagnostic() {
     // X4: `mod` stays integer-only; two `f64` operands is an error.
     let src = ": f ( -- f64 ) 6.0 2.0 mod ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("mod"), "unexpected message: {err}");
     assert!(err.contains("integer"), "unexpected message: {err}");
@@ -522,8 +522,8 @@ fn bool_to_float_conversion_reports_diagnostic() {
     // numeric.
     let src = ": w ( -- f64 ) true >f64 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("numeric"), "unexpected message: {err}");
     assert!(err.contains("`bool`"), "unexpected message: {err}");
@@ -534,8 +534,8 @@ fn unknown_float_conversion_target_reports_diagnostic() {
     // X6: `>f128` is an unknown conversion target.
     let src = ": w ( -- f64 ) 5.0 >f128 ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("unknown type"), "unexpected message: {err}");
     assert!(err.contains("f128"), "unexpected message: {err}");
@@ -547,8 +547,8 @@ fn unknown_float_conversion_target_reports_diagnostic() {
 fn bitwise_op_on_float_reports_diagnostic() {
     let src = ": w ( -- f64 ) 3.0 5.0 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("integer"), "unexpected message: {err}");
     assert!(err.contains("`f64`"), "unexpected message: {err}");
@@ -560,16 +560,16 @@ fn bitwise_op_on_bool_is_now_accepted() {
     // operand class, not just the integer tower.
     let src = ": w ( -- bool ) true false and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    check::check(&module).expect("check should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
 }
 
 #[test]
 fn mixed_bool_int_and_reports_both_types() {
     let src = ": w ( -- bool ) true 5 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same integer or bool type"),
@@ -583,8 +583,8 @@ fn mixed_bool_int_and_reports_both_types() {
 fn mixed_type_and_reports_both_types() {
     let src = ": w ( -- i64 ) 1 >i32 2 and ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same integer or bool type"),
@@ -598,8 +598,8 @@ fn mixed_type_and_reports_both_types() {
 fn shift_with_non_i64_count_reports_diagnostic() {
     let src = ": w ( -- u8 ) 1 >u8 3 >i32 shl ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(err.contains("`shl`"), "unexpected message: {err}");
     assert!(err.contains("`i64`"), "unexpected message: {err}");
@@ -725,8 +725,8 @@ fn negative_shift_count_masks_to_type_width() {
 fn cmp_le_ge_ne_on_bool_reports_diagnostic() {
     let src = ": w ( -- bool ) true false <= ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
 
     assert!(
         err.contains("same numeric type"),
@@ -921,8 +921,8 @@ fn f_dot_is_now_an_unknown_word() {
     // `f.` is removed entirely: it reads as any other unknown word.
     let src = ": w ( f64 -- ) f. ;";
     let tokens = lexer::lex(src).expect("lexing should succeed");
-    let module = parser::parse(&tokens).expect("parsing should succeed");
-    let err = check::check(&module).expect_err("check should fail: `f.` no longer exists");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail: `f.` no longer exists");
 
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("f."), "unexpected message: {err}");

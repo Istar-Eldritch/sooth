@@ -18,8 +18,8 @@ fn binary_path(source: &Path) -> PathBuf {
 pub fn build(path: &Path) -> Result<PathBuf, String> {
     let src = std::fs::read_to_string(path).map_err(|e| format!("reading {path:?}: {e}"))?;
     let tokens = lexer::lex(&src)?;
-    let module = parser::parse(&tokens)?;
-    check::check(&module)?;
+    let mut module = parser::parse(&tokens)?;
+    check::check(&mut module)?;
     let ir = ir::lower(&module)?;
     let ssa = backend::qbe::emit(&ir)?;
 
@@ -124,8 +124,8 @@ mod tests {
     fn compile_so_produces_loadable_object() {
         let src = ": sq ( i64 -- i64 ) | n | n n * ;";
         let tokens = lexer::lex(src).unwrap();
-        let module = parser::parse(&tokens).unwrap();
-        check::check(&module).unwrap();
+        let mut module = parser::parse(&tokens).unwrap();
+        check::check(&mut module).unwrap();
         let ir = ir::lower(&module).unwrap();
         let ssa = backend::qbe::emit(&ir).unwrap();
 

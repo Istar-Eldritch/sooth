@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl, StructId, Term, TermKind,
-    Type, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl,
+    StructId, Term, TermKind, Type, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -46,13 +46,23 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 struct Slot {
     ty: Type,
     literal: bool,
+    /// The integer value of a bare `IntLit` slot (`None` for any computed
+    /// value). Load-bearing for the two compile-time-count array positions:
+    /// `fill`'s count `N` (M1) and a constant-index bounds check (X4, R11).
+    /// Moved verbatim by a shuffle (a duped literal keeps its value), cleared
+    /// by any operator/conversion/word call or branch merge (D8: no folding).
+    int_val: Option<i64>,
 }
 
 impl Slot {
     /// A slot holding a computed (non-literal) value of `ty`: every path but
     /// a bare `IntLit` push produces one of these.
     fn computed(ty: Type) -> Slot {
-        Slot { ty, literal: false }
+        Slot {
+            ty,
+            literal: false,
+            int_val: None,
+        }
     }
 }
 
@@ -136,8 +146,13 @@ impl Ctx<'_> {
     }
 }
 
-pub fn check(module: &Module) -> Result<(), String> {
-    check_types(&module.structs, &module.enums)?;
+/// Takes `&mut Module` because an array word (`fill`) interns its result
+/// shape `[T N]` into `module.arrays` during checking (R3, R10): the same
+/// registry `ir::lower` then reads, so the checker and the layout builder
+/// share one `ArrayId` numbering. `check` runs before `lower`, so the
+/// interned shapes are present when codegen consults them.
+pub fn check(module: &mut Module) -> Result<(), String> {
+    check_types(&module.structs, &module.enums, &module.arrays)?;
 
     let mut env = builtin_table();
     for (name, sig) in struct_generated_sigs(&module.structs) {
@@ -150,8 +165,16 @@ pub fn check(module: &Module) -> Result<(), String> {
         env.insert(word.name.clone(), sig_of(&word.effect));
     }
 
-    for word in &module.words {
-        check_word(word, &module.enums, &env)?;
+    // Split the borrow so a word body can intern into `arrays` while reading
+    // `words`/`enums`.
+    let Module {
+        words,
+        enums,
+        arrays,
+        ..
+    } = module;
+    for word in words.iter() {
+        check_word(word, enums, &env, arrays)?;
     }
     Ok(())
 }
@@ -161,16 +184,20 @@ pub fn check(module: &Module) -> Result<(), String> {
 /// the combined struct+enum registries, and no struct or enum contains itself
 /// by value, directly or transitively, through the combined type graph (D9,
 /// D10, R8, R10).
-pub fn check_types(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
+pub fn check_types(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
     check_duplicate_type_names(structs, enums)?;
-    check_recursion(structs, enums)?;
+    check_recursion(structs, enums, arrays)?;
     Ok(())
 }
 
-/// The struct-only projection of `check_types` (no enums), for callers that
-/// don't yet declare enums.
+/// The struct-only projection of `check_types` (no enums/arrays), for callers
+/// that don't yet declare either.
 pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
-    check_types(structs, &[])
+    check_types(structs, &[], &[])
 }
 
 /// A duplicate `type:` name is a sharp located error naming the type.
@@ -229,41 +256,50 @@ enum VisitState {
 enum TypeNode {
     Struct(usize),
     Enum(usize),
+    Array(usize),
 }
 
 /// Detect a struct or enum that contains itself by value, directly or
 /// transitively, via cycle detection over the *combined* type graph (D9): a
 /// struct's field types and an enum's variant field types are edges, so a
 /// struct-of-enum-of-struct cycle is caught the same as a pure-struct one.
-fn check_recursion(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
-    let mut sstate = vec![VisitState::Unvisited; structs.len()];
-    let mut estate = vec![VisitState::Unvisited; enums.len()];
-    let mut path = Vec::new();
+fn check_recursion(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    let mut st = RecursionState {
+        sstate: vec![VisitState::Unvisited; structs.len()],
+        estate: vec![VisitState::Unvisited; enums.len()],
+        astate: vec![VisitState::Unvisited; arrays.len()],
+        path: Vec::new(),
+    };
     for start in 0..structs.len() {
-        if sstate[start] == VisitState::Unvisited {
-            visit_recursion(
-                TypeNode::Struct(start),
-                structs,
-                enums,
-                &mut sstate,
-                &mut estate,
-                &mut path,
-            )?;
+        if st.sstate[start] == VisitState::Unvisited {
+            visit_recursion(TypeNode::Struct(start), structs, enums, arrays, &mut st)?;
         }
     }
     for start in 0..enums.len() {
-        if estate[start] == VisitState::Unvisited {
-            visit_recursion(
-                TypeNode::Enum(start),
-                structs,
-                enums,
-                &mut sstate,
-                &mut estate,
-                &mut path,
-            )?;
+        if st.estate[start] == VisitState::Unvisited {
+            visit_recursion(TypeNode::Enum(start), structs, enums, arrays, &mut st)?;
+        }
+    }
+    for start in 0..arrays.len() {
+        if st.astate[start] == VisitState::Unvisited {
+            visit_recursion(TypeNode::Array(start), structs, enums, arrays, &mut st)?;
         }
     }
     Ok(())
+}
+
+/// The per-node visit state + current DFS path, bundled so the traversal
+/// signature stays readable now that three registries (struct/enum/array)
+/// contribute nodes.
+struct RecursionState {
+    sstate: Vec<VisitState>,
+    estate: Vec<VisitState>,
+    astate: Vec<VisitState>,
+    path: Vec<TypeNode>,
 }
 
 /// The frontend `Type` of a field, mapped to a graph node (a scalar has no
@@ -272,13 +308,19 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
     match ty {
         Type::Struct(id, _) => Some(TypeNode::Struct(id.index())),
         Type::Enum(id, _) => Some(TypeNode::Enum(id.index())),
+        Type::Array(id, _) => Some(TypeNode::Array(id.index())),
         _ => None,
     }
 }
 
 /// The value-containment edges out of a node: a struct's field types, or every
 /// variant field type of an enum.
-fn node_edges(node: TypeNode, structs: &[StructDecl], enums: &[EnumDecl]) -> Vec<TypeNode> {
+fn node_edges(
+    node: TypeNode,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Vec<TypeNode> {
     match node {
         TypeNode::Struct(i) => structs[i]
             .fields
@@ -291,24 +333,32 @@ fn node_edges(node: TypeNode, structs: &[StructDecl], enums: &[EnumDecl]) -> Vec
             .flat_map(|v| v.fields.iter())
             .filter_map(|(_, ty)| type_node(ty))
             .collect(),
+        // An array's single containment edge is to its element type (M3): a
+        // `[T N]` contains a `T` by value, so a cycle through an array element
+        // is caught exactly as a struct/enum one, and a nested array bottoms
+        // out at a scalar so the DFS terminates.
+        TypeNode::Array(i) => type_node(&arrays[i].element).into_iter().collect(),
     }
 }
 
-fn node_state<'a>(
-    node: TypeNode,
-    sstate: &'a mut [VisitState],
-    estate: &'a mut [VisitState],
-) -> &'a mut VisitState {
+fn node_state(node: TypeNode, st: &mut RecursionState) -> &mut VisitState {
     match node {
-        TypeNode::Struct(i) => &mut sstate[i],
-        TypeNode::Enum(i) => &mut estate[i],
+        TypeNode::Struct(i) => &mut st.sstate[i],
+        TypeNode::Enum(i) => &mut st.estate[i],
+        TypeNode::Array(i) => &mut st.astate[i],
     }
 }
 
-fn node_name<'a>(node: TypeNode, structs: &'a [StructDecl], enums: &'a [EnumDecl]) -> &'a str {
+fn node_name<'a>(
+    node: TypeNode,
+    structs: &'a [StructDecl],
+    enums: &'a [EnumDecl],
+    arrays: &'a [ArrayDecl],
+) -> &'a str {
     match node {
         TypeNode::Struct(i) => structs[i].name.as_str(),
         TypeNode::Enum(i) => enums[i].name.as_str(),
+        TypeNode::Array(i) => arrays[i].name_static,
     }
 }
 
@@ -316,28 +366,28 @@ fn visit_recursion(
     node: TypeNode,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    sstate: &mut [VisitState],
-    estate: &mut [VisitState],
-    path: &mut Vec<TypeNode>,
+    arrays: &[ArrayDecl],
+    st: &mut RecursionState,
 ) -> Result<(), String> {
-    *node_state(node, sstate, estate) = VisitState::InProgress;
-    path.push(node);
-    for child in node_edges(node, structs, enums) {
-        match *node_state(child, sstate, estate) {
-            VisitState::Unvisited => visit_recursion(child, structs, enums, sstate, estate, path)?,
+    *node_state(node, st) = VisitState::InProgress;
+    st.path.push(node);
+    for child in node_edges(node, structs, enums, arrays) {
+        match *node_state(child, st) {
+            VisitState::Unvisited => visit_recursion(child, structs, enums, arrays, st)?,
             VisitState::InProgress => {
-                let cycle_start = path.iter().position(|&x| x == child).unwrap();
-                let mut names: Vec<&str> = path[cycle_start..]
+                let cycle_start = st.path.iter().position(|&x| x == child).unwrap();
+                let mut names: Vec<&str> = st.path[cycle_start..]
                     .iter()
-                    .map(|&n| node_name(n, structs, enums))
+                    .map(|&n| node_name(n, structs, enums, arrays))
                     .collect();
-                names.push(node_name(child, structs, enums));
+                names.push(node_name(child, structs, enums, arrays));
                 // Key the wording on the repeated node's kind so a pure-struct
-                // cycle keeps its Slice 3 message and an enum cycle names an
-                // enum (X3).
+                // cycle keeps its Slice 3 message, an enum cycle names an enum
+                // (X3), and an array cycle names the array (X5).
                 let kind = match child {
                     TypeNode::Struct(_) => "struct",
                     TypeNode::Enum(_) => "enum",
+                    TypeNode::Array(_) => "array",
                 };
                 return Err(format!(
                     "error: recursive {kind} definition (infinite size): {}",
@@ -347,8 +397,8 @@ fn visit_recursion(
             VisitState::Done => {}
         }
     }
-    path.pop();
-    *node_state(node, sstate, estate) = VisitState::Done;
+    st.path.pop();
+    *node_state(node, st) = VisitState::Done;
     Ok(())
 }
 
@@ -434,10 +484,11 @@ pub fn check_def(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env)
+    check_word(word, enums, &env, arrays)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -447,9 +498,10 @@ pub fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<Type>, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
-    let final_stack = check_terms(terms, initial, &Ctx::Line, env)?;
+    let final_stack = check_terms(terms, initial, &Ctx::Line, env, arrays)?;
     Ok(final_stack.into_iter().map(|s| s.ty).collect())
 }
 
@@ -531,6 +583,7 @@ fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
@@ -540,8 +593,10 @@ fn check_word(
         }
     }
     match &word.body {
-        WordBody::Terms { locals, terms } => check_terms_word(word, enums, locals, terms, env),
-        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env),
+        WordBody::Terms { locals, terms } => {
+            check_terms_word(word, enums, locals, terms, env, arrays)
+        }
+        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays),
     }
 }
 
@@ -551,6 +606,7 @@ fn check_terms_word(
     locals: &[String],
     terms: &[Term],
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<(), String> {
     let inputs = word.effect.inputs.len();
 
@@ -584,7 +640,7 @@ fn check_terms_word(
         effect: &word.effect,
         locals: &local_types,
     };
-    let final_stack = check_terms(terms, initial, &ctx, env)?;
+    let final_stack = check_terms(terms, initial, &ctx, env, arrays)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
@@ -600,6 +656,7 @@ fn check_clause_word(
     enums: &[EnumDecl],
     clauses: &[Clause],
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<(), String> {
     let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
         Some(Type::Enum(id, _)) => id,
@@ -647,6 +704,7 @@ fn check_clause_word(
             &enum_decl.variants[vi],
             &declared,
             env,
+            arrays,
         )?;
     }
     for variant in &enum_decl.variants {
@@ -660,6 +718,7 @@ fn check_clause_word(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // one clause's checking inputs; a bundle would obscure them
 fn check_clause_body(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -668,6 +727,7 @@ fn check_clause_body(
     variant: &VariantDecl,
     declared: &[Type],
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<(), String> {
     for name in &clause.locals {
         reject_variant_local(&word.name, name, "local", enums)?;
@@ -704,7 +764,7 @@ fn check_clause_body(
         effect: &word.effect,
         locals: &local_types,
     };
-    let final_stack = check_terms(&clause.body, stack_after_bind, &ctx, env)?;
+    let final_stack = check_terms(&clause.body, stack_after_bind, &ctx, env, arrays)?;
     let line = clause
         .body
         .last()
@@ -929,9 +989,10 @@ fn check_terms(
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<Slot>, String> {
     for term in terms {
-        stack = check_term(term, stack, ctx, env)?;
+        stack = check_term(term, stack, ctx, env, arrays)?;
     }
     Ok(stack)
 }
@@ -941,15 +1002,18 @@ fn check_term(
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<Slot>, String> {
     let span = term.span;
     match &term.kind {
-        TermKind::IntLit(_) => {
+        TermKind::IntLit(n) => {
             // A bare integer literal is the one D8 source: fresh off the
-            // term, it may still silently fill a `usize` position.
+            // term, it may still silently fill a `usize` position. Its value
+            // is retained for the compile-time-count array positions (M1, X4).
             stack.push(Slot {
                 ty: Type::I64,
                 literal: true,
+                int_val: Some(*n),
             });
             Ok(stack)
         }
@@ -970,6 +1034,9 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
+                return Ok(stack);
+            }
+            if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
             let sig = env
@@ -1006,8 +1073,8 @@ fn check_term(
             if cond.ty != Type::Bool {
                 return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
             }
-            let then_stack = check_terms(then_branch, stack.clone(), ctx, env)?;
-            let else_stack = check_terms(else_branch, stack, ctx, env)?;
+            let then_stack = check_terms(then_branch, stack.clone(), ctx, env, arrays)?;
+            let else_stack = check_terms(else_branch, stack, ctx, env, arrays)?;
             if then_stack.len() != else_stack.len() {
                 return Err(branch_mismatch_error(
                     ctx,
@@ -1028,6 +1095,9 @@ fn check_term(
                 merged.push(Slot {
                     ty: t_then.ty,
                     literal: t_then.literal && t_else.literal,
+                    // A value merged from two branches is never a single
+                    // known literal, so it can't feed a compile-time count.
+                    int_val: None,
                 });
             }
             Ok(merged)
@@ -1221,6 +1291,187 @@ fn check_operator(
     Ok(Some(std::mem::take(stack)))
 }
 
+/// An array word (`fill`/`get`/`set`/`len`) applied to a non-array operand:
+/// names the array word and the offending operand type (X8).
+fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line => {
+            format!("error: type mismatch: `{op}` requires an array operand, found `{found}`")
+        }
+    }
+}
+
+/// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
+/// error naming the length `N` and the offending index.
+fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: array index out of range in `{}` (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
+            name, span.line, index, count, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: array index out of range: index {index} is out of bounds for length {count}"
+        ),
+    }
+}
+
+/// `fill` given a *computed* (non-literal) count (M1): the count must be a
+/// compile-time literal, since there is no comptime interpreter to fold it.
+fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: `fill` requires a literal count, found a computed `{found}` (no const-expr eval)"
+        ),
+    }
+}
+
+/// `fill` given a literal count `< 1` (or `> u32::MAX`): an array length must
+/// be `>= 1` (X2, M1), named against the offending count.
+fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
+            name, span.line, count, u32::MAX, effect_str(effect),
+        ),
+        Ctx::Line => format!(
+            "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
+            u32::MAX
+        ),
+    }
+}
+
+/// Match an index `Slot` against a `usize` index position for a `[T N]`
+/// (R11, D6, D8): an exact `usize` is a runtime index (the Phase 4 trap); a
+/// bare integer literal coerces (D8) and gets a compile-time bounds check
+/// (X4); a computed `i64` needs an explicit `>usize` (X10); anything else is
+/// a plain type mismatch.
+fn check_array_index(
+    index: Slot,
+    count: u32,
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+) -> Result<(), String> {
+    match match_slot(index, Type::Usize) {
+        SlotMatch::Exact => Ok(()),
+        SlotMatch::LiteralUsize => {
+            let idx = index.int_val.expect("a literal slot carries its value");
+            if idx < 0 || idx >= i64::from(count) {
+                return Err(array_index_out_of_range_error(ctx, span, count, idx));
+            }
+            Ok(())
+        }
+        SlotMatch::NeedsUsizeConversion => Err(usize_conversion_needed_error(ctx, span, op)),
+        SlotMatch::Mismatch => Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty)),
+    }
+}
+
+/// Apply an array word (`fill`/`get`/`set`/`len`) if `name` is one, returning
+/// `Some(stack)`; `None` if the name is not an array word (the caller then
+/// looks it up in the env). These are generic over the array shape, so
+/// (like the shuffles and numeric operators) they dispatch on the concrete
+/// operand types rather than a fixed env signature (R6, R10):
+///
+/// - `fill ( T -- [T N] )`: the top slot is the compile-time count `N` (a
+///   literal, M1), the slot below is the element `T`; interns the `(T, N)`
+///   shape (R3) and pushes it.
+/// - `get ( [T N] usize -- T )`: **non-consuming** (R12/M4) — the array stays
+///   on the stack; a constant index is bounds-checked (X4).
+/// - `set ( [T N] usize T -- [T N] )`: a functional write; the value must
+///   match the element type.
+/// - `len ( [T N] -- usize )`: **non-consuming**, folds to the constant `N`.
+fn check_array_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+) -> Result<Option<Vec<Slot>>, String> {
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+    match name {
+        "fill" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need("fill", 2, n));
+            }
+            let count = stack[n - 1];
+            let element = stack[n - 2];
+            let Some(count_val) = count.int_val else {
+                return Err(fill_count_not_literal_error(ctx, span, count.ty));
+            };
+            if !(1..=i64::from(u32::MAX)).contains(&count_val) {
+                return Err(fill_count_out_of_range_error(ctx, span, count_val));
+            }
+            let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
+            stack.truncate(n - 2);
+            stack.push(Slot::computed(array_ty));
+        }
+        "len" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("len", 1, n));
+            }
+            if !matches!(stack[n - 1].ty, Type::Array(..)) {
+                return Err(array_word_operand_error(ctx, span, "len", stack[n - 1].ty));
+            }
+            // Non-consuming: the array stays; `len` folds to the constant `N`.
+            stack.push(Slot::computed(Type::Usize));
+        }
+        "get" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need("get", 2, n));
+            }
+            let index = stack[n - 1];
+            let Type::Array(id, _) = stack[n - 2].ty else {
+                return Err(array_word_operand_error(ctx, span, "get", stack[n - 2].ty));
+            };
+            let count = arrays[id.index()].count;
+            let elem = arrays[id.index()].element;
+            check_array_index(index, count, ctx, span, "get")?;
+            // Non-consuming (R12): drop the index, leave the array, push T.
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(elem));
+        }
+        "set" => {
+            let n = stack.len();
+            if n < 3 {
+                return Err(need("set", 3, n));
+            }
+            let value = stack[n - 1];
+            let index = stack[n - 2];
+            let Type::Array(id, _) = stack[n - 3].ty else {
+                return Err(array_word_operand_error(ctx, span, "set", stack[n - 3].ty));
+            };
+            let array_ty = stack[n - 3].ty;
+            let count = arrays[id.index()].count;
+            let elem = arrays[id.index()].element;
+            check_array_index(index, count, ctx, span, "set")?;
+            match match_slot(value, elem) {
+                SlotMatch::Exact | SlotMatch::LiteralUsize => {}
+                SlotMatch::NeedsUsizeConversion => {
+                    return Err(usize_conversion_needed_error(ctx, span, "set"));
+                }
+                SlotMatch::Mismatch => {
+                    return Err(type_mismatch_error(ctx, span, "set", elem, value.ty));
+                }
+            }
+            stack.truncate(n - 3);
+            stack.push(Slot::computed(array_ty));
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
 /// Apply a stack shuffle if `name` is one, returning `Some(stack)`; `None` if
 /// the name is not a shuffle (the caller then looks it up in the env). Shuffles
 /// move concrete slot types with no fixed signature: `dup` of a `bool` yields
@@ -1282,8 +1533,8 @@ mod tests {
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
-        check(&module)
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
     }
 
     #[test]
@@ -1648,6 +1899,123 @@ mod tests {
         check_src(": w ( -- ) 5 >usize . ;").unwrap();
     }
 
+    // Array words (R10-R14): fill / get / set / len type-checking.
+
+    #[test]
+    fn check_fill_get_set_len_happy_path_ok() {
+        // `fill` builds `[i64 4]`; `get`/`len` are non-consuming (the array
+        // stays), `set` yields a fresh array; one `drop` clears the residual.
+        check_src(": w ( -- ) 7 4 fill 0 get drop len drop 0 9 set drop ;").unwrap();
+    }
+
+    #[test]
+    fn check_fill_output_type_is_the_array_shape() {
+        // `fill` interns `[i64 4]` and the declared output must match it, so
+        // this word type-checks with an array-typed output slot (R2/R3/R10).
+        check_src(": w ( -- [i64 4] ) 7 4 fill ;").unwrap();
+    }
+
+    #[test]
+    fn check_get_is_non_consuming_leaves_array_ok() {
+        // R12/M4: `get` leaves the array live, so a word returning both the
+        // array and the read element type-checks without a `dup`.
+        check_src(": w ( [i64 4] usize -- [i64 4] i64 ) | a i | a i get ;").unwrap();
+    }
+
+    #[test]
+    fn check_len_is_non_consuming_leaves_array_ok() {
+        check_src(": w ( [i64 4] -- [i64 4] usize ) | a | a len ;").unwrap();
+    }
+
+    #[test]
+    fn check_get_runtime_usize_index_ok() {
+        // A computed `usize` index is admissible (the runtime path; its bounds
+        // trap lands in Phase 4).
+        check_src(": w ( [i64 4] -- [i64 4] i64 ) | a | a 1 >usize get ;").unwrap();
+    }
+
+    #[test]
+    fn check_constant_index_out_of_range_is_error() {
+        // X4/R11: a literal index >= N is a sharp located compile error naming
+        // the length and the index.
+        let err = check_src(": w ( -- ) 0 4 fill 9 get drop drop ;").unwrap_err();
+        assert!(err.contains("out of range"), "unexpected message: {err}");
+        assert!(err.contains("9"), "should name the index: {err}");
+        assert!(err.contains("4"), "should name the length: {err}");
+    }
+
+    #[test]
+    fn check_computed_index_without_conversion_is_error() {
+        // X10: a computed (non-literal) `i64` index needs an explicit `>usize`.
+        let err = check_src(": w ( i64 -- ) | n | 0 4 fill n get drop drop ;").unwrap_err();
+        assert!(err.contains(">usize"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_fill_non_literal_count_is_error() {
+        // M1: the count must be a compile-time literal; a computed count errors.
+        let err = check_src(": w ( i64 -- ) | n | 0 n fill drop ;").unwrap_err();
+        assert!(err.contains("literal count"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_fill_zero_count_is_error() {
+        // A `fill` count < 1 is invalid (an array length must be >= 1).
+        let err = check_src(": w ( -- ) 0 0 fill drop ;").unwrap_err();
+        assert!(
+            err.contains("length must be >= 1"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_get_on_non_array_is_error() {
+        // X8: `get` on a non-array operand names the array word and the type.
+        let err = check_src(": w ( -- i64 ) 5 1 get ;").unwrap_err();
+        assert!(err.contains("`get`"), "unexpected message: {err}");
+        assert!(err.contains("array"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_set_wrong_element_type_is_error() {
+        // X8: `set` with a value not matching the element type errors.
+        let err = check_src(": w ( -- ) 0 4 fill 0 true set drop ;").unwrap_err();
+        assert!(err.contains("type mismatch"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_print_on_array_is_error() {
+        // X6/R13: `.` on an array is a sharp located error naming `[T N]`.
+        let err = check_src(": w ( -- ) 0 4 fill . ;").unwrap_err();
+        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+    }
+
+    #[test]
+    fn check_arithmetic_on_array_is_error() {
+        // X7/R13: `=` on arrays reaches the operand guard naming the type.
+        let err = check_src(": w ( -- bool ) 0 4 fill 0 4 fill = ;").unwrap_err();
+        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+    }
+
+    #[test]
+    fn check_two_spellings_of_same_shape_are_one_type_ok() {
+        // R8: structural dedup means `[i64 4]` in two positions is one type, so
+        // an `[i64 4]` argument satisfies an `[i64 4]`-typed word.
+        check_src(
+            ": mk ( -- [i64 4] ) 0 4 fill ;\n: use ( [i64 4] -- i64 ) 0 get swap drop ;\n: w ( -- i64 ) mk use ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_value_recursion_through_array_element_is_error() {
+        // X5/R14/M3: a struct containing itself via an array element is a
+        // recursive definition (infinite size), caught by the DFS.
+        let err = check_src("type: Node kids [Node 4] ;").unwrap_err();
+        assert!(err.contains("recursive"), "unexpected message: {err}");
+        assert!(err.contains("Node"), "should name the cycle: {err}");
+    }
+
     #[test]
     fn check_usize_mixed_with_bool_is_error() {
         // X9: `usize` mixed with a non-coercible operand (`bool`) names both.
@@ -1837,7 +2205,7 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        infer_line(&terms, entry, &builtin_table())
+        infer_line(&terms, entry, &builtin_table(), &mut Vec::new())
     }
 
     #[test]
