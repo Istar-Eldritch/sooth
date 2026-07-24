@@ -14,28 +14,40 @@ pub struct Module {
     /// indexed by `StructId`. Populated by the parser pre-pass (names) and
     /// then by the `type:` production (fields).
     pub structs: Vec<StructDecl>,
+    /// The per-program enum registry, parallel to `structs` and indexed by
+    /// `EnumId`. A logically distinct registry from `structs` (D10): shares
+    /// the layout/resolution machinery, not the struct registry's storage.
+    pub enums: Vec<EnumDecl>,
 }
 
 impl Module {
     /// Resolve a source type-name word to a `Type` against this module's
-    /// struct registry. Thin wrapper over the free `resolve_type_name`, the
-    /// one resolver shared with the parser so effect-slot and
-    /// struct-field-type resolution can't drift apart.
+    /// struct and enum registries. Thin wrapper over the free
+    /// `resolve_type_name`, the one resolver shared with the parser so
+    /// effect-slot and field-type resolution can't drift apart.
     pub fn resolve_type_name(&self, name: &str) -> Option<Type> {
-        resolve_type_name(&self.structs, name)
+        resolve_type_name(&self.structs, &self.enums, name)
     }
 }
 
 /// Resolve a source type-name word to a `Type`: the scalar table first, then
-/// `structs` (a struct registry, in `Module` or mid-parse). The single
-/// implementation both `Module::resolve_type_name` and the parser call.
-pub fn resolve_type_name(structs: &[StructDecl], name: &str) -> Option<Type> {
-    Type::from_name(name).or_else(|| {
-        structs
-            .iter()
-            .position(|s| s.name == name)
-            .map(|idx| Type::Struct(StructId(idx), structs[idx].name_static))
-    })
+/// `structs`, then `enums` (a struct/enum registry pair, in `Module` or
+/// mid-parse). The single implementation both `Module::resolve_type_name` and
+/// the parser call.
+pub fn resolve_type_name(structs: &[StructDecl], enums: &[EnumDecl], name: &str) -> Option<Type> {
+    Type::from_name(name)
+        .or_else(|| {
+            structs
+                .iter()
+                .position(|s| s.name == name)
+                .map(|idx| Type::Struct(StructId(idx), structs[idx].name_static))
+        })
+        .or_else(|| {
+            enums
+                .iter()
+                .position(|e| e.name == name)
+                .map(|idx| Type::Enum(EnumId(idx), enums[idx].name_static))
+        })
 }
 
 /// A registered struct: its declared name, an ordered `(field-name, Type)`
@@ -62,6 +74,45 @@ impl StructId {
     /// always tied to a real `Module::structs` entry.
     pub(crate) fn from_index(idx: usize) -> StructId {
         StructId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// A registered enum: its declared name, its ordered variants, and the
+/// leaked `&'static str` copy of its name every `Type::Enum` naming it
+/// carries directly (mirrors `StructDecl::name_static`).
+#[derive(Debug)]
+pub struct EnumDecl {
+    pub name: String,
+    pub name_static: &'static str,
+    pub variants: Vec<VariantDecl>,
+    pub span: Span,
+}
+
+/// One variant of an `EnumDecl`: its declared name, the leaked `&'static
+/// str` copy of that name, and its ordered `(field-name, Type)` list (empty
+/// for a zero-field variant).
+#[derive(Debug)]
+pub struct VariantDecl {
+    pub name: String,
+    pub name_static: &'static str,
+    pub fields: Vec<(String, Type)>,
+    pub span: Span,
+}
+
+/// A small `Copy` index into `Module::enums`, mirroring `StructId`. Two
+/// `Type::Enum` values are equal iff they name the same registered enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EnumId(pub(crate) usize);
+
+impl EnumId {
+    /// Mint an `EnumId` for a registry position; crate-internal so an id is
+    /// always tied to a real `Module::enums` entry.
+    pub(crate) fn from_index(idx: usize) -> EnumId {
+        EnumId(idx)
     }
 
     pub fn index(&self) -> usize {
@@ -114,6 +165,7 @@ pub enum Type {
     Float(FloatType),
     Bool,
     Struct(StructId, &'static str),
+    Enum(EnumId, &'static str),
 }
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
@@ -222,6 +274,7 @@ impl Type {
                 .map(|(n, _)| *n)
                 .expect("Type::Float is always constructed from a FLOAT_TYPES row"),
             Type::Struct(_, name) => name,
+            Type::Enum(_, name) => name,
         }
     }
 }
@@ -343,6 +396,7 @@ mod tests {
                 fields,
                 span: Span::default(),
             }],
+            enums: Vec::new(),
         }
     }
 
@@ -381,6 +435,83 @@ mod tests {
         let a = Type::Struct(StructId(0), "Vec2");
         let b = Type::Struct(StructId(0), "Vec2");
         let c = Type::Struct(StructId(1), "Segment");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    fn module_with_enum(name: &str, variants: Vec<VariantDecl>) -> Module {
+        let name_static: &'static str = Box::leak(name.to_string().into_boxed_str());
+        Module {
+            words: Vec::new(),
+            structs: Vec::new(),
+            enums: vec![EnumDecl {
+                name: name.to_string(),
+                name_static,
+                variants,
+                span: Span::default(),
+            }],
+        }
+    }
+
+    fn variant(name: &str, fields: Vec<(String, Type)>) -> VariantDecl {
+        VariantDecl {
+            name: name.to_string(),
+            name_static: Box::leak(name.to_string().into_boxed_str()),
+            fields,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn module_resolve_type_name_finds_registered_enum() {
+        let module = module_with_enum(
+            "Shape",
+            vec![variant("Circle", vec![("r".to_string(), Type::F64)])],
+        );
+        let ty = module.resolve_type_name("Shape").unwrap();
+        match ty {
+            Type::Enum(id, name) => {
+                assert_eq!(id, EnumId(0));
+                assert_eq!(name, "Shape");
+            }
+            other => panic!("expected Type::Enum, got {other:?}"),
+        }
+        assert_eq!(ty.name(), "Shape");
+        assert_eq!(ty.to_string(), "Shape");
+    }
+
+    #[test]
+    fn module_resolve_type_name_tries_structs_before_enums() {
+        // A name registered as both a struct and an enum resolves to the
+        // struct: struct-then-enum is only a stable tie-break order, the
+        // checker's duplicate-name check (X2) rejects this collision outright.
+        let name_static: &'static str = Box::leak("Dup".to_string().into_boxed_str());
+        let module = Module {
+            words: Vec::new(),
+            structs: vec![StructDecl {
+                name: "Dup".to_string(),
+                name_static,
+                fields: Vec::new(),
+                span: Span::default(),
+            }],
+            enums: vec![EnumDecl {
+                name: "Dup".to_string(),
+                name_static,
+                variants: vec![variant("V", vec![])],
+                span: Span::default(),
+            }],
+        };
+        assert!(matches!(
+            module.resolve_type_name("Dup"),
+            Some(Type::Struct(_, _))
+        ));
+    }
+
+    #[test]
+    fn type_enum_equality_is_by_enum_id() {
+        let a = Type::Enum(EnumId(0), "Shape");
+        let b = Type::Enum(EnumId(0), "Shape");
+        let c = Type::Enum(EnumId(1), "Cmd");
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

@@ -1,9 +1,12 @@
 //! Parser: tokens -> AST.
 //!
-//! Grammar (Phase 0, plus the Slice 3 `type:` production):
+//! Grammar (Phase 0, plus the Slice 3/4 `type:` production):
 //!   module   := (worddef | typedef)*
 //!   worddef  := ':' Word '(' effect ')' locals? term* ';'
-//!   typedef  := 'type:' Word (Word Word)* ';'
+//!   typedef  := struct-typedef | enum-typedef
+//!   struct-typedef := 'type:' Word (Word Word)* ';'
+//!   enum-typedef    := 'type:' Word '|'? variant ('|' variant)* ';'
+//!   variant         := Word (Word Word)*
 //!   effect   := slot* '--' slot*
 //!   slot     := Word (':' Word)?
 //!   locals   := '|' Word* '|'
@@ -11,67 +14,162 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, WordDef,
+    EnumDecl, Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot,
+    VariantDecl, WordDef,
 };
 use crate::lexer::Token;
 
-/// Pre-pass: scan the whole token stream for every `type: Name` and return
-/// its name and span, in source order. Malformed occurrences (a
-/// missing/non-word name) are left for the real `type:` production to report;
-/// this pass only needs to register the names so forward/self references
-/// resolve regardless of declaration order, so it never errors itself.
-fn prepass_struct_names(tokens: &[(Token, Span)]) -> Vec<(String, Span)> {
-    let mut names = Vec::new();
+/// Whether a `type:` body (starting at `body_start`, the token just after the
+/// declared name) is an enum: it contains a `Pipe` before its terminating
+/// `Semicolon`, D1's `|`-separated-variants marker. Shared by the pre-pass
+/// (which never errors, malformed bodies are left for the real production)
+/// and the parser's own lookahead, so both classify a body identically.
+fn body_has_pipe_before_semicolon(tokens: &[(Token, Span)], mut i: usize) -> bool {
+    while let Some((tok, _)) = tokens.get(i) {
+        match tok {
+            Token::Semicolon => return false,
+            Token::Pipe => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// One `type:` decl as classified by the pre-pass: a Slice 3 struct, or an
+/// enum with its variant `(name, span)` list in source order (D8's variant
+/// pre-pass — variant names are known before any word body is parsed,
+/// regardless of `type:` declaration order).
+enum TypeDeclKind {
+    Struct,
+    Enum(Vec<(String, Span)>),
+}
+
+/// Pre-pass: scan the whole token stream for every `type: Name`, classify
+/// its body per `body_has_pipe_before_semicolon`, and for an enum also
+/// collect each variant name: the word immediately following each `|`, or
+/// (D1's optional leading `|`) the very first body token when the body has
+/// no leading `|`. Malformed occurrences are left for the real `type:`
+/// production to report; this pass only registers names, so it never errors
+/// itself.
+fn prepass_type_decls(tokens: &[(Token, Span)]) -> Vec<(String, Span, TypeDeclKind)> {
+    let mut decls = Vec::new();
     for i in 0..tokens.len() {
         if let (Token::Word(w), _) = &tokens[i] {
             if w == "type:" {
                 if let Some((Token::Word(name), span)) = tokens.get(i + 1) {
-                    names.push((name.clone(), *span));
+                    let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
+                        TypeDeclKind::Enum(scan_variant_names(tokens, i + 2))
+                    } else {
+                        TypeDeclKind::Struct
+                    };
+                    decls.push((name.clone(), *span, kind));
                 }
             }
         }
     }
-    names
+    decls
 }
 
-/// Build the initial struct registry (names only, fields filled in once the
-/// real `type:` bodies are parsed) from the pre-pass names, leaking each name
-/// once so every `Type::Struct` naming it renders without a registry.
-fn build_struct_registry(names: &[(String, Span)]) -> Vec<StructDecl> {
-    names
-        .iter()
-        .map(|(name, span)| StructDecl {
-            name: name.clone(),
-            name_static: Box::leak(name.clone().into_boxed_str()),
-            fields: Vec::new(),
-            span: *span,
-        })
-        .collect()
+/// Collect variant `(name, span)` pairs from an enum `type:` body: the word
+/// following each `|`, plus the very first body token when there is no
+/// leading `|`.
+fn scan_variant_names(tokens: &[(Token, Span)], start: usize) -> Vec<(String, Span)> {
+    let mut variants = Vec::new();
+    let mut expect_variant_name = true;
+    let mut i = start;
+    while let Some((tok, span)) = tokens.get(i) {
+        match tok {
+            Token::Semicolon => break,
+            Token::Pipe => expect_variant_name = true,
+            Token::Word(w) if expect_variant_name => {
+                variants.push((w.clone(), *span));
+                expect_variant_name = false;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    variants
+}
+
+/// Build the initial struct and enum registries (names, and for an enum its
+/// variant names, populated by the pre-pass; fields filled in once the real
+/// `type:` bodies are parsed) from the pre-pass decls, leaking each name once
+/// so every `Type::Struct`/`Type::Enum` naming it renders without a registry.
+fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>, Vec<EnumDecl>) {
+    let mut structs = Vec::new();
+    let mut enums = Vec::new();
+    for (name, span, kind) in decls {
+        match kind {
+            TypeDeclKind::Struct => {
+                structs.push(StructDecl {
+                    name: name.clone(),
+                    name_static: Box::leak(name.clone().into_boxed_str()),
+                    fields: Vec::new(),
+                    span: *span,
+                });
+            }
+            TypeDeclKind::Enum(variant_names) => {
+                let variants = variant_names
+                    .iter()
+                    .map(|(vname, vspan)| VariantDecl {
+                        name: vname.clone(),
+                        name_static: Box::leak(vname.clone().into_boxed_str()),
+                        fields: Vec::new(),
+                        span: *vspan,
+                    })
+                    .collect();
+                enums.push(EnumDecl {
+                    name: name.clone(),
+                    name_static: Box::leak(name.clone().into_boxed_str()),
+                    variants,
+                    span: *span,
+                });
+            }
+        }
+    }
+    (structs, enums)
 }
 
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
-    let names = prepass_struct_names(tokens);
-    let mut structs = build_struct_registry(&names);
+    let decls = prepass_type_decls(tokens);
+    let (mut structs, mut enums) = build_registries(&decls);
     let mut words = Vec::new();
-    let mut fields_by_decl = Vec::with_capacity(structs.len());
+    let mut struct_fields_by_decl = Vec::new();
+    let mut enum_fields_by_decl = Vec::new();
     {
         let mut parser = Parser {
             tokens,
             pos: 0,
             structs: &structs,
+            enums: &enums,
         };
         while parser.pos < parser.tokens.len() {
             if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
-                fields_by_decl.push(parser.parse_typedef()?);
+                if parser.current_typedef_is_enum() {
+                    enum_fields_by_decl.push(parser.parse_enum_typedef()?);
+                } else {
+                    struct_fields_by_decl.push(parser.parse_typedef()?);
+                }
             } else {
                 words.push(parser.parse_worddef()?);
             }
         }
     }
-    for (idx, fields) in fields_by_decl.into_iter().enumerate() {
+    for (idx, fields) in struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
     }
-    Ok(Module { words, structs })
+    for (idx, variant_fields) in enum_fields_by_decl.into_iter().enumerate() {
+        for (vidx, fields) in variant_fields.into_iter().enumerate() {
+            enums[idx].variants[vidx].fields = fields;
+        }
+    }
+    Ok(Module {
+        words,
+        structs,
+        enums,
+    })
 }
 
 /// Parse a single REPL line: a `:`-led definition, or a bare term sequence run
@@ -93,6 +191,7 @@ pub fn parse_line_with_structs(
         tokens,
         pos: 0,
         structs,
+        enums: &[],
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -124,6 +223,7 @@ pub fn parse_typedef_line(
         tokens,
         pos: 0,
         structs,
+        enums: &[],
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -144,6 +244,10 @@ struct Parser<'t> {
     /// among structs doesn't matter). Empty for a REPL line (struct
     /// declarations are not yet supported at REPL scope).
     structs: &'t [StructDecl],
+    /// The enum registry, parallel to `structs` (names, and each enum's
+    /// variant names, always populated by the pre-pass; empty for a REPL
+    /// line, enum declarations are not yet supported at REPL scope).
+    enums: &'t [EnumDecl],
 }
 
 impl<'t> Parser<'t> {
@@ -324,12 +428,93 @@ impl<'t> Parser<'t> {
     fn resolve_type(&self, name: &str, span: Span) -> Result<Type, String> {
         // Unknown-type is a semantic error, not a syntax error, so it uses the
         // `error:` prefix (matching check.rs) rather than `parse error:`.
-        crate::ast::resolve_type_name(self.structs, name).ok_or_else(|| {
+        crate::ast::resolve_type_name(self.structs, self.enums, name).ok_or_else(|| {
             format!(
                 "error: unknown type `{name}` at line {}, col {}",
                 span.line, span.col
             )
         })
+    }
+
+    /// Lookahead (no consumption): whether the `type:` decl at the current
+    /// position is an enum (D1's `|`-separated-variants body), per
+    /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`.
+    fn current_typedef_is_enum(&self) -> bool {
+        body_has_pipe_before_semicolon(self.tokens, self.pos + 2)
+    }
+
+    /// The enum `type:` production (D1, M3): `type: Name '|'? variant ('|'
+    /// variant)* ;`, `variant := Word (field-name field-type)*`. The name and
+    /// every variant name were already registered by the pre-pass; this
+    /// parses and returns the ordered per-variant field list. Zero variants
+    /// (an optional leading `|` with nothing after it, or a body with no
+    /// variant at all) is a located malformed-declaration error (M3).
+    fn parse_enum_typedef(&mut self) -> Result<Vec<Vec<(String, Type)>>, String> {
+        let type_span = self.expect_word("type:")?;
+        self.expect_word_any()?; // the enum name; already registered by the pre-pass
+        if matches!(self.peek(), Some((Token::Pipe, _))) {
+            self.pos += 1;
+        }
+        let mut variants = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) => break,
+                Some((Token::Word(_), _)) => {
+                    variants.push(self.parse_variant_fields()?);
+                    if matches!(self.peek(), Some((Token::Pipe, _))) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Some((tok, span)) => {
+                    return Err(format!(
+                        "parse error: expected a variant name, found {tok:?} at line {}, col {}",
+                        span.line, span.col
+                    ));
+                }
+                None => return Err(self.eof_error("`;` (unterminated `type:` declaration)")),
+            }
+        }
+        self.expect(Token::Semicolon)?;
+        if variants.is_empty() {
+            return Err(format!(
+                "error: malformed `type:` declaration (zero variants) at line {}, col {}",
+                type_span.line, type_span.col
+            ));
+        }
+        Ok(variants)
+    }
+
+    /// One variant's field list: a variant name (already consumed by the
+    /// caller's boundary handling elsewhere — here we consume it directly)
+    /// followed by `(field-name field-type)*` up to the next `|` or `;`. An
+    /// odd field-token count or a malformed field type is a located parse
+    /// error, matching `parse_typedef`'s struct-field diagnostics.
+    fn parse_variant_fields(&mut self) -> Result<Vec<(String, Type)>, String> {
+        self.expect_word_any()?; // the variant name; already registered by the pre-pass
+        let mut fields = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) | Some((Token::Pipe, _)) => break,
+                Some(_) => {
+                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    if let Some((tok, span)) = self.peek() {
+                        if matches!(tok, Token::Semicolon | Token::Pipe) {
+                            return Err(format!(
+                                "parse error: field `{field_name}` has no type before `{tok:?}` at line {}, col {} (odd field-token count in `type:` body)",
+                                span.line, span.col
+                            ));
+                        }
+                    }
+                    let (ty_name, ty_span) = self.expect_field_type_token()?;
+                    let ty = self.resolve_type(&ty_name, ty_span)?;
+                    fields.push((field_name, ty));
+                }
+                None => return Err(self.eof_error("`;` or `|` (unterminated `type:` declaration)")),
+            }
+        }
+        Ok(fields)
     }
 
     fn parse_locals_opt(&mut self) -> Result<Vec<String>, String> {
@@ -734,5 +919,104 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("unknown type"), "unexpected message: {err}");
         assert!(err.contains("Nope"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_typedef_enum_with_leading_pipe_registers_variants() {
+        let module = parse_src("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
+        assert!(module.structs.is_empty());
+        assert_eq!(module.enums.len(), 1);
+        let shape = &module.enums[0];
+        assert_eq!(shape.name, "Shape");
+        assert_eq!(shape.variants.len(), 2);
+        assert_eq!(shape.variants[0].name, "Circle");
+        assert_eq!(shape.variants[0].fields, vec![("r".to_string(), Type::F64)]);
+        assert_eq!(shape.variants[1].name, "Rect");
+        assert_eq!(
+            shape.variants[1].fields,
+            vec![("w".to_string(), Type::F64), ("h".to_string(), Type::F64)]
+        );
+    }
+
+    #[test]
+    fn parse_typedef_enum_without_leading_pipe_registers_first_variant() {
+        let module = parse_src("type: MaybeInt None | Some v i64 ;").unwrap();
+        assert_eq!(module.enums.len(), 1);
+        let maybe = &module.enums[0];
+        assert_eq!(maybe.variants.len(), 2);
+        assert_eq!(maybe.variants[0].name, "None");
+        assert!(maybe.variants[0].fields.is_empty());
+        assert_eq!(maybe.variants[1].name, "Some");
+        assert_eq!(maybe.variants[1].fields, vec![("v".to_string(), Type::I64)]);
+    }
+
+    #[test]
+    fn parse_typedef_enum_single_variant_newtype_ok() {
+        // M3: a single-variant enum is allowed.
+        let module = parse_src("type: Id | Wrap v i64 ;").unwrap();
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.enums[0].variants.len(), 1);
+    }
+
+    #[test]
+    fn parse_typedef_enum_zero_variants_is_error() {
+        // M3: a `|`-bearing body with no variant name is malformed.
+        let result = parse_src("type: Empty | ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("malformed"), "unexpected message: {err}");
+        assert!(err.contains("zero variants"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_typedef_enum_odd_field_token_count_is_error() {
+        let result = parse_src("type: Bad | V x i64 y | Other ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("odd field-token count"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains('y'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_typedef_enum_unknown_variant_field_type_is_error() {
+        let result = parse_src("type: Bad | V x Nope ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("Nope"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_typedef_enum_self_referential_field_resolves_to_own_type() {
+        let module = parse_src("type: Loop | Next n Loop | Stop ;").unwrap();
+        assert_eq!(module.enums.len(), 1);
+        match module.enums[0].variants[0].fields[0].1 {
+            Type::Enum(_, name) => assert_eq!(name, "Loop"),
+            other => panic!("expected Type::Enum(Loop), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_typedef_enum_used_in_word_effect_resolves() {
+        let module = parse_src("type: Shape | Circle r f64 ; : id ( Shape -- Shape ) ;").unwrap();
+        let id = &module.words[0];
+        match id.effect.inputs[0].ty {
+            Type::Enum(_, name) => assert_eq!(name, "Shape"),
+            other => panic!("expected Type::Enum(Shape), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_typedef_struct_and_enum_coexist_in_source_order() {
+        let module =
+            parse_src("type: Vec2 x i64 y i64 ; type: Shape | Circle r f64 | Rect w f64 h f64 ;")
+                .unwrap();
+        assert_eq!(module.structs.len(), 1);
+        assert_eq!(module.structs[0].name, "Vec2");
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.enums[0].name, "Shape");
     }
 }

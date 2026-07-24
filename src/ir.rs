@@ -82,6 +82,9 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The layout lives in the module's `StructLayout` registry; the
         // `IrType` carries only the `StructId` so it stays `Copy`.
         Type::Struct(id, _) => IrType::Struct(id),
+        // Enum lowering (`IrType::Enum`, tagged layout) lands in Phase 3
+        // (R13); no enum-typed word reaches lowering before then.
+        Type::Enum(_, _) => unimplemented!("enum lowering lands in Phase 3 (R13)"),
     }
 }
 

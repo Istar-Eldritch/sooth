@@ -10,7 +10,10 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Module, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type, WordDef};
+use crate::ast::{
+    EnumDecl, EnumId, Module, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type,
+    WordDef,
+};
 
 /// A word's typed stack effect: the concrete input and output slot types,
 /// deepest-first (leftmost in `( … )` is deepest on the stack).
@@ -60,9 +63,13 @@ impl Ctx<'_> {
 
 pub fn check(module: &Module) -> Result<(), String> {
     check_structs(&module.structs)?;
+    check_duplicate_type_names(&module.structs, &module.enums)?;
 
     let mut env = builtin_table();
     for (name, sig) in struct_generated_sigs(&module.structs) {
+        env.insert(name, sig);
+    }
+    for (name, sig) in enum_generated_sigs(&module.enums) {
         env.insert(name, sig);
     }
     for word in &module.words {
@@ -88,6 +95,33 @@ pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
 fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
     let mut seen: HashMap<&str, ()> = HashMap::new();
     for decl in structs {
+        if seen.insert(decl.name.as_str(), ()).is_some() {
+            return Err(format!(
+                "error: duplicate type `{}` (line {}, col {})",
+                decl.name, decl.span.line, decl.span.col
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A duplicate type name across the *combined* struct + enum registries
+/// (D10, X2) is a sharp located error naming the type: a name used by two
+/// structs, two enums, or one of each. Generalizes
+/// `check_duplicate_struct_names` to the full type namespace; struct-only
+/// callers (e.g. the REPL, which doesn't yet declare enums) keep using that
+/// narrower check.
+fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
+    let mut seen: HashMap<&str, ()> = HashMap::new();
+    for decl in structs {
+        if seen.insert(decl.name.as_str(), ()).is_some() {
+            return Err(format!(
+                "error: duplicate type `{}` (line {}, col {})",
+                decl.name, decl.span.line, decl.span.col
+            ));
+        }
+    }
+    for decl in enums {
         if seen.insert(decl.name.as_str(), ()).is_some() {
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
@@ -199,6 +233,32 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, Sig)> {
                 Sig {
                     inputs: vec![struct_ty, *field_ty],
                     outputs: vec![struct_ty],
+                },
+            ));
+        }
+    }
+    sigs
+}
+
+/// Synthesize the generated-word `Sig` for every registered enum variant
+/// (D2, R9): a constructor `Variant ( T1 … Tn -- Enum )`, fields in declared
+/// order (first field deepest), a zero-field variant being `Variant ( --
+/// Enum )`. Unlike a struct, a variant has no destructure/getter/setter
+/// (D2: not a standalone type; elimination is clause-style, Phase 4). These
+/// join the env alongside user words and struct-generated words, so a
+/// constructor's arity/field-type misuse (X9) falls out of the existing
+/// call-check path.
+pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
+    let mut sigs = Vec::new();
+    for (idx, decl) in enums.iter().enumerate() {
+        let enum_ty = Type::Enum(EnumId::from_index(idx), decl.name_static);
+        for variant in &decl.variants {
+            let field_types: Vec<Type> = variant.fields.iter().map(|(_, ty)| *ty).collect();
+            sigs.push((
+                variant.name.clone(),
+                Sig {
+                    inputs: field_types,
+                    outputs: vec![enum_ty],
                 },
             ));
         }
@@ -1416,6 +1476,98 @@ mod tests {
         check_src(
             "type: Vec2 x i64 y i64 ;
              : main ( -- Vec2 ) 1 2 Vec2 3 4 Vec2 swap drop dup drop ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_enum_zero_field_variant_constructor_ok() {
+        check_src("type: Cmd | Halt ; : main ( -- Cmd ) Halt ;").unwrap();
+    }
+
+    #[test]
+    fn check_enum_multi_field_variant_constructor_ok() {
+        check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ; : main ( -- Shape ) 2.0 Circle ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_enum_used_in_word_effect_ok() {
+        check_src("type: Shape | Circle r f64 ; : id ( Shape -- Shape ) ;").unwrap();
+    }
+
+    #[test]
+    fn check_enum_single_variant_newtype_ok() {
+        // M3: a single-variant enum is allowed.
+        check_src("type: Id | Wrap v i64 ; : main ( -- Id ) 5 Wrap ;").unwrap();
+    }
+
+    #[test]
+    fn check_enum_duplicate_type_name_across_two_enums_is_error() {
+        // X2: two enum `type:` declarations sharing a name.
+        let err =
+            check_src("type: Shape | Circle r f64 ; type: Shape | Square s f64 ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_duplicate_type_name_against_struct_is_error() {
+        // X2: a struct and an enum sharing a name, across the combined
+        // struct+enum registry (D10).
+        let err = check_src("type: Vec2 x i64 y i64 ; type: Vec2 | Only v i64 ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_constructor_arity_mismatch_is_error() {
+        // X9: too few values fed to a variant constructor, naming the enum.
+        let src = "type: Shape | Rect w f64 h f64 ; : main ( -- Shape ) 1.0 Rect ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+        assert!(err.contains("needs 2 values"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_constructor_field_type_mismatch_is_error() {
+        // X9: a `bool` where an `f64` field is expected, naming both types.
+        let src = "type: Shape | Circle r f64 ; : main ( -- Shape ) true Circle ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_unifies_through_if_else_join_ok() {
+        // R10: an enum type flows through an `if`/`else` join like any Type.
+        check_src(
+            "type: Shape | Circle r f64 | Square s f64 ;
+             : pick ( bool -- Shape ) if 1.0 Circle else 2.0 Square end ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_enum_moves_through_shuffles_ok() {
+        // R10: dup/drop/swap/over move an enum value with no special case.
+        check_src(
+            "type: Shape | Circle r f64 | Square s f64 ;
+             : main ( -- Shape ) 1.0 Circle 2.0 Square swap drop dup drop ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_enum_struct_and_enum_coexist_ok() {
+        // D10: a distinct registry per kind; structs and enums both resolve
+        // and both generate correctly-typed words in the same module.
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             type: Shape | Circle r f64 ;
+             : main ( -- Vec2 Shape ) 1 2 Vec2 3.0 Circle ;",
         )
         .unwrap();
     }
