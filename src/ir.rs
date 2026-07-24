@@ -23,6 +23,13 @@ use crate::ast::{
 /// (criterion 2's structural test flips it to prove no stray literal remains).
 pub const WORD_WIDTH: u32 = 8;
 
+/// The runtime out-of-bounds trap helper (R19/D6): Sooth's first runtime
+/// failure path. A dynamic array index that fails its `index < N` guard calls
+/// this symbol, which prints a located len+index message to stderr and exits
+/// nonzero. The backend emits the definition; the IR references it by name so
+/// both sides agree on one symbol.
+pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
+
 #[derive(Debug, Default)]
 pub struct IrModule {
     pub funcs: Vec<IrFunc>,
@@ -994,7 +1001,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
-            TermKind::Call(name) => self.lower_call(name),
+            TermKind::Call(name) => self.lower_call(name, term.span.line),
             TermKind::If {
                 then_branch,
                 else_branch,
@@ -1002,7 +1009,7 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    fn lower_call(&mut self, name: &str) {
+    fn lower_call(&mut self, name: &str, line: u32) {
         if let Some(&value) = self.locals.get(name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
@@ -1121,7 +1128,7 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
-            "fill" | "get" | "set" | "len" => self.lower_array_word(name),
+            "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
             _ => {
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
@@ -1267,7 +1274,7 @@ impl<'a> FuncBuilder<'a> {
     /// (M6); `get` = element-addr + load, non-consuming (R12); `set` = alloc +
     /// whole-array blit + element-addr + store, yielding a fresh array; `len`
     /// = a constant `usize` from the layout, non-consuming.
-    fn lower_array_word(&mut self, name: &str) {
+    fn lower_array_word(&mut self, name: &str, line: u32) {
         match name {
             "fill" => {
                 let count_v = self.stack.pop().expect("fill: count");
@@ -1294,7 +1301,8 @@ impl<'a> FuncBuilder<'a> {
                     IrType::Array(id) => id,
                     _ => unreachable!("checked: get's second operand is an array"),
                 };
-                let (stride, elem, _) = self.array_parts(id);
+                let (stride, elem, count) = self.array_parts(id);
+                self.bounds_check(index, count, line);
                 match elem {
                     IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                         // The element address is itself the aggregate value.
@@ -1317,7 +1325,8 @@ impl<'a> FuncBuilder<'a> {
                     IrType::Array(id) => id,
                     _ => unreachable!("checked: set's first operand is an array"),
                 };
-                let (stride, elem, _) = self.array_parts(id);
+                let (stride, elem, count) = self.array_parts(id);
+                self.bounds_check(index, count, line);
                 let size = self.arrays.layouts[id.index()].size;
                 let dst = self.alloc_array(id);
                 if size > 0 {
@@ -1341,6 +1350,43 @@ impl<'a> FuncBuilder<'a> {
             }
             _ => unreachable!("lower_array_word only handles fill/get/set/len"),
         }
+    }
+
+    /// Emit the runtime bounds guard for a dynamic array index (R19/D6): an
+    /// `index < N` compare jumps to the continuation, otherwise a trap block
+    /// calls the out-of-bounds helper (a located len+index message to stderr,
+    /// then a nonzero exit) so an out-of-range access aborts rather than
+    /// corrupting. A checked compile-time literal index (X4, R11) already had
+    /// its bounds verified, so it skips the guard entirely and stays
+    /// trap-free.
+    fn bounds_check(&mut self, index: Value, count: u32, line: u32) {
+        if self.const_vals.contains_key(&index) {
+            return;
+        }
+        let n = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(n, i64::from(count)));
+        let cond = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(cond, CmpOp::Lt, index, n));
+        let ok = self.fresh_block();
+        let trap = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cond, ok, trap));
+
+        // The trap block never falls through: the helper exits, so the `Jmp`
+        // to `ok` is an unreachable CFG edge that keeps the block validly
+        // terminated regardless of the enclosing word's return type.
+        self.start_block(trap);
+        let line_v = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(line_v, i64::from(line)));
+        let len_v = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(len_v, i64::from(count)));
+        self.push_instr(Instr::Call(
+            None,
+            OOB_TRAP_SYMBOL.to_string(),
+            vec![line_v, index, len_v],
+        ));
+        self.seal_block(Terminator::Jmp(ok));
+
+        self.start_block(ok);
     }
 
     /// A `Ptr`-typed value for `base + offset` (a scalar field's address).
@@ -1963,6 +2009,44 @@ mod tests {
     }
 
     #[test]
+    fn lower_get_runtime_index_emits_bounds_guard_and_trap_call() {
+        // R19/D6: a runtime (non-literal) index guards the access with
+        // `index < N` and jumps to a trap block that calls the OOB helper.
+        let ir = lower_src(": w ( [i64 4] usize -- i64 ) get swap drop ;");
+        let w = &ir.funcs[0];
+        assert!(w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn lower_get_constant_index_has_no_runtime_guard() {
+        // R11/X4: a checked literal index is bounds-verified at compile time,
+        // so it skips the runtime guard entirely — no branch, no trap call.
+        let ir = lower_src(": w ( [i64 4] -- i64 ) 0 get swap drop ;");
+        let w = &ir.funcs[0];
+        assert!(!w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+            ),
+            0
+        );
+    }
+
+    #[test]
     fn lower_len_is_a_constant_with_no_memory_access() {
         // R18: `len` folds to a constant `usize` (the count) with no load and
         // no element addressing.
@@ -2422,7 +2506,7 @@ mod tests {
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("+");
+        b.lower_call("+", 0);
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }

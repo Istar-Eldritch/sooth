@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
-    Terminator, Value,
+    Terminator, Value, OOB_TRAP_SYMBOL,
 };
 
 /// The backend's view of a program's aggregate layouts: the struct and enum
@@ -37,6 +37,12 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
     out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
     out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
+    // The runtime out-of-bounds trap message (R19/D6): a located line + the
+    // offending index + the array length, printed to stderr before a nonzero
+    // exit. `%ld` for each of line, index, length (passed as `l`).
+    out.push_str(
+        "data $oobfmt = { b \"sooth: array index out of range (line %ld)\\n  index %ld is out of bounds for length %ld\\n\", b 0 }\n",
+    );
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
     // array type (D9, R20) then references an already-declared `:E`/`:arr_N`.
@@ -55,6 +61,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
         out.push('\n');
         emit_func(&mut out, func, layouts);
     }
+    emit_oob_trap(&mut out);
     Ok(out)
 }
 
@@ -494,6 +501,25 @@ fn emit_func(out: &mut String, func: &IrFunc, layouts: Layouts) {
         }
         emit_term(out, &block.term);
     }
+    out.push_str("}\n");
+}
+
+/// Emit the runtime out-of-bounds trap helper (R19/D6): Sooth's first runtime
+/// failure path. It prints the located len+index message to stderr via
+/// `dprintf(2, …)` (the hosted print path, fd 2 = stderr, no new runtime
+/// dependency) then `exit(1)`s. It must abort, not fall through, so the block
+/// ends in `hlt`: after `exit` the program is gone, and `hlt` marks the edge
+/// unreachable rather than returning into corrupt state.
+fn emit_oob_trap(out: &mut String) {
+    writeln!(
+        out,
+        "\nfunction ${OOB_TRAP_SYMBOL}(l %line, l %idx, l %len) {{"
+    )
+    .unwrap();
+    out.push_str("@start\n");
+    out.push_str("\tcall $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)\n");
+    out.push_str("\tcall $exit(w 1)\n");
+    out.push_str("\thlt\n");
     out.push_str("}\n");
 }
 
@@ -1043,6 +1069,31 @@ mod tests {
         let il = emit_src(": w ( bool -- i64 ) if 1 else 2 end ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
+    }
+
+    #[test]
+    fn emit_bounds_trap_helper_prints_and_exits() {
+        // R19/D6: the module always emits the OOB trap helper, which writes the
+        // located message to stderr (`dprintf` fd 2 + `$oobfmt`) and `exit`s
+        // nonzero, ending in `hlt` so it aborts rather than falls through.
+        let il = emit_src(": w ( [i64 4] usize -- i64 ) get swap drop ;");
+        assert!(il.contains("$sooth_oob_trap("), "missing trap helper: {il}");
+        assert!(
+            il.contains("data $oobfmt"),
+            "missing trap message data: {il}"
+        );
+        assert!(
+            il.contains("$dprintf(w 2,"),
+            "trap must write to stderr: {il}"
+        );
+        assert!(il.contains("$exit(w 1)"), "trap must exit nonzero: {il}");
+        assert!(il.contains("hlt"), "trap must abort (hlt): {il}");
+        // The runtime get guards the access with a branch to the trap symbol.
+        assert!(il.contains("jnz "), "runtime index must be guarded: {il}");
+        assert!(
+            il.contains("call $sooth_oob_trap("),
+            "guard must call the trap helper: {il}"
+        );
     }
 
     #[test]
