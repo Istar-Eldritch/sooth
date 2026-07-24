@@ -32,7 +32,15 @@ sharing the Slice 3 layout machinery, a tagged inline-aggregate representation,
 exhaustiveness-checked clause-style elimination (no inline `match`), the `then` -> `end`
 control-flow-closer rename, clause-body locals, and enum values crossing word-call and
 REPL boundaries; `examples/shapes.sth` dogfoods it natively and in the REPL.
-**Next action: Phase 2 Slice 5** (fixed-size arrays). Not yet locked.
+**Slice 5 (fixed-size arrays + `usize`) is complete** and merged to `main`: fixed-size
+heap-free value arrays `[T N]` (structurally interned into an `ArrayId` registry so `Type`
+stays `Copy`, reusing the Slice 3/4 layout machinery), the target-width `usize` index/length
+type (width from a single threaded `WORD_WIDTH` parameter, never a hardcoded 8),
+`fill`/`get`/`set`/`len` words (non-consuming `get`, functional `set`), and dynamic indexing
+with a runtime bounds trap (Sooth's first runtime failure path) via a backend-neutral
+`ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Slice 7 (its only
+motivation, pointer differences, arrives with pointers).
+**Next action: Phase 2 Slice 6** (bytecode-VM dogfood). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -85,7 +93,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs + enums done: Slices 1-4 + floats/bitwise/bool)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs + enums + arrays done: Slices 1-5 + floats/bitwise/bool)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -106,7 +114,10 @@ an inline-aggregate layout model, and generated construction/field-read/function
 destructure words. **Slice 4 (enums/ADTs + clause-style pattern matching) is also done**:
 sum types via the `type:` form, a tagged inline-aggregate representation sharing the Slice 3
 layout machinery, exhaustiveness-checked clause-style elimination, the `then` -> `end`
-rename, and clause-body locals. What remains are arrays/the VM dogfood/`Copy` (Slices 5-7).
+rename, and clause-body locals. **Slice 5 (fixed-size arrays + `usize`) is also done**:
+heap-free value arrays `[T N]` (interned `ArrayId`, reused layout machinery), target-width
+`usize`, `fill`/`get`/`set`/`len`, and dynamic indexing with a runtime bounds trap. What
+remains are the VM dogfood and `Copy`/pointers (Slices 6-7).
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -134,7 +145,10 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    `usize` from the first use rather than a hardcoded `i64` retrofitted later. Its defining
    property (target-defined width, consistent with the opaque `Ptr[T]` invariant) only
    becomes load-bearing and testable once a real consumer (indexing) or a non-64-bit backend
-   exists, which is why it waits until now rather than landing with the integer tower.
+   exists, which is why it waits until now rather than landing with the integer tower. `isize`
+   deferred to Slice 7 (no consumer until pointer differences exist). Arrays are inline `Copy`
+   value aggregates, `get` non-consuming, `set` functional; dynamic indexing has a runtime
+   bounds trap. ✅ done.
 6. **Bytecode-VM dogfood**: the Phase 2 exit dogfood, a small fixed-size VM for a toy
    bytecode, exercising the whole typed core.
 7. **`Copy` marker + optional / non-null pointer**: the `Copy`-vs-affine distinction as a
