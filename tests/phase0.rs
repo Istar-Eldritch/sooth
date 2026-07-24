@@ -1112,3 +1112,27 @@ type: Wrap s Shape ;\n\
     assert_eq!(stdout, "3\n0\n5\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn clause_body_containing_if_else_end_joins_correctly() {
+    // M6: a clause body may itself use `if/else/end`. The clause-dispatch
+    // join's phi predecessor must be the *if's* merged block (captured via
+    // `cur_id` after lowering the clause body), not the clause's dispatch
+    // block — otherwise the join would read a stale/wrong value. `Zero`
+    // exercises a plain clause alongside `NonZero`'s internal branch, so the
+    // two clause styles share one dispatch and one join correctly.
+    let src = "type: Item | Zero | NonZero v i64 ;\n\
+: classify ( Item -- i64 )\n\
+| Zero       0\n\
+| NonZero    0 > if 1 else -1 end\n\
+;\n\
+: main ( -- )\n  Zero classify .\n  5 NonZero classify .\n  -5 NonZero classify . ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-clause-if-else-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "0\n1\n-1\n");
+    assert_eq!(code, 0);
+}
