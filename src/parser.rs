@@ -521,15 +521,23 @@ impl<'t> Parser<'t> {
         ))
     }
 
-    /// The array count token: a decimal literal `>= 1` (M1: no const-expr
-    /// eval, so a non-literal count is always a located error naming the
-    /// offending token). A literal `< 1` is a located error naming the full
-    /// `[T N]` spelling and the invalid length (X2).
+    /// The array count token: a decimal literal `>= 1` and `<= u32::MAX`
+    /// (M1: no const-expr eval, so a non-literal count is always a located
+    /// error naming the offending token). A literal `< 1` or `> u32::MAX` is
+    /// a located error naming the full `[T N]` spelling and the invalid
+    /// length (X2).
     fn parse_array_count(&mut self, element: Type) -> Result<u32, String> {
         match self.peek().cloned() {
-            Some((Token::Int(n), _span)) if n >= 1 => {
+            Some((Token::Int(n), _span)) if (1..=i64::from(u32::MAX)).contains(&n) => {
                 self.pos += 1;
                 Ok(n as u32)
+            }
+            Some((Token::Int(n), span)) if n > i64::from(u32::MAX) => {
+                self.pos += 1;
+                Err(format!(
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N <= {})",
+                    element.name(), n, n, span.line, span.col, u32::MAX
+                ))
             }
             Some((Token::Int(n), span)) => {
                 self.pos += 1;
@@ -1385,5 +1393,28 @@ mod tests {
     fn parse_array_type_missing_rbracket_is_error() {
         let result = parse_src(": w ( [i64 4 -- ) drop ;");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_array_type_count_exceeding_u32_max_is_error() {
+        // A count above u32::MAX is a located error, not a silent truncation.
+        let result = parse_src(": w ( [i64 4294967297] -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("4294967297"), "unexpected message: {err}");
+        assert!(err.contains("4294967295"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_named_slot_array_type_resolves() {
+        // The named-slot path (`name : type`) also recognises `[T N]`, not
+        // just the unnamed-slot shortcut.
+        let module = parse_src(": w ( arr : [i64 4] -- i64 ) drop 0 ;").unwrap();
+        let w = &module.words[0];
+        assert_eq!(w.effect.inputs[0].name.as_deref(), Some("arr"));
+        match w.effect.inputs[0].ty {
+            Type::Array(_, name) => assert_eq!(name, "[i64 4]"),
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
     }
 }
