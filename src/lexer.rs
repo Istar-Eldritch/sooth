@@ -11,13 +11,15 @@ pub enum Token {
     LParen,
     RParen,
     Pipe,
+    LBracket,
+    RBracket,
     Int(i64),
     Float(f64),
     Word(String),
 }
 
 fn is_delimiter(c: char) -> bool {
-    matches!(c, ';' | '(' | ')' | '|')
+    matches!(c, ';' | '(' | ')' | '|' | '[' | ']')
 }
 
 fn is_int_literal(text: &str) -> bool {
@@ -72,13 +74,15 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                     col += 1;
                 }
             }
-            ';' | '(' | ')' | '|' => {
+            ';' | '(' | ')' | '|' | '[' | ']' => {
                 let span = Span { line, col };
                 let tok = match c {
                     ';' => Token::Semicolon,
                     '(' => Token::LParen,
                     ')' => Token::RParen,
                     '|' => Token::Pipe,
+                    '[' => Token::LBracket,
+                    ']' => Token::RBracket,
                     _ => unreachable!(),
                 };
                 chars.next();
@@ -243,6 +247,35 @@ mod tests {
     fn lex_plain_integer_still_int() {
         let tokens = lex("42").unwrap();
         assert_eq!(words(&tokens), vec![Token::Int(42)]);
+    }
+
+    #[test]
+    fn lex_brackets_are_distinct_tokens_expected() {
+        let tokens = lex("[i64 4]").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::LBracket,
+                Token::Word("i64".into()),
+                Token::Int(4),
+                Token::RBracket,
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_bracket_adjacent_to_word_still_splits_expected() {
+        // `[` and `]` are delimiters, so `usize]` and `[usize` split just like
+        // `foo;` splits on `;`, with no separating whitespace required.
+        let tokens = lex("[usize]").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::LBracket,
+                Token::Word("usize".into()),
+                Token::RBracket
+            ]
+        );
     }
 
     #[test]

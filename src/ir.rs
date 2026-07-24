@@ -98,6 +98,9 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The tagged layout lives in the module's `EnumLayout` registry; the
         // `IrType` carries only the `EnumId` so it stays `Copy`.
         Type::Enum(id, _) => IrType::Enum(id),
+        // Array layout/codegen (`IrType::Array`) lands in Phase 3; Phase 1
+        // only needs the frontend `Type::Array` to exist and resolve.
+        Type::Array(..) => unimplemented!("array IR lowering lands in Phase 3"),
     }
 }
 
