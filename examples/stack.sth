@@ -8,8 +8,13 @@
 \ value through a call, so the pair rides home as a single aggregate and the
 \ caller destructures it with the generated `Popped>` word.
 
-type: Stack items [i64 16] top usize ;
-type: Popped rest Stack item i64 ;
+type: Stack 
+  items [i64 16] 
+  top usize ;
+
+type: Popped 
+  rest Stack 
+  item i64 ;
 
 : empty ( -- Stack )
   0 16 fill 0 >usize Stack ;
