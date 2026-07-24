@@ -66,8 +66,9 @@ product-only Slice 3 could hold:
   missing / duplicate / unknown-variant are distinct sharp located errors. Branch-join needs
   no separate pass: every clause is checked against the word's single declared effect.
 - **D6.** Rename the control-flow closer `then` → `end` (`if … else … end`). `end` becomes a
-  reserved word. Behaviour-preserving: migrate the six examples, live tests, and living docs
-  (README, ROADMAP, DESIGN); leave archived per-slice specs on their original `then`. `if`
+  reserved word. Behaviour-preserving: migrate the four examples with an `if…then` closer
+  (`gcd`, `factorial`, `sign`, `bool_abi`), live tests, and living docs (README, ROADMAP,
+  DESIGN); leave archived per-slice specs on their original `then`. `if`
   stays an inline keyword.
 - **D7.** `| … |` locals extended to the *top* of a clause body (name the pushed payload and
   the stack below it), extent = that clause. Word-entry locals unchanged. No mid-body
@@ -117,9 +118,10 @@ product-only Slice 3 could hold:
   word may be named `end`; falls out of the guard). The lexer is unchanged (`end` is an
   ordinary word matched positionally). `TermKind::If { then_branch, else_branch }` field
   names are internal and may stay (they name the arm, not the keyword). Migrate every *live*
-  `then` occurrence: the six examples (`gcd`, `factorial`, `sign`, `bool_abi`, `rgb`,
-  `rgb_bits`), all unit- and integration-test source strings, and README/ROADMAP/DESIGN;
-  leave `docs/phase*-spec.md` untouched.
+  `then` occurrence: the four examples with an `if…then` closer (`gcd`, `factorial`, `sign`,
+  `bool_abi`; `rgb`/`rgb_bits` use `then` only as English prose in comments), all unit- and
+  integration-test source strings, and README/ROADMAP/DESIGN; leave `docs/phase*-spec.md`
+  untouched.
 - **R2. AST enum nodes (D1, D10).** In `src/ast.rs`: `Type` gains `Enum(EnumId, &'static
   str)`, mirroring `Struct(StructId, &'static str)` (stays `Copy`, self-renders without a
   registry). Add `EnumDecl { name, name_static, variants: Vec<VariantDecl>, span }` and
@@ -416,7 +418,7 @@ mid-body (non-top-of-scope) locals; the bytecode-VM dogfood (Slice 6).
   "phases": [
     {
       "phase": 1,
-      "focus": "Behaviour-preserving `then` -> `end` control-flow-closer rename (D6, R1): the `if` production and reserved-word guard, migrate the six examples, all live test source strings, and README/ROADMAP/DESIGN; leave archived per-slice specs on `then`. Full suite stays green.",
+      "focus": "Behaviour-preserving `then` -> `end` control-flow-closer rename (D6, R1): the `if` production and reserved-word guard, migrate the four examples with an `if…then` closer (`gcd`, `factorial`, `sign`, `bool_abi`), all live test source strings, and README/ROADMAP/DESIGN; leave archived per-slice specs on `then`. Full suite stays green.",
       "effort": "S",
       "difficulty": "medium"
     },
