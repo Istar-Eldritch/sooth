@@ -421,6 +421,67 @@ fn shapes_dogfood_runs_full_program_in_repl() {
     );
 }
 
+// Slice 5 (fixed-size arrays + `usize`): criterion 8, REPL parity (R22/R23).
+
+/// An array constructs at REPL scope, marshals into the carried buffer
+/// across the line boundary, and a residual array slot renders `<[T N]>`
+/// (D10); a `usize` slot prints via the type-directed `.`, same as any other
+/// carried scalar.
+#[test]
+fn array_and_usize_cross_repl_line_boundary_and_render() {
+    let out = run_session(&["0 4 fill", "5 >usize"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["stack: <[i64 4]>", "stack: <[i64 4]> 5"]);
+}
+
+/// Criterion 8: the `examples/stack.sth` dogfood — array-as-struct-field, a
+/// runtime `usize` cursor (the trap path), non-consuming `get`, functional
+/// `set`, and `len` — declared and run entirely across REPL lines (`type:`
+/// with an array field, then `fill`/`get`/`set`/`len` at REPL scope,
+/// mirroring the Slice 4 REPL-scope seeding).
+#[test]
+fn stack_dogfood_runs_in_repl() {
+    let out = run_session(&[
+        "type: Stack items [i64 16] top usize ;",
+        "type: Popped rest Stack item i64 ;",
+        ": empty ( -- Stack ) 0 16 fill 0 >usize Stack ;",
+        ": push ( Stack i64 -- Stack ) | s x | s s Stack>items s Stack>top x set Stack<items s Stack>top 1 + Stack<top ;",
+        ": pop ( Stack -- Popped ) | s | s s Stack>top 1 - Stack<top s Stack>items s Stack>top 1 - get swap drop Popped ;",
+        ": peek ( Stack -- Popped ) | s | s s Stack>items s Stack>top 1 - get swap drop Popped ;",
+        "empty 1 push 2 push 3 push",
+        "peek Popped> .",
+        "pop Popped> .",
+        "pop Popped> .",
+        "peek Popped> .",
+        "Stack>items len .",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Stack",
+            "defined type Popped",
+            "defined empty",
+            "defined push",
+            "defined pop",
+            "defined peek",
+            "stack: <Stack>",
+            "3",
+            "stack: <Stack>",
+            "3",
+            "stack: <Stack>",
+            "2",
+            "stack: <Stack>",
+            "1",
+            "stack: <Stack>",
+            "16",
+            "stack: <[i64 16]>",
+            "stack: (empty)",
+        ]
+    );
+}
+
 /// A large-payload variant (three `i64` fields, exceeding one 8-byte carried
 /// cell) survives a REPL line boundary intact: its multi-cell slot is blitted
 /// out of and back into the buffer, and a scalar pushed afterward still reads

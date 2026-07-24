@@ -18,6 +18,13 @@ pub struct Module {
     /// `EnumId`. A logically distinct registry from `structs` (D10): shares
     /// the layout/resolution machinery, not the struct registry's storage.
     pub enums: Vec<EnumDecl>,
+    /// The per-program interned array-type registry (D3, M1): one entry per
+    /// distinct `(element, count)` shape, indexed by `ArrayId` and deduped
+    /// structurally, so two spellings of the same shape (e.g. two `[i64 4]`
+    /// occurrences) share one entry. Populated during type resolution
+    /// (`intern_array_type`), not by a name pre-pass: an array shape has no
+    /// declared name to scan for ahead of parsing.
+    pub arrays: Vec<ArrayDecl>,
 }
 
 impl Module {
@@ -27,6 +34,12 @@ impl Module {
     /// effect-slot and field-type resolution can't drift apart.
     pub fn resolve_type_name(&self, name: &str) -> Option<Type> {
         resolve_type_name(&self.structs, &self.enums, name)
+    }
+
+    /// Intern an array shape `(element, count)` against this module's array
+    /// registry. Thin wrapper over the free `intern_array_type`.
+    pub fn intern_array_type(&mut self, element: Type, count: u32) -> Type {
+        intern_array_type(&mut self.arrays, element, count)
     }
 }
 
@@ -120,6 +133,59 @@ impl EnumId {
     }
 }
 
+/// A registered array type: its element type, compile-time count, and the
+/// leaked `&'static str` spelling `[T N]` every `Type::Array` naming it
+/// carries directly (mirrors `StructDecl::name_static`). Interned and deduped
+/// structurally by `(element, count)` shape (D3, M1): two spellings of the
+/// same shape share one `ArrayDecl`/`ArrayId`.
+#[derive(Debug)]
+pub struct ArrayDecl {
+    pub element: Type,
+    pub count: u32,
+    pub name_static: &'static str,
+}
+
+/// A small `Copy` index into `Module::arrays`, mirroring `StructId`/`EnumId`.
+/// Two `Type::Array` values are equal iff they name the same interned shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArrayId(pub(crate) usize);
+
+impl ArrayId {
+    /// Mint an `ArrayId` for a registry position; crate-internal so an id is
+    /// always tied to a real `arrays` registry entry.
+    pub(crate) fn from_index(idx: usize) -> ArrayId {
+        ArrayId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// Intern an array shape `(element, count)` into `arrays`, deduping
+/// structurally: two calls with the same shape return the same `ArrayId`
+/// (D3, M1). Interning mutates `arrays`, so callers thread it as `&mut Vec`
+/// rather than through an otherwise-`&self` type resolver: unlike a struct or
+/// enum name, an array shape has no declared name a pre-pass could register
+/// ahead of parsing, so the registry grows as type expressions resolve.
+pub fn intern_array_type(arrays: &mut Vec<ArrayDecl>, element: Type, count: u32) -> Type {
+    if let Some(idx) = arrays
+        .iter()
+        .position(|d| d.element == element && d.count == count)
+    {
+        return Type::Array(ArrayId::from_index(idx), arrays[idx].name_static);
+    }
+    let name = format!("[{} {}]", element.name(), count);
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let id = ArrayId::from_index(arrays.len());
+    arrays.push(ArrayDecl {
+        element,
+        count,
+        name_static,
+    });
+    Type::Array(id, name_static)
+}
+
 /// One REPL input unit: either a word definition or a bare term sequence
 /// evaluated against the carried stack.
 #[derive(Debug)]
@@ -176,12 +242,13 @@ pub struct TypedSlot {
 }
 
 /// A frontend type: the fixed-width integer tower (`i8..i64`, `u8..u64`) plus
-/// `bool`, plus a user-declared `struct`. The eight integer
+/// `bool`, plus a user-declared `struct`/`enum`/array. The eight integer
 /// cases are table-generated (`INT_TYPES` below), not eight hand-written
 /// variants, so a further width is one table row. `Type::Struct` carries a
 /// `StructId` and the struct's leaked `&'static str` name so `Type` stays
 /// `Copy` and self-renders without a registry (see `StructDecl::name_static`).
-/// Enums, arrays, etc. are later slices.
+/// `Type::Array` mirrors this: an `ArrayId` into the interned `(element,
+/// count)` registry plus the leaked `[T N]` spelling (D2, D3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Type {
     Int(IntType),
@@ -189,6 +256,16 @@ pub enum Type {
     Bool,
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
+    Array(ArrayId, &'static str),
+    /// The target-width unsigned integer (D7): distinct from every fixed-width
+    /// `uN` in `INT_TYPES`, its size/align comes from the target word-width
+    /// parameter (IR-side, Phase 3), never a hardcoded width here. The
+    /// integer-tower operators (`+ - * mod and or xor not shl shr = < > <= >=
+    /// <> .`, plus conversions) extend to it via `is_int`/`is_numeric`; the
+    /// checker's D8 literal-coercion carve-out (a bare integer literal fills a
+    /// `usize` position without an explicit `>usize`) lives in `check.rs`, not
+    /// here, since `Type` carries no notion of "fresh literal".
+    Usize,
 }
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
@@ -249,6 +326,9 @@ impl Type {
         if name == "bool" {
             return Some(Type::Bool);
         }
+        if name == "usize" {
+            return Some(Type::Usize);
+        }
         if let Some((_, bits)) = FLOAT_TYPES.iter().find(|(n, _)| *n == name) {
             return Some(Type::Float(FloatType { bits: *bits }));
         }
@@ -263,9 +343,11 @@ impl Type {
             })
     }
 
-    /// Whether this type is one of the eight integer types (not `bool`).
+    /// Whether this type is one of the eight integer types, or `usize` (not
+    /// `bool`): every integer-tower operator (`mod`/`and`/`or`/`xor`/`not`/
+    /// `shl`/`shr`) admits `usize` alongside the fixed widths (D7).
     pub fn is_int(&self) -> bool {
-        matches!(self, Type::Int(_))
+        matches!(self, Type::Int(_) | Type::Usize)
     }
 
     /// Whether this type is one of the two float types.
@@ -298,6 +380,8 @@ impl Type {
                 .expect("Type::Float is always constructed from a FLOAT_TYPES row"),
             Type::Struct(_, name) => name,
             Type::Enum(_, name) => name,
+            Type::Array(_, name) => name,
+            Type::Usize => "usize",
         }
     }
 }
@@ -379,12 +463,32 @@ mod tests {
     #[test]
     fn type_display_roundtrip_expected() {
         let names = [
-            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool",
+            "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "usize",
         ];
         for name in names {
             let ty = Type::from_name(name).unwrap();
             assert_eq!(ty.name(), name);
             assert_eq!(ty.to_string(), name);
+        }
+    }
+
+    #[test]
+    fn type_from_name_usize_expected() {
+        assert_eq!(Type::from_name("usize"), Some(Type::Usize));
+    }
+
+    #[test]
+    fn type_usize_is_int_and_numeric_not_float() {
+        assert!(Type::Usize.is_int());
+        assert!(Type::Usize.is_numeric());
+        assert!(!Type::Usize.is_float());
+        assert!(!Type::Usize.is_bool());
+    }
+
+    #[test]
+    fn type_usize_distinct_from_every_int_width() {
+        for name in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+            assert_ne!(Type::Usize, Type::from_name(name).unwrap());
         }
     }
 
@@ -420,6 +524,7 @@ mod tests {
                 span: Span::default(),
             }],
             enums: Vec::new(),
+            arrays: Vec::new(),
         }
     }
 
@@ -473,6 +578,7 @@ mod tests {
                 variants,
                 span: Span::default(),
             }],
+            arrays: Vec::new(),
         }
     }
 
@@ -523,6 +629,7 @@ mod tests {
                 variants: vec![variant("V", vec![])],
                 span: Span::default(),
             }],
+            arrays: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),
@@ -537,5 +644,41 @@ mod tests {
         let c = Type::Enum(EnumId(1), "Cmd");
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn intern_array_type_same_shape_dedups_expected() {
+        let mut arrays = Vec::new();
+        let a = intern_array_type(&mut arrays, Type::I64, 4);
+        let b = intern_array_type(&mut arrays, Type::I64, 4);
+        assert_eq!(a, b);
+        assert_eq!(arrays.len(), 1);
+        match a {
+            Type::Array(id, name) => {
+                assert_eq!(id, ArrayId(0));
+                assert_eq!(name, "[i64 4]");
+            }
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
+        assert_eq!(a.to_string(), "[i64 4]");
+    }
+
+    #[test]
+    fn intern_array_type_different_shapes_are_distinct_expected() {
+        let mut arrays = Vec::new();
+        let a = intern_array_type(&mut arrays, Type::I64, 4);
+        let b = intern_array_type(&mut arrays, Type::I64, 8);
+        let c = intern_array_type(&mut arrays, Type::F64, 4);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(arrays.len(), 3);
+    }
+
+    #[test]
+    fn intern_array_type_nested_renders_bracket_within_bracket_expected() {
+        let mut arrays = Vec::new();
+        let inner = intern_array_type(&mut arrays, Type::I64, 4);
+        let outer = intern_array_type(&mut arrays, inner, 4);
+        assert_eq!(outer.to_string(), "[[i64 4] 4]");
     }
 }

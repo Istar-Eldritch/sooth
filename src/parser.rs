@@ -14,8 +14,8 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    Clause, EnumDecl, Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot,
-    VariantDecl, WordBody, WordDef,
+    ArrayDecl, Clause, EnumDecl, Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type,
+    TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 
@@ -138,12 +138,14 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut words = Vec::new();
     let mut struct_fields_by_decl = Vec::new();
     let mut enum_fields_by_decl = Vec::new();
+    let mut arrays = Vec::new();
     {
         let mut parser = Parser {
             tokens,
             pos: 0,
             structs: &structs,
             enums: &enums,
+            arrays: &mut arrays,
         };
         while parser.pos < parser.tokens.len() {
             if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
@@ -169,6 +171,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         words,
         structs,
         enums,
+        arrays,
     })
 }
 
@@ -176,23 +179,29 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 /// to end of input. One line is one complete unit (an unterminated def is a
 /// normal parse error).
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
-    parse_line_with_structs(tokens, &[], &[])
+    let mut arrays = Vec::new();
+    parse_line_with_structs(tokens, &[], &[], &mut arrays)
 }
 
 /// Parse a REPL line resolving struct and enum type names in a `:`
 /// definition's effect against the session's registries, so a word may take
 /// or return a previously-declared struct or enum. A bare expression carries
-/// no type names, so the registries are unused there.
+/// no type names, so the registries are unused there. `arrays` is the
+/// session's interned array-type registry (R22/R23): a `[T N]` in a word
+/// effect interns into it in place, so the `ArrayId` it returns stays valid
+/// for later lines in the same session.
 pub fn parse_line_with_structs(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Line, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
         enums,
+        arrays,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -220,12 +229,14 @@ pub fn parse_typedef_line(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<(String, Type)>, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
         enums,
+        arrays,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -261,12 +272,14 @@ pub fn parse_enum_typedef_line(
     tokens: &[(Token, Span)],
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    arrays: &mut Vec<ArrayDecl>,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
     let mut parser = Parser {
         tokens,
         pos: 0,
         structs,
         enums,
+        arrays,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -291,6 +304,14 @@ struct Parser<'t> {
     /// variant names, always populated by the pre-pass; empty for a REPL
     /// line, enum declarations are not yet supported at REPL scope).
     enums: &'t [EnumDecl],
+    /// The interned array-type registry (D3, M1): unlike `structs`/`enums`,
+    /// an array shape has no declared name a pre-pass could register ahead
+    /// of time, so this grows during type-expression resolution rather than
+    /// being pre-populated. A mutable borrow of the caller's registry (the
+    /// whole-module `Module.arrays` for a native build, the session's
+    /// `arrays` for a REPL line), so interning persists across REPL lines
+    /// (R22/R23).
+    arrays: &'t mut Vec<ArrayDecl>,
 }
 
 impl<'t> Parser<'t> {
@@ -458,11 +479,17 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_slot(&mut self) -> Result<TypedSlot, String> {
+        // An array type has no name of its own to lead with (`[i64 4]` opens
+        // on `[`, not a word), so an unnamed array slot is recognised before
+        // the usual name-then-optional-`:type` read (R3, R7).
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            let ty = self.parse_array_type_expr()?;
+            return Ok(TypedSlot { name: None, ty });
+        }
         let (text, span) = self.expect_word_any_spanned()?;
         if matches!(self.peek(), Some((Token::Word(w), _)) if w == ":") {
             self.pos += 1;
-            let (ty_name, ty_span) = self.expect_word_any_spanned()?;
-            let ty = self.resolve_type(&ty_name, ty_span)?;
+            let ty = self.parse_type_expr()?;
             Ok(TypedSlot {
                 name: Some(text),
                 ty,
@@ -470,6 +497,64 @@ impl<'t> Parser<'t> {
         } else {
             let ty = self.resolve_type(&text, span)?;
             Ok(TypedSlot { name: None, ty })
+        }
+    }
+
+    /// A type expression (R3): either a single word (scalar/struct/enum,
+    /// resolved via `resolve_type`) or a bracketed array type `[ elem count
+    /// ]`, where `elem` is itself a type expression (nested arrays recurse).
+    fn parse_type_expr(&mut self) -> Result<Type, String> {
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            self.parse_array_type_expr()
+        } else {
+            let (name, span) = self.expect_word_any_spanned()?;
+            self.resolve_type(&name, span)
+        }
+    }
+
+    /// The array-type-expression production `[ elem count ]` (D2, D3, M1):
+    /// `elem` is a nested type expression, `count` a decimal literal `>= 1`
+    /// with no const-expr evaluation. Resolving it interns the `(element,
+    /// count)` shape (structurally deduped) and returns the resulting
+    /// `Type::Array`.
+    fn parse_array_type_expr(&mut self) -> Result<Type, String> {
+        self.expect(Token::LBracket)?;
+        let element = self.parse_type_expr()?;
+        let count = self.parse_array_count(element)?;
+        self.expect(Token::RBracket)?;
+        Ok(crate::ast::intern_array_type(self.arrays, element, count))
+    }
+
+    /// The array count token: a decimal literal `>= 1` and `<= u32::MAX`
+    /// (M1: no const-expr eval, so a non-literal count is always a located
+    /// error naming the offending token). A literal `< 1` or `> u32::MAX` is
+    /// a located error naming the full `[T N]` spelling and the invalid
+    /// length (X2).
+    fn parse_array_count(&mut self, element: Type) -> Result<u32, String> {
+        match self.peek().cloned() {
+            Some((Token::Int(n), _span)) if (1..=i64::from(u32::MAX)).contains(&n) => {
+                self.pos += 1;
+                Ok(n as u32)
+            }
+            Some((Token::Int(n), span)) if n > i64::from(u32::MAX) => {
+                self.pos += 1;
+                Err(format!(
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N <= {})",
+                    element.name(), n, n, span.line, span.col, u32::MAX
+                ))
+            }
+            Some((Token::Int(n), span)) => {
+                self.pos += 1;
+                Err(format!(
+                    "error: array type `[{} {}]` has invalid length {} at line {}, col {} (`[T N]` requires N >= 1)",
+                    element.name(), n, n, span.line, span.col
+                ))
+            }
+            Some((tok, span)) => Err(format!(
+                "error: array count must be a decimal literal, found `{}` at line {}, col {} (`[T N]` requires a literal N, no const-expr eval)",
+                describe_token(&tok), span.line, span.col
+            )),
+            None => Err(self.eof_error("an array count literal")),
         }
     }
 
@@ -492,8 +577,7 @@ impl<'t> Parser<'t> {
                             span.line, span.col
                         ));
                     }
-                    let (ty_name, ty_span) = self.expect_field_type_token()?;
-                    let ty = self.resolve_type(&ty_name, ty_span)?;
+                    let ty = self.parse_field_type_expr()?;
                     fields.push((field_name, ty));
                 }
                 None => return Err(self.eof_error("`;` (unterminated `type:` declaration)")),
@@ -501,6 +585,17 @@ impl<'t> Parser<'t> {
         }
         self.expect(Token::Semicolon)?;
         Ok(fields)
+    }
+
+    /// A field-type expression: an array type `[ elem count ]`, or a plain
+    /// field-type word (rejecting `type:`/`:` as before via
+    /// `expect_field_type_token`).
+    fn parse_field_type_expr(&mut self) -> Result<Type, String> {
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            return self.parse_array_type_expr();
+        }
+        let (ty_name, ty_span) = self.expect_field_type_token()?;
+        self.resolve_type(&ty_name, ty_span)
     }
 
     /// A field-type token: a plain word, but not `type:`/`:` (a malformed
@@ -616,8 +711,7 @@ impl<'t> Parser<'t> {
                             ));
                         }
                     }
-                    let (ty_name, ty_span) = self.expect_field_type_token()?;
-                    let ty = self.resolve_type(&ty_name, ty_span)?;
+                    let ty = self.parse_field_type_expr()?;
                     fields.push((field_name, ty));
                 }
                 None => return Err(self.eof_error("`;` or `|` (unterminated `type:` declaration)")),
@@ -733,6 +827,18 @@ impl<'t> Parser<'t> {
 
 fn is_word(tok: &Token, text: &str) -> bool {
     matches!(tok, Token::Word(w) if w == text)
+}
+
+/// A short, human-readable rendering of a token for a diagnostic (e.g. the
+/// offending non-literal array count in X3): a word or numeric literal
+/// renders as its source text, everything else falls back to `Debug`.
+fn describe_token(tok: &Token) -> String {
+    match tok {
+        Token::Word(w) => w.clone(),
+        Token::Int(n) => n.to_string(),
+        Token::Float(v) => v.to_string(),
+        other => format!("{other:?}"),
+    }
 }
 
 #[cfg(test)]
@@ -1198,5 +1304,121 @@ mod tests {
         .unwrap();
         let sq = module.words.iter().find(|w| w.name == "sq").unwrap();
         assert_eq!(terms_body(sq).0, ["n"]);
+    }
+
+    #[test]
+    fn parse_slot_array_type_resolves_and_interns() {
+        let module = parse_src(": w ( [i64 4] -- i64 ) drop 0 ;").unwrap();
+        let w = &module.words[0];
+        assert_eq!(module.arrays.len(), 1);
+        match w.effect.inputs[0].ty {
+            Type::Array(id, name) => {
+                assert_eq!(id.index(), 0);
+                assert_eq!(name, "[i64 4]");
+            }
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
+        assert_eq!(module.arrays[0].count, 4);
+        assert_eq!(module.arrays[0].element, Type::I64);
+    }
+
+    #[test]
+    fn parse_slot_array_type_same_shape_dedups_to_one_array_id() {
+        let module =
+            parse_src(": a ( [i64 4] -- i64 ) drop 0 ; : b ( [i64 4] -- i64 ) drop 0 ;").unwrap();
+        assert_eq!(module.arrays.len(), 1);
+        let a_ty = module.words[0].effect.inputs[0].ty;
+        let b_ty = module.words[1].effect.inputs[0].ty;
+        assert_eq!(a_ty, b_ty);
+    }
+
+    #[test]
+    fn parse_slot_nested_array_type_resolves_both_shapes() {
+        let module = parse_src(": w ( [[i64 4] 4] -- i64 ) drop 0 ;").unwrap();
+        assert_eq!(module.arrays.len(), 2);
+        match module.words[0].effect.inputs[0].ty {
+            Type::Array(_, name) => assert_eq!(name, "[[i64 4] 4]"),
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_typedef_array_field_resolves() {
+        let module = parse_src("type: Buf items [i64 16] top i64 ;").unwrap();
+        assert_eq!(module.arrays.len(), 1);
+        match module.structs[0].fields[0].1 {
+            Type::Array(_, name) => assert_eq!(name, "[i64 16]"),
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
+        assert_eq!(module.structs[0].fields[1].1, Type::I64);
+    }
+
+    #[test]
+    fn parse_typedef_enum_variant_array_field_resolves() {
+        let module = parse_src("type: Shape | Poly pts [f64 3] ;").unwrap();
+        assert_eq!(module.arrays.len(), 1);
+        match module.enums[0].variants[0].fields[0].1 {
+            Type::Array(_, name) => assert_eq!(name, "[f64 3]"),
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_array_type_unknown_element_is_error() {
+        // X1: an unknown element type in `[T N]` names the unknown element.
+        let result = parse_src(": w ( [Nope 4] -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("Nope"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_array_type_zero_length_is_error() {
+        // X2: a zero (or negative) length names the type and the invalid length.
+        let result = parse_src(": w ( [i64 0] -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("[i64 0]"), "unexpected message: {err}");
+        assert!(err.contains(">= 1"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_array_type_non_literal_count_is_error() {
+        // X3: a non-literal count names the offending count token.
+        let result = parse_src(": w ( [i64 n] -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("decimal literal"), "unexpected message: {err}");
+        assert!(err.contains('n'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_array_type_missing_rbracket_is_error() {
+        let result = parse_src(": w ( [i64 4 -- ) drop ;");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_array_type_count_exceeding_u32_max_is_error() {
+        // A count above u32::MAX is a located error, not a silent truncation.
+        let result = parse_src(": w ( [i64 4294967297] -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("4294967297"), "unexpected message: {err}");
+        assert!(err.contains("4294967295"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_named_slot_array_type_resolves() {
+        // The named-slot path (`name : type`) also recognises `[T N]`, not
+        // just the unnamed-slot shortcut.
+        let module = parse_src(": w ( arr : [i64 4] -- i64 ) drop 0 ;").unwrap();
+        let w = &module.words[0];
+        assert_eq!(w.effect.inputs[0].name.as_deref(), Some("arr"));
+        match w.effect.inputs[0].ty {
+            Type::Array(_, name) => assert_eq!(name, "[i64 4]"),
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
     }
 }

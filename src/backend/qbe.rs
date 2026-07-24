@@ -7,8 +7,8 @@
 use std::fmt::Write;
 
 use crate::ir::{
-    BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout, Terminator,
-    Value,
+    ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
+    Terminator, Value, OOB_TRAP_SYMBOL,
 };
 
 /// The backend's view of a program's aggregate layouts: the struct and enum
@@ -37,10 +37,22 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
     out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
     out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
-    // Enum aggregates are self-contained opaque byte blobs, emitted first so a
-    // struct member of enum type (D9) references an already-declared `:E`.
+    // The runtime out-of-bounds trap message (R19/D6): a located line + the
+    // offending index + the array length, printed to stderr before a nonzero
+    // exit. `%ld` for each of line, index, length (passed as `l`).
+    out.push_str(
+        "data $oobfmt = { b \"sooth: array index out of range (line %ld)\\n  index %ld is out of bounds for length %ld\\n\", b 0 }\n",
+    );
+    // Enum and array aggregates are self-contained opaque byte blobs (they name
+    // no member types), so they are emitted first: a struct member of enum or
+    // array type (D9, R20) then references an already-declared `:E`/`:arr_N`.
+    // Structs are the only aggregates whose QBE type spells its members, so
+    // they come last and rely on declaration order among themselves.
     for layout in &ir.enums {
         emit_enum_type(&mut out, layout);
+    }
+    for (idx, layout) in ir.arrays.iter().enumerate() {
+        emit_array_type(&mut out, idx, layout);
     }
     for layout in &ir.structs {
         emit_struct_type(&mut out, layout, layouts);
@@ -49,6 +61,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
         out.push('\n');
         emit_func(&mut out, func, layouts);
     }
+    emit_oob_trap(&mut out);
     Ok(out)
 }
 
@@ -81,6 +94,31 @@ fn emit_enum_type(out: &mut String, layout: &EnumLayout) {
         layout.size.max(1)
     )
     .unwrap();
+}
+
+/// Emit an array's QBE aggregate type as an alignment-annotated opaque byte
+/// blob `type :Name = align A { b N }` (R20), like the enum aggregate: the
+/// backend never reasons about element structure except through the
+/// element-addressing op + width-exact field ops + `Blit`. Caller and callee
+/// agree because they share `:Name`.
+fn emit_array_type(out: &mut String, idx: usize, layout: &ArrayLayout) {
+    writeln!(
+        out,
+        "type :{} = align {} {{ b {} }}",
+        array_type_symbol(idx),
+        layout.align,
+        layout.size.max(1)
+    )
+    .unwrap();
+}
+
+/// The QBE aggregate symbol for array `idx`: the `[T N]` spelling is not a
+/// valid QBE identifier (it contains `[`, spaces, `]`), so an array's `:A`
+/// name is derived from its `ArrayId` index instead, which is unique per
+/// compilation unit. Struct/enum names are already valid identifiers and keep
+/// their declared spelling.
+fn array_type_symbol(idx: usize) -> String {
+    format!("arr_{idx}")
 }
 
 /// The Sooth `main` word is emitted as `sooth_main`; the C shim owns `main`.
@@ -147,10 +185,13 @@ fn width(ty: IrType) -> &'static str {
                 "d"
             }
         }
+        // `usize` is a target-width unsigned integer; on the 8-byte QBE target
+        // it fills the `l` register (its width flows from `WORD_WIDTH`, R15).
+        IrType::Usize => "l",
         IrType::Ptr => "l",
-        // A struct/enum value is a pointer in a register (`l`); its aggregate
-        // `:S`/`:E` type is only spelled in ABI positions (`qbe_abi_ty`).
-        IrType::Struct(_) | IrType::Enum(_) => "l",
+        // A struct/enum/array value is a pointer in a register (`l`); its
+        // aggregate `:S`/`:E`/`:A` type is only spelled in ABI positions.
+        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => "l",
     }
 }
 
@@ -161,6 +202,7 @@ fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
     match ty {
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
+        IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         _ => width(ty).to_string(),
     }
 }
@@ -176,9 +218,11 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Int { .. } => "l".to_string(),
         IrType::Float { bits: 32 } => "s".to_string(),
         IrType::Float { .. } => "d".to_string(),
+        IrType::Usize => "l".to_string(),
         IrType::Ptr => "l".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
+        IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
     }
 }
 
@@ -199,8 +243,9 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Int { .. } => ("l", "loadl"),
         IrType::Float { bits: 32 } => ("s", "loads"),
         IrType::Float { .. } => ("d", "loadd"),
+        IrType::Usize => ("l", "loadl"),
         IrType::Ptr => ("l", "loadl"),
-        IrType::Struct(_) | IrType::Enum(_) => {
+        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
     }
@@ -215,8 +260,9 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Int { .. } => "storel",
         IrType::Float { bits: 32 } => "stores",
         IrType::Float { .. } => "stored",
+        IrType::Usize => "storel",
         IrType::Ptr => "storel",
-        IrType::Struct(_) | IrType::Enum(_) => {
+        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
     }
@@ -280,8 +326,8 @@ fn emit_conv(
     value_types: &[IrType],
     ext_id: &mut u32,
 ) -> std::fmt::Result {
-    let src_ty = ty_of(value_types, src);
-    let dst_ty = ty_of(value_types, dst);
+    let src_ty = norm_scalar(ty_of(value_types, src));
+    let dst_ty = norm_scalar(ty_of(value_types, dst));
     match (src_ty, dst_ty) {
         (IrType::Int { .. }, IrType::Int { .. }) => {
             emit_conv_int(out, dst, src, value_types, ext_id)
@@ -369,15 +415,17 @@ fn emit_conv_int(
     value_types: &[IrType],
     ext_id: &mut u32,
 ) -> std::fmt::Result {
-    let db = match ty_of(value_types, dst) {
+    let dst_ty = norm_scalar(ty_of(value_types, dst));
+    let src_ty = norm_scalar(ty_of(value_types, src));
+    let db = match dst_ty {
         IrType::Int { bits, .. } => bits,
         other => unreachable!("conversion target is always an integer, got {other:?}"),
     };
-    let (sb, ss) = match ty_of(value_types, src) {
+    let (sb, ss) = match src_ty {
         IrType::Int { bits, signed } => (bits, signed),
         other => unreachable!("conversion source is always an integer, got {other:?}"),
     };
-    let dw = width(ty_of(value_types, dst));
+    let dw = width(dst_ty);
     if db > sb {
         // Widen: sign-/zero-extend from the source width by the source sign.
         let ext = match (sb, ss) {
@@ -389,7 +437,7 @@ fn emit_conv_int(
             (32, false) => "extuw",
             _ => unreachable!("widening source is 8/16/32 bits, got {sb}"),
         };
-        match sub_word(ty_of(value_types, dst)) {
+        match sub_word(dst_ty) {
             Some((bits, signed)) => {
                 let tmp = format!("%widen{ext_id}");
                 *ext_id += 1;
@@ -402,7 +450,7 @@ fn emit_conv_int(
         // Narrow or same-width: the value already sits in `src`'s low `db` bits.
         // Canonicalize a sub-word target; otherwise a `copy` fills (and, for a
         // `64 -> 32` narrowing, truncates) the register.
-        match sub_word(ty_of(value_types, dst)) {
+        match sub_word(dst_ty) {
             Some((bits, signed)) => emit_canonicalize(out, &val(dst), &val(src), dw, bits, signed),
             None => writeln!(out, "\t{} ={dw} copy {}", val(dst), val(src)),
         }
@@ -411,6 +459,20 @@ fn emit_conv_int(
 
 fn ty_of(value_types: &[IrType], v: Value) -> IrType {
     value_types[v.0 as usize]
+}
+
+/// Normalize a scalar for the bits/signedness-inspecting arms (conversion,
+/// `Rem`): `usize` is a target-width unsigned integer, so on the 8-byte QBE
+/// target it behaves exactly like a `u64` (R15). Every other type is
+/// unchanged; the `width` register class already agrees (`l`).
+fn norm_scalar(ty: IrType) -> IrType {
+    match ty {
+        IrType::Usize => IrType::Int {
+            bits: 64,
+            signed: false,
+        },
+        other => other,
+    }
 }
 
 fn emit_func(out: &mut String, func: &IrFunc, layouts: Layouts) {
@@ -439,6 +501,25 @@ fn emit_func(out: &mut String, func: &IrFunc, layouts: Layouts) {
         }
         emit_term(out, &block.term);
     }
+    out.push_str("}\n");
+}
+
+/// Emit the runtime out-of-bounds trap helper (R19/D6): Sooth's first runtime
+/// failure path. It prints the located len+index message to stderr via
+/// `dprintf(2, …)` (the hosted print path, fd 2 = stderr, no new runtime
+/// dependency) then `exit(1)`s. It must abort, not fall through, so the block
+/// ends in `hlt`: after `exit` the program is gone, and `hlt` marks the edge
+/// unreachable rather than returning into corrupt state.
+fn emit_oob_trap(out: &mut String) {
+    writeln!(
+        out,
+        "\nfunction ${OOB_TRAP_SYMBOL}(l %line, l %idx, l %len) {{"
+    )
+    .unwrap();
+    out.push_str("@start\n");
+    out.push_str("\tcall $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)\n");
+    out.push_str("\tcall $exit(w 1)\n");
+    out.push_str("\thlt\n");
     out.push_str("}\n");
 }
 
@@ -519,7 +600,9 @@ fn emit_instr(
                 // `div` is emitted only for floats (no integer `/`, R16); it
                 // runs at the operand's `s`/`d` width like the other arms.
                 BinOp::Div => "div",
-                BinOp::Rem if matches!(ty, IrType::Int { signed: false, .. }) => "urem",
+                BinOp::Rem if matches!(ty, IrType::Usize | IrType::Int { signed: false, .. }) => {
+                    "urem"
+                }
                 BinOp::Rem => "rem",
                 BinOp::And => "and",
                 BinOp::Or => "or",
@@ -683,13 +766,26 @@ fn emit_instr(
                 writeln!(out, "\t{w64} =l {ext} {}", val(*v)).unwrap();
                 writeln!(out, "\tcall $printf(l {fmt}, l {w64}, ...)")
             }
+            // `usize` prints unsigned decimal (`%lu`), like a `u64`: the value
+            // fills the `l` register on this target, so no widening is needed.
+            IrType::Usize => writeln!(out, "\tcall $printf(l $ufmt, l {}, ...)", val(*v)),
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
-            IrType::Struct(_) | IrType::Enum(_) => {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
             }
         },
         Instr::PtrOffset(dst, base, bytes) => {
             writeln!(out, "\t{} =l add {}, {bytes}", val(*dst), val(*base))
+        }
+        // `dst = base + index*stride` (R17): a `mul` of the runtime index by
+        // the compile-time stride, then an `add` onto the aggregate base. Both
+        // run at `l` width; `Ptr` stays opaque (no pointer-as-`u64` reasoning
+        // leaks into the IR, only into this backend arm).
+        Instr::ElemAddr(dst, base, index, stride) => {
+            let off = format!("%eoff{ext_id}");
+            *ext_id += 1;
+            writeln!(out, "\t{off} =l mul {}, {stride}", val(*index)).unwrap();
+            writeln!(out, "\t{} =l add {}, {off}", val(*dst), val(*base))
         }
         Instr::Alloc(dst, size, align) => {
             // A frame-local aggregate slot; QBE only offers alloc4/8/16, so a
@@ -774,15 +870,15 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, Enums, IrModule, Structs};
+    use crate::ir::{lower, lower_line, Arrays, Enums, IrModule, Structs};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
 
     fn emit_src(src: &str) -> String {
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
-        check(&module).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
         let ir = lower(&module).unwrap();
         emit(&ir).unwrap()
     }
@@ -805,6 +901,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -952,6 +1049,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         let il = emit(&IrModule {
             funcs: vec![func],
@@ -971,6 +1069,31 @@ mod tests {
         let il = emit_src(": w ( bool -- i64 ) if 1 else 2 end ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
+    }
+
+    #[test]
+    fn emit_bounds_trap_helper_prints_and_exits() {
+        // R19/D6: the module always emits the OOB trap helper, which writes the
+        // located message to stderr (`dprintf` fd 2 + `$oobfmt`) and `exit`s
+        // nonzero, ending in `hlt` so it aborts rather than falls through.
+        let il = emit_src(": w ( [i64 4] usize -- i64 ) get swap drop ;");
+        assert!(il.contains("$sooth_oob_trap("), "missing trap helper: {il}");
+        assert!(
+            il.contains("data $oobfmt"),
+            "missing trap message data: {il}"
+        );
+        assert!(
+            il.contains("$dprintf(w 2,"),
+            "trap must write to stderr: {il}"
+        );
+        assert!(il.contains("$exit(w 1)"), "trap must exit nonzero: {il}");
+        assert!(il.contains("hlt"), "trap must abort (hlt): {il}");
+        // The runtime get guards the access with a branch to the trap symbol.
+        assert!(il.contains("jnz "), "runtime index must be guarded: {il}");
+        assert!(
+            il.contains("call $sooth_oob_trap("),
+            "guard must call the trap helper: {il}"
+        );
     }
 
     #[test]

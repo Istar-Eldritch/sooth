@@ -12,9 +12,10 @@ use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::ast::{EnumDecl, Line, Span, StructDecl, Term, Type, VariantDecl, WordDef};
+use crate::ast::{ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, Type, VariantDecl, WordDef};
 use crate::check::{self, Sig};
 use crate::driver;
+use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
 use crate::lexer::Token;
 use crate::{backend, lexer, parser};
@@ -165,6 +166,7 @@ pub fn format_stack(
     types: &[Type],
     layouts: &[StructLayout],
     enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
 ) -> String {
     if types.is_empty() {
         return "stack: (empty)".to_string();
@@ -184,6 +186,14 @@ pub fn format_stack(
                 // by its tagged aggregate's cell span (no tag/payload shown).
                 vals.push(format!("<{name}>"));
                 let size = enum_layouts[id.index()].size as usize;
+                cell += size.div_ceil(8);
+            }
+            Type::Array(id, name) => {
+                // An array slot renders as its `<[T N]>` placeholder (D10),
+                // reusing the aggregate-placeholder path, and advances the
+                // buffer by its inline aggregate's cell span.
+                vals.push(format!("<{name}>"));
+                let size = array_layouts[id.index()].size as usize;
                 cell += size.div_ceil(8);
             }
             _ => {
@@ -218,6 +228,10 @@ pub struct Session {
     /// lines. Variant field types resolve against the struct and enum
     /// registries.
     enums: Vec<EnumDecl>,
+    /// The interned array-type registry, in interning order so `ArrayId` =
+    /// index stays stable across lines. Grows as array type expressions and
+    /// `fill` shapes resolve; shared by the checker and the layout builder.
+    arrays: Vec<ArrayDecl>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct or enum), so the
     /// buffer is byte-addressable and slot offsets are computed from `types`,
@@ -238,6 +252,7 @@ impl Session {
             env: HashMap::new(),
             structs: Vec::new(),
             enums: Vec::new(),
+            arrays: Vec::new(),
             buf: Vec::new(),
             top: 0,
             types: Vec::new(),
@@ -270,7 +285,8 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
-        let line = parser::parse_line_with_structs(&tokens, &self.structs, &self.enums)?;
+        let line =
+            parser::parse_line_with_structs(&tokens, &self.structs, &self.enums, &mut self.arrays)?;
         match line {
             Line::Def(word) => self.eval_def(word, writer),
             Line::Expr(terms) => self.eval_expr(&terms, writer),
@@ -314,10 +330,11 @@ impl Session {
             span,
         });
         let result =
-            parser::parse_typedef_line(tokens, &self.structs, &self.enums).and_then(|fields| {
-                self.structs[idx].fields = fields;
-                check::check_types(&self.structs, &self.enums)
-            });
+            parser::parse_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
+                .and_then(|fields| {
+                    self.structs[idx].fields = fields;
+                    check::check_types(&self.structs, &self.enums, &self.arrays)
+                });
         if let Err(e) = result {
             self.structs.pop();
             return Err(e);
@@ -352,14 +369,14 @@ impl Session {
             variants,
             span,
         });
-        let result = parser::parse_enum_typedef_line(tokens, &self.structs, &self.enums).and_then(
-            |variant_fields| {
-                for (vidx, fields) in variant_fields.into_iter().enumerate() {
-                    self.enums[idx].variants[vidx].fields = fields;
-                }
-                check::check_types(&self.structs, &self.enums)
-            },
-        );
+        let result =
+            parser::parse_enum_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
+                .and_then(|variant_fields| {
+                    for (vidx, fields) in variant_fields.into_iter().enumerate() {
+                        self.enums[idx].variants[vidx].fields = fields;
+                    }
+                    check::check_types(&self.structs, &self.enums, &self.arrays)
+                });
         if let Err(e) = result {
             self.enums.pop();
             return Err(e);
@@ -372,7 +389,7 @@ impl Session {
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(&word, &self.enums, &env)?;
+        check::check_def(&word, &self.enums, &env, &mut self.arrays)?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);
@@ -383,10 +400,11 @@ impl Session {
         // derived from the typed env (RK2): ir needs only counts + output type.
         env.insert(name.clone(), sig.clone());
         let ir_lower_env = ir_arity_env(&env);
-        let (structs, enums) = ir::build_registries(&self.structs, &self.enums);
+        let (structs, enums, arrays) =
+            ir::build_registries(&self.structs, &self.enums, &self.arrays);
         let mut func = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums)
+            ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays)
         };
         func.name = symbol.clone();
 
@@ -394,6 +412,7 @@ impl Session {
             funcs: vec![func],
             structs: structs.layouts,
             enums: enums.layouts,
+            arrays: arrays.layouts,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
@@ -417,14 +436,15 @@ impl Session {
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
-        let net_stack = check::infer_line(terms, &self.types, &env)?;
+        let net_stack = check::infer_line(terms, &self.types, &env, &mut self.arrays)?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
 
         self.seq += 1;
         let seq = self.seq;
-        let (structs, enums) = ir::build_registries(&self.structs, &self.enums);
+        let (structs, enums, arrays) =
+            ir::build_registries(&self.structs, &self.enums, &self.arrays);
         let (func, m, out_bytes) = {
             let resolve = resolver_for(&self.env);
             ir::lower_line(
@@ -436,6 +456,7 @@ impl Session {
                 &resolve,
                 &structs,
                 &enums,
+                &arrays,
             )
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
@@ -453,6 +474,7 @@ impl Session {
             funcs: vec![func],
             structs: structs.layouts.clone(),
             enums: enums.layouts.clone(),
+            arrays: arrays.layouts.clone(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
@@ -500,7 +522,8 @@ impl Session {
                 &self.buf[..cells],
                 &self.types,
                 &structs.layouts,
-                &enums.layouts
+                &enums.layouts,
+                &arrays.layouts
             )
         )
         .map_err(|e| format!("writing stdout: {e}"))?;
@@ -547,8 +570,8 @@ mod tests {
     fn compiled_word_is_dlsymable_and_callable() {
         let src = ": sq ( i64 -- i64 ) | n | n n * ;";
         let tokens = lexer::lex(src).unwrap();
-        let module = parser::parse(&tokens).unwrap();
-        check::check(&module).unwrap();
+        let mut module = parser::parse(&tokens).unwrap();
+        check::check(&mut module).unwrap();
         let ir = ir::lower(&module).unwrap();
         let ssa = backend::qbe::emit(&ir).unwrap();
 
@@ -567,19 +590,25 @@ mod tests {
     #[test]
     fn format_stack_bottom_to_top() {
         let types = vec![Type::I64, Type::I64, Type::I64];
-        assert_eq!(format_stack(&[1, 2, 3], &types, &[], &[]), "stack: 1 2 3");
+        assert_eq!(
+            format_stack(&[1, 2, 3], &types, &[], &[], &[]),
+            "stack: 1 2 3"
+        );
     }
 
     #[test]
     fn format_stack_empty_is_marker() {
-        assert_eq!(format_stack(&[], &[], &[], &[]), "stack: (empty)");
+        assert_eq!(format_stack(&[], &[], &[], &[], &[]), "stack: (empty)");
     }
 
     #[test]
     fn format_stack_f64_slot_renders_float_not_bits() {
         // A carried `f64` displays its value, not the `i64` bit pattern (R21).
         let bits = 2.5f64.to_bits() as i64;
-        assert_eq!(format_stack(&[bits], &[Type::F64], &[], &[]), "stack: 2.5");
+        assert_eq!(
+            format_stack(&[bits], &[Type::F64], &[], &[], &[]),
+            "stack: 2.5"
+        );
     }
 
     #[test]
@@ -587,14 +616,17 @@ mod tests {
         // An `f32` slot stores 4 bytes; display reads the low 32 bits (Q2/R21).
         let bits = 1.5f32.to_bits() as u64 as i64;
         let f32_ty = Type::from_name("f32").unwrap();
-        assert_eq!(format_stack(&[bits], &[f32_ty], &[], &[]), "stack: 1.5");
+        assert_eq!(
+            format_stack(&[bits], &[f32_ty], &[], &[], &[]),
+            "stack: 1.5"
+        );
     }
 
     #[test]
     fn format_stack_bool_slot_displays_as_true_or_false() {
         // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
         assert_eq!(
-            format_stack(&[1, 0], &[Type::Bool, Type::Bool], &[], &[]),
+            format_stack(&[1, 0], &[Type::Bool, Type::Bool], &[], &[], &[]),
             "stack: true false"
         );
     }
@@ -614,7 +646,7 @@ mod tests {
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
         assert_eq!(
-            format_stack(&[5, 6, 99], &[vec2, Type::I64], &layouts, &[]),
+            format_stack(&[5, 6, 99], &[vec2, Type::I64], &layouts, &[], &[]),
             "stack: <Vec2> 99"
         );
     }
@@ -625,7 +657,7 @@ mod tests {
         // display must render its unsigned value, not that negative number.
         let u64_ty = Type::from_name("u64").unwrap();
         assert_eq!(
-            format_stack(&[-1], &[u64_ty], &[], &[]),
+            format_stack(&[-1], &[u64_ty], &[], &[], &[]),
             "stack: 18446744073709551615"
         );
     }

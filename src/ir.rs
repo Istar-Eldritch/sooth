@@ -11,8 +11,24 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::ast::{
-    Clause, EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef,
+    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind,
+    Type, WordBody, WordDef,
 };
+
+/// The single target word-width parameter (R15, M2): the byte width of a
+/// target machine word, from which `usize` size/align and every array/aggregate
+/// offset that embeds a `usize` derive. It is `8` for the QBE/x86-64 target
+/// today; `Ptr` retrofits to the same parameter in Slice 7. Every layout path
+/// routes through this rather than a literal `8`, so a re-target is one edit
+/// (criterion 2's structural test flips it to prove no stray literal remains).
+pub const WORD_WIDTH: u32 = 8;
+
+/// The runtime out-of-bounds trap helper (R19/D6): Sooth's first runtime
+/// failure path. A dynamic array index that fails its `index < N` guard calls
+/// this symbol, which prints a located len+index message to stderr and exits
+/// nonzero. The backend emits the definition; the IR references it by name so
+/// both sides agree on one symbol.
+pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -25,6 +41,10 @@ pub struct IrModule {
     /// opaque byte-blob `type :E = align A { b N }` per entry (D3, R15) and
     /// reads tag/payload offsets from it; empty for an enum-free module.
     pub enums: Vec<EnumLayout>,
+    /// Per-array element layout, indexed by `ArrayId`. The backend emits an
+    /// opaque byte-blob `type :A = align N { b S }` per entry (R20) and reads
+    /// element stride from it; empty for an array-free module.
+    pub arrays: Vec<ArrayLayout>,
 }
 
 #[derive(Debug)]
@@ -69,6 +89,17 @@ pub enum IrType {
     /// backend spells it `:E` in ABI positions and `l` (a pointer) in a
     /// register, exactly like `Struct`.
     Enum(EnumId),
+    /// A fixed-size array (D3), keyed by a small `Copy` `ArrayId` into the
+    /// module's `ArrayLayout` registry; the element stride/size/align live
+    /// there, not inlined, so `IrType` stays `Copy`. At runtime an array value
+    /// is a pointer to its inline aggregate storage, spelled `:A` in ABI
+    /// positions and `l` (a pointer) in a register, exactly like `Struct`.
+    Array(ArrayId),
+    /// The target-width unsigned integer (D7): its size/align come from the
+    /// `WORD_WIDTH` parameter, never a hardcoded literal. The backend derives
+    /// its register class (`l` today) and unsigned ops the same way it does for
+    /// a `u64`, but the *width* flows from the parameter (R15).
+    Usize,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -98,6 +129,10 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The tagged layout lives in the module's `EnumLayout` registry; the
         // `IrType` carries only the `EnumId` so it stays `Copy`.
         Type::Enum(id, _) => IrType::Enum(id),
+        // The element stride/size lives in the module's `ArrayLayout`
+        // registry; the `IrType` carries only the `ArrayId` so it stays `Copy`.
+        Type::Array(id, _) => IrType::Array(id),
+        Type::Usize => IrType::Usize,
     }
 }
 
@@ -169,6 +204,33 @@ pub struct VariantLayout {
     pub fields: Vec<FieldLayout>,
 }
 
+/// The computed layout of one array type (D3, M2), word-width-neutral: the
+/// element's `IrType`, the compile-time `count`, the per-element `stride`
+/// (`round_up(elem_size, elem_align)`, so element `i` sits at `i * stride`),
+/// the total `size` (`count * stride`), and the `align` (the element's align).
+/// A `usize` element sizes from `WORD_WIDTH` (R15) via the same path as a
+/// scalar field. `name` is the leaked `[T N]` spelling the backend emits
+/// as `:name`.
+#[derive(Debug, Clone)]
+pub struct ArrayLayout {
+    pub name: &'static str,
+    pub elem: IrType,
+    pub count: u32,
+    pub stride: u32,
+    pub size: u32,
+    pub align: u32,
+}
+
+/// The IR's view of a program's arrays: the per-`ArrayId` layout registry.
+/// Unlike `Structs`/`Enums` there is no generated-word name map: the array
+/// words (`fill`/`get`/`set`/`len`) are generic and dispatched by name +
+/// operand type in `lower_call`, not by a per-array symbol. Empty for an
+/// array-free program.
+#[derive(Debug, Default)]
+pub struct Arrays {
+    pub layouts: Vec<ArrayLayout>,
+}
+
 /// How a generated enum-word name lowers, keyed off the enum registry
 /// (parallel to `StructWord`, D10): a variant constructor naming its enum and
 /// the variant's declaration index. Enums have no getter/setter/destructure
@@ -192,18 +254,29 @@ fn round_up(offset: u32, align: u32) -> u32 {
     offset.div_ceil(align) * align
 }
 
-/// The size/align of a scalar `IrType`: `i8`/`u8`/`bool` = 1, `i16`/`u16`
-/// = 2, `i32`/`u32`/`f32` = 4, `i64`/`u64`/`f64` = 8. A `Ptr` is 8 (unused as a
-/// field this slice). Never called on a `Struct` (nested fields resolve through
-/// the layout registry).
+/// The size/align of a scalar `IrType` at the default target word width
+/// (`WORD_WIDTH`). Thin wrapper over `scalar_size_align_ww`; criterion 2's
+/// structural test calls the `_ww` form directly with a flipped width to prove
+/// `usize` sizing derives from the parameter, not a stray literal.
 fn scalar_size_align(ty: IrType) -> (u32, u32) {
+    scalar_size_align_ww(ty, WORD_WIDTH)
+}
+
+/// The size/align of a scalar `IrType`, `usize` sized from the supplied
+/// `word_width` (R15): `i8`/`u8`/`bool` = 1, `i16`/`u16` = 2, `i32`/`u32`/`f32`
+/// = 4, `i64`/`u64`/`f64` = 8, `usize` = `word_width`. A `Ptr` is 8 (unused as
+/// a field this slice). Never called on a `Struct`/`Enum`/`Array` (nested
+/// aggregates resolve through the layout registry).
+fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
     let bytes = match ty {
         IrType::Bool => 1,
         IrType::Int { bits, .. } => (bits / 8) as u32,
         IrType::Float { bits } => (bits / 8) as u32,
+        IrType::Usize => word_width,
         IrType::Ptr => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
         IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
+        IrType::Array(_) => unreachable!("an array field resolves via the layout registry"),
     };
     (bytes, bytes)
 }
@@ -213,10 +286,11 @@ fn scalar_size_align(ty: IrType) -> (u32, u32) {
 /// before; a struct or enum occupies its aggregate size rounded up to a
 /// multiple of 8 so the next slot stays 8-aligned. Cumulative sums give each
 /// carried slot's byte offset in the buffer.
-pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums) -> u32 {
+pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> u32 {
     match ty {
         IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
         IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
+        IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
         _ => 8,
     }
 }
@@ -227,7 +301,7 @@ impl Structs {
     /// needs the full `build_registries` (its enums must be present to size
     /// the field, D9).
     pub fn from_structs(structs: &[StructDecl]) -> Structs {
-        build_registries(structs, &[]).0
+        build_registries(structs, &[], &[]).0
     }
 }
 
@@ -238,18 +312,41 @@ impl Structs {
 /// field of struct/enum type are sized via the peer registry (D9); the
 /// registries themselves stay logically separate (D10). Recursion is already
 /// rejected by the checker, so the memoized layout recursion terminates.
-pub fn build_registries(structs: &[StructDecl], enums: &[EnumDecl]) -> (Structs, Enums) {
+pub fn build_registries(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> (Structs, Enums, Arrays) {
+    build_registries_ww(structs, enums, arrays, WORD_WIDTH)
+}
+
+/// `build_registries` with an explicit target word width (R15). Production
+/// callers use `build_registries`; criterion 2's structural test flips
+/// `word_width` here to prove a `usize`-embedding aggregate resizes with the
+/// parameter (no stray literal `8`).
+pub fn build_registries_ww(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    word_width: u32,
+) -> (Structs, Enums, Arrays) {
     let mut lb = LayoutBuilder {
         structs,
         enums,
+        arrays,
+        word_width,
         struct_memo: vec![None; structs.len()],
         enum_memo: vec![None; enums.len()],
+        array_memo: vec![None; arrays.len()],
     };
     for i in 0..structs.len() {
         lb.ensure_struct(i);
     }
     for i in 0..enums.len() {
         lb.ensure_enum(i);
+    }
+    for i in 0..arrays.len() {
+        lb.ensure_array(i);
     }
     let struct_layouts: Vec<StructLayout> = lb
         .struct_memo
@@ -258,6 +355,11 @@ pub fn build_registries(structs: &[StructDecl], enums: &[EnumDecl]) -> (Structs,
         .collect();
     let enum_layouts: Vec<EnumLayout> = lb
         .enum_memo
+        .into_iter()
+        .map(|l| l.expect("layout"))
+        .collect();
+    let array_layouts: Vec<ArrayLayout> = lb
+        .array_memo
         .into_iter()
         .map(|l| l.expect("layout"))
         .collect();
@@ -290,6 +392,9 @@ pub fn build_registries(structs: &[StructDecl], enums: &[EnumDecl]) -> (Structs,
             layouts: enum_layouts,
             words: ewords,
         },
+        Arrays {
+            layouts: array_layouts,
+        },
     )
 }
 
@@ -301,8 +406,11 @@ pub fn build_registries(structs: &[StructDecl], enums: &[EnumDecl]) -> (Structs,
 struct LayoutBuilder<'a> {
     structs: &'a [StructDecl],
     enums: &'a [EnumDecl],
+    arrays: &'a [ArrayDecl],
+    word_width: u32,
     struct_memo: Vec<Option<StructLayout>>,
     enum_memo: Vec<Option<EnumLayout>>,
+    array_memo: Vec<Option<ArrayLayout>>,
 }
 
 impl LayoutBuilder<'_> {
@@ -320,7 +428,12 @@ impl LayoutBuilder<'_> {
                 let l = self.enum_memo[id.index()].as_ref().expect("inner layout");
                 (l.size, l.align)
             }
-            _ => scalar_size_align(ir_type_of(ty)),
+            Type::Array(id, _) => {
+                self.ensure_array(id.index());
+                let l = self.array_memo[id.index()].as_ref().expect("inner layout");
+                (l.size, l.align)
+            }
+            _ => scalar_size_align_ww(ir_type_of(ty), self.word_width),
         }
     }
 
@@ -373,7 +486,7 @@ impl LayoutBuilder<'_> {
             bits: 32,
             signed: true,
         };
-        let (tag_size, tag_align) = scalar_size_align(tag_ty);
+        let (tag_size, tag_align) = scalar_size_align_ww(tag_ty, self.word_width);
         let mut variants = Vec::with_capacity(enums[idx].variants.len());
         let mut payload_align = 1u32;
         let mut max_payload = 0u32;
@@ -396,9 +509,33 @@ impl LayoutBuilder<'_> {
             variants,
         });
     }
+
+    /// Compute one array's layout (M2): the element's size/align (recursing
+    /// into a nested aggregate element via `size_align`), the per-element
+    /// `stride = round_up(elem_size, elem_align)`, `align = elem_align`, and
+    /// `size = count * stride`. Memoized like structs/enums so a nested-array
+    /// element resolves once.
+    fn ensure_array(&mut self, idx: usize) {
+        if self.array_memo[idx].is_some() {
+            return;
+        }
+        let element = self.arrays[idx].element;
+        let count = self.arrays[idx].count;
+        let elem = ir_type_of(element);
+        let (elem_size, elem_align) = self.size_align(element);
+        let stride = round_up(elem_size, elem_align);
+        self.array_memo[idx] = Some(ArrayLayout {
+            name: self.arrays[idx].name_static,
+            elem,
+            count,
+            stride,
+            size: stride * count,
+            align: elem_align.max(1),
+        });
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -429,6 +566,12 @@ pub enum Instr {
     Phi(Value, Vec<(BlockId, Value)>),
     /// `dst: Ptr = base + bytes`. Keeps `Ptr` opaque (no native-width assumption).
     PtrOffset(Value, Value, i64),
+    /// `dst: Ptr = base + index*stride` (R17): the dynamic element-addressing
+    /// op. `base` is an aggregate `Value`, `index` a runtime `usize` `Value`,
+    /// `stride` the compile-time constant from `ArrayLayout`. Yields an opaque
+    /// element place; keeps `Ptr` opaque (no pointer-as-`u64` arithmetic in the
+    /// IR), the backend concretises `base + index*stride`.
+    ElemAddr(Value, Value, Value, i64),
     /// `dst: Int = *ptr`.
     Load(Value, Value),
     /// `*ptr = val` (Int).
@@ -507,7 +650,7 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
-    let (structs, enums) = build_registries(&module.structs, &module.enums);
+    let (structs, enums, arrays) = build_registries(&module.structs, &module.enums, &module.arrays);
     let env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -524,13 +667,14 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let funcs = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve, &structs, &enums))
+        .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays))
         .collect();
 
     Ok(IrModule {
         funcs,
         structs: structs.layouts,
         enums: enums.layouts,
+        arrays: arrays.layouts,
     })
 }
 
@@ -571,9 +715,10 @@ pub fn lower_line(
     resolve: Resolver,
     structs: &Structs,
     enums: &Enums,
+    arrays: &Arrays,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
-    let mut b = FuncBuilder::new(env, resolve, structs, enums);
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays);
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -611,6 +756,14 @@ pub fn lower_line(
                 }
                 stack.push(dst);
             }
+            IrType::Array(id) => {
+                let dst = b.alloc_array(id);
+                let size = b.arrays.layouts[id.index()].size;
+                if size > 0 {
+                    b.push_instr(Instr::Blit(ptr, dst, size));
+                }
+                stack.push(dst);
+            }
             IrType::Float { .. } => {
                 let v = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Load(v, ptr));
@@ -629,7 +782,7 @@ pub fn lower_line(
                 stack.push(v);
             }
         }
-        in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums);
+        in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums, b.arrays);
     }
     b.stack = stack;
 
@@ -660,9 +813,15 @@ pub fn lower_line(
                     b.push_instr(Instr::Blit(*v, ptr, size));
                 }
             }
+            IrType::Array(id) => {
+                let size = b.arrays.layouts[id.index()].size;
+                if size > 0 {
+                    b.push_instr(Instr::Blit(*v, ptr, size));
+                }
+            }
             _ => b.push_instr(Instr::Store(ptr, *v)),
         }
-        out_bytes += carried_slot_bytes(vty, b.structs, b.enums);
+        out_bytes += carried_slot_bytes(vty, b.structs, b.enums, b.arrays);
     }
 
     // Return the advanced top as a byte delta; (out_bytes - in_bytes) may be
@@ -693,6 +852,7 @@ pub(crate) fn lower_word(
     resolve: Resolver,
     structs: &Structs,
     enums: &Enums,
+    arrays: &Arrays,
 ) -> IrFunc {
     let params: Vec<IrType> = word
         .effect
@@ -702,7 +862,7 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(env, resolve, structs, enums);
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays);
 
     // Params occupy the first N value ids; leftmost input is deepest.
     let params_values: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
@@ -739,6 +899,7 @@ struct FuncBuilder<'a> {
     resolve: Resolver<'a>,
     structs: &'a Structs,
     enums: &'a Enums,
+    arrays: &'a Arrays,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -747,6 +908,11 @@ struct FuncBuilder<'a> {
     stack: Vec<Value>,
     locals: HashMap<String, Value>,
     value_types: Vec<IrType>,
+    /// Compile-time integer value of each `Const`-defined `Value`, for the
+    /// `fill` count (M1: the count is a checker-guaranteed literal) and the
+    /// element/array-shape lookup. A shuffle reuses a value id, so a duped
+    /// literal keeps its recorded value.
+    const_vals: HashMap<Value, i64>,
 }
 
 impl<'a> FuncBuilder<'a> {
@@ -755,12 +921,14 @@ impl<'a> FuncBuilder<'a> {
         resolve: Resolver<'a>,
         structs: &'a Structs,
         enums: &'a Enums,
+        arrays: &'a Arrays,
     ) -> Self {
         FuncBuilder {
             env,
             resolve,
             structs,
             enums,
+            arrays,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -769,6 +937,7 @@ impl<'a> FuncBuilder<'a> {
             stack: Vec::new(),
             locals: HashMap::new(),
             value_types: Vec::new(),
+            const_vals: HashMap::new(),
         }
     }
 
@@ -819,6 +988,7 @@ impl<'a> FuncBuilder<'a> {
             TermKind::IntLit(n) => {
                 let v = self.fresh_value(IrType::I64);
                 self.push_instr(Instr::Const(v, *n));
+                self.const_vals.insert(v, *n);
                 self.stack.push(v);
             }
             TermKind::FloatLit(x) => {
@@ -831,7 +1001,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
-            TermKind::Call(name) => self.lower_call(name),
+            TermKind::Call(name) => self.lower_call(name, term.span.line),
             TermKind::If {
                 then_branch,
                 else_branch,
@@ -839,7 +1009,7 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    fn lower_call(&mut self, name: &str) {
+    fn lower_call(&mut self, name: &str, line: u32) {
         if let Some(&value) = self.locals.get(name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
@@ -863,6 +1033,14 @@ impl<'a> FuncBuilder<'a> {
                     IrType::Enum(id) => {
                         let copy = self.alloc_enum(id);
                         let size = self.enums.layouts[id.index()].size;
+                        if size > 0 {
+                            self.push_instr(Instr::Blit(top, copy, size));
+                        }
+                        self.stack.push(copy);
+                    }
+                    IrType::Array(id) => {
+                        let copy = self.alloc_array(id);
+                        let size = self.arrays.layouts[id.index()].size;
                         if size > 0 {
                             self.push_instr(Instr::Blit(top, copy, size));
                         }
@@ -950,6 +1128,7 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
+            "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
             _ => {
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
@@ -1022,6 +1201,194 @@ impl<'a> FuncBuilder<'a> {
         v
     }
 
+    /// Alloc a fresh frame slot for array `id`'s inline aggregate and yield it
+    /// as an `Array`-typed value (a pointer to the storage), mirroring
+    /// `alloc_struct`/`alloc_enum`.
+    fn alloc_array(&mut self, id: ArrayId) -> Value {
+        let (size, align) = {
+            let l = &self.arrays.layouts[id.index()];
+            (l.size, l.align)
+        };
+        let v = self.fresh_value(IrType::Array(id));
+        self.push_instr(Instr::Alloc(v, size, align));
+        v
+    }
+
+    /// The `(stride, element type, count)` of array `id`, copied out of the
+    /// layout registry so the caller can then emit against `&mut self`.
+    fn array_parts(&self, id: ArrayId) -> (u32, IrType, u32) {
+        let l = &self.arrays.layouts[id.index()];
+        (l.stride, l.elem, l.count)
+    }
+
+    /// The `ArrayId` whose layout has element `elem` and `count`: `fill`'s
+    /// target shape, already interned by the checker (R10), found by structural
+    /// match on the combined registry.
+    fn array_id_of(&self, elem: IrType, count: u32) -> ArrayId {
+        let idx = self
+            .arrays
+            .layouts
+            .iter()
+            .position(|l| l.elem == elem && l.count == count)
+            .expect("fill's array shape is interned by the checker");
+        ArrayId::from_index(idx)
+    }
+
+    /// The exact byte size of a value of `ty` (an aggregate's whole size, a
+    /// scalar's width) — the blit length for a `fill`/`set` aggregate element.
+    fn value_size(&self, ty: IrType) -> u32 {
+        match ty {
+            IrType::Struct(id) => self.structs.layouts[id.index()].size,
+            IrType::Enum(id) => self.enums.layouts[id.index()].size,
+            IrType::Array(id) => self.arrays.layouts[id.index()].size,
+            other => scalar_size_align(other).0,
+        }
+    }
+
+    /// `dst = base + index*stride`, typed `ty` (R17). Scalar element paths pass
+    /// `Ptr` (a `FieldLoad`/`FieldStore` follows); an aggregate element path
+    /// passes the element's own aggregate type so the address doubles as the
+    /// element value.
+    fn elem_addr(&mut self, base: Value, index: Value, stride: u32, ty: IrType) -> Value {
+        let dst = self.fresh_value(ty);
+        self.push_instr(Instr::ElemAddr(dst, base, index, stride as i64));
+        dst
+    }
+
+    /// Store `val` (of element type `elem`) at element place `fptr`: a
+    /// width-exact scalar `FieldStore`, or an aggregate `Blit` of the whole
+    /// element. Shared by `fill`'s unrolled stores and `set`'s single store.
+    fn store_elem(&mut self, fptr: Value, val: Value, elem: IrType) {
+        match elem {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                let size = self.value_size(elem);
+                if size > 0 {
+                    self.push_instr(Instr::Blit(val, fptr, size));
+                }
+            }
+            _ => self.push_instr(Instr::FieldStore(fptr, val)),
+        }
+    }
+
+    /// Lower an array word inline (R18): `fill` = alloc + N unrolled stores
+    /// (M6); `get` = element-addr + load, non-consuming (R12); `set` = alloc +
+    /// whole-array blit + element-addr + store, yielding a fresh array; `len`
+    /// = a constant `usize` from the layout, non-consuming.
+    fn lower_array_word(&mut self, name: &str, line: u32) {
+        match name {
+            "fill" => {
+                let count_v = self.stack.pop().expect("fill: count");
+                let n = *self
+                    .const_vals
+                    .get(&count_v)
+                    .expect("fill's count is a checked literal") as u32;
+                let elem_v = self.stack.pop().expect("fill: element");
+                let elem = self.value_type(elem_v);
+                let id = self.array_id_of(elem, n);
+                let (stride, _, _) = self.array_parts(id);
+                let dst = self.alloc_array(id);
+                for i in 0..n {
+                    let fptr = self.field_ptr(dst, i * stride);
+                    self.store_elem(fptr, elem_v, elem);
+                }
+                self.stack.push(dst);
+            }
+            "get" => {
+                let index = self.stack.pop().expect("get: index");
+                // Non-consuming (R12/M4): the array stays on the stack.
+                let array = *self.stack.last().expect("get: array");
+                let id = match self.value_type(array) {
+                    IrType::Array(id) => id,
+                    _ => unreachable!("checked: get's second operand is an array"),
+                };
+                let (stride, elem, count) = self.array_parts(id);
+                self.bounds_check(index, count, line);
+                match elem {
+                    IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                        // The element address is itself the aggregate value.
+                        let v = self.elem_addr(array, index, stride, elem);
+                        self.stack.push(v);
+                    }
+                    _ => {
+                        let addr = self.elem_addr(array, index, stride, IrType::Ptr);
+                        let v = self.fresh_value(elem);
+                        self.push_instr(Instr::FieldLoad(v, addr));
+                        self.stack.push(v);
+                    }
+                }
+            }
+            "set" => {
+                let val = self.stack.pop().expect("set: value");
+                let index = self.stack.pop().expect("set: index");
+                let array = self.stack.pop().expect("set: array");
+                let id = match self.value_type(array) {
+                    IrType::Array(id) => id,
+                    _ => unreachable!("checked: set's first operand is an array"),
+                };
+                let (stride, elem, count) = self.array_parts(id);
+                self.bounds_check(index, count, line);
+                let size = self.arrays.layouts[id.index()].size;
+                let dst = self.alloc_array(id);
+                if size > 0 {
+                    self.push_instr(Instr::Blit(array, dst, size));
+                }
+                let addr = self.elem_addr(dst, index, stride, IrType::Ptr);
+                self.store_elem(addr, val, elem);
+                self.stack.push(dst);
+            }
+            "len" => {
+                // Non-consuming (R10): the array stays; the constant folds in.
+                let array = *self.stack.last().expect("len: array");
+                let id = match self.value_type(array) {
+                    IrType::Array(id) => id,
+                    _ => unreachable!("checked: len's operand is an array"),
+                };
+                let (_, _, count) = self.array_parts(id);
+                let v = self.fresh_value(IrType::Usize);
+                self.push_instr(Instr::Const(v, count as i64));
+                self.stack.push(v);
+            }
+            _ => unreachable!("lower_array_word only handles fill/get/set/len"),
+        }
+    }
+
+    /// Emit the runtime bounds guard for a dynamic array index (R19/D6): an
+    /// `index < N` compare jumps to the continuation, otherwise a trap block
+    /// calls the out-of-bounds helper (a located len+index message to stderr,
+    /// then a nonzero exit) so an out-of-range access aborts rather than
+    /// corrupting. A checked compile-time literal index (X4, R11) already had
+    /// its bounds verified, so it skips the guard entirely and stays
+    /// trap-free.
+    fn bounds_check(&mut self, index: Value, count: u32, line: u32) {
+        if self.const_vals.contains_key(&index) {
+            return;
+        }
+        let n = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(n, i64::from(count)));
+        let cond = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(cond, CmpOp::Lt, index, n));
+        let ok = self.fresh_block();
+        let trap = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cond, ok, trap));
+
+        // The trap block never falls through: the helper exits, so the `Jmp`
+        // to `ok` is an unreachable CFG edge that keeps the block validly
+        // terminated regardless of the enclosing word's return type.
+        self.start_block(trap);
+        let line_v = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(line_v, i64::from(line)));
+        let len_v = self.fresh_value(IrType::Usize);
+        self.push_instr(Instr::Const(len_v, i64::from(count)));
+        self.push_instr(Instr::Call(
+            None,
+            OOB_TRAP_SYMBOL.to_string(),
+            vec![line_v, index, len_v],
+        ));
+        self.seal_block(Terminator::Jmp(ok));
+
+        self.start_block(ok);
+    }
+
     /// A `Ptr`-typed value for `base + offset` (a scalar field's address).
     fn field_ptr(&mut self, base: Value, offset: u32) -> Value {
         let p = self.fresh_value(IrType::Ptr);
@@ -1043,7 +1410,7 @@ impl<'a> FuncBuilder<'a> {
     /// an aggregate blit for a nested struct/enum field.
     fn store_field(&mut self, fptr: Value, val: Value, field: FieldLayout) {
         match field.ty {
-            IrType::Struct(_) | IrType::Enum(_) => {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 if field.size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, field.size));
                 }
@@ -1056,7 +1423,7 @@ impl<'a> FuncBuilder<'a> {
     /// or the interior pointer as a nested struct/enum value.
     fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
         let v = match field.ty {
-            IrType::Struct(_) | IrType::Enum(_) => {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 self.field_aggregate_value(base, field.offset, field.ty)
             }
             _ => {
@@ -1301,23 +1668,23 @@ mod tests {
 
     fn lower_src(src: &str) -> IrModule {
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
-        check(&module).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
         lower(&module).unwrap()
     }
 
     fn structs_of(src: &str) -> Structs {
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
-        check(&module).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
         Structs::from_structs(&module.structs)
     }
 
     fn enums_of(src: &str) -> Enums {
         let tokens = lex(src).unwrap();
-        let module = parse(&tokens).unwrap();
-        check(&module).unwrap();
-        build_registries(&module.structs, &module.enums).1
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        build_registries(&module.structs, &module.enums, &module.arrays).1
     }
 
     fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
@@ -1434,6 +1801,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -1454,6 +1822,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -1487,14 +1856,21 @@ mod tests {
         // every scalar-only line marshals unchanged); a struct occupies its
         // aggregate size rounded up to a multiple of 8.
         let s = structs_of("type: Pair a i8 b i8 ;\ntype: Vec2 x i64 y i64 ;");
-        assert_eq!(carried_slot_bytes(IrType::I64, &s, &Enums::default()), 8);
-        assert_eq!(carried_slot_bytes(IrType::Bool, &s, &Enums::default()), 8);
+        assert_eq!(
+            carried_slot_bytes(IrType::I64, &s, &Enums::default(), &Arrays::default()),
+            8
+        );
+        assert_eq!(
+            carried_slot_bytes(IrType::Bool, &s, &Enums::default(), &Arrays::default()),
+            8
+        );
         // Pair is two i8s = 2 bytes, rounded up to one 8-byte cell.
         assert_eq!(
             carried_slot_bytes(
                 IrType::Struct(StructId::from_index(0)),
                 &s,
-                &Enums::default()
+                &Enums::default(),
+                &Arrays::default()
             ),
             8
         );
@@ -1503,10 +1879,183 @@ mod tests {
             carried_slot_bytes(
                 IrType::Struct(StructId::from_index(1)),
                 &s,
-                &Enums::default()
+                &Enums::default(),
+                &Arrays::default()
             ),
             16
         );
+    }
+
+    fn arrays_of(src: &str) -> Arrays {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        build_registries(&module.structs, &module.enums, &module.arrays).2
+    }
+
+    fn module_of(src: &str) -> Module {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+
+    #[test]
+    fn word_width_parameter_sizes_usize_not_a_literal_eight() {
+        // Criterion 2 (structural): `usize` size/align derives from the word
+        // width parameter, not a hardcoded `8`. At the default width it is 8;
+        // flipping the parameter to 4 changes the derived size of both a bare
+        // `usize` and an aggregate that embeds one, proving no stray literal.
+        assert_eq!(scalar_size_align(IrType::Usize), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Usize, 8), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Usize, 4), (4, 4));
+
+        // A struct with two `usize` fields and an array of `usize`: both resize
+        // with the parameter.
+        let m = module_of(": w ( [usize 4] -- ) drop ;\ntype: Cursor a usize b usize ;");
+        let (s8, _, a8) = build_registries_ww(&m.structs, &m.enums, &m.arrays, 8);
+        let (s4, _, a4) = build_registries_ww(&m.structs, &m.enums, &m.arrays, 4);
+        assert_eq!(s8.layouts[0].size, 16, "two usize fields at width 8");
+        assert_eq!(s4.layouts[0].size, 8, "two usize fields at width 4");
+        assert_eq!(a8.layouts[0].size, 32, "[usize 4] at width 8");
+        assert_eq!(a4.layouts[0].size, 16, "[usize 4] at width 4");
+    }
+
+    #[test]
+    fn ir_type_of_array_and_usize_map() {
+        let m = module_of(": w ( [i64 4] usize -- ) drop drop ;");
+        let arr = m.resolve_type_name("usize").unwrap();
+        assert_eq!(ir_type_of(arr), IrType::Usize);
+        // The `[i64 4]` shape is interned as ArrayId 0.
+        assert_eq!(
+            ir_type_of(Type::Array(ArrayId::from_index(0), "[i64 4]")),
+            IrType::Array(ArrayId::from_index(0))
+        );
+    }
+
+    #[test]
+    fn array_layout_stride_size_align_from_element() {
+        // M2: `stride = round_up(elem_size, elem_align)`, `size = count*stride`,
+        // `align = elem_align`. An `i64` element: stride 8, size 32, align 8.
+        let a = arrays_of(": w ( [i64 4] -- ) drop ;");
+        assert_eq!((a.layouts[0].stride, a.layouts[0].size), (8, 32));
+        assert_eq!(a.layouts[0].align, 8);
+        // A sub-word `u8` element: stride 1, size 3, align 1.
+        let b = arrays_of(": w ( [u8 3] -- ) drop ;");
+        assert_eq!(
+            (b.layouts[0].stride, b.layouts[0].size, b.layouts[0].align),
+            (1, 3, 1)
+        );
+    }
+
+    #[test]
+    fn array_layout_nested_array_of_array_sizes_via_registry() {
+        // M3: `[[i64 4] 2]` sizes its element (the inner `[i64 4]`, 32 bytes)
+        // via the registry: outer stride 32, size 64, align 8.
+        let a = arrays_of(": w ( [[i64 4] 2] -- ) drop ;");
+        let outer = a.layouts.iter().find(|l| l.name == "[[i64 4] 2]").unwrap();
+        assert_eq!((outer.stride, outer.size, outer.align), (32, 64, 8));
+    }
+
+    #[test]
+    fn carried_slot_bytes_array_is_aligned_aggregate() {
+        // R16/M2: a carried array slot occupies its size rounded up to a
+        // multiple of 8. `[u8 3]` is 3 bytes, rounding up to one 8-byte cell.
+        let a = arrays_of(": w ( [u8 3] -- ) drop ;");
+        assert_eq!(
+            carried_slot_bytes(
+                IrType::Array(ArrayId::from_index(0)),
+                &Structs::default(),
+                &Enums::default(),
+                &a
+            ),
+            8
+        );
+    }
+
+    #[test]
+    fn lower_fill_allocs_and_unrolls_n_stores() {
+        // R18/M6: `fill` allocs one array slot and unrolls N FieldStores of the
+        // element (no loop, no blit for a scalar element).
+        let ir = lower_src(": w ( -- ) 7 4 fill drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 4);
+        assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn lower_get_is_non_consuming_elem_addr_and_load() {
+        // R18/R17: `get` addresses the element (`ElemAddr`) and loads it
+        // (`FieldLoad`); it allocs nothing (non-consuming, R12).
+        let ir = lower_src(": w ( [i64 4] -- i64 ) 0 get swap drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 0);
+    }
+
+    #[test]
+    fn lower_set_allocs_blits_addresses_and_stores() {
+        // R18: `set` allocs a fresh array, blits the whole original into it,
+        // addresses the element, and stores the new value — yielding a new
+        // array while the original is untouched (value semantics, D5).
+        let ir = lower_src(": w ( [i64 4] -- [i64 4] ) 0 9 set ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 1);
+    }
+
+    #[test]
+    fn lower_get_runtime_index_emits_bounds_guard_and_trap_call() {
+        // R19/D6: a runtime (non-literal) index guards the access with
+        // `index < N` and jumps to a trap block that calls the OOB helper.
+        let ir = lower_src(": w ( [i64 4] usize -- i64 ) get swap drop ;");
+        let w = &ir.funcs[0];
+        assert!(w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn lower_get_constant_index_has_no_runtime_guard() {
+        // R11/X4: a checked literal index is bounds-verified at compile time,
+        // so it skips the runtime guard entirely — no branch, no trap call.
+        let ir = lower_src(": w ( [i64 4] -- i64 ) 0 get swap drop ;");
+        let w = &ir.funcs[0];
+        assert!(!w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn lower_len_is_a_constant_with_no_memory_access() {
+        // R18: `len` folds to a constant `usize` (the count) with no load and
+        // no element addressing.
+        let ir = lower_src(": w ( [i64 4] -- usize ) len swap drop ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).iter().any(|i| matches!(i, Instr::Const(_, 4))));
+        assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::Load(..))), 0);
     }
 
     #[test]
@@ -1528,6 +2077,7 @@ mod tests {
             &resolve,
             &s,
             &Enums::default(),
+            &Arrays::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
@@ -1554,6 +2104,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -1590,6 +2141,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -1621,6 +2173,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -1701,6 +2254,7 @@ mod tests {
             &resolve,
             &Structs::default(),
             &Enums::default(),
+            &Arrays::default(),
         );
         let loaded = func
             .blocks
@@ -1947,11 +2501,12 @@ mod tests {
         let resolve = |name: &str| name.to_string();
         let structs = Structs::default();
         let enums = Enums::default();
-        let mut b = FuncBuilder::new(&env, &resolve, &structs, &enums);
+        let arrays = Arrays::default();
+        let mut b = FuncBuilder::new(&env, &resolve, &structs, &enums, &arrays);
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("+");
+        b.lower_call("+", 0);
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }
@@ -2130,12 +2685,12 @@ mod tests {
     fn enum_layout_nested_struct_payload_sized_via_combined_registry() {
         // D9: a variant field of struct type is sized via its layout (16 for a
         // two-f64 Vec2), not `scalar_size_align`.
-        let (structs, enums) = {
+        let (structs, enums, _arrays) = {
             let src = "type: Vec2 x f64 y f64 ; type: Shape | Dot p Vec2 | Unit ;";
             let tokens = lex(src).unwrap();
-            let module = parse(&tokens).unwrap();
-            check(&module).unwrap();
-            build_registries(&module.structs, &module.enums)
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            build_registries(&module.structs, &module.enums, &module.arrays)
         };
         let _ = structs;
         let s = enum_layout(&enums, "Shape");
@@ -2149,13 +2704,13 @@ mod tests {
     fn struct_field_of_enum_type_sized_via_combined_registry() {
         // D9: a struct field of enum type is sized via the enum's layout, not
         // `scalar_size_align`; the struct places the next field past it.
-        let (structs, _enums) = {
+        let (structs, _enums, _arrays) = {
             let src =
                 "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ;";
             let tokens = lex(src).unwrap();
-            let module = parse(&tokens).unwrap();
-            check(&module).unwrap();
-            build_registries(&module.structs, &module.enums)
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            build_registries(&module.structs, &module.enums, &module.arrays)
         };
         let t = layout(&structs, "Tagged");
         // Shape is 24 bytes align 8: k at 0 (size 24), n (i64) at 24; size 32.
@@ -2211,11 +2766,21 @@ mod tests {
         // (4 bytes) rounds up to one 8-byte cell.
         let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Dir | N | S ;");
         assert_eq!(
-            carried_slot_bytes(IrType::Enum(EnumId::from_index(0)), &Structs::default(), &e),
+            carried_slot_bytes(
+                IrType::Enum(EnumId::from_index(0)),
+                &Structs::default(),
+                &e,
+                &Arrays::default()
+            ),
             24
         );
         assert_eq!(
-            carried_slot_bytes(IrType::Enum(EnumId::from_index(1)), &Structs::default(), &e),
+            carried_slot_bytes(
+                IrType::Enum(EnumId::from_index(1)),
+                &Structs::default(),
+                &e,
+                &Arrays::default()
+            ),
             8
         );
     }
@@ -2227,11 +2792,11 @@ mod tests {
         // the enum's aligned carried size. An empty line carries the one Shape
         // straight through: one prologue blit, one epilogue blit.
         let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;";
-        let (structs, enums) = {
+        let (structs, enums, arrays) = {
             let tokens = lex(src).unwrap();
-            let module = parse(&tokens).unwrap();
-            check(&module).unwrap();
-            build_registries(&module.structs, &module.enums)
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            build_registries(&module.structs, &module.enums, &module.arrays)
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
@@ -2245,6 +2810,7 @@ mod tests {
             &resolve,
             &structs,
             &enums,
+            &arrays,
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);

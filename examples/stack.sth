@@ -1,0 +1,44 @@
+\ Dogfood: Slice 5 fixed-size arrays + usize. A bounded `i64` stack over an
+\ embedded array and a runtime `usize` cursor, exercising array-as-field, the
+\ runtime cursor (the bounds-trap path), non-consuming `get`, functional
+\ `set`, and `len`.
+\
+\ `pop`/`peek` bundle their two results (the updated `Stack` and the read
+\ value) into a `Popped` struct: a user-defined word may only return one
+\ value through a call, so the pair rides home as a single aggregate and the
+\ caller destructures it with the generated `Popped>` word.
+
+type: Stack items [i64 16] top usize ;
+type: Popped rest Stack item i64 ;
+
+: empty ( -- Stack )
+  0 16 fill 0 >usize Stack ;
+
+: push ( Stack i64 -- Stack )
+  | s x |
+  s s Stack>items s Stack>top x set Stack<items
+  s Stack>top 1 + Stack<top ;
+
+: pop ( Stack -- Popped )
+  | s |
+  s s Stack>top 1 - Stack<top          \ new stack, top decremented
+  s Stack>items s Stack>top 1 - get    \ new-stack array elem
+  swap drop                            \ new-stack elem
+  Popped ;
+
+: peek ( Stack -- Popped )
+  | s |
+  s
+  s Stack>items s Stack>top 1 - get    \ s array elem
+  swap drop                            \ s elem
+  Popped ;
+
+: main ( -- )
+  empty
+  1 push 2 push 3 push
+  peek Popped> .                \ 3, non-consuming: stack unchanged underneath
+  pop Popped> .                 \ 3
+  pop Popped> .                 \ 2
+  peek Popped> .                \ 1, one item left
+  Stack>items len .             \ 16, len is a compile-time constant of the array shape
+  drop ;                        \ discard the residual items array
