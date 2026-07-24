@@ -132,9 +132,32 @@ pub enum Line {
 pub struct WordDef {
     pub name: String,
     pub effect: StackEffect,
-    /// Names bound by `| ... |`, in effect order; empty if absent.
+    pub body: WordBody,
+}
+
+/// A word's body: either a term sequence with optional entry locals (the
+/// Slice 0-3 form), or a clause list (a clause-style eliminator over the
+/// word's enum top input, D4). A clause-style word has no word-entry locals
+/// (D8).
+#[derive(Debug)]
+pub enum WordBody {
+    Terms {
+        /// Names bound by `| ... |`, in effect order; empty if absent.
+        locals: Vec<String>,
+        terms: Vec<Term>,
+    },
+    Clauses(Vec<Clause>),
+}
+
+/// One `|`-led clause of a clause-style word (D4): the matched variant name,
+/// its optional clause-body `| names |` locals (payload then the stack below,
+/// D7), and the body terms.
+#[derive(Debug)]
+pub struct Clause {
+    pub variant: String,
     pub locals: Vec<String>,
     pub body: Vec<Term>,
+    pub span: Span,
 }
 
 /// A checked stack effect, e.g. `( i64 i64 -- i64 )`. A slot may carry a name

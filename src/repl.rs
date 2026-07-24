@@ -372,7 +372,7 @@ impl Session {
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(&word, &env)?;
+        check::check_def(&word, &self.enums, &env)?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);

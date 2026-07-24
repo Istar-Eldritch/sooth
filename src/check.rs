@@ -11,8 +11,8 @@
 use std::collections::HashMap;
 
 use crate::ast::{
-    EnumDecl, EnumId, Module, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type,
-    WordDef,
+    Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl, StructId, Term, TermKind,
+    Type, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -76,7 +76,7 @@ pub fn check(module: &Module) -> Result<(), String> {
     }
 
     for word in &module.words {
-        check_word(word, &env)?;
+        check_word(word, &module.enums, &env)?;
     }
     Ok(())
 }
@@ -352,11 +352,17 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
 }
 
 /// Check a single word definition against an external env, seeding the env with
-/// the word's own signature so self-recursion type-checks.
-pub fn check_def(word: &WordDef, env: &HashMap<String, Sig>) -> Result<(), String> {
+/// the word's own signature so self-recursion type-checks. `enums` is the
+/// registry the clause-style checks (coverage, scrutinee type, variant-name
+/// collision) consult.
+pub fn check_def(
+    word: &WordDef,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Sig>,
+) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, &env)
+    check_word(word, enums, &env)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -383,25 +389,102 @@ fn effect_str(effect: &StackEffect) -> String {
     format!("( {} )", parts.join(" "))
 }
 
-fn check_word(word: &WordDef, env: &HashMap<String, Sig>) -> Result<(), String> {
+/// Whether `name` is a registered variant name of any enum (the D8 backstop's
+/// lookup set).
+fn is_registered_variant(name: &str, enums: &[EnumDecl]) -> bool {
+    enums
+        .iter()
+        .any(|e| e.variants.iter().any(|v| v.name == name))
+}
+
+/// A parameter / word-entry / clause-body binding name equal to a registered
+/// variant name is a sharp error (D8 backstop, X12): it would make the
+/// clause-vs-locals `|` disambiguation ambiguous.
+fn reject_variant_local(
+    word_name: &str,
+    name: &str,
+    kind: &str,
+    enums: &[EnumDecl],
+) -> Result<(), String> {
+    if is_registered_variant(name, enums) {
+        return Err(format!(
+            "error: {kind} `{name}` in `{word_name}` collides with the variant name `{name}`"
+        ));
+    }
+    Ok(())
+}
+
+/// The output-count / output-type mismatch check shared by a term body and a
+/// clause body (M6, X8): `final_stack` must match the declared outputs.
+fn check_outputs(
+    word: &WordDef,
+    final_stack: &[Type],
+    declared: &[Type],
+    line: u32,
+) -> Result<(), String> {
+    if final_stack.len() != declared.len() {
+        return Err(format!(
+            "error: stack effect mismatch in `{}` (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
+            word.name, line, final_stack.len(), declared.len(), effect_str(&word.effect),
+        ));
+    }
+    for (found, want) in final_stack.iter().zip(declared) {
+        if found != want {
+            return Err(format!(
+                "error: type mismatch in `{}` (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
+                word.name, line, found, want, effect_str(&word.effect),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn check_word(
+    word: &WordDef,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Sig>,
+) -> Result<(), String> {
+    // A parameter name equal to a registered variant name is rejected (X12)
+    // regardless of body form.
+    for slot in &word.effect.inputs {
+        if let Some(name) = &slot.name {
+            reject_variant_local(&word.name, name, "parameter", enums)?;
+        }
+    }
+    match &word.body {
+        WordBody::Terms { locals, terms } => check_terms_word(word, enums, locals, terms, env),
+        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env),
+    }
+}
+
+fn check_terms_word(
+    word: &WordDef,
+    enums: &[EnumDecl],
+    locals: &[String],
+    terms: &[Term],
+    env: &HashMap<String, Sig>,
+) -> Result<(), String> {
     let inputs = word.effect.inputs.len();
 
-    if word.locals.len() > inputs {
+    if locals.len() > inputs {
         return Err(format!(
             "error: stack effect mismatch in `{}`\n  locals bind {} value(s), but only {} input(s) are declared\n  note: declared {}",
             word.name,
-            word.locals.len(),
+            locals.len(),
             inputs,
             effect_str(&word.effect),
         ));
     }
+    for name in locals {
+        reject_variant_local(&word.name, name, "local", enums)?;
+    }
 
     // Locals bind the topmost inputs; the remaining (deepest) inputs stay on the
     // simulated stack, deepest-first.
-    let split = inputs - word.locals.len();
+    let split = inputs - locals.len();
     let initial: Vec<Type> = word.effect.inputs[..split].iter().map(|s| s.ty).collect();
     let mut local_types = HashMap::new();
-    for (name, slot) in word.locals.iter().zip(&word.effect.inputs[split..]) {
+    for (name, slot) in locals.iter().zip(&word.effect.inputs[split..]) {
         local_types.insert(name.clone(), slot.ty);
     }
 
@@ -410,26 +493,130 @@ fn check_word(word: &WordDef, env: &HashMap<String, Sig>) -> Result<(), String> 
         effect: &word.effect,
         locals: &local_types,
     };
-    let final_stack = check_terms(&word.body, initial, &ctx, env)?;
+    let final_stack = check_terms(terms, initial, &ctx, env)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
-    let line = word.body.last().map(|t| t.span.line).unwrap_or(0);
-    if final_stack.len() != declared.len() {
-        return Err(format!(
-            "error: stack effect mismatch in `{}` (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
-            word.name, line, final_stack.len(), declared.len(), effect_str(&word.effect),
-        ));
-    }
-    for (found, want) in final_stack.iter().zip(&declared) {
-        if found != want {
+    let line = terms.last().map(|t| t.span.line).unwrap_or(0);
+    check_outputs(word, &final_stack, &declared, line)
+}
+
+/// Check a clause-style word (D4, D5, D7, M6, R11): the top input must be an
+/// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
+/// and every clause body must leave the word's single declared output effect
+/// (X8).
+fn check_clause_word(
+    word: &WordDef,
+    enums: &[EnumDecl],
+    clauses: &[Clause],
+    env: &HashMap<String, Sig>,
+) -> Result<(), String> {
+    let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
+        Some(Type::Enum(id, _)) => id,
+        _ => {
             return Err(format!(
-                "error: type mismatch in `{}` (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
-                word.name, line, found, want, effect_str(&word.effect),
+                "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
+                word.name,
+                effect_str(&word.effect),
+            ));
+        }
+    };
+    let enum_decl = &enums[enum_id.index()];
+    let enum_name = enum_decl.name.as_str();
+
+    let n_inputs = word.effect.inputs.len();
+    let below: Vec<Type> = word.effect.inputs[..n_inputs - 1]
+        .iter()
+        .map(|s| s.ty)
+        .collect();
+    let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
+
+    let mut seen: HashMap<&str, ()> = HashMap::new();
+    for clause in clauses {
+        let Some(vi) = enum_decl
+            .variants
+            .iter()
+            .position(|v| v.name == clause.variant)
+        else {
+            return Err(format!(
+                "error: unknown variant `{}` of enum `{}` in clause-style `{}` (line {})",
+                clause.variant, enum_name, word.name, clause.span.line
+            ));
+        };
+        if seen.insert(clause.variant.as_str(), ()).is_some() {
+            return Err(format!(
+                "error: duplicate clause for variant `{}` of enum `{}` in `{}` (line {})",
+                clause.variant, enum_name, word.name, clause.span.line
+            ));
+        }
+        check_clause_body(
+            word,
+            enums,
+            clause,
+            &below,
+            &enum_decl.variants[vi],
+            &declared,
+            env,
+        )?;
+    }
+    for variant in &enum_decl.variants {
+        if !seen.contains_key(variant.name.as_str()) {
+            return Err(format!(
+                "error: non-exhaustive clause-style `{}`: missing variant `{}` of enum `{}`",
+                word.name, variant.name, enum_name
             ));
         }
     }
-
     Ok(())
+}
+
+fn check_clause_body(
+    word: &WordDef,
+    enums: &[EnumDecl],
+    clause: &Clause,
+    below: &[Type],
+    variant: &VariantDecl,
+    declared: &[Type],
+    env: &HashMap<String, Sig>,
+) -> Result<(), String> {
+    for name in &clause.locals {
+        reject_variant_local(&word.name, name, "local", enums)?;
+    }
+
+    // The clause consumes the scrutinee and pushes the variant's fields
+    // (first field deepest) atop any inputs below it.
+    let mut initial = below.to_vec();
+    for (_, ty) in &variant.fields {
+        initial.push(*ty);
+    }
+
+    // Clause-body `| names |` bind the top N (payload then below), leftmost
+    // deepest, reusing the word-entry local-binding shape.
+    let n = clause.locals.len();
+    if n > initial.len() {
+        return Err(format!(
+            "error: stack effect mismatch in `{}` (line {})\n  clause `{}` binds {} value(s), but only {} are available\n  note: declared {}",
+            word.name, clause.span.line, clause.variant, n, initial.len(), effect_str(&word.effect),
+        ));
+    }
+    let split = initial.len() - n;
+    let mut local_types = HashMap::new();
+    for (name, ty) in clause.locals.iter().zip(&initial[split..]) {
+        local_types.insert(name.clone(), *ty);
+    }
+    let stack_after_bind = initial[..split].to_vec();
+
+    let ctx = Ctx::Word {
+        name: &word.name,
+        effect: &word.effect,
+        locals: &local_types,
+    };
+    let final_stack = check_terms(&clause.body, stack_after_bind, &ctx, env)?;
+    let line = clause
+        .body
+        .last()
+        .map(|t| t.span.line)
+        .unwrap_or(clause.span.line);
+    check_outputs(word, &final_stack, declared, line)
 }
 
 fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
@@ -1704,5 +1891,135 @@ mod tests {
              : main ( -- Vec2 Shape ) 1 2 Vec2 3.0 Circle ;",
         )
         .unwrap();
+    }
+
+    #[test]
+    fn check_clause_word_multi_and_zero_field_ok() {
+        // R11: a clause per variant, each leaving the single declared output;
+        // a clause-body `| w h |` binds the payload, a zero-field clause with
+        // a value flowing underneath the scrutinee type-checks.
+        check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             type: MaybeInt | None | Some v i64 ;
+             : area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;
+             : unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_clause_word_non_exhaustive_names_missing_variant() {
+        // X4: a clause word missing a variant names the missing one.
+        let err = check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             : area ( Shape -- f64 ) | Circle dup * ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("non-exhaustive"), "unexpected message: {err}");
+        assert!(err.contains("Rect"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_clause_word_duplicate_clause_names_variant() {
+        // X5: two clauses for the same variant names it.
+        let err = check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             : area ( Shape -- f64 ) | Circle dup * | Circle dup * | Rect | w h | w h * ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("duplicate clause"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("Circle"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_clause_word_unknown_variant_names_it_and_enum() {
+        // X6: a clause naming a non-variant of the scrutinee enum.
+        let err = check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             type: Other | Blob b i64 ;
+             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * | Blob 0.0 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown variant"), "unexpected message: {err}");
+        assert!(err.contains("Blob"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_clause_word_on_non_enum_top_input_is_error() {
+        // X7: a clause body whose top input is a scalar (not an enum).
+        let err = check_src(
+            "type: Circle | C r f64 ;
+             : bad ( i64 -- i64 ) | C 0 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("not an enum"), "unexpected message: {err}");
+        assert!(err.contains("bad"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_clause_body_violating_declared_output_is_error() {
+        // X8/M6: a clause whose body leaves a type other than the single
+        // declared output effect.
+        let err = check_src(
+            "type: MaybeInt | None | Some v i64 ;
+             : bad ( MaybeInt -- i64 ) | None true | Some ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_parameter_named_after_variant_is_error() {
+        // X12 (D8 backstop): a binding name equal to a registered variant
+        // name is rejected. A parameter name is the reachable case — a `|`
+        // local named after a variant is instead read as a clause by D8, so
+        // the parameter slot is where the collision actually surfaces.
+        let err = check_src(
+            "type: Shape | Circle r f64 ;
+             : bad ( Circle : i64 -- i64 ) drop 0 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("collides"), "unexpected message: {err}");
+        assert!(err.contains("Circle"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_term_word_with_entry_locals_still_ok() {
+        // Regression: a plain term word with `| ... |` entry locals is
+        // unaffected by the clause-body path (no enum in scope).
+        check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
+    }
+
+    #[test]
+    fn check_enum_print_is_error() {
+        // X10/M2: `.` on an enum reaches the printable guard, naming the enum.
+        let err = check_src("type: Shape | Circle r f64 ; : w ( Shape -- ) . ;").unwrap_err();
+        assert!(err.contains("printable"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_equality_operator_is_error() {
+        // X10/M2: `=` on two enums reaches the operand-pair guard.
+        let err =
+            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- bool ) = ;").unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_enum_arithmetic_operator_is_error() {
+        // X10/M2: arithmetic on an enum reaches the operand-pair guard.
+        let err =
+            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Shape ) + ;").unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
     }
 }

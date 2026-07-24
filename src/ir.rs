@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::mem;
 
-use crate::ast::{EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind, Type, WordDef};
+use crate::ast::{
+    Clause, EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef,
+};
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -703,17 +705,22 @@ pub(crate) fn lower_word(
     let mut b = FuncBuilder::new(env, resolve, structs, enums);
 
     // Params occupy the first N value ids; leftmost input is deepest.
-    let mut stack: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
+    let params_values: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
 
-    // Bind `| ... |` locals: pop the top N params, leftmost local = deepest.
-    let take = word.locals.len();
-    let bound = stack.split_off(stack.len() - take);
-    for (name, value) in word.locals.iter().zip(bound) {
-        b.locals.insert(name.clone(), value);
+    match &word.body {
+        WordBody::Terms { locals, terms } => {
+            let mut stack = params_values;
+            // Bind `| ... |` locals: pop the top N params, leftmost local = deepest.
+            let take = locals.len();
+            let bound = stack.split_off(stack.len() - take);
+            for (name, value) in locals.iter().zip(bound) {
+                b.locals.insert(name.clone(), value);
+            }
+            b.stack = stack;
+            b.lower_terms(terms);
+        }
+        WordBody::Clauses(clauses) => b.lower_clauses(clauses, &params_values),
     }
-    b.stack = stack;
-
-    b.lower_terms(&word.body);
 
     let result = if ret.is_some() { b.stack.pop() } else { None };
     b.seal_block(Terminator::Ret(result));
@@ -1172,6 +1179,114 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Phi(v, vec![(then_pred, t), (else_pred, e)]));
                 join_stack.push(v);
             }
+        }
+        self.stack = join_stack;
+    }
+
+    /// Lower a clause-style word (R16): load the scrutinee's discriminant into
+    /// a temp, dispatch N-way (a `Cmp(Eq)`-tag compare-chain to each variant's
+    /// clause block, the last variant the terminal fall-through since coverage
+    /// is exhaustive), and merge every clause's outputs at a single join block
+    /// with one `Phi` per declared output over all N clause predecessors.
+    ///
+    /// This is deliberately *not* the 2-predecessor `lower_if` shape: the join
+    /// has N predecessors and M outputs.
+    fn lower_clauses(&mut self, clauses: &[Clause], params: &[Value]) {
+        let scrutinee = *params.last().expect("clause word has a scrutinee input");
+        let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
+        let scrut_id = match self.value_type(scrutinee) {
+            IrType::Enum(id) => id,
+            _ => unreachable!("checked: a clause word's top input is an enum"),
+        };
+        let (tag_ty, tag_offset, payload_offset, n) = {
+            let l = &self.enums.layouts[scrut_id.index()];
+            (l.tag_ty, l.tag_offset, l.payload_offset, l.variants.len())
+        };
+
+        // The discriminant is a temp used only for the compare-chain, never
+        // pushed onto the virtual stack.
+        let tag = self.fresh_value(tag_ty);
+        let tag_ptr = self.field_ptr(scrutinee, tag_offset);
+        self.push_instr(Instr::FieldLoad(tag, tag_ptr));
+
+        // Map each variant index to the clause handling it (checker-guaranteed
+        // exact coverage), so dispatch on tag == variant_index lands correctly
+        // regardless of clause source order.
+        let clause_ids: Vec<BlockId> = (0..n).map(|_| self.fresh_block()).collect();
+        let join_id = self.fresh_block();
+        let mut clause_for_variant: Vec<Option<&Clause>> = vec![None; n];
+        for clause in clauses {
+            let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant];
+            clause_for_variant[vi] = Some(clause);
+        }
+
+        if n == 1 {
+            self.seal_block(Terminator::Jmp(clause_ids[0]));
+        } else {
+            for vi in 0..n - 1 {
+                let idx_val = self.fresh_value(tag_ty);
+                self.push_instr(Instr::Const(idx_val, vi as i64));
+                let c = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
+                // The last compare's false edge falls straight through to the
+                // final variant; no default/trap block (exhaustive coverage).
+                let false_target = if vi == n - 2 {
+                    clause_ids[n - 1]
+                } else {
+                    self.fresh_block()
+                };
+                self.seal_block(Terminator::Jnz(c, clause_ids[vi], false_target));
+                if vi < n - 2 {
+                    self.start_block(false_target);
+                }
+            }
+        }
+
+        let mut clause_ends: Vec<(BlockId, Vec<Value>)> = Vec::with_capacity(n);
+        for vi in 0..n {
+            let clause = clause_for_variant[vi].expect("checked: exhaustive coverage");
+            self.start_block(clause_ids[vi]);
+            self.locals = HashMap::new();
+            self.stack = stack_below.clone();
+            // Push the variant's payload first-deepest, loading each field from
+            // `payload_offset + field.offset`.
+            let fields = self.enums.layouts[scrut_id.index()].variants[vi]
+                .fields
+                .clone();
+            for field in &fields {
+                let adjusted = FieldLayout {
+                    offset: payload_offset + field.offset,
+                    ..*field
+                };
+                self.load_field_onto_stack(scrutinee, adjusted);
+            }
+            // Bind clause-body `| names |` locals (top N, leftmost deepest).
+            let take = clause.locals.len();
+            let bound = self.stack.split_off(self.stack.len() - take);
+            for (name, value) in clause.locals.iter().zip(bound) {
+                self.locals.insert(name.clone(), value);
+            }
+            self.lower_terms(&clause.body);
+            let result = self.stack.clone();
+            let pred = self.cur_id;
+            self.seal_block(Terminator::Jmp(join_id));
+            clause_ends.push((pred, result));
+        }
+
+        // Single join block: one phi per declared output, merging all N clause
+        // predecessors.
+        self.start_block(join_id);
+        let m = clause_ends[0].1.len();
+        let mut join_stack = Vec::with_capacity(m);
+        for out_i in 0..m {
+            let arms: Vec<(BlockId, Value)> = clause_ends
+                .iter()
+                .map(|(pred, st)| (*pred, st[out_i]))
+                .collect();
+            let ty = self.value_type(arms[0].1);
+            let v = self.fresh_value(ty);
+            self.push_instr(Instr::Phi(v, arms));
+            join_stack.push(v);
         }
         self.stack = join_stack;
     }
@@ -2137,5 +2252,44 @@ mod tests {
         assert_eq!(count(&func, |i| matches!(i, Instr::Blit(..))), 2);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 0);
         assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 0);
+    }
+
+    #[test]
+    fn lower_clause_word_builds_nway_dispatch_and_join_phi() {
+        // R16: a clause word loads the discriminant (one FieldLoad on the
+        // scrutinee tag), builds an N-way `Cmp(Eq)` compare-chain (N-1
+        // compares for N variants, the last variant a fall-through), and
+        // merges the clauses at a single join with one Phi per declared
+        // output. A 4-variant enum: 3 Cmp(Eq), one Phi.
+        let ir = lower_src(
+            "type: Cmd | Halt | Push v i64 | Add | Dbl ;
+             : run ( i64 Cmd -- i64 ) | Halt drop 0 | Push swap drop | Add 1 + | Dbl 2 * ;",
+        );
+        let run = ir.funcs.iter().find(|f| f.name == "run").unwrap();
+        // Three `Cmp(Eq)` compares for four variants (the last falls through).
+        assert_eq!(
+            count(run, |i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
+            3
+        );
+        // Exactly one Phi (single declared output) merging all four clauses.
+        let phi_arms: Vec<usize> = run
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::Phi(_, arms) => Some(arms.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phi_arms, vec![4]);
+    }
+
+    #[test]
+    fn lower_single_variant_clause_word_jumps_without_compare() {
+        // R16: a single-variant (newtype) enum needs no compare — the sole
+        // clause is the terminal fall-through, reached by a direct jump.
+        let ir = lower_src("type: Id | Wrap v i64 ; : unwrap ( Id -- i64 ) | Wrap ;");
+        let unwrap = ir.funcs.iter().find(|f| f.name == "unwrap").unwrap();
+        assert_eq!(count(unwrap, |i| matches!(i, Instr::Cmp(..))), 0);
     }
 }

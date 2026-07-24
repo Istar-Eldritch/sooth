@@ -1052,3 +1052,63 @@ fn vectors_dogfood_compiles_and_runs() {
     assert_eq!(stdout, "25\n6\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn shapes_dogfood_compiles_and_runs() {
+    // Slice 4 (criteria 3, 6): the clause-style eliminator end-to-end.
+    // `area` dispatches over a multi-field-variant `Shape` (a `Rect | w h |`
+    // clause-body-locals arm and a `Circle` arm reading its payload
+    // first-deepest); `unwrap-or` dispatches over a zero-field `None` (an
+    // empty clause yielding the default flowing *underneath* the scrutinee)
+    // and a one-field `Some`. All run in one native binary.
+    let (stdout, code) = run_and_capture_stdout("examples/shapes.sth");
+    assert_eq!(stdout, "12.5664\n12\n5\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn clause_word_over_three_plus_variant_enum_dispatches_correctly() {
+    // R16 key risk: an N-way (here 4-way) `Cmp(Eq)`-tag compare-chain must
+    // land on each variant's own clause, not a two-way miscompile. Each of
+    // the four commands drives a distinct arm; verified at runtime, not by
+    // reading IL.
+    let src = "type: Cmd | Halt | Push v i64 | Add | Dbl ;\n\
+: run ( i64 Cmd -- i64 )\n\
+| Halt   drop 0\n\
+| Push   swap drop\n\
+| Add    1 +\n\
+| Dbl    2 *\n\
+;\n\
+: main ( -- )\n  99 Halt run .\n  1 20 Push run .\n  10 Add run .\n  10 Dbl run . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-nway-clause-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "0\n20\n11\n20\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn nested_aggregate_clause_word_reads_back_through_registries_native() {
+    // Slice 4 (criterion 3, D9): a variant carrying a struct payload (`Dot p
+    // Vec2`) constructs, passes through a clause word, and its nested field
+    // reads back; and an enum used as a struct field (`Wrap s Shape`) is
+    // unwrapped through the getter into the same clause word — guarding the
+    // combined-registry field sizing in both directions.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+type: Shape | Dot p Vec2 | Nothing ;\n\
+type: Wrap s Shape ;\n\
+: px ( Shape -- i64 )\n\
+| Dot      Vec2>x\n\
+| Nothing  0\n\
+;\n\
+: main ( -- )\n  3 4 Vec2 Dot px .\n  Nothing px .\n  5 6 Vec2 Dot Wrap Wrap>s px . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-nested-clause-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "3\n0\n5\n");
+    assert_eq!(code, 0);
+}

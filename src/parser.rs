@@ -14,8 +14,8 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    EnumDecl, Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot,
-    VariantDecl, WordDef,
+    Clause, EnumDecl, Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot,
+    VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 
@@ -361,15 +361,81 @@ impl<'t> Parser<'t> {
         self.expect(Token::LParen)?;
         let effect = self.parse_effect()?;
         self.expect(Token::RParen)?;
-        let locals = self.parse_locals_opt()?;
-        let body = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
+        // D8: a `|` immediately followed by a known variant name opens a
+        // clause-style body; otherwise the `|` (if any) opens entry-locals.
+        let body = if self.at_clause_start() {
+            WordBody::Clauses(self.parse_clauses()?)
+        } else {
+            let locals = self.parse_locals_opt()?;
+            let terms = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
+            WordBody::Terms { locals, terms }
+        };
         self.expect(Token::Semicolon)?;
-        Ok(WordDef {
-            name,
-            effect,
-            locals,
-            body,
-        })
+        Ok(WordDef { name, effect, body })
+    }
+
+    /// Whether `name` is a registered variant name of any enum (D8's variant
+    /// pre-pass result), the load-bearing clause-vs-locals discriminator.
+    fn is_variant_name(&self, name: &str) -> bool {
+        self.enums
+            .iter()
+            .any(|e| e.variants.iter().any(|v| v.name == name))
+    }
+
+    /// Whether the token at `self.pos + offset` is a registered variant name.
+    fn token_at_is_variant(&self, offset: usize) -> bool {
+        matches!(self.tokens.get(self.pos + offset), Some((Token::Word(w), _)) if self.is_variant_name(w))
+    }
+
+    /// D8: the current position opens a clause-style body — a `|` immediately
+    /// followed by a known variant name.
+    fn at_clause_start(&self) -> bool {
+        matches!(self.peek(), Some((Token::Pipe, _))) && self.token_at_is_variant(1)
+    }
+
+    /// Parse a clause-style word body (D4, D7, D8): one `|`-led clause per
+    /// variant. Each clause is `|` + variant name + an optional clause-body
+    /// `| names |` locals block (present iff the `|` after the variant name is
+    /// *not* immediately followed by a known variant name) + body terms up to
+    /// the next clause-starting `|` or `;`.
+    fn parse_clauses(&mut self) -> Result<Vec<Clause>, String> {
+        let mut clauses = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) => break,
+                Some((Token::Pipe, span)) => {
+                    let span = *span;
+                    self.pos += 1; // the clause-leading `|`
+                    let variant = self.expect_word_any()?;
+                    // A `|` here opens clause-body locals unless it starts the
+                    // next clause (a `|` followed by a known variant name).
+                    let locals = if matches!(self.peek(), Some((Token::Pipe, _)))
+                        && !self.token_at_is_variant(1)
+                    {
+                        self.parse_locals_opt()?
+                    } else {
+                        Vec::new()
+                    };
+                    let body = self.parse_terms("`;` or `|`", |tok| {
+                        matches!(tok, Token::Semicolon | Token::Pipe)
+                    })?;
+                    clauses.push(Clause {
+                        variant,
+                        locals,
+                        body,
+                        span,
+                    });
+                }
+                Some((tok, span)) => {
+                    return Err(format!(
+                        "parse error: expected a clause `|` or `;`, found {tok:?} at line {}, col {}",
+                        span.line, span.col
+                    ));
+                }
+                None => return Err(self.eof_error("`;` (unterminated clause-style word)")),
+            }
+        }
+        Ok(clauses)
     }
 
     fn parse_effect(&mut self) -> Result<StackEffect, String> {
@@ -679,6 +745,14 @@ mod tests {
         parse(&tokens)
     }
 
+    /// The `(locals, terms)` of a `WordBody::Terms`; panics on a clause body.
+    fn terms_body(word: &WordDef) -> (&[String], &[Term]) {
+        match &word.body {
+            WordBody::Terms { locals, terms } => (locals, terms),
+            WordBody::Clauses(_) => panic!("expected a term body, got clauses"),
+        }
+    }
+
     #[test]
     fn parse_gcd_shape_matches_ast() {
         let src = std::fs::read_to_string("examples/gcd.sth").unwrap();
@@ -687,16 +761,17 @@ mod tests {
 
         let gcd = &module.words[0];
         assert_eq!(gcd.name, "gcd");
-        assert!(gcd.locals.is_empty());
+        let (gcd_locals, gcd_body) = terms_body(gcd);
+        assert!(gcd_locals.is_empty());
         assert_eq!(gcd.effect.inputs.len(), 2);
         assert_eq!(gcd.effect.outputs.len(), 1);
 
         // dup 0 = if drop else swap over mod gcd end
-        assert_eq!(gcd.body.len(), 4);
-        assert!(matches!(&gcd.body[0].kind, TermKind::Call(w) if w == "dup"));
-        assert!(matches!(gcd.body[1].kind, TermKind::IntLit(0)));
-        assert!(matches!(&gcd.body[2].kind, TermKind::Call(w) if w == "="));
-        match &gcd.body[3].kind {
+        assert_eq!(gcd_body.len(), 4);
+        assert!(matches!(&gcd_body[0].kind, TermKind::Call(w) if w == "dup"));
+        assert!(matches!(gcd_body[1].kind, TermKind::IntLit(0)));
+        assert!(matches!(&gcd_body[2].kind, TermKind::Call(w) if w == "="));
+        match &gcd_body[3].kind {
             TermKind::If {
                 then_branch,
                 else_branch,
@@ -710,7 +785,7 @@ mod tests {
 
         let main = &module.words[1];
         assert_eq!(main.name, "main");
-        assert!(main.locals.is_empty());
+        assert!(terms_body(main).0.is_empty());
     }
 
     #[test]
@@ -718,7 +793,7 @@ mod tests {
         let src = std::fs::read_to_string("examples/lerp.sth").unwrap();
         let module = parse_src(&src).unwrap();
         let lerp = module.words.iter().find(|w| w.name == "lerp").unwrap();
-        assert_eq!(lerp.locals, vec!["a", "b", "t"]);
+        assert_eq!(terms_body(lerp).0, ["a", "b", "t"]);
     }
 
     #[test]
@@ -752,7 +827,7 @@ mod tests {
     #[test]
     fn parse_true_false_are_bool_literals() {
         let module = parse_src(": w ( -- bool bool ) true false ;").unwrap();
-        let body = &module.words[0].body;
+        let (_, body) = terms_body(&module.words[0]);
         assert!(matches!(body[0].kind, TermKind::BoolLit(true)));
         assert!(matches!(body[1].kind, TermKind::BoolLit(false)));
     }
@@ -760,7 +835,7 @@ mod tests {
     #[test]
     fn parse_if_without_else_has_empty_else_branch() {
         let module = parse_src(": w ( i64 -- i64 ) if 1 end ;").unwrap();
-        let body = &module.words[0].body;
+        let (_, body) = terms_body(&module.words[0]);
         match &body[0].kind {
             TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
             other => panic!("expected If, got {other:?}"),
@@ -1061,5 +1136,63 @@ mod tests {
         assert_eq!(module.structs[0].name, "Vec2");
         assert_eq!(module.enums.len(), 1);
         assert_eq!(module.enums[0].name, "Shape");
+    }
+
+    /// The `Clause` list of a `WordBody::Clauses`; panics on a term body.
+    fn clauses_body(word: &WordDef) -> &[crate::ast::Clause] {
+        match &word.body {
+            WordBody::Clauses(clauses) => clauses,
+            WordBody::Terms { .. } => panic!("expected clauses, got a term body"),
+        }
+    }
+
+    #[test]
+    fn parse_clause_word_multi_field_with_body_locals() {
+        // D8: the first `|` is followed by a known variant, so the body is
+        // clauses, not entry-locals; the `Rect` clause's `| w h |` is
+        // clause-body locals (the `|` after `Rect` is not a variant).
+        let module = parse_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * ;",
+        )
+        .unwrap();
+        let area = module.words.iter().find(|w| w.name == "area").unwrap();
+        let clauses = clauses_body(area);
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0].variant, "Circle");
+        assert!(clauses[0].locals.is_empty());
+        assert_eq!(clauses[1].variant, "Rect");
+        assert_eq!(clauses[1].locals, ["w", "h"]);
+    }
+
+    #[test]
+    fn parse_clause_word_empty_clause_before_next_clause() {
+        // D8 empty-clause disambiguation: `| None` directly followed by
+        // `| Some` (a known variant) is an empty-bodied clause, not locals.
+        let module = parse_src(
+            "type: MaybeInt | None | Some v i64 ;
+             : unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
+        )
+        .unwrap();
+        let uo = module.words.iter().find(|w| w.name == "unwrap-or").unwrap();
+        let clauses = clauses_body(uo);
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0].variant, "None");
+        assert!(clauses[0].locals.is_empty());
+        assert!(clauses[0].body.is_empty());
+        assert_eq!(clauses[1].variant, "Some");
+    }
+
+    #[test]
+    fn parse_term_word_with_leading_locals_is_not_a_clause() {
+        // D8: a `|` followed by a non-variant word (with an enum in scope) is
+        // entry-locals, not a clause.
+        let module = parse_src(
+            "type: Shape | Circle r f64 ;
+             : sq ( i64 -- i64 ) | n | n n * ;",
+        )
+        .unwrap();
+        let sq = module.words.iter().find(|w| w.name == "sq").unwrap();
+        assert_eq!(terms_body(sq).0, ["n"]);
     }
 }
