@@ -1158,7 +1158,29 @@ fn clause_body_containing_if_else_end_joins_correctly() {
     assert_eq!(code, 0);
 }
 
-// Slice 5 (fixed-size arrays + `usize`): success criteria 3-7.
+// Slice 5 (fixed-size arrays + `usize`): success criteria 2-7.
+
+#[test]
+fn usize_arithmetic_comparison_and_conversion_native() {
+    // Criterion 2: a native golden exercising the `usize` tower end to end -
+    // `usize` arithmetic and comparison, `>usize` on a computed value, a
+    // `usize`->`i64` conversion (`>i64`), type-directed `.` on a `usize`, and
+    // a bare literal coercing into a `usize` position without `>usize` (D8).
+    let src = ": main ( -- )\n\
+  2 3 + >usize 4 >usize + .\n\
+  10 >usize 3 >usize - .\n\
+  3 >usize 5 >usize < .\n\
+  5 >usize 3 >usize < .\n\
+  7 >usize >i64 1 + .\n\
+  9 >usize dup . drop ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-usize-tower-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "9\n7\ntrue\nfalse\n8\n9\n");
+    assert_eq!(code, 0);
+}
 
 #[test]
 fn fill_constructs_and_get_reads_every_element_back_native() {
