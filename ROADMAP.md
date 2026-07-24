@@ -26,7 +26,8 @@ declaration form, a user-extensible type namespace, an inline-aggregate layout m
 (offsets/size/alignment computed from field widths, word-width-neutral) backed by QBE
 aggregate types, generated constructor/getter/setter/destructure words, nesting, and
 size-aware carried-stack marshalling across word and REPL boundaries.
-**Next action: Phase 2 Slice 4** (enums/ADTs + `match`).
+**Next action: Phase 2 Slice 4** (enums/ADTs + clause-style pattern matching). Design
+is locked (`docs/phase2-slice4-brief.md`); spec next.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -52,7 +53,8 @@ it, since LLVM and Z3 were dropped. Free choice.
 ### Phase 0 — Codegen spine  `[L]`  ✅ **done** (go/no-go on the architecture: **go**)
 
 Lexer/parser for a minimal concrete-typed core (`: ;`, literals, arithmetic,
-comparisons, `if/else/then`, the core stack shuffles `dup`/`drop`/`swap`/`over`/`rot`
+comparisons, `if/else/then` (the closer is renamed to `end` in Slice 4), the core stack
+shuffles `dup`/`drop`/`swap`/`over`/`rot`
 (monomorphic, int-only here; widened later), and `| locals |`). Compile-time virtual
 stack → a
 backend-neutral IR → **QBE** IL → `qbe` → system assembler + linker → native binary.
@@ -105,13 +107,18 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
 2. **Integer tower + conversions**: `i8`..`i64` / `u8`..`u64`, target-only `>iN`/`>uN`
    conversions, homogeneous arithmetic/comparison, width/signedness codegen. ✅ done.
 3. **Structs / records**: aggregate value types. ✅ done.
-4. **Enums / ADTs + `match`**: exhaustiveness-checked pattern matching (Result/Either fall
-   out mostly free). Also lands **generalized mid-body `| … |` locals** (bind top-of-stack to
-   names anywhere in a body, not just once at entry), motivated by destructuring a variant's
-   payload and reordering/reusing it in a `match` arm; sequence it before/with `match` so arms
-   can bind. Semantics to pin: scope extent, shadowing, branch-join (arm-local bindings that
-   don't escape `then`), and affine liveness (Copy ref copies, affine ref moves, use-after-move
-   is an error). Prefer-the-stack stays the culture; locals stay opt-in.
+4. **Enums / ADTs + clause-style pattern matching**: sum types via the `type:` form with
+   `|`-separated variants; exhaustiveness-checked elimination **folded into word definition**
+   (a word whose top input is an enum is defined by `|`-led clauses, one per variant, with no
+   inline `match` keyword); Result/Either fall out as ordinary monomorphic enums. Variants are
+   not standalone types (a variant constructor yields the enum); a clause consumes the
+   scrutinee and pushes the variant's fields onto the stack (affine destructor dispatch);
+   exhaustive-only, no `_` wildcard yet; no recursive enums (infinite size is a located error,
+   since recursion needs a pointer, Slice 7). Also **renames the control-flow closer `then` ->
+   `end`** (`if … else … end`), unifying it, and extends **top-of-scope `| … |` locals** to
+   clause bodies (bind names at the top of a word body or a clause body, extent = that scope;
+   no mid-body binding, no closer: factor a word instead). Design locked in
+   `docs/phase2-slice4-brief.md`. Prefer-the-stack stays the culture; locals stay opt-in.
 5. **Fixed-size arrays** (still heap-free). Introduce **`usize`** (and likely **`isize`** for
    pointer differences) here, as the target-width index/length type, so array indices are
    `usize` from the first use rather than a hardcoded `i64` retrofitted later. Its defining
@@ -215,6 +222,24 @@ loops rather than a `call` per element. Escaping quotations use the uniform-runt
 stack fallback and depend on the alloc layer (Phase 6). With quotations in hand, `if`
 is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-style) and
 stops being a keyword, and a `cond` multi-way combinator lands alongside the others.
+
+**Dispatch and uniformity (bundled here on purpose).** Several deferred ideas are one
+conversation, and none is clean without quotations, so they land together in this phase:
+(a) **`if` becomes an ordinary combinator** over quotations (above); (b) **generics /
+minimal polymorphism** (above); (c) **ad-hoc dispatch**, both static **overloading** (one
+word name, several statically-known input types, e.g. `+` over `i64`/`f64`/`Vec2`) and
+**open multimethods** (`generic:`/`method:` on a sum, the open/dynamic dual of Slice 4's
+closed clause-style match, trading closed exhaustiveness for module-level extensibility,
+the expression-problem tradeoff); and (d) **`Bool` as a library enum**
+(`type: Bool | False | True ;`) rather than a primitive. (d) waits for here specifically
+because bool's specialness is not the *type* but that strict, quotation-less two-way
+branching needs inline syntax; once `if` is a quotation combinator, `Bool`-as-enum +
+`if`-as-word unify, and only then does making it a library type avoid re-adding special
+cases (at `if`, at the `True`/`False` literals, and at type-directed printing). Slice 4's
+clause-style match and `if/else/end` are deliberately designed not to foreclose any of
+this: clause structure maps 1:1 onto a future quotation arm-table, and `if` staying a
+keyword for now is the honest strict-eval choice, not a commitment.
+
 **Exit:** polymorphic `dup`/`swap`/`max`; a constant-stack `each`/`fold` over a
 collection; combinators verified to inline to loops, not per-element calls.
 **Dogfood:** write the combinator library (`each`/`map`/`fold`/`while`) in Sooth
