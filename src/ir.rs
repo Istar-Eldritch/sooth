@@ -1203,12 +1203,6 @@ impl<'a> FuncBuilder<'a> {
             (l.tag_ty, l.tag_offset, l.payload_offset, l.variants.len())
         };
 
-        // The discriminant is a temp used only for the compare-chain, never
-        // pushed onto the virtual stack.
-        let tag = self.fresh_value(tag_ty);
-        let tag_ptr = self.field_ptr(scrutinee, tag_offset);
-        self.push_instr(Instr::FieldLoad(tag, tag_ptr));
-
         // Map each variant index to the clause handling it (checker-guaranteed
         // exact coverage), so dispatch on tag == variant_index lands correctly
         // regardless of clause source order.
@@ -1223,6 +1217,11 @@ impl<'a> FuncBuilder<'a> {
         if n == 1 {
             self.seal_block(Terminator::Jmp(clause_ids[0]));
         } else {
+            // The discriminant is a temp used only for the compare-chain, never
+            // pushed onto the virtual stack. A newtype (n == 1) skips it.
+            let tag = self.fresh_value(tag_ty);
+            let tag_ptr = self.field_ptr(scrutinee, tag_offset);
+            self.push_instr(Instr::FieldLoad(tag, tag_ptr));
             for vi in 0..n - 1 {
                 let idx_val = self.fresh_value(tag_ty);
                 self.push_instr(Instr::Const(idx_val, vi as i64));
