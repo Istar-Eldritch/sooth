@@ -58,7 +58,8 @@ it, since LLVM and Z3 were dropped. Free choice.
 ### Phase 0 — Codegen spine  `[L]`  ✅ **done** (go/no-go on the architecture: **go**)
 
 Lexer/parser for a minimal concrete-typed core (`: ;`, literals, arithmetic,
-comparisons, `if/else/then` (the closer is renamed to `end` in Slice 4), the core stack
+comparisons, `if/else/end` (originally `if/else/then`; the closer was renamed to `end`
+in Slice 4), the core stack
 shuffles `dup`/`drop`/`swap`/`over`/`rot`
 (monomorphic, int-only here; widened later), and `| locals |`). Compile-time virtual
 stack → a

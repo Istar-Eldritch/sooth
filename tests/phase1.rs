@@ -384,6 +384,43 @@ fn enum_declared_then_clause_word_defined_and_eliminated_on_later_lines() {
     );
 }
 
+/// Criterion 8: `examples/shapes.sth` runs correctly end-to-end *in the REPL*,
+/// not just natively. Each definition collapses to one REPL line (multi-line
+/// input isn't the point of this golden; exercising every clause arm from the
+/// dogfood file is), and all four `main` operations run, hitting the exact
+/// native golden's output (`12.5664 / 12 / 5 / 7`) through the REPL path.
+#[test]
+fn shapes_dogfood_runs_full_program_in_repl() {
+    let out = run_session(&[
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;",
+        "type: MaybeInt | None | Some v i64 ;",
+        ": area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;",
+        ": unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
+        "2.0 Circle area .",
+        "3.0 4.0 Rect area .",
+        "5 None unwrap-or .",
+        "5 7 Some unwrap-or .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Shape",
+            "defined type MaybeInt",
+            "defined area",
+            "defined unwrap-or",
+            "12.5664",
+            "stack: (empty)",
+            "12",
+            "stack: (empty)",
+            "5",
+            "stack: (empty)",
+            "7",
+            "stack: (empty)",
+        ]
+    );
+}
+
 /// A large-payload variant (three `i64` fields, exceeding one 8-byte carried
 /// cell) survives a REPL line boundary intact: its multi-cell slot is blitted
 /// out of and back into the buffer, and a scalar pushed afterward still reads
