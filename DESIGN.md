@@ -17,8 +17,9 @@ performance for simplicity and legibility, simplicity wins.
 The one intellectual bet that makes Sooth more than a tidy Forth clone: **in a
 stack language the stack discipline already is move semantics.** Every word
 consumes its inputs and produces its outputs, so a value is moved by default and
-keeping a copy requires an explicit `dup`. Affine types therefore drop in for
-free: `dup` is the copy, and drop is a statically-known destructor point. That
+keeping a copy requires an explicit `dup`. Linear types therefore fall out for
+free: `dup` is the explicit copy, and `drop` is the explicit, checked destructor
+point. That
 single idea pays off three times over (resource safety, deterministic destruction,
 data-race-free concurrency) and is the reason to write programs in Sooth rather
 than in Forth or Rust.
@@ -104,7 +105,7 @@ alternative to binding it, useful as caller-facing documentation for a word that
 juggles on the stack instead of naming; a slot that is bound by `| … |` stays a bare
 type, so a name is never written twice.
 
-## The affine spine
+## The linear spine
 
 Plain data is `Copy`: reuse is free and `dup` is ordinary.
 
@@ -113,7 +114,7 @@ Plain data is `Copy`: reuse is free and `dup` is ordinary.
   dup * ;                \ int is Copy, so `dup` just copies the bits
 ```
 
-A value is *moved* by default, and a resource is affine (not `Copy`). `dup` on
+A value is *moved* by default, and a resource is *linear*, not `Copy`. `dup` on
 something that owns a resource is a type error. This is the whole point, and it is
 where Sooth diverges from both Forth and Rust:
 
@@ -125,7 +126,7 @@ where Sooth diverges from both Forth and Rust:
 ```
 error: cannot `dup` a value of type File
   dup
-  ^^^ File is affine: it owns an OS handle and has no Copy instance
+  ^^^ File is linear: it owns an OS handle and has no Copy instance
   note: `dup` on plain data copies bits; there are no bits to copy here.
         thread the File through, or open a second handle explicitly.
 ```
@@ -143,18 +144,28 @@ hand it back, which in a stack language is just normal data flow
   close ;                \ ( File -- )          destructor runs HERE
 ```
 
-Deterministic drop, with no GC and no finalizer. Forget `close` and the program is
-still correct: the File is still owned at end of scope, so the compiler inserts its
-destructor at that statically-known point.
+Disposal is explicit and deterministic: a linear value is used *exactly once*. You
+end its life by consuming it, either with a word that takes it and never hands it
+back (`close` above), or with a bare `drop` when you hold a live value and have no
+further use for it. `drop` is the single disposal primitive; `close`/`free` are
+library words layered on top. Forgetting to dispose is **not** silently patched up,
+it is a compile error:
 
 ```forth
-: report ( str -- )
+: leak-file ( str -- )
   | path |
   path open-read
   size-of
-  print ;                \ File never explicitly closed;
-                         \ compiler drops it (runs close) exactly here.
+  print ;                \ error: `print` leaves a File on the stack, but ( str -- )
+                         \ declares no output. Close it, `drop` it, or return it.
 ```
+
+A forgotten resource surfaces through the same stack-effect check that catches a
+forgotten `int`: every value is accounted for by the signature or explicitly dropped.
+Nothing runs behind your back, so the destructor fires exactly where you wrote the
+disposal. That is the deterministic-drop property with no hidden control flow, and it
+is a **linear** discipline (use exactly once), stricter than the affine (use at most
+once, auto-drop) style of Rust or Hylo.
 
 ## Type system: deliberately small
 
@@ -169,7 +180,7 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
 - Enough parametric polymorphism to give `dup`/`swap`/`max` honest signatures:
   type variables (`'T`) and a row variable (`..s`, the rest of the stack). This is
   Kitten-style row polymorphism, kept minimal.
-- The `Copy` marker distinction (copyable vs affine). This is the load-bearing
+- The `Copy` marker distinction (copyable vs linear). This is the load-bearing
   bit for the memory model and must exist early.
 
 **Out, and why:**
@@ -190,7 +201,7 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
 
 ## Memory model
 
-Ownership + affine types, deterministic drop, **no tracing GC**. Reference counting
+Ownership + linear types, deterministic explicit drop, **no tracing GC**. Reference counting
 is opt-in only (`Rc`/`Arc`-equivalent), reached for knowingly when shared ownership
 is genuinely needed, because dropping the last ref cascades frees synchronously.
 
@@ -281,7 +292,7 @@ compile error.
 project is the language and writing programs in it, not emitting machine code, so
 codegen is offloaded to the smallest backend that stays legible. QBE (~15k lines you
 could actually read) gives arm64/x86_64/riscv64 plus C-ABI struct classification for
-free, and can carry essentially the entire design: everything interesting (affine
+free, and can carry essentially the entire design: everything interesting (linear
 analysis, monomorphisation of the small polymorphic core, deterministic drop) is
 frontend/runtime work QBE is agnostic to. A hand-written native backend (own the
 vertical, direct syscalls) was the craft-purist alternative, set aside for
@@ -371,7 +382,7 @@ Only two things must be core intrinsics; everything else is a library.
 - **A spawn primitive.** Can be a thin FFI to `pthread_create` at the hosted layer
   rather than a language feature.
 
-**Free from the affine spine:** data-race freedom. Sending a message *moves* the
+**Free from the linear spine:** data-race freedom. Sending a message *moves* the
 payload (the same `dup`-is-the-copy rule across a thread boundary), so there is no
 shared mutable aliasing by construction. Second-class refs can't cross a thread
 boundary because they can't escape a scope at all, so the dangerous case is already
@@ -393,7 +404,7 @@ channels so nothing needs to be `dup`ed:
   again ;
 
 : main ( -- )
-  chan                          \ ( -- Send[Job] Recv[Job] )  two affine ends
+  chan                          \ ( -- Send[Job] Recv[Job] )  two linear ends
   swap [ worker ] spawn drop    \ Recv end moves into the spawned quotation
   ... ;                         \ Send end stays here, still owned, race-free
 ```
@@ -433,7 +444,7 @@ object and the thing that runs on a microcontroller with no OS. The hosted layer
 
 ```
 core       stack semantics, numeric tower, bool, fixed arrays + slices,
-           string slices (rodata), affine/move/drop, checked stack effects,
+           string slices (rodata), linear/move/drop, checked stack effects,
            control flow, modules, non-escaping quotations, atomics,
            second-class refs, and the allocator *interface* (not an impl).
            assumes: a few compiler intrinsics, no allocator, no OS.
@@ -498,8 +509,8 @@ rows, no borrow analysis needed to write the compiler in it.
 
 - Scope: craft language, not a product. Optimise for legibility, hold-in-head size,
   and the joy of building and writing it.
-- Signature idea: affine by default, `dup` is the explicit copy, drop is a
-  statically-known destructor point.
+- Signature idea: linear (use exactly once) by default, `dup` is the explicit copy,
+  `drop` is the explicit destructor point the checker enforces.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
 - Control flow: `if/else/end` for boolean branching (becomes an ordinary combinator,
   `cond [ then ] [ else ] if`, once quotations land in Phase 4); `match` for exhaustive
@@ -515,7 +526,7 @@ rows, no borrow analysis needed to write the compiler in it.
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
-- Memory: ownership + affine, deterministic drop, no GC, RC opt-in; second-class
+- Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in; second-class
   refs (Hylo-style), no borrow checker; non-null pointers; hidden/checked return
   stack.
 - Codegen: compile-time virtual stack to native; words as functions.
@@ -528,7 +539,7 @@ rows, no borrow analysis needed to write the compiler in it.
   whole-program run uses compile-to-binary + subprocess.
 - Errors as values, no THROW/CATCH, no unwinding.
 - Concurrency: library, not core. Only atomics + spawn are intrinsics; data-race
-  freedom is free from affine + non-escaping refs.
+  freedom is free from linear types + non-escaping refs.
 - Real-time: soft-RT out of the box; hard-RT by discipline (fixed layer + static
   topology), not by enforced guarantee.
 - `no_std` core with core / fixed / alloc / hosted layering; allocator interface in
@@ -555,11 +566,11 @@ rows, no borrow analysis needed to write the compiler in it.
   signature (a divergent return type would want a result union, i.e. generics, Phase 4).
   Until then, mutual tail recursion is a located compile error, not a silent overflow.
 - **Drop at the back-edge (co-design with deterministic drop).** The self-tail-call
-  transform is the point where the outgoing iteration's affine values that are *not*
-  forwarded must have their destructors run before the jump. In Phase 2 every type is
-  `Copy`, so that drop set is empty and the concern is vacuous; but the back-edge is the
-  **defined insertion point**, so Phase 3's destructors have a home rather than being
-  retrofitted.
+  transform is the point where the outgoing iteration's linear values that are *not*
+  forwarded must be dropped before the jump. In Phase 2 every type is `Copy`, so that
+  drop set is empty and the concern is vacuous; the back-edge is the **defined disposal
+  point**, so it has a home when a later Phase 3 slice lets a linear value ride a loop
+  (Phase 3 Slice 1 defers loop-carried linear values).
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

@@ -6,8 +6,9 @@ for the pleasure of writing it and writing programs in it, not as a product. See
 [DESIGN.md](./DESIGN.md) for the why and [ROADMAP.md](./ROADMAP.md) for the plan.
 
 The one bet that makes it more than a tidy Forth: in a stack language the stack
-discipline already is move semantics, so affine types drop in for free. `dup` is the
-explicit copy, and drop is a statically-known destructor point.
+discipline already is move semantics, so linear types fall out for free. `dup` is the
+explicit copy, and `drop` is the explicit destructor point (use exactly once, forgetting
+is a compile error).
 
 ```forth
 : gcd ( i64 i64 -- i64 )

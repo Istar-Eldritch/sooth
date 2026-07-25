@@ -58,9 +58,9 @@ bytecode loop with a backward branch, exercising the whole typed core at once (a
 is itself the exit verdict: the typed core is sufficient to write a real interpreter.
 **Phase 2 is complete.** The old Slice 8 (`Copy` marker + optional / non-null pointer) was
 dissolved into Phase 3: in a heap-free phase the `Copy` marker has no non-`Copy` type to
-reject and pointers have nothing to point at, so `Copy`/affine, pointers, recursive/heap
+reject and pointers have nothing to point at, so `Copy`/linear, pointers, recursive/heap
 data, and drop all move to Phase 3, where their first real clients live.
-**Next action: Phase 3 Slice 1** (affine analysis + move-by-default + `dup` gated on
+**Next action: Phase 3 Slice 1** (linear analysis + move-by-default + `dup` gated on
 `Copy` + deterministic drop). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -70,7 +70,7 @@ it, since LLVM and Z3 were dropped. Free choice.
 ## Guiding principles
 
 - **De-risk novel-before-laborious.** Prove the uncertain, novel parts (the codegen
-  model, then the affine memory model, which is the whole point of the language)
+  model, then the linear memory model, which is the whole point of the language)
   early. The larger-but-understood parts (stdlib, self-hosting) can wait.
 - **Vertical slices with a dogfood program each phase.** Every phase ends with a
   language you can run a real (if small) program in, and you actually write that
@@ -154,7 +154,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    (a word whose top input is an enum is defined by `|`-led clauses, one per variant, with no
    inline `match` keyword); Result/Either fall out as ordinary monomorphic enums. Variants are
    not standalone types (a variant constructor yields the enum); a clause consumes the
-   scrutinee and pushes the variant's fields onto the stack (affine destructor dispatch);
+   scrutinee and pushes the variant's fields onto the stack (linear destructor dispatch);
    exhaustive-only, no `_` wildcard yet; no recursive enums (infinite size is a located error,
    since recursion needs a pointer, which arrives in Phase 3). Also **renames the control-flow closer `then` ->
    `end`** (`if … else … end`), unifying it, and extends **top-of-scope `| … |` locals** to
@@ -190,8 +190,8 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    and the self-tail-call dispatch loop from Slice 6). Shipped as `examples/vm.sth` with
    zero compiler machinery. ✅ done.
 The old **Slice 8** (`Copy` marker + optional / non-null pointer) is **dissolved into
-Phase 3**: with no heap and no affine type in Phase 2, the marker had nothing to reject and
-pointers had nothing to point at. `Copy`/affine, pointers, recursive/heap data, and drop now
+Phase 3**: with no heap and no linear type in Phase 2, the marker had nothing to reject and
+pointers had nothing to point at. `Copy`/linear, pointers, recursive/heap data, and drop now
 land together in Phase 3, where their first real clients exist. See the Phase 3 slice plan.
 
 Numeric axes carved out of Slice 2 have all landed: **floats** and **bitwise operators**
@@ -264,46 +264,55 @@ data are deferred (Phase 4 / Phase 3).
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; `*/` widening primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
 pattern matching. Non-null pointers + explicit optional type. The **`Copy` vs
-affine distinction** as a built-in property of types (primitives Copy; anything
-owning a resource affine), so Phase 3 has it to build on. Stack-effect checking now
+linear distinction** as a built-in property of types (primitives Copy; anything
+owning a resource linear), so Phase 3 has it to build on. Stack-effect checking now
 unifies **type and arity** at branch join points (loops arrive with the loop
 primitive in Phase 4). Still heap-free: value types and fixed-size arrays only.
 **Exit:** typed programs with structs/enums/match; type and arity errors are sharp
 compile errors.
 **Dogfood:** a small parser or a fixed-size VM for some toy bytecode.
 
-### Phase 3 — The affine spine  `[XL]`  `[highest novelty: this is the point of the language]`
+### Phase 3 — The linear spine  `[XL]`  `[highest novelty: this is the point of the language]`
 
-Move semantics as the default; `dup` (a plain int-copy since Phase 0) becomes the
-explicit copy **gated on `Copy`**, and `drop` (a plain discard since Phase 0) becomes
-the statically-known destructor point; deterministic drop (destructor at the
-statically-known end of ownership). Hylo-style
-mutable value semantics: parameter conventions (`let`/`inout`/`sink`/`set`) and
-second-class references (can't be stored, can't escape scope), so no borrow checker
-and no lifetimes. Opt-in RC (`Rc`/`Arc`-equivalent). **Heap arrives here**, under
-ownership. Resources (fds, later locks) modelled as affine values; `dup` on them is
-a compile error.
+**Linear** types (use exactly once), not affine: `dup` (a plain int-copy since Phase 0)
+becomes the explicit copy **gated on `Copy`**, and `drop` (a plain discard since Phase 0)
+becomes the explicit destructor. Move-by-default, use-after-move is an error, and
+**forgetting to dispose a linear value is a compile error** caught by the existing
+stack-effect check (nothing auto-drops; the destructor runs exactly where you write the
+`drop`). Hylo-style mutable value semantics: parameter conventions
+(`let`/`inout`/`sink`/`set`) and second-class references (can't be stored, can't escape
+scope), so no borrow checker and no lifetimes. Opt-in RC (`Rc`/`Arc`-equivalent). **Heap
+arrives here**, under ownership. Resources (fds, later locks) are linear values; `dup` on
+them is a compile error, and leaking one is too.
 **Exit:** memory-safe heap programs, no GC, deterministic destruction, resources as
-affine values that can't be duplicated or leaked.
+linear values that can't be duplicated, and can't be silently forgotten.
 **Dogfood:** a program that opens/reads/closes files and manages owned buffers,
 with the compiler catching a deliberate double-use.
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review,
 same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
 
-1. **Affine analysis + move-by-default + `dup` gated on `Copy` + deterministic drop.**
-   The core novelty, isolated from heap. Move tracking (use-after-move is a located
-   error), `dup` rejected on a non-`Copy` type, `drop` lowered to a destructor call at the
-   statically-known end of ownership. Bootstrap decision (1a): introduce a small builtin
-   affine type with an observable destructor to give the analysis teeth before heap
-   exists, rather than pulling heap forward into this slice. Dogfood: a deliberate
-   double-use is a compile error, and a destructor runs exactly once.
-2. **Heap + owning pointer + allocator.** The first affine type with a real destructor
-   (`free`), building on slice 1's drop machinery. Dogfood: an owned buffer, auto-freed at
-   end of scope.
+1. **Linear analysis + move-by-default + `dup` gated on `Copy` + explicit `drop`.**
+   The core novelty, isolated from heap. Move tracking (a second use of a moved value is a
+   located error), `dup`/`over` rejected on a non-`Copy` type, `drop` lowered to a
+   destructor call. **Linear, not affine**: no auto-drop, forgetting to dispose is a
+   compile error via the existing surplus-value check (Copy and linear handled
+   symmetrically). Bootstrap (1a): a **test-only builtin linear primitive** (a drop-spy
+   with a print-on-drop destructor tagged by an `i64`) gives the analysis teeth before
+   heap exists; it is not user-facing surface and dissolves into an ordinary type once
+   `drop` is overridable (a polymorphic word, Phase 4). Aggregates are in scope via
+   destructure-whole (no partial moves): `S>fi` stays consuming and drops the non-extracted
+   fields, `S|>fi` is a non-consuming Copy-field peek (forbidden on linear fields), `S<fi`
+   drops the overwritten field; the compiler synthesises recursive/tag-dispatched drop
+   glue. Deferred: loop-carried linear values across the Slice 6 back-edge (a later slice).
+   Dogfood: a deliberate second-use is a compile error, a forgotten value is a compile
+   error, and a destructor runs exactly once at its explicit `drop`.
+2. **Heap + owning pointer + allocator.** The first linear type with a real destructor
+   (`free`), building on slice 1's drop machinery. Dogfood: an owned buffer, freed by an
+   explicit `drop` at end of scope.
 3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
    content, now with a home: recursive enums/structs need the heap indirection slice 2
-   provides. Dogfood: a linked list or tree that builds, walks, and auto-frees.
+   provides. Dogfood: a linked list or tree that builds, walks, and is explicitly freed.
 4. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
    checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
    the escape checker keeping refs from being stored or escaping scope. Comes after heap
@@ -311,8 +320,8 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    in-place mutation of an owned buffer through `inout`.
 5. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
-6. **Resources as affine values (fds, hosted).** The Phase 3 exit dogfood: open/read/close
-   files, with the compiler catching a deliberate double-use.
+6. **Resources as linear values (fds, hosted).** The Phase 3 exit dogfood: open/read/close
+   files, with the compiler catching a deliberate double-use and a forgotten `close`.
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
 
@@ -384,7 +393,7 @@ Core intrinsics only: **atomics + memory ordering** (LL/SC on arm64, or FFI to C
 atomics on QBE) and a **spawn** primitive (thin FFI to `pthread_create` at the
 hosted layer). Everything else is library: split-endpoint channels, mutexes,
 pools, and actors (mailbox + loop + move-only messages). Data-race freedom is
-inherited from the affine spine (send = move) and non-escaping refs, no separate
+inherited from the linear spine (send = move) and non-escaping refs, no separate
 `Send`/`Sync` apparatus. Ship two libraries: the convenient hosted one and a
 constrained `no_std`/RT one (static topology, fixed mailboxes, no escaping
 captures).
@@ -443,11 +452,11 @@ priority for a craft language; add it only if you're using it enough to want it.
 ## Shape of the risk
 
 - **Phase 0 is done and the go/no-go came back *go***: the virtual-stack → IR → QBE
-  → native path holds. The remaining mass and risk is **Phase 3** (the affine memory
+  → native path holds. The remaining mass and risk is **Phase 3** (the linear memory
   model, the most novel work and the reason the language exists); do it carefully.
   **Phase 9** (self-hosting) is the other large lift but is well understood.
 - Phases 4-8 are more independent than the numbering implies. Errors (5) is nearly
-  free once ADTs exist (2). Concurrency (7) needs the affine model (3) but little
+  free once ADTs exist (2). Concurrency (7) needs the linear model (3) but little
   else. Bare metal (8) needs the `fixed` layer (6) but not the hosted one. Reorder
   within that band by what you want to play with first, which for a craft project is
   a legitimate way to choose.
