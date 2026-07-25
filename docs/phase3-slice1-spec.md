@@ -19,9 +19,10 @@ partial moves). No heap, refs, RC, or fds. Design locked in `docs/phase3-slice1-
 - **R3 (D2)** — Mentioning a linear local moves it; a second mention is `use after move`
   naming the move site. No mid-body rebinding.
 - **R4 (D3)** — `dup`/`over` on non-`Copy` is an error in the DESIGN.md form ("cannot `dup` a
-  value of type X; X is linear …"). `swap`/`rot`/`nip` stay legal on linear values.
-- **R5/R6 (D4/D5)** — `drop` is universal disposal. `__spy` is a `Type` variant lowering as
-  `IrType::Int{64,signed}`; constructor `( i64 -- __spy )` lowers inline as identity; its
+  value of type X; X is linear …"). `swap`/`rot` stay legal on linear values.
+- **R5/R6 (D4/D5)** — `drop` is universal disposal. `__spy` is a `Type` variant lowering as its
+  own `IrType::Spy` variant (distinct from a plain `i64`, so drop emission can tell a spy
+  apart from an ordinary integer); constructor `( i64 -- __spy )` lowers inline as identity; its
   compiler-known destructor prints `drop <tag>` via the existing print path. Convention-fenced
   out of user surface; dissolves once `drop` is overridable (Phase 4 of the roadmap).
 - **R7/R8 (D6)** — A struct/enum is linear iff any field/variant payload is linear
@@ -91,14 +92,14 @@ are proven.
 |---|---|---|
 | 1 / 1b | `dup` / `over` on a bare spy is an error | `dup_of_linear_value_is_error`, `over_of_linear_value_is_error` (P1) |
 | 2 | Use-after-move names the move site | `use_after_move_of_linear_local_is_error` (P1) |
-| 3 | Destructor runs exactly once at explicit `drop` | `explicit_drop_runs_destructor_once` (P1) |
+| 3 | Destructor runs exactly once at explicit `drop` (full-stdout equality) | `explicit_drop_runs_destructor_once` (P1) |
 | 4a/4b/4c | Surplus linear on stack errors; unconsumed local errors; surplus **Copy** keeps the arity error | `surplus_linear_on_stack_is_error`, `unconsumed_linear_local_is_error`, `surplus_copy_value_keeps_existing_error` (P1) |
 | swap | `swap`/`rot` on linear values allowed (over-broad-gate guard) | `swap_of_linear_values_is_allowed` (P1) |
 | 10a/10b/10c | Both arms consume → one drop; one arm + later use → use-after-move; one arm, unused → unconsumed at scope end | `both_arms_consume_linear_ok`, `divergent_arm_use_is_error`, `divergent_arm_unconsumed_is_error` (P1) |
 | 12 | Linear across a back-edge is a located not-yet error; Copy loop unaffected | `linear_across_loop_back_edge_is_located_error` + `copy_loop_still_compiles` (P1) |
-| 5 / 5b | `S>` drops each field in order; linearity is transitive through nesting | `destructure_whole_drops_each_field`, `nested_struct_is_linear_transitively` (P2) |
-| 6 / 8 / 13 | `S>fi` drops the rest; `S<fi` drops the overwritten field before the store; whole-struct `drop` runs glue in declaration order | `get_field_drops_the_rest_on_linear_struct`, `set_field_drops_overwritten_linear_field`, `drop_of_linear_struct_runs_field_glue_in_declaration_order` (P2) |
-| 7a / 7b | Peek keeps the struct live (one drop); peek on a linear field errors | `peek_copy_field_keeps_struct`, `peek_linear_field_is_error` (P3) |
-| 9 / 9b | Runtime tag dispatch drops the active payload (stdout differs per tag); matched clause disposes its payload | `drop_of_linear_enum_dispatches_on_tag`, `clause_body_disposes_linear_payload` (P4) |
+| 5 / 5b | `S>` drops each field in order (>=2 distinctly-tagged spies); linearity is transitive through nesting | `destructure_whole_drops_each_field`, `nested_struct_is_linear_transitively` (P2) |
+| 6 / 8 / 13 | `S>fi` drops the rest; `S<fi` drops the overwritten field before the store; whole-struct `drop` runs glue in declaration order (>=2 distinctly-tagged spies) | `get_field_drops_the_rest_on_linear_struct`, `set_field_drops_overwritten_linear_field`, `drop_of_linear_struct_runs_field_glue_in_declaration_order` (P2) |
+| 7a / 7b | Peek keeps the struct live (peek twice then dispose -> exactly one drop line); peek on a linear field errors | `peek_copy_field_keeps_struct`, `peek_linear_field_is_error` (P3) |
+| 9 / 9b | Runtime tag dispatch drops the active payload (built at runtime behind an `if` with >=2 differently-shaped variants; stdout differs per tag); matched clause disposes its payload | `drop_of_linear_enum_dispatches_on_tag`, `clause_body_disposes_linear_payload` (P4) |
 | 14 | `:quit` disposes residual linear values LIFO (bare spy, struct, enum); an explicit earlier `drop` prints once | `repl_quit_disposes_residual_linear{,_struct,_enum}` + `repl_explicit_drop_not_redisposed_at_quit` (P1/P4) |
 | 11 | No regression across the existing example+test suite + REPL parity | existing goldens (P5) |
