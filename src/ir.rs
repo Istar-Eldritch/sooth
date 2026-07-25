@@ -937,6 +937,16 @@ struct FuncBuilder<'a> {
     /// carried slot)`. Finalized into the header phis after the body lowers,
     /// since the operands are only known on the back-edges.
     back_edges: Vec<(BlockId, Vec<Value>)>,
+    /// The loop's entry block (the block that ran before `begin_loop`'s jump
+    /// to the header), `Some` alongside `header`. An `Alloc` emitted while
+    /// looping is hoisted here (R6 constant-stack corollary): QBE's `alloc*`
+    /// bumps the frame pointer on every execution and never reclaims it
+    /// within a function, so an aggregate constructed on the back-edge (e.g.
+    /// a clause's variant re-scrutinee) would otherwise grow the frame by one
+    /// slot per iteration and blow the stack well before the loop's constant-
+    /// stack guarantee is exercised. Hoisting reserves one fixed slot per
+    /// static alloc site, reused (overwritten) every iteration instead.
+    entry_block: Option<BlockId>,
     /// Whether the current block has already been sealed (by a back-edge Jmp or
     /// another terminator), so no fall-through Ret/Jmp should follow.
     terminated: bool,
@@ -974,6 +984,7 @@ impl<'a> FuncBuilder<'a> {
             header: None,
             header_phis: Vec::new(),
             back_edges: Vec::new(),
+            entry_block: None,
             terminated: false,
             blocks: Vec::new(),
             cur_id: BlockId(0),
@@ -1008,6 +1019,23 @@ impl<'a> FuncBuilder<'a> {
         self.cur_instrs.push(instr);
     }
 
+    /// Emit an `Alloc` into the current block, unless looping (`entry_block`
+    /// is `Some`), in which case it goes into the entry block instead: see
+    /// `entry_block`'s doc comment for why a loop body must never alloc.
+    fn push_alloc(&mut self, instr: Instr) {
+        match self.entry_block {
+            Some(entry) => {
+                let block = self
+                    .blocks
+                    .iter_mut()
+                    .find(|b| b.id == entry)
+                    .expect("entry block");
+                block.instrs.push(instr);
+            }
+            None => self.push_instr(instr),
+        }
+    }
+
     /// Seal the current block with `term` and append it to the function.
     fn seal_block(&mut self, term: Terminator) {
         let instrs = mem::take(&mut self.cur_instrs);
@@ -1035,6 +1063,7 @@ impl<'a> FuncBuilder<'a> {
         self.seal_block(Terminator::Jmp(header));
         self.start_block(header);
         self.header = Some(header);
+        self.entry_block = Some(entry);
         let mut outs = Vec::with_capacity(params.len());
         for &p in params {
             let out = self.fresh_value(self.value_type(p));
@@ -1301,7 +1330,7 @@ impl<'a> FuncBuilder<'a> {
             (l.size, l.align)
         };
         let v = self.fresh_value(IrType::Struct(id));
-        self.push_instr(Instr::Alloc(v, size, align));
+        self.push_alloc(Instr::Alloc(v, size, align));
         v
     }
 
@@ -1314,7 +1343,7 @@ impl<'a> FuncBuilder<'a> {
             (l.size, l.align)
         };
         let v = self.fresh_value(IrType::Enum(id));
-        self.push_instr(Instr::Alloc(v, size, align));
+        self.push_alloc(Instr::Alloc(v, size, align));
         v
     }
 
@@ -1327,7 +1356,7 @@ impl<'a> FuncBuilder<'a> {
             (l.size, l.align)
         };
         let v = self.fresh_value(IrType::Array(id));
-        self.push_instr(Instr::Alloc(v, size, align));
+        self.push_alloc(Instr::Alloc(v, size, align));
         v
     }
 
@@ -3207,6 +3236,38 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn clause_tail_call_alloc_is_hoisted_to_entry_not_loop_body() {
+        // A clause self-tail-call rebuilds its enum scrutinee on every
+        // back-edge (`Go`/`Stop` above are payload-free, but the tag store
+        // still needs a slot). If that `Alloc` stayed in the loop body, QBE's
+        // `alloc*` would bump the frame pointer every iteration and blow the
+        // stack well before Phase 4's N >= 1_000_000 golden. It must land in
+        // the entry block instead, so the loop body has none.
+        let ir = lower_src(
+            "type: Flag | Go | Stop ; \
+             : run ( i64 Flag -- i64 ) | Go 1 - Stop run | Stop ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
+        let header = loop_header(f);
+        let entry = &f.blocks[0];
+        assert!(
+            entry.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "the Stop scrutinee's alloc should be hoisted into the entry block"
+        );
+        let entry_id = entry.id;
+        for block in &f.blocks {
+            if block.id == entry_id || block.id == header {
+                continue;
+            }
+            assert!(
+                !block.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+                "block {:?} in the loop body must not alloc",
+                block.id
+            );
         }
     }
 }
