@@ -1794,4 +1794,36 @@ mod tests {
             "the enum type must be declared before the struct that references it: {il}"
         );
     }
+
+    #[test]
+    fn emit_self_tail_call_loop_renders_phi_and_back_edge_jmp() {
+        // R12: no codegen change is expected for the self-tail-call -> loop
+        // transform (D5); QBE already renders `Phi`/back-edge `Jmp` natively.
+        // This structural test verifies the loop IL (a header `phi` with a
+        // back-edge predecessor, plus the back-edge `jmp`) is valid QBE text.
+        let il = emit_src(
+            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = if acc else acc n + n 1 - sum-to end ;",
+        );
+        assert!(
+            il.contains("phi"),
+            "expected a header phi in the loop IL: {il}"
+        );
+        assert!(
+            !il.contains("call $sum_to"),
+            "a tail self-call must not render as a QBE call: {il}"
+        );
+        let jmp_targets: Vec<&str> = il
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("jmp "))
+            .collect();
+        assert!(
+            jmp_targets.len() >= 2,
+            "expected at least two jmps (entry forward jump + back-edge): {il}"
+        );
+        let target = jmp_targets[0];
+        assert!(
+            jmp_targets.iter().filter(|t| **t == target).count() >= 2,
+            "expected the entry jump and the back-edge jump to target the same header label: {il}"
+        );
+    }
 }

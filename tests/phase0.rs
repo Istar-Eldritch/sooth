@@ -1336,3 +1336,139 @@ type: Box arr [i64 3] ;\n\
     assert_eq!(stdout, "1\n1\n9\n9\n0\n0\n");
     assert_eq!(code, 0);
 }
+
+// Phase 2 Slice 6 (self-tail-call -> loop lowering): success criteria 1, 3, 4,
+// 7. Every N here is >= 1_000_000: naive (un-transformed) recursion at that
+// depth overflows the 8MB default host stack, so a regression that silently
+// disables the transform turns these goldens red rather than passing small.
+
+#[test]
+fn countdown_dogfood_runs_in_constant_stack() {
+    // Criterion 1 (D8): `examples/countdown.sth`, a tail-recursive
+    // accumulator summing 1..=1_000_000, completes and prints the right
+    // total, and the "recursive case in one arm, base case in the other"
+    // half of criterion 4. Criterion 7 (locals rebind correctly across
+    // iterations) has its own dedicated golden below, since a commutative sum
+    // wouldn't surface a swapped/stale rebind until the very last iteration.
+    let (stdout, code) = run_and_capture_stdout("examples/countdown.sth");
+    assert_eq!(stdout, "500000500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn locals_rebind_correctly_across_tail_iterations_native() {
+    // Criterion 7: `| acc n |` must rebind to the *new* tail-call arguments
+    // on every iteration, not to stale or swapped values. `acc*10 + n` is
+    // order-sensitive (unlike a sum), so a wrong rebind produces a wrong
+    // digit sequence immediately; this only needs a handful of iterations,
+    // deliberately kept separate from the constant-stack goldens above.
+    let src = ": digits ( i64 i64 -- i64 )\n\
+  | acc n |\n\
+  n 0 = if\n\
+    acc\n\
+  else\n\
+    acc 10 * n + n 1 - digits\n\
+  end ;\n\
+: main ( -- ) 0 5 digits . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-locals-rebind-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "54321\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn terminal_if_both_arms_tail_produce_two_back_edges_native() {
+    // Criterion 4's both-arms-tail golden: a self-tail-call in each arm of a
+    // terminal `if` produces two back-edges from the `if` path into one
+    // header (R8 multi-arm back-patch through `lower_if`, distinct from the
+    // clause back-edge path of criterion 3). Both arms happen to do the same
+    // arithmetic; what matters is that they are two distinct call sites that
+    // both eliminate, at N large enough to overflow if either didn't.
+    let src = ": both-tail ( i64 i64 -- i64 )\n\
+  | acc n |\n\
+  n 0 = if\n\
+    acc\n\
+  else\n\
+    n 500000 > if\n\
+      acc n + n 1 - both-tail\n\
+    else\n\
+      acc n + n 1 - both-tail\n\
+    end\n\
+  end ;\n\
+: main ( -- ) 0 1000000 both-tail . ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-both-arms-tail-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "500000500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn clause_multi_tail_runs_in_constant_stack_native() {
+    // Criterion 3: a `|`-clause self-tail-recursive word where *both*
+    // clauses tail-recurse into one shared header, alternating tags each
+    // iteration (each clause contributes its own back-edge).
+    let src = "type: Parity | Even | Odd ;\n\
+: sum-parity ( i64 i64 Parity -- i64 )\n\
+  | Even | acc n | n 0 = if acc else acc n + n 1 - Odd sum-parity end\n\
+  | Odd  | acc n | n 0 = if acc else acc n + n 1 - Even sum-parity end\n\
+;\n\
+: main ( -- ) 0 1000000 Even sum-parity . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-clause-multi-tail-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "500000500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
+    // Criterion 3's mixed-clause golden (R9 / risk 5): both of the `Go`
+    // clause's `if` arms are self-tail-calls, so both back-edge to the loop
+    // header (one recurses with the `Go` tag, one recurses with the `Halt`
+    // tag; neither arm itself `Ret`s). The only genuine base case is the
+    // separate `Halt` clause, which `Ret`s with no self-call at all. The loop
+    // header's predecessors (entry + `Go`'s two back-edges) and the Slice-4
+    // dispatch-join's predecessors must stay disjoint for this to compile and
+    // run correctly.
+    let src = "type: Step | Go | Halt ;\n\
+: run-mix ( i64 i64 Step -- i64 )\n\
+  | Go   | acc n | n 0 = if acc n Halt run-mix else acc n + n 1 - Go run-mix end\n\
+  | Halt | acc n | acc\n\
+;\n\
+: main ( -- ) 0 1000000 Go run-mix . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-mixed-clause-tail-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "500000500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn non_tail_factorial_still_a_real_call_native() {
+    // Criterion 5: the existing `examples/factorial.sth` (`dup 1 - factorial
+    // *`) has a self-call followed by `*`, so it is deliberately not in tail
+    // position and stays a real, un-eliminated `Call` (R10); it still
+    // computes correctly at small N. The over-eager-miscompile boundary
+    // (self-call inside a non-terminal `if`) is covered by the
+    // `self_call_in_non_terminal_if_stays_a_call` unit test in `src/ir.rs`.
+    let (stdout, code) = run_and_capture_stdout("examples/factorial.sth");
+    assert_eq!(stdout, "120\n");
+    assert_eq!(code, 0);
+}
