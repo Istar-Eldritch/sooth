@@ -1973,3 +1973,42 @@ fn peek_linear_field_is_error() {
     assert!(err.contains("`__spy`"), "unexpected message: {err}");
     assert!(err.contains("`S>`"), "unexpected message: {err}");
 }
+
+// Phase 3 Slice 1, Phase 4: enums via a synthesized, tag-dispatched
+// destructor. A linear enum's `drop` doesn't know at compile time which
+// variant is active, so the synthesized destructor tests the runtime tag and
+// drops only the active variant's linear payload.
+
+#[test]
+fn drop_of_linear_enum_dispatches_on_tag() {
+    // Criterion 9: a linear enum built behind an `if` (so its active variant
+    // is a runtime fact, not something lowering can fold), dropped whole
+    // (never destructured/matched). The synthesized destructor's tag dispatch
+    // must find the right variant each time: the `Full` branch's spy payload
+    // is dropped, the `Empty` branch's `drop` is a no-op, and the surrounding
+    // prints prove the dispatch didn't run the wrong arm's glue (or both).
+    let stdout = run_linear_golden(
+        "enum-tag-dispatch",
+        "type: Item | Empty | Full v __spy ;\n\
+: main ( -- )\n  1 .\n  true if 5 __spy Full else Empty end drop\n  2 .\n\
+  false if 9 __spy Full else Empty end drop\n  3 . ;\n",
+    );
+    assert_eq!(stdout, "1\ndrop 5\n2\n3\n");
+}
+
+#[test]
+fn clause_body_disposes_linear_payload() {
+    // Criterion 9b: a clause-style word matching on the enum exposes the
+    // active variant's payload on the stack; the matched clause is
+    // responsible for disposing it like any other linear value (here via a
+    // bare `drop`, no local name needed). The `Empty` clause runs no glue at
+    // all (zero fields), proving the drop in the `Full` clause is the clause
+    // body's own doing, not compiler-inserted compensation.
+    let stdout = run_linear_golden(
+        "clause-disposes-payload",
+        "type: Item | Empty | Full v __spy ;\n\
+: handle ( Item -- )\n| Empty   99 .\n| Full    drop\n;\n\
+: main ( -- )\n  Empty handle\n  7 __spy Full handle ;\n",
+    );
+    assert_eq!(stdout, "99\ndrop 7\n");
+}

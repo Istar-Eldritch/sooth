@@ -171,10 +171,11 @@ pub struct StructLayout {
 /// computes `is_linear` itself, inline, while `layouts` is still being built
 /// (this function needs a fully-populated `structs.layouts` to look up a
 /// nested struct field's linearity).
-fn field_is_linear(ty: IrType, structs: &Structs) -> bool {
+fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums) -> bool {
     match ty {
         IrType::Spy => true,
         IrType::Struct(id) => structs.layouts[id.index()].is_linear,
+        IrType::Enum(id) => enums.layouts[id.index()].is_linear,
         _ => false,
     }
 }
@@ -184,6 +185,13 @@ fn field_is_linear(ty: IrType, structs: &Structs) -> bool {
 /// struct's field drops are uniform with an enum's tag-dispatched drops).
 fn struct_drop_symbol(id: StructId) -> String {
     format!("sooth_struct_drop_{}", id.index())
+}
+
+/// The synthesized per-type destructor symbol for a linear enum (R12, Phase
+/// 4): mirrors `struct_drop_symbol`, one uniform naming scheme for both
+/// aggregate kinds.
+fn enum_drop_symbol(id: EnumId) -> String {
+    format!("sooth_enum_drop_{}", id.index())
 }
 
 /// One field's placement within its owning struct: its byte offset and its own
@@ -236,6 +244,12 @@ pub struct EnumLayout {
     pub size: u32,
     pub align: u32,
     pub variants: Vec<VariantLayout>,
+    /// R7/R12 (Phase 4): whether this enum is linear (any variant's payload
+    /// field is, transitively). A variant field's own `is_linear` is already
+    /// resolved by the time this is computed (`place_fields` -> `size_align`
+    /// recurses into nested fields first), so this is a one-shot fold, not a
+    /// further recursion, mirroring `StructLayout::is_linear`.
+    pub is_linear: bool,
 }
 
 /// One variant's payload placement: its fields laid out (first field deepest)
@@ -514,20 +528,11 @@ impl LayoutBuilder<'_> {
         }
         let structs = self.structs;
         let (fields, size, align) = self.place_fields(&structs[idx].fields);
-        // R7: linear iff any field is, transitively. A nested struct field's
-        // own `is_linear` is already memoized (`place_fields` -> `size_align`
-        // ensures it first), so this is a plain fold over the just-placed
-        // fields, not a further recursion.
-        let is_linear = fields.iter().any(|f| match f.ty {
-            IrType::Spy => true,
-            IrType::Struct(id) => {
-                self.struct_memo[id.index()]
-                    .as_ref()
-                    .expect("nested struct field already laid out")
-                    .is_linear
-            }
-            _ => false,
-        });
+        // R7: linear iff any field is, transitively. A nested aggregate
+        // field's own `is_linear` is already memoized (`place_fields` ->
+        // `size_align` ensures it first), so this is a plain fold over the
+        // just-placed fields, not a further recursion.
+        let is_linear = fields.iter().any(|f| self.layout_field_is_linear(f.ty));
         self.struct_memo[idx] = Some(StructLayout {
             name: structs[idx].name_static,
             size,
@@ -562,6 +567,12 @@ impl LayoutBuilder<'_> {
         let payload_offset = round_up(tag_size, payload_align);
         let align = tag_align.max(payload_align);
         let size = round_up(payload_offset + max_payload, align);
+        // R7/R12: an enum is linear iff any variant's payload field is,
+        // transitively (mirrors the struct fold above).
+        let is_linear = variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .any(|f| self.layout_field_is_linear(f.ty));
         self.enum_memo[idx] = Some(EnumLayout {
             name: enums[idx].name_static,
             tag_offset: 0,
@@ -570,7 +581,31 @@ impl LayoutBuilder<'_> {
             size,
             align,
             variants,
+            is_linear,
         });
+    }
+
+    /// Whether a just-laid-out field's `IrType` is linear (R7): the drop-spy
+    /// directly, or a nested struct/enum whose own memoized layout is linear.
+    /// Shared by the struct and enum `is_linear` folds; both call sites have
+    /// already ensured the nested aggregate's memo entry via `size_align`.
+    fn layout_field_is_linear(&self, ty: IrType) -> bool {
+        match ty {
+            IrType::Spy => true,
+            IrType::Struct(id) => {
+                self.struct_memo[id.index()]
+                    .as_ref()
+                    .expect("nested struct field already laid out")
+                    .is_linear
+            }
+            IrType::Enum(id) => {
+                self.enum_memo[id.index()]
+                    .as_ref()
+                    .expect("nested enum field already laid out")
+                    .is_linear
+            }
+            _ => false,
+        }
     }
 
     /// Compute one array's layout (M2): the element's size/align (recursing
@@ -766,7 +801,7 @@ pub fn synthesize_aggregate_destructors(
     enums: &Enums,
     arrays: &Arrays,
 ) -> Vec<IrFunc> {
-    structs
+    let struct_destructors = structs
         .layouts
         .iter()
         .enumerate()
@@ -780,8 +815,23 @@ pub fn synthesize_aggregate_destructors(
                 enums,
                 arrays,
             )
-        })
-        .collect()
+        });
+    let enum_destructors = enums
+        .layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| layout.is_linear)
+        .map(|(idx, _)| {
+            synthesize_enum_destructor(
+                EnumId::from_index(idx),
+                env,
+                resolve,
+                structs,
+                enums,
+                arrays,
+            )
+        });
+    struct_destructors.chain(enum_destructors).collect()
 }
 
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
@@ -801,7 +851,7 @@ fn synthesize_struct_destructor(
     let param = b.fresh_value(IrType::Struct(id));
     let fields = structs.layouts[id.index()].fields.clone();
     for field in fields {
-        if field_is_linear(field.ty, structs) {
+        if field_is_linear(field.ty, structs, enums) {
             let v = b.field_value(param, field);
             b.emit_drop(v);
         }
@@ -810,6 +860,82 @@ fn synthesize_struct_destructor(
     IrFunc {
         name: struct_drop_symbol(id),
         params: vec![IrType::Struct(id)],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }
+}
+
+/// R12 (Phase 4): synthesize enum `id`'s destructor, called by `drop` on any
+/// value of that type. Unlike the struct case (a fixed field list), an enum's
+/// active variant is a runtime fact, so the destructor tag-dispatches (its
+/// own `Jnz` chain, the same compare-chain shape `lower_clauses` uses for a
+/// clause-style word's scrutinee) and then drops only the dispatched variant's
+/// linear payload fields. Every variant gets its own block even if none of its
+/// fields are linear (an empty block that just returns), so the dispatch
+/// shape stays uniform regardless of which variants happen to carry a linear
+/// field.
+fn synthesize_enum_destructor(
+    id: EnumId,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> IrFunc {
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let param = b.fresh_value(IrType::Enum(id));
+    let (tag_ty, tag_offset, payload_offset, n) = {
+        let l = &enums.layouts[id.index()];
+        (l.tag_ty, l.tag_offset, l.payload_offset, l.variants.len())
+    };
+
+    let variant_ids: Vec<BlockId> = (0..n).map(|_| b.fresh_block()).collect();
+    if n == 1 {
+        b.seal_block(Terminator::Jmp(variant_ids[0]));
+    } else {
+        let tag = b.fresh_value(tag_ty);
+        let tag_ptr = b.field_ptr(param, tag_offset);
+        b.push_instr(Instr::FieldLoad(tag, tag_ptr));
+        for vi in 0..n - 1 {
+            let idx_val = b.fresh_value(tag_ty);
+            b.push_instr(Instr::Const(idx_val, vi as i64));
+            let c = b.fresh_value(IrType::Bool);
+            b.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
+            // The last compare's false edge falls straight through to the
+            // final variant; no default/trap block (every tag is one of the
+            // `n` declared variants).
+            let false_target = if vi == n - 2 {
+                variant_ids[n - 1]
+            } else {
+                b.fresh_block()
+            };
+            b.seal_block(Terminator::Jnz(c, variant_ids[vi], false_target));
+            if vi < n - 2 {
+                b.start_block(false_target);
+            }
+        }
+    }
+
+    for (vi, &block) in variant_ids.iter().enumerate() {
+        b.start_block(block);
+        let fields = enums.layouts[id.index()].variants[vi].fields.clone();
+        for field in &fields {
+            if field_is_linear(field.ty, structs, enums) {
+                let adjusted = FieldLayout {
+                    offset: payload_offset + field.offset,
+                    ..*field
+                };
+                let v = b.field_value(param, adjusted);
+                b.emit_drop(v);
+            }
+        }
+        b.seal_block(Terminator::Ret(None));
+    }
+
+    IrFunc {
+        name: enum_drop_symbol(id),
+        params: vec![IrType::Enum(id)],
         ret: None,
         blocks: b.blocks,
         value_types: b.value_types,
@@ -1754,8 +1880,8 @@ impl<'a> FuncBuilder<'a> {
     /// `__spy`, or a struct whose `is_linear` is set) this is a plain `Call`
     /// to the (builtin or synthesized) destructor; a `Copy` value is discarded
     /// with no runtime effect. Shared by `drop`, `S>fi`'s drop-the-rest,
-    /// `S<fi`'s drop-on-overwrite, and the synthesized struct destructor
-    /// itself, so "how a value is disposed" lives in one place.
+    /// `S<fi`'s drop-on-overwrite, and the synthesized struct/enum destructors
+    /// themselves, so "how a value is disposed" lives in one place.
     fn emit_drop(&mut self, v: Value) {
         match self.value_type(v) {
             IrType::Spy => {
@@ -1763,6 +1889,9 @@ impl<'a> FuncBuilder<'a> {
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
                 self.push_instr(Instr::Call(None, struct_drop_symbol(id), vec![v]));
+            }
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
+                self.push_instr(Instr::Call(None, enum_drop_symbol(id), vec![v]));
             }
             _ => {}
         }
@@ -1792,7 +1921,7 @@ impl<'a> FuncBuilder<'a> {
                 // here (a no-op drop-the-rest when every other field is
                 // Copy, unchanged from before this slice).
                 for (j, field) in fields.iter().enumerate() {
-                    if j != fi && field_is_linear(field.ty, self.structs) {
+                    if j != fi && field_is_linear(field.ty, self.structs, self.enums) {
                         let v = self.field_value(s, *field);
                         self.emit_drop(v);
                     }
@@ -1811,7 +1940,7 @@ impl<'a> FuncBuilder<'a> {
                 // above (consumed, never dropped); only the field being
                 // overwritten is read back out and dropped, before the store,
                 // so the order is deterministic.
-                if field_is_linear(field.ty, self.structs) {
+                if field_is_linear(field.ty, self.structs, self.enums) {
                     let old = self.field_value(dst, field);
                     self.emit_drop(old);
                 }
@@ -3563,22 +3692,22 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
-        let (structs, _, _) = build_registries(&module.structs, &module.enums, &module.arrays);
+        let (structs, enums, _) = build_registries(&module.structs, &module.enums, &module.arrays);
         for (idx, layout) in structs.layouts.iter().enumerate() {
             let ty = Type::Struct(StructId::from_index(idx), layout.name);
             assert_eq!(
-                crate::check::is_copy(ty, &module.structs),
+                crate::check::is_copy(ty, &module.structs, &module.enums),
                 !layout.is_linear,
                 "`{}`: checker says Copy={}, `ensure_struct` says linear={}",
                 layout.name,
-                crate::check::is_copy(ty, &module.structs),
+                crate::check::is_copy(ty, &module.structs, &module.enums),
                 layout.is_linear
             );
             assert_eq!(
                 layout
                     .fields
                     .iter()
-                    .any(|f| field_is_linear(f.ty, &structs)),
+                    .any(|f| field_is_linear(f.ty, &structs, &enums)),
                 layout.is_linear,
                 "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
                 layout.name

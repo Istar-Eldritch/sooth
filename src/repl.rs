@@ -483,7 +483,7 @@ impl Session {
         let Some(deepest) = self
             .types
             .iter()
-            .position(|ty| !check::is_copy(*ty, &self.structs))
+            .position(|ty| !check::is_copy(*ty, &self.structs, &self.enums))
         else {
             return Ok(());
         };
@@ -507,8 +507,14 @@ impl Session {
     ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
-        let net_stack =
-            check::infer_line(terms, &self.types, &env, &mut self.arrays, &self.structs)?;
+        let net_stack = check::infer_line(
+            terms,
+            &self.types,
+            &env,
+            &mut self.arrays,
+            &self.structs,
+            &self.enums,
+        )?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);

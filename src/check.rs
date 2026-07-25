@@ -136,17 +136,23 @@ pub fn builtin_table() -> HashMap<String, Sig> {
 
 /// R2/R7: whether `ty` is `Copy` (freely duplicated and discarded) rather than
 /// linear (used exactly once, disposed by `drop`). The drop-spy is linear;
-/// a struct is linear iff any field is (transitively), so a struct-of-struct-
-/// of-spy is linear too. `structs` resolves a `Type::Struct`'s fields; structs
-/// can't recurse into themselves (`check_recursion` rejects that first), so
-/// this always terminates.
-pub fn is_copy(ty: Type, structs: &[StructDecl]) -> bool {
+/// a struct or enum is linear iff any field/variant-payload field is
+/// (transitively), so a struct-of-struct-of-spy or an enum carrying one is
+/// linear too. `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s
+/// fields; neither can recurse into itself (`check_recursion` rejects that
+/// first), so this always terminates.
+pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl]) -> bool {
     match ty {
         Type::Spy => false,
         Type::Struct(id, _) => structs[id.index()]
             .fields
             .iter()
-            .all(|(_, field_ty)| is_copy(*field_ty, structs)),
+            .all(|(_, field_ty)| is_copy(*field_ty, structs, enums)),
+        Type::Enum(id, _) => enums[id.index()]
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .all(|(_, field_ty)| is_copy(*field_ty, structs, enums)),
         _ => true,
     }
 }
@@ -171,11 +177,11 @@ struct Moves {
 }
 
 impl Moves {
-    fn new(locals: &HashMap<String, Type>, structs: &[StructDecl]) -> Moves {
+    fn new(locals: &HashMap<String, Type>, structs: &[StructDecl], enums: &[EnumDecl]) -> Moves {
         Moves {
             states: locals
                 .iter()
-                .filter(|(_, ty)| !is_copy(**ty, structs))
+                .filter(|(_, ty)| !is_copy(**ty, structs, enums))
                 .map(|(name, _)| (name.clone(), MoveState::Live))
                 .collect(),
         }
@@ -235,18 +241,20 @@ impl Moves {
 
 /// Error context for the shared stack simulation: a full word (with its
 /// declared effect and typed locals) or a bare REPL line (no signature to cite).
-/// Both carry the struct registry `is_copy` needs to resolve a `Type::Struct`'s
-/// linearity, so `dup`/`over`/back-edge checking works identically whether the
-/// caller is a compiled word or a REPL line.
+/// Both carry the struct/enum registries `is_copy` needs to resolve a
+/// `Type::Struct`/`Type::Enum`'s linearity, so `dup`/`over`/back-edge checking
+/// works identically whether the caller is a compiled word or a REPL line.
 enum Ctx<'a> {
     Word {
         name: &'a str,
         effect: &'a StackEffect,
         locals: &'a HashMap<String, Type>,
         structs: &'a [StructDecl],
+        enums: &'a [EnumDecl],
     },
     Line {
         structs: &'a [StructDecl],
+        enums: &'a [EnumDecl],
     },
 }
 
@@ -260,7 +268,13 @@ impl Ctx<'_> {
 
     fn structs(&self) -> &[StructDecl] {
         match self {
-            Ctx::Word { structs, .. } | Ctx::Line { structs } => structs,
+            Ctx::Word { structs, .. } | Ctx::Line { structs, .. } => structs,
+        }
+    }
+
+    fn enums(&self) -> &[EnumDecl] {
+        match self {
+            Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
         }
     }
 
@@ -634,6 +648,7 @@ pub fn infer_line(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     structs: &[StructDecl],
+    enums: &[EnumDecl],
 ) -> Result<Vec<Type>, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
     // A bare line binds no locals (so it has no move-state) and is not a word
@@ -641,7 +656,7 @@ pub fn infer_line(
     let final_stack = check_terms(
         terms,
         initial,
-        &Ctx::Line { structs },
+        &Ctx::Line { structs, enums },
         env,
         arrays,
         &mut Moves::default(),
@@ -698,6 +713,7 @@ fn check_outputs(
     declared: &[Type],
     line: u32,
     structs: &[StructDecl],
+    enums: &[EnumDecl],
 ) -> Result<(), String> {
     if final_stack.len() != declared.len() {
         // R13/R2: a *linear* surplus value is the forgotten-disposal case, so it
@@ -707,7 +723,7 @@ fn check_outputs(
             .get(declared.len()..)
             .unwrap_or_default()
             .iter()
-            .find(|s| !is_copy(s.ty, structs))
+            .find(|s| !is_copy(s.ty, structs, enums))
         {
             return Err(surplus_linear_value_error(word, slot.ty, line));
         }
@@ -945,13 +961,14 @@ fn check_terms_word(
         effect: &word.effect,
         locals: &local_types,
         structs,
+        enums,
     };
-    let mut moves = Moves::new(&local_types, structs);
+    let mut moves = Moves::new(&local_types, structs, enums);
     let final_stack = check_terms(terms, initial, &ctx, env, arrays, &mut moves, true)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
-    check_outputs(word, &final_stack, &declared, line, structs)?;
+    check_outputs(word, &final_stack, &declared, line, structs, enums)?;
     check_linear_locals_consumed(word, &local_types, &moves, line)
 }
 
@@ -1075,8 +1092,9 @@ fn check_clause_body(
         effect: &word.effect,
         locals: &local_types,
         structs,
+        enums,
     };
-    let mut moves = Moves::new(&local_types, structs);
+    let mut moves = Moves::new(&local_types, structs, enums);
     let final_stack = check_terms(
         &clause.body,
         stack_after_bind,
@@ -1091,7 +1109,7 @@ fn check_clause_body(
         .last()
         .map(|t| t.span.line)
         .unwrap_or(clause.span.line);
-    check_outputs(word, &final_stack, declared, line, structs)?;
+    check_outputs(word, &final_stack, declared, line, structs, enums)?;
     check_linear_locals_consumed(word, &local_types, &moves, line)
 }
 
@@ -1340,7 +1358,10 @@ fn check_linear_across_back_edge(
     below_args: &[Slot],
     moves: &Moves,
 ) -> Result<(), String> {
-    if let Some(slot) = below_args.iter().find(|s| !is_copy(s.ty, ctx.structs())) {
+    if let Some(slot) = below_args
+        .iter()
+        .find(|s| !is_copy(s.ty, ctx.structs(), ctx.enums()))
+    {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
     if let Some(local) = moves.unconsumed().first() {
@@ -1919,7 +1940,7 @@ fn check_array_word(
             if !(1..=i64::from(u32::MAX)).contains(&count_val) {
                 return Err(fill_count_out_of_range_error(ctx, span, count_val));
             }
-            if !is_copy(element.ty, ctx.structs()) {
+            if !is_copy(element.ty, ctx.structs(), ctx.enums()) {
                 return Err(fill_of_linear_element_error(ctx, span, element.ty));
             }
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
@@ -2012,7 +2033,7 @@ fn check_struct_peek_word(
         return Ok(None);
     };
     let field_ty = *field_ty;
-    if !is_copy(field_ty, structs) {
+    if !is_copy(field_ty, structs, ctx.enums()) {
         return Err(peek_of_linear_field_error(ctx, span, name, field_ty));
     }
     let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
@@ -2045,7 +2066,7 @@ fn check_shuffle(
             // R4 (D3): `dup` is the explicit copy, so it is gated on `Copy`.
             // The pure reorderings below (`swap`/`rot`) move rather than copy
             // and stay legal on a linear value.
-            if !is_copy(top.ty, ctx.structs()) {
+            if !is_copy(top.ty, ctx.structs(), ctx.enums()) {
                 return Err(cannot_copy_linear_error(ctx, span, "dup", top.ty));
             }
             stack.push(top);
@@ -2071,7 +2092,7 @@ fn check_shuffle(
             let below = stack[n - 2];
             // R4: `over` copies the second slot, so it is gated exactly like
             // `dup`.
-            if !is_copy(below.ty, ctx.structs()) {
+            if !is_copy(below.ty, ctx.structs(), ctx.enums()) {
                 return Err(cannot_copy_linear_error(ctx, span, "over", below.ty));
             }
             stack.push(below);
@@ -2828,7 +2849,7 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        infer_line(&terms, entry, &builtin_table(), &mut Vec::new(), &[])
+        infer_line(&terms, entry, &builtin_table(), &mut Vec::new(), &[], &[])
     }
 
     #[test]
@@ -3419,11 +3440,11 @@ mod tests {
     fn is_copy_every_type_but_the_spy() {
         for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
             assert!(
-                is_copy(Type::from_name(name).unwrap(), &[]),
+                is_copy(Type::from_name(name).unwrap(), &[], &[]),
                 "{name} is Copy"
             );
         }
-        assert!(!is_copy(Type::Spy, &[]));
+        assert!(!is_copy(Type::Spy, &[], &[]));
     }
 
     #[test]
@@ -3438,9 +3459,9 @@ type: Wraps h Holds ;\n")
         let plain = Type::Struct(StructId::from_index(0), "Plain");
         let holds = Type::Struct(StructId::from_index(1), "Holds");
         let wraps = Type::Struct(StructId::from_index(2), "Wraps");
-        assert!(is_copy(plain, &module.structs));
-        assert!(!is_copy(holds, &module.structs));
-        assert!(!is_copy(wraps, &module.structs));
+        assert!(is_copy(plain, &module.structs, &module.enums));
+        assert!(!is_copy(holds, &module.structs, &module.enums));
+        assert!(!is_copy(wraps, &module.structs, &module.enums));
     }
 
     #[test]
