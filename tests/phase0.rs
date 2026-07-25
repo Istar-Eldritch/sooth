@@ -2138,3 +2138,15 @@ fn main_declaring_linear_input_is_error() {
     assert!(err.contains("`__spy`"), "unexpected message: {err}");
     assert!(err.contains("`main`"), "unexpected message: {err}");
 }
+
+#[test]
+fn fill_of_linear_element_is_error() {
+    // Array-element linearity isn't tracked transitively by the drop-glue
+    // path yet, so `fill` rejects a linear element outright.
+    let err = linear_check_error(": main ( -- )\n  0 __spy 3 fill drop ;\n");
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
