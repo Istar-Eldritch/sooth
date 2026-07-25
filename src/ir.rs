@@ -1887,7 +1887,7 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
-    /// `__spy`, or a struct whose `is_linear` is set) this is a plain `Call`
+    /// `__spy`, or a struct/enum whose `is_linear` is set) this is a plain `Call`
     /// to the (builtin or synthesized) destructor; a `Copy` value is discarded
     /// with no runtime effect. Shared by `drop`, `S>fi`'s drop-the-rest,
     /// `S<fi`'s drop-on-overwrite, and the synthesized struct/enum destructors

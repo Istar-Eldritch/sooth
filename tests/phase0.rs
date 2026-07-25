@@ -1980,6 +1980,43 @@ fn peek_linear_field_is_error() {
 // drops only the active variant's linear payload.
 
 #[test]
+fn dup_of_linear_enum_is_error() {
+    // The hole Phase 2 left open: `is_copy` used to return `true` for every
+    // enum, so an enum with a linear payload was silently duplicable and this
+    // exact source compiled, ran, and printed nothing (an exactly-once
+    // violation with no diagnostic). It is now rejected like any other linear
+    // value, naming the enum type.
+    let err = linear_check_error(
+        "type: Box | Full v __spy | Empty ;\n\
+: main ( -- )\n  1 __spy Full dup drop drop ;\n",
+    );
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Box`"), "unexpected message: {err}");
+    assert!(err.contains("linear"), "unexpected message: {err}");
+}
+
+#[test]
+fn nested_enum_is_linear_transitively() {
+    // The enum half of criterion 5b: linearity propagates through a
+    // struct-of-enum-of-struct-of-spy, so `dup` on the outer struct is
+    // rejected naming `Wrap`, and dropping it whole runs the chain of
+    // synthesized destructors (struct -> tag dispatch -> struct -> spy).
+    let src = "type: Inner v __spy ;\ntype: Held | Empty | Some i Inner ;\n\
+type: Wrap h Held ;\n";
+    let err = linear_check_error(&format!(
+        "{src}: main ( -- )\n  5 __spy Inner Some Wrap dup drop drop ;\n"
+    ));
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Wrap`"), "unexpected message: {err}");
+
+    let stdout = run_linear_golden(
+        "nested-enum",
+        &format!("{src}: main ( -- )\n  5 __spy Inner Some Wrap drop ;\n"),
+    );
+    assert_eq!(stdout, "drop 5\n");
+}
+
+#[test]
 fn drop_of_linear_enum_dispatches_on_tag() {
     // Criterion 9: a linear enum built behind an `if` (so its active variant
     // is a runtime fact, not something lowering can fold), dropped whole
@@ -2011,4 +2048,27 @@ fn clause_body_disposes_linear_payload() {
 : main ( -- )\n  Empty handle\n  7 __spy Full handle ;\n",
     );
     assert_eq!(stdout, "99\ndrop 7\n");
+}
+
+#[test]
+fn unconsumed_linear_clause_payload_is_error() {
+    // The clause-body half of criterion 9b: a payload bound to a clause local
+    // is subject to the same scope-end rule as any other linear local, so
+    // forgetting it is a compile error naming the local and the word. This is
+    // the branch Phase 1 left unreachable (a linear clause payload needed the
+    // enum linearity this phase adds).
+    let err = linear_check_error(
+        "type: Item | Empty | Full v __spy ;\n\
+: handle ( Item -- )\n| Empty   99 .\n| Full | s |   1 .\n;\n",
+    );
+    assert!(err.contains("never consumed"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the local: {err}"
+    );
+    assert!(
+        err.contains("`handle`"),
+        "the error should name the word: {err}"
+    );
 }
