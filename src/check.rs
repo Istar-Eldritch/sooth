@@ -1824,6 +1824,24 @@ fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
     }
 }
 
+/// `fill` given a linear element type: unlike `dup`/`over`, `fill` has no
+/// per-slot `Copy` gate today, so it would silently replicate a linear value
+/// (and array-element linearity is not tracked transitively yet, so neither
+/// `drop` nor a nested struct's `dup` check would ever see the array's real
+/// element count). Reject rather than accept a value the rest of the linear
+/// checker can't reason about; array-of-linear support is future work.
+fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear array elements are not supported yet in `{}` (line {})\n  `fill` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
+            name, span.line, elem, elem, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear array elements are not supported yet: `fill` would replicate a `{elem}` across every slot, but `{elem}` is linear and has no `Copy` instance"
+        ),
+    }
+}
+
 /// Match an index `Slot` against a `usize` index position for a `[T N]`
 /// (R11, D6, D8): an exact `usize` is a runtime index (the Phase 4 trap); a
 /// bare integer literal coerces (D8) and gets a compile-time bounds check
@@ -1885,6 +1903,9 @@ fn check_array_word(
             };
             if !(1..=i64::from(u32::MAX)).contains(&count_val) {
                 return Err(fill_count_out_of_range_error(ctx, span, count_val));
+            }
+            if !is_copy(element.ty, ctx.structs()) {
+                return Err(fill_of_linear_element_error(ctx, span, element.ty));
             }
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
             stack.truncate(n - 2);
@@ -2453,6 +2474,33 @@ mod tests {
             err.contains("length must be >= 1"),
             "unexpected message: {err}"
         );
+    }
+
+    #[test]
+    fn check_fill_of_linear_element_is_error() {
+        // `fill` has no per-slot `Copy` gate today (unlike `dup`/`over`), and
+        // array-element linearity isn't tracked transitively, so a linear
+        // element is rejected rather than silently replicated/leaked.
+        let err = check_src(": w ( -- ) 0 __spy 3 fill drop ;").unwrap_err();
+        assert!(
+            err.contains("not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_fill_of_linear_struct_element_is_error() {
+        // The same rejection applies transitively: a struct that is linear
+        // because one of its fields is (R7) is just as unsupported as a bare
+        // `__spy` element.
+        let err = check_src("type: Holder xs __spy ;\n: w ( -- ) 0 __spy Holder 3 fill drop ;")
+            .unwrap_err();
+        assert!(
+            err.contains("not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holder`"), "unexpected message: {err}");
     }
 
     #[test]

@@ -1924,3 +1924,19 @@ fn drop_of_linear_struct_runs_field_glue_in_declaration_order() {
     );
     assert_eq!(stdout, "drop 1\ndrop 2\n");
 }
+
+#[test]
+fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
+    // Criterion 5b + 13 combined: `drop` on the *outer* struct's own synthesized
+    // destructor must itself call `sooth_struct_drop_Inner` for the nested field,
+    // rather than only handling one level of nesting. Field order is `i` (tag 1),
+    // then `Inner` (whose own destructor drops `z`, tag 3) is inside `Outer`
+    // at declaration order after a scalar sibling `n` (tag 2), proving the
+    // recursion isn't just "the nested struct happens to be first".
+    let stdout = run_linear_golden(
+        "drop-whole-nested-struct",
+        "type: Inner z __spy ;\ntype: Outer i __spy n __spy w Inner ;\n\
+: main ( -- )\n  1 __spy 2 __spy 3 __spy Inner Outer drop ;\n",
+    );
+    assert_eq!(stdout, "drop 1\ndrop 2\ndrop 3\n");
+}

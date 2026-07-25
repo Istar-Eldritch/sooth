@@ -611,3 +611,63 @@ fn repl_explicit_drop_not_redisposed_at_quit() {
         "a spy dropped on an earlier line prints once, not again at `:quit`"
     );
 }
+
+// Phase 2: the synthesized struct destructor (`sooth_struct_drop_N`) must be
+// emitted into every REPL module that can reach a `drop` on that struct type
+// (a bare line's module, a `: word ;` definition's module, and the synthesized
+// `:quit` disposal), not only the build path's single shared module.
+
+#[test]
+fn repl_bare_line_drops_linear_struct() {
+    let out = run_session(&[
+        "type: Pair a __spy b __spy ;",
+        "1 __spy 2 __spy Pair",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Pair",
+            "stack: <Pair>",
+            "drop 1",
+            "drop 2",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
+fn repl_word_definition_drops_linear_struct() {
+    let out = run_session(&[
+        "type: Pair a __spy b __spy ;",
+        ": mk ( -- ) 1 __spy 2 __spy Pair drop ;",
+        "mk",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Pair",
+            "defined mk",
+            "drop 1",
+            "drop 2",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
+fn repl_quit_disposes_residual_linear_struct() {
+    let out = run_session(&[
+        "type: Pair a __spy b __spy ;",
+        "1 __spy 2 __spy Pair",
+        ":quit",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Pair", "stack: <Pair>", "drop 1", "drop 2"],
+        "a residual linear struct should be disposed at `:quit`, field-order drop"
+    );
+}

@@ -404,14 +404,28 @@ impl Session {
         let ir_lower_env = ir_arity_env(&env);
         let (structs, enums, arrays) =
             ir::build_registries(&self.structs, &self.enums, &self.arrays);
-        let mut func = {
+        let funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays)
+            let mut func =
+                ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays);
+            func.name = symbol.clone();
+            let mut funcs = vec![func];
+            // R12: this module must carry its own struct destructors (they are
+            // not emitted elsewhere in the REPL, unlike the build path's single
+            // shared module), or `drop` on a linear struct dies at `dlopen`
+            // with an undefined `sooth_struct_drop_N`.
+            funcs.extend(ir::synthesize_aggregate_destructors(
+                &ir_lower_env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+            ));
+            funcs
         };
-        func.name = symbol.clone();
 
         let ssa = backend::qbe::emit(&IrModule {
-            funcs: vec![func],
+            funcs,
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
@@ -503,9 +517,9 @@ impl Session {
         let seq = self.seq;
         let (structs, enums, arrays) =
             ir::build_registries(&self.structs, &self.enums, &self.arrays);
-        let (func, m, out_bytes) = {
+        let (func, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
-            ir::lower_line(
+            let (func, m, out_bytes) = ir::lower_line(
                 seq,
                 terms,
                 entry_depth,
@@ -515,7 +529,18 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
-            )
+            );
+            // R12: this line's module must carry its own struct destructors, or
+            // `drop` on a linear struct dies at `dlopen` with an undefined
+            // `sooth_struct_drop_N`.
+            let aggregate_destructors = ir::synthesize_aggregate_destructors(
+                &ir_lower_env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+            );
+            (func, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
         // checker's independently-inferred net effect) are the same depth
@@ -528,8 +553,10 @@ impl Session {
             "lowering emitted a different depth than the checker inferred"
         );
 
+        let mut funcs = vec![func];
+        funcs.extend(aggregate_destructors);
         let ssa = backend::qbe::emit(&IrModule {
-            funcs: vec![func],
+            funcs,
             structs: structs.layouts.clone(),
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),

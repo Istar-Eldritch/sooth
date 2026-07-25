@@ -165,10 +165,12 @@ pub struct StructLayout {
 }
 
 /// Whether a field's `IrType` is linear (R6/R7): the drop-spy directly, or a
-/// nested struct whose own layout is linear. Shared by struct-layout
-/// computation and every drop-glue site (`drop`, `S>fi`'s drop-the-rest,
-/// `S<fi`'s drop-on-overwrite, and the synthesized struct destructor), so the
-/// "what counts as linear" rule lives in one place.
+/// nested struct whose own layout is linear. Shared by every drop-glue site
+/// (`drop`, `S>fi`'s drop-the-rest, `S<fi`'s drop-on-overwrite, and the
+/// synthesized struct destructor). `ensure_struct` cannot call this: it
+/// computes `is_linear` itself, inline, while `layouts` is still being built
+/// (this function needs a fully-populated `structs.layouts` to look up a
+/// nested struct field's linearity).
 fn field_is_linear(ty: IrType, structs: &Structs) -> bool {
     match ty {
         IrType::Spy => true,
@@ -727,18 +729,9 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // R12: append a synthesized destructor for every linear struct type
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
-    for (idx, layout) in structs.layouts.iter().enumerate() {
-        if layout.is_linear {
-            funcs.push(synthesize_struct_destructor(
-                StructId::from_index(idx),
-                &env,
-                &resolve,
-                &structs,
-                &enums,
-                &arrays,
-            ));
-        }
-    }
+    funcs.extend(synthesize_aggregate_destructors(
+        &env, &resolve, &structs, &enums, &arrays,
+    ));
 
     Ok(IrModule {
         funcs,
@@ -746,6 +739,36 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         enums: enums.layouts,
         arrays: arrays.layouts,
     })
+}
+
+/// R12: every linear struct's synthesized destructor, one `IrFunc` per type.
+/// Callable by any lowering path that produces an `IrModule` (the build path's
+/// single module and the REPL's per-line/per-def module both need it, since
+/// `drop` calls it by symbol and the symbol must resolve wherever `drop` is
+/// compiled).
+pub fn synthesize_aggregate_destructors(
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> Vec<IrFunc> {
+    structs
+        .layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| layout.is_linear)
+        .map(|(idx, _)| {
+            synthesize_struct_destructor(
+                StructId::from_index(idx),
+                env,
+                resolve,
+                structs,
+                enums,
+                arrays,
+            )
+        })
+        .collect()
 }
 
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
