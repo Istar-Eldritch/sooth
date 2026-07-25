@@ -630,7 +630,7 @@ fn repl_word_definition_keeps_strict_linear_rule() {
     // rule (forgetting a linear value is a compile error, not an auto-drop),
     // and the bad definition reports and rolls back rather than killing the
     // session.
-    let out = run_session(&[": bad ( -- ) 7 __spy ;", "1 .", ":quit"]);
+    let out = run_session(&[": bad ( -- ) 7 __spy ;", "bad", "1 .", ":quit"]);
     let lines: Vec<&str> = out.lines().collect();
     assert!(
         lines[0].contains("linear value left on the stack") && lines[0].contains("`bad`"),
@@ -638,15 +638,21 @@ fn repl_word_definition_keeps_strict_linear_rule() {
         lines[0]
     );
     assert_eq!(
-        &lines[1..],
+        &lines[1..3],
         [
             "  body leaves a `__spy` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it",
             "  note: declared ( -- )",
-            "1",
-            "stack: (empty)",
         ],
         "the session should survive the bad definition and keep processing later lines: {out}"
     );
+    // The rejected definition must not have half-landed: calling `bad` next
+    // is an unknown word, not a call into a partially-registered one.
+    assert!(
+        lines[3].contains("unknown word") && lines[3].contains("bad"),
+        "expected `bad` to be unregistered after its rejected definition: {}",
+        lines[3]
+    );
+    assert_eq!(&lines[4..], ["1", "stack: (empty)"]);
 }
 
 // Phase 2: the synthesized struct destructor (`sooth_struct_drop_N`) must be
