@@ -64,8 +64,8 @@ Initial `mem[0]=N`, `mem[1]=0`. **N rule:** the criterion is *dispatch steps*, n
 
 | # | Proven where |
 |---|---|
-| 1 | `vm_dogfood_compiles_and_runs` (phase0) |
-| 2 | same native golden; asserted sum only reachable via the `Jz`/`Jmp` loop |
+| 1 | `vm_dispatch_loop_runs_in_constant_stack` (phase0) builds and runs the committed `examples/vm.sth`; `vm_dogfood_compiles_and_runs` proves the same VM at small N (temp-source copy) for a fast correctness check |
+| 2 | both goldens; the asserted sum is only reachable via the `Jz`/`Jmp` loop actually iterating |
 | 3 | `vm_dispatch_loop_runs_in_constant_stack` (phase0), N=100_000, overflow caught by `.code()` |
 | 4 | sum program uses payload *and* no-payload variants; no separate test |
 | 5 | builder + operand helpers; native golden |
