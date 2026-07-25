@@ -8,7 +8,7 @@
 //! on both depth and per-slot type: the `then` and `else` arms must leave the
 //! same stack shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl,
@@ -703,6 +703,25 @@ fn reject_variant_local(
     Ok(())
 }
 
+/// A name repeated in a binding list (`| a a |`) collapses to last-wins when
+/// zipped into the name -> type map, so the earlier binding (and any linear
+/// value held in it) is tracked by nothing and never disposed. Reject
+/// unconditionally, regardless of the bound type.
+fn reject_duplicate_local<'a>(
+    word_name: &str,
+    name: &'a str,
+    span: Span,
+    seen: &mut HashSet<&'a str>,
+) -> Result<(), String> {
+    if !seen.insert(name) {
+        return Err(format!(
+            "error: duplicate local `{name}` in `{word_name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
+            span.line
+        ));
+    }
+    Ok(())
+}
+
 /// The output-count / output-type mismatch check shared by a term body and a
 /// clause body (M6, X8): `final_stack` must match the declared outputs.
 /// Honors D8's literal coercion (a bare integer literal satisfies a declared
@@ -940,8 +959,11 @@ fn check_terms_word(
             effect_str(&word.effect),
         ));
     }
+    let dup_span = terms.first().map(|t| t.span).unwrap_or_default();
+    let mut seen_locals = HashSet::new();
     for name in locals {
         reject_variant_local(&word.name, name, "local", enums)?;
+        reject_duplicate_local(&word.name, name, dup_span, &mut seen_locals)?;
     }
 
     // Locals bind the topmost inputs; the remaining (deepest) inputs stay on the
@@ -1057,8 +1079,10 @@ fn check_clause_body(
     arrays: &mut Vec<ArrayDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
+    let mut seen_locals = HashSet::new();
     for name in &clause.locals {
         reject_variant_local(&word.name, name, "local", enums)?;
+        reject_duplicate_local(&word.name, name, clause.span, &mut seen_locals)?;
     }
 
     // The clause consumes the scrutinee and pushes the variant's fields
@@ -2183,6 +2207,25 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("body leaves 2 values"));
         assert!(err.contains("declares 1 outputs"));
+    }
+
+    #[test]
+    fn check_word_duplicate_local_is_error() {
+        let src = ": w ( i64 i64 -- i64 ) | a a | a ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`w`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_clause_body_duplicate_local_is_error() {
+        let src = "type: Shape | Circle r f64 s f64 ;
+             : area ( Shape -- f64 ) | Circle | a a | a ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`area`"), "unexpected message: {err}");
     }
 
     #[test]

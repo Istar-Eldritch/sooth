@@ -2072,3 +2072,43 @@ fn unconsumed_linear_clause_payload_is_error() {
         "the error should name the word: {err}"
     );
 }
+
+#[test]
+fn duplicate_word_entry_local_is_error() {
+    // A repeated binding name (`| s s |`) must not collapse to last-wins in
+    // the name -> type map: that would silently drop the earlier binding
+    // (and any linear value in it) from all tracking, with no diagnostic.
+    let err = linear_check_error(
+        ": hold ( __spy __spy -- )\n  | s s |\n  s drop ;\n\
+: main ( -- ) 1 __spy 2 __spy hold 99 . ;\n",
+    );
+    assert!(err.contains("duplicate local"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the duplicated local: {err}"
+    );
+    assert!(
+        err.contains("`hold`"),
+        "the error should name the word: {err}"
+    );
+}
+
+#[test]
+fn duplicate_clause_body_local_is_error() {
+    // The clause-body twin of `duplicate_word_entry_local_is_error`: the
+    // same last-wins hazard exists in the `| Variant | s s |` binding path.
+    let err = linear_check_error(
+        "type: R | Two a __spy b __spy ;\n\
+: use ( R -- ) | Two | s s | s drop ;\n\
+: main ( -- ) 1 __spy 2 __spy Two use ;\n",
+    );
+    assert!(err.contains("duplicate local"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the duplicated local: {err}"
+    );
+    assert!(
+        err.contains("`use`"),
+        "the error should name the word: {err}"
+    );
+}
