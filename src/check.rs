@@ -1386,6 +1386,22 @@ fn linear_local_unconsumed_error(word: &WordDef, local: &str, ty: Type, line: u3
     )
 }
 
+/// R13/R14: a linear local consumed on one `if` arm but not the other. Unlike
+/// `linear_local_unconsumed_error` (never touched at all), this local WAS
+/// disposed on one path; the bug is the other arm forgetting it, so the
+/// message points at the divergence rather than implying nothing happened.
+fn linear_local_maybe_moved_error(word: &WordDef, local: &str, ty: Type, line: u32) -> String {
+    format!(
+        "error: linear value `{}` is not consumed on every path in `{}` (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
+        local,
+        word.name,
+        line,
+        local,
+        ty,
+        effect_str(&word.effect),
+    )
+}
+
 /// R13 (D7): a linear value left on the stack beyond the declared outputs. The
 /// generic arity error (`check_outputs`) already rejects it, but a linear
 /// surplus gets its own wording: the fix is disposal, not an extra output slot.
@@ -1452,12 +1468,15 @@ fn check_linear_locals_consumed(
     line: u32,
 ) -> Result<(), String> {
     match moves.unconsumed().first() {
-        Some(local) => Err(linear_local_unconsumed_error(
-            word,
-            local,
-            locals[*local],
-            line,
-        )),
+        Some(local) => {
+            let ty = locals[*local];
+            match moves.states.get(*local) {
+                Some(MoveState::MaybeMoved(_)) => {
+                    Err(linear_local_maybe_moved_error(word, local, ty, line))
+                }
+                _ => Err(linear_local_unconsumed_error(word, local, ty, line)),
+            }
+        }
         None => Ok(()),
     }
 }
@@ -3744,7 +3763,10 @@ type: Boxed | Some h Holds | None ;\n")
     fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
         let err = check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;")
             .unwrap_err();
-        assert!(err.contains("never consumed"), "unexpected message: {err}");
+        assert!(
+            err.contains("not consumed on every path"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`__spy`"), "unexpected message: {err}");
     }
 

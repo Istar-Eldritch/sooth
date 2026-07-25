@@ -1807,9 +1807,14 @@ fn divergent_arm_use_is_error() {
 fn divergent_arm_unconsumed_is_error() {
     // Criterion 10c: consumed in one arm only and never referenced again. The
     // compiler errors at scope end rather than inserting a compensating drop.
+    // `s` WAS consumed on the `then` arm, so the diagnostic must not claim it
+    // was never touched: the bug is the `else` arm forgetting it.
     let err =
         linear_check_error(": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;\n");
-    assert!(err.contains("never consumed"), "unexpected message: {err}");
+    assert!(
+        err.contains("not consumed on every path"),
+        "unexpected message: {err}"
+    );
     assert!(err.contains("`__spy`"), "unexpected message: {err}");
 }
 
