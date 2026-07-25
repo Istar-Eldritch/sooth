@@ -12,7 +12,9 @@ use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::ast::{ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, Type, VariantDecl, WordDef};
+use crate::ast::{
+    ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, TermKind, Type, VariantDecl, WordDef,
+};
 use crate::check::{self, Sig};
 use crate::driver;
 use crate::ir::ArrayLayout;
@@ -389,7 +391,7 @@ impl Session {
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(&word, &self.enums, &env, &mut self.arrays)?;
+        check::check_def(&word, &self.enums, &env, &mut self.arrays, &self.structs)?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);
@@ -402,14 +404,29 @@ impl Session {
         let ir_lower_env = ir_arity_env(&env);
         let (structs, enums, arrays) =
             ir::build_registries(&self.structs, &self.enums, &self.arrays);
-        let mut func = {
+        let funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays)
+            let mut func =
+                ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays);
+            func.name = symbol.clone();
+            let mut funcs = vec![func];
+            // R12: this module must carry its own struct/enum destructors
+            // (they are not emitted elsewhere in the REPL, unlike the build
+            // path's single shared module), or `drop` on a linear struct/enum
+            // dies at `dlopen` with an undefined `sooth_struct_drop_N`/
+            // `sooth_enum_drop_N`.
+            funcs.extend(ir::synthesize_aggregate_destructors(
+                &ir_lower_env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+            ));
+            funcs
         };
-        func.name = symbol.clone();
 
         let ssa = backend::qbe::emit(&IrModule {
-            funcs: vec![func],
+            funcs,
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
@@ -434,9 +451,65 @@ impl Session {
     }
 
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
+        let (structs, enums, arrays) = self.run_terms(terms, writer)?;
+        let cells = self.top / 8;
+        writeln!(
+            writer,
+            "{}",
+            format_stack(
+                &self.buf[..cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts
+            )
+        )
+        .map_err(|e| format!("writing stdout: {e}"))
+    }
+
+    /// The end of the REPL-main scope: dispose every linear value still on the
+    /// residual stack, top first, since a live session's body is never
+    /// provably complete for the ordinary forgotten-disposal check. Word
+    /// definitions entered at the REPL keep the strict rule. Disposal goes
+    /// through the ordinary expression path (a synthesized run of `drop`
+    /// terms), so it reuses the same drop glue a compiled program does
+    /// instead of a second, drifting implementation.
+    fn dispose_residual(&mut self, writer: &mut impl Write) -> Result<(), String> {
+        let Some(deepest) = self
+            .types
+            .iter()
+            .position(|ty| !check::is_copy(*ty, &self.structs, &self.enums, &self.arrays))
+        else {
+            return Ok(());
+        };
+        let terms: Vec<Term> = (deepest..self.types.len())
+            .map(|_| Term {
+                kind: TermKind::Call("drop".to_string()),
+                span: Span::default(),
+            })
+            .collect();
+        self.run_terms(&terms, writer).map(|_| ())
+    }
+
+    /// Compile and run one bare term sequence against the carried stack,
+    /// committing the resulting stack state. Returns the aggregate registries it
+    /// built, so the caller can render the residual stack from the same
+    /// layouts.
+    fn run_terms(
+        &mut self,
+        terms: &[Term],
+        writer: &mut impl Write,
+    ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
-        let net_stack = check::infer_line(terms, &self.types, &env, &mut self.arrays)?;
+        let net_stack = check::infer_line(
+            terms,
+            &self.types,
+            &env,
+            &mut self.arrays,
+            &self.structs,
+            &self.enums,
+        )?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
@@ -445,9 +518,9 @@ impl Session {
         let seq = self.seq;
         let (structs, enums, arrays) =
             ir::build_registries(&self.structs, &self.enums, &self.arrays);
-        let (func, m, out_bytes) = {
+        let (func, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
-            ir::lower_line(
+            let (func, m, out_bytes) = ir::lower_line(
                 seq,
                 terms,
                 entry_depth,
@@ -457,7 +530,18 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
-            )
+            );
+            // R12: this line's module must carry its own struct/enum
+            // destructors, or `drop` on a linear struct/enum dies at `dlopen`
+            // with an undefined `sooth_struct_drop_N`/`sooth_enum_drop_N`.
+            let aggregate_destructors = ir::synthesize_aggregate_destructors(
+                &ir_lower_env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+            );
+            (func, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
         // checker's independently-inferred net effect) are the same depth
@@ -470,8 +554,10 @@ impl Session {
             "lowering emitted a different depth than the checker inferred"
         );
 
+        let mut funcs = vec![func];
+        funcs.extend(aggregate_destructors);
         let ssa = backend::qbe::emit(&IrModule {
-            funcs: vec![func],
+            funcs,
             structs: structs.layouts.clone(),
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),
@@ -514,20 +600,7 @@ impl Session {
         self.types = net_stack;
         self.libs.push(lib);
 
-        let cells = self.top / 8;
-        writeln!(
-            writer,
-            "{}",
-            format_stack(
-                &self.buf[..cells],
-                &self.types,
-                &structs.layouts,
-                &enums.layouts,
-                &arrays.layouts
-            )
-        )
-        .map_err(|e| format!("writing stdout: {e}"))?;
-        Ok(())
+        Ok((structs, enums, arrays))
     }
 }
 
@@ -537,9 +610,18 @@ impl Default for Session {
     }
 }
 
-/// The read-eval-print loop: blank lines are skipped silently, EOF exits
-/// cleanly, and any stage error prints the diagnostic without mutating
-/// session state.
+/// End the session: run the residual stack's destructors (the REPL-main scope
+/// end), reporting a failure the way any other line's failure is reported.
+fn end_session(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
+    if let Err(e) = session.dispose_residual(writer) {
+        writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The read-eval-print loop: blank lines are skipped silently, `:quit` or EOF
+/// exits cleanly (disposing any residual linear values first), and any stage
+/// error prints the diagnostic without mutating session state.
 pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
     let mut session = Session::new();
     let mut line = String::new();
@@ -549,11 +631,14 @@ pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Strin
             .read_line(&mut line)
             .map_err(|e| format!("reading stdin: {e}"))?;
         if n == 0 {
-            return Ok(());
+            return end_session(&mut session, &mut writer);
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        if trimmed == ":quit" {
+            return end_session(&mut session, &mut writer);
         }
         if let Err(e) = session.eval_line(trimmed, &mut writer) {
             writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
@@ -643,6 +728,7 @@ mod tests {
             size: 16,
             align: 8,
             fields: vec![],
+            is_linear: false,
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
         assert_eq!(

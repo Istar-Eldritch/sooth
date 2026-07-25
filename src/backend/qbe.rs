@@ -8,7 +8,7 @@ use std::fmt::Write;
 
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
-    Terminator, Value, OOB_TRAP_SYMBOL,
+    Terminator, Value, OOB_TRAP_SYMBOL, SPY_DROP_SYMBOL,
 };
 
 /// The backend's view of a program's aggregate layouts: the struct and enum
@@ -43,6 +43,10 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oobfmt = { b \"sooth: array index out of range (line %ld)\\n  index %ld is out of bounds for length %ld\\n\", b 0 }\n",
     );
+    // The drop-spy destructor's message (R6): `drop <tag>` on stdout, through
+    // the same `printf` path `.` uses, so a golden can assert drop count and
+    // order interleaved with ordinary output.
+    out.push_str("data $spyfmt = { b \"drop %ld\\n\", b 0 }\n");
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
     // array type (D9, R20) then references an already-declared `:E`/`:arr_N`.
@@ -62,6 +66,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
         emit_func(&mut out, func, layouts);
     }
     emit_oob_trap(&mut out);
+    emit_spy_drop(&mut out);
     Ok(out)
 }
 
@@ -189,6 +194,9 @@ fn width(ty: IrType) -> &'static str {
         // it fills the `l` register (its width flows from `WORD_WIDTH`, R15).
         IrType::Usize => "l",
         IrType::Ptr => "l",
+        // A spy is its `i64` tag in a register; only the frontend distinguishes
+        // it (to emit the destructor call on `drop`).
+        IrType::Spy => "l",
         // A struct/enum/array value is a pointer in a register (`l`); its
         // aggregate `:S`/`:E`/`:A` type is only spelled in ABI positions.
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => "l",
@@ -220,6 +228,7 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Float { .. } => "d".to_string(),
         IrType::Usize => "l".to_string(),
         IrType::Ptr => "l".to_string(),
+        IrType::Spy => "l".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
@@ -245,6 +254,7 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Float { .. } => ("d", "loadd"),
         IrType::Usize => ("l", "loadl"),
         IrType::Ptr => ("l", "loadl"),
+        IrType::Spy => ("l", "loadl"),
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
@@ -262,6 +272,7 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Float { .. } => "stored",
         IrType::Usize => "storel",
         IrType::Ptr => "storel",
+        IrType::Spy => "storel",
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
@@ -471,6 +482,9 @@ fn norm_scalar(ty: IrType) -> IrType {
             bits: 64,
             signed: false,
         },
+        // A spy is its `i64` tag, so the spy constructor's relabel `Conv`
+        // (R6) lands in the same-width integer arm and emits a plain `copy`.
+        IrType::Spy => IrType::I64,
         other => other,
     }
 }
@@ -520,6 +534,17 @@ fn emit_oob_trap(out: &mut String) {
     out.push_str("\tcall $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)\n");
     out.push_str("\tcall $exit(w 1)\n");
     out.push_str("\thlt\n");
+    out.push_str("}\n");
+}
+
+/// Emit the drop-spy's destructor (R5/R6): print `drop <tag>` and return. Every
+/// `drop` of a `__spy` is a `Call` to this, so the count, order and timing of
+/// destructor runs are exactly what the program's `drop`s say they are.
+fn emit_spy_drop(out: &mut String) {
+    writeln!(out, "\nfunction ${SPY_DROP_SYMBOL}(l %tag) {{").unwrap();
+    out.push_str("@start\n");
+    out.push_str("\tcall $printf(l $spyfmt, l %tag, ...)\n");
+    out.push_str("\tret\n");
     out.push_str("}\n");
 }
 
@@ -770,6 +795,9 @@ fn emit_instr(
             // fills the `l` register on this target, so no widening is needed.
             IrType::Usize => writeln!(out, "\tcall $printf(l $ufmt, l {}, ...)", val(*v)),
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
+            IrType::Spy => {
+                unreachable!("__spy is not a printable scalar; checker rejects it (R16)")
+            }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
             }
@@ -1824,6 +1852,37 @@ mod tests {
         assert!(
             jmp_targets.iter().filter(|t| **t == target).count() >= 2,
             "expected the entry jump and the back-edge jump to target the same header label: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_spy_destructor_prints_the_tag_and_returns() {
+        // R5/R6: the destructor is a plain function printing `drop <tag>`; a
+        // `drop` of a `__spy` is a call to it, so drop order is exactly the
+        // order the calls are emitted in.
+        let il = emit_src(": w ( -- ) 7 __spy drop ;");
+        assert!(
+            il.contains("data $spyfmt = { b \"drop %ld"),
+            "expected the destructor's format string: {il}"
+        );
+        assert!(
+            il.contains("function $sooth_spy_drop(l %tag)"),
+            "expected the destructor definition: {il}"
+        );
+        assert!(
+            il.contains("call $sooth_spy_drop(l "),
+            "expected `drop` to call the destructor: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_spy_value_uses_l_width() {
+        // A spy is its `i64` tag in a register: the constructor's relabel is a
+        // plain `l`-width copy, never an aggregate or a `w`.
+        let il = emit_src(": w ( -- ) 7 __spy drop ;");
+        assert!(
+            il.lines().any(|l| l.trim().ends_with("=l copy %v0")),
+            "expected an l-width relabel of the tag: {il}"
         );
     }
 }

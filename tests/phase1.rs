@@ -583,3 +583,173 @@ fn vm_dogfood_runs_in_repl() {
         ]
     );
 }
+
+// Phase 3 Slice 1, criterion 14: the REPL session is the interactive program's
+// "main" word and `:quit` is the end of its scope, so residual linear values are
+// disposed there (top first) rather than leaked. A live session can never prove
+// "you forgot to dispose this" at compile time, since the next line might
+// consume it, but exactly-once still holds.
+
+#[test]
+fn repl_quit_disposes_residual_linear() {
+    let out = run_session(&["7 __spy", "8 __spy", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 7", "stack: 7 8", "drop 8", "drop 7"],
+        "residual spies should be disposed at `:quit`, top of stack first"
+    );
+}
+
+#[test]
+fn repl_within_one_line_create_and_drop_prints_once() {
+    let out = run_session(&["7 __spy drop", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["drop 7", "stack: (empty)"],
+        "a spy created and dropped within one line should print exactly once"
+    );
+}
+
+#[test]
+fn repl_explicit_drop_not_redisposed_at_quit() {
+    let out = run_session(&["7 __spy", "drop", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 7", "drop 7", "stack: (empty)"],
+        "a spy dropped on an earlier line prints once, not again at `:quit`"
+    );
+}
+
+#[test]
+fn repl_word_definition_keeps_strict_linear_rule() {
+    // `:quit`'s residual disposal is a REPL-session-only relaxation; a word
+    // DEFINITION typed at the REPL is still checked by the ordinary strict
+    // rule (forgetting a linear value is a compile error, not an auto-drop),
+    // and the bad definition reports and rolls back rather than killing the
+    // session.
+    let out = run_session(&[": bad ( -- ) 7 __spy ;", "bad", "1 .", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].contains("linear value left on the stack") && lines[0].contains("`bad`"),
+        "expected the surplus-linear diagnostic naming `bad`: {}",
+        lines[0]
+    );
+    assert_eq!(
+        &lines[1..3],
+        [
+            "  body leaves a `__spy` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it",
+            "  note: declared ( -- )",
+        ],
+        "the session should survive the bad definition and keep processing later lines: {out}"
+    );
+    // The rejected definition must not have half-landed: calling `bad` next
+    // is an unknown word, not a call into a partially-registered one.
+    assert!(
+        lines[3].contains("unknown word") && lines[3].contains("bad"),
+        "expected `bad` to be unregistered after its rejected definition: {}",
+        lines[3]
+    );
+    assert_eq!(&lines[4..], ["1", "stack: (empty)"]);
+}
+
+// Phase 2: the synthesized struct destructor (`sooth_struct_drop_N`) must be
+// emitted into every REPL module that can reach a `drop` on that struct type
+// (a bare line's module, a `: word ;` definition's module, and the synthesized
+// `:quit` disposal), not only the build path's single shared module.
+
+#[test]
+fn repl_bare_line_drops_linear_struct() {
+    let out = run_session(&[
+        "type: Pair a __spy b __spy ;",
+        "1 __spy 2 __spy Pair",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Pair",
+            "stack: <Pair>",
+            "drop 1",
+            "drop 2",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
+fn repl_word_definition_drops_linear_struct() {
+    let out = run_session(&[
+        "type: Pair a __spy b __spy ;",
+        ": mk ( -- ) 1 __spy 2 __spy Pair drop ;",
+        "mk",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Pair",
+            "defined mk",
+            "drop 1",
+            "drop 2",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
+fn repl_quit_disposes_residual_linear_struct() {
+    let out = run_session(&[
+        "type: Pair a __spy b __spy ;",
+        "1 __spy 2 __spy Pair",
+        ":quit",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Pair", "stack: <Pair>", "drop 1", "drop 2"],
+        "a residual linear struct should be disposed at `:quit`, field-order drop"
+    );
+}
+
+// Phase 4: the synthesized enum destructor (`sooth_enum_drop_N`) must be
+// emitted into every REPL module that can reach a `drop` on that enum type,
+// exactly like the struct case above; a missing symbol here is a `dlopen`
+// failure, not a compile error, so it needs its own coverage.
+
+#[test]
+fn repl_word_definition_drops_linear_enum() {
+    let out = run_session(&[
+        "type: Item | Empty | Full v __spy ;",
+        ": mk ( -- ) 1 __spy Full drop ;",
+        "mk",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Item",
+            "defined mk",
+            "drop 1",
+            "stack: (empty)"
+        ]
+    );
+}
+
+#[test]
+fn repl_quit_disposes_residual_linear_enum() {
+    let out = run_session(&[
+        "type: Item | Empty | Full v __spy ;",
+        "1 __spy Full",
+        ":quit",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Item", "stack: <Item>", "drop 1"],
+        "a residual linear enum should be disposed at `:quit`, tag-dispatched"
+    );
+}

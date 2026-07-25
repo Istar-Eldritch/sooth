@@ -516,7 +516,10 @@ impl<'t> Parser<'t> {
     /// `elem` is a nested type expression, `count` a decimal literal `>= 1`
     /// with no const-expr evaluation. Resolving it interns the `(element,
     /// count)` shape (structurally deduped) and returns the resulting
-    /// `Type::Array`.
+    /// `Type::Array`. A linear `elem` is not rejected here: struct/enum field
+    /// lists aren't resolved until after the whole module is parsed (see
+    /// `parse`), so the parser cannot yet know whether a named type is
+    /// linear. The checker rejects it once `is_copy` is answerable.
     fn parse_array_type_expr(&mut self) -> Result<Type, String> {
         self.expect(Token::LBracket)?;
         let element = self.parse_type_expr()?;
@@ -1407,6 +1410,21 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("4294967297"), "unexpected message: {err}");
         assert!(err.contains("4294967295"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_array_type_linear_element_in_signature_parses_ok() {
+        // The parser cannot know `__spy` is linear until the checker resolves
+        // it (struct/enum field lists aren't filled in until the whole
+        // module is parsed); rejection happens later, in the checker.
+        let result = parse_src(": w ( [__spy 2] -- ) drop ;");
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+    }
+
+    #[test]
+    fn parse_typedef_linear_array_field_parses_ok() {
+        let result = parse_src("type: Bag xs [__spy 2] ;");
+        assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
     #[test]

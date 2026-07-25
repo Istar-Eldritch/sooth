@@ -8,11 +8,11 @@
 //! on both depth and per-slot type: the `then` and `else` arms must leave the
 //! same stack shape.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl,
-    StructId, Term, TermKind, Type, VariantDecl, WordBody, WordDef,
+    StructId, Term, TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -117,31 +117,179 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
 }
 
 /// The builtin word -> typed-effect table, as the seed of a checking env.
-/// Every builtin word is structural and handled directly in `check_term`
+/// Every *structural* builtin is handled directly in `check_term`
 /// (`check_shuffle`/`check_operator`): the stack shuffles, the numeric-tower
 /// operators, and `.` (type-directed over any printable scalar, not a fixed
-/// `( i64 -- )`) all dispatch on the concrete operand type rather than a
-/// fixed signature, so this table is currently empty.
+/// `( i64 -- )`) all dispatch on the concrete operand type rather than a fixed
+/// signature, so they are absent here. The drop-spy constructor `__spy ( i64
+/// -- __spy )` (R6) is the one builtin with a fixed effect, so it is the one
+/// entry.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    HashMap::new()
+    HashMap::from([(
+        SPY_NAME.to_string(),
+        Sig {
+            inputs: vec![Type::I64],
+            outputs: vec![Type::Spy],
+        },
+    )])
+}
+
+/// R2/R7: whether `ty` is `Copy` (freely duplicated and discarded) rather than
+/// linear (used exactly once, disposed by `drop`). The drop-spy is linear;
+/// a struct or enum is linear iff any field/variant-payload field is
+/// (transitively), so a struct-of-struct-of-spy or an enum carrying one is
+/// linear too. `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s
+/// fields; neither can recurse into itself (`check_recursion` rejects that
+/// first), so this always terminates.
+pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[ArrayDecl]) -> bool {
+    match ty {
+        Type::Spy => false,
+        Type::Struct(id, _) => structs[id.index()]
+            .fields
+            .iter()
+            .all(|(_, field_ty)| is_copy(*field_ty, structs, enums, arrays)),
+        Type::Enum(id, _) => enums[id.index()]
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .all(|(_, field_ty)| is_copy(*field_ty, structs, enums, arrays)),
+        Type::Array(id, _) => is_copy(arrays[id.index()].element, structs, enums, arrays),
+        _ => true,
+    }
+}
+
+/// R14: the move-state of one linear local, a three-value lattice. `Moved` and
+/// `MaybeMoved` carry the site that consumed the value, so a later use can name
+/// it; `MaybeMoved` is the join of disagreeing arms (consumed on one path only),
+/// which is neither usable nor accepted as disposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveState {
+    Live,
+    Moved(Span),
+    MaybeMoved(Span),
+}
+
+/// The move-state of every *linear* local in the scope being checked, threaded
+/// `&mut` through the walker (R14). A Copy local never appears: it carries no
+/// ownership obligation, so mentioning it twice is ordinary reuse.
+#[derive(Debug, Clone, Default)]
+struct Moves {
+    states: HashMap<String, MoveState>,
+}
+
+impl Moves {
+    fn new(
+        locals: &HashMap<String, Type>,
+        structs: &[StructDecl],
+        enums: &[EnumDecl],
+        arrays: &[ArrayDecl],
+    ) -> Moves {
+        Moves {
+            states: locals
+                .iter()
+                .filter(|(_, ty)| !is_copy(**ty, structs, enums, arrays))
+                .map(|(name, _)| (name.clone(), MoveState::Live))
+                .collect(),
+        }
+    }
+
+    /// R3 (D2): mentioning a linear local moves its value out. `Ok(())` for a
+    /// Copy local (absent from the map) or a first mention; `Err(site)` names
+    /// the move that already consumed it.
+    fn take(&mut self, name: &str, span: Span) -> Result<(), Span> {
+        match self.states.get(name) {
+            None => Ok(()),
+            Some(MoveState::Live) => {
+                self.states.insert(name.to_string(), MoveState::Moved(span));
+                Ok(())
+            }
+            Some(MoveState::Moved(site) | MoveState::MaybeMoved(site)) => Err(*site),
+        }
+    }
+
+    /// The locals still holding an unconsumed value: `Live` (never mentioned)
+    /// or `MaybeMoved` (consumed on one branch only), name-sorted so a scope
+    /// with two of them always reports the same one.
+    fn unconsumed(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .states
+            .iter()
+            .filter(|(_, st)| !matches!(st, MoveState::Moved(_)))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// R14: combine two `if` arms at the join. Equal states are preserved; any
+    /// disagreement (`Live` vs `Moved`, or anything vs `MaybeMoved`) yields
+    /// `MaybeMoved`, carrying whichever arm's move site exists, so the value is
+    /// neither usable past the join nor counted as disposed at scope end. The
+    /// checker never inserts a compensating drop.
+    fn join(then_arm: Moves, else_arm: Moves) -> Moves {
+        let mut states = then_arm.states;
+        for (name, state) in states.iter_mut() {
+            let other = else_arm.states[name.as_str()];
+            *state = match (*state, other) {
+                (MoveState::Live, MoveState::Live) => MoveState::Live,
+                // Consumed on both paths (at two different sites, which is
+                // still exactly once at runtime), so the join stays `Moved`.
+                (MoveState::Moved(site), MoveState::Moved(_)) => MoveState::Moved(site),
+                (MoveState::Moved(site) | MoveState::MaybeMoved(site), _)
+                | (_, MoveState::Moved(site) | MoveState::MaybeMoved(site)) => {
+                    MoveState::MaybeMoved(site)
+                }
+            };
+        }
+        Moves { states }
+    }
 }
 
 /// Error context for the shared stack simulation: a full word (with its
 /// declared effect and typed locals) or a bare REPL line (no signature to cite).
+/// Both carry the struct/enum registries `is_copy` needs to resolve a
+/// `Type::Struct`/`Type::Enum`'s linearity, so `dup`/`over`/back-edge checking
+/// works identically whether the caller is a compiled word or a REPL line.
 enum Ctx<'a> {
     Word {
         name: &'a str,
         effect: &'a StackEffect,
         locals: &'a HashMap<String, Type>,
+        structs: &'a [StructDecl],
+        enums: &'a [EnumDecl],
     },
-    Line,
+    Line {
+        structs: &'a [StructDecl],
+        enums: &'a [EnumDecl],
+    },
 }
 
 impl Ctx<'_> {
     fn local_type(&self, name: &str) -> Option<Type> {
         match self {
             Ctx::Word { locals, .. } => locals.get(name).copied(),
-            Ctx::Line => None,
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    fn structs(&self) -> &[StructDecl] {
+        match self {
+            Ctx::Word { structs, .. } | Ctx::Line { structs, .. } => structs,
+        }
+    }
+
+    fn enums(&self) -> &[EnumDecl] {
+        match self {
+            Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
+        }
+    }
+
+    /// The enclosing word's name, for recognizing a self-tail-call back-edge
+    /// (R15). A bare REPL line has no word to recurse into.
+    fn word_name(&self) -> Option<&str> {
+        match self {
+            Ctx::Word { name, .. } => Some(name),
+            Ctx::Line { .. } => None,
         }
     }
 }
@@ -169,16 +317,24 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // tail-call graph, after signature registration and before body checking.
     check_tail_call_cycles(&module.words)?;
 
+    check_main_effect(
+        &module.words,
+        &module.structs,
+        &module.enums,
+        &module.arrays,
+    )?;
+
     // Split the borrow so a word body can intern into `arrays` while reading
-    // `words`/`enums`.
+    // `words`/`enums`/`structs`.
     let Module {
         words,
+        structs,
         enums,
         arrays,
         ..
     } = module;
     for word in words.iter() {
-        check_word(word, enums, &env, arrays)?;
+        check_word(word, enums, &env, arrays, structs)?;
     }
     Ok(())
 }
@@ -195,6 +351,37 @@ pub fn check_types(
 ) -> Result<(), String> {
     check_duplicate_type_names(structs, enums)?;
     check_recursion(structs, enums, arrays)?;
+    check_no_linear_array_elements(structs, enums, arrays)?;
+    Ok(())
+}
+
+/// Arrays of linear elements are not supported yet: rejected here, over the
+/// module's interned array registry, rather than in the parser, because
+/// linearity (`is_copy`) is only answerable once every struct/enum field list
+/// is resolved, which happens after the whole module is parsed. Every array
+/// type named anywhere (a word signature slot, a struct field, an enum
+/// variant field) is interned into this one registry, and `is_copy` already
+/// walks an array's element transitively, so this single sweep catches a
+/// direct `[__spy N]` and an indirect `[LinearStruct N]` alike. Runs after
+/// `check_recursion`, which rules out a self-referential struct/enum/array
+/// first, so `is_copy`'s recursion over the field graph is guaranteed to
+/// terminate. `ArrayDecl` carries no span (an array shape has no declared
+/// name a pre-pass could register), so the error names the array/element
+/// types rather than inventing a wrong line number.
+fn check_no_linear_array_elements(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    for decl in arrays {
+        if !is_copy(decl.element, structs, enums, arrays) {
+            return Err(format!(
+                "error: linear array elements are not supported yet: array type `{}` has element `{}`, which is linear and has no `Copy` instance",
+                decl.name_static,
+                decl.element.name(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -489,10 +676,11 @@ pub fn check_def(
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env, arrays)
+    check_word(word, enums, &env, arrays, structs)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -503,10 +691,53 @@ pub fn infer_line(
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
 ) -> Result<Vec<Type>, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
-    let final_stack = check_terms(terms, initial, &Ctx::Line, env, arrays)?;
+    // A bare line binds no locals (so it has no move-state) and is not a word
+    // body (so nothing in it is in tail position).
+    let final_stack = check_terms(
+        terms,
+        initial,
+        &Ctx::Line { structs, enums },
+        env,
+        arrays,
+        &mut Moves::default(),
+        false,
+    )?;
     Ok(final_stack.into_iter().map(|s| s.ty).collect())
+}
+
+/// `main` is the program's entry point: nothing in the program calls it, so
+/// a linear value in its declared effect either leaks past the program
+/// boundary unnoticed (an output) or runs a destructor over an
+/// uninitialised ABI register (an input). A non-empty Copy-typed effect on
+/// `main` stays legal; only a non-Copy type in either side is rejected.
+fn check_main_effect(
+    words: &[WordDef],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    let Some(main) = words.iter().find(|w| w.name == "main") else {
+        return Ok(());
+    };
+    let offending = main
+        .effect
+        .inputs
+        .iter()
+        .chain(&main.effect.outputs)
+        .map(|slot| slot.ty)
+        .find(|ty| !is_copy(*ty, structs, enums, arrays));
+    let Some(ty) = offending else {
+        return Ok(());
+    };
+    let span = word_span(main);
+    Err(format!(
+        "error: `main` (line {}) cannot declare a linear type `{}` in its stack effect\n  note: declared {}",
+        span.line, ty, effect_str(&main.effect)
+    ))
 }
 
 fn effect_str(effect: &StackEffect) -> String {
@@ -547,6 +778,25 @@ fn reject_variant_local(
     Ok(())
 }
 
+/// A name repeated in a binding list (`| a a |`) collapses to last-wins when
+/// zipped into the name -> type map, so the earlier binding (and any linear
+/// value held in it) is tracked by nothing and never disposed. Reject
+/// unconditionally, regardless of the bound type.
+fn reject_duplicate_local<'a>(
+    word_name: &str,
+    name: &'a str,
+    span: Span,
+    seen: &mut HashSet<&'a str>,
+) -> Result<(), String> {
+    if !seen.insert(name) {
+        return Err(format!(
+            "error: duplicate local `{name}` in `{word_name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
+            span.line
+        ));
+    }
+    Ok(())
+}
+
 /// The output-count / output-type mismatch check shared by a term body and a
 /// clause body (M6, X8): `final_stack` must match the declared outputs.
 /// Honors D8's literal coercion (a bare integer literal satisfies a declared
@@ -556,8 +806,22 @@ fn check_outputs(
     final_stack: &[Slot],
     declared: &[Type],
     line: u32,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
 ) -> Result<(), String> {
     if final_stack.len() != declared.len() {
+        // R13/R2: a *linear* surplus value is the forgotten-disposal case, so it
+        // gets the disposal wording (and names its type) before the generic
+        // arity error a surplus Copy value keeps.
+        if let Some(slot) = final_stack
+            .get(declared.len()..)
+            .unwrap_or_default()
+            .iter()
+            .find(|s| !is_copy(s.ty, structs, enums, arrays))
+        {
+            return Err(surplus_linear_value_error(word, slot.ty, line));
+        }
         return Err(format!(
             "error: stack effect mismatch in `{}` (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
             word.name, line, final_stack.len(), declared.len(), effect_str(&word.effect),
@@ -734,6 +998,7 @@ fn check_word(
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
@@ -744,9 +1009,9 @@ fn check_word(
     }
     match &word.body {
         WordBody::Terms { locals, terms } => {
-            check_terms_word(word, enums, locals, terms, env, arrays)
+            check_terms_word(word, enums, locals, terms, env, arrays, structs)
         }
-        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays),
+        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays, structs),
     }
 }
 
@@ -757,6 +1022,7 @@ fn check_terms_word(
     terms: &[Term],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     let inputs = word.effect.inputs.len();
 
@@ -769,8 +1035,11 @@ fn check_terms_word(
             effect_str(&word.effect),
         ));
     }
+    let dup_span = terms.first().map(|t| t.span).unwrap_or_default();
+    let mut seen_locals = HashSet::new();
     for name in locals {
         reject_variant_local(&word.name, name, "local", enums)?;
+        reject_duplicate_local(&word.name, name, dup_span, &mut seen_locals)?;
     }
 
     // Locals bind the topmost inputs; the remaining (deepest) inputs stay on the
@@ -789,12 +1058,16 @@ fn check_terms_word(
         name: &word.name,
         effect: &word.effect,
         locals: &local_types,
+        structs,
+        enums,
     };
-    let final_stack = check_terms(terms, initial, &ctx, env, arrays)?;
+    let mut moves = Moves::new(&local_types, structs, enums, arrays);
+    let final_stack = check_terms(terms, initial, &ctx, env, arrays, &mut moves, true)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
-    check_outputs(word, &final_stack, &declared, line)
+    check_outputs(word, &final_stack, &declared, line, structs, enums, arrays)?;
+    check_linear_locals_consumed(word, &local_types, &moves, line)
 }
 
 /// Check a clause-style word (D4, D5, D7, M6, R11): the top input must be an
@@ -807,6 +1080,7 @@ fn check_clause_word(
     clauses: &[Clause],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
         Some(Type::Enum(id, _)) => id,
@@ -855,6 +1129,7 @@ fn check_clause_word(
             &declared,
             env,
             arrays,
+            structs,
         )?;
     }
     for variant in &enum_decl.variants {
@@ -878,9 +1153,12 @@ fn check_clause_body(
     declared: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
+    let mut seen_locals = HashSet::new();
     for name in &clause.locals {
         reject_variant_local(&word.name, name, "local", enums)?;
+        reject_duplicate_local(&word.name, name, clause.span, &mut seen_locals)?;
     }
 
     // The clause consumes the scrutinee and pushes the variant's fields
@@ -913,14 +1191,26 @@ fn check_clause_body(
         name: &word.name,
         effect: &word.effect,
         locals: &local_types,
+        structs,
+        enums,
     };
-    let final_stack = check_terms(&clause.body, stack_after_bind, &ctx, env, arrays)?;
+    let mut moves = Moves::new(&local_types, structs, enums, arrays);
+    let final_stack = check_terms(
+        &clause.body,
+        stack_after_bind,
+        &ctx,
+        env,
+        arrays,
+        &mut moves,
+        true,
+    )?;
     let line = clause
         .body
         .last()
         .map(|t| t.span.line)
         .unwrap_or(clause.span.line);
-    check_outputs(word, &final_stack, declared, line)
+    check_outputs(word, &final_stack, declared, line, structs, enums, arrays)?;
+    check_linear_locals_consumed(word, &local_types, &moves, line)
 }
 
 fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
@@ -929,7 +1219,7 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
             "error: unknown word `{}` in `{}` (line {})",
             name, wname, span.line
         ),
-        Ctx::Line => format!("error: unknown word `{name}`"),
+        Ctx::Line { .. } => format!("error: unknown word `{name}`"),
     }
 }
 
@@ -939,7 +1229,7 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
             "error: stack effect mismatch in `{}` (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
             name, span.line, op, needs, holds, effect_str(effect),
         ),
-        Ctx::Line => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
+        Ctx::Line { .. } => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
     }
 }
 
@@ -949,7 +1239,7 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
             "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
             name, span.line, op, expected, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
         }
     }
@@ -964,7 +1254,7 @@ fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires two operands of the same numeric type, found `{a}` and `{b}`"
         ),
     }
@@ -978,7 +1268,7 @@ fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
             "error: type mismatch in `{}` (line {})\n  `/` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
             name, span.line, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `/` requires two operands of the same float type (integer division is unsupported), found `{a}` and `{b}`"
         ),
     }
@@ -992,7 +1282,7 @@ fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
             "error: type mismatch in `{}` (line {})\n  `mod` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `mod` requires two operands of the same integer type, found `{a}` and `{b}`"
         ),
     }
@@ -1007,7 +1297,7 @@ fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or bool type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires two operands of the same integer or bool type, found `{a}` and `{b}`"
         ),
     }
@@ -1020,7 +1310,7 @@ fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String 
             "error: type mismatch in `{}` (line {})\n  `not` requires an integer or bool operand, found `{}`\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `not` requires an integer or bool operand, found `{found}`"
         ),
     }
@@ -1033,7 +1323,7 @@ fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
             "error: type mismatch in `{}` (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires an integer value operand, found `{found}`"
         ),
     }
@@ -1046,7 +1336,7 @@ fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
             "error: type mismatch in `{}` (line {})\n  `{}` requires an `i64` shift count, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires an `i64` shift count, found `{found}`"
         ),
     }
@@ -1060,7 +1350,7 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
             "error: type mismatch in `{}` (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires a numeric source, found `{found}`")
         }
     }
@@ -1076,9 +1366,149 @@ fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String 
             "error: type mismatch in `{}` (line {})\n  `.` requires a printable scalar, found `{}`\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `.` requires a printable scalar, found `{found}`")
         }
+    }
+}
+
+/// R4 (D3): `dup`/`over` applied to a non-`Copy` value, in the DESIGN.md form.
+/// A linear value has no bits to copy: the only ways to get a second one are to
+/// thread this one through or to acquire another explicitly.
+fn cannot_copy_linear_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `{}` a value of type `{}` in `{}` (line {})\n  `{}` is linear: it owns a resource and has no `Copy` instance, so there are no bits to copy; thread the value through instead\n  note: declared {}",
+            op, found, name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `{op}` a value of type `{found}`: `{found}` is linear and has no `Copy` instance"
+        ),
+    }
+}
+
+/// R3 (D2): a linear local mentioned again after its value was moved out, the
+/// diagnostic naming the earlier move site.
+fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: use after move in `{}` (line {})\n  local `{}` of type `{}` was moved at line {}, col {}; `{}` is linear, so it is used exactly once\n  note: declared {}",
+            name, span.line, local, ty, site.line, site.col, ty, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: use after move: local `{local}` of type `{ty}` was moved at line {}, col {}",
+            site.line, site.col
+        ),
+    }
+}
+
+/// R13/R14: a linear local still holding a value at the end of its scope,
+/// either never mentioned or consumed on one branch only. Nothing is
+/// auto-dropped, so this is an error rather than a compiler-inserted disposal.
+fn linear_local_unconsumed_error(word: &WordDef, local: &str, ty: Type, line: u32) -> String {
+    format!(
+        "error: linear value `{}` is never consumed in `{}` (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
+        local,
+        word.name,
+        line,
+        local,
+        ty,
+        effect_str(&word.effect),
+    )
+}
+
+/// R13/R14: a linear local consumed on one `if` arm but not the other. Unlike
+/// `linear_local_unconsumed_error` (never touched at all), this local WAS
+/// disposed on one path; the bug is the other arm forgetting it, so the
+/// message points at the divergence rather than implying nothing happened.
+fn linear_local_maybe_moved_error(word: &WordDef, local: &str, ty: Type, line: u32) -> String {
+    format!(
+        "error: linear value `{}` is not consumed on every path in `{}` (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
+        local,
+        word.name,
+        line,
+        local,
+        ty,
+        effect_str(&word.effect),
+    )
+}
+
+/// R13 (D7): a linear value left on the stack beyond the declared outputs. The
+/// generic arity error (`check_outputs`) already rejects it, but a linear
+/// surplus gets its own wording: the fix is disposal, not an extra output slot.
+fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
+    format!(
+        "error: linear value left on the stack in `{}` (line {})\n  body leaves a `{}` beyond the {} declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared {}",
+        word.name,
+        line,
+        ty,
+        word.effect.outputs.len(),
+        effect_str(&word.effect),
+    )
+}
+
+/// R15 (D8): a linear value live across the self-tail-call back-edge, which the
+/// loop lowering would carry into the next iteration with nobody responsible
+/// for disposing it. Deferred to a later Phase 3 slice, as a located error
+/// rather than silence. Copy loops are untouched.
+fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear values across a loop are not supported yet in `{}` (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
+            name, span.line, ty, callee, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear values across a loop are not supported yet: a `{ty}` is live across the back-edge to `{callee}`"
+        ),
+    }
+}
+
+/// R15: reject a linear value that would survive the back-edge of a
+/// self-tail-call, either stranded on the stack below the call's arguments or
+/// held by a local that was never consumed. A value *moved into* the call's
+/// arguments is forwarded, not live across the edge, so it stays legal.
+fn check_linear_across_back_edge(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    below_args: &[Slot],
+    moves: &Moves,
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    if let Some(slot) = below_args
+        .iter()
+        .find(|s| !is_copy(s.ty, ctx.structs(), ctx.enums(), arrays))
+    {
+        return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
+    }
+    if let Some(local) = moves.unconsumed().first() {
+        let ty = ctx
+            .local_type(local)
+            .expect("a tracked local has a declared type");
+        return Err(linear_across_back_edge_error(ctx, span, callee, ty));
+    }
+    Ok(())
+}
+
+/// R13/R14: every linear local must be consumed exactly once by the end of its
+/// scope. A local still `Live` or `MaybeMoved` is the forgotten-disposal error.
+fn check_linear_locals_consumed(
+    word: &WordDef,
+    locals: &HashMap<String, Type>,
+    moves: &Moves,
+    line: u32,
+) -> Result<(), String> {
+    match moves.unconsumed().first() {
+        Some(local) => {
+            let ty = locals[*local];
+            match moves.states.get(*local) {
+                Some(MoveState::MaybeMoved(_)) => {
+                    Err(linear_local_maybe_moved_error(word, local, ty, line))
+                }
+                _ => Err(linear_local_unconsumed_error(word, local, ty, line)),
+            }
+        }
+        None => Ok(()),
     }
 }
 
@@ -1093,7 +1523,7 @@ fn usize_conversion_needed_error(ctx: &Ctx, span: Span, op: &str) -> String {
             "error: type mismatch in `{}` (line {})\n  `{}` mixes `usize` with a computed `i64`: convert it explicitly with `>usize` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
             name, span.line, op, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` mixes `usize` with a computed `i64`: convert it explicitly with `>usize` first"
         ),
     }
@@ -1106,7 +1536,7 @@ fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
             "error: unknown type `{name}` in `{wname}` (line {})",
             span.line
         ),
-        Ctx::Line => format!("error: unknown type `{name}`"),
+        Ctx::Line { .. } => format!("error: unknown type `{name}`"),
     }
 }
 
@@ -1116,7 +1546,7 @@ fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) ->
             "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
             name, span.line, d_then, d_else, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
         ),
     }
@@ -1128,31 +1558,43 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
             "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
             name, span.line, t_then, t_else, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `if` branches leave different types (then: `{t_then}`, else: `{t_else}`)"
         ),
     }
 }
 
+/// Walk a term sequence. `moves` is the scope's linear-local move-state,
+/// mutated in place as locals are mentioned; `tail` marks the sequence as
+/// occupying its word's tail position, so its final term (and, recursively,
+/// both arms of a final `if`) sits on the self-tail-call back-edge. The rule
+/// mirrors `tail_position_calls`/`lower_terms`; all three must stay in
+/// lockstep.
 fn check_terms(
     terms: &[Term],
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    moves: &mut Moves,
+    tail: bool,
 ) -> Result<Vec<Slot>, String> {
-    for term in terms {
-        stack = check_term(term, stack, ctx, env, arrays)?;
+    let last = terms.len().wrapping_sub(1);
+    for (i, term) in terms.iter().enumerate() {
+        stack = check_term(term, stack, ctx, env, arrays, moves, tail && i == last)?;
     }
     Ok(stack)
 }
 
+#[allow(clippy::too_many_arguments)] // the walker's threaded state; a bundle would obscure it
 fn check_term(
     term: &Term,
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    moves: &mut Moves,
+    tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let span = term.span;
     match &term.kind {
@@ -1177,16 +1619,24 @@ fn check_term(
         }
         TermKind::Call(name) => {
             if let Some(ty) = ctx.local_type(name) {
+                // R3 (D2): mentioning a linear local moves its value out; a
+                // second mention names the site that already consumed it.
+                if let Err(site) = moves.take(name, span) {
+                    return Err(use_after_move_error(ctx, span, name, ty, site));
+                }
                 stack.push(Slot::computed(ty));
                 return Ok(stack);
             }
-            if let Some(stack) = check_shuffle(name, span, &mut stack, ctx)? {
+            if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
+                return Ok(stack);
+            }
+            if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
             let sig = env
@@ -1209,6 +1659,9 @@ fn check_term(
                     }
                 }
             }
+            if tail && ctx.word_name() == Some(name.as_str()) {
+                check_linear_across_back_edge(ctx, span, name, &stack[..base], moves, arrays)?;
+            }
             stack.truncate(base);
             stack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
             Ok(stack)
@@ -1223,8 +1676,22 @@ fn check_term(
             if cond.ty != Type::Bool {
                 return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
             }
-            let then_stack = check_terms(then_branch, stack.clone(), ctx, env, arrays)?;
-            let else_stack = check_terms(else_branch, stack, ctx, env, arrays)?;
+            // R14: each arm advances its own copy of the move-state; the join
+            // reconciles them into `MaybeMoved` wherever they disagree.
+            let mut then_moves = moves.clone();
+            let mut else_moves = moves.clone();
+            let then_stack = check_terms(
+                then_branch,
+                stack.clone(),
+                ctx,
+                env,
+                arrays,
+                &mut then_moves,
+                tail,
+            )?;
+            let else_stack =
+                check_terms(else_branch, stack, ctx, env, arrays, &mut else_moves, tail)?;
+            *moves = Moves::join(then_moves, else_moves);
             if then_stack.len() != else_stack.len() {
                 return Err(branch_mismatch_error(
                     ctx,
@@ -1449,9 +1916,24 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
             "error: type mismatch in `{}` (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires an array operand, found `{found}`")
         }
+    }
+}
+
+/// `S|>fi` (R10) applied to a linear field: unlike `S>fi`, a peek must leave
+/// the aggregate live, so it can't also transfer ownership of a linear
+/// field's value; the workaround is `S>` (destructure the whole aggregate).
+fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
+            op, name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `{op}` a linear field: the field has type `{found}`, which is linear and has no `Copy` instance"
+        ),
     }
 }
 
@@ -1463,7 +1945,7 @@ fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64)
             "error: array index out of range in `{}` (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
             name, span.line, index, count, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: array index out of range: index {index} is out of bounds for length {count}"
         ),
     }
@@ -1477,7 +1959,7 @@ fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
             "error: type mismatch in `{}` (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `fill` requires a literal count, found a computed `{found}` (no const-expr eval)"
         ),
     }
@@ -1491,18 +1973,34 @@ fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
             "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
             name, span.line, count, u32::MAX, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
             u32::MAX
         ),
     }
 }
 
-/// Match an index `Slot` against a `usize` index position for a `[T N]`
-/// (R11, D6, D8): an exact `usize` is a runtime index (the Phase 4 trap); a
-/// bare integer literal coerces (D8) and gets a compile-time bounds check
-/// (X4); a computed `i64` needs an explicit `>usize` (X10); anything else is
-/// a plain type mismatch.
+/// `fill` given a linear element type: unlike `dup`/`over`, `fill` has no
+/// per-slot `Copy` gate today, so it would silently replicate a linear value
+/// (and array-element linearity is not tracked transitively yet, so neither
+/// `drop` nor a nested struct's `dup` check would ever see the array's real
+/// element count). Reject rather than accept a value the rest of the linear
+/// checker can't reason about; array-of-linear support is future work.
+fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear array elements are not supported yet in `{}` (line {})\n  `fill` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
+            name, span.line, elem, elem, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear array elements are not supported yet: `fill` would replicate a `{elem}` across every slot, but `{elem}` is linear and has no `Copy` instance"
+        ),
+    }
+}
+
+/// An exact `usize` is a runtime index; a bare integer literal coerces and
+/// gets a compile-time bounds check; a computed `i64` needs an explicit
+/// `>usize`; anything else is a plain type mismatch.
 fn check_array_index(
     index: Slot,
     count: u32,
@@ -1559,6 +2057,9 @@ fn check_array_word(
             };
             if !(1..=i64::from(u32::MAX)).contains(&count_val) {
                 return Err(fill_count_out_of_range_error(ctx, span, count_val));
+            }
+            if !is_copy(element.ty, ctx.structs(), ctx.enums(), arrays) {
+                return Err(fill_of_linear_element_error(ctx, span, element.ty));
             }
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
             stack.truncate(n - 2);
@@ -1622,6 +2123,51 @@ fn check_array_word(
     Ok(Some(std::mem::take(stack)))
 }
 
+/// `S|>fi` (R10): a new non-consuming `( S -- S field )` peek, keyed by the
+/// per-struct-per-field name (unlike `fill`/`get`/`set`, it is not generic
+/// over a shape, so it is not a fixed entry in `struct_generated_sigs`
+/// either: it is looked up by parsing the `Struct|>field` name against the
+/// struct registry, same as the IR's `structs.words` map). `None` if `name`
+/// doesn't split on `|>` or doesn't resolve to a known struct+field (the
+/// caller falls through to the env lookup, so an unrelated word still gets
+/// the ordinary unknown-word error). A linear field is rejected outright
+/// (R10): the peek would leave a second, unowned reference to a resource the
+/// aggregate still owns, with no reference machinery to make that legal.
+fn check_struct_peek_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Result<Option<Vec<Slot>>, String> {
+    let Some((struct_name, field_name)) = name.split_once("|>") else {
+        return Ok(None);
+    };
+    let structs = ctx.structs();
+    let Some(idx) = structs.iter().position(|d| d.name == struct_name) else {
+        return Ok(None);
+    };
+    let decl = &structs[idx];
+    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
+        return Ok(None);
+    };
+    let field_ty = *field_ty;
+    if !is_copy(field_ty, structs, ctx.enums(), arrays) {
+        return Err(peek_of_linear_field_error(ctx, span, name, field_ty));
+    }
+    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
+    let n = stack.len();
+    if n < 1 {
+        return Err(underflow_error(ctx, span, name, 1, n));
+    }
+    let top = stack[n - 1];
+    if top.ty != struct_ty {
+        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
+    }
+    stack.push(Slot::computed(field_ty));
+    Ok(Some(std::mem::take(stack)))
+}
+
 /// Apply a stack shuffle if `name` is one, returning `Some(stack)`; `None` if
 /// the name is not a shuffle (the caller then looks it up in the env). Shuffles
 /// move concrete slot types with no fixed signature: `dup` of a `bool` yields
@@ -1631,11 +2177,18 @@ fn check_shuffle(
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
+    arrays: &[ArrayDecl],
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
         "dup" => {
             let top = *stack.last().ok_or_else(|| need("dup", 1, stack.len()))?;
+            // R4 (D3): `dup` is the explicit copy, so it is gated on `Copy`.
+            // The pure reorderings below (`swap`/`rot`) move rather than copy
+            // and stay legal on a linear value.
+            if !is_copy(top.ty, ctx.structs(), ctx.enums(), arrays) {
+                return Err(cannot_copy_linear_error(ctx, span, "dup", top.ty));
+            }
             stack.push(top);
         }
         "drop" => {
@@ -1657,6 +2210,11 @@ fn check_shuffle(
                 return Err(need("over", 2, n));
             }
             let below = stack[n - 2];
+            // R4: `over` copies the second slot, so it is gated exactly like
+            // `dup`.
+            if !is_copy(below.ty, ctx.structs(), ctx.enums(), arrays) {
+                return Err(cannot_copy_linear_error(ctx, span, "over", below.ty));
+            }
             stack.push(below);
         }
         "rot" => {
@@ -1745,6 +2303,53 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("body leaves 2 values"));
         assert!(err.contains("declares 1 outputs"));
+    }
+
+    #[test]
+    fn check_word_duplicate_local_is_error() {
+        let src = ": w ( i64 i64 -- i64 ) | a a | a ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`w`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_main_linear_output_is_error() {
+        let err = check_src(": main ( -- __spy ) 7 __spy ;").unwrap_err();
+        assert!(
+            err.contains("cannot declare a linear type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_main_linear_input_is_error() {
+        let err = check_src(": main ( __spy -- ) | s | s drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot declare a linear type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_main_copy_effect_is_ok() {
+        check_src(": main ( i64 -- i64 ) 1 + ;").unwrap();
+        // The misfire risk is `is_copy`'s recursive struct/enum arms, not the
+        // scalar arm: a Copy struct in `main`'s effect must not be rejected.
+        check_src("type: P a i64 b i64 ; : main ( P -- ) P> drop drop ;").unwrap();
+    }
+
+    #[test]
+    fn check_clause_body_duplicate_local_is_error() {
+        let src = "type: Shape | Circle r f64 s f64 ;
+             : area ( Shape -- f64 ) | Circle | a a | a ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`area`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -2119,6 +2724,33 @@ mod tests {
     }
 
     #[test]
+    fn check_fill_of_linear_element_is_error() {
+        // `fill` has no per-slot `Copy` gate today (unlike `dup`/`over`), and
+        // array-element linearity isn't tracked transitively, so a linear
+        // element is rejected rather than silently replicated/leaked.
+        let err = check_src(": w ( -- ) 0 __spy 3 fill drop ;").unwrap_err();
+        assert!(
+            err.contains("not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_fill_of_linear_struct_element_is_error() {
+        // The same rejection applies transitively: a struct that is linear
+        // because one of its fields is (R7) is just as unsupported as a bare
+        // `__spy` element.
+        let err = check_src("type: Holder xs __spy ;\n: w ( -- ) 0 __spy Holder 3 fill drop ;")
+            .unwrap_err();
+        assert!(
+            err.contains("not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holder`"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn check_get_on_non_array_is_error() {
         // X8: `get` on a non-array operand names the array word and the type.
         let err = check_src(": w ( -- i64 ) 5 1 get ;").unwrap_err();
@@ -2384,7 +3016,7 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        infer_line(&terms, entry, &builtin_table(), &mut Vec::new())
+        infer_line(&terms, entry, &builtin_table(), &mut Vec::new(), &[], &[])
     }
 
     #[test]
@@ -2450,6 +3082,40 @@ mod tests {
     }
 
     #[test]
+    fn check_struct_peek_copy_field_leaves_struct_live_ok() {
+        // R10: `Vec2|>x` is non-consuming, so the struct is still on the
+        // stack for the second peek and the trailing `Vec2>` destructure.
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 Vec2|>x drop Vec2> drop drop ;")
+            .unwrap();
+    }
+
+    #[test]
+    fn check_struct_peek_on_linear_field_is_error() {
+        // R10: a linear field can't be peeked (workaround: `S>`).
+        let err = check_src(
+            "type: Holds a __spy b i64 ; : main ( -- ) 7 __spy 1 Holds Holds|>a drop drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot `Holds|>a`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`S>`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_peek_on_wrong_type_is_error() {
+        // A peek word applied to a value that isn't its struct: names the
+        // peek word and both types, same shape as the getter/setter checks.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2|>x drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2|>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn check_struct_duplicate_type_name_is_error() {
         // X2: two `type:` declarations sharing a name name that type.
         let err = check_src("type: Vec2 x i64 ; type: Vec2 y i64 ;").unwrap_err();
@@ -2508,6 +3174,60 @@ mod tests {
         assert!(err.contains("recursive"), "unexpected message: {err}");
         assert!(err.contains('S'), "unexpected message: {err}");
         assert!(err.contains('E'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_direct_element_in_struct_field_is_error() {
+        // The parser cannot reject `[__spy N]` (struct fields aren't resolved
+        // until the whole module is parsed), so this is the checker's job.
+        let err = check_src("type: Bag xs [__spy 2] ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_direct_element_in_word_signature_is_error() {
+        let err = check_src(": w ( [__spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_indirect_via_linear_struct_field_is_error() {
+        // `Arr`'s element (`Holds`) is not itself `__spy`, but contains one
+        // transitively; `is_copy` already sees through that, so the sweep
+        // over `module.arrays` must too.
+        let err = check_src("type: Holds s __spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
+            .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_indirect_via_linear_struct_in_signature_is_error() {
+        let err = check_src(
+            "type: Holds s __spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_copy_element_is_ok() {
+        check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
     }
 
     #[test]
@@ -2933,5 +3653,245 @@ mod tests {
         // A self-loop (`gcd -> gcd`) is tier-1 and must not be flagged as a
         // mutual cycle.
         check_src(&std::fs::read_to_string("examples/gcd.sth").unwrap()).unwrap();
+    }
+
+    // Phase 3 Slice 1: the linear core on bare `__spy` values.
+
+    #[test]
+    fn is_copy_every_type_but_the_spy() {
+        for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
+            assert!(
+                is_copy(Type::from_name(name).unwrap(), &[], &[], &[]),
+                "{name} is Copy"
+            );
+        }
+        assert!(!is_copy(Type::Spy, &[], &[], &[]));
+    }
+
+    #[test]
+    fn is_copy_struct_is_linear_iff_a_field_is_transitively() {
+        // R7/R8 (Phase 2): a struct with no linear field is Copy; one with a
+        // linear field (direct or nested) is linear, transitively.
+        let tokens = lex("type: Plain x i64 y i64 ;\n\
+type: Holds a __spy b i64 ;\n\
+type: Wraps h Holds ;\n")
+        .unwrap();
+        let module = parse(&tokens).unwrap();
+        let plain = Type::Struct(StructId::from_index(0), "Plain");
+        let holds = Type::Struct(StructId::from_index(1), "Holds");
+        let wraps = Type::Struct(StructId::from_index(2), "Wraps");
+        assert!(is_copy(
+            plain,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!is_copy(
+            holds,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!is_copy(
+            wraps,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+    }
+
+    #[test]
+    fn is_copy_enum_is_linear_iff_a_variant_field_is_transitively() {
+        // R7/R12 (Phase 4): an enum with no linear variant field is Copy; one
+        // with a linear field (direct in one variant, or nested through a
+        // struct in another) is linear, transitively. `Plain` has no linear
+        // variant, `Item` carries a spy directly in `Full`, `Boxed` carries
+        // one nested inside `Holds`.
+        let tokens = lex("type: Plain | A | B ;\n\
+type: Item | Empty | Full v __spy ;\n\
+type: Holds a __spy b i64 ;\n\
+type: Boxed | Some h Holds | None ;\n")
+        .unwrap();
+        let module = parse(&tokens).unwrap();
+        let plain = Type::Enum(EnumId::from_index(0), "Plain");
+        let item = Type::Enum(EnumId::from_index(1), "Item");
+        let boxed = Type::Enum(EnumId::from_index(2), "Boxed");
+        assert!(is_copy(
+            plain,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!is_copy(
+            item,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!is_copy(
+            boxed,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+    }
+
+    #[test]
+    fn check_spy_constructor_takes_an_i64_tag_ok() {
+        check_src(": w ( -- ) 7 __spy drop ;").unwrap();
+    }
+
+    #[test]
+    fn check_spy_constructor_on_a_float_tag_is_error() {
+        let err = check_src(": w ( -- ) 7.5 __spy drop ;").unwrap_err();
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_dup_of_linear_value_is_error() {
+        let err = check_src(": w ( -- ) 7 __spy dup drop drop ;").unwrap_err();
+        assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("linear"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_over_of_linear_value_is_error() {
+        let err = check_src(": w ( -- ) 7 __spy 1 over drop drop drop ;").unwrap_err();
+        assert!(err.contains("cannot `over`"), "unexpected message: {err}");
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_shuffles_that_only_reorder_linear_values_are_ok() {
+        // `swap`/`rot` move rather than copy, so the `dup`/`over` gate must not
+        // over-reach to them.
+        check_src(": w ( -- ) 7 __spy 8 __spy swap drop drop ;").unwrap();
+        check_src(": w ( -- ) 1 __spy 2 __spy 3 __spy rot drop drop drop ;").unwrap();
+    }
+
+    #[test]
+    fn check_print_on_linear_value_is_error() {
+        // R16: `.` is a printable-scalar path, and a linear value is not one
+        // (the backend's `unreachable!` guard depends on this).
+        let err = check_src(": w ( -- ) 7 __spy . ;").unwrap_err();
+        assert!(err.contains("printable"), "unexpected message: {err}");
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_use_after_move_of_linear_local_names_the_move_site() {
+        let err = check_src(": w ( __spy -- )\n  | s |\n  s drop\n  s drop ;").unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(
+            err.contains("moved at line 3, col 3"),
+            "the diagnostic should name the move site: {err}"
+        );
+    }
+
+    #[test]
+    fn check_second_mention_of_a_copy_local_is_ordinary_reuse() {
+        // The move-state tracks linear locals only: a Copy local stays usable.
+        check_src(": w ( i64 -- i64 ) | n | n n + ;").unwrap();
+    }
+
+    #[test]
+    fn check_unconsumed_linear_local_is_error() {
+        let err = check_src(": w ( __spy -- )\n  | s |\n  1 . ;").unwrap_err();
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(
+            err.contains("`s`"),
+            "the error should name the local: {err}"
+        );
+    }
+
+    #[test]
+    fn check_surplus_linear_value_is_a_linear_flavoured_error() {
+        let err = check_src(": w ( -- ) 7 __spy ;").unwrap_err();
+        assert!(
+            err.contains("linear value left on the stack"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_surplus_copy_value_keeps_the_arity_error() {
+        // No misfire: the linear branch must not swallow the Copy surplus case.
+        let err = check_src(": w ( -- ) 1 ;").unwrap_err();
+        assert!(
+            err.contains("body leaves 1 values"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("linear"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_linear_local_consumed_in_both_arms_is_ok() {
+        // R14: `Moved` in both arms joins to `Moved`, not `MaybeMoved`, even
+        // though the two move sites differ.
+        check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else s drop end ;").unwrap();
+    }
+
+    #[test]
+    fn check_linear_local_moved_in_one_arm_then_used_is_error() {
+        let err =
+            check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;")
+                .unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
+        let err = check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;")
+            .unwrap_err();
+        assert!(
+            err.contains("not consumed on every path"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_linear_value_across_self_tail_call_is_error() {
+        // R15: the fresh spy pushed in the recursive arm leaves `s` live across
+        // the back-edge, which the loop lowering cannot dispose yet.
+        let err = check_src(
+            ": spin ( __spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else 9 __spy n 1 - spin end ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("line 3"), "the error should be located: {err}");
+    }
+
+    #[test]
+    fn check_linear_value_forwarded_into_the_self_tail_call_is_ok() {
+        // Moved *into* the recursive call's arguments, the spy is forwarded, not
+        // stranded, so the R15 guard must not fire.
+        check_src(
+            ": spin ( __spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else s n 1 - spin end ;",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn check_copy_self_tail_call_is_unaffected_by_the_linear_guard() {
+        check_src(&std::fs::read_to_string("examples/countdown.sth").unwrap()).unwrap();
+    }
+
+    #[test]
+    fn infer_line_consumes_a_carried_linear_slot_ok() {
+        // The REPL path: a residual linear slot can be dropped by a later line
+        // (no scope-end rule applies to a bare line).
+        let out = infer_src("drop", &[Type::Spy]).unwrap();
+        assert!(out.is_empty());
     }
 }

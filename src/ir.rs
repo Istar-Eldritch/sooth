@@ -12,7 +12,7 @@ use std::mem;
 
 use crate::ast::{
     ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind,
-    Type, WordBody, WordDef,
+    Type, WordBody, WordDef, SPY_NAME,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -29,6 +29,12 @@ pub const WORD_WIDTH: u32 = 8;
 /// nonzero. The backend emits the definition; the IR references it by name so
 /// both sides agree on one symbol.
 pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
+
+/// The drop-spy's compiler-known destructor (R5/R6): `drop` on a `__spy` lowers
+/// to a plain `Call` of this symbol, which prints `drop <tag>`. The backend
+/// emits the definition; the IR references it by name so both sides agree on
+/// one symbol, exactly like `OOB_TRAP_SYMBOL`.
+pub const SPY_DROP_SYMBOL: &str = "sooth_spy_drop";
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -104,6 +110,11 @@ pub enum IrType {
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
     Ptr,
+    /// The drop-spy primitive (R6). Represented as a 64-bit signed integer (its
+    /// tag) everywhere the backend touches it, but distinct from `Int` in the
+    /// IR: `drop` reads a value's `IrType` to decide whether to emit the
+    /// destructor call, and an `i64` tag must not become one by accident.
+    Spy,
 }
 
 impl IrType {
@@ -133,6 +144,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // registry; the `IrType` carries only the `ArrayId` so it stays `Copy`.
         Type::Array(id, _) => IrType::Array(id),
         Type::Usize => IrType::Usize,
+        Type::Spy => IrType::Spy,
     }
 }
 
@@ -145,6 +157,33 @@ pub struct StructLayout {
     pub size: u32,
     pub align: u32,
     pub fields: Vec<FieldLayout>,
+    /// Whether this struct is linear (any field is, transitively).
+    pub is_linear: bool,
+}
+
+/// Whether a field's `IrType` is linear: the drop-spy directly, or a nested
+/// aggregate whose own layout is linear. `ensure_struct`/`ensure_enum` cannot
+/// call this: each computes its own `is_linear` inline while `layouts` is
+/// still being built, before a nested field's entry exists here.
+fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
+    match ty {
+        IrType::Spy => true,
+        IrType::Struct(id) => structs.layouts[id.index()].is_linear,
+        IrType::Enum(id) => enums.layouts[id.index()].is_linear,
+        IrType::Array(id) => arrays.layouts[id.index()].is_linear,
+        _ => false,
+    }
+}
+
+/// The synthesized per-type destructor symbol for a linear struct.
+fn struct_drop_symbol(id: StructId) -> String {
+    format!("sooth_struct_drop_{}", id.index())
+}
+
+/// The synthesized per-type destructor symbol for a linear enum: mirrors
+/// `struct_drop_symbol`, one uniform naming scheme for both aggregate kinds.
+fn enum_drop_symbol(id: EnumId) -> String {
+    format!("sooth_enum_drop_{}", id.index())
 }
 
 /// One field's placement within its owning struct: its byte offset and its own
@@ -166,10 +205,13 @@ pub enum StructWord {
     Get(StructId, usize),
     Set(StructId, usize),
     Destructure(StructId),
+    /// `S|>fi` (R10): a non-consuming `( S -- S field )` peek, Copy fields
+    /// only (the checker rejects a linear field before this is ever reached).
+    Peek(StructId, usize),
 }
 
 /// The IR's view of a program's structs: the per-`StructId` layout registry and
-/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi` → `StructWord`). Built
+/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi` → `StructWord`). Built
 /// once from the module and threaded into lowering; empty for a struct-free
 /// program (the scalar paths never consult it).
 #[derive(Debug, Default)]
@@ -194,6 +236,12 @@ pub struct EnumLayout {
     pub size: u32,
     pub align: u32,
     pub variants: Vec<VariantLayout>,
+    /// R7/R12 (Phase 4): whether this enum is linear (any variant's payload
+    /// field is, transitively). A variant field's own `is_linear` is already
+    /// resolved by the time this is computed (`place_fields` -> `size_align`
+    /// recurses into nested fields first), so this is a one-shot fold, not a
+    /// further recursion, mirroring `StructLayout::is_linear`.
+    pub is_linear: bool,
 }
 
 /// One variant's payload placement: its fields laid out (first field deepest)
@@ -219,6 +267,7 @@ pub struct ArrayLayout {
     pub stride: u32,
     pub size: u32,
     pub align: u32,
+    pub is_linear: bool,
 }
 
 /// The IR's view of a program's arrays: the per-`ArrayId` layout registry.
@@ -274,6 +323,8 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
         IrType::Ptr => 8,
+        // A spy is its `i64` tag.
+        IrType::Spy => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
         IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
         IrType::Array(_) => unreachable!("an array field resolves via the layout registry"),
@@ -372,6 +423,10 @@ pub fn build_registries_ww(
         for (fi, (fname, _)) in decl.fields.iter().enumerate() {
             swords.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
             swords.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
+            swords.insert(
+                format!("{}|>{}", decl.name, fname),
+                StructWord::Peek(id, fi),
+            );
         }
     }
 
@@ -466,10 +521,16 @@ impl LayoutBuilder<'_> {
         }
         let structs = self.structs;
         let (fields, size, align) = self.place_fields(&structs[idx].fields);
+        // R7: linear iff any field is, transitively. A nested aggregate
+        // field's own `is_linear` is already memoized (`place_fields` ->
+        // `size_align` ensures it first), so this is a plain fold over the
+        // just-placed fields, not a further recursion.
+        let is_linear = fields.iter().any(|f| self.layout_field_is_linear(f.ty));
         self.struct_memo[idx] = Some(StructLayout {
             name: structs[idx].name_static,
             size,
             align,
+            is_linear,
             fields,
         });
     }
@@ -499,6 +560,12 @@ impl LayoutBuilder<'_> {
         let payload_offset = round_up(tag_size, payload_align);
         let align = tag_align.max(payload_align);
         let size = round_up(payload_offset + max_payload, align);
+        // R7/R12: an enum is linear iff any variant's payload field is,
+        // transitively (mirrors the struct fold above).
+        let is_linear = variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .any(|f| self.layout_field_is_linear(f.ty));
         self.enum_memo[idx] = Some(EnumLayout {
             name: enums[idx].name_static,
             tag_offset: 0,
@@ -507,7 +574,37 @@ impl LayoutBuilder<'_> {
             size,
             align,
             variants,
+            is_linear,
         });
+    }
+
+    /// Whether a just-laid-out field's `IrType` is linear (R7): the drop-spy
+    /// directly, or a nested struct/enum whose own memoized layout is linear.
+    /// Shared by the struct and enum `is_linear` folds; both call sites have
+    /// already ensured the nested aggregate's memo entry via `size_align`.
+    fn layout_field_is_linear(&self, ty: IrType) -> bool {
+        match ty {
+            IrType::Spy => true,
+            IrType::Struct(id) => {
+                self.struct_memo[id.index()]
+                    .as_ref()
+                    .expect("nested struct field already laid out")
+                    .is_linear
+            }
+            IrType::Enum(id) => {
+                self.enum_memo[id.index()]
+                    .as_ref()
+                    .expect("nested enum field already laid out")
+                    .is_linear
+            }
+            IrType::Array(id) => {
+                self.array_memo[id.index()]
+                    .as_ref()
+                    .expect("nested array field already laid out")
+                    .is_linear
+            }
+            _ => false,
+        }
     }
 
     /// Compute one array's layout (M2): the element's size/align (recursing
@@ -524,6 +621,9 @@ impl LayoutBuilder<'_> {
         let elem = ir_type_of(element);
         let (elem_size, elem_align) = self.size_align(element);
         let stride = round_up(elem_size, elem_align);
+        // R7: an array is linear iff its element is, transitively; `size_align`
+        // above already ensured a nested struct/enum/array element's memo.
+        let is_linear = self.layout_field_is_linear(elem);
         self.array_memo[idx] = Some(ArrayLayout {
             name: self.arrays[idx].name_static,
             elem,
@@ -531,6 +631,7 @@ impl LayoutBuilder<'_> {
             stride,
             size: stride * count,
             align: elem_align.max(1),
+            is_linear,
         });
     }
 }
@@ -664,11 +765,18 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .collect();
     let resolve = |name: &str| name.to_string();
 
-    let funcs = module
+    let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
         .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays))
         .collect();
+
+    // R12: append a synthesized destructor for every linear struct/enum type
+    // (the drop-glue home decided in Phase 4, used starting here): `drop`
+    // calls it as a plain `Call` (R16).
+    funcs.extend(synthesize_aggregate_destructors(
+        &env, &resolve, &structs, &enums, &arrays,
+    ));
 
     Ok(IrModule {
         funcs,
@@ -676,6 +784,129 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         enums: enums.layouts,
         arrays: arrays.layouts,
     })
+}
+
+/// Every linear struct's and enum's synthesized destructor, one `IrFunc` per
+/// type. The REPL redefines these per line; safe because type redefinition is
+/// rejected, so every generation's glue is identical. If type redefinition is
+/// ever allowed, add a generation suffix, matching word symbols.
+pub fn synthesize_aggregate_destructors(
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> Vec<IrFunc> {
+    let struct_destructors = structs
+        .layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| layout.is_linear)
+        .map(|(idx, _)| {
+            synthesize_struct_destructor(
+                StructId::from_index(idx),
+                env,
+                resolve,
+                structs,
+                enums,
+                arrays,
+            )
+        });
+    let enum_destructors = enums
+        .layouts
+        .iter()
+        .enumerate()
+        .filter(|(_, layout)| layout.is_linear)
+        .map(|(idx, _)| {
+            synthesize_enum_destructor(
+                EnumId::from_index(idx),
+                env,
+                resolve,
+                structs,
+                enums,
+                arrays,
+            )
+        });
+    struct_destructors.chain(enum_destructors).collect()
+}
+
+/// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
+/// that type: drop each linear field, in declaration order. Built via a
+/// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
+/// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
+/// is disposed" stays in one place.
+fn synthesize_struct_destructor(
+    id: StructId,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> IrFunc {
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let param = b.fresh_value(IrType::Struct(id));
+    let fields = structs.layouts[id.index()].fields.clone();
+    for field in fields {
+        if field_is_linear(field.ty, structs, enums, arrays) {
+            let v = b.field_value(param, field);
+            b.emit_drop(v);
+        }
+    }
+    b.seal_block(Terminator::Ret(None));
+    IrFunc {
+        name: struct_drop_symbol(id),
+        params: vec![IrType::Struct(id)],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }
+}
+
+/// R12 (Phase 4): synthesize enum `id`'s destructor, called by `drop` on any
+/// value of that type. Unlike the struct case (a fixed field list), an enum's
+/// active variant is a runtime fact, so the destructor tag-dispatches (its
+/// own `Jnz` chain, the same compare-chain shape `lower_clauses` uses for a
+/// clause-style word's scrutinee) and then drops only the dispatched variant's
+/// linear payload fields. Every variant gets its own block even if none of its
+/// fields are linear (an empty block that just returns), so the dispatch
+/// shape stays uniform regardless of which variants happen to carry a linear
+/// field.
+fn synthesize_enum_destructor(
+    id: EnumId,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> IrFunc {
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let param = b.fresh_value(IrType::Enum(id));
+    let payload_offset = enums.layouts[id.index()].payload_offset;
+    let variant_ids = b.dispatch_on_tag(param, id);
+
+    for (vi, &block) in variant_ids.iter().enumerate() {
+        b.start_block(block);
+        let fields = enums.layouts[id.index()].variants[vi].fields.clone();
+        for field in &fields {
+            if field_is_linear(field.ty, structs, enums, arrays) {
+                let adjusted = FieldLayout {
+                    offset: payload_offset + field.offset,
+                    ..*field
+                };
+                let v = b.field_value(param, adjusted);
+                b.emit_drop(v);
+            }
+        }
+        b.seal_block(Terminator::Ret(None));
+    }
+
+    IrFunc {
+        name: enum_drop_symbol(id),
+        params: vec![IrType::Enum(id)],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }
 }
 
 /// Lower a bare REPL line to a uniform-signature wrapper `sooth_line_{seq}`
@@ -776,6 +1007,14 @@ pub fn lower_line(
                 let relabeled = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Conv(relabeled, v));
                 stack.push(relabeled);
+            }
+            // A carried spy slot loads its `i64` tag but keeps its `Spy`
+            // `IrType`, so a `drop` later in the line still finds the
+            // destructor (the REPL's residual disposal path, R6).
+            IrType::Spy => {
+                let v = b.fresh_value(IrType::Spy);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
             }
             _ => {
                 let v = b.fresh_value(IrType::I64);
@@ -1180,7 +1419,8 @@ impl<'a> FuncBuilder<'a> {
                 }
             }
             "drop" => {
-                self.stack.pop().expect("drop: non-empty stack");
+                let v = self.stack.pop().expect("drop: non-empty stack");
+                self.emit_drop(v);
             }
             "swap" => {
                 let n = self.stack.len();
@@ -1259,6 +1499,16 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
+            // The spy constructor `( i64 -- __spy )` is identity at runtime
+            // (R6): the tag *is* the value. It emits no call, only the same
+            // `Conv` relabel a same-width conversion uses, so the result value
+            // carries `IrType::Spy` and a later `drop` can recognise it.
+            SPY_NAME => {
+                let tag = self.stack.pop().expect("__spy: tag");
+                let spy = self.fresh_value(IrType::Spy);
+                self.push_instr(Instr::Conv(spy, tag));
+                self.stack.push(spy);
+            }
             _ => {
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
@@ -1276,7 +1526,7 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.push(dst);
                     return;
                 }
-                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`) lowers to
+                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi`) lowers to
                 // alloc/blit/field-load-store inline, not a normal call.
                 if let Some(&sw) = self.structs.words.get(name) {
                     self.lower_struct_word(sw);
@@ -1571,10 +1821,10 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Load field `field` at `fptr` onto the stack: a width-exact scalar load,
+    /// Field `field` of aggregate `base` as a value: a width-exact scalar load,
     /// or the interior pointer as a nested struct/enum value.
-    fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
-        let v = match field.ty {
+    fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
+        match field.ty {
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 self.field_aggregate_value(base, field.offset, field.ty)
             }
@@ -1584,8 +1834,75 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::FieldLoad(v, fptr));
                 v
             }
-        };
+        }
+    }
+
+    fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
+        let v = self.field_value(base, field);
         self.stack.push(v);
+    }
+
+    /// Dispatch on `scrutinee`'s runtime tag (enum `id`): seal a compare chain
+    /// (`n == 1` short-circuits to a bare `Jmp`; otherwise load the tag once
+    /// and `Cmp`/`Jnz` variant-by-variant, the last compare's false edge
+    /// falling straight through to the final variant with no default/trap
+    /// block) and return one freshly allocated, not-yet-started block per
+    /// variant in declaration order. Shared by `lower_clauses` (a clause
+    /// word's scrutinee) and `synthesize_enum_destructor` (the same shape,
+    /// only what each variant block does next differs).
+    fn dispatch_on_tag(&mut self, scrutinee: Value, id: EnumId) -> Vec<BlockId> {
+        let (tag_ty, tag_offset, n) = {
+            let l = &self.enums.layouts[id.index()];
+            (l.tag_ty, l.tag_offset, l.variants.len())
+        };
+        let variant_ids: Vec<BlockId> = (0..n).map(|_| self.fresh_block()).collect();
+        if n == 1 {
+            self.seal_block(Terminator::Jmp(variant_ids[0]));
+        } else {
+            let tag = self.fresh_value(tag_ty);
+            let tag_ptr = self.field_ptr(scrutinee, tag_offset);
+            self.push_instr(Instr::FieldLoad(tag, tag_ptr));
+            for vi in 0..n - 1 {
+                let idx_val = self.fresh_value(tag_ty);
+                self.push_instr(Instr::Const(idx_val, vi as i64));
+                let c = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
+                let false_target = if vi == n - 2 {
+                    variant_ids[n - 1]
+                } else {
+                    self.fresh_block()
+                };
+                self.seal_block(Terminator::Jnz(c, variant_ids[vi], false_target));
+                if vi < n - 2 {
+                    self.start_block(false_target);
+                }
+            }
+        }
+        variant_ids
+    }
+
+    /// R5/R12/R16: the universal disposal primitive. On a linear value (a
+    /// `__spy`, or a struct/enum whose `is_linear` is set) this is a plain `Call`
+    /// to the (builtin or synthesized) destructor; a `Copy` value is discarded
+    /// with no runtime effect. Shared by `drop`, `S>fi`'s drop-the-rest,
+    /// `S<fi`'s drop-on-overwrite, and the synthesized struct/enum destructors
+    /// themselves, so "how a value is disposed" lives in one place.
+    fn emit_drop(&mut self, v: Value) {
+        match self.value_type(v) {
+            IrType::Spy => {
+                self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
+            }
+            IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
+                self.push_instr(Instr::Call(None, struct_drop_symbol(id), vec![v]));
+            }
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
+                self.push_instr(Instr::Call(None, enum_drop_symbol(id), vec![v]));
+            }
+            IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => unreachable!(
+                "checked: a linear array element is rejected wherever an array type is named"
+            ),
+            _ => {}
+        }
     }
 
     /// Lower a generated struct word inline, first field deepest.
@@ -1605,8 +1922,18 @@ impl<'a> FuncBuilder<'a> {
             }
             StructWord::Get(id, fi) => {
                 let s = self.stack.pop().expect("getter: struct operand");
-                let field = self.structs.layouts[id.index()].fields[fi];
-                self.load_field_onto_stack(s, field);
+                let fields = self.structs.layouts[id.index()].fields.clone();
+                self.load_field_onto_stack(s, fields[fi]);
+                // R9: on a linear receiver, `S>fi` still consumes the whole
+                // aggregate, so every non-extracted linear field is dropped
+                // here (a no-op drop-the-rest when every other field is
+                // Copy, unchanged from before this slice).
+                for (j, field) in fields.iter().enumerate() {
+                    if j != fi && field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
+                        let v = self.field_value(s, *field);
+                        self.emit_drop(v);
+                    }
+                }
             }
             StructWord::Set(id, fi) => {
                 let newval = self.stack.pop().expect("setter: new field value");
@@ -1617,6 +1944,14 @@ impl<'a> FuncBuilder<'a> {
                     self.push_instr(Instr::Blit(s, dst, size));
                 }
                 let field = self.structs.layouts[id.index()].fields[fi];
+                // R11: the old shell's other fields transfer via the blit
+                // above (consumed, never dropped); only the field being
+                // overwritten is read back out and dropped, before the store,
+                // so the order is deterministic.
+                if field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
+                    let old = self.field_value(dst, field);
+                    self.emit_drop(old);
+                }
                 let fptr = self.field_ptr(dst, field.offset);
                 self.store_field(fptr, newval, field);
                 self.stack.push(dst);
@@ -1628,6 +1963,15 @@ impl<'a> FuncBuilder<'a> {
                     let field = self.structs.layouts[id.index()].fields[fi];
                     self.load_field_onto_stack(s, field);
                 }
+            }
+            StructWord::Peek(id, fi) => {
+                // R10: non-consuming, so the aggregate stays on the stack;
+                // only the field's value is pushed on top of it. The checker
+                // already rejected a linear field, so there is no drop glue
+                // to consider here (unlike `Get`).
+                let s = *self.stack.last().expect("peek: struct operand");
+                let field = self.structs.layouts[id.index()].fields[fi];
+                self.load_field_onto_stack(s, field);
             }
         }
     }
@@ -1754,47 +2098,18 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) => id,
             _ => unreachable!("checked: a clause word's top input is an enum"),
         };
-        let (tag_ty, tag_offset, payload_offset, n) = {
-            let l = &self.enums.layouts[scrut_id.index()];
-            (l.tag_ty, l.tag_offset, l.payload_offset, l.variants.len())
-        };
+        let payload_offset = self.enums.layouts[scrut_id.index()].payload_offset;
+        let n = self.enums.layouts[scrut_id.index()].variants.len();
 
         // Map each variant index to the clause handling it (checker-guaranteed
         // exact coverage), so dispatch on tag == variant_index lands correctly
         // regardless of clause source order.
-        let clause_ids: Vec<BlockId> = (0..n).map(|_| self.fresh_block()).collect();
+        let clause_ids = self.dispatch_on_tag(scrutinee, scrut_id);
         let join_id = self.fresh_block();
         let mut clause_for_variant: Vec<Option<&Clause>> = vec![None; n];
         for clause in clauses {
             let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant];
             clause_for_variant[vi] = Some(clause);
-        }
-
-        if n == 1 {
-            self.seal_block(Terminator::Jmp(clause_ids[0]));
-        } else {
-            // The discriminant is a temp used only for the compare-chain, never
-            // pushed onto the virtual stack. A newtype (n == 1) skips it.
-            let tag = self.fresh_value(tag_ty);
-            let tag_ptr = self.field_ptr(scrutinee, tag_offset);
-            self.push_instr(Instr::FieldLoad(tag, tag_ptr));
-            for vi in 0..n - 1 {
-                let idx_val = self.fresh_value(tag_ty);
-                self.push_instr(Instr::Const(idx_val, vi as i64));
-                let c = self.fresh_value(IrType::Bool);
-                self.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
-                // The last compare's false edge falls straight through to the
-                // final variant; no default/trap block (exhaustive coverage).
-                let false_target = if vi == n - 2 {
-                    clause_ids[n - 1]
-                } else {
-                    self.fresh_block()
-                };
-                self.seal_block(Terminator::Jnz(c, clause_ids[vi], false_target));
-                if vi < n - 2 {
-                    self.start_block(false_target);
-                }
-            }
         }
 
         let mut clause_ends: Vec<(BlockId, Vec<Value>)> = Vec::with_capacity(n);
@@ -3275,5 +3590,296 @@ mod tests {
                 block.id
             );
         }
+    }
+
+    // Phase 3 Slice 1: the drop-spy's lowering (R5/R6/R16).
+
+    #[test]
+    fn lower_spy_constructor_relabels_the_tag_without_a_call() {
+        // The constructor is identity at runtime: no `Call`, just the relabel
+        // that gives the value its `Spy` `IrType`.
+        let ir = lower_src(": w ( -- ) 7 __spy drop ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(
+            is.iter().any(
+                |i| matches!(i, Instr::Conv(dst, _) if w.value_types[dst.0 as usize] == IrType::Spy)
+            ),
+            "expected a relabel to a Spy-typed value: {is:?}"
+        );
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(_, sym, _) if sym != SPY_DROP_SYMBOL)
+            ),
+            0,
+            "the constructor emits no call: {is:?}"
+        );
+    }
+
+    #[test]
+    fn lower_drop_of_linear_value_calls_the_destructor() {
+        let ir = lower_src(": w ( -- ) 7 __spy drop ;");
+        let w = &ir.funcs[0];
+        let calls: Vec<&String> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL], "expected one destructor call");
+    }
+
+    #[test]
+    fn lower_drop_of_copy_value_emits_no_destructor_call() {
+        // R2: `drop` on a Copy value keeps its no-runtime-effect discard.
+        let ir = lower_src(": w ( -- ) 7 drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    // Phase 3 Slice 1, Phase 2: struct linearity + the synthesized destructor
+    // (R7/R9/R11/R12).
+
+    #[test]
+    fn struct_layout_is_linear_iff_a_field_is_transitively() {
+        let ir = lower_src(
+            "type: Plain x i64 y i64 ; \
+             type: Holds a __spy b i64 ; \
+             type: Wraps h Holds ; \
+             : w ( -- ) ;",
+        );
+        assert!(!ir.structs[0].is_linear, "Plain has no linear field");
+        assert!(ir.structs[1].is_linear, "Holds carries a spy directly");
+        assert!(ir.structs[2].is_linear, "Wraps carries one transitively");
+    }
+
+    #[test]
+    fn struct_linearity_agrees_across_the_checker_and_both_lowering_folds() {
+        // Linearity is decided in three places over the same field lists:
+        // `check::is_copy` walks `Type`, `ensure_struct` folds `IrType` inline
+        // while `layouts` is still being built, and `field_is_linear` is what
+        // every drop-glue site consults. If they ever disagree the checker
+        // gates a `dup` the lowering then emits no glue for (or the reverse),
+        // so pin all three rather than trusting three hand-kept matches.
+        let src = "type: Plain x i64 y i64 ; \
+                   type: Holds a __spy b i64 ; \
+                   type: Wraps h Holds ; \
+                   type: Deep w Wraps p Plain ; \
+                   type: Item | Empty | Full v __spy ; \
+                   type: EnumInStruct e Item ; \
+                   type: StructInEnum | Some h Holds | None ; \
+                   type: EnumInEnum | Inner i EnumInStruct | Outer ; \
+                   type: PlainArr xs [i64 4] ; \
+                   : w ( -- ) ;";
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        // `SpyArr` (an `[__spy 4]` field) is spliced in directly rather than
+        // through source: Item 1's array-type-use rejection means no source
+        // program can spell this declaration any more, but the predicate
+        // must still be correct on the type alone.
+        let spy_array_id = ArrayId::from_index(module.arrays.len());
+        let spy_array_name: &'static str = "[__spy 4]";
+        module.arrays.push(ArrayDecl {
+            element: Type::Spy,
+            count: 4,
+            name_static: spy_array_name,
+        });
+        module.structs.push(StructDecl {
+            name: "SpyArr".to_string(),
+            name_static: "SpyArr",
+            fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
+            span: crate::ast::Span::default(),
+        });
+        let (structs, enums, arrays) =
+            build_registries(&module.structs, &module.enums, &module.arrays);
+        for (idx, layout) in structs.layouts.iter().enumerate() {
+            let ty = Type::Struct(StructId::from_index(idx), layout.name);
+            assert_eq!(
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                !layout.is_linear,
+                "`{}`: checker says Copy={}, `ensure_struct` says linear={}",
+                layout.name,
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                layout.is_linear
+            );
+            assert_eq!(
+                layout
+                    .fields
+                    .iter()
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
+                layout.is_linear,
+                "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
+                layout.name
+            );
+        }
+        // R7/R12 (Phase 4): the same three-way pin, over the enum registry's
+        // `Type::Enum` arm of `is_copy` and the variant-payload fold
+        // (`ensure_enum`/`layout_field_is_linear`), including transitivity
+        // through a struct-in-enum and an enum-in-enum.
+        for (idx, layout) in enums.layouts.iter().enumerate() {
+            let ty = Type::Enum(EnumId::from_index(idx), layout.name);
+            assert_eq!(
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                !layout.is_linear,
+                "`{}`: checker says Copy={}, `ensure_enum` says linear={}",
+                layout.name,
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                layout.is_linear
+            );
+            assert_eq!(
+                layout
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter())
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
+                layout.is_linear,
+                "`{}`: `field_is_linear` disagrees with the `ensure_enum` fold",
+                layout.name
+            );
+        }
+        // Criterion (item 3): an array field is linear iff its element is,
+        // transitively; `PlainArr` (an `[i64 4]` field) stays Copy, `SpyArr`
+        // (an `[__spy 4]` field, spliced in above) is linear even though no
+        // source program can declare that field any more, so the predicate
+        // must be correct on the type alone.
+        let plain_arr_idx = structs
+            .layouts
+            .iter()
+            .position(|l| l.name == "PlainArr")
+            .unwrap();
+        let spy_arr_idx = structs
+            .layouts
+            .iter()
+            .position(|l| l.name == "SpyArr")
+            .unwrap();
+        assert!(!structs.layouts[plain_arr_idx].is_linear);
+        assert!(structs.layouts[spy_arr_idx].is_linear);
+        let plain_arr_ty = Type::Struct(
+            StructId::from_index(plain_arr_idx),
+            structs.layouts[plain_arr_idx].name,
+        );
+        let spy_arr_ty = Type::Struct(
+            StructId::from_index(spy_arr_idx),
+            structs.layouts[spy_arr_idx].name,
+        );
+        assert!(crate::check::is_copy(
+            plain_arr_ty,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!crate::check::is_copy(
+            spy_arr_ty,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+    }
+
+    #[test]
+    fn lower_appends_one_destructor_func_per_linear_struct_only() {
+        // R12: a synthesized destructor exists for every linear struct type,
+        // and only those (a Copy struct needs no glue, so gets no function).
+        let ir = lower_src(
+            "type: Plain x i64 y i64 ; \
+             type: Holds a __spy b i64 ; \
+             : w ( -- ) ;",
+        );
+        assert!(ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_1"));
+        assert!(!ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_0"));
+    }
+
+    #[test]
+    fn lower_drop_of_whole_linear_struct_calls_its_synthesized_destructor() {
+        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds drop ;");
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let calls: Vec<&String> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["sooth_struct_drop_0"]);
+    }
+
+    #[test]
+    fn synthesized_struct_destructor_drops_linear_fields_in_declaration_order() {
+        // R12: struct -> drop its linear fields in declaration order. `Holds`
+        // has a linear field (`a`) then a Copy one (`b`), so the destructor
+        // calls the spy destructor exactly once, for `a`.
+        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_struct_drop_0")
+            .expect("a destructor was synthesized for the linear struct");
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+    }
+
+    // Phase 3 Slice 1, Phase 4: the synthesized enum destructor's own tag
+    // dispatch (structural, not full-stdout: `tests/phase0.rs` covers the
+    // 2-variant runtime behavior; these pin the shapes it doesn't reach).
+
+    #[test]
+    fn synthesized_enum_destructor_newtype_skips_the_tag_compare() {
+        // R7/R12: a single-variant enum (n == 1) has nothing to dispatch on,
+        // so the destructor jumps straight to the one variant block instead
+        // of loading a tag and comparing it (the `n == 1` branch of
+        // `dispatch_on_tag`, otherwise unreached by the 2-variant goldens).
+        let ir = lower_src("type: Box | Full v __spy ; : w ( -- ) ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_enum_drop_0")
+            .expect("a destructor was synthesized for the linear enum");
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 0);
+        assert_eq!(
+            dtor.blocks.len(),
+            2,
+            "a bare `Jmp` to the one variant block, no compare block"
+        );
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+    }
+
+    #[test]
+    fn synthesized_enum_destructor_three_variants_chains_through_a_middle_block() {
+        // R7/R12: with 3 variants the compare chain has an intermediate block
+        // between the first and last compare (`vi < n - 2` in
+        // `dispatch_on_tag`), never built by the 2-variant goldens. Each of
+        // the 3 variants gets its own block; only `Full`'s carries a drop.
+        let ir = lower_src("type: Item | Empty | Full v __spy | Named n i64 ; : w ( -- ) ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_enum_drop_0")
+            .expect("a destructor was synthesized for the linear enum");
+        assert_eq!(dtor.blocks.len(), 5, "2 compares + 3 variant blocks");
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 2);
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
     }
 }

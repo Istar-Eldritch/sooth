@@ -1666,3 +1666,545 @@ fn non_tail_factorial_still_a_real_call_native() {
     assert_eq!(stdout, "120\n");
     assert_eq!(code, 0);
 }
+
+// Phase 3 Slice 1: the linear core on bare `__spy` values. Every
+// drop-observing golden compares the *whole* stdout, so "exactly once" and drop
+// order are actually proven; every negative golden asserts the diagnostic and
+// the backticked type name.
+
+fn run_linear_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-linear-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "linear golden `{tag}` should exit 0");
+    stdout
+}
+
+fn linear_check_error(src: &str) -> String {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect_err("check should fail")
+}
+
+#[test]
+fn dup_of_linear_value_is_error() {
+    // Criterion 1: `dup` is the explicit copy and a linear value has no copy.
+    let err = linear_check_error(": main ( -- )\n  7 __spy dup drop drop ;\n");
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("linear"), "unexpected message: {err}");
+}
+
+#[test]
+fn over_of_linear_value_is_error() {
+    // Criterion 1b: `over` copies its second slot, so it is gated too.
+    let err = linear_check_error(": main ( -- )\n  7 __spy 1 over drop drop drop ;\n");
+    assert!(err.contains("cannot `over`"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn use_after_move_of_linear_local_is_error() {
+    // Criterion 2: the second mention errors and names the site of the first.
+    let err = linear_check_error(
+        ": main ( -- )\n  7 __spy hold ;\n\
+: hold ( __spy -- )\n  | s |\n  s drop\n  s drop ;\n",
+    );
+    assert!(err.contains("use after move"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("moved at line 5, col 3"),
+        "the diagnostic should name the move site: {err}"
+    );
+}
+
+#[test]
+fn explicit_drop_runs_destructor_once() {
+    // Criterion 3: the destructor runs exactly once, exactly where the `drop`
+    // is written (between the two ordinary prints).
+    let stdout = run_linear_golden(
+        "drop-once",
+        ": main ( -- )\n  1 .\n  7 __spy drop\n  2 . ;\n",
+    );
+    assert_eq!(stdout, "1\ndrop 7\n2\n");
+}
+
+#[test]
+fn surplus_linear_on_stack_is_error() {
+    // Criterion 4a: forgetting is an error, not a silent drop.
+    let err = linear_check_error(": main ( -- )\n  7 __spy ;\n");
+    assert!(
+        err.contains("linear value left on the stack"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn unconsumed_linear_local_is_error() {
+    // Criterion 4b: a linear local never consumed by scope end. Locals are not
+    // on the final stack, so this is its own pass, not `check_outputs`.
+    let err = linear_check_error(": hold ( __spy -- )\n  | s |\n  1 . ;\n");
+    assert!(err.contains("never consumed"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the local: {err}"
+    );
+}
+
+#[test]
+fn surplus_copy_value_keeps_existing_error() {
+    // Criterion 4c: no misfire. A surplus Copy value keeps the arity error it
+    // always had, with no linear wording.
+    let err = linear_check_error(": main ( -- )\n  1 ;\n");
+    assert!(
+        err.contains("body leaves 1 values"),
+        "unexpected message: {err}"
+    );
+    assert!(!err.contains("linear"), "unexpected message: {err}");
+}
+
+#[test]
+fn swap_of_linear_values_is_allowed() {
+    // Criterion `swap`: the pure reorderings move rather than copy, so the
+    // `dup`/`over` gate must not reach them. The drop order proves the reorder
+    // actually happened: `swap` makes 7 the top, and `rot` (a b c -> b c a)
+    // makes 1 the top.
+    let stdout = run_linear_golden(
+        "reorder",
+        ": main ( -- )\n  7 __spy 8 __spy swap drop drop\n\
+  1 __spy 2 __spy 3 __spy rot drop drop drop ;\n",
+    );
+    assert_eq!(stdout, "drop 7\ndrop 8\ndrop 1\ndrop 3\ndrop 2\n");
+}
+
+#[test]
+fn both_arms_consume_linear_ok() {
+    // Criterion 10a: consumed in both arms compiles, and each call disposes its
+    // own spy exactly once.
+    let stdout = run_linear_golden(
+        "both-arms",
+        ": dispose ( __spy bool -- )\n  | s c |\n  c if s drop else 99 . s drop end ;\n\
+: main ( -- )\n  7 __spy true dispose\n  8 __spy false dispose ;\n",
+    );
+    assert_eq!(stdout, "drop 7\n99\ndrop 8\n");
+}
+
+#[test]
+fn divergent_arm_use_is_error() {
+    // Criterion 10b: consumed in one arm only, then referenced past the join.
+    // The join yields `MaybeMoved`, so the later use is a use-after-move.
+    let err = linear_check_error(
+        ": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;\n",
+    );
+    assert!(err.contains("use after move"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn divergent_arm_unconsumed_is_error() {
+    // Criterion 10c: consumed in one arm only and never referenced again. The
+    // compiler errors at scope end rather than inserting a compensating drop.
+    // `s` WAS consumed on the `then` arm, so the diagnostic must not claim it
+    // was never touched: the bug is the `else` arm forgetting it.
+    let err =
+        linear_check_error(": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;\n");
+    assert!(
+        err.contains("not consumed on every path"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_across_loop_back_edge_is_located_error() {
+    // Criterion 12: a linear value live across the self-tail-call back-edge is
+    // deferred (R15/D8), as a located error rather than a miscompile.
+    let err = linear_check_error(
+        ": spin ( __spy i64 -- i64 )\n  | s n |\n\
+  n 0 = if s drop 0 else 9 __spy n 1 - spin end ;\n",
+    );
+    assert!(
+        err.contains("not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("line 3"), "the error should be located: {err}");
+}
+
+#[test]
+fn copy_loop_still_compiles() {
+    // Criterion 12 (other half): a `countdown`-shaped Copy loop is unaffected
+    // by the back-edge guard.
+    let stdout = run_linear_golden(
+        "copy-loop",
+        ": countdown ( i64 -- i64 )\n  | n |\n  n 0 = if 0 else n 1 - countdown end ;\n\
+: main ( -- )\n  100 countdown . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+// Phase 3 Slice 1, Phase 2: struct aggregates via destructure-whole. A struct
+// is linear iff any field is (transitively); `S>fi`/`S<fi`/`drop` on a linear
+// struct run compiler-synthesized field drop glue. Every drop-observing
+// golden compares the *whole* stdout, so drop count and order are proven, not
+// just "it compiled".
+
+#[test]
+fn destructure_whole_drops_each_field() {
+    // Criterion 5: `S>` a struct of two distinctly-tagged spies pushes both
+    // fields (first field deepest), and dropping them top-first proves the
+    // destructure moved both fields out rather than just the top one.
+    let stdout = run_linear_golden(
+        "destructure-whole",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair\n  Pair> drop drop ;\n",
+    );
+    assert_eq!(stdout, "drop 2\ndrop 1\n");
+}
+
+#[test]
+fn nested_struct_is_linear_transitively() {
+    // Criterion 5b: a struct-of-struct-of-spy is linear too. `dup` is
+    // rejected exactly like a bare spy, naming the outer struct type, proving
+    // linearity propagates through a nested aggregate rather than stopping at
+    // the immediate field.
+    let err = linear_check_error(
+        "type: Inner v __spy ;\ntype: Outer i Inner ;\n\
+: main ( -- )\n  5 __spy Inner Outer dup\n  Outer> Inner> drop\n  Outer> Inner> drop ;\n",
+    );
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Outer`"), "unexpected message: {err}");
+
+    // And once actually consumed exactly once, the nested destructure/drop
+    // chain runs correctly end to end.
+    let stdout = run_linear_golden(
+        "nested-struct",
+        "type: Inner v __spy ;\ntype: Outer i Inner ;\n\
+: main ( -- )\n  5 __spy Inner Outer\n  Outer> Inner> drop ;\n",
+    );
+    assert_eq!(stdout, "drop 5\n");
+}
+
+#[test]
+fn get_field_drops_the_rest_on_linear_struct() {
+    // Criterion 6: `S>fi` still consumes the whole aggregate on a linear
+    // receiver, so the non-extracted field (`b`, tag 2) is dropped as part of
+    // the getter itself, before the explicit `drop` of the extracted `a`
+    // (tag 1) that follows.
+    let stdout = run_linear_golden(
+        "get-drops-rest",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair\n  Pair>a drop ;\n",
+    );
+    assert_eq!(stdout, "drop 2\ndrop 1\n");
+}
+
+#[test]
+fn set_field_drops_overwritten_linear_field() {
+    // Criterion 8: `S<fi` drops the field it overwrites (old `a`, tag 1)
+    // before storing the new value (tag 9); the other field (`b`, tag 2)
+    // transfers via the blit untouched, and both surface later at the final
+    // destructure+drop.
+    let stdout = run_linear_golden(
+        "set-drops-overwritten",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair\n  9 __spy Pair<a\n  Pair> drop drop ;\n",
+    );
+    assert_eq!(stdout, "drop 1\ndrop 2\ndrop 9\n");
+}
+
+#[test]
+fn drop_of_linear_struct_runs_field_glue_in_declaration_order() {
+    // Criterion 13: `drop` on the whole struct (no destructure in sight) runs
+    // the synthesized destructor, which drops fields in declaration order
+    // (`a` tag 1, then `b` tag 2) — not stack/reverse order, proving the glue
+    // is field-order-driven, not a generic "drop whatever's on the stack".
+    let stdout = run_linear_golden(
+        "drop-whole-struct",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair drop ;\n",
+    );
+    assert_eq!(stdout, "drop 1\ndrop 2\n");
+}
+
+#[test]
+fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
+    // Criterion 5b + 13 combined: `drop` on the *outer* struct's own synthesized
+    // destructor must itself call `sooth_struct_drop_Inner` for the nested field,
+    // rather than only handling one level of nesting. Field order is `i` (tag 1),
+    // then `Inner` (whose own destructor drops `z`, tag 3) is inside `Outer`
+    // at declaration order after a scalar sibling `n` (tag 2), proving the
+    // recursion isn't just "the nested struct happens to be first".
+    let stdout = run_linear_golden(
+        "drop-whole-nested-struct",
+        "type: Inner z __spy ;\ntype: Outer i __spy n __spy w Inner ;\n\
+: main ( -- )\n  1 __spy 2 __spy 3 __spy Inner Outer drop ;\n",
+    );
+    assert_eq!(stdout, "drop 1\ndrop 2\ndrop 3\n");
+}
+
+// Phase 3 Slice 1, Phase 3: `S|>fi`, the non-consuming peek. Copy fields only;
+// a linear field is a compile error (workaround: `S>`).
+
+#[test]
+fn peek_copy_field_keeps_struct() {
+    // Criterion 7a: `Pair|>a` peeks the Copy field `a` twice, leaving the
+    // aggregate itself live both times (proven because the final `drop` of
+    // the whole struct still finds its linear field `b` intact and disposes
+    // it exactly once — a consuming `Pair>a` in its place would have dropped
+    // `b` at the first peek, or left nothing for the trailing `drop` to see).
+    let stdout = run_linear_golden(
+        "peek-copy-field",
+        "type: Pair a i64 b __spy ;\n\
+: main ( -- )\n  5 3 __spy Pair\n  Pair|>a drop\n  Pair|>a drop\n  drop ;\n",
+    );
+    assert_eq!(stdout, "drop 3\n");
+}
+
+#[test]
+fn peek_linear_field_is_error() {
+    // Criterion 7b: peeking the linear field `b` is a compile error naming
+    // both the peek workaround and the offending field's type.
+    let err = linear_check_error(
+        "type: Pair a i64 b __spy ;\n: main ( -- )\n  5 3 __spy Pair\n  Pair|>b drop drop ;\n",
+    );
+    assert!(
+        err.contains("cannot `Pair|>b`"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`S>`"), "unexpected message: {err}");
+}
+
+// Phase 3 Slice 1, Phase 4: enums via a synthesized, tag-dispatched
+// destructor. A linear enum's `drop` doesn't know at compile time which
+// variant is active, so the synthesized destructor tests the runtime tag and
+// drops only the active variant's linear payload.
+
+#[test]
+fn dup_of_linear_enum_is_error() {
+    // The hole Phase 2 left open: `is_copy` used to return `true` for every
+    // enum, so an enum with a linear payload was silently duplicable and this
+    // exact source compiled, ran, and printed nothing (an exactly-once
+    // violation with no diagnostic). It is now rejected like any other linear
+    // value, naming the enum type.
+    let err = linear_check_error(
+        "type: Box | Full v __spy | Empty ;\n\
+: main ( -- )\n  1 __spy Full dup drop drop ;\n",
+    );
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Box`"), "unexpected message: {err}");
+    assert!(err.contains("linear"), "unexpected message: {err}");
+}
+
+#[test]
+fn nested_enum_is_linear_transitively() {
+    // The enum half of criterion 5b: linearity propagates through a
+    // struct-of-enum-of-struct-of-spy, so `dup` on the outer struct is
+    // rejected naming `Wrap`, and dropping it whole runs the chain of
+    // synthesized destructors (struct -> tag dispatch -> struct -> spy).
+    let src = "type: Inner v __spy ;\ntype: Held | Empty | Some i Inner ;\n\
+type: Wrap h Held ;\n";
+    let err = linear_check_error(&format!(
+        "{src}: main ( -- )\n  5 __spy Inner Some Wrap dup drop drop ;\n"
+    ));
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Wrap`"), "unexpected message: {err}");
+
+    let stdout = run_linear_golden(
+        "nested-enum",
+        &format!("{src}: main ( -- )\n  5 __spy Inner Some Wrap drop ;\n"),
+    );
+    assert_eq!(stdout, "drop 5\n");
+}
+
+#[test]
+fn drop_of_linear_enum_dispatches_on_tag() {
+    // Criterion 9: a linear enum built behind an `if` (so its active variant
+    // is a runtime fact, not something lowering can fold), dropped whole
+    // (never destructured/matched). The synthesized destructor's tag dispatch
+    // must find the right variant each time: the `Full` branch's spy payload
+    // is dropped, the `Empty` branch's `drop` is a no-op, and the surrounding
+    // prints prove the dispatch didn't run the wrong arm's glue (or both).
+    let stdout = run_linear_golden(
+        "enum-tag-dispatch",
+        "type: Item | Empty | Full v __spy ;\n\
+: main ( -- )\n  1 .\n  true if 5 __spy Full else Empty end drop\n  2 .\n\
+  false if 9 __spy Full else Empty end drop\n  3 . ;\n",
+    );
+    assert_eq!(stdout, "1\ndrop 5\n2\n3\n");
+}
+
+#[test]
+fn clause_body_disposes_linear_payload() {
+    // Criterion 9b: a clause-style word matching on the enum exposes the
+    // active variant's payload on the stack; the matched clause is
+    // responsible for disposing it like any other linear value (here via a
+    // bare `drop`, no local name needed). The `Empty` clause runs no glue at
+    // all (zero fields), proving the drop in the `Full` clause is the clause
+    // body's own doing, not compiler-inserted compensation.
+    let stdout = run_linear_golden(
+        "clause-disposes-payload",
+        "type: Item | Empty | Full v __spy ;\n\
+: handle ( Item -- )\n| Empty   99 .\n| Full    drop\n;\n\
+: main ( -- )\n  Empty handle\n  7 __spy Full handle ;\n",
+    );
+    assert_eq!(stdout, "99\ndrop 7\n");
+}
+
+#[test]
+fn unconsumed_linear_clause_payload_is_error() {
+    // The clause-body half of criterion 9b: a payload bound to a clause local
+    // is subject to the same scope-end rule as any other linear local, so
+    // forgetting it is a compile error naming the local and the word. This is
+    // the branch Phase 1 left unreachable (a linear clause payload needed the
+    // enum linearity this phase adds).
+    let err = linear_check_error(
+        "type: Item | Empty | Full v __spy ;\n\
+: handle ( Item -- )\n| Empty   99 .\n| Full | s |   1 .\n;\n",
+    );
+    assert!(err.contains("never consumed"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the local: {err}"
+    );
+    assert!(
+        err.contains("`handle`"),
+        "the error should name the word: {err}"
+    );
+}
+
+#[test]
+fn duplicate_word_entry_local_is_error() {
+    // A repeated binding name (`| s s |`) must not collapse to last-wins in
+    // the name -> type map: that would silently drop the earlier binding
+    // (and any linear value in it) from all tracking, with no diagnostic.
+    let err = linear_check_error(
+        ": hold ( __spy __spy -- )\n  | s s |\n  s drop ;\n\
+: main ( -- ) 1 __spy 2 __spy hold 99 . ;\n",
+    );
+    assert!(err.contains("duplicate local"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the duplicated local: {err}"
+    );
+    assert!(
+        err.contains("`hold`"),
+        "the error should name the word: {err}"
+    );
+}
+
+#[test]
+fn duplicate_clause_body_local_is_error() {
+    // The clause-body twin of `duplicate_word_entry_local_is_error`: the
+    // same last-wins hazard exists in the `| Variant | s s |` binding path.
+    let err = linear_check_error(
+        "type: R | Two a __spy b __spy ;\n\
+: use ( R -- ) | Two | s s | s drop ;\n\
+: main ( -- ) 1 __spy 2 __spy Two use ;\n",
+    );
+    assert!(err.contains("duplicate local"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the duplicated local: {err}"
+    );
+    assert!(
+        err.contains("`use`"),
+        "the error should name the word: {err}"
+    );
+}
+
+#[test]
+fn main_declaring_linear_output_is_error() {
+    // Nothing calls `main`, so a linear output would leak past the program
+    // boundary unnoticed instead of being disposed.
+    let err = linear_check_error(": main ( -- __spy ) 7 __spy ;\n");
+    assert!(
+        err.contains("cannot declare a linear type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`main`"), "unexpected message: {err}");
+}
+
+#[test]
+fn main_declaring_linear_input_is_error() {
+    // Nothing calls `main`, so a linear input arrives in an uninitialised
+    // ABI register; running its destructor would be undefined behaviour.
+    let err = linear_check_error(": main ( __spy -- ) | s | s drop ;\n");
+    assert!(
+        err.contains("cannot declare a linear type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`main`"), "unexpected message: {err}");
+}
+
+#[test]
+fn fill_of_linear_element_is_error() {
+    // Array-element linearity isn't tracked transitively by the drop-glue
+    // path yet, so `fill` rejects a linear element outright.
+    let err = linear_check_error(": main ( -- )\n  0 __spy 3 fill drop ;\n");
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_in_word_signature_is_error() {
+    // The array-type boundary (not just `fill`) rejects a linear element: a
+    // `[__spy 2]` slot in a word's stack effect names the type directly. The
+    // parser cannot know `__spy` is linear until struct/enum fields are
+    // resolved, so this is a checker error, not a parse error.
+    let err = linear_check_error(": w ( [__spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n");
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_in_struct_field_is_error() {
+    // Same boundary, reached via a `type:` field declaration instead of a
+    // word signature.
+    let err = linear_check_error("type: Bag xs [__spy 2] ;\n: main ( -- ) 0 . ;\n");
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_via_linear_struct_in_struct_field_is_error() {
+    // Indirect linearity: `Arr`'s field isn't itself `__spy`, but `Holds`
+    // (its element) contains one transitively, so the array is linear too.
+    let err =
+        linear_check_error("type: Holds s __spy ;\ntype: Arr a [Holds 2] ;\n: main ( -- ) 0 . ;\n");
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Holds`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
+    // Same indirection, reached via a word signature slot instead of a
+    // struct field.
+    let err = linear_check_error(
+        "type: Holds s __spy ;\n: w ( [Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n",
+    );
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Holds`"), "unexpected message: {err}");
+}
