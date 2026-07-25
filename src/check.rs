@@ -882,7 +882,6 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)] // the word-checking entry point's threaded inputs; a bundle would obscure them
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -905,7 +904,6 @@ fn check_word(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // the word-body walker's threaded inputs; a bundle would obscure them
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -961,7 +959,6 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
-#[allow(clippy::too_many_arguments)] // the clause-word entry point's threaded inputs; a bundle would obscure them
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],

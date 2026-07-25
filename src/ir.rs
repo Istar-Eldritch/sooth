@@ -746,6 +746,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// single module and the REPL's per-line/per-def module both need it, since
 /// `drop` calls it by symbol and the symbol must resolve wherever `drop` is
 /// compiled).
+///
+/// The REPL therefore redefines these symbols once per line, which is only safe
+/// because redefining a *type* is rejected (`check`): every generation's glue is
+/// identical, so `RTLD_GLOBAL`'s first-definition-wins is indistinguishable. If
+/// type redefinition is ever allowed, this symbol needs a generation suffix the
+/// way word symbols already have one.
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -3523,6 +3529,45 @@ mod tests {
         assert!(!ir.structs[0].is_linear, "Plain has no linear field");
         assert!(ir.structs[1].is_linear, "Holds carries a spy directly");
         assert!(ir.structs[2].is_linear, "Wraps carries one transitively");
+    }
+
+    #[test]
+    fn struct_linearity_agrees_across_the_checker_and_both_lowering_folds() {
+        // Linearity is decided in three places over the same field lists:
+        // `check::is_copy` walks `Type`, `ensure_struct` folds `IrType` inline
+        // while `layouts` is still being built, and `field_is_linear` is what
+        // every drop-glue site consults. If they ever disagree the checker
+        // gates a `dup` the lowering then emits no glue for (or the reverse),
+        // so pin all three rather than trusting three hand-kept matches.
+        let src = "type: Plain x i64 y i64 ; \
+                   type: Holds a __spy b i64 ; \
+                   type: Wraps h Holds ; \
+                   type: Deep w Wraps p Plain ; \
+                   : w ( -- ) ;";
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        let (structs, _, _) = build_registries(&module.structs, &module.enums, &module.arrays);
+        for (idx, layout) in structs.layouts.iter().enumerate() {
+            let ty = Type::Struct(StructId::from_index(idx), layout.name);
+            assert_eq!(
+                crate::check::is_copy(ty, &module.structs),
+                !layout.is_linear,
+                "`{}`: checker says Copy={}, `ensure_struct` says linear={}",
+                layout.name,
+                crate::check::is_copy(ty, &module.structs),
+                layout.is_linear
+            );
+            assert_eq!(
+                layout
+                    .fields
+                    .iter()
+                    .any(|f| field_is_linear(f.ty, &structs)),
+                layout.is_linear,
+                "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
+                layout.name
+            );
+        }
     }
 
     #[test]

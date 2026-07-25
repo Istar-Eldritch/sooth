@@ -166,6 +166,18 @@ not in struct/enum glue.
   uniform.
 - **Enum case**: the synthesized destructor tag-dispatches and drops the active variant's
   linear payload; a matched clause consumes/drops its exposed payload per R3/R13.
+- **Open hole inherited from Phase 2 (start here)**: `check::is_copy` returns `true` for
+  `Type::Enum` unconditionally, so an enum with a linear payload is silently duplicable and
+  droppable-to-nothing today: `type: Box | Full v __spy | Empty ;` with
+  `1 __spy Full dup drop drop` compiles, runs, and prints nothing (an R1 exactly-once
+  violation with no diagnostic). Phase 2 deliberately left this rather than shipping a
+  reject-guard it would delete here, unlike the linear *array element* case, which is a
+  located not-supported-yet error because arrays get no glue in this slice at all. Extending
+  `is_copy` to enums (linear iff any variant has a linear field) belongs with the
+  tag-dispatched glue and must land in the same phase as it. Note this makes linearity a
+  *four*-site decision: `check::is_copy`, `ir::field_is_linear`, the `ensure_struct` fold,
+  and the new enum-variant fold; `struct_linearity_agrees_across_the_checker_and_both_lowering_folds`
+  (@ir.rs) pins the first three and should be extended to cover enums.
 - **Changes**: `src/check.rs`, `src/ir.rs`, `src/backend/qbe.rs`, `tests/phase0.rs`.
 - **Exit**: criteria 9 (runtime tag dispatch, stdout differs per tag) and 9b (matched clause
   disposes payload) pass; green; no regression.
