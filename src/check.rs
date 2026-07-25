@@ -135,11 +135,20 @@ pub fn builtin_table() -> HashMap<String, Sig> {
 }
 
 /// R2/R7: whether `ty` is `Copy` (freely duplicated and discarded) rather than
-/// linear (used exactly once, disposed by `drop`). Every type is `Copy` but the
-/// drop-spy; aggregates become linear-iff-a-field-is in Phase 2, which is why
-/// this is one query rather than a `matches!` scattered over the checker.
-pub fn is_copy(ty: Type) -> bool {
-    !matches!(ty, Type::Spy)
+/// linear (used exactly once, disposed by `drop`). The drop-spy is linear;
+/// a struct is linear iff any field is (transitively), so a struct-of-struct-
+/// of-spy is linear too. `structs` resolves a `Type::Struct`'s fields; structs
+/// can't recurse into themselves (`check_recursion` rejects that first), so
+/// this always terminates.
+pub fn is_copy(ty: Type, structs: &[StructDecl]) -> bool {
+    match ty {
+        Type::Spy => false,
+        Type::Struct(id, _) => structs[id.index()]
+            .fields
+            .iter()
+            .all(|(_, field_ty)| is_copy(*field_ty, structs)),
+        _ => true,
+    }
 }
 
 /// R14: the move-state of one linear local, a three-value lattice. `Moved` and
@@ -162,11 +171,11 @@ struct Moves {
 }
 
 impl Moves {
-    fn new(locals: &HashMap<String, Type>) -> Moves {
+    fn new(locals: &HashMap<String, Type>, structs: &[StructDecl]) -> Moves {
         Moves {
             states: locals
                 .iter()
-                .filter(|(_, ty)| !is_copy(**ty))
+                .filter(|(_, ty)| !is_copy(**ty, structs))
                 .map(|(name, _)| (name.clone(), MoveState::Live))
                 .collect(),
         }
@@ -226,20 +235,32 @@ impl Moves {
 
 /// Error context for the shared stack simulation: a full word (with its
 /// declared effect and typed locals) or a bare REPL line (no signature to cite).
+/// Both carry the struct registry `is_copy` needs to resolve a `Type::Struct`'s
+/// linearity, so `dup`/`over`/back-edge checking works identically whether the
+/// caller is a compiled word or a REPL line.
 enum Ctx<'a> {
     Word {
         name: &'a str,
         effect: &'a StackEffect,
         locals: &'a HashMap<String, Type>,
+        structs: &'a [StructDecl],
     },
-    Line,
+    Line {
+        structs: &'a [StructDecl],
+    },
 }
 
 impl Ctx<'_> {
     fn local_type(&self, name: &str) -> Option<Type> {
         match self {
             Ctx::Word { locals, .. } => locals.get(name).copied(),
-            Ctx::Line => None,
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    fn structs(&self) -> &[StructDecl] {
+        match self {
+            Ctx::Word { structs, .. } | Ctx::Line { structs } => structs,
         }
     }
 
@@ -248,7 +269,7 @@ impl Ctx<'_> {
     fn word_name(&self) -> Option<&str> {
         match self {
             Ctx::Word { name, .. } => Some(name),
-            Ctx::Line => None,
+            Ctx::Line { .. } => None,
         }
     }
 }
@@ -277,15 +298,16 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     check_tail_call_cycles(&module.words)?;
 
     // Split the borrow so a word body can intern into `arrays` while reading
-    // `words`/`enums`.
+    // `words`/`enums`/`structs`.
     let Module {
         words,
+        structs,
         enums,
         arrays,
         ..
     } = module;
     for word in words.iter() {
-        check_word(word, enums, &env, arrays)?;
+        check_word(word, enums, &env, arrays, structs)?;
     }
     Ok(())
 }
@@ -596,10 +618,11 @@ pub fn check_def(
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env, arrays)
+    check_word(word, enums, &env, arrays, structs)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -610,6 +633,7 @@ pub fn infer_line(
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<Vec<Type>, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
     // A bare line binds no locals (so it has no move-state) and is not a word
@@ -617,7 +641,7 @@ pub fn infer_line(
     let final_stack = check_terms(
         terms,
         initial,
-        &Ctx::Line,
+        &Ctx::Line { structs },
         env,
         arrays,
         &mut Moves::default(),
@@ -673,6 +697,7 @@ fn check_outputs(
     final_stack: &[Slot],
     declared: &[Type],
     line: u32,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     if final_stack.len() != declared.len() {
         // R13/R2: a *linear* surplus value is the forgotten-disposal case, so it
@@ -682,7 +707,7 @@ fn check_outputs(
             .get(declared.len()..)
             .unwrap_or_default()
             .iter()
-            .find(|s| !is_copy(s.ty))
+            .find(|s| !is_copy(s.ty, structs))
         {
             return Err(surplus_linear_value_error(word, slot.ty, line));
         }
@@ -857,11 +882,13 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // the word-checking entry point's threaded inputs; a bundle would obscure them
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
@@ -872,12 +899,13 @@ fn check_word(
     }
     match &word.body {
         WordBody::Terms { locals, terms } => {
-            check_terms_word(word, enums, locals, terms, env, arrays)
+            check_terms_word(word, enums, locals, terms, env, arrays, structs)
         }
-        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays),
+        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays, structs),
     }
 }
 
+#[allow(clippy::too_many_arguments)] // the word-body walker's threaded inputs; a bundle would obscure them
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -885,6 +913,7 @@ fn check_terms_word(
     terms: &[Term],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     let inputs = word.effect.inputs.len();
 
@@ -917,13 +946,14 @@ fn check_terms_word(
         name: &word.name,
         effect: &word.effect,
         locals: &local_types,
+        structs,
     };
-    let mut moves = Moves::new(&local_types);
+    let mut moves = Moves::new(&local_types, structs);
     let final_stack = check_terms(terms, initial, &ctx, env, arrays, &mut moves, true)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
-    check_outputs(word, &final_stack, &declared, line)?;
+    check_outputs(word, &final_stack, &declared, line, structs)?;
     check_linear_locals_consumed(word, &local_types, &moves, line)
 }
 
@@ -931,12 +961,14 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
+#[allow(clippy::too_many_arguments)] // the clause-word entry point's threaded inputs; a bundle would obscure them
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
     clauses: &[Clause],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
         Some(Type::Enum(id, _)) => id,
@@ -985,6 +1017,7 @@ fn check_clause_word(
             &declared,
             env,
             arrays,
+            structs,
         )?;
     }
     for variant in &enum_decl.variants {
@@ -1008,6 +1041,7 @@ fn check_clause_body(
     declared: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    structs: &[StructDecl],
 ) -> Result<(), String> {
     for name in &clause.locals {
         reject_variant_local(&word.name, name, "local", enums)?;
@@ -1043,8 +1077,9 @@ fn check_clause_body(
         name: &word.name,
         effect: &word.effect,
         locals: &local_types,
+        structs,
     };
-    let mut moves = Moves::new(&local_types);
+    let mut moves = Moves::new(&local_types, structs);
     let final_stack = check_terms(
         &clause.body,
         stack_after_bind,
@@ -1059,7 +1094,7 @@ fn check_clause_body(
         .last()
         .map(|t| t.span.line)
         .unwrap_or(clause.span.line);
-    check_outputs(word, &final_stack, declared, line)?;
+    check_outputs(word, &final_stack, declared, line, structs)?;
     check_linear_locals_consumed(word, &local_types, &moves, line)
 }
 
@@ -1069,7 +1104,7 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
             "error: unknown word `{}` in `{}` (line {})",
             name, wname, span.line
         ),
-        Ctx::Line => format!("error: unknown word `{name}`"),
+        Ctx::Line { .. } => format!("error: unknown word `{name}`"),
     }
 }
 
@@ -1079,7 +1114,7 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
             "error: stack effect mismatch in `{}` (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
             name, span.line, op, needs, holds, effect_str(effect),
         ),
-        Ctx::Line => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
+        Ctx::Line { .. } => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
     }
 }
 
@@ -1089,7 +1124,7 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
             "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
             name, span.line, op, expected, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
         }
     }
@@ -1104,7 +1139,7 @@ fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires two operands of the same numeric type, found `{a}` and `{b}`"
         ),
     }
@@ -1118,7 +1153,7 @@ fn div_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
             "error: type mismatch in `{}` (line {})\n  `/` requires two operands of the same float type (integer division is unsupported), found `{}` and `{}`\n  note: declared {}",
             name, span.line, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `/` requires two operands of the same float type (integer division is unsupported), found `{a}` and `{b}`"
         ),
     }
@@ -1132,7 +1167,7 @@ fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
             "error: type mismatch in `{}` (line {})\n  `mod` requires two operands of the same integer type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `mod` requires two operands of the same integer type, found `{a}` and `{b}`"
         ),
     }
@@ -1147,7 +1182,7 @@ fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or bool type, found `{}` and `{}`\n  note: declared {}",
             name, span.line, op, a, b, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires two operands of the same integer or bool type, found `{a}` and `{b}`"
         ),
     }
@@ -1160,7 +1195,7 @@ fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String 
             "error: type mismatch in `{}` (line {})\n  `not` requires an integer or bool operand, found `{}`\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `not` requires an integer or bool operand, found `{found}`"
         ),
     }
@@ -1173,7 +1208,7 @@ fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
             "error: type mismatch in `{}` (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires an integer value operand, found `{found}`"
         ),
     }
@@ -1186,7 +1221,7 @@ fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
             "error: type mismatch in `{}` (line {})\n  `{}` requires an `i64` shift count, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` requires an `i64` shift count, found `{found}`"
         ),
     }
@@ -1200,7 +1235,7 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
             "error: type mismatch in `{}` (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires a numeric source, found `{found}`")
         }
     }
@@ -1216,7 +1251,7 @@ fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String 
             "error: type mismatch in `{}` (line {})\n  `.` requires a printable scalar, found `{}`\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `.` requires a printable scalar, found `{found}`")
         }
     }
@@ -1231,7 +1266,7 @@ fn cannot_copy_linear_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
             "error: cannot `{}` a value of type `{}` in `{}` (line {})\n  `{}` is linear: it owns a resource and has no `Copy` instance, so there are no bits to copy; thread the value through instead\n  note: declared {}",
             op, found, name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: cannot `{op}` a value of type `{found}`: `{found}` is linear and has no `Copy` instance"
         ),
     }
@@ -1245,7 +1280,7 @@ fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span
             "error: use after move in `{}` (line {})\n  local `{}` of type `{}` was moved at line {}, col {}; `{}` is linear, so it is used exactly once\n  note: declared {}",
             name, span.line, local, ty, site.line, site.col, ty, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: use after move: local `{local}` of type `{ty}` was moved at line {}, col {}",
             site.line, site.col
         ),
@@ -1291,7 +1326,7 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
             "error: linear values across a loop are not supported yet in `{}` (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
             name, span.line, ty, callee, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: linear values across a loop are not supported yet: a `{ty}` is live across the back-edge to `{callee}`"
         ),
     }
@@ -1308,7 +1343,7 @@ fn check_linear_across_back_edge(
     below_args: &[Slot],
     moves: &Moves,
 ) -> Result<(), String> {
-    if let Some(slot) = below_args.iter().find(|s| !is_copy(s.ty)) {
+    if let Some(slot) = below_args.iter().find(|s| !is_copy(s.ty, ctx.structs())) {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
     if let Some(local) = moves.unconsumed().first() {
@@ -1350,7 +1385,7 @@ fn usize_conversion_needed_error(ctx: &Ctx, span: Span, op: &str) -> String {
             "error: type mismatch in `{}` (line {})\n  `{}` mixes `usize` with a computed `i64`: convert it explicitly with `>usize` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
             name, span.line, op, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: type mismatch: `{op}` mixes `usize` with a computed `i64`: convert it explicitly with `>usize` first"
         ),
     }
@@ -1363,7 +1398,7 @@ fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
             "error: unknown type `{name}` in `{wname}` (line {})",
             span.line
         ),
-        Ctx::Line => format!("error: unknown type `{name}`"),
+        Ctx::Line { .. } => format!("error: unknown type `{name}`"),
     }
 }
 
@@ -1373,7 +1408,7 @@ fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) ->
             "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
             name, span.line, d_then, d_else, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
         ),
     }
@@ -1385,7 +1420,7 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
             "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
             name, span.line, t_then, t_else, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `if` branches leave different types (then: `{t_then}`, else: `{t_else}`)"
         ),
     }
@@ -1740,7 +1775,7 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
             "error: type mismatch in `{}` (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
             name, span.line, op, found, effect_str(effect),
         ),
-        Ctx::Line => {
+        Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires an array operand, found `{found}`")
         }
     }
@@ -1754,7 +1789,7 @@ fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64)
             "error: array index out of range in `{}` (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
             name, span.line, index, count, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: array index out of range: index {index} is out of bounds for length {count}"
         ),
     }
@@ -1768,7 +1803,7 @@ fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
             "error: type mismatch in `{}` (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
             name, span.line, found, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `fill` requires a literal count, found a computed `{found}` (no const-expr eval)"
         ),
     }
@@ -1782,7 +1817,7 @@ fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
             "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
             name, span.line, count, u32::MAX, effect_str(effect),
         ),
-        Ctx::Line => format!(
+        Ctx::Line { .. } => format!(
             "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
             u32::MAX
         ),
@@ -1930,7 +1965,7 @@ fn check_shuffle(
             // R4 (D3): `dup` is the explicit copy, so it is gated on `Copy`.
             // The pure reorderings below (`swap`/`rot`) move rather than copy
             // and stay legal on a linear value.
-            if !is_copy(top.ty) {
+            if !is_copy(top.ty, ctx.structs()) {
                 return Err(cannot_copy_linear_error(ctx, span, "dup", top.ty));
             }
             stack.push(top);
@@ -1956,7 +1991,7 @@ fn check_shuffle(
             let below = stack[n - 2];
             // R4: `over` copies the second slot, so it is gated exactly like
             // `dup`.
-            if !is_copy(below.ty) {
+            if !is_copy(below.ty, ctx.structs()) {
                 return Err(cannot_copy_linear_error(ctx, span, "over", below.ty));
             }
             stack.push(below);
@@ -2686,7 +2721,7 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        infer_line(&terms, entry, &builtin_table(), &mut Vec::new())
+        infer_line(&terms, entry, &builtin_table(), &mut Vec::new(), &[])
     }
 
     #[test]
@@ -3242,9 +3277,29 @@ mod tests {
     #[test]
     fn is_copy_every_type_but_the_spy() {
         for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
-            assert!(is_copy(Type::from_name(name).unwrap()), "{name} is Copy");
+            assert!(
+                is_copy(Type::from_name(name).unwrap(), &[]),
+                "{name} is Copy"
+            );
         }
-        assert!(!is_copy(Type::Spy));
+        assert!(!is_copy(Type::Spy, &[]));
+    }
+
+    #[test]
+    fn is_copy_struct_is_linear_iff_a_field_is_transitively() {
+        // R7/R8 (Phase 2): a struct with no linear field is Copy; one with a
+        // linear field (direct or nested) is linear, transitively.
+        let tokens = lex("type: Plain x i64 y i64 ;\n\
+type: Holds a __spy b i64 ;\n\
+type: Wraps h Holds ;\n")
+        .unwrap();
+        let module = parse(&tokens).unwrap();
+        let plain = Type::Struct(StructId::from_index(0), "Plain");
+        let holds = Type::Struct(StructId::from_index(1), "Holds");
+        let wraps = Type::Struct(StructId::from_index(2), "Wraps");
+        assert!(is_copy(plain, &module.structs));
+        assert!(!is_copy(holds, &module.structs));
+        assert!(!is_copy(wraps, &module.structs));
     }
 
     #[test]

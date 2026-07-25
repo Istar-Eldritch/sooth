@@ -1840,3 +1840,87 @@ fn copy_loop_still_compiles() {
     );
     assert_eq!(stdout, "0\n");
 }
+
+// Phase 3 Slice 1, Phase 2: struct aggregates via destructure-whole. A struct
+// is linear iff any field is (transitively); `S>fi`/`S<fi`/`drop` on a linear
+// struct run compiler-synthesized field drop glue. Every drop-observing
+// golden compares the *whole* stdout, so drop count and order are proven, not
+// just "it compiled".
+
+#[test]
+fn destructure_whole_drops_each_field() {
+    // Criterion 5: `S>` a struct of two distinctly-tagged spies pushes both
+    // fields (first field deepest), and dropping them top-first proves the
+    // destructure moved both fields out rather than just the top one.
+    let stdout = run_linear_golden(
+        "destructure-whole",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair\n  Pair> drop drop ;\n",
+    );
+    assert_eq!(stdout, "drop 2\ndrop 1\n");
+}
+
+#[test]
+fn nested_struct_is_linear_transitively() {
+    // Criterion 5b: a struct-of-struct-of-spy is linear too. `dup` is
+    // rejected exactly like a bare spy, naming the outer struct type, proving
+    // linearity propagates through a nested aggregate rather than stopping at
+    // the immediate field.
+    let err = linear_check_error(
+        "type: Inner v __spy ;\ntype: Outer i Inner ;\n\
+: main ( -- )\n  5 __spy Inner Outer dup\n  Outer> Inner> drop\n  Outer> Inner> drop ;\n",
+    );
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Outer`"), "unexpected message: {err}");
+
+    // And once actually consumed exactly once, the nested destructure/drop
+    // chain runs correctly end to end.
+    let stdout = run_linear_golden(
+        "nested-struct",
+        "type: Inner v __spy ;\ntype: Outer i Inner ;\n\
+: main ( -- )\n  5 __spy Inner Outer\n  Outer> Inner> drop ;\n",
+    );
+    assert_eq!(stdout, "drop 5\n");
+}
+
+#[test]
+fn get_field_drops_the_rest_on_linear_struct() {
+    // Criterion 6: `S>fi` still consumes the whole aggregate on a linear
+    // receiver, so the non-extracted field (`b`, tag 2) is dropped as part of
+    // the getter itself, before the explicit `drop` of the extracted `a`
+    // (tag 1) that follows.
+    let stdout = run_linear_golden(
+        "get-drops-rest",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair\n  Pair>a drop ;\n",
+    );
+    assert_eq!(stdout, "drop 2\ndrop 1\n");
+}
+
+#[test]
+fn set_field_drops_overwritten_linear_field() {
+    // Criterion 8: `S<fi` drops the field it overwrites (old `a`, tag 1)
+    // before storing the new value (tag 9); the other field (`b`, tag 2)
+    // transfers via the blit untouched, and both surface later at the final
+    // destructure+drop.
+    let stdout = run_linear_golden(
+        "set-drops-overwritten",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair\n  9 __spy Pair<a\n  Pair> drop drop ;\n",
+    );
+    assert_eq!(stdout, "drop 1\ndrop 2\ndrop 9\n");
+}
+
+#[test]
+fn drop_of_linear_struct_runs_field_glue_in_declaration_order() {
+    // Criterion 13: `drop` on the whole struct (no destructure in sight) runs
+    // the synthesized destructor, which drops fields in declaration order
+    // (`a` tag 1, then `b` tag 2) — not stack/reverse order, proving the glue
+    // is field-order-driven, not a generic "drop whatever's on the stack".
+    let stdout = run_linear_golden(
+        "drop-whole-struct",
+        "type: Pair a __spy b __spy ;\n\
+: main ( -- )\n  1 __spy 2 __spy Pair drop ;\n",
+    );
+    assert_eq!(stdout, "drop 1\ndrop 2\n");
+}

@@ -157,6 +157,31 @@ pub struct StructLayout {
     pub size: u32,
     pub align: u32,
     pub fields: Vec<FieldLayout>,
+    /// R7: whether this struct is linear (any field is, transitively). A
+    /// struct field's own `is_linear` is already resolved by the time this is
+    /// computed (`ensure_struct` recurses into nested fields first), so this
+    /// is a one-shot fold, not a further recursion.
+    pub is_linear: bool,
+}
+
+/// Whether a field's `IrType` is linear (R6/R7): the drop-spy directly, or a
+/// nested struct whose own layout is linear. Shared by struct-layout
+/// computation and every drop-glue site (`drop`, `S>fi`'s drop-the-rest,
+/// `S<fi`'s drop-on-overwrite, and the synthesized struct destructor), so the
+/// "what counts as linear" rule lives in one place.
+fn field_is_linear(ty: IrType, structs: &Structs) -> bool {
+    match ty {
+        IrType::Spy => true,
+        IrType::Struct(id) => structs.layouts[id.index()].is_linear,
+        _ => false,
+    }
+}
+
+/// The synthesized per-type destructor symbol for a linear struct (R12): the
+/// drop-glue home decided in Phase 4 and used starting here in Phase 2 (a
+/// struct's field drops are uniform with an enum's tag-dispatched drops).
+fn struct_drop_symbol(id: StructId) -> String {
+    format!("sooth_struct_drop_{}", id.index())
 }
 
 /// One field's placement within its owning struct: its byte offset and its own
@@ -480,10 +505,25 @@ impl LayoutBuilder<'_> {
         }
         let structs = self.structs;
         let (fields, size, align) = self.place_fields(&structs[idx].fields);
+        // R7: linear iff any field is, transitively. A nested struct field's
+        // own `is_linear` is already memoized (`place_fields` -> `size_align`
+        // ensures it first), so this is a plain fold over the just-placed
+        // fields, not a further recursion.
+        let is_linear = fields.iter().any(|f| match f.ty {
+            IrType::Spy => true,
+            IrType::Struct(id) => {
+                self.struct_memo[id.index()]
+                    .as_ref()
+                    .expect("nested struct field already laid out")
+                    .is_linear
+            }
+            _ => false,
+        });
         self.struct_memo[idx] = Some(StructLayout {
             name: structs[idx].name_static,
             size,
             align,
+            is_linear,
             fields,
         });
     }
@@ -678,11 +718,27 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .collect();
     let resolve = |name: &str| name.to_string();
 
-    let funcs = module
+    let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
         .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays))
         .collect();
+
+    // R12: append a synthesized destructor for every linear struct type
+    // (the drop-glue home decided in Phase 4, used starting here): `drop`
+    // calls it as a plain `Call` (R16).
+    for (idx, layout) in structs.layouts.iter().enumerate() {
+        if layout.is_linear {
+            funcs.push(synthesize_struct_destructor(
+                StructId::from_index(idx),
+                &env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+            ));
+        }
+    }
 
     Ok(IrModule {
         funcs,
@@ -690,6 +746,38 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         enums: enums.layouts,
         arrays: arrays.layouts,
     })
+}
+
+/// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
+/// that type: drop each linear field, in declaration order. Built via a
+/// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
+/// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
+/// is disposed" stays in one place.
+fn synthesize_struct_destructor(
+    id: StructId,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+) -> IrFunc {
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let param = b.fresh_value(IrType::Struct(id));
+    let fields = structs.layouts[id.index()].fields.clone();
+    for field in fields {
+        if field_is_linear(field.ty, structs) {
+            let v = b.field_value(param, field);
+            b.emit_drop(v);
+        }
+    }
+    b.seal_block(Terminator::Ret(None));
+    IrFunc {
+        name: struct_drop_symbol(id),
+        params: vec![IrType::Struct(id)],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }
 }
 
 /// Lower a bare REPL line to a uniform-signature wrapper `sooth_line_{seq}`
@@ -1203,13 +1291,7 @@ impl<'a> FuncBuilder<'a> {
             }
             "drop" => {
                 let v = self.stack.pop().expect("drop: non-empty stack");
-                // R5/R16: `drop` is the universal disposal primitive. On a
-                // linear value it is a plain `Call` to the (compiler-known)
-                // destructor; a `Copy` value is discarded with no runtime
-                // effect, as before.
-                if self.value_type(v) == IrType::Spy {
-                    self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
-                }
+                self.emit_drop(v);
             }
             "swap" => {
                 let n = self.stack.len();
@@ -1610,10 +1692,10 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Load field `field` at `fptr` onto the stack: a width-exact scalar load,
+    /// Field `field` of aggregate `base` as a value: a width-exact scalar load,
     /// or the interior pointer as a nested struct/enum value.
-    fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
-        let v = match field.ty {
+    fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
+        match field.ty {
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 self.field_aggregate_value(base, field.offset, field.ty)
             }
@@ -1623,8 +1705,31 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::FieldLoad(v, fptr));
                 v
             }
-        };
+        }
+    }
+
+    /// Load field `field` at `base` onto the stack.
+    fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
+        let v = self.field_value(base, field);
         self.stack.push(v);
+    }
+
+    /// R5/R12/R16: the universal disposal primitive. On a linear value (a
+    /// `__spy`, or a struct whose `is_linear` is set) this is a plain `Call`
+    /// to the (builtin or synthesized) destructor; a `Copy` value is discarded
+    /// with no runtime effect. Shared by `drop`, `S>fi`'s drop-the-rest,
+    /// `S<fi`'s drop-on-overwrite, and the synthesized struct destructor
+    /// itself, so "how a value is disposed" lives in one place.
+    fn emit_drop(&mut self, v: Value) {
+        match self.value_type(v) {
+            IrType::Spy => {
+                self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
+            }
+            IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
+                self.push_instr(Instr::Call(None, struct_drop_symbol(id), vec![v]));
+            }
+            _ => {}
+        }
     }
 
     /// Lower a generated struct word inline, first field deepest.
@@ -1644,8 +1749,18 @@ impl<'a> FuncBuilder<'a> {
             }
             StructWord::Get(id, fi) => {
                 let s = self.stack.pop().expect("getter: struct operand");
-                let field = self.structs.layouts[id.index()].fields[fi];
-                self.load_field_onto_stack(s, field);
+                let fields = self.structs.layouts[id.index()].fields.clone();
+                self.load_field_onto_stack(s, fields[fi]);
+                // R9: on a linear receiver, `S>fi` still consumes the whole
+                // aggregate, so every non-extracted linear field is dropped
+                // here (a no-op drop-the-rest when every other field is
+                // Copy, unchanged from before this slice).
+                for (j, field) in fields.iter().enumerate() {
+                    if j != fi && field_is_linear(field.ty, self.structs) {
+                        let v = self.field_value(s, *field);
+                        self.emit_drop(v);
+                    }
+                }
             }
             StructWord::Set(id, fi) => {
                 let newval = self.stack.pop().expect("setter: new field value");
@@ -1656,6 +1771,14 @@ impl<'a> FuncBuilder<'a> {
                     self.push_instr(Instr::Blit(s, dst, size));
                 }
                 let field = self.structs.layouts[id.index()].fields[fi];
+                // R11: the old shell's other fields transfer via the blit
+                // above (consumed, never dropped); only the field being
+                // overwritten is read back out and dropped, before the store,
+                // so the order is deterministic.
+                if field_is_linear(field.ty, self.structs) {
+                    let old = self.field_value(dst, field);
+                    self.emit_drop(old);
+                }
                 let fptr = self.field_ptr(dst, field.offset);
                 self.store_field(fptr, newval, field);
                 self.stack.push(dst);
@@ -3361,5 +3484,69 @@ mod tests {
         let ir = lower_src(": w ( -- ) 7 drop ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    // Phase 3 Slice 1, Phase 2: struct linearity + the synthesized destructor
+    // (R7/R9/R11/R12).
+
+    #[test]
+    fn struct_layout_is_linear_iff_a_field_is_transitively() {
+        let ir = lower_src(
+            "type: Plain x i64 y i64 ; \
+             type: Holds a __spy b i64 ; \
+             type: Wraps h Holds ; \
+             : w ( -- ) ;",
+        );
+        assert!(!ir.structs[0].is_linear, "Plain has no linear field");
+        assert!(ir.structs[1].is_linear, "Holds carries a spy directly");
+        assert!(ir.structs[2].is_linear, "Wraps carries one transitively");
+    }
+
+    #[test]
+    fn lower_appends_one_destructor_func_per_linear_struct_only() {
+        // R12: a synthesized destructor exists for every linear struct type,
+        // and only those (a Copy struct needs no glue, so gets no function).
+        let ir = lower_src(
+            "type: Plain x i64 y i64 ; \
+             type: Holds a __spy b i64 ; \
+             : w ( -- ) ;",
+        );
+        assert!(ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_1"));
+        assert!(!ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_0"));
+    }
+
+    #[test]
+    fn lower_drop_of_whole_linear_struct_calls_its_synthesized_destructor() {
+        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds drop ;");
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let calls: Vec<&String> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["sooth_struct_drop_0"]);
+    }
+
+    #[test]
+    fn synthesized_struct_destructor_drops_linear_fields_in_declaration_order() {
+        // R12: struct -> drop its linear fields in declaration order. `Holds`
+        // has a linear field (`a`) then a Copy one (`b`), so the destructor
+        // calls the spy destructor exactly once, for `a`.
+        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_struct_drop_0")
+            .expect("a destructor was synthesized for the linear struct");
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
     }
 }

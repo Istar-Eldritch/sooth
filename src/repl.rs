@@ -391,7 +391,7 @@ impl Session {
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(&word, &self.enums, &env, &mut self.arrays)?;
+        check::check_def(&word, &self.enums, &env, &mut self.arrays, &self.structs)?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);
@@ -466,7 +466,11 @@ impl Session {
     /// deepest linear one are dropped along the way, which has no runtime
     /// effect.
     fn dispose_residual(&mut self, writer: &mut impl Write) -> Result<(), String> {
-        let Some(deepest) = self.types.iter().position(|ty| !check::is_copy(*ty)) else {
+        let Some(deepest) = self
+            .types
+            .iter()
+            .position(|ty| !check::is_copy(*ty, &self.structs))
+        else {
             return Ok(());
         };
         let terms: Vec<Term> = (deepest..self.types.len())
@@ -489,7 +493,8 @@ impl Session {
     ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
-        let net_stack = check::infer_line(terms, &self.types, &env, &mut self.arrays)?;
+        let net_stack =
+            check::infer_line(terms, &self.types, &env, &mut self.arrays, &self.structs)?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
@@ -695,6 +700,7 @@ mod tests {
             size: 16,
             align: 8,
             fields: vec![],
+            is_linear: false,
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
         assert_eq!(
