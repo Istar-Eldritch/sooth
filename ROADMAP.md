@@ -12,7 +12,7 @@ backend-neutral IR → QBE IL → native binary), with `gcd`/`factorial`/`lerp`
 compiling to native binaries that run. **Phase 1 (REPL / liveness) is complete**:
 `cargo run -- repl` compiles each line to a `.so` and `dlopen`s it into the session,
 with a persistent stack, generation-mangled redefinition, and the golden sessions in
-`tests/phase1.rs`. **Phase 2 is in progress**, sliced into vertical increments: **Slice 1
+`tests/phase1.rs`. **Phase 2 is complete**, sliced into vertical increments: **Slice 1
 (typed-core spine) is complete** and merged to `main`, carrying a `Type` per stack slot
 (`i64` and `bool`), checking operand/condition/output types, unifying types at branch
 joins, and lowering `bool` to QBE `w`. **Slice 2 (integer tower + conversions) is
@@ -38,7 +38,7 @@ stays `Copy`, reusing the Slice 3/4 layout machinery), the target-width `usize` 
 type (width from a single threaded `WORD_WIDTH` parameter, never a hardcoded 8),
 `fill`/`get`/`set`/`len` words (non-consuming `get`, functional `set`), and dynamic indexing
 with a runtime bounds trap (Sooth's first runtime failure path) via a backend-neutral
-`ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Slice 8 (its only
+`ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Phase 3 (its only
 motivation, pointer differences, arrives with pointers).
 **Slice 6 (self-tail-call → loop lowering) is complete** and merged to `main`: a word
 whose body or clause body ends in a tail call to itself compiles to a back-edge `Jmp` to a
@@ -56,8 +56,12 @@ bytecode loop with a backward branch, exercising the whole typed core at once (a
 `usize`, enums/clauses, structs, and the Slice 6 dispatch loop) in constant stack over
 ~1.1M dispatch steps. It shipped with **zero compiler machinery** (no `src/` change), which
 is itself the exit verdict: the typed core is sufficient to write a real interpreter.
-**Next action: Phase 2 Slice 8** (`Copy` marker + optional / non-null pointer, the Phase
-2 -> 3 bridge). Not yet locked.
+**Phase 2 is complete.** The old Slice 8 (`Copy` marker + optional / non-null pointer) was
+dissolved into Phase 3: in a heap-free phase the `Copy` marker has no non-`Copy` type to
+reject and pointers have nothing to point at, so `Copy`/affine, pointers, recursive/heap
+data, and drop all move to Phase 3, where their first real clients live.
+**Next action: Phase 3 Slice 1** (affine analysis + move-by-default + `dup` gated on
+`Copy` + deterministic drop). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -110,7 +114,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (typed core + VM dogfood done: Slices 1-7 + floats/bitwise/bool; only the `Copy`/pointer bridge remains)
+### Phase 2 — Typed core (monomorphic)  `[L]`  ✅ **done** (Slices 1-7 + floats/bitwise/bool; the VM dogfood was the exit. The old Slice 8 `Copy`/pointer bridge moved to Phase 3.)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -134,8 +138,8 @@ layout machinery, exhaustiveness-checked clause-style elimination, the `then` ->
 rename, and clause-body locals. **Slice 5 (fixed-size arrays + `usize`) is also done**:
 heap-free value arrays `[T N]` (interned `ArrayId`, reused layout machinery), target-width
 `usize`, `fill`/`get`/`set`/`len`, and dynamic indexing with a runtime bounds trap. What
-remains is the `Copy`/pointer bridge (Slice 8); the VM dogfood (Slice 7, the Phase 2 exit)
-is done.
+nothing remains in Phase 2: the VM dogfood (Slice 7) was the exit, and the old `Copy`/pointer
+bridge (Slice 8) moved to Phase 3.
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -152,7 +156,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    not standalone types (a variant constructor yields the enum); a clause consumes the
    scrutinee and pushes the variant's fields onto the stack (affine destructor dispatch);
    exhaustive-only, no `_` wildcard yet; no recursive enums (infinite size is a located error,
-   since recursion needs a pointer, Slice 8). Also **renames the control-flow closer `then` ->
+   since recursion needs a pointer, which arrives in Phase 3). Also **renames the control-flow closer `then` ->
    `end`** (`if … else … end`), unifying it, and extends **top-of-scope `| … |` locals** to
    clause bodies (bind names at the top of a word body or a clause body, extent = that scope;
    no mid-body binding, no closer: factor a word instead). Design locked in
@@ -164,7 +168,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    property (target-defined width, consistent with the opaque `Ptr[T]` invariant) only
    becomes load-bearing and testable once a real consumer (indexing) or a non-64-bit backend
    exists, which is why it waits until now rather than landing with the integer tower. `isize`
-   deferred to Slice 8 (no consumer until pointer differences exist). Arrays are inline `Copy`
+   deferred to Phase 3 (no consumer until pointer differences exist). Arrays are inline `Copy`
    value aggregates, `get` non-consuming, `set` functional; dynamic indexing has a runtime
    bounds trap. ✅ done.
 6. **Self-tail-call → loop lowering** (mandatory TCO for self-recursion). A word whose
@@ -185,9 +189,10 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    bytecode, exercising the whole typed core (arrays, `usize`, enums/clauses, structs,
    and the self-tail-call dispatch loop from Slice 6). Shipped as `examples/vm.sth` with
    zero compiler machinery. ✅ done.
-8. **`Copy` marker + optional / non-null pointer**: the `Copy`-vs-affine distinction as a
-   built-in type property (so Phase 3 has it to build on), plus explicit optional and
-   non-null pointer types.
+The old **Slice 8** (`Copy` marker + optional / non-null pointer) is **dissolved into
+Phase 3**: with no heap and no affine type in Phase 2, the marker had nothing to reject and
+pointers had nothing to point at. `Copy`/affine, pointers, recursive/heap data, and drop now
+land together in Phase 3, where their first real clients exist. See the Phase 3 slice plan.
 
 Numeric axes carved out of Slice 2 have all landed: **floats** and **bitwise operators**
 (`and`/`or`/`xor`/`not`/`shl`/`shr`, type-directed right shift), both merged to `main`. The
@@ -254,7 +259,7 @@ to enum slots across both the word-call and REPL-line boundary. The `examples/sh
 dogfood (`Shape`'s `Circle`/`Rect` via `area`, `MaybeInt`'s `None`/`Some` via
 `unwrap-or`) runs both as a native binary and in the REPL. Generics, `Option<T>`/
 `Result<T,E>`, open multimethods, the `_` wildcard, inline `match`, and recursive/heap
-data are deferred (Phase 4 / Slice 8 / Phase 3).
+data are deferred (Phase 4 / Phase 3).
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
 u8..u64, f32/f64; `*/` widening primitive; literal defaults). Records/structs, enums/ADTs, exhaustiveness-checked
@@ -282,6 +287,32 @@ a compile error.
 affine values that can't be duplicated or leaked.
 **Dogfood:** a program that opens/reads/closes files and manages owned buffers,
 with the compiler catching a deliberate double-use.
+
+**Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review,
+same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
+
+1. **Affine analysis + move-by-default + `dup` gated on `Copy` + deterministic drop.**
+   The core novelty, isolated from heap. Move tracking (use-after-move is a located
+   error), `dup` rejected on a non-`Copy` type, `drop` lowered to a destructor call at the
+   statically-known end of ownership. Bootstrap decision (1a): introduce a small builtin
+   affine type with an observable destructor to give the analysis teeth before heap
+   exists, rather than pulling heap forward into this slice. Dogfood: a deliberate
+   double-use is a compile error, and a destructor runs exactly once.
+2. **Heap + owning pointer + allocator.** The first affine type with a real destructor
+   (`free`), building on slice 1's drop machinery. Dogfood: an owned buffer, auto-freed at
+   end of scope.
+3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
+   content, now with a home: recursive enums/structs need the heap indirection slice 2
+   provides. Dogfood: a linked list or tree that builds, walks, and auto-frees.
+4. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
+   checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
+   the escape checker keeping refs from being stored or escaping scope. Comes after heap
+   because "hand the value back" already works by threading it through the stack. Dogfood:
+   in-place mutation of an owned buffer through `inout`.
+5. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
+   slice; could slip toward Phase 6 if it wants a stdlib home.
+6. **Resources as affine values (fds, hosted).** The Phase 3 exit dogfood: open/read/close
+   files, with the compiler catching a deliberate double-use.
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
 
