@@ -157,6 +157,6 @@ type: VmPop vm Vm val i64 ;
   0 >usize                       \ pc = 0
   0 8 fill
   0 >usize                       \ sp = 0
-  0 4 fill 0 >usize 10 set       \ mem[0] = N = 10, mem[1] = 0
+  0 4 fill 0 >usize 100000 set  \ mem[0] = N = 100000, mem[1] = 0
   Vm
   fetch Fetched> run . ;
