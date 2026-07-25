@@ -1461,6 +1461,43 @@ fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
 }
 
 #[test]
+fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
+    // Slice 7 criterion 8 (the crux): `get` an `Op` out of the *carried*
+    // program array, clause-match it, and tail-recurse. The array-across-the
+    // -back-edge half was proven by a prior spike; the residual unproven
+    // composition is enum-`get`-from-carried-array + clause dispatch in
+    // constant stack. 1_000_000 back-edges each read the enum out of the
+    // carried `[Op 2]`, dispatch, and self-tail-call; naive recursion at that
+    // depth overflows the default 8MB host stack, which `run_and_capture_stdout`
+    // catches as a signal death (no exit code) and turns a no-op Slice 6
+    // transform red. `idx` goes bool -> index via `if 1 else 0 end >usize`
+    // (a conversion word on a `bool` is a checker error), and `fetch` reads
+    // the enum with non-consuming `get` (`swap drop` keeps the `Op`).
+    let src = "type: Op | Step | Stop ;\n\
+: idx ( i64 -- usize ) | count | count 0 = if 1 else 0 end >usize ;\n\
+: fetch ( [Op 2] usize -- Op ) | a i | a i get swap drop ;\n\
+: run ( [Op 2] i64 i64 Op -- i64 )\n\
+  | Step | prog count acc |\n\
+      prog\n\
+      count 1 -\n\
+      acc 1 +\n\
+      prog count 1 - idx fetch\n\
+      run\n\
+  | Stop | prog count acc | acc\n\
+;\n\
+: build ( -- [Op 2] ) Step 2 fill 1 Stop set ;\n\
+: start ( [Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
+: main ( -- ) build start . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-vm-smoke-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1000000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn non_tail_factorial_still_a_real_call_native() {
     // Criterion 5: the existing `examples/factorial.sth` (`dup 1 - factorial
     // *`) has a self-call followed by `*`, so it is deliberately not in tail
