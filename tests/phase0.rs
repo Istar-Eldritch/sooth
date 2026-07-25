@@ -1498,6 +1498,18 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
 }
 
 #[test]
+fn vm_dogfood_data_model_pushes_and_pops() {
+    // Phase 2 of Slice 7: the `Op`/`Vm`/`Fetched`/`VmPop` data model in
+    // `examples/vm.sth` and the `vm-push`/`vm-pop` operand-stack helpers
+    // (the bundle-and-destructure idiom from `examples/stack.sth`). No
+    // dispatch loop yet: proves the struct/array construction and the
+    // multi-result `VmPop` bundle round-trip correctly.
+    let (stdout, code) = run_and_capture_stdout("examples/vm.sth");
+    assert_eq!(stdout, "20\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn non_tail_factorial_still_a_real_call_native() {
     // Criterion 5: the existing `examples/factorial.sth` (`dup 1 - factorial
     // *`) has a self-call followed by `*`, so it is deliberately not in tail

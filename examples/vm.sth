@@ -1,0 +1,57 @@
+\ Dogfood: Phase 2 exit. A fixed-size bytecode stack machine that interprets a
+\ toy instruction set, composing fixed-size arrays, `usize`, enums with
+\ clause dispatch, structs, and the Slice 6 self-tail-call dispatch loop.
+\
+\ `Op` is mixed-arity: `Push`/`Load`/`Store`/`Jz`/`Jmp` carry a `i64`/`usize`
+\ payload; `Add`/`Sub`/`Mul`/`Halt` do not. `Vm` bundles the whole machine
+\ state (program, program counter, operand stack + cursor, addressable
+\ memory) so it can ride across the dispatch loop's tail-call back-edge as a
+\ single value.
+\
+\ A user word may only return one value through a call (see
+\ `examples/stack.sth`), so `vm-pop` bundles its `(Vm, i64)` result into a
+\ `VmPop` struct, destructured inline by the caller with the generated
+\ `VmPop>` word — same idiom as `Stack`/`Popped` in `examples/stack.sth`.
+\ `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same way.
+
+type: Op
+| Push v i64
+| Add
+| Sub
+| Mul
+| Load  addr usize
+| Store addr usize
+| Jz    target usize
+| Jmp   target usize
+| Halt
+;
+
+type: Vm
+  prog  [Op 4]
+  pc    usize
+  stack [i64 8]
+  sp    usize
+  mem   [i64 4]
+;
+
+type: Fetched vm Vm op Op ;
+type: VmPop vm Vm val i64 ;
+
+: vm-push ( Vm i64 -- Vm )
+  | vm x |
+  vm vm Vm>stack vm Vm>sp x set Vm<stack
+  vm Vm>sp 1 + Vm<sp ;
+
+: vm-pop ( Vm -- VmPop )
+  | vm |
+  vm vm Vm>sp 1 - Vm<sp                \ new vm, sp decremented
+  vm Vm>stack vm Vm>sp 1 - get         \ original-vm array elem
+  swap drop                            \ elem
+  VmPop ;
+
+: main ( -- )
+  Halt 4 fill 0 >usize 0 8 fill 0 >usize 0 4 fill Vm
+  10 vm-push
+  20 vm-push
+  vm-pop VmPop> .
+  drop ;
