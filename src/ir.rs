@@ -787,7 +787,8 @@ pub fn lower_line(
     }
     b.stack = stack;
 
-    b.lower_terms(terms);
+    // A REPL expr line is not a word body, so nothing is in self-tail position.
+    b.lower_terms(terms, false);
 
     // Epilogue: store each result slot back to the buffer at its cumulative
     // byte offset. A scalar 8-byte cell is written at the value's own width: a
@@ -869,23 +870,44 @@ pub(crate) fn lower_word(
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
     let params_values: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
 
+    // R6: a self-tail-recursive word lowers to a loop. The entry block binds
+    // the params and jumps to a header carrying one phi per loop-carried slot;
+    // the body reads the phi outputs so each iteration rebinds them. A word
+    // with no tail self-call lowers exactly as before (no header, no phi).
+    let self_tail = crate::check::has_self_tail_call(word);
+    let entry_values = if self_tail {
+        b.begin_loop(&params_values)
+    } else {
+        params_values
+    };
+
     match &word.body {
         WordBody::Terms { locals, terms } => {
-            let mut stack = params_values;
-            // Bind `| ... |` locals: pop the top N params, leftmost local = deepest.
+            let mut stack = entry_values;
+            // Bind `| ... |` locals: pop the top N (D6: from the header phi
+            // outputs when looping), leftmost local = deepest.
             let take = locals.len();
             let bound = stack.split_off(stack.len() - take);
             for (name, value) in locals.iter().zip(bound) {
                 b.locals.insert(name.clone(), value);
             }
             b.stack = stack;
-            b.lower_terms(terms);
+            b.lower_terms(terms, self_tail);
         }
-        WordBody::Clauses(clauses) => b.lower_clauses(clauses, &params_values),
+        WordBody::Clauses(clauses) => b.lower_clauses(clauses, &entry_values),
     }
 
-    let result = if ret.is_some() { b.stack.pop() } else { None };
-    b.seal_block(Terminator::Ret(result));
+    // R8: back-patch the header phis with the collected back-edge operands.
+    if self_tail {
+        b.finalize_loop();
+    }
+
+    // The fall-through (base-case) block returns; a body that ended entirely in
+    // back-edges is already terminated and needs no Ret.
+    if !b.terminated {
+        let result = if ret.is_some() { b.stack.pop() } else { None };
+        b.seal_block(Terminator::Ret(result));
+    }
 
     IrFunc {
         name: word.name.clone(),
@@ -903,10 +925,21 @@ struct FuncBuilder<'a> {
     enums: &'a Enums,
     arrays: &'a Arrays,
     /// Name of the word currently being lowered, used by the tail-call ->
-    /// back-edge transform (R7, next phase) to recognize a self-call; not yet
-    /// read outside tests.
-    #[allow(dead_code)]
+    /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
+    /// The loop header block (R6), `Some` iff this word is self-tail-recursive
+    /// and is being lowered as a loop. Tail self-calls back-edge to it (R7).
+    header: Option<BlockId>,
+    /// One phi output value per loop-carried slot (input arity many), in slot
+    /// order (R6). The body reads these, not the raw params.
+    header_phis: Vec<Value>,
+    /// Collected back-edges (R8): each is `(pred block, one arg value per
+    /// carried slot)`. Finalized into the header phis after the body lowers,
+    /// since the operands are only known on the back-edges.
+    back_edges: Vec<(BlockId, Vec<Value>)>,
+    /// Whether the current block has already been sealed (by a back-edge Jmp or
+    /// another terminator), so no fall-through Ret/Jmp should follow.
+    terminated: bool,
     blocks: Vec<Block>,
     cur_id: BlockId,
     cur_instrs: Vec<Instr>,
@@ -938,6 +971,10 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cur_word_name,
+            header: None,
+            header_phis: Vec::new(),
+            back_edges: Vec::new(),
+            terminated: false,
             blocks: Vec::new(),
             cur_id: BlockId(0),
             cur_instrs: Vec::new(),
@@ -986,13 +1023,62 @@ impl<'a> FuncBuilder<'a> {
         self.cur_id = id;
     }
 
-    fn lower_terms(&mut self, terms: &[Term]) {
-        for term in terms {
-            self.lower_term(term);
+    /// R6: open the loop shape. The current (entry) block binds `params`,
+    /// jumps to a fresh header, and the header carries one phi per carried
+    /// slot, each seeded with the entry arm `(entry, param)`. Returns the phi
+    /// outputs, which the body reads instead of the raw params. An input arity
+    /// of 0 yields a header with zero phis (just a back-edge target), handled
+    /// without special-casing.
+    fn begin_loop(&mut self, params: &[Value]) -> Vec<Value> {
+        let entry = self.cur_id;
+        let header = self.fresh_block();
+        self.seal_block(Terminator::Jmp(header));
+        self.start_block(header);
+        self.header = Some(header);
+        let mut outs = Vec::with_capacity(params.len());
+        for &p in params {
+            let out = self.fresh_value(self.value_type(p));
+            self.push_instr(Instr::Phi(out, vec![(entry, p)]));
+            self.header_phis.push(out);
+            outs.push(out);
+        }
+        outs
+    }
+
+    /// R8: after the body lowers, append each collected back-edge's per-slot
+    /// operand to the matching header phi. The back-edge arms cannot be known
+    /// when the header is emitted (they are produced on the back-edges), so
+    /// they are finalized here in a second step.
+    fn finalize_loop(&mut self) {
+        let header = self.header.expect("finalize_loop: loop mode");
+        let phis = mem::take(&mut self.header_phis);
+        let back_edges = mem::take(&mut self.back_edges);
+        let block = self
+            .blocks
+            .iter_mut()
+            .find(|b| b.id == header)
+            .expect("header block");
+        for instr in &mut block.instrs {
+            if let Instr::Phi(v, arms) = instr {
+                if let Some(slot) = phis.iter().position(|&p| p == *v) {
+                    for (pred, vals) in &back_edges {
+                        arms.push((*pred, vals[slot]));
+                    }
+                }
+            }
         }
     }
 
-    fn lower_term(&mut self, term: &Term) {
+    fn lower_terms(&mut self, terms: &[Term], tail: bool) {
+        // Only the final term of a body can be in tail position (R1); a term
+        // followed by any further term is not.
+        let last = terms.len().wrapping_sub(1);
+        for (i, term) in terms.iter().enumerate() {
+            self.lower_term(term, tail && i == last);
+        }
+    }
+
+    fn lower_term(&mut self, term: &Term, tail: bool) {
         match &term.kind {
             TermKind::IntLit(n) => {
                 let v = self.fresh_value(IrType::I64);
@@ -1010,15 +1096,15 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
-            TermKind::Call(name) => self.lower_call(name, term.span.line),
+            TermKind::Call(name) => self.lower_call(name, term.span.line, tail),
             TermKind::If {
                 then_branch,
                 else_branch,
-            } => self.lower_if(then_branch, else_branch),
+            } => self.lower_if(then_branch, else_branch, tail),
         }
     }
 
-    fn lower_call(&mut self, name: &str, line: u32) {
+    fn lower_call(&mut self, name: &str, line: u32, tail: bool) {
         if let Some(&value) = self.locals.get(name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
@@ -1165,6 +1251,28 @@ impl<'a> FuncBuilder<'a> {
                 // stores inline, parallel to a struct constructor (R14/R15).
                 if let Some(&ew) = self.enums.words.get(name) {
                     self.lower_enum_word(ew);
+                    return;
+                }
+                // R7: a tail-position self-call is a back-edge to the loop
+                // header, not a real call. `self.header` is `Some` iff the word
+                // is self-tail-recursive (R6), and `tail` marks the syntactic
+                // tail position (R1); a non-tail self-call (R10) falls through
+                // to the ordinary `Instr::Call` below. Pop the args as the
+                // back-edge phi operands (one per carried slot; a self-call's
+                // input arity is the word's own signature, so the count always
+                // matches the header phi count) and jump.
+                //
+                // R11: the back-edge is the defined destructor insertion point
+                // for this iteration's non-forwarded affine values; in Phase 2
+                // every type is `Copy`, so the drop set is empty and no drop
+                // glue is emitted here.
+                if tail && self.header.is_some() && name == self.cur_word_name {
+                    let (in_arity, ..) = *self.env.get(name).expect("checked user word exists");
+                    let split = self.stack.len() - in_arity;
+                    let args = self.stack.split_off(split);
+                    self.back_edges.push((self.cur_id, args));
+                    self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
+                    self.terminated = true;
                     return;
                 }
                 let (in_arity, out_arity, ret_ty) =
@@ -1521,7 +1629,12 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    fn lower_if(&mut self, then_branch: &[Term], else_branch: &[Term]) {
+    /// `tail` (R1) is true when this `if` is itself in tail position; it then
+    /// hands tail position to the last term of both arms, so a self-call at the
+    /// end of either arm back-edges (R7). An arm that back-edges leaves the
+    /// builder `terminated` and contributes no predecessor to the join; the
+    /// join is elided entirely when both arms back-edge (R8, both-arms-tail).
+    fn lower_if(&mut self, then_branch: &[Term], else_branch: &[Term], tail: bool) {
         let test = self.stack.pop().expect("if: test value");
         let then_id = self.fresh_block();
         let else_id = self.fresh_block();
@@ -1531,32 +1644,61 @@ impl<'a> FuncBuilder<'a> {
         self.seal_block(Terminator::Jnz(test, then_id, else_id));
 
         self.start_block(then_id);
+        self.terminated = false;
         self.stack = post_pop.clone();
-        self.lower_terms(then_branch);
-        let then_stack = self.stack.clone();
-        let then_pred = self.cur_id;
-        self.seal_block(Terminator::Jmp(join_id));
+        self.lower_terms(then_branch, tail);
+        let then_arm = self.seal_arm(join_id);
 
         self.start_block(else_id);
+        self.terminated = false;
         self.stack = post_pop;
-        self.lower_terms(else_branch);
-        let else_stack = self.stack.clone();
-        let else_pred = self.cur_id;
-        self.seal_block(Terminator::Jmp(join_id));
+        self.lower_terms(else_branch, tail);
+        let else_arm = self.seal_arm(join_id);
 
-        self.start_block(join_id);
-        let mut join_stack = Vec::with_capacity(then_stack.len());
-        for (t, e) in then_stack.into_iter().zip(else_stack) {
-            if t == e {
-                join_stack.push(t);
-            } else {
-                let ty = self.value_type(t);
-                let v = self.fresh_value(ty);
-                self.push_instr(Instr::Phi(v, vec![(then_pred, t), (else_pred, e)]));
-                join_stack.push(v);
+        match (then_arm, else_arm) {
+            (None, None) => {
+                // Both arms back-edged to the loop header; the join is
+                // unreachable and the enclosing body is terminated.
+                self.terminated = true;
+            }
+            (Some((_, s)), None) | (None, Some((_, s))) => {
+                // A single fall-through predecessor: values flow directly, no
+                // phi needed.
+                self.start_block(join_id);
+                self.terminated = false;
+                self.stack = s;
+            }
+            (Some((then_pred, then_stack)), Some((else_pred, else_stack))) => {
+                self.start_block(join_id);
+                self.terminated = false;
+                let mut join_stack = Vec::with_capacity(then_stack.len());
+                for (t, e) in then_stack.into_iter().zip(else_stack) {
+                    if t == e {
+                        join_stack.push(t);
+                    } else {
+                        let ty = self.value_type(t);
+                        let v = self.fresh_value(ty);
+                        self.push_instr(Instr::Phi(v, vec![(then_pred, t), (else_pred, e)]));
+                        join_stack.push(v);
+                    }
+                }
+                self.stack = join_stack;
             }
         }
-        self.stack = join_stack;
+    }
+
+    /// Seal a just-lowered `if` arm: if it back-edged (terminated) it jumps
+    /// nowhere here and yields no join predecessor; otherwise it jumps to the
+    /// join, yielding `(pred, stack)`.
+    fn seal_arm(&mut self, join_id: BlockId) -> Option<(BlockId, Vec<Value>)> {
+        if self.terminated {
+            None
+        } else {
+            let s = self.stack.clone();
+            let pred = self.cur_id;
+            self.seal_block(Terminator::Jmp(join_id));
+            Some((pred, s))
+        }
     }
 
     /// Lower a clause-style word (R16): load the scrutinee's discriminant into
@@ -1568,6 +1710,9 @@ impl<'a> FuncBuilder<'a> {
     /// This is deliberately *not* the 2-predecessor `lower_if` shape: the join
     /// has N predecessors and M outputs.
     fn lower_clauses(&mut self, clauses: &[Clause], params: &[Value]) {
+        // A clause word is self-tail-recursive iff a header was opened (R6);
+        // its clause bodies then carry tail position (D7).
+        let tail = self.header.is_some();
         let scrutinee = *params.last().expect("clause word has a scrutinee input");
         let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
         let scrut_id = match self.value_type(scrutinee) {
@@ -1641,16 +1786,32 @@ impl<'a> FuncBuilder<'a> {
             for (name, value) in clause.locals.iter().zip(bound) {
                 self.locals.insert(name.clone(), value);
             }
-            self.lower_terms(&clause.body);
-            let result = self.stack.clone();
-            let pred = self.cur_id;
-            self.seal_block(Terminator::Jmp(join_id));
-            clause_ends.push((pred, result));
+            // R7/R9: a clause whose body ends in a tail self-call back-edges to
+            // the shared loop header and contributes no join predecessor;
+            // `tail` is true iff this word is self-tail-recursive. The header
+            // phi preds (entry + tail clause ends) and the dispatch-join phi
+            // preds (non-tail clause ends) therefore stay disjoint.
+            self.terminated = false;
+            self.lower_terms(&clause.body, tail);
+            if !self.terminated {
+                let result = self.stack.clone();
+                let pred = self.cur_id;
+                self.seal_block(Terminator::Jmp(join_id));
+                clause_ends.push((pred, result));
+            }
         }
 
-        // Single join block: one phi per declared output, merging all N clause
-        // predecessors.
+        // Every clause back-edged: the join is unreachable and the word is
+        // terminated (no fall-through Ret).
+        if clause_ends.is_empty() {
+            self.terminated = true;
+            return;
+        }
+
+        // Single join block: one phi per declared output, merging the
+        // fall-through clause predecessors.
         self.start_block(join_id);
+        self.terminated = false;
         let m = clause_ends[0].1.len();
         let mut join_stack = Vec::with_capacity(m);
         for out_i in 0..m {
@@ -2536,7 +2697,7 @@ mod tests {
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("+", 0);
+        b.lower_call("+", 0, false);
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }
@@ -2886,5 +3047,166 @@ mod tests {
         let ir = lower_src("type: Id | Wrap v i64 ; : unwrap ( Id -- i64 ) | Wrap ;");
         let unwrap = ir.funcs.iter().find(|f| f.name == "unwrap").unwrap();
         assert_eq!(count(unwrap, |i| matches!(i, Instr::Cmp(..))), 0);
+    }
+
+    /// The loop header of a self-tail-recursive word: the entry block (block 0)
+    /// jumps to it (R6), so its id is the entry's `Jmp` target.
+    fn loop_header(func: &IrFunc) -> BlockId {
+        match func.blocks[0].term {
+            Terminator::Jmp(h) => h,
+            ref t => panic!("entry block should Jmp to the loop header, got {t:?}"),
+        }
+    }
+
+    fn header_block<'a>(func: &'a IrFunc, header: BlockId) -> &'a Block {
+        func.blocks.iter().find(|b| b.id == header).expect("header")
+    }
+
+    fn header_phis(block: &Block) -> Vec<&Vec<(BlockId, Value)>> {
+        block
+            .instrs
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Phi(_, arms) => Some(arms),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn jmps_to(func: &IrFunc, target: BlockId) -> usize {
+        func.blocks
+            .iter()
+            .filter(|b| matches!(b.term, Terminator::Jmp(h) if h == target))
+            .count()
+    }
+
+    #[test]
+    fn tail_self_call_lowers_to_back_edge_not_call() {
+        // Criterion 2 (R6/R7/R8): a self-tail-recursive word lowers to a header
+        // carrying one phi per loop-carried (input-arity) slot, and the tail
+        // self-call is a `Jmp` back to that header with no `Instr::Call` to
+        // self. `go` has input arity 2, so the header has two phis.
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+        let f = &ir.funcs[0];
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(phis.len(), 2, "one header phi per loop-carried slot");
+        // Each phi has the entry arm plus the single back-edge arm.
+        assert!(phis.iter().all(|arms| arms.len() == 2));
+        // Entry + one back-edge both target the header.
+        assert_eq!(jmps_to(f, header), 2);
+        assert_eq!(
+            count(f, |i| matches!(i, Instr::Call(..))),
+            0,
+            "tail self-call is a back-edge, not a Call"
+        );
+    }
+
+    #[test]
+    fn non_tail_self_call_stays_a_call() {
+        // R10: a self-call followed by more work (`fact *`) is not in tail
+        // position, so it stays a real `Instr::Call` and no loop is built.
+        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = if drop 1 else dup 1 - fact * end ;");
+        let f = &ir.funcs[0];
+        assert_eq!(
+            count(f, |i| matches!(i, Instr::Call(..))),
+            1,
+            "non-tail self-call stays a real Call"
+        );
+        assert!(
+            !matches!(f.blocks[0].term, Terminator::Jmp(_)),
+            "a non-tail-recursive word builds no loop header"
+        );
+    }
+
+    #[test]
+    fn self_call_in_non_terminal_if_stays_a_call() {
+        // R10 over-eager boundary: the `if` is followed by more terms
+        // (`drop 5`), so it is non-terminal and its arms are not in tail
+        // position; the self-call stays a real `Instr::Call`.
+        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > if w else drop 0 end drop 5 ;");
+        let f = &ir.funcs[0];
+        assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 1);
+        assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
+    }
+
+    #[test]
+    fn both_if_arms_tail_produce_two_back_edges() {
+        // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
+        // arm of a terminal `if` back-edges, so the single header phi gains two
+        // back-edge arms on top of the entry arm (three total).
+        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > if 1 - go else 1 + go end ;");
+        let f = &ir.funcs[0];
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(phis.len(), 1);
+        assert_eq!(phis[0].len(), 3, "entry arm + two back-edge arms");
+        assert_eq!(jmps_to(f, header), 3);
+        assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    #[test]
+    fn clause_tails_share_one_header() {
+        // R9: a `|`-clause self-tail-recursive word gets a single header; each
+        // clause's terminal self-call is one back-edge into it. Both clauses
+        // here tail-recurse, so each of the two header phis has three arms
+        // (entry + two back-edges) and no `Instr::Call` to self remains.
+        let ir = lower_src(
+            "type: Flag | Go | Stop ; \
+             : loop2 ( i64 Flag -- i64 ) | Go 1 - Go loop2 | Stop 1 + Stop loop2 ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "loop2").unwrap();
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(phis.len(), 2, "one header phi per input slot (i64, Flag)");
+        assert!(phis.iter().all(|arms| arms.len() == 3));
+        assert_eq!(jmps_to(f, header), 3, "entry + two clause back-edges");
+        assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    #[test]
+    fn mixed_clause_header_and_join_predecessors_stay_disjoint() {
+        // R9 / risk 5: some clauses back-edge and one is a base case that
+        // `Ret`s. The loop header phi (preds = entry + tail clause ends) and
+        // the Slice-4 dispatch-join phi (preds = non-tail clause ends) must
+        // keep disjoint predecessor sets.
+        let ir = lower_src(
+            "type: Flag | Go | Stop ; \
+             : run ( i64 Flag -- i64 ) | Go 1 - Stop run | Stop ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
+        let header = loop_header(f);
+        let hb = header_block(f, header);
+        let hphis = header_phis(hb);
+        assert_eq!(hphis.len(), 2);
+        // header preds: entry arm + the one Go back-edge.
+        assert!(hphis.iter().all(|arms| arms.len() == 2));
+        assert!(
+            f.blocks
+                .iter()
+                .any(|b| matches!(b.term, Terminator::Ret(_))),
+            "the Stop base case still Rets"
+        );
+        // Every phi that is not a header phi is a dispatch/join phi; its
+        // predecessors must not overlap the header phi's predecessors.
+        let header_preds: std::collections::HashSet<u32> = hphis
+            .iter()
+            .flat_map(|arms| arms.iter().map(|(p, _)| p.0))
+            .collect();
+        for block in &f.blocks {
+            if block.id == header {
+                continue;
+            }
+            for instr in &block.instrs {
+                if let Instr::Phi(_, arms) = instr {
+                    for (p, _) in arms {
+                        assert!(
+                            !header_preds.contains(&p.0),
+                            "join phi pred {p:?} collides with a header phi pred"
+                        );
+                    }
+                }
+            }
+        }
     }
 }
