@@ -1502,9 +1502,12 @@ fn vm_dogfood_compiles_and_runs() {
     // Phase 3 of Slice 7 (criteria 1, 2, 4, 5, 6): `examples/vm.sth`'s real
     // dispatch loop (`fetch` + the nine-clause self-tail-recursive `run`)
     // interprets the sum-1..N bytecode program (built via `fill`+`set`,
-    // no array literal) at N = 10, exercising every opcode
-    // (`Push`/`Add`/`Sub`/`Mul`/`Load`/`Store`/`Jz`/`Jmp`/`Halt`) and the
-    // `Jz`/`Jmp` backward branch. Replaces the Phase 2 placeholder `main`.
+    // no array literal) at N = 10, exercising every opcode the sum program
+    // needs (`Push`/`Add`/`Sub`/`Load`/`Store`/`Jz`/`Jmp`/`Halt`) and the
+    // `Jz`/`Jmp` backward branch. `Mul` dispatches too (its clause is
+    // identical in shape to `Add`/`Sub`) but sum-1..N never multiplies, so
+    // this golden doesn't exercise it. Replaces the Phase 2 placeholder
+    // `main`.
     let (stdout, code) = run_and_capture_stdout("examples/vm.sth");
     assert_eq!(stdout, "55\n");
     assert_eq!(code, 0);
