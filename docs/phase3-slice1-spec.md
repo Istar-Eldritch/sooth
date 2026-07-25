@@ -116,13 +116,17 @@ not in struct/enum glue.
   (`tail_position_calls`/`has_self_tail_call` @check.rs:~600) the stack-simulating walker does
   not see, so thread tail-position into the walker (or a pre-pass mapping term positions to
   tail-ness) as part of this slice; it is a real checker hook, not an afterthought.
+- **REPL `:quit` disposal**: `src/repl.rs` walks the residual typed stack at `:quit` and runs
+  each linear value's destructor LIFO (the REPL-main scope end; see "REPL residual linear
+  values" below). Word definitions typed at the REPL keep the strict rule.
 - **Changes**: `src/check.rs`, `src/ir.rs`, `src/backend/qbe.rs`, `src/ast.rs` (drop-spy
-  `Type` variant + constructor), `tests/phase0.rs`. (`src/lexer.rs`/`src/parser.rs` are *not*
-  needed here: `__spy` resolves via `resolve_type_name`/`Type::from_name`, which the parser
-  already calls; the `S|>fi` surface form is Phase 3.)
-- **Exit**: criteria 1 (incl. `over`), 2, 3, 4a/4b/4c, 10a/10b/10c, 12, and the `swap`-legal
-  positive pass as native goldens; `cargo fmt --check && cargo clippy -- -D warnings && cargo
-  test` green; all pre-existing examples/tests still pass.
+  `Type` variant + constructor), `src/repl.rs` (`:quit` disposal), `tests/phase0.rs`,
+  `tests/phase1.rs` (REPL `:quit` golden). (`src/lexer.rs`/`src/parser.rs` are *not* needed
+  here: `__spy` resolves via `resolve_type_name`/`Type::from_name`, which the parser already
+  calls; the `S|>fi` surface form is Phase 3.)
+- **Exit**: criteria 1 (incl. `over`), 2, 3, 4a/4b/4c, 10a/10b/10c, 12, 14 (REPL `:quit`
+  disposal), and the `swap`-legal positive pass as goldens; `cargo fmt --check && cargo clippy
+  -- -D warnings && cargo test` green; all pre-existing examples/tests still pass.
 
 ### Phase 2 — Struct aggregates via destructure-whole
 
@@ -179,18 +183,29 @@ not in struct/enum glue.
 - **Changes**: `tests/phase0.rs`, `tests/phase1.rs`.
 - **Exit**: criterion 11 (no regression) holds; green.
 
-## Open decision (pending user): REPL residual linear values
+## REPL residual linear values (resolved)
 
-The REPL carries a typed stack across lines (`self.types = net_stack`, repl.rs:514) and a
-bare line goes through `infer_line` (check.rs:504), which never calls `check_outputs`. So a
-`__spy` created on one line persists on the session stack, never disposed, its destructor
-never running at `:quit` — contradicting R1/R13 with no error. D1-D8 did not cover this.
-**Recommended resolution** (linear-consistent, minimal): forbid a linear value in the
-residual REPL stack — each line net-disposes its linear values, symmetric with a word-body
-scope end — deferring cross-line linear ergonomics like everything else defers to refs.
-Alternatives: allow persistence and accept a silent session-end leak, or run destructors at
-`:quit`. If the recommendation is adopted, add a Phase 1 golden and `src/repl.rs` to Phase 1's
-changes. **Held for the user.**
+The REPL session is the "main" word of the interactive program: the residual stack carried
+across lines (`self.types`, repl.rs:514) is that word's working stack, and `:quit` is the end
+of its scope. Because the body is revealed incrementally and is never complete until `:quit`,
+the compile-time "you forgot to dispose X" proof can never fire (the next line might consume
+it), so the linear scope-end check degenerates gracefully at runtime: **at `:quit` the REPL
+runs the destructor of every linear value left on the residual stack**, top-of-stack first
+(LIFO unwind). Exactly-once is preserved (each residual value is disposed once, at `:quit`),
+so this is consistent with the linear core invariant (R1); what is relaxed is only that
+forgetting cannot be a *compile error* in a live, never-complete session.
+
+**Scope of the relaxation**: it applies only to residual bare-expression stack values. A word
+*definition* entered at the REPL (`: foo … ;`) is checked with the full strict linear rule,
+exactly like a compiled word (forgetting a linear value in `foo`'s body is a compile error,
+R13). A residual linear value persists across lines and may be consumed by a later line; only
+the leftovers at `:quit` are auto-disposed.
+
+**Implementation**: `src/repl.rs` walks the residual typed stack at `:quit` and invokes each
+value's destructor via the same drop-glue mechanism (bare `__spy` in Phase 1; aggregates once
+their glue exists in Phases 2/4). Golden (criterion 14): a REPL session creates a `__spy`,
+quits, and asserts the destructor printed at `:quit`, and a paired session that `drop`s it
+explicitly on an earlier line prints exactly once (not again at `:quit`).
 
 ## Criterion → test map
 
@@ -224,13 +239,14 @@ the error is located. **Every drop-observing golden compares the *complete* stdo
 | 7b | `S|>fi` on a linear field is a compile error | `peek_linear_field_is_error` (P3) |
 | 9 | Tag dispatch: a linear enum built at runtime behind an `if` with ≥2 differently-shaped variants, dropped unmatched, drops the **active** variant's payload (stdout differs per tag) | `drop_of_linear_enum_dispatches_on_tag` (P4) |
 | 9b | A matched clause consumes/drops its exposed linear payload | `clause_body_disposes_linear_payload` (P4) |
+| 14 | REPL `:quit` runs destructors on residual linear values (LIFO); a value `drop`ped on an earlier line prints exactly once, not again at `:quit` | `repl_quit_disposes_residual_linear` + `repl_explicit_drop_not_redisposed_at_quit` (P1, REPL session) |
 | 11 | No regression: full existing example+test suite (gcd, factorial, vm, stack, shapes, vectors, rgb, countdown, lerp, sign, leap, mean, …) stays green + REPL parity | existing goldens + REPL parity (P5) |
 
 ## Phases JSON
 
 ```json
 {"phases":[
-  {"phase":1,"focus":"Isolated linear core on bare __spy values, no aggregates: Copy-vs-linear predicate; the test-only __spy builtin primitive (new Type variant lowering as i64) + inline-identity constructor with a print-on-drop destructor; move-tracking on linear locals as a Live/Moved/MaybeMoved lattice threaded &mut through the checker walker (use-after-move naming the move site; divergent-arm move -> MaybeMoved); dup AND over gated on Copy; drop lowers to a Call to the destructor; the disposal check (surplus linear value reuses/extends check_outputs, plus a NEW unconsumed-linear-local pass since locals are not on final_stack; Copy surplus unregressed); a linear value across the Slice 6 back-edge is a located not-supported-yet error (thread tail-position into the walker). No new Instr/Terminator.","difficulty":"hard","changes":["src/check.rs","src/ir.rs","src/backend/qbe.rs","src/ast.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 1 (incl over), 2, 3, 4a/4b/4c, 10a/10b/10c, 12, and swap-legal pass as native goldens; fmt/clippy/test green; existing examples and tests unregressed"},
+  {"phase":1,"focus":"Isolated linear core on bare __spy values, no aggregates: Copy-vs-linear predicate; the test-only __spy builtin primitive (new Type variant lowering as i64) + inline-identity constructor with a print-on-drop destructor; move-tracking on linear locals as a Live/Moved/MaybeMoved lattice threaded &mut through the checker walker (use-after-move naming the move site; divergent-arm move -> MaybeMoved); dup AND over gated on Copy; drop lowers to a Call to the destructor; the disposal check (surplus linear value reuses/extends check_outputs, plus a NEW unconsumed-linear-local pass since locals are not on final_stack; Copy surplus unregressed); a linear value across the Slice 6 back-edge is a located not-supported-yet error (thread tail-position into the walker); and REPL :quit disposes residual linear values LIFO (the REPL-main scope end), while REPL word definitions keep the strict rule. No new Instr/Terminator.","difficulty":"hard","changes":["src/check.rs","src/ir.rs","src/backend/qbe.rs","src/ast.rs","src/repl.rs","tests/phase0.rs","tests/phase1.rs"],"tests":["tests/phase0.rs","tests/phase1.rs"],"exit":"criteria 1 (incl over), 2, 3, 4a/4b/4c, 10a/10b/10c, 12, 14 (REPL :quit disposal), and swap-legal pass as goldens; fmt/clippy/test green; existing examples and tests unregressed"},
   {"phase":2,"focus":"Struct aggregates via destructure-whole (no partial moves): linear-iff-any-field-linear propagation (transitive/nested); S>fi stays ( S -- field ) consuming and drops the non-extracted fields on a linear receiver; S<fi functional update drops the overwritten linear field BEFORE the store (order pinned); synthesized recursive struct drop glue (via the per-type destructor-function mechanism).","changes":["src/check.rs","src/ir.rs","src/backend/qbe.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 5, 5b (transitive), 6, 8, 13 (drop-whole-struct glue order) pass as native goldens; green; no regression"},
   {"phase":3,"focus":"The new S|>fi non-consuming peek word: lexing rule that glues | into a word only when immediately followed by > and preceded by a word char (so | locals | and | Circle clause heads are untouched; re-verify shapes.sth/vm.sth); parser/ast; checker typing as ( S -- S field ) for Copy fields only with a compile error on a linear field; inline non-consuming projection lowering.","changes":["src/lexer.rs","src/parser.rs","src/ast.rs","src/check.rs","src/ir.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 7a (peek keeps struct live, full-stdout one-drop) and 7b (peek on linear field errors) pass; green; no regression"},
   {"phase":4,"focus":"Enums via a synthesized destructor function per linear aggregate type (IrFunc appended during lowering, taking the aggregate as a param), called by drop; NOT block-splitting inside lower_call and NOT reusing lower_clauses. The destructor tag-dispatches (its own Jnz) and drops the active variant's linear payload; a matched clause consumes/drops its exposed payload. Struct case (Phase 2) uses the same mechanism.","changes":["src/check.rs","src/ir.rs","src/backend/qbe.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 9 (runtime tag dispatch, stdout differs per tag) and 9b (matched clause disposes payload) pass; green; no regression"},
