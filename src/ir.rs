@@ -205,10 +205,13 @@ pub enum StructWord {
     Get(StructId, usize),
     Set(StructId, usize),
     Destructure(StructId),
+    /// `S|>fi` (R10): a non-consuming `( S -- S field )` peek, Copy fields
+    /// only (the checker rejects a linear field before this is ever reached).
+    Peek(StructId, usize),
 }
 
 /// The IR's view of a program's structs: the per-`StructId` layout registry and
-/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi` → `StructWord`). Built
+/// the generated-word name map (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi` → `StructWord`). Built
 /// once from the module and threaded into lowering; empty for a struct-free
 /// program (the scalar paths never consult it).
 #[derive(Debug, Default)]
@@ -413,6 +416,10 @@ pub fn build_registries_ww(
         for (fi, (fname, _)) in decl.fields.iter().enumerate() {
             swords.insert(format!("{}>{}", decl.name, fname), StructWord::Get(id, fi));
             swords.insert(format!("{}<{}", decl.name, fname), StructWord::Set(id, fi));
+            swords.insert(
+                format!("{}|>{}", decl.name, fname),
+                StructWord::Peek(id, fi),
+            );
         }
     }
 
@@ -1426,7 +1433,7 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.push(dst);
                     return;
                 }
-                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`) lowers to
+                // A generated struct word (`S`/`S>`/`S>fi`/`S<fi`/`S|>fi`) lowers to
                 // alloc/blit/field-load-store inline, not a normal call.
                 if let Some(&sw) = self.structs.words.get(name) {
                     self.lower_struct_word(sw);
@@ -1819,6 +1826,15 @@ impl<'a> FuncBuilder<'a> {
                     let field = self.structs.layouts[id.index()].fields[fi];
                     self.load_field_onto_stack(s, field);
                 }
+            }
+            StructWord::Peek(id, fi) => {
+                // R10: non-consuming, so the aggregate stays on the stack;
+                // only the field's value is pushed on top of it. The checker
+                // already rejected a linear field, so there is no drop glue
+                // to consider here (unlike `Get`).
+                let s = *self.stack.last().expect("peek: struct operand");
+                let field = self.structs.layouts[id.index()].fields[fi];
+                self.load_field_onto_stack(s, field);
             }
         }
     }

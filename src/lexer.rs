@@ -93,6 +93,22 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 let start = Span { line, col };
                 let mut text = String::new();
                 while let Some(&c) = chars.peek() {
+                    // `S|>fi` peek-word glue: `|` joins the current word only
+                    // when a word char already precedes it (so `| a |` and a
+                    // clause head `| Circle` are untouched, since those hit
+                    // `|` as the very first character of a scan) and `>`
+                    // immediately follows (so a bare trailing `|` still
+                    // delimits normally).
+                    if c == '|' && !text.is_empty() {
+                        let mut lookahead = chars.clone();
+                        lookahead.next();
+                        if lookahead.peek() == Some(&'>') {
+                            text.push('|');
+                            chars.next();
+                            col += 1;
+                            continue;
+                        }
+                    }
                     if c.is_whitespace() || is_delimiter(c) {
                         break;
                     }
@@ -282,5 +298,29 @@ mod tests {
     fn lex_int_then_print_word_expected() {
         let tokens = lex("5 .").unwrap();
         assert_eq!(words(&tokens), vec![Token::Int(5), Token::Word(".".into())]);
+    }
+
+    #[test]
+    fn lex_peek_word_glues_pipe_gt_into_one_word() {
+        let tokens = lex("Point|>x").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Word("Point|>x".into())]);
+    }
+
+    #[test]
+    fn lex_locals_pipes_stay_separate_tokens() {
+        let tokens = lex("| n |").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![Token::Pipe, Token::Word("n".into()), Token::Pipe]
+        );
+    }
+
+    #[test]
+    fn lex_clause_head_pipe_stays_separate_token() {
+        let tokens = lex("| Circle").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![Token::Pipe, Token::Word("Circle".into())]
+        );
     }
 }

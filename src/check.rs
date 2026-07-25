@@ -1495,6 +1495,9 @@ fn check_term(
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
+            if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx)? {
+                return Ok(stack);
+            }
             let sig = env
                 .get(name)
                 .ok_or_else(|| unknown_word_error(ctx, span, name))?;
@@ -1778,6 +1781,21 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
     }
 }
 
+/// `S|>fi` (R10) applied to a linear field: unlike `S>fi`, a peek must leave
+/// the aggregate live, so it can't also transfer ownership of a linear
+/// field's value; the workaround is `S>` (destructure the whole aggregate).
+fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
+            op, name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `{op}` a linear field: the field has type `{found}`, which is linear and has no `Copy` instance"
+        ),
+    }
+}
+
 /// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
 /// error naming the length `N` and the offending index.
 fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64) -> String {
@@ -1963,6 +1981,50 @@ fn check_array_word(
         }
         _ => return Ok(None),
     }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// `S|>fi` (R10): a new non-consuming `( S -- S field )` peek, keyed by the
+/// per-struct-per-field name (unlike `fill`/`get`/`set`, it is not generic
+/// over a shape, so it is not a fixed entry in `struct_generated_sigs`
+/// either: it is looked up by parsing the `Struct|>field` name against the
+/// struct registry, same as the IR's `structs.words` map). `None` if `name`
+/// doesn't split on `|>` or doesn't resolve to a known struct+field (the
+/// caller falls through to the env lookup, so an unrelated word still gets
+/// the ordinary unknown-word error). A linear field is rejected outright
+/// (R10): the peek would leave a second, unowned reference to a resource the
+/// aggregate still owns, with no reference machinery to make that legal.
+fn check_struct_peek_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+) -> Result<Option<Vec<Slot>>, String> {
+    let Some((struct_name, field_name)) = name.split_once("|>") else {
+        return Ok(None);
+    };
+    let structs = ctx.structs();
+    let Some(idx) = structs.iter().position(|d| d.name == struct_name) else {
+        return Ok(None);
+    };
+    let decl = &structs[idx];
+    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
+        return Ok(None);
+    };
+    let field_ty = *field_ty;
+    if !is_copy(field_ty, structs) {
+        return Err(peek_of_linear_field_error(ctx, span, name, field_ty));
+    }
+    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
+    let n = stack.len();
+    if n < 1 {
+        return Err(underflow_error(ctx, span, name, 1, n));
+    }
+    let top = stack[n - 1];
+    if top.ty != struct_ty {
+        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
+    }
+    stack.push(Slot::computed(field_ty));
     Ok(Some(std::mem::take(stack)))
 }
 
@@ -2829,6 +2891,40 @@ mod tests {
     #[test]
     fn check_struct_setter_returns_updated_struct_ok() {
         check_src("type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 3 Vec2<x ;").unwrap();
+    }
+
+    #[test]
+    fn check_struct_peek_copy_field_leaves_struct_live_ok() {
+        // R10: `Vec2|>x` is non-consuming, so the struct is still on the
+        // stack for the second peek and the trailing `Vec2>` destructure.
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 Vec2|>x drop Vec2> drop drop ;")
+            .unwrap();
+    }
+
+    #[test]
+    fn check_struct_peek_on_linear_field_is_error() {
+        // R10: a linear field can't be peeked (workaround: `S>`).
+        let err = check_src(
+            "type: Holds a __spy b i64 ; : main ( -- ) 7 __spy 1 Holds Holds|>a drop drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("cannot `Holds|>a`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`S>`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_struct_peek_on_wrong_type_is_error() {
+        // A peek word applied to a value that isn't its struct: names the
+        // peek word and both types, same shape as the getter/setter checks.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2|>x drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2|>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
     }
 
     #[test]

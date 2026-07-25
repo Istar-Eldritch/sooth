@@ -1940,3 +1940,36 @@ fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
     );
     assert_eq!(stdout, "drop 1\ndrop 2\ndrop 3\n");
 }
+
+// Phase 3 Slice 1, Phase 3: `S|>fi`, the non-consuming peek. Copy fields only;
+// a linear field is a compile error (workaround: `S>`).
+
+#[test]
+fn peek_copy_field_keeps_struct() {
+    // Criterion 7a: `Pair|>a` peeks the Copy field `a` twice, leaving the
+    // aggregate itself live both times (proven because the final `drop` of
+    // the whole struct still finds its linear field `b` intact and disposes
+    // it exactly once — a consuming `Pair>a` in its place would have dropped
+    // `b` at the first peek, or left nothing for the trailing `drop` to see).
+    let stdout = run_linear_golden(
+        "peek-copy-field",
+        "type: Pair a i64 b __spy ;\n\
+: main ( -- )\n  5 3 __spy Pair\n  Pair|>a drop\n  Pair|>a drop\n  drop ;\n",
+    );
+    assert_eq!(stdout, "drop 3\n");
+}
+
+#[test]
+fn peek_linear_field_is_error() {
+    // Criterion 7b: peeking the linear field `b` is a compile error naming
+    // both the peek workaround and the offending field's type.
+    let err = linear_check_error(
+        "type: Pair a i64 b __spy ;\n: main ( -- )\n  5 3 __spy Pair\n  Pair|>b drop drop ;\n",
+    );
+    assert!(
+        err.contains("cannot `Pair|>b`"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`S>`"), "unexpected message: {err}");
+}
