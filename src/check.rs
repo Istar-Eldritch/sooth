@@ -1534,10 +1534,10 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
 }
 
 /// Walk a term sequence. `moves` is the scope's linear-local move-state,
-/// mutated in place as locals are mentioned (R14); `tail` marks the sequence as
+/// mutated in place as locals are mentioned; `tail` marks the sequence as
 /// occupying its word's tail position, so its final term (and, recursively,
-/// both arms of a final `if`) sits on the self-tail-call back-edge (R15). The
-/// rule mirrors `tail_position_calls`/`lower_terms`; all three must stay in
+/// both arms of a final `if`) sits on the self-tail-call back-edge. The rule
+/// mirrors `tail_position_calls`/`lower_terms`; all three must stay in
 /// lockstep.
 fn check_terms(
     terms: &[Term],
@@ -1967,11 +1967,9 @@ fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type) -> String {
     }
 }
 
-/// Match an index `Slot` against a `usize` index position for a `[T N]`
-/// (R11, D6, D8): an exact `usize` is a runtime index (the Phase 4 trap); a
-/// bare integer literal coerces (D8) and gets a compile-time bounds check
-/// (X4); a computed `i64` needs an explicit `>usize` (X10); anything else is
-/// a plain type mismatch.
+/// An exact `usize` is a runtime index; a bare integer literal coerces and
+/// gets a compile-time bounds check; a computed `i64` needs an explicit
+/// `>usize`; anything else is a plain type mismatch.
 fn check_array_index(
     index: Slot,
     count: u32,

@@ -266,13 +266,9 @@ pub enum Type {
     /// `usize` position without an explicit `>usize`) lives in `check.rs`, not
     /// here, since `Type` carries no notion of "fresh literal".
     Usize,
-    /// The test-only linear drop-spy primitive (R6/D5), spelled `__spy`. It
-    /// carries an `i64` tag and is the one *linear* type in the language so
-    /// far: its compiler-known destructor prints `drop <tag>`, so drop count,
-    /// order and timing are golden-observable. Convention-fenced, not
-    /// flag-gated: the `__` name marks it a compiler test intrinsic rather than
-    /// user surface, and it dissolves into an ordinary type once `drop` is
-    /// user-overridable (Phase 4). It lowers as an `i64` under the hood.
+    /// The test-only linear drop-spy primitive, spelled `__spy`: carries an
+    /// `i64` tag, and its compiler-known destructor prints `drop <tag>`, so
+    /// drop count, order, and timing are golden-observable.
     Spy,
 }
 

@@ -468,18 +468,9 @@ impl Session {
     }
 
     /// The end of the REPL-main scope: dispose every linear value still on the
-    /// residual stack, top first (LIFO). A live session's body is never
-    /// complete, so "you forgot to dispose this" can never be proved at compile
-    /// time (the next line might consume it); the linear rule degenerates to
-    /// running each leftover's destructor exactly once, here. A value already
-    /// `drop`ped on an earlier line is gone from `types` and is not disposed
-    /// again. Word definitions entered at the REPL keep the strict rule.
-    ///
-    /// Disposal goes through the ordinary expression path (a synthesized run of
-    /// `drop` terms), so it uses the same drop glue a compiled program does
-    /// rather than a second, drifting implementation. Copy slots above the
-    /// deepest linear one are dropped along the way, which has no runtime
-    /// effect.
+    /// residual stack, top first, since a live session's body is never
+    /// provably complete for the ordinary forgotten-disposal check. Word
+    /// definitions entered at the REPL keep the strict rule.
     fn dispose_residual(&mut self, writer: &mut impl Write) -> Result<(), String> {
         let Some(deepest) = self
             .types

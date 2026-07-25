@@ -157,20 +157,14 @@ pub struct StructLayout {
     pub size: u32,
     pub align: u32,
     pub fields: Vec<FieldLayout>,
-    /// R7: whether this struct is linear (any field is, transitively). A
-    /// struct field's own `is_linear` is already resolved by the time this is
-    /// computed (`ensure_struct` recurses into nested fields first), so this
-    /// is a one-shot fold, not a further recursion.
+    /// Whether this struct is linear (any field is, transitively).
     pub is_linear: bool,
 }
 
-/// Whether a field's `IrType` is linear (R6/R7): the drop-spy directly, or a
-/// nested struct/enum whose own layout is linear. Shared by every drop-glue
-/// site (`drop`, `S>fi`'s drop-the-rest, `S<fi`'s drop-on-overwrite, and the
-/// synthesized struct/enum destructors). `ensure_struct`/`ensure_enum` cannot
-/// call this: each computes its own `is_linear` inline, while `layouts` is
-/// still being built (this function needs a fully-populated
-/// `structs.layouts`/`enums.layouts` to look up a nested field's linearity).
+/// Whether a field's `IrType` is linear: the drop-spy directly, or a nested
+/// aggregate whose own layout is linear. `ensure_struct`/`ensure_enum` cannot
+/// call this: each computes its own `is_linear` inline while `layouts` is
+/// still being built, before a nested field's entry exists here.
 fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
     match ty {
         IrType::Spy => true,
@@ -181,16 +175,13 @@ fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays
     }
 }
 
-/// The synthesized per-type destructor symbol for a linear struct (R12): the
-/// drop-glue home decided in Phase 4 and used starting here in Phase 2 (a
-/// struct's field drops are uniform with an enum's tag-dispatched drops).
+/// The synthesized per-type destructor symbol for a linear struct.
 fn struct_drop_symbol(id: StructId) -> String {
     format!("sooth_struct_drop_{}", id.index())
 }
 
-/// The synthesized per-type destructor symbol for a linear enum (R12, Phase
-/// 4): mirrors `struct_drop_symbol`, one uniform naming scheme for both
-/// aggregate kinds.
+/// The synthesized per-type destructor symbol for a linear enum: mirrors
+/// `struct_drop_symbol`, one uniform naming scheme for both aggregate kinds.
 fn enum_drop_symbol(id: EnumId) -> String {
     format!("sooth_enum_drop_{}", id.index())
 }
@@ -795,17 +786,9 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     })
 }
 
-/// R12: every linear struct's and enum's synthesized destructor, one `IrFunc`
-/// per type. Callable by any lowering path that produces an `IrModule` (the
-/// build path's single module and the REPL's per-line/per-def module both
-/// need it, since `drop` calls it by symbol and the symbol must resolve
-/// wherever `drop` is compiled).
-///
-/// The REPL therefore redefines these symbols once per line, which is only safe
-/// because redefining a *type* is rejected (`check`): every generation's glue is
-/// identical, so `RTLD_GLOBAL`'s first-definition-wins is indistinguishable. If
-/// type redefinition is ever allowed, this symbol needs a generation suffix the
-/// way word symbols already have one.
+/// Every linear struct's and enum's synthesized destructor, one `IrFunc` per
+/// type. The REPL redefines these per line; safe because type redefinition is
+/// rejected, so every generation's glue is identical.
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -1853,7 +1836,6 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Load field `field` at `base` onto the stack.
     fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
         let v = self.field_value(base, field);
         self.stack.push(v);
