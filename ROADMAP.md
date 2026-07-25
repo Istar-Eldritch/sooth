@@ -40,9 +40,16 @@ type (width from a single threaded `WORD_WIDTH` parameter, never a hardcoded 8),
 with a runtime bounds trap (Sooth's first runtime failure path) via a backend-neutral
 `ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Slice 8 (its only
 motivation, pointer differences, arrives with pointers).
-**Next action: Phase 2 Slice 6** (self-tail-call → loop lowering; guaranteed
-constant-stack self-tail-recursion, precedes the VM dogfood). Not yet locked.
-(The bytecode-VM dogfood and `Copy`/pointer slices renumber to 7 and 8.)
+**Slice 6 (self-tail-call → loop lowering) is complete** and merged to `main`: a word
+whose body or clause body ends in a tail call to itself compiles to a back-edge `Jmp` to a
+phi'd loop header instead of a `Call`, giving guaranteed constant-stack self-tail-recursion
+(verified at 1M+ iterations under a 256KB stack). Reuses existing IR (blocks / `Phi` /
+back-edge `Jmp`) with no new instruction; back-patching is a small deferred `back_edges`
+accumulation; loop-body allocs are hoisted to the entry block (QBE `alloc*` never reclaims
+within a function). Mutual tail recursion is a located compile error (3-color DFS over the
+tail-call graph); tier-2 SCC contraction stays deferred. `examples/countdown.sth` dogfoods
+it.
+**Next action: Phase 2 Slice 7** (bytecode-VM dogfood, the Phase 2 exit). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -95,7 +102,7 @@ throwaway-but-real interactive session exists.
 **Dogfood (met):** a tiny interactive calculator session (`tests/phase1.rs`,
 `calculator_session_dogfood`).
 
-### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs + enums + arrays done: Slices 1-5 + floats/bitwise/bool)
+### Phase 2 — Typed core (monomorphic)  `[L]`  🚧 **in progress** (scalar core + structs + enums + arrays + self-TCO done: Slices 1-6 + floats/bitwise/bool)
 
 Sliced into vertical increments (each green and runnable). **Slice 1 (typed-core spine)
 is done**: two concrete types (`i64`/`bool`), a type-carrying checker that unifies type
@@ -119,8 +126,7 @@ layout machinery, exhaustiveness-checked clause-style elimination, the `then` ->
 rename, and clause-body locals. **Slice 5 (fixed-size arrays + `usize`) is also done**:
 heap-free value arrays `[T N]` (interned `ArrayId`, reused layout machinery), target-width
 `usize`, `fill`/`get`/`set`/`len`, and dynamic indexing with a runtime bounds trap. What
-remains are self-tail-call loop lowering, the VM dogfood, and `Copy`/pointers
-(Slices 6-8).
+remains are the VM dogfood and `Copy`/pointers (Slices 7-8).
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review
 cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
@@ -165,7 +171,7 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    with a located error; tier 2 (SCC contraction into one tagged loop, explicitly not a
    trampoline and not QBE backend TCO) is a planned follow-on, see DESIGN.md. Drop-at-
    back-edge is vacuous in Phase 2 (all-`Copy`) but the back-edge is the defined drop-
-   insertion point for Phase 3.
+   insertion point for Phase 3. ✅ done.
 7. **Bytecode-VM dogfood**: the Phase 2 exit dogfood, a small fixed-size VM for a toy
    bytecode, exercising the whole typed core (arrays, `usize`, enums/clauses, structs,
    and the self-tail-call dispatch loop from Slice 6).
