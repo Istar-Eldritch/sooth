@@ -60,8 +60,15 @@ is itself the exit verdict: the typed core is sufficient to write a real interpr
 dissolved into Phase 3: in a heap-free phase the `Copy` marker has no non-`Copy` type to
 reject and pointers have nothing to point at, so `Copy`/linear, pointers, recursive/heap
 data, and drop all move to Phase 3, where their first real clients live.
-**Next action: Phase 3 Slice 1** (linear analysis + move-by-default + `dup` gated on
-`Copy` + deterministic drop). Not yet locked.
+**Phase 3 Slice 1 (linear analysis + move-by-default + `dup` gated on `Copy` + explicit
+`drop`) is complete**: move tracking on linear locals (a `Live`/`Moved`/`MaybeMoved`
+lattice reconciled at branch joins), `dup`/`over` rejected on non-`Copy` types, `drop`
+lowered to a destructor call, the test-only `__spy` drop-spy bootstrap primitive,
+destructure-whole struct/enum aggregates (`S>fi` drop-the-rest, the non-consuming
+`S|>fi` Copy-field peek, `S<fi` drop-on-overwrite) with synthesized recursive/
+tag-dispatched drop glue, a located error for a linear value across a Slice 6
+back-edge, and REPL `:quit` disposing residual linear values LIFO.
+**Next action: Phase 3 Slice 2** (heap + owning pointer + allocator). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -292,7 +299,7 @@ with the compiler catching a deliberate double-use.
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review,
 same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
 
-1. **Linear analysis + move-by-default + `dup` gated on `Copy` + explicit `drop`.**
+1. **Linear analysis + move-by-default + `dup` gated on `Copy` + explicit `drop`.** ✅ done.
    The core novelty, isolated from heap. Move tracking (a second use of a moved value is a
    located error), `dup`/`over` rejected on a non-`Copy` type, `drop` lowered to a
    destructor call. **Linear, not affine**: no auto-drop, forgetting to dispose is a

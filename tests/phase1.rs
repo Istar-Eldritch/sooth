@@ -602,6 +602,17 @@ fn repl_quit_disposes_residual_linear() {
 }
 
 #[test]
+fn repl_within_one_line_create_and_drop_prints_once() {
+    let out = run_session(&["7 __spy drop", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["drop 7", "stack: (empty)"],
+        "a spy created and dropped within one line should print exactly once"
+    );
+}
+
+#[test]
 fn repl_explicit_drop_not_redisposed_at_quit() {
     let out = run_session(&["7 __spy", "drop", ":quit"]);
     let lines: Vec<&str> = out.lines().collect();
