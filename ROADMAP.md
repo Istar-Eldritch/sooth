@@ -313,11 +313,23 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
 3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
    content, now with a home: recursive enums/structs need the heap indirection slice 2
    provides. Dogfood: a linked list or tree that builds, walks, and is explicitly freed.
+   A **zipper** (focus + stored path of one-hole steps) is the sharper dogfood candidate:
+   it exercises the recursive drop glue harder than a list, and it is the one shape
+   slice 4's second-class references provably cannot express, since the path must be
+   stored. Hand-write the step sum for one type before considering compiler-generated
+   one-hole types.
 4. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
    checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
    the escape checker keeping refs from being stored or escaping scope. Comes after heap
    because "hand the value back" already works by threading it through the stack. Dogfood:
    in-place mutation of an owned buffer through `inout`.
+   **Design question this slice's brief must answer:** do `inout` projections into nested
+   fields subsume a reified take/fill pair (`S/fi` yielding a residual `∂S/∂fi`, refilled
+   exactly once)? A second-class projection is the same residual, made implicit and
+   lexically bounded, and it also covers whole-value borrows, so the expectation is yes
+   for every statically known path, leaving reified residuals worth having only where the
+   focus must escape (slice 3's zipper, as a stdlib type). Answer it here rather than
+   letting nested-path ergonomics get solved twice.
 5. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
 6. **Resources as linear values (fds, hosted).** The Phase 3 exit dogfood: open/read/close
