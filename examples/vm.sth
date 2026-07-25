@@ -1,0 +1,162 @@
+\ Dogfood: Phase 2 exit. A fixed-size bytecode stack machine that interprets a
+\ toy instruction set, composing fixed-size arrays, `usize`, enums with
+\ clause dispatch, structs, and the Slice 6 self-tail-call dispatch loop.
+\
+\ `Op` is mixed-arity: `Push`/`Load`/`Store`/`Jz`/`Jmp` carry a `i64`/`usize`
+\ payload; `Add`/`Sub`/`Mul`/`Halt` do not. `Vm` bundles the whole machine
+\ state (program, program counter, operand stack + cursor, addressable
+\ memory) so it can ride across the dispatch loop's tail-call back-edge as a
+\ single value.
+\
+\ A user word may only return one value through a call (see
+\ `examples/stack.sth`), so `vm-pop` bundles its `(Vm, i64)` result into a
+\ `VmPop` struct, destructured inline by the caller with the generated
+\ `VmPop>` word — same idiom as `Stack`/`Popped` in `examples/stack.sth`.
+\ `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same way.
+
+type: Op
+| Push v i64
+| Add
+| Sub
+| Mul
+| Load  addr usize
+| Store addr usize
+| Jz    target usize
+| Jmp   target usize
+| Halt
+;
+
+type: Vm
+  prog  [Op 13]
+  pc    usize
+  stack [i64 8]
+  sp    usize
+  mem   [i64 4]
+;
+
+type: Fetched vm Vm op Op ;
+type: VmPop vm Vm val i64 ;
+
+: vm-push ( Vm i64 -- Vm )
+  | vm x |
+  vm vm Vm>stack vm Vm>sp x set Vm<stack
+  vm Vm>sp 1 + Vm<sp ;
+
+: vm-pop ( Vm -- VmPop )
+  | vm |
+  vm vm Vm>sp 1 - Vm<sp                \ new vm, sp decremented
+  vm Vm>stack vm Vm>sp 1 - get         \ original-vm array elem
+  swap drop                            \ elem
+  VmPop ;
+
+: bump-pc ( Vm -- Vm )
+  dup Vm>pc 1 + Vm<pc ;
+
+: fetch ( Vm -- Fetched )
+  | vm |
+  vm
+  vm Vm>prog vm Vm>pc get swap drop    \ read prog[pc], keep the Op
+  Fetched ;
+
+\ Nine-clause self-tail-recursive dispatch loop. Every non-`Halt` clause
+\ produces an updated `Vm`, refetches the next `Op` out of the carried
+\ `prog`, and tail-calls `run` (the Slice 6 back-edge). `Halt` returns the
+\ popped operand-stack top without a self-call (the base case that `Ret`s).
+: run ( Vm Op -- i64 )
+| Push  | vm v |
+    vm v vm-push
+    bump-pc
+    fetch Fetched> run
+| Add   | vm |
+    vm vm-pop VmPop>          \ vm' b
+    swap vm-pop VmPop>        \ b vm'' a
+    rot                        \ vm'' a b
+    +
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Sub   | vm |
+    vm vm-pop VmPop>
+    swap vm-pop VmPop>
+    rot
+    -
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Mul   | vm |
+    vm vm-pop VmPop>
+    swap vm-pop VmPop>
+    rot
+    *
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Load  | vm addr |
+    vm vm Vm>mem addr get swap drop    \ vm mem[addr]
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Store | vm addr |
+    vm vm-pop VmPop>           \ vm' x
+    over Vm>mem                 \ vm' x mem
+    addr                         \ vm' x mem addr
+    rot                          \ vm' mem addr x
+    set
+    Vm<mem
+    bump-pc
+    fetch Fetched> run
+| Jz    | vm target |
+    vm vm-pop VmPop>           \ vm' x
+    0 =
+    if
+      target Vm<pc
+    else
+      bump-pc
+    end
+    fetch Fetched> run
+| Jmp   | vm target |
+    vm target Vm<pc
+    fetch Fetched> run
+| Halt  | vm |
+    vm vm-pop VmPop>
+    swap drop
+;
+
+\ Assembles the sum-1..N-via-bytecode program (fill+set, no array literal):
+\   0  Load  0    (L)   push i
+\   1  Jz    11         if i == 0 goto E
+\   2  Load  1          push acc
+\   3  Load  0          push i
+\   4  Add               acc + i
+\   5  Store 1          acc = acc + i
+\   6  Load  0          push i
+\   7  Push  1
+\   8  Sub               i - 1
+\   9  Store 0          i = i - 1
+\   10 Jmp   0          backward branch to L
+\   11 Load  1    (E)   push acc
+\   12 Halt             result = acc on top of stack (seeded by fill)
+: build ( -- [Op 13] )
+  Halt 13 fill
+  0  >usize 0  >usize Load  set
+  1  >usize 11 >usize Jz    set
+  2  >usize 1  >usize Load  set
+  3  >usize 0  >usize Load  set
+  4  >usize Add set
+  5  >usize 1  >usize Store set
+  6  >usize 0  >usize Load  set
+  7  >usize 1 Push set
+  8  >usize Sub set
+  9  >usize 0  >usize Store set
+  10 >usize 0  >usize Jmp   set
+  11 >usize 1  >usize Load  set
+;
+
+: main ( -- )
+  build
+  0 >usize                       \ pc = 0
+  0 8 fill
+  0 >usize                       \ sp = 0
+  0 4 fill 0 >usize 100000 set  \ mem[0] = N = 100000, mem[1] = 0
+  Vm
+  fetch Fetched> run . ;

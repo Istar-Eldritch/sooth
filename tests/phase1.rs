@@ -541,3 +541,45 @@ fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
         vec!["defined sum-to", "500000500000", "stack: (empty)"]
     );
 }
+
+/// Phase 2 Slice 7, criterion 7 (D7): the `examples/vm.sth` bytecode-VM
+/// dogfood, defined and run entirely as REPL session lines (each definition
+/// flattened onto one line, since the REPL reads one line at a time). The
+/// self-tail-recursive `run` gets the same self-tail-call -> loop transform
+/// through the `dlopen` path with no REPL-specific plumbing (established by
+/// Slice 6 criterion 8), and the session runs the same N = 100_000 program as
+/// the native golden, so "the same result" is literal.
+#[test]
+fn vm_dogfood_runs_in_repl() {
+    let out = run_session(&[
+        "type: Op | Push v i64 | Add | Sub | Mul | Load addr usize | Store addr usize | Jz target usize | Jmp target usize | Halt ;",
+        "type: Vm prog [Op 13] pc usize stack [i64 8] sp usize mem [i64 4] ;",
+        "type: Fetched vm Vm op Op ;",
+        "type: VmPop vm Vm val i64 ;",
+        ": vm-push ( Vm i64 -- Vm ) | vm x | vm vm Vm>stack vm Vm>sp x set Vm<stack vm Vm>sp 1 + Vm<sp ;",
+        ": vm-pop ( Vm -- VmPop ) | vm | vm vm Vm>sp 1 - Vm<sp vm Vm>stack vm Vm>sp 1 - get swap drop VmPop ;",
+        ": bump-pc ( Vm -- Vm ) dup Vm>pc 1 + Vm<pc ;",
+        ": fetch ( Vm -- Fetched ) | vm | vm vm Vm>prog vm Vm>pc get swap drop Fetched ;",
+        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | vm vm Vm>mem addr get swap drop vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> over Vm>mem addr rot set Vm<mem bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = if target Vm<pc else bump-pc end fetch Fetched> run | Jmp | vm target | vm target Vm<pc fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
+        ": build ( -- [Op 13] ) Halt 13 fill 0 >usize 0 >usize Load set 1 >usize 11 >usize Jz set 2 >usize 1 >usize Load set 3 >usize 0 >usize Load set 4 >usize Add set 5 >usize 1 >usize Store set 6 >usize 0 >usize Load set 7 >usize 1 Push set 8 >usize Sub set 9 >usize 0 >usize Store set 10 >usize 0 >usize Jmp set 11 >usize 1 >usize Load set ;",
+        "build 0 >usize 0 8 fill 0 >usize 0 4 fill 0 >usize 100000 set Vm fetch Fetched> run .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Op",
+            "defined type Vm",
+            "defined type Fetched",
+            "defined type VmPop",
+            "defined vm-push",
+            "defined vm-pop",
+            "defined bump-pc",
+            "defined fetch",
+            "defined run",
+            "defined build",
+            "5000050000",
+            "stack: (empty)",
+        ]
+    );
+}

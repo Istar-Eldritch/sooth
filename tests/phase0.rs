@@ -1461,6 +1461,200 @@ fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
 }
 
 #[test]
+fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
+    // Slice 7 criterion 8 (the crux): `get` an `Op` out of the *carried*
+    // program array, clause-match it, and tail-recurse. The array-across-the
+    // -back-edge half was proven by a prior spike; the residual unproven
+    // composition is enum-`get`-from-carried-array + clause dispatch in
+    // constant stack. 1_000_000 back-edges each read the enum out of the
+    // carried `[Op 2]`, dispatch, and self-tail-call; naive recursion at that
+    // depth overflows the default 8MB host stack, which `run_and_capture_stdout`
+    // catches as a signal death (no exit code) and turns a no-op Slice 6
+    // transform red. `idx` goes bool -> index via `if 1 else 0 end >usize`
+    // (a conversion word on a `bool` is a checker error), and `fetch` reads
+    // the enum with non-consuming `get` (`swap drop` keeps the `Op`).
+    let src = "type: Op | Step | Stop ;\n\
+: idx ( i64 -- usize ) | count | count 0 = if 1 else 0 end >usize ;\n\
+: fetch ( [Op 2] usize -- Op ) | a i | a i get swap drop ;\n\
+: run ( [Op 2] i64 i64 Op -- i64 )\n\
+  | Step | prog count acc |\n\
+      prog\n\
+      count 1 -\n\
+      acc 1 +\n\
+      prog count 1 - idx fetch\n\
+      run\n\
+  | Stop | prog count acc | acc\n\
+;\n\
+: build ( -- [Op 2] ) Step 2 fill 1 Stop set ;\n\
+: start ( [Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
+: main ( -- ) build start . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-vm-smoke-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "1000000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn vm_dogfood_compiles_and_runs() {
+    // Phase 3 of Slice 7 (criteria 1, 2, 4, 5, 6): the VM's real dispatch
+    // loop (`fetch` + the nine-clause self-tail-recursive `run`) interprets
+    // the sum-1..N bytecode program (built via `fill`+`set`, no array
+    // literal) at N = 10, exercising every opcode the sum program needs
+    // (`Push`/`Add`/`Sub`/`Load`/`Store`/`Jz`/`Jmp`/`Halt`) and the `Jz`/`Jmp`
+    // backward branch. `Mul` dispatches too (its clause is identical in shape
+    // to `Add`/`Sub`) but sum-1..N never multiplies, so this golden doesn't
+    // exercise it. This is an inline temp-source copy of `examples/vm.sth`
+    // at a small N: Phase 4 scales the committed example to N = 100_000 for
+    // the constant-stack golden below, so this fast correctness check keeps
+    // its own small-N copy rather than sharing the committed example's `main`.
+    let src = "type: Op\n\
+| Push v i64\n\
+| Add\n\
+| Sub\n\
+| Mul\n\
+| Load  addr usize\n\
+| Store addr usize\n\
+| Jz    target usize\n\
+| Jmp   target usize\n\
+| Halt\n\
+;\n\
+type: Vm\n\
+  prog  [Op 13]\n\
+  pc    usize\n\
+  stack [i64 8]\n\
+  sp    usize\n\
+  mem   [i64 4]\n\
+;\n\
+type: Fetched vm Vm op Op ;\n\
+type: VmPop vm Vm val i64 ;\n\
+: vm-push ( Vm i64 -- Vm )\n\
+  | vm x |\n\
+  vm vm Vm>stack vm Vm>sp x set Vm<stack\n\
+  vm Vm>sp 1 + Vm<sp ;\n\
+: vm-pop ( Vm -- VmPop )\n\
+  | vm |\n\
+  vm vm Vm>sp 1 - Vm<sp\n\
+  vm Vm>stack vm Vm>sp 1 - get\n\
+  swap drop\n\
+  VmPop ;\n\
+: bump-pc ( Vm -- Vm )\n\
+  dup Vm>pc 1 + Vm<pc ;\n\
+: fetch ( Vm -- Fetched )\n\
+  | vm |\n\
+  vm\n\
+  vm Vm>prog vm Vm>pc get swap drop\n\
+  Fetched ;\n\
+: run ( Vm Op -- i64 )\n\
+| Push  | vm v |\n\
+    vm v vm-push\n\
+    bump-pc\n\
+    fetch Fetched> run\n\
+| Add   | vm |\n\
+    vm vm-pop VmPop>\n\
+    swap vm-pop VmPop>\n\
+    rot\n\
+    +\n\
+    vm-push\n\
+    bump-pc\n\
+    fetch Fetched> run\n\
+| Sub   | vm |\n\
+    vm vm-pop VmPop>\n\
+    swap vm-pop VmPop>\n\
+    rot\n\
+    -\n\
+    vm-push\n\
+    bump-pc\n\
+    fetch Fetched> run\n\
+| Mul   | vm |\n\
+    vm vm-pop VmPop>\n\
+    swap vm-pop VmPop>\n\
+    rot\n\
+    *\n\
+    vm-push\n\
+    bump-pc\n\
+    fetch Fetched> run\n\
+| Load  | vm addr |\n\
+    vm vm Vm>mem addr get swap drop\n\
+    vm-push\n\
+    bump-pc\n\
+    fetch Fetched> run\n\
+| Store | vm addr |\n\
+    vm vm-pop VmPop>\n\
+    over Vm>mem\n\
+    addr\n\
+    rot\n\
+    set\n\
+    Vm<mem\n\
+    bump-pc\n\
+    fetch Fetched> run\n\
+| Jz    | vm target |\n\
+    vm vm-pop VmPop>\n\
+    0 =\n\
+    if\n\
+      target Vm<pc\n\
+    else\n\
+      bump-pc\n\
+    end\n\
+    fetch Fetched> run\n\
+| Jmp   | vm target |\n\
+    vm target Vm<pc\n\
+    fetch Fetched> run\n\
+| Halt  | vm |\n\
+    vm vm-pop VmPop>\n\
+    swap drop\n\
+;\n\
+: build ( -- [Op 13] )\n\
+  Halt 13 fill\n\
+  0  >usize 0  >usize Load  set\n\
+  1  >usize 11 >usize Jz    set\n\
+  2  >usize 1  >usize Load  set\n\
+  3  >usize 0  >usize Load  set\n\
+  4  >usize Add set\n\
+  5  >usize 1  >usize Store set\n\
+  6  >usize 0  >usize Load  set\n\
+  7  >usize 1 Push set\n\
+  8  >usize Sub set\n\
+  9  >usize 0  >usize Store set\n\
+  10 >usize 0  >usize Jmp   set\n\
+  11 >usize 1  >usize Load  set\n\
+;\n\
+: main ( -- )\n\
+  build\n\
+  0 >usize\n\
+  0 8 fill\n\
+  0 >usize\n\
+  0 4 fill 0 >usize 10 set\n\
+  Vm\n\
+  fetch Fetched> run . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-vm-small-n-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "55\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn vm_dispatch_loop_runs_in_constant_stack() {
+    // Phase 4 of Slice 7 (criterion 3): the committed `examples/vm.sth` runs
+    // its sum-1..N program at N = 100_000. The loop body is 11 opcodes
+    // (`Load Jz Load Load Add Store Load Push Sub Store Jmp`), so 100_000
+    // trips execute ~1_100_000 dispatch steps, clearing the >=1_000_000-
+    // dispatch-step rule (Slice 6's constant-stack rule applied at the
+    // dispatch level). `run`'s self-tail-call keeps this in constant stack;
+    // naive recursion at this depth would overflow the default 8MB host
+    // stack, which `run_and_capture_stdout` catches as a signal death (no
+    // exit code), turning a no-op Slice 6 transform red.
+    let (stdout, code) = run_and_capture_stdout("examples/vm.sth");
+    assert_eq!(stdout, "5000050000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn non_tail_factorial_still_a_real_call_native() {
     // Criterion 5: the existing `examples/factorial.sth` (`dup 1 - factorial
     // *`) has a self-call followed by `*`, so it is deliberately not in tail
