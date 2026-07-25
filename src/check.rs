@@ -2306,6 +2306,9 @@ mod tests {
     #[test]
     fn check_main_copy_effect_is_ok() {
         check_src(": main ( i64 -- i64 ) 1 + ;").unwrap();
+        // The misfire risk is `is_copy`'s recursive struct/enum arms, not the
+        // scalar arm: a Copy struct in `main`'s effect must not be rejected.
+        check_src("type: P a i64 b i64 ; : main ( P -- ) P> drop drop ;").unwrap();
     }
 
     #[test]
