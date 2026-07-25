@@ -171,11 +171,12 @@ pub struct StructLayout {
 /// call this: each computes its own `is_linear` inline, while `layouts` is
 /// still being built (this function needs a fully-populated
 /// `structs.layouts`/`enums.layouts` to look up a nested field's linearity).
-fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums) -> bool {
+fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
     match ty {
         IrType::Spy => true,
         IrType::Struct(id) => structs.layouts[id.index()].is_linear,
         IrType::Enum(id) => enums.layouts[id.index()].is_linear,
+        IrType::Array(id) => arrays.layouts[id.index()].is_linear,
         _ => false,
     }
 }
@@ -275,6 +276,7 @@ pub struct ArrayLayout {
     pub stride: u32,
     pub size: u32,
     pub align: u32,
+    pub is_linear: bool,
 }
 
 /// The IR's view of a program's arrays: the per-`ArrayId` layout registry.
@@ -604,6 +606,12 @@ impl LayoutBuilder<'_> {
                     .expect("nested enum field already laid out")
                     .is_linear
             }
+            IrType::Array(id) => {
+                self.array_memo[id.index()]
+                    .as_ref()
+                    .expect("nested array field already laid out")
+                    .is_linear
+            }
             _ => false,
         }
     }
@@ -622,6 +630,9 @@ impl LayoutBuilder<'_> {
         let elem = ir_type_of(element);
         let (elem_size, elem_align) = self.size_align(element);
         let stride = round_up(elem_size, elem_align);
+        // R7: an array is linear iff its element is, transitively; `size_align`
+        // above already ensured a nested struct/enum/array element's memo.
+        let is_linear = self.layout_field_is_linear(elem);
         self.array_memo[idx] = Some(ArrayLayout {
             name: self.arrays[idx].name_static,
             elem,
@@ -629,6 +640,7 @@ impl LayoutBuilder<'_> {
             stride,
             size: stride * count,
             align: elem_align.max(1),
+            is_linear,
         });
     }
 }
@@ -851,7 +863,7 @@ fn synthesize_struct_destructor(
     let param = b.fresh_value(IrType::Struct(id));
     let fields = structs.layouts[id.index()].fields.clone();
     for field in fields {
-        if field_is_linear(field.ty, structs, enums) {
+        if field_is_linear(field.ty, structs, enums, arrays) {
             let v = b.field_value(param, field);
             b.emit_drop(v);
         }
@@ -892,7 +904,7 @@ fn synthesize_enum_destructor(
         b.start_block(block);
         let fields = enums.layouts[id.index()].variants[vi].fields.clone();
         for field in &fields {
-            if field_is_linear(field.ty, structs, enums) {
+            if field_is_linear(field.ty, structs, enums, arrays) {
                 let adjusted = FieldLayout {
                     offset: payload_offset + field.offset,
                     ..*field
@@ -1931,7 +1943,7 @@ impl<'a> FuncBuilder<'a> {
                 // here (a no-op drop-the-rest when every other field is
                 // Copy, unchanged from before this slice).
                 for (j, field) in fields.iter().enumerate() {
-                    if j != fi && field_is_linear(field.ty, self.structs, self.enums) {
+                    if j != fi && field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
                         let v = self.field_value(s, *field);
                         self.emit_drop(v);
                     }
@@ -1950,7 +1962,7 @@ impl<'a> FuncBuilder<'a> {
                 // above (consumed, never dropped); only the field being
                 // overwritten is read back out and dropped, before the store,
                 // so the order is deterministic.
-                if field_is_linear(field.ty, self.structs, self.enums) {
+                if field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
                     let old = self.field_value(dst, field);
                     self.emit_drop(old);
                 }
@@ -3673,26 +3685,29 @@ mod tests {
                    type: EnumInStruct e Item ; \
                    type: StructInEnum | Some h Holds | None ; \
                    type: EnumInEnum | Inner i EnumInStruct | Outer ; \
+                   type: PlainArr xs [i64 4] ; \
+                   type: SpyArr xs [__spy 4] ; \
                    : w ( -- ) ;";
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
-        let (structs, enums, _) = build_registries(&module.structs, &module.enums, &module.arrays);
+        let (structs, enums, arrays) =
+            build_registries(&module.structs, &module.enums, &module.arrays);
         for (idx, layout) in structs.layouts.iter().enumerate() {
             let ty = Type::Struct(StructId::from_index(idx), layout.name);
             assert_eq!(
-                crate::check::is_copy(ty, &module.structs, &module.enums),
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
                 !layout.is_linear,
                 "`{}`: checker says Copy={}, `ensure_struct` says linear={}",
                 layout.name,
-                crate::check::is_copy(ty, &module.structs, &module.enums),
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
                 layout.is_linear
             );
             assert_eq!(
                 layout
                     .fields
                     .iter()
-                    .any(|f| field_is_linear(f.ty, &structs, &enums)),
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
                 layout.is_linear,
                 "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
                 layout.name
@@ -3705,11 +3720,11 @@ mod tests {
         for (idx, layout) in enums.layouts.iter().enumerate() {
             let ty = Type::Enum(EnumId::from_index(idx), layout.name);
             assert_eq!(
-                crate::check::is_copy(ty, &module.structs, &module.enums),
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
                 !layout.is_linear,
                 "`{}`: checker says Copy={}, `ensure_enum` says linear={}",
                 layout.name,
-                crate::check::is_copy(ty, &module.structs, &module.enums),
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
                 layout.is_linear
             );
             assert_eq!(
@@ -3717,12 +3732,49 @@ mod tests {
                     .variants
                     .iter()
                     .flat_map(|v| v.fields.iter())
-                    .any(|f| field_is_linear(f.ty, &structs, &enums)),
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
                 layout.is_linear,
                 "`{}`: `field_is_linear` disagrees with the `ensure_enum` fold",
                 layout.name
             );
         }
+        // Criterion (item 3): an array field is linear iff its element is,
+        // transitively; `PlainArr` (an `[i64 4]` field) stays Copy, `SpyArr`
+        // (an `[__spy 4]` field) is linear even though no source program can
+        // ever construct that array value (`fill` rejects a linear element),
+        // so the predicate must be correct on the type alone.
+        let plain_arr_idx = structs
+            .layouts
+            .iter()
+            .position(|l| l.name == "PlainArr")
+            .unwrap();
+        let spy_arr_idx = structs
+            .layouts
+            .iter()
+            .position(|l| l.name == "SpyArr")
+            .unwrap();
+        assert!(!structs.layouts[plain_arr_idx].is_linear);
+        assert!(structs.layouts[spy_arr_idx].is_linear);
+        let plain_arr_ty = Type::Struct(
+            StructId::from_index(plain_arr_idx),
+            structs.layouts[plain_arr_idx].name,
+        );
+        let spy_arr_ty = Type::Struct(
+            StructId::from_index(spy_arr_idx),
+            structs.layouts[spy_arr_idx].name,
+        );
+        assert!(crate::check::is_copy(
+            plain_arr_ty,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!crate::check::is_copy(
+            spy_arr_ty,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
     }
 
     #[test]

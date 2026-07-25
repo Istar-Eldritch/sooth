@@ -484,7 +484,7 @@ impl Session {
         let Some(deepest) = self
             .types
             .iter()
-            .position(|ty| !check::is_copy(*ty, &self.structs, &self.enums))
+            .position(|ty| !check::is_copy(*ty, &self.structs, &self.enums, &self.arrays))
         else {
             return Ok(());
         };
