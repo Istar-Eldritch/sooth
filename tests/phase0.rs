@@ -1434,10 +1434,11 @@ fn clause_multi_tail_runs_in_constant_stack_native() {
 
 #[test]
 fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
-    // Criterion 3's mixed-clause golden (R9 / risk 5): the `Go` clause
-    // back-edges (both its own `if` arms are self-tail-calls: one continues,
-    // one transitions the tag to `Halt`), while the `Halt` clause is an
-    // unconditional base case that `Ret`s with no self-call at all. The loop
+    // Criterion 3's mixed-clause golden (R9 / risk 5): both of the `Go`
+    // clause's `if` arms are self-tail-calls, so both back-edge to the loop
+    // header (one recurses with the `Go` tag, one recurses with the `Halt`
+    // tag; neither arm itself `Ret`s). The only genuine base case is the
+    // separate `Halt` clause, which `Ret`s with no self-call at all. The loop
     // header's predecessors (entry + `Go`'s two back-edges) and the Slice-4
     // dispatch-join's predecessors must stay disjoint for this to compile and
     // run correctly.
