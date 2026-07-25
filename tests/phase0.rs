@@ -1666,3 +1666,177 @@ fn non_tail_factorial_still_a_real_call_native() {
     assert_eq!(stdout, "120\n");
     assert_eq!(code, 0);
 }
+
+// Phase 3 Slice 1: the linear core on bare `__spy` values. Every
+// drop-observing golden compares the *whole* stdout, so "exactly once" and drop
+// order are actually proven; every negative golden asserts the diagnostic and
+// the backticked type name.
+
+fn run_linear_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-linear-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "linear golden `{tag}` should exit 0");
+    stdout
+}
+
+fn linear_check_error(src: &str) -> String {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect_err("check should fail")
+}
+
+#[test]
+fn dup_of_linear_value_is_error() {
+    // Criterion 1: `dup` is the explicit copy and a linear value has no copy.
+    let err = linear_check_error(": main ( -- )\n  7 __spy dup drop drop ;\n");
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("linear"), "unexpected message: {err}");
+}
+
+#[test]
+fn over_of_linear_value_is_error() {
+    // Criterion 1b: `over` copies its second slot, so it is gated too.
+    let err = linear_check_error(": main ( -- )\n  7 __spy 1 over drop drop drop ;\n");
+    assert!(err.contains("cannot `over`"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn use_after_move_of_linear_local_is_error() {
+    // Criterion 2: the second mention errors and names the site of the first.
+    let err = linear_check_error(
+        ": main ( -- )\n  7 __spy hold ;\n\
+: hold ( __spy -- )\n  | s |\n  s drop\n  s drop ;\n",
+    );
+    assert!(err.contains("use after move"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("moved at line 5, col 3"),
+        "the diagnostic should name the move site: {err}"
+    );
+}
+
+#[test]
+fn explicit_drop_runs_destructor_once() {
+    // Criterion 3: the destructor runs exactly once, exactly where the `drop`
+    // is written (between the two ordinary prints).
+    let stdout = run_linear_golden(
+        "drop-once",
+        ": main ( -- )\n  1 .\n  7 __spy drop\n  2 . ;\n",
+    );
+    assert_eq!(stdout, "1\ndrop 7\n2\n");
+}
+
+#[test]
+fn surplus_linear_on_stack_is_error() {
+    // Criterion 4a: forgetting is an error, not a silent drop.
+    let err = linear_check_error(": main ( -- )\n  7 __spy ;\n");
+    assert!(
+        err.contains("linear value left on the stack"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn unconsumed_linear_local_is_error() {
+    // Criterion 4b: a linear local never consumed by scope end. Locals are not
+    // on the final stack, so this is its own pass, not `check_outputs`.
+    let err = linear_check_error(": hold ( __spy -- )\n  | s |\n  1 . ;\n");
+    assert!(err.contains("never consumed"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(
+        err.contains("`s`"),
+        "the error should name the local: {err}"
+    );
+}
+
+#[test]
+fn surplus_copy_value_keeps_existing_error() {
+    // Criterion 4c: no misfire. A surplus Copy value keeps the arity error it
+    // always had, with no linear wording.
+    let err = linear_check_error(": main ( -- )\n  1 ;\n");
+    assert!(
+        err.contains("body leaves 1 values"),
+        "unexpected message: {err}"
+    );
+    assert!(!err.contains("linear"), "unexpected message: {err}");
+}
+
+#[test]
+fn swap_of_linear_values_is_allowed() {
+    // Criterion `swap`: the pure reorderings move rather than copy, so the
+    // `dup`/`over` gate must not reach them. The drop order proves the reorder
+    // actually happened: `swap` makes 7 the top, and `rot` (a b c -> b c a)
+    // makes 1 the top.
+    let stdout = run_linear_golden(
+        "reorder",
+        ": main ( -- )\n  7 __spy 8 __spy swap drop drop\n\
+  1 __spy 2 __spy 3 __spy rot drop drop drop ;\n",
+    );
+    assert_eq!(stdout, "drop 7\ndrop 8\ndrop 1\ndrop 3\ndrop 2\n");
+}
+
+#[test]
+fn both_arms_consume_linear_ok() {
+    // Criterion 10a: consumed in both arms compiles, and each call disposes its
+    // own spy exactly once.
+    let stdout = run_linear_golden(
+        "both-arms",
+        ": dispose ( __spy bool -- )\n  | s c |\n  c if s drop else 99 . s drop end ;\n\
+: main ( -- )\n  7 __spy true dispose\n  8 __spy false dispose ;\n",
+    );
+    assert_eq!(stdout, "drop 7\n99\ndrop 8\n");
+}
+
+#[test]
+fn divergent_arm_use_is_error() {
+    // Criterion 10b: consumed in one arm only, then referenced past the join.
+    // The join yields `MaybeMoved`, so the later use is a use-after-move.
+    let err = linear_check_error(
+        ": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;\n",
+    );
+    assert!(err.contains("use after move"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn divergent_arm_unconsumed_is_error() {
+    // Criterion 10c: consumed in one arm only and never referenced again. The
+    // compiler errors at scope end rather than inserting a compensating drop.
+    let err =
+        linear_check_error(": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;\n");
+    assert!(err.contains("never consumed"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_across_loop_back_edge_is_located_error() {
+    // Criterion 12: a linear value live across the self-tail-call back-edge is
+    // deferred (R15/D8), as a located error rather than a miscompile.
+    let err = linear_check_error(
+        ": spin ( __spy i64 -- i64 )\n  | s n |\n\
+  n 0 = if s drop 0 else 9 __spy n 1 - spin end ;\n",
+    );
+    assert!(
+        err.contains("not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("line 3"), "the error should be located: {err}");
+}
+
+#[test]
+fn copy_loop_still_compiles() {
+    // Criterion 12 (other half): a `countdown`-shaped Copy loop is unaffected
+    // by the back-edge guard.
+    let stdout = run_linear_golden(
+        "copy-loop",
+        ": countdown ( i64 -- i64 )\n  | n |\n  n 0 = if 0 else n 1 - countdown end ;\n\
+: main ( -- )\n  100 countdown . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+}

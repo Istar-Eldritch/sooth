@@ -12,7 +12,9 @@ use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use crate::ast::{ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, Type, VariantDecl, WordDef};
+use crate::ast::{
+    ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, TermKind, Type, VariantDecl, WordDef,
+};
 use crate::check::{self, Sig};
 use crate::driver;
 use crate::ir::ArrayLayout;
@@ -434,6 +436,57 @@ impl Session {
     }
 
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
+        let (structs, enums, arrays) = self.run_terms(terms, writer)?;
+        let cells = self.top / 8;
+        writeln!(
+            writer,
+            "{}",
+            format_stack(
+                &self.buf[..cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts
+            )
+        )
+        .map_err(|e| format!("writing stdout: {e}"))
+    }
+
+    /// The end of the REPL-main scope: dispose every linear value still on the
+    /// residual stack, top first (LIFO). A live session's body is never
+    /// complete, so "you forgot to dispose this" can never be proved at compile
+    /// time (the next line might consume it); the linear rule degenerates to
+    /// running each leftover's destructor exactly once, here. A value already
+    /// `drop`ped on an earlier line is gone from `types` and is not disposed
+    /// again. Word definitions entered at the REPL keep the strict rule.
+    ///
+    /// Disposal goes through the ordinary expression path (a synthesized run of
+    /// `drop` terms), so it uses the same drop glue a compiled program does
+    /// rather than a second, drifting implementation. Copy slots above the
+    /// deepest linear one are dropped along the way, which has no runtime
+    /// effect.
+    fn dispose_residual(&mut self, writer: &mut impl Write) -> Result<(), String> {
+        let Some(deepest) = self.types.iter().position(|ty| !check::is_copy(*ty)) else {
+            return Ok(());
+        };
+        let terms: Vec<Term> = (deepest..self.types.len())
+            .map(|_| Term {
+                kind: TermKind::Call("drop".to_string()),
+                span: Span::default(),
+            })
+            .collect();
+        self.run_terms(&terms, writer).map(|_| ())
+    }
+
+    /// Compile and run one bare term sequence against the carried stack,
+    /// committing the resulting stack state. Returns the aggregate registries it
+    /// built, so the caller can render the residual stack from the same
+    /// layouts.
+    fn run_terms(
+        &mut self,
+        terms: &[Term],
+        writer: &mut impl Write,
+    ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
         let net_stack = check::infer_line(terms, &self.types, &env, &mut self.arrays)?;
@@ -514,20 +567,7 @@ impl Session {
         self.types = net_stack;
         self.libs.push(lib);
 
-        let cells = self.top / 8;
-        writeln!(
-            writer,
-            "{}",
-            format_stack(
-                &self.buf[..cells],
-                &self.types,
-                &structs.layouts,
-                &enums.layouts,
-                &arrays.layouts
-            )
-        )
-        .map_err(|e| format!("writing stdout: {e}"))?;
-        Ok(())
+        Ok((structs, enums, arrays))
     }
 }
 
@@ -537,9 +577,18 @@ impl Default for Session {
     }
 }
 
-/// The read-eval-print loop: blank lines are skipped silently, EOF exits
-/// cleanly, and any stage error prints the diagnostic without mutating
-/// session state.
+/// End the session: run the residual stack's destructors (the REPL-main scope
+/// end), reporting a failure the way any other line's failure is reported.
+fn end_session(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
+    if let Err(e) = session.dispose_residual(writer) {
+        writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
+    }
+    Ok(())
+}
+
+/// The read-eval-print loop: blank lines are skipped silently, `:quit` or EOF
+/// exits cleanly (disposing any residual linear values first), and any stage
+/// error prints the diagnostic without mutating session state.
 pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
     let mut session = Session::new();
     let mut line = String::new();
@@ -549,11 +598,14 @@ pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Strin
             .read_line(&mut line)
             .map_err(|e| format!("reading stdin: {e}"))?;
         if n == 0 {
-            return Ok(());
+            return end_session(&mut session, &mut writer);
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
+        }
+        if trimmed == ":quit" {
+            return end_session(&mut session, &mut writer);
         }
         if let Err(e) = session.eval_line(trimmed, &mut writer) {
             writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;

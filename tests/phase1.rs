@@ -583,3 +583,31 @@ fn vm_dogfood_runs_in_repl() {
         ]
     );
 }
+
+// Phase 3 Slice 1, criterion 14: the REPL session is the interactive program's
+// "main" word and `:quit` is the end of its scope, so residual linear values are
+// disposed there (top first) rather than leaked. A live session can never prove
+// "you forgot to dispose this" at compile time, since the next line might
+// consume it, but exactly-once still holds.
+
+#[test]
+fn repl_quit_disposes_residual_linear() {
+    let out = run_session(&["7 __spy", "8 __spy", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 7", "stack: 7 8", "drop 8", "drop 7"],
+        "residual spies should be disposed at `:quit`, top of stack first"
+    );
+}
+
+#[test]
+fn repl_explicit_drop_not_redisposed_at_quit() {
+    let out = run_session(&["7 __spy", "drop", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["stack: 7", "drop 7", "stack: (empty)"],
+        "a spy dropped on an earlier line prints once, not again at `:quit`"
+    );
+}

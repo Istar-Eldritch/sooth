@@ -266,7 +266,20 @@ pub enum Type {
     /// `usize` position without an explicit `>usize`) lives in `check.rs`, not
     /// here, since `Type` carries no notion of "fresh literal".
     Usize,
+    /// The test-only linear drop-spy primitive (R6/D5), spelled `__spy`. It
+    /// carries an `i64` tag and is the one *linear* type in the language so
+    /// far: its compiler-known destructor prints `drop <tag>`, so drop count,
+    /// order and timing are golden-observable. Convention-fenced, not
+    /// flag-gated: the `__` name marks it a compiler test intrinsic rather than
+    /// user surface, and it dissolves into an ordinary type once `drop` is
+    /// user-overridable (Phase 4). It lowers as an `i64` under the hood.
+    Spy,
 }
+
+/// The source spelling of the drop-spy type and of its constructor word (R6):
+/// one name for both, resolved as a type by `Type::from_name` and as a word by
+/// `check::builtin_table`.
+pub const SPY_NAME: &str = "__spy";
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
 /// `Type::Int` can only be built via `Type::from_name`/`Type::I64`, both of
@@ -329,6 +342,9 @@ impl Type {
         if name == "usize" {
             return Some(Type::Usize);
         }
+        if name == SPY_NAME {
+            return Some(Type::Spy);
+        }
         if let Some((_, bits)) = FLOAT_TYPES.iter().find(|(n, _)| *n == name) {
             return Some(Type::Float(FloatType { bits: *bits }));
         }
@@ -382,6 +398,7 @@ impl Type {
             Type::Enum(_, name) => name,
             Type::Array(_, name) => name,
             Type::Usize => "usize",
+            Type::Spy => SPY_NAME,
         }
     }
 }
@@ -450,6 +467,15 @@ mod tests {
             );
         }
         assert_eq!(Type::from_name("bool"), Some(Type::Bool));
+    }
+
+    #[test]
+    fn type_spy_resolves_by_its_internal_name_and_is_not_numeric() {
+        assert_eq!(Type::from_name(SPY_NAME), Some(Type::Spy));
+        assert_eq!(Type::Spy.name(), "__spy");
+        assert!(!Type::Spy.is_numeric());
+        assert!(!Type::Spy.is_int());
+        assert!(!Type::Spy.is_bool());
     }
 
     #[test]

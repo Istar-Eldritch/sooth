@@ -12,7 +12,7 @@ use std::mem;
 
 use crate::ast::{
     ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind,
-    Type, WordBody, WordDef,
+    Type, WordBody, WordDef, SPY_NAME,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -29,6 +29,12 @@ pub const WORD_WIDTH: u32 = 8;
 /// nonzero. The backend emits the definition; the IR references it by name so
 /// both sides agree on one symbol.
 pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
+
+/// The drop-spy's compiler-known destructor (R5/R6): `drop` on a `__spy` lowers
+/// to a plain `Call` of this symbol, which prints `drop <tag>`. The backend
+/// emits the definition; the IR references it by name so both sides agree on
+/// one symbol, exactly like `OOB_TRAP_SYMBOL`.
+pub const SPY_DROP_SYMBOL: &str = "sooth_spy_drop";
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -104,6 +110,11 @@ pub enum IrType {
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
     Ptr,
+    /// The drop-spy primitive (R6). Represented as a 64-bit signed integer (its
+    /// tag) everywhere the backend touches it, but distinct from `Int` in the
+    /// IR: `drop` reads a value's `IrType` to decide whether to emit the
+    /// destructor call, and an `i64` tag must not become one by accident.
+    Spy,
 }
 
 impl IrType {
@@ -133,6 +144,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // registry; the `IrType` carries only the `ArrayId` so it stays `Copy`.
         Type::Array(id, _) => IrType::Array(id),
         Type::Usize => IrType::Usize,
+        Type::Spy => IrType::Spy,
     }
 }
 
@@ -274,6 +286,8 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
         IrType::Ptr => 8,
+        // A spy is its `i64` tag.
+        IrType::Spy => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
         IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
         IrType::Array(_) => unreachable!("an array field resolves via the layout registry"),
@@ -777,6 +791,14 @@ pub fn lower_line(
                 b.push_instr(Instr::Conv(relabeled, v));
                 stack.push(relabeled);
             }
+            // A carried spy slot loads its `i64` tag but keeps its `Spy`
+            // `IrType`, so a `drop` later in the line still finds the
+            // destructor (the REPL's residual disposal path, R6).
+            IrType::Spy => {
+                let v = b.fresh_value(IrType::Spy);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
             _ => {
                 let v = b.fresh_value(IrType::I64);
                 b.push_instr(Instr::Load(v, ptr));
@@ -1180,7 +1202,14 @@ impl<'a> FuncBuilder<'a> {
                 }
             }
             "drop" => {
-                self.stack.pop().expect("drop: non-empty stack");
+                let v = self.stack.pop().expect("drop: non-empty stack");
+                // R5/R16: `drop` is the universal disposal primitive. On a
+                // linear value it is a plain `Call` to the (compiler-known)
+                // destructor; a `Copy` value is discarded with no runtime
+                // effect, as before.
+                if self.value_type(v) == IrType::Spy {
+                    self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
+                }
             }
             "swap" => {
                 let n = self.stack.len();
@@ -1259,6 +1288,16 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
+            // The spy constructor `( i64 -- __spy )` is identity at runtime
+            // (R6): the tag *is* the value. It emits no call, only the same
+            // `Conv` relabel a same-width conversion uses, so the result value
+            // carries `IrType::Spy` and a later `drop` can recognise it.
+            SPY_NAME => {
+                let tag = self.stack.pop().expect("__spy: tag");
+                let spy = self.fresh_value(IrType::Spy);
+                self.push_instr(Instr::Conv(spy, tag));
+                self.stack.push(spy);
+            }
             _ => {
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
@@ -3275,5 +3314,52 @@ mod tests {
                 block.id
             );
         }
+    }
+
+    // Phase 3 Slice 1: the drop-spy's lowering (R5/R6/R16).
+
+    #[test]
+    fn lower_spy_constructor_relabels_the_tag_without_a_call() {
+        // The constructor is identity at runtime: no `Call`, just the relabel
+        // that gives the value its `Spy` `IrType`.
+        let ir = lower_src(": w ( -- ) 7 __spy drop ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(
+            is.iter().any(
+                |i| matches!(i, Instr::Conv(dst, _) if w.value_types[dst.0 as usize] == IrType::Spy)
+            ),
+            "expected a relabel to a Spy-typed value: {is:?}"
+        );
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(_, sym, _) if sym != SPY_DROP_SYMBOL)
+            ),
+            0,
+            "the constructor emits no call: {is:?}"
+        );
+    }
+
+    #[test]
+    fn lower_drop_of_linear_value_calls_the_destructor() {
+        let ir = lower_src(": w ( -- ) 7 __spy drop ;");
+        let w = &ir.funcs[0];
+        let calls: Vec<&String> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL], "expected one destructor call");
+    }
+
+    #[test]
+    fn lower_drop_of_copy_value_emits_no_destructor_call() {
+        // R2: `drop` on a Copy value keeps its no-runtime-effect discard.
+        let ir = lower_src(": w ( -- ) 7 drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::Call(..))), 0);
     }
 }
