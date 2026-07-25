@@ -1897,6 +1897,9 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
                 self.push_instr(Instr::Call(None, enum_drop_symbol(id), vec![v]));
             }
+            IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => unreachable!(
+                "checked: a linear array element is rejected wherever an array type is named"
+            ),
             _ => {}
         }
     }
@@ -3668,11 +3671,27 @@ mod tests {
                    type: StructInEnum | Some h Holds | None ; \
                    type: EnumInEnum | Inner i EnumInStruct | Outer ; \
                    type: PlainArr xs [i64 4] ; \
-                   type: SpyArr xs [__spy 4] ; \
                    : w ( -- ) ;";
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
+        // `SpyArr` (an `[__spy 4]` field) is spliced in directly rather than
+        // through source: Item 1's array-type-use rejection means no source
+        // program can spell this declaration any more, but the predicate
+        // must still be correct on the type alone.
+        let spy_array_id = ArrayId::from_index(module.arrays.len());
+        let spy_array_name: &'static str = "[__spy 4]";
+        module.arrays.push(ArrayDecl {
+            element: Type::Spy,
+            count: 4,
+            name_static: spy_array_name,
+        });
+        module.structs.push(StructDecl {
+            name: "SpyArr".to_string(),
+            name_static: "SpyArr",
+            fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
+            span: crate::ast::Span::default(),
+        });
         let (structs, enums, arrays) =
             build_registries(&module.structs, &module.enums, &module.arrays);
         for (idx, layout) in structs.layouts.iter().enumerate() {
@@ -3722,9 +3741,9 @@ mod tests {
         }
         // Criterion (item 3): an array field is linear iff its element is,
         // transitively; `PlainArr` (an `[i64 4]` field) stays Copy, `SpyArr`
-        // (an `[__spy 4]` field) is linear even though no source program can
-        // ever construct that array value (`fill` rejects a linear element),
-        // so the predicate must be correct on the type alone.
+        // (an `[__spy 4]` field, spliced in above) is linear even though no
+        // source program can declare that field any more, so the predicate
+        // must be correct on the type alone.
         let plain_arr_idx = structs
             .layouts
             .iter()

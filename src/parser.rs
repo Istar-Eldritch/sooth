@@ -516,12 +516,18 @@ impl<'t> Parser<'t> {
     /// `elem` is a nested type expression, `count` a decimal literal `>= 1`
     /// with no const-expr evaluation. Resolving it interns the `(element,
     /// count)` shape (structurally deduped) and returns the resulting
-    /// `Type::Array`.
+    /// `Type::Array`. Rejects a linear `elem` here, wherever an array type is
+    /// named (a signature slot or a struct/enum field), not only where
+    /// `fill` would construct one dynamically: arrays of linear elements are
+    /// not supported yet.
     fn parse_array_type_expr(&mut self) -> Result<Type, String> {
-        self.expect(Token::LBracket)?;
+        let bracket_span = self.expect(Token::LBracket)?;
         let element = self.parse_type_expr()?;
         let count = self.parse_array_count(element)?;
         self.expect(Token::RBracket)?;
+        if !crate::check::is_copy(element, self.structs, self.enums, self.arrays) {
+            return Err(linear_array_element_error(element, count, bracket_span));
+        }
         Ok(crate::ast::intern_array_type(self.arrays, element, count))
     }
 
@@ -839,6 +845,16 @@ fn describe_token(tok: &Token) -> String {
         Token::Float(v) => v.to_string(),
         other => format!("{other:?}"),
     }
+}
+
+/// A `[elem count]` array-type expression whose `elem` is linear: rejected
+/// wherever an array type is named in source (a signature slot or a
+/// struct/enum field), matching `fill`'s own linear-element rejection.
+fn linear_array_element_error(element: Type, count: u32, span: Span) -> String {
+    format!(
+        "error: linear array elements are not supported yet: array type `[{} {}]` has element `{}`, which is linear and has no `Copy` instance, at line {}, col {}",
+        element.name(), count, element.name(), span.line, span.col
+    )
 }
 
 #[cfg(test)]
@@ -1407,6 +1423,32 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("4294967297"), "unexpected message: {err}");
         assert!(err.contains("4294967295"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_array_type_linear_element_in_signature_is_error() {
+        // Arrays of linear elements are rejected wherever an array type is
+        // named, not only where `fill` would construct one.
+        let result = parse_src(": w ( [__spy 2] -- ) drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_typedef_linear_array_field_is_error() {
+        let result = parse_src("type: Bag xs [__spy 2] ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
     }
 
     #[test]

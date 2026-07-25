@@ -2155,3 +2155,33 @@ fn fill_of_linear_element_is_error() {
     );
     assert!(err.contains("`__spy`"), "unexpected message: {err}");
 }
+
+#[test]
+fn linear_array_element_in_word_signature_is_error() {
+    // The array-type boundary (not just `fill`) rejects a linear element: a
+    // `[__spy 2]` slot in a word's stack effect names the type directly.
+    let src = ": w ( [__spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let err = parser::parse(&tokens).expect_err("parsing should fail");
+
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_in_struct_field_is_error() {
+    // Same boundary, reached via a `type:` field declaration instead of a
+    // word signature.
+    let src = "type: Bag xs [__spy 2] ;\n: main ( -- ) 0 . ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let err = parser::parse(&tokens).expect_err("parsing should fail");
+
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
