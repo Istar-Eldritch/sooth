@@ -3465,6 +3465,27 @@ type: Wraps h Holds ;\n")
     }
 
     #[test]
+    fn is_copy_enum_is_linear_iff_a_variant_field_is_transitively() {
+        // R7/R12 (Phase 4): an enum with no linear variant field is Copy; one
+        // with a linear field (direct in one variant, or nested through a
+        // struct in another) is linear, transitively. `Plain` has no linear
+        // variant, `Item` carries a spy directly in `Full`, `Boxed` carries
+        // one nested inside `Holds`.
+        let tokens = lex("type: Plain | A | B ;\n\
+type: Item | Empty | Full v __spy ;\n\
+type: Holds a __spy b i64 ;\n\
+type: Boxed | Some h Holds | None ;\n")
+        .unwrap();
+        let module = parse(&tokens).unwrap();
+        let plain = Type::Enum(EnumId::from_index(0), "Plain");
+        let item = Type::Enum(EnumId::from_index(1), "Item");
+        let boxed = Type::Enum(EnumId::from_index(2), "Boxed");
+        assert!(is_copy(plain, &module.structs, &module.enums));
+        assert!(!is_copy(item, &module.structs, &module.enums));
+        assert!(!is_copy(boxed, &module.structs, &module.enums));
+    }
+
+    #[test]
     fn check_spy_constructor_takes_an_i64_tag_ok() {
         check_src(": w ( -- ) 7 __spy drop ;").unwrap();
     }

@@ -671,3 +671,42 @@ fn repl_quit_disposes_residual_linear_struct() {
         "a residual linear struct should be disposed at `:quit`, field-order drop"
     );
 }
+
+// Phase 4: the synthesized enum destructor (`sooth_enum_drop_N`) must be
+// emitted into every REPL module that can reach a `drop` on that enum type,
+// exactly like the struct case above; a missing symbol here is a `dlopen`
+// failure, not a compile error, so it needs its own coverage.
+
+#[test]
+fn repl_word_definition_drops_linear_enum() {
+    let out = run_session(&[
+        "type: Item | Empty | Full v __spy ;",
+        ": mk ( -- ) 1 __spy Full drop ;",
+        "mk",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Item",
+            "defined mk",
+            "drop 1",
+            "stack: (empty)"
+        ]
+    );
+}
+
+#[test]
+fn repl_quit_disposes_residual_linear_enum() {
+    let out = run_session(&[
+        "type: Item | Empty | Full v __spy ;",
+        "1 __spy Full",
+        ":quit",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined type Item", "stack: <Item>", "drop 1"],
+        "a residual linear enum should be disposed at `:quit`, tag-dispatched"
+    );
+}

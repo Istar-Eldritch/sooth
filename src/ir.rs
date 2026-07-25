@@ -165,12 +165,12 @@ pub struct StructLayout {
 }
 
 /// Whether a field's `IrType` is linear (R6/R7): the drop-spy directly, or a
-/// nested struct whose own layout is linear. Shared by every drop-glue site
-/// (`drop`, `S>fi`'s drop-the-rest, `S<fi`'s drop-on-overwrite, and the
-/// synthesized struct destructor). `ensure_struct` cannot call this: it
-/// computes `is_linear` itself, inline, while `layouts` is still being built
-/// (this function needs a fully-populated `structs.layouts` to look up a
-/// nested struct field's linearity).
+/// nested struct/enum whose own layout is linear. Shared by every drop-glue
+/// site (`drop`, `S>fi`'s drop-the-rest, `S<fi`'s drop-on-overwrite, and the
+/// synthesized struct/enum destructors). `ensure_struct`/`ensure_enum` cannot
+/// call this: each computes its own `is_linear` inline, while `layouts` is
+/// still being built (this function needs a fully-populated
+/// `structs.layouts`/`enums.layouts` to look up a nested field's linearity).
 fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums) -> bool {
     match ty {
         IrType::Spy => true,
@@ -768,7 +768,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays))
         .collect();
 
-    // R12: append a synthesized destructor for every linear struct type
+    // R12: append a synthesized destructor for every linear struct/enum type
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
     funcs.extend(synthesize_aggregate_destructors(
@@ -783,11 +783,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     })
 }
 
-/// R12: every linear struct's synthesized destructor, one `IrFunc` per type.
-/// Callable by any lowering path that produces an `IrModule` (the build path's
-/// single module and the REPL's per-line/per-def module both need it, since
-/// `drop` calls it by symbol and the symbol must resolve wherever `drop` is
-/// compiled).
+/// R12: every linear struct's and enum's synthesized destructor, one `IrFunc`
+/// per type. Callable by any lowering path that produces an `IrModule` (the
+/// build path's single module and the REPL's per-line/per-def module both
+/// need it, since `drop` calls it by symbol and the symbol must resolve
+/// wherever `drop` is compiled).
 ///
 /// The REPL therefore redefines these symbols once per line, which is only safe
 /// because redefining a *type* is rejected (`check`): every generation's glue is
@@ -885,37 +885,8 @@ fn synthesize_enum_destructor(
 ) -> IrFunc {
     let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
     let param = b.fresh_value(IrType::Enum(id));
-    let (tag_ty, tag_offset, payload_offset, n) = {
-        let l = &enums.layouts[id.index()];
-        (l.tag_ty, l.tag_offset, l.payload_offset, l.variants.len())
-    };
-
-    let variant_ids: Vec<BlockId> = (0..n).map(|_| b.fresh_block()).collect();
-    if n == 1 {
-        b.seal_block(Terminator::Jmp(variant_ids[0]));
-    } else {
-        let tag = b.fresh_value(tag_ty);
-        let tag_ptr = b.field_ptr(param, tag_offset);
-        b.push_instr(Instr::FieldLoad(tag, tag_ptr));
-        for vi in 0..n - 1 {
-            let idx_val = b.fresh_value(tag_ty);
-            b.push_instr(Instr::Const(idx_val, vi as i64));
-            let c = b.fresh_value(IrType::Bool);
-            b.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
-            // The last compare's false edge falls straight through to the
-            // final variant; no default/trap block (every tag is one of the
-            // `n` declared variants).
-            let false_target = if vi == n - 2 {
-                variant_ids[n - 1]
-            } else {
-                b.fresh_block()
-            };
-            b.seal_block(Terminator::Jnz(c, variant_ids[vi], false_target));
-            if vi < n - 2 {
-                b.start_block(false_target);
-            }
-        }
-    }
+    let payload_offset = enums.layouts[id.index()].payload_offset;
+    let variant_ids = b.dispatch_on_tag(param, id);
 
     for (vi, &block) in variant_ids.iter().enumerate() {
         b.start_block(block);
@@ -1876,6 +1847,45 @@ impl<'a> FuncBuilder<'a> {
         self.stack.push(v);
     }
 
+    /// Dispatch on `scrutinee`'s runtime tag (enum `id`): seal a compare chain
+    /// (`n == 1` short-circuits to a bare `Jmp`; otherwise load the tag once
+    /// and `Cmp`/`Jnz` variant-by-variant, the last compare's false edge
+    /// falling straight through to the final variant with no default/trap
+    /// block) and return one freshly allocated, not-yet-started block per
+    /// variant in declaration order. Shared by `lower_clauses` (a clause
+    /// word's scrutinee) and `synthesize_enum_destructor` (the same shape,
+    /// only what each variant block does next differs).
+    fn dispatch_on_tag(&mut self, scrutinee: Value, id: EnumId) -> Vec<BlockId> {
+        let (tag_ty, tag_offset, n) = {
+            let l = &self.enums.layouts[id.index()];
+            (l.tag_ty, l.tag_offset, l.variants.len())
+        };
+        let variant_ids: Vec<BlockId> = (0..n).map(|_| self.fresh_block()).collect();
+        if n == 1 {
+            self.seal_block(Terminator::Jmp(variant_ids[0]));
+        } else {
+            let tag = self.fresh_value(tag_ty);
+            let tag_ptr = self.field_ptr(scrutinee, tag_offset);
+            self.push_instr(Instr::FieldLoad(tag, tag_ptr));
+            for vi in 0..n - 1 {
+                let idx_val = self.fresh_value(tag_ty);
+                self.push_instr(Instr::Const(idx_val, vi as i64));
+                let c = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
+                let false_target = if vi == n - 2 {
+                    variant_ids[n - 1]
+                } else {
+                    self.fresh_block()
+                };
+                self.seal_block(Terminator::Jnz(c, variant_ids[vi], false_target));
+                if vi < n - 2 {
+                    self.start_block(false_target);
+                }
+            }
+        }
+        variant_ids
+    }
+
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
     /// `__spy`, or a struct whose `is_linear` is set) this is a plain `Call`
     /// to the (builtin or synthesized) destructor; a `Copy` value is discarded
@@ -2090,47 +2100,18 @@ impl<'a> FuncBuilder<'a> {
             IrType::Enum(id) => id,
             _ => unreachable!("checked: a clause word's top input is an enum"),
         };
-        let (tag_ty, tag_offset, payload_offset, n) = {
-            let l = &self.enums.layouts[scrut_id.index()];
-            (l.tag_ty, l.tag_offset, l.payload_offset, l.variants.len())
-        };
+        let payload_offset = self.enums.layouts[scrut_id.index()].payload_offset;
+        let n = self.enums.layouts[scrut_id.index()].variants.len();
 
         // Map each variant index to the clause handling it (checker-guaranteed
         // exact coverage), so dispatch on tag == variant_index lands correctly
         // regardless of clause source order.
-        let clause_ids: Vec<BlockId> = (0..n).map(|_| self.fresh_block()).collect();
+        let clause_ids = self.dispatch_on_tag(scrutinee, scrut_id);
         let join_id = self.fresh_block();
         let mut clause_for_variant: Vec<Option<&Clause>> = vec![None; n];
         for clause in clauses {
             let EnumWord::Construct(_, vi) = self.enums.words[&clause.variant];
             clause_for_variant[vi] = Some(clause);
-        }
-
-        if n == 1 {
-            self.seal_block(Terminator::Jmp(clause_ids[0]));
-        } else {
-            // The discriminant is a temp used only for the compare-chain, never
-            // pushed onto the virtual stack. A newtype (n == 1) skips it.
-            let tag = self.fresh_value(tag_ty);
-            let tag_ptr = self.field_ptr(scrutinee, tag_offset);
-            self.push_instr(Instr::FieldLoad(tag, tag_ptr));
-            for vi in 0..n - 1 {
-                let idx_val = self.fresh_value(tag_ty);
-                self.push_instr(Instr::Const(idx_val, vi as i64));
-                let c = self.fresh_value(IrType::Bool);
-                self.push_instr(Instr::Cmp(c, CmpOp::Eq, tag, idx_val));
-                // The last compare's false edge falls straight through to the
-                // final variant; no default/trap block (exhaustive coverage).
-                let false_target = if vi == n - 2 {
-                    clause_ids[n - 1]
-                } else {
-                    self.fresh_block()
-                };
-                self.seal_block(Terminator::Jnz(c, clause_ids[vi], false_target));
-                if vi < n - 2 {
-                    self.start_block(false_target);
-                }
-            }
         }
 
         let mut clause_ends: Vec<(BlockId, Vec<Value>)> = Vec::with_capacity(n);
@@ -3688,6 +3669,10 @@ mod tests {
                    type: Holds a __spy b i64 ; \
                    type: Wraps h Holds ; \
                    type: Deep w Wraps p Plain ; \
+                   type: Item | Empty | Full v __spy ; \
+                   type: EnumInStruct e Item ; \
+                   type: StructInEnum | Some h Holds | None ; \
+                   type: EnumInEnum | Inner i EnumInStruct | Outer ; \
                    : w ( -- ) ;";
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
@@ -3710,6 +3695,31 @@ mod tests {
                     .any(|f| field_is_linear(f.ty, &structs, &enums)),
                 layout.is_linear,
                 "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
+                layout.name
+            );
+        }
+        // R7/R12 (Phase 4): the same three-way pin, over the enum registry's
+        // `Type::Enum` arm of `is_copy` and the variant-payload fold
+        // (`ensure_enum`/`layout_field_is_linear`), including transitivity
+        // through a struct-in-enum and an enum-in-enum.
+        for (idx, layout) in enums.layouts.iter().enumerate() {
+            let ty = Type::Enum(EnumId::from_index(idx), layout.name);
+            assert_eq!(
+                crate::check::is_copy(ty, &module.structs, &module.enums),
+                !layout.is_linear,
+                "`{}`: checker says Copy={}, `ensure_enum` says linear={}",
+                layout.name,
+                crate::check::is_copy(ty, &module.structs, &module.enums),
+                layout.is_linear
+            );
+            assert_eq!(
+                layout
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter())
+                    .any(|f| field_is_linear(f.ty, &structs, &enums)),
+                layout.is_linear,
+                "`{}`: `field_is_linear` disagrees with the `ensure_enum` fold",
                 layout.name
             );
         }
@@ -3753,6 +3763,62 @@ mod tests {
             .iter()
             .find(|f| f.name == "sooth_struct_drop_0")
             .expect("a destructor was synthesized for the linear struct");
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+    }
+
+    // Phase 3 Slice 1, Phase 4: the synthesized enum destructor's own tag
+    // dispatch (structural, not full-stdout: `tests/phase0.rs` covers the
+    // 2-variant runtime behavior; these pin the shapes it doesn't reach).
+
+    #[test]
+    fn synthesized_enum_destructor_newtype_skips_the_tag_compare() {
+        // R7/R12: a single-variant enum (n == 1) has nothing to dispatch on,
+        // so the destructor jumps straight to the one variant block instead
+        // of loading a tag and comparing it (the `n == 1` branch of
+        // `dispatch_on_tag`, otherwise unreached by the 2-variant goldens).
+        let ir = lower_src("type: Box | Full v __spy ; : w ( -- ) ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_enum_drop_0")
+            .expect("a destructor was synthesized for the linear enum");
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 0);
+        assert_eq!(
+            dtor.blocks.len(),
+            2,
+            "a bare `Jmp` to the one variant block, no compare block"
+        );
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+    }
+
+    #[test]
+    fn synthesized_enum_destructor_three_variants_chains_through_a_middle_block() {
+        // R7/R12: with 3 variants the compare chain has an intermediate block
+        // between the first and last compare (`vi < n - 2` in
+        // `dispatch_on_tag`), never built by the 2-variant goldens. Each of
+        // the 3 variants gets its own block; only `Full`'s carries a drop.
+        let ir = lower_src("type: Item | Empty | Full v __spy | Named n i64 ; : w ( -- ) ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_enum_drop_0")
+            .expect("a destructor was synthesized for the linear enum");
+        assert_eq!(dtor.blocks.len(), 5, "2 compares + 3 variant blocks");
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 2);
         let calls: Vec<&String> = instrs(dtor)
             .iter()
             .filter_map(|i| match i {

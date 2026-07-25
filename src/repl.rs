@@ -410,10 +410,11 @@ impl Session {
                 ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays);
             func.name = symbol.clone();
             let mut funcs = vec![func];
-            // R12: this module must carry its own struct destructors (they are
-            // not emitted elsewhere in the REPL, unlike the build path's single
-            // shared module), or `drop` on a linear struct dies at `dlopen`
-            // with an undefined `sooth_struct_drop_N`.
+            // R12: this module must carry its own struct/enum destructors
+            // (they are not emitted elsewhere in the REPL, unlike the build
+            // path's single shared module), or `drop` on a linear struct/enum
+            // dies at `dlopen` with an undefined `sooth_struct_drop_N`/
+            // `sooth_enum_drop_N`.
             funcs.extend(ir::synthesize_aggregate_destructors(
                 &ir_lower_env,
                 &resolve,
@@ -536,9 +537,9 @@ impl Session {
                 &enums,
                 &arrays,
             );
-            // R12: this line's module must carry its own struct destructors, or
-            // `drop` on a linear struct dies at `dlopen` with an undefined
-            // `sooth_struct_drop_N`.
+            // R12: this line's module must carry its own struct/enum
+            // destructors, or `drop` on a linear struct/enum dies at `dlopen`
+            // with an undefined `sooth_struct_drop_N`/`sooth_enum_drop_N`.
             let aggregate_destructors = ir::synthesize_aggregate_destructors(
                 &ir_lower_env,
                 &resolve,
