@@ -311,6 +311,8 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // tail-call graph, after signature registration and before body checking.
     check_tail_call_cycles(&module.words)?;
 
+    check_main_effect(&module.words, &module.structs, &module.enums)?;
+
     // Split the borrow so a word body can intern into `arrays` while reading
     // `words`/`enums`/`structs`.
     let Module {
@@ -663,6 +665,36 @@ pub fn infer_line(
         false,
     )?;
     Ok(final_stack.into_iter().map(|s| s.ty).collect())
+}
+
+/// `main` is the program's entry point: nothing in the program calls it, so
+/// a linear value in its declared effect either leaks past the program
+/// boundary unnoticed (an output) or runs a destructor over an
+/// uninitialised ABI register (an input). A non-empty Copy-typed effect on
+/// `main` stays legal; only a non-Copy type in either side is rejected.
+fn check_main_effect(
+    words: &[WordDef],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+) -> Result<(), String> {
+    let Some(main) = words.iter().find(|w| w.name == "main") else {
+        return Ok(());
+    };
+    let offending = main
+        .effect
+        .inputs
+        .iter()
+        .chain(&main.effect.outputs)
+        .map(|slot| slot.ty)
+        .find(|ty| !is_copy(*ty, structs, enums));
+    let Some(ty) = offending else {
+        return Ok(());
+    };
+    let span = word_span(main);
+    Err(format!(
+        "error: `main` (line {}) cannot declare a linear type `{}` in its stack effect\n  note: declared {}",
+        span.line, ty, effect_str(&main.effect)
+    ))
 }
 
 fn effect_str(effect: &StackEffect) -> String {
@@ -2216,6 +2248,31 @@ mod tests {
         assert!(err.contains("duplicate local"), "unexpected message: {err}");
         assert!(err.contains("`a`"), "unexpected message: {err}");
         assert!(err.contains("`w`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_main_linear_output_is_error() {
+        let err = check_src(": main ( -- __spy ) 7 __spy ;").unwrap_err();
+        assert!(
+            err.contains("cannot declare a linear type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_main_linear_input_is_error() {
+        let err = check_src(": main ( __spy -- ) | s | s drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot declare a linear type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_main_copy_effect_is_ok() {
+        check_src(": main ( i64 -- i64 ) 1 + ;").unwrap();
     }
 
     #[test]

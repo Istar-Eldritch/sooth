@@ -2112,3 +2112,29 @@ fn duplicate_clause_body_local_is_error() {
         "the error should name the word: {err}"
     );
 }
+
+#[test]
+fn main_declaring_linear_output_is_error() {
+    // Nothing calls `main`, so a linear output would leak past the program
+    // boundary unnoticed instead of being disposed.
+    let err = linear_check_error(": main ( -- __spy ) 7 __spy ;\n");
+    assert!(
+        err.contains("cannot declare a linear type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`main`"), "unexpected message: {err}");
+}
+
+#[test]
+fn main_declaring_linear_input_is_error() {
+    // Nothing calls `main`, so a linear input arrives in an uninitialised
+    // ABI register; running its destructor would be undefined behaviour.
+    let err = linear_check_error(": main ( __spy -- ) | s | s drop ;\n");
+    assert!(
+        err.contains("cannot declare a linear type"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`main`"), "unexpected message: {err}");
+}
