@@ -522,3 +522,22 @@ fn enum_declaration_errors_report_and_session_survives() {
     // The rolled-back duplicate never shadowed the original Shape.
     assert_eq!(lines[3], "stack: <Shape>");
 }
+
+/// Phase 2 Slice 6, criterion 8 (M6, R5): a self-tail-recursive word defined
+/// at the REPL gets the same self-tail-call -> loop transform as the native
+/// path (`lower_word` is shared, so the current-word name reaches the REPL
+/// lowering with no REPL-specific plumbing) and completes in constant stack
+/// over N >= 1_000_000, the depth at which un-transformed recursion would
+/// overflow the host stack.
+#[test]
+fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
+    let out = run_session(&[
+        ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = if acc else acc n + n 1 - sum-to end ;",
+        "0 1000000 sum-to .",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["defined sum-to", "500000500000", "stack: (empty)"]
+    );
+}
