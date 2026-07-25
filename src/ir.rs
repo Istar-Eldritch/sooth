@@ -788,7 +788,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 
 /// Every linear struct's and enum's synthesized destructor, one `IrFunc` per
 /// type. The REPL redefines these per line; safe because type redefinition is
-/// rejected, so every generation's glue is identical.
+/// rejected, so every generation's glue is identical. If type redefinition is
+/// ever allowed, add a generation suffix, matching word symbols.
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
