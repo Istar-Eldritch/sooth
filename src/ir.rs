@@ -1100,7 +1100,9 @@ impl<'a> FuncBuilder<'a> {
 
     fn lower_terms(&mut self, terms: &[Term], tail: bool) {
         // Only the final term of a body can be in tail position (R1); a term
-        // followed by any further term is not.
+        // followed by any further term is not. This positional `tail` threading
+        // is the same syntactic rule as the checker's `tail_position_calls`
+        // (src/check.rs); the two must stay in lockstep if the rule changes.
         let last = terms.len().wrapping_sub(1);
         for (i, term) in terms.iter().enumerate() {
             self.lower_term(term, tail && i == last);

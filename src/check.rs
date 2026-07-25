@@ -594,8 +594,10 @@ fn check_outputs(
 /// is not tail. Output-equality with the declared outputs is a *consequence*
 /// of this rule for a well-typed final call, not a second check.
 ///
-/// Shared by the checker (R2 predicate, R3 tail-call graph) and, later, the
-/// lowerer, so tail position has a single definition.
+/// Shared by the checker (R2 predicate, R3 tail-call graph); the lowerer
+/// re-encodes the same syntactic rule via positional `tail` threading in
+/// `lower_terms` (src/ir.rs), which a name list can't express. The two must
+/// stay in lockstep if the tail rule changes.
 pub fn tail_position_calls(body: &WordBody) -> Vec<&str> {
     let mut out = Vec::new();
     match body {
