@@ -162,33 +162,17 @@ pub struct StructLayout {
 }
 
 /// Whether a field's `IrType` is linear: the drop-spy directly, or a nested
-/// aggregate whose own memoized layout is linear. `struct_linear`/`enum_linear`/
-/// `array_linear` fetch that memoized `is_linear` by id; shared by every
-/// post-build drop-glue site and (via `LayoutBuilder::layout_field_is_linear`)
-/// the still-building struct/enum layout folds, which differ only in how a
-/// nested layout is fetched (a plain slice index vs. an `Option` memo entry).
-fn field_is_linear(
-    ty: IrType,
-    struct_linear: impl Fn(usize) -> bool,
-    enum_linear: impl Fn(usize) -> bool,
-    array_linear: impl Fn(usize) -> bool,
-) -> bool {
+/// aggregate whose own layout is linear. `ensure_struct`/`ensure_enum` cannot
+/// call this: each computes its own `is_linear` inline while `layouts` is
+/// still being built, before a nested field's entry exists here.
+fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
     match ty {
         IrType::Spy => true,
-        IrType::Struct(id) => struct_linear(id.index()),
-        IrType::Enum(id) => enum_linear(id.index()),
-        IrType::Array(id) => array_linear(id.index()),
+        IrType::Struct(id) => structs.layouts[id.index()].is_linear,
+        IrType::Enum(id) => enums.layouts[id.index()].is_linear,
+        IrType::Array(id) => arrays.layouts[id.index()].is_linear,
         _ => false,
     }
-}
-
-fn field_is_linear_built(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
-    field_is_linear(
-        ty,
-        |i| structs.layouts[i].is_linear,
-        |i| enums.layouts[i].is_linear,
-        |i| arrays.layouts[i].is_linear,
-    )
 }
 
 /// The synthesized per-type destructor symbol for a linear struct.
@@ -594,31 +578,33 @@ impl LayoutBuilder<'_> {
         });
     }
 
-    /// Whether a just-laid-out field's `IrType` is linear: the struct/enum/
-    /// array cases fetch a nested aggregate's memoized `is_linear` (already
-    /// ensured via `size_align` before this is called).
+    /// Whether a just-laid-out field's `IrType` is linear (R7): the drop-spy
+    /// directly, or a nested struct/enum whose own memoized layout is linear.
+    /// Shared by the struct and enum `is_linear` folds; both call sites have
+    /// already ensured the nested aggregate's memo entry via `size_align`.
     fn layout_field_is_linear(&self, ty: IrType) -> bool {
-        field_is_linear(
-            ty,
-            |i| {
-                self.struct_memo[i]
+        match ty {
+            IrType::Spy => true,
+            IrType::Struct(id) => {
+                self.struct_memo[id.index()]
                     .as_ref()
                     .expect("nested struct field already laid out")
                     .is_linear
-            },
-            |i| {
-                self.enum_memo[i]
+            }
+            IrType::Enum(id) => {
+                self.enum_memo[id.index()]
                     .as_ref()
                     .expect("nested enum field already laid out")
                     .is_linear
-            },
-            |i| {
-                self.array_memo[i]
+            }
+            IrType::Array(id) => {
+                self.array_memo[id.index()]
                     .as_ref()
                     .expect("nested array field already laid out")
                     .is_linear
-            },
-        )
+            }
+            _ => false,
+        }
     }
 
     /// Compute one array's layout (M2): the element's size/align (recursing
@@ -860,7 +846,7 @@ fn synthesize_struct_destructor(
     let param = b.fresh_value(IrType::Struct(id));
     let fields = structs.layouts[id.index()].fields.clone();
     for field in fields {
-        if field_is_linear_built(field.ty, structs, enums, arrays) {
+        if field_is_linear(field.ty, structs, enums, arrays) {
             let v = b.field_value(param, field);
             b.emit_drop(v);
         }
@@ -901,7 +887,7 @@ fn synthesize_enum_destructor(
         b.start_block(block);
         let fields = enums.layouts[id.index()].variants[vi].fields.clone();
         for field in &fields {
-            if field_is_linear_built(field.ty, structs, enums, arrays) {
+            if field_is_linear(field.ty, structs, enums, arrays) {
                 let adjusted = FieldLayout {
                     offset: payload_offset + field.offset,
                     ..*field
@@ -1939,9 +1925,7 @@ impl<'a> FuncBuilder<'a> {
                 // here (a no-op drop-the-rest when every other field is
                 // Copy, unchanged from before this slice).
                 for (j, field) in fields.iter().enumerate() {
-                    if j != fi
-                        && field_is_linear_built(field.ty, self.structs, self.enums, self.arrays)
-                    {
+                    if j != fi && field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
                         let v = self.field_value(s, *field);
                         self.emit_drop(v);
                     }
@@ -1960,7 +1944,7 @@ impl<'a> FuncBuilder<'a> {
                 // above (consumed, never dropped); only the field being
                 // overwritten is read back out and dropped, before the store,
                 // so the order is deterministic.
-                if field_is_linear_built(field.ty, self.structs, self.enums, self.arrays) {
+                if field_is_linear(field.ty, self.structs, self.enums, self.arrays) {
                     let old = self.field_value(dst, field);
                     self.emit_drop(old);
                 }
@@ -3705,7 +3689,7 @@ mod tests {
                 layout
                     .fields
                     .iter()
-                    .any(|f| field_is_linear_built(f.ty, &structs, &enums, &arrays)),
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
                 layout.is_linear,
                 "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
                 layout.name
@@ -3730,7 +3714,7 @@ mod tests {
                     .variants
                     .iter()
                     .flat_map(|v| v.fields.iter())
-                    .any(|f| field_is_linear_built(f.ty, &structs, &enums, &arrays)),
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
                 layout.is_linear,
                 "`{}`: `field_is_linear` disagrees with the `ensure_enum` fold",
                 layout.name
