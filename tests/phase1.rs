@@ -623,6 +623,32 @@ fn repl_explicit_drop_not_redisposed_at_quit() {
     );
 }
 
+#[test]
+fn repl_word_definition_keeps_strict_linear_rule() {
+    // `:quit`'s residual disposal is a REPL-session-only relaxation; a word
+    // DEFINITION typed at the REPL is still checked by the ordinary strict
+    // rule (forgetting a linear value is a compile error, not an auto-drop),
+    // and the bad definition reports and rolls back rather than killing the
+    // session.
+    let out = run_session(&[": bad ( -- ) 7 __spy ;", "1 .", ":quit"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(
+        lines[0].contains("linear value left on the stack") && lines[0].contains("`bad`"),
+        "expected the surplus-linear diagnostic naming `bad`: {}",
+        lines[0]
+    );
+    assert_eq!(
+        &lines[1..],
+        [
+            "  body leaves a `__spy` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it",
+            "  note: declared ( -- )",
+            "1",
+            "stack: (empty)",
+        ],
+        "the session should survive the bad definition and keep processing later lines: {out}"
+    );
+}
+
 // Phase 2: the synthesized struct destructor (`sooth_struct_drop_N`) must be
 // emitted into every REPL module that can reach a `drop` on that struct type
 // (a bare line's module, a `: word ;` definition's module, and the synthesized
