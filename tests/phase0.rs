@@ -1346,11 +1346,36 @@ type: Box arr [i64 3] ;\n\
 fn countdown_dogfood_runs_in_constant_stack() {
     // Criterion 1 (D8): `examples/countdown.sth`, a tail-recursive
     // accumulator summing 1..=1_000_000, completes and prints the right
-    // total. Also exercises criterion 7 (`| acc n |` locals rebind correctly
-    // across iterations, since a wrong rebind would corrupt the sum) and the
-    // "recursive case in one arm, base case in the other" half of criterion 4.
+    // total, and the "recursive case in one arm, base case in the other"
+    // half of criterion 4. Criterion 7 (locals rebind correctly across
+    // iterations) has its own dedicated golden below, since a commutative sum
+    // wouldn't surface a swapped/stale rebind until the very last iteration.
     let (stdout, code) = run_and_capture_stdout("examples/countdown.sth");
     assert_eq!(stdout, "500000500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn locals_rebind_correctly_across_tail_iterations_native() {
+    // Criterion 7: `| acc n |` must rebind to the *new* tail-call arguments
+    // on every iteration, not to stale or swapped values. `acc*10 + n` is
+    // order-sensitive (unlike a sum), so a wrong rebind produces a wrong
+    // digit sequence immediately; this only needs a handful of iterations,
+    // deliberately kept separate from the constant-stack goldens above.
+    let src = ": digits ( i64 i64 -- i64 )\n\
+  | acc n |\n\
+  n 0 = if\n\
+    acc\n\
+  else\n\
+    acc 10 * n + n 1 - digits\n\
+  end ;\n\
+: main ( -- ) 0 5 digits . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-locals-rebind-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "54321\n");
     assert_eq!(code, 0);
 }
 
