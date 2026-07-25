@@ -470,7 +470,10 @@ impl Session {
     /// The end of the REPL-main scope: dispose every linear value still on the
     /// residual stack, top first, since a live session's body is never
     /// provably complete for the ordinary forgotten-disposal check. Word
-    /// definitions entered at the REPL keep the strict rule.
+    /// definitions entered at the REPL keep the strict rule. Disposal goes
+    /// through the ordinary expression path (a synthesized run of `drop`
+    /// terms), so it reuses the same drop glue a compiled program does
+    /// instead of a second, drifting implementation.
     fn dispose_residual(&mut self, writer: &mut impl Write) -> Result<(), String> {
         let Some(deepest) = self
             .types
