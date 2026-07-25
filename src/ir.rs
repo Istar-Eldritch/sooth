@@ -945,7 +945,11 @@ struct FuncBuilder<'a> {
     /// a clause's variant re-scrutinee) would otherwise grow the frame by one
     /// slot per iteration and blow the stack well before the loop's constant-
     /// stack guarantee is exercised. Hoisting reserves one fixed slot per
-    /// static alloc site, reused (overwritten) every iteration instead.
+    /// static alloc site, reused (overwritten) every iteration instead. Safe
+    /// only because a same-site slot is read (its carried value marshalled onto
+    /// the back-edge) before the next iteration overwrites it: a future lowering
+    /// that constructed an inline aggregate into a same-site slot before reading
+    /// the prior iteration's value from it would alias.
     entry_block: Option<BlockId>,
     /// Whether the current block has already been sealed (by a back-edge Jmp or
     /// another terminator), so no fall-through Ret/Jmp should follow.
