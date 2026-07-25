@@ -1498,14 +1498,15 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
 }
 
 #[test]
-fn vm_dogfood_data_model_pushes_and_pops() {
-    // Phase 2 of Slice 7: the `Op`/`Vm`/`Fetched`/`VmPop` data model in
-    // `examples/vm.sth` and the `vm-push`/`vm-pop` operand-stack helpers
-    // (the bundle-and-destructure idiom from `examples/stack.sth`). No
-    // dispatch loop yet: proves the struct/array construction and the
-    // multi-result `VmPop` bundle round-trip correctly.
+fn vm_dogfood_compiles_and_runs() {
+    // Phase 3 of Slice 7 (criteria 1, 2, 4, 5, 6): `examples/vm.sth`'s real
+    // dispatch loop (`fetch` + the nine-clause self-tail-recursive `run`)
+    // interprets the sum-1..N bytecode program (built via `fill`+`set`,
+    // no array literal) at N = 10, exercising every opcode
+    // (`Push`/`Add`/`Sub`/`Mul`/`Load`/`Store`/`Jz`/`Jmp`/`Halt`) and the
+    // `Jz`/`Jmp` backward branch. Replaces the Phase 2 placeholder `main`.
     let (stdout, code) = run_and_capture_stdout("examples/vm.sth");
-    assert_eq!(stdout, "20\n");
+    assert_eq!(stdout, "55\n");
     assert_eq!(code, 0);
 }
 

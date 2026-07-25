@@ -27,7 +27,7 @@ type: Op
 ;
 
 type: Vm
-  prog  [Op 4]
+  prog  [Op 13]
   pc    usize
   stack [i64 8]
   sp    usize
@@ -49,9 +49,114 @@ type: VmPop vm Vm val i64 ;
   swap drop                            \ elem
   VmPop ;
 
+: bump-pc ( Vm -- Vm )
+  dup Vm>pc 1 + Vm<pc ;
+
+: fetch ( Vm -- Fetched )
+  | vm |
+  vm
+  vm Vm>prog vm Vm>pc get swap drop    \ read prog[pc], keep the Op
+  Fetched ;
+
+\ Nine-clause self-tail-recursive dispatch loop. Every non-`Halt` clause
+\ produces an updated `Vm`, refetches the next `Op` out of the carried
+\ `prog`, and tail-calls `run` (the Slice 6 back-edge). `Halt` returns the
+\ popped operand-stack top without a self-call (the base case that `Ret`s).
+: run ( Vm Op -- i64 )
+| Push  | vm v |
+    vm v vm-push
+    bump-pc
+    fetch Fetched> run
+| Add   | vm |
+    vm vm-pop VmPop>          \ vm' b
+    swap vm-pop VmPop>        \ b vm'' a
+    rot                        \ vm'' a b
+    +
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Sub   | vm |
+    vm vm-pop VmPop>
+    swap vm-pop VmPop>
+    rot
+    -
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Mul   | vm |
+    vm vm-pop VmPop>
+    swap vm-pop VmPop>
+    rot
+    *
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Load  | vm addr |
+    vm vm Vm>mem addr get swap drop    \ vm mem[addr]
+    vm-push
+    bump-pc
+    fetch Fetched> run
+| Store | vm addr |
+    vm vm-pop VmPop>           \ vm' x
+    over Vm>mem                 \ vm' x mem
+    addr                         \ vm' x mem addr
+    rot                          \ vm' mem addr x
+    set
+    Vm<mem
+    bump-pc
+    fetch Fetched> run
+| Jz    | vm target |
+    vm vm-pop VmPop>           \ vm' x
+    0 =
+    if
+      target Vm<pc
+    else
+      bump-pc
+    end
+    fetch Fetched> run
+| Jmp   | vm target |
+    vm target Vm<pc
+    fetch Fetched> run
+| Halt  | vm |
+    vm vm-pop VmPop>
+    swap drop
+;
+
+\ Assembles the sum-1..N-via-bytecode program (fill+set, no array literal):
+\   0  Load  0    (L)   push i
+\   1  Jz    11         if i == 0 goto E
+\   2  Load  1          push acc
+\   3  Load  0          push i
+\   4  Add               acc + i
+\   5  Store 1          acc = acc + i
+\   6  Load  0          push i
+\   7  Push  1
+\   8  Sub               i - 1
+\   9  Store 0          i = i - 1
+\   10 Jmp   0          backward branch to L
+\   11 Load  1    (E)   push acc
+\   12 Halt             result = acc on top of stack (seeded by fill)
+: build ( -- [Op 13] )
+  Halt 13 fill
+  0  >usize 0  >usize Load  set
+  1  >usize 11 >usize Jz    set
+  2  >usize 1  >usize Load  set
+  3  >usize 0  >usize Load  set
+  4  >usize Add set
+  5  >usize 1  >usize Store set
+  6  >usize 0  >usize Load  set
+  7  >usize 1 Push set
+  8  >usize Sub set
+  9  >usize 0  >usize Store set
+  10 >usize 0  >usize Jmp   set
+  11 >usize 1  >usize Load  set
+;
+
 : main ( -- )
-  Halt 4 fill 0 >usize 0 8 fill 0 >usize 0 4 fill Vm
-  10 vm-push
-  20 vm-push
-  vm-pop VmPop> .
-  drop ;
+  build
+  0 >usize                       \ pc = 0
+  0 8 fill
+  0 >usize                       \ sp = 0
+  0 4 fill 0 >usize 10 set       \ mem[0] = N = 10, mem[1] = 0
+  Vm
+  fetch Fetched> run . ;
