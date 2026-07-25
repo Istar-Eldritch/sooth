@@ -351,6 +351,37 @@ pub fn check_types(
 ) -> Result<(), String> {
     check_duplicate_type_names(structs, enums)?;
     check_recursion(structs, enums, arrays)?;
+    check_no_linear_array_elements(structs, enums, arrays)?;
+    Ok(())
+}
+
+/// Arrays of linear elements are not supported yet: rejected here, over the
+/// module's interned array registry, rather than in the parser, because
+/// linearity (`is_copy`) is only answerable once every struct/enum field list
+/// is resolved, which happens after the whole module is parsed. Every array
+/// type named anywhere (a word signature slot, a struct field, an enum
+/// variant field) is interned into this one registry, and `is_copy` already
+/// walks an array's element transitively, so this single sweep catches a
+/// direct `[__spy N]` and an indirect `[LinearStruct N]` alike. Runs after
+/// `check_recursion`, which rules out a self-referential struct/enum/array
+/// first, so `is_copy`'s recursion over the field graph is guaranteed to
+/// terminate. `ArrayDecl` carries no span (an array shape has no declared
+/// name a pre-pass could register), so the error names the array/element
+/// types rather than inventing a wrong line number.
+fn check_no_linear_array_elements(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    for decl in arrays {
+        if !is_copy(decl.element, structs, enums, arrays) {
+            return Err(format!(
+                "error: linear array elements are not supported yet: array type `{}` has element `{}`, which is linear and has no `Copy` instance",
+                decl.name_static,
+                decl.element.name(),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -3143,6 +3174,60 @@ mod tests {
         assert!(err.contains("recursive"), "unexpected message: {err}");
         assert!(err.contains('S'), "unexpected message: {err}");
         assert!(err.contains('E'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_direct_element_in_struct_field_is_error() {
+        // The parser cannot reject `[__spy N]` (struct fields aren't resolved
+        // until the whole module is parsed), so this is the checker's job.
+        let err = check_src("type: Bag xs [__spy 2] ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_direct_element_in_word_signature_is_error() {
+        let err = check_src(": w ( [__spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_indirect_via_linear_struct_field_is_error() {
+        // `Arr`'s element (`Holds`) is not itself `__spy`, but contains one
+        // transitively; `is_copy` already sees through that, so the sweep
+        // over `module.arrays` must too.
+        let err = check_src("type: Holds s __spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
+            .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_indirect_via_linear_struct_in_signature_is_error() {
+        let err = check_src(
+            "type: Holds s __spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_no_linear_array_elements_copy_element_is_ok() {
+        check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
     }
 
     #[test]

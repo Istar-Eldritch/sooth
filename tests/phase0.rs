@@ -2159,11 +2159,10 @@ fn fill_of_linear_element_is_error() {
 #[test]
 fn linear_array_element_in_word_signature_is_error() {
     // The array-type boundary (not just `fill`) rejects a linear element: a
-    // `[__spy 2]` slot in a word's stack effect names the type directly.
-    let src = ": w ( [__spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n";
-    let tokens = lexer::lex(src).expect("lexing should succeed");
-    let err = parser::parse(&tokens).expect_err("parsing should fail");
-
+    // `[__spy 2]` slot in a word's stack effect names the type directly. The
+    // parser cannot know `__spy` is linear until struct/enum fields are
+    // resolved, so this is a checker error, not a parse error.
+    let err = linear_check_error(": w ( [__spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n");
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
@@ -2175,13 +2174,37 @@ fn linear_array_element_in_word_signature_is_error() {
 fn linear_array_element_in_struct_field_is_error() {
     // Same boundary, reached via a `type:` field declaration instead of a
     // word signature.
-    let src = "type: Bag xs [__spy 2] ;\n: main ( -- ) 0 . ;\n";
-    let tokens = lexer::lex(src).expect("lexing should succeed");
-    let err = parser::parse(&tokens).expect_err("parsing should fail");
-
+    let err = linear_check_error("type: Bag xs [__spy 2] ;\n: main ( -- ) 0 . ;\n");
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
     );
     assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_via_linear_struct_in_struct_field_is_error() {
+    // Indirect linearity: `Arr`'s field isn't itself `__spy`, but `Holds`
+    // (its element) contains one transitively, so the array is linear too.
+    let err =
+        linear_check_error("type: Holds s __spy ;\ntype: Arr a [Holds 2] ;\n: main ( -- ) 0 . ;\n");
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Holds`"), "unexpected message: {err}");
+}
+
+#[test]
+fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
+    // Same indirection, reached via a word signature slot instead of a
+    // struct field.
+    let err = linear_check_error(
+        "type: Holds s __spy ;\n: w ( [Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n",
+    );
+    assert!(
+        err.contains("linear array elements are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Holds`"), "unexpected message: {err}");
 }
