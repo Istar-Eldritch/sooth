@@ -316,6 +316,19 @@ mod tests {
     }
 
     #[test]
+    fn lex_mid_word_pipe_without_gt_still_delimits() {
+        let tokens = lex("a| b").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::Word("a".into()),
+                Token::Pipe,
+                Token::Word("b".into())
+            ]
+        );
+    }
+
+    #[test]
     fn lex_clause_head_pipe_stays_separate_token() {
         let tokens = lex("| Circle").unwrap();
         assert_eq!(
