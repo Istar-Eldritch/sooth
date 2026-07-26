@@ -315,11 +315,40 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    Dogfood: a deliberate second-use is a compile error, a forgotten value is a compile
    error, and a destructor runs exactly once at its explicit `drop`.
 2. **Heap + owning pointer + allocator.** The first linear type with a real destructor
-   (`free`), building on slice 1's drop machinery. Dogfood: an owned buffer, freed by an
+   (`free`), building on slice 1's drop machinery. Locked decisions: the heap primitive is
+   **`Owned[T]`, a single heap cell** (Box-shaped, not a sized buffer), because slice 3's
+   recursive data needs the *indirection* and a growable buffer wants Phase 6's `alloc`
+   layer; a fixed-capacity heap buffer then composes for free as `Owned[[u8 N]]`, with the
+   size in the type. `Owned[T]` is a **compiler-known type constructor, not generics**: one
+   interned entry per concrete payload, builtin words checked ad hoc at the call site,
+   exactly as `[T N]` arrays already work (there are no type variables in the type system,
+   and Phase 4 still owns adding them). **Tripwire**: `Owned` is the *second* such ad-hoc
+   type constructor; if slice 3 wants a third, that is the signal the special-casing has
+   become the mechanism and Phase 4's generics should subsume all of them rather than sit
+   alongside. Allocation is a **single global allocator behind an interface in `core`**
+   (`allocate(n)` / `free(ptr, n)`), deliberately not parameterized per value: a swappable
+   global (Rust `#[global_allocator]`-style) is cheap to retrofit later because it changes
+   no value's representation, whereas per-value allocators change all of them. Access
+   words mirror slice 1's struct words (consuming unwrap, non-consuming Copy-only peek), so
+   no new access idiom is invented and second-class refs stay deferred to slice 4.
+   **OOM traps and aborts** for now, reusing the bounds-check trap pattern, since optional
+   pointers (slice 3) and Result (Phase 5) do not exist yet. **Testability**: `free` is
+   silent where the drop-spy printed, so this slice needs the same trick one level down, a
+   **test-only alloc/free counter** in the runtime shim, letting goldens assert the counts
+   balance and catch both leaks and double-frees. Dogfood: an owned heap cell, freed by an
    explicit `drop` at end of scope.
+   **Rework expected**: the allocator arrives as a **compiler-emitted shim** wrapping
+   `malloc`/`free` (the same way slice 1's backend emits the drop-spy's `printf` helper),
+   because the language has no user-facing FFI yet. Once Phase 6 lands FFI-to-libc via safe
+   wrappers, this shim should be re-expressed as ordinary bound foreign words and stop being
+   a backend special case.
 3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
    content, now with a home: recursive enums/structs need the heap indirection slice 2
-   provides. Dogfood: a linked list or tree that builds, walks, and is explicitly freed.
+   provides. **Revisit slice 2's OOM-traps-and-aborts decision here**: this is the slice
+   that introduces optional / non-null pointers, so it is the first point at which a failed
+   allocation can be *returned* rather than aborted, and the trap was explicitly a
+   placeholder for that. Dogfood: a linked list or tree that builds, walks, and is
+   explicitly freed.
    A **zipper** (focus + stored path of one-hole steps) is the sharper dogfood candidate:
    it exercises the recursive drop glue harder than a list, and it is the one shape
    slice 4's second-class references provably cannot express, since the path must be
