@@ -46,6 +46,7 @@ D9's silent counter was unimplementable (nothing can read it, no mutable-global 
 - **R16 (consequence)** — Since `^T` is linear, Slice 1's module-wide `check_no_linear_array_elements` sweep rejects `[^i64 4]`, and nesting does not launder it (`^[^i64 4]` also rejected). So **there is no collection of resources in this slice**; first real pressure is Slice 6.
 - **R17** — The cell gets its own `IrType` variant so drop dispatch is not keyed off a bare pointer, mirroring `IrType::Spy`, with a cell counterpart for **every** `IrType::Spy` match arm (~fourteen). Two beyond compilation: `field_is_linear` and `layout_field_is_linear` must return **true** (else criteria 9/9b/10 silently pass while doing nothing), and `scalar_size_align_ww` governs a cell-typed struct field. Print path is `unreachable!`. Cell size defers to `Ptr`'s existing convention; no second width assumption. **Exception (P3):** `norm_scalar` deliberately has no cell arm, so the constructor types the allocator `Call` destination as the cell directly and never relabels a `Ptr` with a `Conv`, which would hit `emit_conv`'s numeric-endpoints `unreachable!`. The REPL's `format_stack` `cell += 1` is not a width site either (`carried_slot_bytes` is 8 for every scalar).
 - **R18 (deferred)** — Registry consolidation not done. The forcing function was imaginary (R4 keeps `is_copy`'s arity), and one more `&mut Vec<..>` threaded alongside `arrays` (13 checker signatures plus the parser's `TypeCtx`) is materially cheaper than a 50-60-site change. Consolidation cannot be a rename: `Ctx` holds immutable borrows while interning needs a mutable one. **Trigger**: a third interning registry, or any change needing `Ctx` surgery anyway.
+- **R19** — `^`-led type-expression production: strip the leading `^`-run; if the remainder is empty, expect a following type expression (recursing into the array-bracket case or a further `^`-run), otherwise resolve the remainder as a type name. Applies in every type position, including `parse_field_type_expr` (the struct-field position) and the REPL typedef line — without the field-position case, `type: Buf b ^[u8 4] ;` fails to parse.
 
 ## Load-bearing invariants
 
@@ -67,7 +68,7 @@ Sequencing rule: a golden observing an allocation or free cannot land before the
 
 ## Criterion → test map
 
-Goldens are runnable native binaries (`tests/phase0.rs`) or REPL sessions (`tests/phase1.rs`), except criteria 14 and 20, deliberately emitter- and lexer-level. House rules: every negative golden asserts the diagnostic substring **and** the backticked type name; criterion 4 also asserts the move site; every trace-observing golden asserts the **exact ordered transcript** (a count cannot distinguish a leak from a double-free), criterion 1b excepted.
+Goldens are runnable native binaries (`tests/phase0.rs`) or REPL sessions (`tests/phase1.rs`), except criteria 14 and 20, deliberately emitter- and lexer-level, and criteria 16 and 19, which are unit-level in `src/check.rs` and `src/parser.rs` respectively (parse/check errors with no runtime to observe). House rules: every negative golden asserts the diagnostic substring **and** the backticked type name; criterion 4 also asserts the move site; every trace-observing golden asserts the **exact ordered transcript** (a count cannot distinguish a leak from a double-free), criterion 1b excepted.
 
 | # | Criterion | Test (phase) |
 |---|---|---|
@@ -104,3 +105,7 @@ The `ulimit -v` probe is unsound, not merely awkward: a limit low enough to make
 ## Honest cost note
 
 `^[u8 1024]` is a fixed-capacity heap buffer, but the payload transits the data stack both ways, so construction copies the buffer once onto the stack and once into the cell. Correct, not free. A genuinely cheap large buffer wants runtime-sized allocation: Phase 6's `alloc` layer.
+
+`getenv` runs per allocation and per free (R10), not just on a test path: the gate check is on the permanent allocator path in release builds too. Accepted deliberately, since caching would need a mutable global with no precedent in the emitter; recorded here so it is not rediscovered as a surprise later.
+
+A runtime OOM golden (criterion 14's Slice 3 revisit) needs a deterministic way to make `malloc` return NULL. `ulimit -v`/`RLIMIT_AS` fails during `ld.so` startup before `main` runs (see above), so it cannot express "fail this one small allocation". The known-good technique is interposing `malloc` via `LD_PRELOAD` to return NULL for small sizes: deterministic, and it needs no resource limits. Not implemented in this slice; recorded so the Slice 3 revisit starts from a working approach.
