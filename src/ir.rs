@@ -216,6 +216,14 @@ fn enum_drop_symbol(id: EnumId) -> String {
     format!("sooth_enum_drop_{}", id.index())
 }
 
+/// The synthesized per-cell destructor symbol (R8, Phase 4): every cell gets
+/// one, unlike `struct_drop_symbol`/`enum_drop_symbol` which only cover
+/// linear types, because disposal must always free the cell regardless of
+/// whether its payload happens to be linear.
+fn cell_drop_symbol(id: OwnedCellId) -> String {
+    format!("sooth_cell_drop_{}", id.index())
+}
+
 /// One field's placement within its owning struct: its byte offset and its own
 /// `IrType`/size/align (a nested struct contributes its whole size/align).
 #[derive(Debug, Clone, Copy)]
@@ -890,7 +898,23 @@ pub fn synthesize_aggregate_destructors(
                 cells,
             )
         });
-    struct_destructors.chain(enum_destructors).collect()
+    // R5/R8: every cell gets a destructor (not just those whose filter would
+    // require a linear payload), since `drop` on any cell must free it.
+    let cell_destructors = cells.payload.iter().enumerate().map(|(idx, _)| {
+        synthesize_cell_destructor(
+            OwnedCellId::from_index(idx),
+            env,
+            resolve,
+            structs,
+            enums,
+            arrays,
+            cells,
+        )
+    });
+    struct_destructors
+        .chain(enum_destructors)
+        .chain(cell_destructors)
+        .collect()
 }
 
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
@@ -970,6 +994,49 @@ fn synthesize_enum_destructor(
     IrFunc {
         name: enum_drop_symbol(id),
         params: vec![IrType::Enum(id)],
+        ret: None,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }
+}
+
+/// R5/R8 (Phase 4): synthesize owning-cell `id`'s destructor, called by `drop`
+/// on any value of that type: drop the payload first if it is linear (R5),
+/// then free the cell (R8), mirroring `synthesize_struct_destructor`. Reuses
+/// `load_owned_payload` (the same copy-out `^>` uses, R13) so the payload is
+/// materialised before the cell is freed rather than aliasing freed storage.
+/// Every cell gets a destructor, not only ones whose payload is linear
+/// (unlike the struct/enum filters above), because disposal always frees the
+/// cell regardless of the payload's own linearity.
+#[allow(clippy::too_many_arguments)] // one cell's synthesis inputs; a bundle would obscure them
+fn synthesize_cell_destructor(
+    id: OwnedCellId,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    structs: &Structs,
+    enums: &Enums,
+    arrays: &Arrays,
+    cells: &Cells,
+) -> IrFunc {
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
+    let param = b.fresh_value(IrType::OwnedCell(id));
+    let payload_ty = cells.payload[id.index()];
+    if field_is_linear(payload_ty, structs, enums, arrays) {
+        let payload = b.load_owned_payload(param, payload_ty);
+        b.emit_drop(payload);
+    }
+    let size = b.value_size(payload_ty);
+    let size_v = b.fresh_value(IrType::I64);
+    b.push_instr(Instr::Const(size_v, size as i64));
+    b.push_instr(Instr::Call(
+        None,
+        FREE_SYMBOL.to_string(),
+        vec![param, size_v],
+    ));
+    b.seal_block(Terminator::Ret(None));
+    IrFunc {
+        name: cell_drop_symbol(id),
+        params: vec![IrType::OwnedCell(id)],
         ret: None,
         blocks: b.blocks,
         value_types: b.value_types,
@@ -2110,6 +2177,12 @@ impl<'a> FuncBuilder<'a> {
         match self.value_type(v) {
             IrType::Spy => {
                 self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
+            }
+            // R8: a cell always frees on drop, regardless of its payload's
+            // own linearity (the synthesized destructor drops a linear
+            // payload first).
+            IrType::OwnedCell(id) => {
+                self.push_instr(Instr::Call(None, cell_drop_symbol(id), vec![v]));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
                 self.push_instr(Instr::Call(None, struct_drop_symbol(id), vec![v]));

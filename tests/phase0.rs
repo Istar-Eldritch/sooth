@@ -2374,3 +2374,151 @@ fn alloc_trace_is_silent_when_unset() {
     let stdout = run_owned_golden("gate-off", ": main ( -- )\n  5 ^ ^> . ;\n");
     assert_eq!(stdout, "5\n");
 }
+
+// Phase 4: drop glue (`emit_drop`'s `OwnedCell` arm plus a synthesized
+// per-cell destructor, R5/R8) and the allocation-observing goldens it makes
+// possible. Every golden below is free to `drop` a cell, unlike Phase 3's.
+
+fn run_owned_memory_bounded_golden(tag: &str, src: &str) -> i32 {
+    let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    // Criterion 1b: gate off (the env var is removed, not just unset in this
+    // process) under a 64 MB `RLIMIT_AS` (`ulimit -v`, in KB): a fake free
+    // (a leak) grows unbounded across ~100k iterations and necessarily trips
+    // the limit, while a genuine free-per-iteration loop stays comfortably
+    // within it. Unlike criterion 14's OOM trap, this doesn't need to
+    // distinguish a NULL `malloc` from a live one, only survive; see the
+    // spec's "why criterion 14 is not a runtime golden" for why that
+    // distinction specifically is unsound to probe at runtime.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -v 65536 && exec \"{}\"", binary.display()))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .status()
+        .expect("binary should run");
+    status
+        .code()
+        .expect("process should exit normally, not die by signal")
+}
+
+#[test]
+fn owned_alloc_and_drop_traces_one_pair() {
+    // Criterion 1: construct then `drop` (not `^>`): the transcript is
+    // exactly one `alloc` and one `free`, at the `i64` payload's 8-byte size.
+    let stdout = run_owned_traced_golden("drop-scalar", ": main ( -- )\n  5 ^ drop ;\n");
+    assert_eq!(stdout, "alloc 8\nfree 8\n");
+}
+
+#[test]
+fn owned_alloc_dispose_loop_stays_within_memory_bound() {
+    // Criterion 1b: ~100k construct-and-dispose iterations of a `[u8 1024]`
+    // cell under a 64 MB `RLIMIT_AS`, gate off. Mirrors `countdown.sth`'s
+    // tail-call -> loop shape (constant stack), so the outer loop itself
+    // never grows memory; only a broken `free` (a real leak, or a fake one)
+    // would.
+    let src = ": loop-owned ( i64 -- )\n  dup 0 = if\n    drop\n  else\n    0 >u8 1024 fill ^ drop\n    1 - loop-owned\n  end ;\n\
+: main ( -- )\n  100000 loop-owned ;\n";
+    let code = run_owned_memory_bounded_golden("mem-bound", src);
+    assert_eq!(
+        code, 0,
+        "a real free-per-iteration loop should stay within the 64 MB bound"
+    );
+}
+
+#[test]
+fn peek_owned_copy_payload_keeps_cell_live() {
+    // Criterion 6: peek twice then dispose; both peeked values are correct
+    // and equal (proving the cell stayed live and unchanged across two
+    // peeks), and the transcript shows exactly one `free`.
+    let stdout = run_owned_traced_golden(
+        "peek-twice",
+        ": main ( -- )\n  5 ^ ^|> swap ^|> rot = . drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 8\ntrue\nfree 8\n");
+}
+
+#[test]
+fn owned_linear_payload_drops_before_free() {
+    // Criterion 8: `^__spy` disposal. The transcript is `drop 7` *then*
+    // `free 8`, one stdout stream so the order is real (R5: the payload
+    // drops before the cell frees).
+    let stdout = run_owned_traced_golden("spy-payload", ": main ( -- )\n  7 __spy ^ drop ;\n");
+    assert_eq!(stdout, "alloc 8\ndrop 7\nfree 8\n");
+}
+
+#[test]
+fn dropping_struct_with_owned_frees_cell() {
+    // Criterion 9b: dropping a struct containing a cell field frees the
+    // cell (the struct destructor's synthesized drop of its linear field).
+    let stdout = run_owned_traced_golden(
+        "struct-with-cell",
+        "type: Box v ^i64 ;\n: main ( -- )\n  5 ^ Box drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 8\nfree 8\n");
+}
+
+#[test]
+fn enum_variant_with_owned_frees_on_drop() {
+    // Criterion 10: an enum variant carrying a cell, built behind an `if` so
+    // the active variant is a runtime fact, not a compile-time one. Dropping
+    // the cell-carrying variant frees exactly once; dropping the *other*
+    // variant frees zero times. Both are asserted in one transcript: only
+    // one alloc/free pair appears, from the `Full` branch.
+    let stdout = run_owned_traced_golden(
+        "enum-variant",
+        "type: Item | Empty | Full v ^i64 ;\n\
+: main ( -- )\n  true if 5 ^ Full else Empty end drop\n  \
+false if 9 ^ Full else Empty end drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 8\nfree 8\n");
+}
+
+#[test]
+fn nested_owned_frees_inner_before_outer() {
+    // Criterion 11: `^^[u8 24]`. The inner and outer sizes are deliberately
+    // distinct (24 vs. the pointer-width 8) so the transcript order proves
+    // the inner cell frees *before* the outer one; equal sizes could not
+    // distinguish that from the reverse.
+    let stdout = run_owned_traced_golden("nested", ": main ( -- )\n  0 >u8 24 fill ^ ^ drop ;\n");
+    assert_eq!(stdout, "alloc 24\nalloc 8\nfree 24\nfree 8\n");
+}
+
+#[test]
+fn owned_zero_sized_payload_allocs_one_byte() {
+    // Criterion 12: a zero-sized (`Unit`) payload. The transcript shows
+    // `alloc 1`/`free 1`, witnessing R15's `max(size, 1)` adjustment;
+    // asserting the *size* (not just a count) matters, since glibc's
+    // `malloc(0)` returns non-NULL and would pass a count-only test even if
+    // the adjustment were deleted.
+    let stdout = run_owned_traced_golden(
+        "zero-sized",
+        "type: Unit ;\n: main ( -- )\n  Unit ^ drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 1\nfree 1\n");
+}
+
+#[test]
+fn owned_byte_buffer_peek_get_and_free_once() {
+    // Criterion 13: `^[u8 N]` constructed from a filled array, peeked, a
+    // byte `get` off the peeked copy, then `drop`; exactly one alloc/free.
+    let stdout = run_owned_traced_golden(
+        "byte-buffer",
+        ": main ( -- )\n  7 >u8 4 fill ^ ^|> 0 get . drop drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 4\n7\nfree 4\n");
+}
+
+#[test]
+fn peek_aggregate_does_not_alias_cell() {
+    // Criterion 13 (continued): peek an aggregate, dispose the cell, *then*
+    // read the peeked copy. If `^|>` had aliased the cell instead of copying
+    // out (R14), the read after `drop` would see freed memory; reading the
+    // right value after the free proves it didn't.
+    let stdout = run_owned_traced_golden(
+        "peek-no-alias",
+        ": main ( -- )\n  9 >u8 4 fill ^ ^|> swap drop 0 get . drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 4\nfree 4\n9\n");
+}
