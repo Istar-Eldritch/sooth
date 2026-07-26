@@ -1,7 +1,7 @@
 \ A singly linked list: build it, sum the first few nodes off the front
 \ (a consuming walk), then drop whatever's left. The `drop` disposes the
-\ list's tail via the fused iterative destructor (Phase 3 Slice 3), not
-\ recursion, so it stays constant-stack no matter how long the tail is.
+\ list's tail via the fused iterative destructor, not recursion, so it
+\ stays constant-stack no matter how long the tail is.
 
 type: List | Nil | Cons v i64 next ^List ;
 type: Popped rest List val i64 ;
