@@ -1022,6 +1022,15 @@ fn expand_path(
 /// Backtracking, not a syntactic guess: a field is only chosen once a
 /// complete path through it is known to exist.
 ///
+/// A direct `^target` field is tried, in reverse order, before any other
+/// field: this is today's fusable shape, and it must keep winning even when
+/// a *later*-declared field also reaches `target`, only indirectly. Without
+/// this tier, declaring an indirect-but-successful field after a direct one
+/// flips which edge the reverse scan below picks, silently lengthening the
+/// fused loop's path and moving an already-constant-stack shape onto
+/// `direct_loop_field`'s fallback (recursive, not fused) — see the
+/// destructors phase-1 spec regression note for the shape that exposed this.
+///
 /// Reverse order generalizes the old direct-edge rule's last-field tie-break
 /// to every struct level of the walk. This is D1's one restriction: a struct
 /// with two fields that could each reach `target` picks exactly one, since
@@ -1037,6 +1046,17 @@ fn expand_fields(
     visited: &mut Vec<IrType>,
     regs: Registries,
 ) -> Option<Vec<PathStep>> {
+    for (fi, field) in fields.iter().enumerate().rev() {
+        if let IrType::OwnedCell(c) = field.ty {
+            if regs.cells.payload[c.index()] == target {
+                return Some(vec![PathStep::Unwrap {
+                    field: Some(fi),
+                    cell: c,
+                }]);
+            }
+        }
+    }
+
     for (fi, field) in fields.iter().enumerate().rev() {
         match field.ty {
             IrType::OwnedCell(c) => {
@@ -4964,5 +4984,29 @@ mod tests {
                 }])
             );
         }
+    }
+
+    #[test]
+    fn recursive_disposal_path_prefers_direct_field_over_later_indirect_one() {
+        // `a` is a direct `^Self` field, today's fusable shape; `b` is
+        // declared after it and also reaches `Self`, but only by way of
+        // `Wrap`'s own cell field. Without a preferred tier for direct
+        // fields, the reverse scan tries `b` first and finds it succeeds,
+        // silently swapping in the longer path and defusing a loop that
+        // fused before path-finding generalized past direct edges.
+        let p = Probe::new(
+            "type: Wrap v i64 n ^List ;\n\
+             type: List a ^List b Wrap ;\n\
+             : main ( -- ) ;",
+        );
+        let list = p.struct_ty("List");
+        assert_eq!(
+            p.path(list),
+            Some(vec![PathStep::Unwrap {
+                field: Some(0),
+                cell: p.cell(list),
+            }])
+        );
+        assert_eq!(direct_loop_field(p.path(list).as_deref()), Some(0));
     }
 }
