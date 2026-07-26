@@ -90,8 +90,9 @@ indirect cycles, `^^Self`, and mutually recursive types keep the recursive path 
 depth limit. The OOM trap stays: there is still no compiler-known optional/non-null
 pointer type to return failure through (that needs Phase 4's generics), so this was
 never this slice's revisit to make. `examples/list.sth` dogfoods it.
-**Next action: Phase 3 Slice 4** (second-class references + parameter conventions). Not
-yet locked.
+**Next action: Phase 3 Slice 4** (generalized recursive disposal, the Slice 3 follow-on:
+indirect cycles, `^^Self`, mutually recursive types, and worklist-based branching
+disposal). Not yet locked; second-class references move to Slice 5.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -393,9 +394,25 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    `examples/list.sth`, a linked list that builds, walks (sums via a non-consuming or
    consuming pass), and disposes what remains via the fused loop.
    A **zipper** (focus + stored path of one-hole steps) remains a sharper future exercise
-   for the recursive drop glue, and the one shape slice 4's second-class references
+   for the recursive drop glue, and the one shape slice 5's second-class references
    provably cannot express, since the path must be stored; not attempted this slice.
-4. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
+4. **Generalized recursive disposal (the Slice 3 follow-on).** Not yet locked. Slice 3's
+   fused destructor loop covers only direct self-recursion, on a single type, looping the
+   *last* recursive field and recursing the rest. Slice 3's own "Out of scope" note names
+   three distinct gaps left open, not built: **indirect cycles** through an intervening
+   struct (a wrapper type whose cell payload is a *different* type that eventually cycles
+   back), **`^^Self`** (a cell of a cell of the enclosing type, excluded by
+   `recursive_loop_field`'s exact-match predicate), and **multi-type cycles** (mutually
+   recursive types, where no fused loop today spans more than one declared type). Separately,
+   **worklist-based disposal for branching structures** would let every recursive field of a
+   multi-child type dispose in constant stack rather than only the last one — today a
+   left-leaning tree is still O(depth), an asymmetry driven by field order rather than by
+   anything principled. The first design decision is whether these are one slice or several:
+   the cycle-generalization work needs real graph analysis (no SCC code exists anywhere in
+   the repo yet) and loop codegen that spans more than one declared type, while worklist
+   disposal needs a growable structure that allocates *during* disposal, a new collision with
+   the OOM trap that Slice 2/3 never had to face.
+5. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
    checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
    the escape checker keeping refs from being stored or escaping scope. Comes after heap
    because "hand the value back" already works by threading it through the stack. Dogfood:
@@ -407,9 +424,9 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    for every statically known path, leaving reified residuals worth having only where the
    focus must escape (slice 3's zipper, as a stdlib type). Answer it here rather than
    letting nested-path ergonomics get solved twice.
-5. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
+6. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
-6. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The
+7. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The
    Phase 3 exit dogfood: open/read/close files, with the compiler catching a deliberate
    double-use and a forgotten `close`. **This slice is where a user can first attach their
    own cleanup code to a type**, rather than only inheriting disposal by composition. It
