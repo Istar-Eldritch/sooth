@@ -14,8 +14,16 @@ scope: the type rule needs **pinning**, the destructor needs **rewriting**.
   `recursive struct definition (infinite size): Bad -> Bad`.
 - Building and consuming-walking a list is already constant-stack, because such walks are
   self-tail-recursive and Slice 6's TCO applies.
+- **Every recursive shape this slice cares about already builds and disposes correctly**,
+  with a balanced allocation trace: recursive enums, recursive structs, multi-child types
+  (a binary tree, `alloc 32 / alloc 32 / free 32 / free 32`), and **mutually recursive**
+  types `A`↔`B` (`alloc 24 / alloc 24 / free 24 / free 24`). Nothing here needs building.
+  Consequently phases 2 and 5 are almost entirely **pinning existing behaviour**, and their
+  risk is that phase 4's loop transform *regresses* one of these shapes, not that any of
+  them is missing.
 - The synthesized destructor recurses on the native stack. One binary, 100,000 nodes:
   8 MB stack → SIGSEGV (139); 64 MB → exit 0; 1 MB → SIGSEGV. 50,000 nodes passes at 8 MB.
+  **This is the only defect in the slice.**
 
 ## Requirements
 
