@@ -154,6 +154,10 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
             .flat_map(|v| v.fields.iter())
             .all(|(_, field_ty)| is_copy(*field_ty, structs, enums, arrays)),
         Type::Array(id, _) => is_copy(arrays[id.index()].element, structs, enums, arrays),
+        // R4: always linear regardless of payload, with no payload lookup,
+        // so this arm never recurses (unlike struct/enum/array above) and
+        // `is_copy`'s arity stays unchanged.
+        Type::OwnedCell(_, _) => false,
         _ => true,
     }
 }
@@ -3231,6 +3235,27 @@ mod tests {
     }
 
     #[test]
+    fn array_of_owned_is_error() {
+        let err = check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(err.contains("linear array elements are not supported yet"));
+        assert!(err.contains("^i64"));
+    }
+
+    #[test]
+    fn owned_of_linear_array_is_error() {
+        let err = check_src(": w ( ^[__spy 2] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(err.contains("linear array elements are not supported yet"));
+        assert!(err.contains("__spy"));
+    }
+
+    #[test]
+    fn nested_array_of_owned_is_error() {
+        let err = check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(err.contains("linear array elements are not supported yet"));
+        assert!(err.contains("^i64"));
+    }
+
+    #[test]
     fn check_struct_and_enum_duplicate_name_across_registries_is_error() {
         // X2: a name used by one struct and one enum names that type.
         let err = check_src("type: Dup x i64 ; type: Dup | V ;").unwrap_err();
@@ -3666,6 +3691,14 @@ mod tests {
             );
         }
         assert!(!is_copy(Type::Spy, &[], &[], &[]));
+    }
+
+    #[test]
+    fn is_copy_owned_cell_is_never_copy_regardless_of_payload() {
+        // R4: always linear, no payload lookup, even over a Copy payload.
+        let mut cells = Vec::new();
+        let ty = crate::ast::intern_owned_cell_type(&mut cells, Type::I64);
+        assert!(!is_copy(ty, &[], &[], &[]));
     }
 
     #[test]

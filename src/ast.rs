@@ -25,6 +25,14 @@ pub struct Module {
     /// (`intern_array_type`), not by a name pre-pass: an array shape has no
     /// declared name to scan for ahead of parsing.
     pub arrays: Vec<ArrayDecl>,
+    /// The per-program interned owning-cell registry (R2): one entry per
+    /// distinct payload-type shape, indexed by `OwnedCellId` and deduped
+    /// structurally, mirroring `arrays`. Unlike `arrays` there is no count: a
+    /// cell holds exactly one value, so the dedup key is the payload type
+    /// alone. Populated during type resolution (`intern_owned_cell_type`),
+    /// not by a name pre-pass, for the same reason arrays aren't: a `^T`
+    /// shape has no declared name to scan for ahead of parsing.
+    pub owned_cells: Vec<OwnedCellDecl>,
 }
 
 impl Module {
@@ -40,6 +48,12 @@ impl Module {
     /// registry. Thin wrapper over the free `intern_array_type`.
     pub fn intern_array_type(&mut self, element: Type, count: u32) -> Type {
         intern_array_type(&mut self.arrays, element, count)
+    }
+
+    /// Intern an owning-cell payload shape against this module's owned-cell
+    /// registry. Thin wrapper over the free `intern_owned_cell_type`.
+    pub fn intern_owned_cell_type(&mut self, payload: Type) -> Type {
+        intern_owned_cell_type(&mut self.owned_cells, payload)
     }
 }
 
@@ -143,6 +157,63 @@ pub struct ArrayDecl {
     pub element: Type,
     pub count: u32,
     pub name_static: &'static str,
+}
+
+/// A registered owning-cell type: its payload type and the leaked `&'static
+/// str` spelling `^T` every `Type::OwnedCell` naming it carries directly
+/// (mirrors `ArrayDecl::name_static`). Interned and deduped structurally by
+/// payload shape (R2): two spellings of the same payload share one
+/// `OwnedCellDecl`/`OwnedCellId`. Unlike `ArrayDecl` there is no count: the
+/// cell holds exactly one value.
+#[derive(Debug)]
+pub struct OwnedCellDecl {
+    pub payload: Type,
+    pub name_static: &'static str,
+}
+
+/// A small `Copy` index into `Module::owned_cells`, mirroring `ArrayId`. Two
+/// `Type::OwnedCell` values are equal iff they name the same interned shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OwnedCellId(pub(crate) usize);
+
+impl OwnedCellId {
+    /// Mint an `OwnedCellId` for a registry position; crate-internal so an id
+    /// is always tied to a real `owned_cells` registry entry.
+    pub(crate) fn from_index(idx: usize) -> OwnedCellId {
+        OwnedCellId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// Intern an owning-cell payload shape into `cells`, deduping structurally:
+/// two calls with the same payload type return the same `OwnedCellId` (R2).
+/// Mirrors `intern_array_type`; the caller threads `cells` as `&mut Vec` for
+/// the same reason: a cell shape (like an array shape) has no declared name a
+/// pre-pass could register ahead of parsing.
+pub fn intern_owned_cell_type(cells: &mut Vec<OwnedCellDecl>, payload: Type) -> Type {
+    if let Some(idx) = cells.iter().position(|d| d.payload == payload) {
+        return Type::OwnedCell(OwnedCellId::from_index(idx), cells[idx].name_static);
+    }
+    let name = format!("^{}", payload.name());
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let id = OwnedCellId::from_index(cells.len());
+    cells.push(OwnedCellDecl {
+        payload,
+        name_static,
+    });
+    Type::OwnedCell(id, name_static)
+}
+
+/// R12a: whether `name` collides with the owning-cell syntax (`^`, `^>`,
+/// `^|>`) or would shadow/be shadowed by it: any name beginning with `^` is
+/// reserved. Sooth has no notion of an identifier — a `type:`/`:` name or a
+/// local binding is otherwise just a bare word — so this is a plain prefix
+/// check, not a fixed set of three spellings.
+pub fn is_reserved_caret_name(name: &str) -> bool {
+    name.starts_with('^')
 }
 
 /// A small `Copy` index into `Module::arrays`, mirroring `StructId`/`EnumId`.
@@ -257,6 +328,12 @@ pub enum Type {
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
     Array(ArrayId, &'static str),
+    /// A single-value owning heap cell (R1, R2): a compiler-known type
+    /// constructor, not a generic, one interned registry entry per concrete
+    /// payload shape. Mirrors `Type::Array`: an `OwnedCellId` into the
+    /// interned payload registry plus the leaked `^T` spelling. Always
+    /// linear regardless of payload (R4): see `is_copy`.
+    OwnedCell(OwnedCellId, &'static str),
     /// The target-width unsigned integer (D7): distinct from every fixed-width
     /// `uN` in `INT_TYPES`, its size/align comes from the target word-width
     /// parameter (IR-side, Phase 3), never a hardcoded width here. The
@@ -393,6 +470,7 @@ impl Type {
             Type::Struct(_, name) => name,
             Type::Enum(_, name) => name,
             Type::Array(_, name) => name,
+            Type::OwnedCell(_, name) => name,
             Type::Usize => "usize",
             Type::Spy => SPY_NAME,
         }
@@ -547,6 +625,7 @@ mod tests {
             }],
             enums: Vec::new(),
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
         }
     }
 
@@ -601,6 +680,7 @@ mod tests {
                 span: Span::default(),
             }],
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
         }
     }
 
@@ -652,6 +732,7 @@ mod tests {
                 span: Span::default(),
             }],
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),

@@ -14,8 +14,8 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    ArrayDecl, Clause, EnumDecl, Line, Module, Span, StackEffect, StructDecl, Term, TermKind, Type,
-    TypedSlot, VariantDecl, WordBody, WordDef,
+    is_reserved_caret_name, ArrayDecl, Clause, EnumDecl, Line, Module, OwnedCellDecl, Span,
+    StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 
@@ -52,12 +52,17 @@ enum TypeDeclKind {
 /// no leading `|`. Malformed occurrences are left for the real `type:`
 /// production to report; this pass only registers names, so it never errors
 /// itself.
-fn prepass_type_decls(tokens: &[(Token, Span)]) -> Vec<(String, Span, TypeDeclKind)> {
+fn prepass_type_decls(
+    tokens: &[(Token, Span)],
+) -> Result<Vec<(String, Span, TypeDeclKind)>, String> {
     let mut decls = Vec::new();
     for i in 0..tokens.len() {
         if let (Token::Word(w), _) = &tokens[i] {
             if w == "type:" {
                 if let Some((Token::Word(name), span)) = tokens.get(i + 1) {
+                    if is_reserved_caret_name(name) {
+                        return Err(reserved_caret_name_error("type", name, *span));
+                    }
                     let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
                         TypeDeclKind::Enum(scan_variant_names(tokens, i + 2))
                     } else {
@@ -68,7 +73,19 @@ fn prepass_type_decls(tokens: &[(Token, Span)]) -> Vec<(String, Span, TypeDeclKi
             }
         }
     }
-    decls
+    Ok(decls)
+}
+
+/// R12a: a located error for a name reserved by the owning-cell syntax
+/// (`^`, `^>`, `^|>`, or any name beginning with `^`), used at all three
+/// declaration sites it can arise (a `type:` name, a `:` word name, a local
+/// binding) plus the REPL's own `type:`-line path (`repl.rs`), which reads its
+/// name outside this module's pre-pass.
+pub fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is reserved for the owning-cell syntax (`^`, `^>`, `^|>`) and cannot be used as a {kind} name at line {}, col {}",
+        span.line, span.col
+    )
 }
 
 /// Collect variant `(name, span)` pairs from an enum `type:` body: the word
@@ -133,12 +150,13 @@ fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>,
 }
 
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
-    let decls = prepass_type_decls(tokens);
+    let decls = prepass_type_decls(tokens)?;
     let (mut structs, mut enums) = build_registries(&decls);
     let mut words = Vec::new();
     let mut struct_fields_by_decl = Vec::new();
     let mut enum_fields_by_decl = Vec::new();
     let mut arrays = Vec::new();
+    let mut owned_cells = Vec::new();
     {
         let mut parser = Parser {
             tokens,
@@ -146,6 +164,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
             structs: &structs,
             enums: &enums,
             arrays: &mut arrays,
+            owned_cells: &mut owned_cells,
         };
         while parser.pos < parser.tokens.len() {
             if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
@@ -172,6 +191,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         structs,
         enums,
         arrays,
+        owned_cells,
     })
 }
 
@@ -180,7 +200,8 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 /// normal parse error).
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
     let mut arrays = Vec::new();
-    parse_line_with_structs(tokens, &[], &[], &mut arrays)
+    let mut owned_cells = Vec::new();
+    parse_line_with_structs(tokens, &[], &[], &mut arrays, &mut owned_cells)
 }
 
 /// Parse a REPL line resolving struct and enum type names in a `:`
@@ -195,6 +216,7 @@ pub fn parse_line_with_structs(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
 ) -> Result<Line, String> {
     let mut parser = Parser {
         tokens,
@@ -202,6 +224,7 @@ pub fn parse_line_with_structs(
         structs,
         enums,
         arrays,
+        owned_cells,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -230,6 +253,7 @@ pub fn parse_typedef_line(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
 ) -> Result<Vec<(String, Type)>, String> {
     let mut parser = Parser {
         tokens,
@@ -237,6 +261,7 @@ pub fn parse_typedef_line(
         structs,
         enums,
         arrays,
+        owned_cells,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -273,6 +298,7 @@ pub fn parse_enum_typedef_line(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
     let mut parser = Parser {
         tokens,
@@ -280,6 +306,7 @@ pub fn parse_enum_typedef_line(
         structs,
         enums,
         arrays,
+        owned_cells,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -312,6 +339,11 @@ struct Parser<'t> {
     /// `arrays` for a REPL line), so interning persists across REPL lines
     /// (R22/R23).
     arrays: &'t mut Vec<ArrayDecl>,
+    /// The interned owning-cell registry (R2), mirroring `arrays` for the
+    /// same reason: a `^T` shape has no declared name a pre-pass could
+    /// register ahead of time, so it grows during type-expression resolution
+    /// and persists across REPL lines exactly like `arrays`.
+    owned_cells: &'t mut Vec<OwnedCellDecl>,
 }
 
 impl<'t> Parser<'t> {
@@ -378,7 +410,10 @@ impl<'t> Parser<'t> {
 
     fn parse_worddef(&mut self) -> Result<WordDef, String> {
         self.expect_word(":")?;
-        let name = self.expect_word_any()?;
+        let (name, name_span) = self.expect_word_any_spanned()?;
+        if is_reserved_caret_name(&name) {
+            return Err(reserved_caret_name_error("word", &name, name_span));
+        }
         self.expect(Token::LParen)?;
         let effect = self.parse_effect()?;
         self.expect(Token::RParen)?;
@@ -486,6 +521,13 @@ impl<'t> Parser<'t> {
             let ty = self.parse_array_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
+        // An owning-cell type is likewise nameless (R12a reserves every
+        // `^`-led word from local/slot-name position), so it too is
+        // recognised before the name-then-optional-`:type` read.
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
+            let ty = self.parse_type_expr()?;
+            return Ok(TypedSlot { name: None, ty });
+        }
         let (text, span) = self.expect_word_any_spanned()?;
         if matches!(self.peek(), Some((Token::Word(w), _)) if w == ":") {
             self.pos += 1;
@@ -500,16 +542,47 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// A type expression (R3): either a single word (scalar/struct/enum,
-    /// resolved via `resolve_type`) or a bracketed array type `[ elem count
-    /// ]`, where `elem` is itself a type expression (nested arrays recurse).
+    /// A type expression (R3, R19): a single word (scalar/struct/enum,
+    /// resolved via `resolve_type`), a bracketed array type `[ elem count ]`
+    /// (`elem` itself a type expression, nested arrays recurse), or a
+    /// `^`-led owning-cell type (nested cells recurse the same way).
     fn parse_type_expr(&mut self) -> Result<Type, String> {
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             self.parse_array_type_expr()
+        } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
+            self.parse_owning_cell_type_expr()
         } else {
             let (name, span) = self.expect_word_any_spanned()?;
             self.resolve_type(&name, span)
         }
+    }
+
+    /// The `^`-led owning-cell type-expression production (R12, R19): the
+    /// token is a run of one or more `^` optionally immediately followed by
+    /// more type-name text (`^i64`, `^^i64`, `^Point` lex as one word) or by
+    /// nothing (`^[u8 4]`/`^^[u8 4]` lex the `^`-run as its own word, since
+    /// `[` is a delimiter). The rule: strip the leading `^`-run; if the
+    /// remainder is empty, expect a following type expression (recursing into
+    /// the array-bracket case or a further `^`-run); otherwise resolve the
+    /// remainder as a type name directly. Each stripped `^` wraps the result
+    /// in one more interned owning-cell layer, innermost first, so `^^i64` is
+    /// two layers over `i64` and `^[u8 4]` is one layer over `[u8 4]`. A bare
+    /// `^`-run with nothing following (remainder empty and no further type
+    /// expression, e.g. end of input or a delimiter) surfaces as the ordinary
+    /// located "expected a word"/`[`-vs-word error from the recursive call.
+    fn parse_owning_cell_type_expr(&mut self) -> Result<Type, String> {
+        let (word, span) = self.expect_word_any_spanned()?;
+        let run_len = word.chars().take_while(|&c| c == '^').count();
+        let remainder = &word[run_len..];
+        let mut inner = if remainder.is_empty() {
+            self.parse_type_expr()?
+        } else {
+            self.resolve_type(remainder, span)?
+        };
+        for _ in 0..run_len {
+            inner = crate::ast::intern_owned_cell_type(self.owned_cells, inner);
+        }
+        Ok(inner)
     }
 
     /// The array-type-expression production `[ elem count ]` (D2, D3, M1):
@@ -596,6 +669,9 @@ impl<'t> Parser<'t> {
     fn parse_field_type_expr(&mut self) -> Result<Type, String> {
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             return self.parse_array_type_expr();
+        }
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
+            return self.parse_owning_cell_type_expr();
         }
         let (ty_name, ty_span) = self.expect_field_type_token()?;
         self.resolve_type(&ty_name, ty_span)
@@ -735,7 +811,10 @@ impl<'t> Parser<'t> {
                     self.pos += 1;
                     break;
                 }
-                Some((Token::Word(w), _)) => {
+                Some((Token::Word(w), span)) => {
+                    if is_reserved_caret_name(w) {
+                        return Err(reserved_caret_name_error("local", w, *span));
+                    }
                     names.push(w.clone());
                     self.pos += 1;
                 }
@@ -1425,6 +1504,166 @@ mod tests {
     fn parse_typedef_linear_array_field_parses_ok() {
         let result = parse_src("type: Bag xs [__spy 2] ;");
         assert!(result.is_ok(), "unexpected error: {:?}", result.err());
+    }
+
+    #[test]
+    fn parse_owning_cell_slot_resolves_and_interns() {
+        let module = parse_src(": w ( ^i64 -- i64 ) ^> ;").unwrap();
+        assert_eq!(module.owned_cells.len(), 1);
+        match module.words[0].effect.inputs[0].ty {
+            Type::OwnedCell(id, name) => {
+                assert_eq!(id.index(), 0);
+                assert_eq!(name, "^i64");
+            }
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+        assert_eq!(module.owned_cells[0].payload, Type::I64);
+    }
+
+    #[test]
+    fn parse_owning_cell_same_payload_dedups_to_one_id() {
+        let module = parse_src(": a ( ^i64 -- ^i64 ) ; : b ( ^i64 -- ^i64 ) ;").unwrap();
+        assert_eq!(module.owned_cells.len(), 1);
+        let a_ty = module.words[0].effect.inputs[0].ty;
+        let b_ty = module.words[1].effect.inputs[0].ty;
+        assert_eq!(a_ty, b_ty);
+    }
+
+    #[test]
+    fn parse_owning_cell_struct_type_resolves() {
+        let module = parse_src("type: Point x i64 y i64 ; : w ( ^Point -- ) ;").unwrap();
+        match module.words[0].effect.inputs[0].ty {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^Point"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_owning_cell_nested_scalar_is_two_layers() {
+        let module = parse_src(": w ( ^^i64 -- ) ;").unwrap();
+        assert_eq!(module.owned_cells.len(), 2);
+        match module.words[0].effect.inputs[0].ty {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^^i64"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+        assert_eq!(module.owned_cells[0].payload, Type::I64);
+        match module.owned_cells[1].payload {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^i64"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_owning_cell_array_buffer_type_resolves() {
+        // R1: a fixed-capacity heap buffer is `^[u8 N]`, distinct from `^T`
+        // over a scalar/struct.
+        let module = parse_src(": w ( ^[u8 4] -- ) ;").unwrap();
+        assert_eq!(module.arrays.len(), 1);
+        assert_eq!(module.owned_cells.len(), 1);
+        match module.words[0].effect.inputs[0].ty {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^[u8 4]"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+        match module.owned_cells[0].payload {
+            Type::Array(_, name) => assert_eq!(name, "[u8 4]"),
+            other => panic!("expected Type::Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_owning_cell_nested_array_buffer_type_resolves() {
+        let module = parse_src(": w ( ^^[u8 4] -- ) ;").unwrap();
+        assert_eq!(module.owned_cells.len(), 2);
+        match module.words[0].effect.inputs[0].ty {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^^[u8 4]"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_owning_cell_type_resolves_in_struct_field_position() {
+        // R19: without the field position, `type: Buf b ^[u8 4] ;` fails to
+        // parse; this is the buffer case R1 advertises.
+        let module = parse_src("type: Buf b ^[u8 4] ;").unwrap();
+        match module.structs[0].fields[0].1 {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^[u8 4]"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_owning_cell_type_resolves_in_enum_variant_field_position() {
+        let module = parse_src("type: Shape | Boxed b ^i64 ;").unwrap();
+        match module.enums[0].variants[0].fields[0].1 {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^i64"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_owning_cell_named_slot_resolves() {
+        // The named-slot path (`name : type`) also recognises `^T`, not just
+        // the unnamed-slot shortcut.
+        let module = parse_src(": w ( c : ^i64 -- ) ;").unwrap();
+        match module.words[0].effect.inputs[0].ty {
+            Type::OwnedCell(_, name) => assert_eq!(name, "^i64"),
+            other => panic!("expected Type::OwnedCell, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_bare_caret_with_no_payload_is_error() {
+        let result = parse_src(": w ( ^ -- ) ;");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_bare_caret_field_with_no_payload_is_error() {
+        let result = parse_src("type: Bad b ^ ;");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reserved_caret_type_name_is_error() {
+        let err = parse_src("type: ^ x i64 ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_prefixed_type_name_is_error() {
+        let err = parse_src("type: ^Foo x i64 ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains("^Foo"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_word_name_is_error() {
+        let err = parse_src(": ^ ( -- ) ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_word_peek_spelling_is_error() {
+        let err = parse_src(": ^|> ( -- ) ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains("^|>"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_local_is_error() {
+        let err = parse_src(": w ( i64 -- i64 ) | ^ | ^ ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_clause_body_local_is_error() {
+        let src = "type: Shape | Circle r f64 ; : area ( Shape -- f64 ) | Circle | ^ | ^ ;";
+        let err = parse_src(src).unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
     }
 
     #[test]

@@ -143,6 +143,11 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The element stride/size lives in the module's `ArrayLayout`
         // registry; the `IrType` carries only the `ArrayId` so it stays `Copy`.
         Type::Array(id, _) => IrType::Array(id),
+        // Phase 1: no `IrType::Cell` variant exists yet (R17 adds it in
+        // Phase 2, alongside every parallel match arm); a bare pointer is a
+        // safe stand-in since no `^` value can be constructed or lowered
+        // until Phase 3.
+        Type::OwnedCell(_, _) => IrType::Ptr,
         Type::Usize => IrType::Usize,
         Type::Spy => IrType::Spy,
     }

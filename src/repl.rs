@@ -13,7 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ast::{
-    ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, TermKind, Type, VariantDecl, WordDef,
+    ArrayDecl, EnumDecl, Line, OwnedCellDecl, Span, StructDecl, Term, TermKind, Type, VariantDecl,
+    WordDef,
 };
 use crate::check::{self, Sig};
 use crate::driver;
@@ -234,6 +235,9 @@ pub struct Session {
     /// index stays stable across lines. Grows as array type expressions and
     /// `fill` shapes resolve; shared by the checker and the layout builder.
     arrays: Vec<ArrayDecl>,
+    /// The interned owning-cell registry, mirroring `arrays`: grows as `^T`
+    /// type expressions resolve, persisting across lines in the same session.
+    owned_cells: Vec<OwnedCellDecl>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct or enum), so the
     /// buffer is byte-addressable and slot offsets are computed from `types`,
@@ -255,6 +259,7 @@ impl Session {
             structs: Vec::new(),
             enums: Vec::new(),
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
             buf: Vec::new(),
             top: 0,
             types: Vec::new(),
@@ -287,8 +292,13 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
-        let line =
-            parser::parse_line_with_structs(&tokens, &self.structs, &self.enums, &mut self.arrays)?;
+        let line = parser::parse_line_with_structs(
+            &tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+        )?;
         match line {
             Line::Def(word) => self.eval_def(word, writer),
             Line::Expr(terms) => self.eval_expr(&terms, writer),
@@ -309,6 +319,9 @@ impl Session {
             Some((Token::Word(w), span)) => (w.clone(), *span),
             _ => return Err("parse error: `type:` must be followed by a type name".to_string()),
         };
+        if crate::ast::is_reserved_caret_name(&name) {
+            return Err(parser::reserved_caret_name_error("type", &name, span));
+        }
         if parser::typedef_line_is_enum(tokens) {
             self.eval_enum_typedef(tokens, name.clone(), span)?;
         } else {
@@ -331,12 +344,17 @@ impl Session {
             fields: Vec::new(),
             span,
         });
-        let result =
-            parser::parse_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
-                .and_then(|fields| {
-                    self.structs[idx].fields = fields;
-                    check::check_types(&self.structs, &self.enums, &self.arrays)
-                });
+        let result = parser::parse_typedef_line(
+            tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+        )
+        .and_then(|fields| {
+            self.structs[idx].fields = fields;
+            check::check_types(&self.structs, &self.enums, &self.arrays)
+        });
         if let Err(e) = result {
             self.structs.pop();
             return Err(e);
@@ -371,14 +389,19 @@ impl Session {
             variants,
             span,
         });
-        let result =
-            parser::parse_enum_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
-                .and_then(|variant_fields| {
-                    for (vidx, fields) in variant_fields.into_iter().enumerate() {
-                        self.enums[idx].variants[vidx].fields = fields;
-                    }
-                    check::check_types(&self.structs, &self.enums, &self.arrays)
-                });
+        let result = parser::parse_enum_typedef_line(
+            tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+        )
+        .and_then(|variant_fields| {
+            for (vidx, fields) in variant_fields.into_iter().enumerate() {
+                self.enums[idx].variants[vidx].fields = fields;
+            }
+            check::check_types(&self.structs, &self.enums, &self.arrays)
+        });
         if let Err(e) = result {
             self.enums.pop();
             return Err(e);
