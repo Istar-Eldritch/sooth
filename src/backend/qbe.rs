@@ -12,14 +12,12 @@ use crate::ir::{
     TRACE_ALLOC_ENV,
 };
 
-/// The failed-allocation trap (R9): reached only from the allocator shim's NULL
-/// branch, so unlike `OOB_TRAP_SYMBOL` the IR never names it and it stays
-/// backend-private.
+/// Reached only from the allocator shim's NULL branch, so unlike
+/// `OOB_TRAP_SYMBOL` the IR never names it and it stays backend-private.
 const OOM_TRAP_SYMBOL: &str = "sooth_oom_trap";
 
-/// The allocation trace's gated print helper (R10), shared by both halves of the
-/// allocator so the gate is decided in exactly one place. Backend-private for
-/// the same reason as `OOM_TRAP_SYMBOL`.
+/// Shared by both halves of the allocator so the gate is decided in exactly
+/// one place. Backend-private for the same reason as `OOM_TRAP_SYMBOL`.
 const TRACE_EVENT_SYMBOL: &str = "sooth_trace_event";
 
 /// The backend's view of a program's aggregate layouts: the struct and enum
@@ -48,35 +46,30 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str("data $true_str = { b \"true\\n\", b 0 }\n");
     out.push_str("data $false_str = { b \"false\\n\", b 0 }\n");
     out.push_str("data $boolstrs = { l $false_str, l $true_str }\n");
-    // The runtime out-of-bounds trap message (R19/D6): a located line + the
-    // offending index + the array length, printed to stderr before a nonzero
-    // exit. `%ld` for each of line, index, length (passed as `l`).
+    // The runtime out-of-bounds trap message: a located line + the offending
+    // index + the array length, printed to stderr before a nonzero exit.
     out.push_str(
         "data $oobfmt = { b \"sooth: array index out of range (line %ld)\\n  index %ld is out of bounds for length %ld\\n\", b 0 }\n",
     );
-    // The drop-spy destructor's message (R6): `drop <tag>` on stdout, through
-    // the same `printf` path `.` uses, so a golden can assert drop count and
+    // The drop-spy destructor's message: `drop <tag>` on stdout, through the
+    // same `printf` path `.` uses, so a golden can assert drop count and
     // order interleaved with ordinary output.
     out.push_str("data $spyfmt = { b \"drop %ld\\n\", b 0 }\n");
-    // The allocation trace's two event lines and its gating environment variable
-    // (R10). One line per event, size only and no address, so a golden can
-    // assert an exact ordered transcript; both go to stdout through the same
-    // `printf` the spy and `.` use, which is what makes program order equal
-    // transcript order (the emitter's stderr path is unbuffered `dprintf`, so a
-    // cross-stream assertion would have no order to observe at all).
+    // Both trace lines go through the same `printf` path as the spy and `.`,
+    // so program order equals transcript order in a golden.
     out.push_str("data $allocfmt = { b \"alloc %ld\\n\", b 0 }\n");
     out.push_str("data $freefmt = { b \"free %ld\\n\", b 0 }\n");
     writeln!(out, "data $tracenv = {{ b \"{TRACE_ALLOC_ENV}\", b 0 }}").unwrap();
-    // The failed-allocation message (R9): stderr, then a nonzero exit, exactly
+    // The failed-allocation message: stderr, then a nonzero exit, exactly
     // like the out-of-bounds trap.
     out.push_str(
         "data $oomfmt = { b \"sooth: out of memory (allocation of %ld bytes failed)\\n\", b 0 }\n",
     );
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
-    // array type (D9, R20) then references an already-declared `:E`/`:arr_N`.
-    // Structs are the only aggregates whose QBE type spells its members, so
-    // they come last and rely on declaration order among themselves.
+    // array type then references an already-declared `:E`/`:arr_N`. Structs
+    // are the only aggregates whose QBE type spells its members, so they come
+    // last and rely on declaration order among themselves.
     for layout in &ir.enums {
         emit_enum_type(&mut out, layout);
     }
@@ -583,22 +576,12 @@ fn emit_spy_drop(out: &mut String) {
     out.push_str("}\n");
 }
 
-/// Emit the R15 size adjustment into `%adj`: a size is non-negative, so
-/// `n + (n == 0)` is a branch-free `max(n, 1)`. Both halves of the allocator
-/// apply it, so `free` reports the same size `allocate` requested. Without it a
-/// zero-sized payload reaches `malloc(0)`, which may return NULL and fire the
-/// trap on a correct program; the adjustment also keeps every cell's address
-/// distinct, so free-once stays meaningful. The caller's size parameter must be
-/// named `%n`; this reads it directly rather than taking it as an argument.
+/// `max(n, 1)` because `malloc(0)` may return NULL.
 fn emit_size_adjust(out: &mut String) {
     out.push_str("\t%zero =l ceql %n, 0\n");
     out.push_str("\t%adj =l add %n, %zero\n");
 }
 
-/// Emit the allocator's acquire half (R6/R7): a compiler-emitted shim over
-/// `malloc`, following the `emit_spy_drop` precedent rather than exposing any
-/// user-facing FFI (Phase 6 re-expresses it as bound foreign words). A NULL
-/// return traps (R9); a successful one traces (R10) and returns the pointer.
 fn emit_alloc_shim(out: &mut String) {
     writeln!(out, "\nfunction l ${ALLOC_SYMBOL}(l %n) {{").unwrap();
     out.push_str("@start\n");
@@ -615,9 +598,8 @@ fn emit_alloc_shim(out: &mut String) {
     out.push_str("}\n");
 }
 
-/// Emit the allocator's release half (R6/R7): `free(ptr, n)`. `malloc`'s `free`
-/// needs no size, but the interface carries one because the trace reports it and
-/// a future non-`malloc` allocator would need it.
+/// `malloc`'s `free` needs no size, but the interface carries one because
+/// the trace reports it.
 fn emit_free_shim(out: &mut String) {
     writeln!(out, "\nfunction ${FREE_SYMBOL}(l %p, l %n) {{").unwrap();
     out.push_str("@start\n");
@@ -628,9 +610,8 @@ fn emit_free_shim(out: &mut String) {
     out.push_str("}\n");
 }
 
-/// Emit the failed-allocation trap (R9): the out-of-bounds trap's shape, down to
-/// `exit(1)` rather than `abort`, so a test observes `Some(1)` instead of death
-/// by signal. It must not fall through, so the block ends in `hlt`.
+/// `exit(1)` rather than `abort`, so a test observes `Some(1)` instead of
+/// death by signal.
 fn emit_oom_trap(out: &mut String) {
     writeln!(out, "\nfunction ${OOM_TRAP_SYMBOL}(l %n) {{").unwrap();
     out.push_str("@start\n");
@@ -640,11 +621,8 @@ fn emit_oom_trap(out: &mut String) {
     out.push_str("}\n");
 }
 
-/// Emit the allocation trace's gated print (R10): `getenv` per event, not cached,
-/// because caching would need a mutable global data symbol that has no precedent
-/// in the emitter, and this is test-only telemetry where the cost is irrelevant.
-/// An unset *or* empty value prints nothing, so a real program using `^` stays
-/// silent by default.
+/// `getenv` per event, not cached: caching would need a mutable global data
+/// symbol with no precedent in the emitter. Unset or empty prints nothing.
 fn emit_trace_event(out: &mut String) {
     writeln!(out, "\nfunction ${TRACE_EVENT_SYMBOL}(l %fmt, l %n) {{").unwrap();
     out.push_str("@start\n");

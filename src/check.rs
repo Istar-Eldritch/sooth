@@ -155,9 +155,7 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
             .flat_map(|v| v.fields.iter())
             .all(|(_, field_ty)| is_copy(*field_ty, structs, enums, arrays)),
         Type::Array(id, _) => is_copy(arrays[id.index()].element, structs, enums, arrays),
-        // R4: always linear regardless of payload, with no payload lookup,
-        // so this arm never recurses (unlike struct/enum/array above) and
-        // `is_copy`'s arity stays unchanged.
+        // Always linear regardless of payload, so no payload lookup here.
         Type::OwnedCell(_, _) => false,
         _ => true,
     }
@@ -692,7 +690,7 @@ pub fn check_def(
 /// Infer the net effect of a bare line: simulate the typed stack from
 /// `entry_stack` (the carried slot types) and return the resulting typed stack.
 /// A type mismatch or underflow against the carried stack is a reported error.
-#[allow(clippy::too_many_arguments)] // a bare line's checking inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 pub fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
@@ -1002,7 +1000,7 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)] // one word's checking inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1028,7 +1026,7 @@ fn check_word(
     }
 }
 
-#[allow(clippy::too_many_arguments)] // one word's checking inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1089,7 +1087,7 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
-#[allow(clippy::too_many_arguments)] // one clause-style word's checking inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1161,7 +1159,7 @@ fn check_clause_word(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // one clause's checking inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn check_clause_body(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1590,7 +1588,7 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
 /// both arms of a final `if`) sits on the self-tail-call back-edge. The rule
 /// mirrors `tail_position_calls`/`lower_terms`; all three must stay in
 /// lockstep.
-#[allow(clippy::too_many_arguments)] // the walker's threaded state; a bundle would obscure it
+#[allow(clippy::too_many_arguments)]
 fn check_terms(
     terms: &[Term],
     mut stack: Vec<Slot>,
@@ -1617,7 +1615,7 @@ fn check_terms(
     Ok(stack)
 }
 
-#[allow(clippy::too_many_arguments)] // the walker's threaded state; a bundle would obscure it
+#[allow(clippy::too_many_arguments)]
 fn check_term(
     term: &Term,
     mut stack: Vec<Slot>,
@@ -1996,11 +1994,9 @@ fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -
     }
 }
 
-/// `^|> ( ^T -- ^T T )` (R11/R14) applied to a linear payload: unlike `S|>fi`
-/// (whose field is Copy-gated the same way), the cell stays live afterward, so
-/// peeking would leave a second, unowned reference to a resource the cell
-/// still owns; there is no reference machinery to make that legal. `^>`
-/// (consuming unwrap) is the workaround.
+/// `^|>` on a linear payload: the cell stays live afterward, so peeking
+/// would leave a second, unowned reference to a resource the cell still
+/// owns. `^>` (consuming unwrap) is the workaround.
 fn peek_of_linear_owned_payload_error(
     ctx: &Ctx,
     span: Span,
@@ -2204,18 +2200,10 @@ fn check_array_word(
     Ok(Some(std::mem::take(stack)))
 }
 
-/// The three owning-cell access words (R11, R12, R12b): `^ ( T -- ^T )`
-/// constructs a cell around whatever type sits on top of the stack (generic
-/// over the payload shape, like `fill`, dispatching on the concrete operand
-/// type rather than a fixed env signature); `^> ( ^T -- T )` consumes the
-/// cell and yields the payload (frees the cell at lowering time, R13); `^|>
-/// ( ^T -- ^T T )` is a non-consuming peek, restricted to a `Copy` payload
-/// (R14) exactly like `S|>fi`. Matched by **exact name only** (R12b): `^>x`
-/// and `^|>x` don't match any arm here and fall through to the ordinary
-/// unknown-word error. Running before `check_struct_peek_word` is defensive
-/// only: `"^|>".split_once("|>")` probes a struct named `^`, but that probe
-/// returns `None` on a registry miss and R12a makes `^` undeclarable, so the
-/// order is unobservable (swapping the two arms keeps the suite green).
+/// The three owning-cell access words: `^ ( T -- ^T )` constructs a cell,
+/// `^> ( ^T -- T )` consumes it and yields the payload, `^|> ( ^T -- ^T T )`
+/// is a non-consuming peek restricted to a `Copy` payload. Matched by exact
+/// name only, so `^>x`/`^|>x` fall through to the ordinary unknown-word error.
 fn check_owned_cell_word(
     name: &str,
     span: Span,

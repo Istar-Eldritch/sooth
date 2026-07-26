@@ -36,22 +36,18 @@ pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
 /// one symbol, exactly like `OOB_TRAP_SYMBOL`.
 pub const SPY_DROP_SYMBOL: &str = "sooth_spy_drop";
 
-/// The heap allocator's acquire half (R6/R7): `allocate(n) -> ptr`, a
-/// compiler-emitted shim over `malloc` that traps on a NULL return and requests
-/// `max(n, 1)` bytes (R15). Referenced by name like `SPY_DROP_SYMBOL`; the
-/// language never sees libc, only this interface.
+/// The heap allocator's acquire half: `allocate(n) -> ptr`, a compiler-emitted
+/// shim over `malloc` that traps on a NULL return and requests `max(n, 1)`
+/// bytes. The language never sees libc, only this interface.
 pub const ALLOC_SYMBOL: &str = "sooth_alloc";
 
-/// The heap allocator's release half (R6/R7): `free(ptr, n)`. The size is not
-/// needed by `free` itself; it is what the allocation trace reports, and what a
-/// future non-`malloc` allocator would need.
+/// The heap allocator's release half: `free(ptr, n)`. The size is not needed
+/// by `free` itself; it is what the allocation trace reports.
 pub const FREE_SYMBOL: &str = "sooth_free";
 
-/// The environment variable gating the allocation trace (R10). When unset or
-/// empty the allocator shim prints nothing, because `^` is user surface and a
-/// real program must stay silent; when set, every acquire/release prints one
-/// `alloc <size>`/`free <size>` line to stdout. Named here rather than in the
-/// backend so the emitter and the tests that read the trace cannot drift.
+/// The environment variable gating the allocation trace. Unset or empty
+/// prints nothing, since a real program using `^` must stay silent by
+/// default.
 pub const TRACE_ALLOC_ENV: &str = "SOOTH_TRACE_ALLOC";
 
 #[derive(Debug, Default)]
@@ -133,12 +129,11 @@ pub enum IrType {
     /// IR: `drop` reads a value's `IrType` to decide whether to emit the
     /// destructor call, and an `i64` tag must not become one by accident.
     Spy,
-    /// An owning heap cell `^T` (R17), keyed by the `OwnedCellId` of its
-    /// interned payload shape. A pointer everywhere the backend touches it (its
-    /// width defers to `Ptr`'s convention, never a second independent
-    /// assumption), but distinct from `Ptr` in the IR for the same reason `Spy`
-    /// is distinct from `Int`: `drop` dispatches on a value's `IrType`, and
-    /// dispatch must not key off a bare pointer.
+    /// An owning heap cell `^T`, keyed by the `OwnedCellId` of its interned
+    /// payload shape. A pointer everywhere the backend touches it, but
+    /// distinct from `Ptr` in the IR for the same reason `Spy` is distinct
+    /// from `Int`: `drop` dispatches on a value's `IrType`, and dispatch must
+    /// not key off a bare pointer.
     OwnedCell(OwnedCellId),
 }
 
@@ -196,7 +191,7 @@ pub struct StructLayout {
 fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
     match ty {
         IrType::Spy => true,
-        // R4: a cell is linear whatever its payload, so no payload lookup.
+        // Always linear whatever its payload, so no payload lookup.
         IrType::OwnedCell(_) => true,
         IrType::Struct(id) => structs.layouts[id.index()].is_linear,
         IrType::Enum(id) => enums.layouts[id.index()].is_linear,
@@ -216,9 +211,8 @@ fn enum_drop_symbol(id: EnumId) -> String {
     format!("sooth_enum_drop_{}", id.index())
 }
 
-/// The synthesized per-cell destructor symbol (R8, Phase 4): mirrors
-/// `struct_drop_symbol`/`enum_drop_symbol`, one uniform naming scheme across
-/// all three kinds.
+/// Mirrors `struct_drop_symbol`/`enum_drop_symbol`, one uniform naming
+/// scheme across all three kinds.
 fn cell_drop_symbol(id: OwnedCellId) -> String {
     format!("sooth_cell_drop_{}", id.index())
 }
@@ -359,8 +353,7 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Int { bits, .. } => (bits / 8) as u32,
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
-        // A cell is a pointer, so its width defers to `Ptr`'s convention (both
-        // retrofit to the word-width parameter together, R17).
+        // A cell is a pointer, so its width defers to `Ptr`'s convention.
         IrType::Ptr | IrType::OwnedCell(_) => 8,
         // A spy is its `i64` tag.
         IrType::Spy => 8,
@@ -396,13 +389,7 @@ impl Structs {
 }
 
 /// The IR's view of a program's owning cells: the per-`OwnedCellId` payload
-/// `IrType`, mirroring `Arrays`. Unlike `Structs`/`Enums`/`Arrays` there is no
-/// separate layout struct: a cell is always a pointer (its width defers to
-/// `Ptr`'s convention, R17), so only the payload type is needed to decide a
-/// construct/unwrap/peek's copy-in/copy-out shape (scalar load/store,
-/// aggregate alloc+blit, or nothing for a zero-sized payload); the payload's
-/// own size/align resolve through the struct/enum/array registries it may
-/// itself point into.
+/// `IrType`.
 #[derive(Debug, Default)]
 pub struct Cells {
     pub payload: Vec<IrType>,
@@ -644,7 +631,7 @@ impl LayoutBuilder<'_> {
     fn layout_field_is_linear(&self, ty: IrType) -> bool {
         match ty {
             IrType::Spy => true,
-            // R4: a cell is linear whatever its payload, so no payload lookup.
+            // Always linear whatever its payload, so no payload lookup.
             IrType::OwnedCell(_) => true,
             IrType::Struct(id) => {
                 self.struct_memo[id.index()]
@@ -856,7 +843,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// type. The REPL redefines these per line; safe because type redefinition is
 /// rejected, so every generation's glue is identical. If type redefinition is
 /// ever allowed, add a generation suffix, matching word symbols.
-#[allow(clippy::too_many_arguments)] // one module's synthesis inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -897,8 +884,8 @@ pub fn synthesize_aggregate_destructors(
                 cells,
             )
         });
-    // R5/R8: every cell gets a destructor (not just those whose filter would
-    // require a linear payload), since `drop` on any cell must free it.
+    // Every cell gets a destructor, not just those whose filter would
+    // require a linear payload: `drop` on any cell must free it.
     let cell_destructors = cells.payload.iter().enumerate().map(|(idx, _)| {
         synthesize_cell_destructor(
             OwnedCellId::from_index(idx),
@@ -921,7 +908,7 @@ pub fn synthesize_aggregate_destructors(
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
 /// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
 /// is disposed" stays in one place.
-#[allow(clippy::too_many_arguments)] // one struct's synthesis inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
@@ -959,7 +946,7 @@ fn synthesize_struct_destructor(
 /// fields are linear (an empty block that just returns), so the dispatch
 /// shape stays uniform regardless of which variants happen to carry a linear
 /// field.
-#[allow(clippy::too_many_arguments)] // one enum's synthesis inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
@@ -999,13 +986,9 @@ fn synthesize_enum_destructor(
     }
 }
 
-/// R5/R8 (Phase 4): synthesize owning-cell `id`'s destructor, called by `drop`
-/// on any value of that type: drop the payload first if it is linear (R5),
-/// then free the cell (R8), mirroring `synthesize_struct_destructor`. Reuses
-/// `load_owned_payload` (the same copy-out `^>` uses, R13) for uniformity
-/// with `^>` rather than out of necessity: the payload's destructor returns
-/// before the free runs, so dropping in place would read live storage too.
-#[allow(clippy::too_many_arguments)] // one cell's synthesis inputs; a bundle would obscure them
+/// Drop the payload first if it is linear, then free the cell, mirroring
+/// `synthesize_struct_destructor`.
+#[allow(clippy::too_many_arguments)]
 fn synthesize_cell_destructor(
     id: OwnedCellId,
     env: &HashMap<String, Arity>,
@@ -1067,7 +1050,7 @@ fn synthesize_cell_destructor(
 /// (the number of buffer bytes the epilogue actually wrote), so the caller
 /// sizes its buffer from the same numbers the wrapper uses rather than from a
 /// separately-computed depth that could in principle diverge.
-#[allow(clippy::too_many_arguments)] // one wrapper's marshalling inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 pub fn lower_line(
     seq: u64,
     terms: &[Term],
@@ -1227,7 +1210,7 @@ pub fn lower_line(
 /// Lower a single word body against an external env/resolver. The REPL uses
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
 /// so a definition compiles against previously-loaded words.
-#[allow(clippy::too_many_arguments)] // one word's lowering inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
@@ -1360,7 +1343,7 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
-    #[allow(clippy::too_many_arguments)] // the builder's threaded state; a bundle would obscure it
+    #[allow(clippy::too_many_arguments)]
     fn new(
         env: &'a HashMap<String, Arity>,
         resolve: Resolver<'a>,
@@ -1910,8 +1893,8 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// The `OwnedCellId` whose payload shape is `payload`: `^`'s target shape,
-    /// already interned by the checker (R11), found by structural match on
-    /// the combined registry, mirroring `array_id_of`.
+    /// already interned by the checker, found by structural match on the
+    /// combined registry, mirroring `array_id_of`.
     fn cell_id_of(&self, payload: IrType) -> OwnedCellId {
         let idx = self
             .cells
@@ -1924,7 +1907,7 @@ impl<'a> FuncBuilder<'a> {
 
     /// Alloc a fresh frame slot for aggregate `ty` (a `Struct`/`Enum`/`Array`),
     /// dispatching to the matching per-kind helper. Shared by a cell's
-    /// unwrap/peek, which must never alias the cell's own storage (R14).
+    /// unwrap/peek, which must never alias the cell's own storage.
     fn alloc_aggregate(&mut self, ty: IrType) -> Value {
         match ty {
             IrType::Struct(id) => self.alloc_struct(id),
@@ -1934,13 +1917,9 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Copy `payload_ty`'s value out of `cell_ptr` (R13/R14): a scalar payload
-    /// (including a nested cell, pointer-width like `Spy`) is a width-exact
-    /// `FieldLoad` directly off the cell pointer; an aggregate payload gets a
-    /// fresh frame `Alloc` and a `Blit` out, **never aliasing the cell** (a
-    /// later `drop`/`free` must not leave the caller holding a dangling
-    /// interior pointer); a zero-sized aggregate allocs (mirroring a bare
-    /// zero-field struct elsewhere) but blits nothing.
+    /// Never alias the cell: an aggregate payload gets a fresh frame slot and
+    /// a `Blit` out, so a later `free` never leaves the caller holding a
+    /// dangling interior pointer.
     fn load_owned_payload(&mut self, cell_ptr: Value, payload_ty: IrType) -> Value {
         match payload_ty {
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
@@ -1960,7 +1939,7 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Store `val` (of `payload_ty`) into the cell at `cell_ptr`: the mirror
-    /// of `load_owned_payload` (R14). A scalar payload is a width-exact
+    /// of `load_owned_payload`. A scalar payload is a width-exact
     /// `FieldStore`; an aggregate is a `Blit` from its frame slot; a
     /// zero-sized payload writes nothing.
     fn store_owned_payload(&mut self, cell_ptr: Value, val: Value, payload_ty: IrType) {
@@ -1975,16 +1954,8 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Lower one of the three owning-cell access words (R11-R14): `^`
-    /// allocates a cell sized to the popped payload's byte size and stores
-    /// the payload in (a scalar `FieldStore`, an aggregate `Blit`, nothing for
-    /// a zero-sized payload); `^>` is the mirror of construction plus release
-    /// — it **materialises the payload before freeing the cell** (R13), so
-    /// the freed pointer is never handed to the stack; `^|>` is `^>`'s
-    /// non-consuming sibling, leaving the cell live. The raw byte size passed
-    /// to `sooth_alloc`/`sooth_free` may be 0 (a zero-sized payload); the
-    /// shim itself applies the `max(size, 1)` adjustment (R15), so the IR
-    /// never special-cases it.
+    /// `^>` materialises the payload before freeing the cell, so the freed
+    /// pointer is never handed to the stack.
     fn lower_owned_cell_word(&mut self, name: &str) {
         match name {
             "^" => {
@@ -2022,8 +1993,8 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(val);
             }
             "^|>" => {
-                // Non-consuming (R11): the cell stays on the stack, the
-                // payload copy is pushed atop it.
+                // Non-consuming: the cell stays on the stack, the payload
+                // copy is pushed atop it.
                 let cell = *self.stack.last().expect("^|>: cell");
                 let id = match self.value_type(cell) {
                     IrType::OwnedCell(id) => id,
@@ -2175,9 +2146,9 @@ impl<'a> FuncBuilder<'a> {
             IrType::Spy => {
                 self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
             }
-            // R8: a cell always frees on drop, regardless of its payload's
-            // own linearity (the synthesized destructor drops a linear
-            // payload first).
+            // A cell always frees on drop, regardless of its payload's own
+            // linearity: the synthesized destructor drops a linear payload
+            // first.
             IrType::OwnedCell(id) => {
                 self.push_instr(Instr::Call(None, cell_drop_symbol(id), vec![v]));
             }

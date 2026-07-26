@@ -82,11 +82,10 @@ fn prepass_type_decls(
     Ok(decls)
 }
 
-/// R12a: a located error for a name reserved by the owning-cell syntax
-/// (`^`, `^>`, `^|>`, or any name beginning with `^`), used at all three
-/// declaration sites it can arise (a `type:` name, a `:` word name, a local
-/// binding) plus the REPL's own `type:`-line path (`repl.rs`), which reads its
-/// name outside this module's pre-pass.
+/// A located error for a name reserved by the owning-cell syntax (`^`, `^>`,
+/// `^|>`, or any name beginning with `^`), used at every declaration site it
+/// can arise: a `type:` name, a `:` word name, a local binding, or the
+/// REPL's own `type:`-line path.
 pub fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
     format!(
         "error: `{name}` is reserved for the owning-cell syntax (`^`, `^>`, `^|>`) and cannot be used as a {kind} name at line {}, col {}",
@@ -94,7 +93,7 @@ pub fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
     )
 }
 
-/// R12a: whether `name` collides with the owning-cell syntax (`^`, `^>`,
+/// Whether `name` collides with the owning-cell syntax (`^`, `^>`,
 /// `^|>`) or would shadow/be shadowed by it: any name beginning with `^` is
 /// reserved. Sooth has no notion of an identifier — a `type:`/`:` name or a
 /// local binding is otherwise just a bare word — so this is a plain prefix
@@ -354,10 +353,10 @@ struct Parser<'t> {
     /// `arrays` for a REPL line), so interning persists across REPL lines
     /// (R22/R23).
     arrays: &'t mut Vec<ArrayDecl>,
-    /// The interned owning-cell registry (R2), mirroring `arrays` for the
-    /// same reason: a `^T` shape has no declared name a pre-pass could
-    /// register ahead of time, so it grows during type-expression resolution
-    /// and persists across REPL lines exactly like `arrays`.
+    /// The interned owning-cell registry, mirroring `arrays` for the same
+    /// reason: a `^T` shape has no declared name a pre-pass could register
+    /// ahead of time, so it grows during type-expression resolution and
+    /// persists across REPL lines exactly like `arrays`.
     owned_cells: &'t mut Vec<OwnedCellDecl>,
 }
 
@@ -536,12 +535,11 @@ impl<'t> Parser<'t> {
             let ty = self.parse_array_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
-        // An owning-cell type is likewise nameless (R12a reserves every
-        // `^`-led word from local/slot-name position), so it too is
-        // recognised before the name-then-optional-`:type` read. But a
-        // `^`-led word immediately followed by `:` is the *name* half of a
-        // `name : type` slot (R7), not a bare owning-cell type expression;
-        // report the reserved-name error here rather than falling through to
+        // An owning-cell type is likewise nameless, so it too is recognised
+        // before the name-then-optional-`:type` read. But a `^`-led word
+        // immediately followed by `:` is the *name* half of a `name : type`
+        // slot, not a bare owning-cell type expression; report the
+        // reserved-name error here rather than falling through to
         // `parse_type_expr`, which would try to resolve the `:` itself as an
         // unknown type name.
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
@@ -566,7 +564,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// A type expression (R3, R19): a single word (scalar/struct/enum,
+    /// A type expression: a single word (scalar/struct/enum,
     /// resolved via `resolve_type`), a bracketed array type `[ elem count ]`
     /// (`elem` itself a type expression, nested arrays recurse), or a
     /// `^`-led owning-cell type (nested cells recurse the same way).
@@ -581,20 +579,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    /// The `^`-led owning-cell type-expression production (R12, R19): the
-    /// token is a run of one or more `^` optionally immediately followed by
-    /// more type-name text (`^i64`, `^^i64`, `^Point` lex as one word) or by
-    /// nothing (`^[u8 4]`/`^^[u8 4]` lex the `^`-run as its own word, since
-    /// `[` is a delimiter). The rule: strip the leading `^`-run; if the
-    /// remainder is empty, expect a following type expression (recursing into
-    /// the array-bracket case or a further `^`-run); otherwise resolve the
-    /// remainder as a type name directly. Each stripped `^` wraps the result
-    /// in one more interned owning-cell layer, innermost first, so `^^i64` is
-    /// two layers over `i64` and `^[u8 4]` is one layer over `[u8 4]`. A bare
-    /// `^`-run followed by `--` (the stack-effect separator) is a dedicated
-    /// located error naming the `^`-run itself; any other bare `^`-run with
-    /// nothing following surfaces as the ordinary located "expected a
-    /// word"/`[`-vs-word error from the recursive call.
+    /// `^` is not a lexer delimiter, so `^^i64` arrives as one word.
     fn parse_owning_cell_type_expr(&mut self) -> Result<Type, String> {
         let (word, span) = self.expect_word_any_spanned()?;
         let run_len = word.chars().take_while(|&c| c == '^').count();

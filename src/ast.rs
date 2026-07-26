@@ -25,13 +25,9 @@ pub struct Module {
     /// (`intern_array_type`), not by a name pre-pass: an array shape has no
     /// declared name to scan for ahead of parsing.
     pub arrays: Vec<ArrayDecl>,
-    /// The per-program interned owning-cell registry (R2): one entry per
-    /// distinct payload-type shape, indexed by `OwnedCellId` and deduped
-    /// structurally, mirroring `arrays`. Unlike `arrays` there is no count: a
-    /// cell holds exactly one value, so the dedup key is the payload type
-    /// alone. Populated during type resolution (`intern_owned_cell_type`),
-    /// not by a name pre-pass, for the same reason arrays aren't: a `^T`
-    /// shape has no declared name to scan for ahead of parsing.
+    /// The per-program interned owning-cell registry: one entry per distinct
+    /// payload-type shape, indexed by `OwnedCellId` and deduped structurally.
+    /// Unlike `arrays` there is no count: a cell holds exactly one value.
     pub owned_cells: Vec<OwnedCellDecl>,
 }
 
@@ -160,11 +156,9 @@ pub struct ArrayDecl {
 }
 
 /// A registered owning-cell type: its payload type and the leaked `&'static
-/// str` spelling `^T` every `Type::OwnedCell` naming it carries directly
-/// (mirrors `ArrayDecl::name_static`). Interned and deduped structurally by
-/// payload shape (R2): two spellings of the same payload share one
-/// `OwnedCellDecl`/`OwnedCellId`. Unlike `ArrayDecl` there is no count: the
-/// cell holds exactly one value.
+/// str` spelling `^T` every `Type::OwnedCell` naming it carries directly.
+/// Deduped structurally by payload shape; unlike `ArrayDecl` there is no
+/// count, since a cell holds exactly one value.
 #[derive(Debug)]
 pub struct OwnedCellDecl {
     pub payload: Type,
@@ -189,10 +183,8 @@ impl OwnedCellId {
 }
 
 /// Intern an owning-cell payload shape into `cells`, deduping structurally:
-/// two calls with the same payload type return the same `OwnedCellId` (R2).
-/// Mirrors `intern_array_type`; the caller threads `cells` as `&mut Vec` for
-/// the same reason: a cell shape (like an array shape) has no declared name a
-/// pre-pass could register ahead of parsing.
+/// two calls with the same payload type return the same `OwnedCellId`.
+/// Mirrors `intern_array_type`.
 pub fn intern_owned_cell_type(cells: &mut Vec<OwnedCellDecl>, payload: Type) -> Type {
     if let Some(idx) = cells.iter().position(|d| d.payload == payload) {
         return Type::OwnedCell(OwnedCellId::from_index(idx), cells[idx].name_static);
@@ -319,11 +311,10 @@ pub enum Type {
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
     Array(ArrayId, &'static str),
-    /// A single-value owning heap cell (R1, R2): a compiler-known type
-    /// constructor, not a generic, one interned registry entry per concrete
-    /// payload shape. Mirrors `Type::Array`: an `OwnedCellId` into the
-    /// interned payload registry plus the leaked `^T` spelling. Always
-    /// linear regardless of payload (R4): see `is_copy`.
+    /// A single-value owning heap cell: a compiler-known type constructor,
+    /// not a generic, one interned registry entry per concrete payload
+    /// shape. Mirrors `Type::Array`. Always linear regardless of payload;
+    /// see `is_copy`.
     OwnedCell(OwnedCellId, &'static str),
     /// The target-width unsigned integer (D7): distinct from every fixed-width
     /// `uN` in `INT_TYPES`, its size/align comes from the target word-width

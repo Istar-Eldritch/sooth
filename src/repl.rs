@@ -192,7 +192,7 @@ pub fn format_stack(
                 cell += size.div_ceil(8);
             }
             Type::Array(id, name) => {
-                // An array slot renders as its `<[T N]>` placeholder (D10),
+                // An array slot renders as its `<[T N]>` placeholder,
                 // reusing the aggregate-placeholder path, and advances the
                 // buffer by its inline aggregate's cell span.
                 vals.push(format!("<{name}>"));
@@ -200,12 +200,7 @@ pub fn format_stack(
                 cell += size.div_ceil(8);
             }
             Type::OwnedCell(_, name) => {
-                // A cell slot renders as its `<^T>` placeholder rather than
-                // the live heap address it holds (R10: an address defeats an
-                // exact transcript, and here it would be a nondeterministic
-                // one at that). It advances one 8-byte carried cell like any
-                // other scalar (`carried_slot_bytes` = 8), not a pointer's
-                // width, so this is not a second width site to retrofit.
+                // An address is nondeterministic, so print a placeholder.
                 vals.push(format!("<{name}>"));
                 cell += 1;
             }
