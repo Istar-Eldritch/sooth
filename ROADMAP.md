@@ -349,11 +349,15 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    allocation and per free**, so it sits on the permanent allocator path in release builds,
    not merely a test path; caching it needs a mutable global, which has no precedent in the
    emitter.
-   **Deferred cleanup now overdue**: threading a fourth registry took
-   `#[allow(clippy::too_many_arguments)]` from 3 to 14 sites, all passing the same
-   `structs`/`enums`/`arrays`/`cells` bundle with nothing consuming a subset. The IR backend
-   already has the pattern (a `Copy` `Layouts` handle). Bundling removes 11 suppressions and
-   ~60 lines of pure threading; doing it before slice 3 avoids a fifteenth.
+   **Registry bundling done post-merge**: `ir.rs` threaded `structs`/`enums`/`arrays`/`cells`
+   as four separate references through 7 functions, all passing the identical quartet with
+   nothing consuming a subset; bundled into one `Registries` handle (`Copy`, mirroring the
+   backend's `Layouts`), which removed every `#[allow(clippy::too_many_arguments)]` in
+   `ir.rs` (three were already no-ops, found by removing all of them and reading which
+   functions clippy actually flagged). `check.rs`'s four equivalent parameters were *not*
+   bundled: `arrays`/`cells` are `&mut` there (interned during checking) while
+   `structs`/`enums` are `&`, so there is no single handle, and its highest-arity function
+   stays over threshold on its own real parameters regardless.
 3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
    content, now with a home: recursive enums/structs need the heap indirection slice 2
    provides. **Revisit slice 2's OOM-traps-and-aborts decision here**: this is the slice
