@@ -325,6 +325,10 @@ pub enum Type {
     /// `usize` position without an explicit `>usize`) lives in `check.rs`, not
     /// here, since `Type` carries no notion of "fresh literal".
     Usize,
+    /// The target-width *signed* integer, mirroring `Usize` exactly: same
+    /// word-width-derived size/align, same D8 literal-coercion carve-out, but
+    /// prints and computes as signed.
+    Isize,
     /// The test-only linear drop-spy primitive, spelled `__spy`: carries an
     /// `i64` tag, and its compiler-known destructor prints `drop <tag>`, so
     /// drop count, order, and timing are golden-observable.
@@ -397,6 +401,9 @@ impl Type {
         if name == "usize" {
             return Some(Type::Usize);
         }
+        if name == "isize" {
+            return Some(Type::Isize);
+        }
         if name == SPY_NAME {
             return Some(Type::Spy);
         }
@@ -418,7 +425,7 @@ impl Type {
     /// `bool`): every integer-tower operator (`mod`/`and`/`or`/`xor`/`not`/
     /// `shl`/`shr`) admits `usize` alongside the fixed widths (D7).
     pub fn is_int(&self) -> bool {
-        matches!(self, Type::Int(_) | Type::Usize)
+        matches!(self, Type::Int(_) | Type::Usize | Type::Isize)
     }
 
     /// Whether this type is one of the two float types.
@@ -454,6 +461,7 @@ impl Type {
             Type::Array(_, name) => name,
             Type::OwnedCell(_, name) => name,
             Type::Usize => "usize",
+            Type::Isize => "isize",
             Type::Spy => SPY_NAME,
         }
     }
@@ -546,6 +554,7 @@ mod tests {
     fn type_display_roundtrip_expected() {
         let names = [
             "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "f32", "f64", "bool", "usize",
+            "isize",
         ];
         for name in names {
             let ty = Type::from_name(name).unwrap();
@@ -571,6 +580,27 @@ mod tests {
     fn type_usize_distinct_from_every_int_width() {
         for name in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
             assert_ne!(Type::Usize, Type::from_name(name).unwrap());
+        }
+    }
+
+    #[test]
+    fn type_from_name_isize_expected() {
+        assert_eq!(Type::from_name("isize"), Some(Type::Isize));
+    }
+
+    #[test]
+    fn type_isize_is_int_and_numeric_not_float() {
+        assert!(Type::Isize.is_int());
+        assert!(Type::Isize.is_numeric());
+        assert!(!Type::Isize.is_float());
+        assert!(!Type::Isize.is_bool());
+    }
+
+    #[test]
+    fn type_isize_distinct_from_usize_and_every_int_width() {
+        assert_ne!(Type::Isize, Type::Usize);
+        for name in ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64"] {
+            assert_ne!(Type::Isize, Type::from_name(name).unwrap());
         }
     }
 

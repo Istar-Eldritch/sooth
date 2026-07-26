@@ -26,7 +26,8 @@ Prerequisite state: Slice 1 is merged (`f8c48da`). 588 tests green.
   payload does not make the cell Copy. It composes into structs and enums for free via
   Slice 1's transitive propagation, and a struct containing one is linear.
 - **D4 — A `Owned[T]` may hold a linear payload.** `Owned[__spy]` is legal and its
-  disposal must drop the payload *then* free the cell, in that order (observable). This is
+  disposal must free the cell *then* drop the payload, in that order (observable; reversed
+  in Phase 3 Slice 3, R8). This is
   deliberately unlike the linear-*array*-element case that Slice 1 rejected: an array
   needs an element-wise drop loop, whereas a cell has exactly one payload and the existing
   synthesized-destructor mechanism handles it directly.
@@ -77,7 +78,7 @@ The owning cell is spelled with a `^` sigil, in both type and term position:
 | construct | `^` | `( T -- ^T )`, moves the value onto the heap |
 | unwrap (consuming) | `^>` | `( ^T -- T )`, frees the cell |
 | peek (non-consuming) | `^\|>` | `( ^T -- ^T T )`, **Copy payload only** |
-| dispose | `drop` | frees the cell, dropping a linear payload first |
+| dispose | `drop` | frees the cell, then drops a linear payload (Phase 3 Slice 3, R8) |
 
 Chosen over a `Owned[T]` word form, and over `Owned<T>`, for composition: `^` nests
 *with* the leading-bracket array convention rather than against it, so owned-of-array and
@@ -129,8 +130,8 @@ and buffer cases reading well, which is where most real use will land.
 6. Peek reads a Copy payload without consuming the cell; peeking twice then disposing
    yields exactly one free.
 7. Peek of a **linear** payload is a compile error.
-8. `Owned[__spy]`: disposal drops the payload **then** frees, order asserted via the spy's
-   printed tag interleaved with the counter.
+8. `Owned[__spy]`: disposal frees **then** drops the payload (reversed in Phase 3 Slice 3,
+   R8), order asserted via the spy's printed tag interleaved with the counter.
 9. An `Owned` inside a struct makes the struct linear; dropping the struct frees the cell.
 10. `Owned[[u8 N]]` as a fixed-capacity heap buffer: allocate, write, read back, free once.
 11. REPL `:quit` frees a residual `Owned` (counts balance at session end).
@@ -148,8 +149,8 @@ and buffer cases reading well, which is where most real use will land.
   (and merely unread outside tests) or gated; always-emitted is simpler and keeps one code
   path, but must not change observable stdout for existing goldens.
 - **Drop ordering with a linear payload** (D4) is observable and therefore a contract:
-  payload first, then free. Pin it in a golden, do not let it fall out of implementation
-  order.
+  free first, then the payload (reversed in Phase 3 Slice 3, R8, for uniformity across every
+  cell). Pin it in a golden, do not let it fall out of implementation order.
 - **`Owned` of a zero-sized payload**, if such a type is constructible, needs a defined
   answer rather than a `malloc(0)` accident.
 - **OOM is hard to test** without exhausting memory. A huge single allocation is the

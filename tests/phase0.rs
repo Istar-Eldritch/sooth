@@ -1209,6 +1209,37 @@ fn usize_arithmetic_comparison_and_conversion_native() {
     assert_eq!(code, 0);
 }
 
+// Phase 3 slice 3, phase 1 (R1): `isize` mirrors `usize` end to end.
+
+#[test]
+fn isize_round_trips_arithmetic_and_conversion() {
+    // Criterion 1: `isize` arithmetic and comparison, `>isize` on a computed
+    // value, an `isize`->`i64` conversion, type-directed `.` printing signed
+    // (a negative result must print as negative, unlike `usize`'s `%lu`), and
+    // a bare literal coercing into an `isize` position without `>isize` (D8).
+    // Comparisons and the shift both include a negative operand so a
+    // wrongly-unsigned codegen arm (falling through past `Isize`) would flip
+    // the result instead of silently agreeing with the signed answer.
+    let src = ": main ( -- )\n\
+  2 3 + >isize 4 >isize + .\n\
+  3 >isize 10 >isize - .\n\
+  3 >isize 5 >isize < .\n\
+  5 >isize 3 >isize < .\n\
+  0 >isize 5 >isize - 1 >isize < .\n\
+  0 >isize 5 >isize - 0 >isize > .\n\
+  0 >isize 8 >isize - 1 shr .\n\
+  0 >isize 7 >isize - 2 >isize mod .\n\
+  7 >isize >i64 1 + .\n\
+  9 >isize dup . drop ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-isize-tower-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "9\n-7\ntrue\nfalse\ntrue\nfalse\n-4\n-1\n8\n9\n");
+    assert_eq!(code, 0);
+}
+
 #[test]
 fn fill_constructs_and_get_reads_every_element_back_native() {
     // Criterion 3: `fill` an `[i64 N]`, then read every element back via
@@ -2441,12 +2472,26 @@ fn peek_owned_copy_payload_keeps_cell_live() {
 }
 
 #[test]
-fn owned_linear_payload_drops_before_free() {
-    // Criterion 8: `^__spy` disposal. The transcript is `drop 7` *then*
-    // `free 8`, one stdout stream so the order is real (R5: the payload
-    // drops before the cell frees).
+fn owned_linear_payload_frees_before_dropping_payload() {
+    // Criterion 8: `^__spy` disposal. The transcript is `free 8` *then*
+    // `drop 7`, one stdout stream so the order is real (R8: the cell frees
+    // before the payload's own destructor runs).
     let stdout = run_owned_traced_golden("spy-payload", ": main ( -- )\n  7 __spy ^ drop ;\n");
-    assert_eq!(stdout, "alloc 8\ndrop 7\nfree 8\n");
+    assert_eq!(stdout, "alloc 8\nfree 8\ndrop 7\n");
+}
+
+#[test]
+fn owned_aggregate_payload_frees_before_dropping_fields() {
+    // Criterion 6: R8 ordering for an aggregate payload (a struct with a
+    // linear field) held in a cell, the `Blit`-into-a-frame-slot arm of
+    // `load_owned_payload`, where freeing early is most likely to bite. The
+    // cell frees (`free 16`) before the copied-out struct's own destructor
+    // drops its linear field (`drop 1`).
+    let stdout = run_owned_traced_golden(
+        "aggregate-payload",
+        "type: Holds a __spy b i64 ;\n: main ( -- )\n  1 __spy 2 Holds ^ drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 16\nfree 16\ndrop 1\n");
 }
 
 #[test]
@@ -2477,13 +2522,13 @@ false if 9 ^ Full else Empty end drop ;\n",
 }
 
 #[test]
-fn nested_owned_frees_inner_before_outer() {
+fn nested_owned_frees_outer_before_inner() {
     // Criterion 11: `^^[u8 24]`. The inner and outer sizes are deliberately
     // distinct (24 vs. the pointer-width 8) so the transcript order proves
-    // the inner cell frees *before* the outer one; equal sizes could not
+    // the outer cell frees *before* the inner one (R8); equal sizes could not
     // distinguish that from the reverse.
     let stdout = run_owned_traced_golden("nested", ": main ( -- )\n  0 >u8 24 fill ^ ^ drop ;\n");
-    assert_eq!(stdout, "alloc 24\nalloc 8\nfree 24\nfree 8\n");
+    assert_eq!(stdout, "alloc 24\nalloc 8\nfree 8\nfree 24\n");
 }
 
 #[test]
@@ -2541,4 +2586,372 @@ fn caret_field_suffix_is_unknown_word() {
     let err = linear_check_error(": main ( -- )\n  5 ^ ^|>x ;\n");
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("^|>x"), "unexpected message: {err}");
+}
+
+// Phase 3 slice 3: recursion through `^` and the fused iterative destructor
+// (R11-R16). A directly self-recursive type disposes in one loop over the
+// reused frame slot instead of a `cell_drop`/`enum_drop` pair per node.
+
+/// Like `run_owned_memory_bounded_golden`, but bounding the *stack* rather
+/// than the address space: 1 MB via `ulimit -s`, the budget a per-node
+/// recursive destructor blows long before a million nodes. Returns the exit
+/// code, or `None` when the child died by signal (a stack overflow is a
+/// SIGSEGV, which the shared `run_binary` would `expect` away as a panic
+/// naming the wrong thing).
+fn run_stack_bounded_golden(tag: &str, src: &str) -> Option<i32> {
+    let path = std::env::temp_dir().join(format!("sooth-deep-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    // `exec` replaces the shell, so the child's signal death propagates as the
+    // shell's own status rather than being flattened into an exit code.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -s 1024 && exec \"{}\"", binary.display()))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .status()
+        .expect("binary should run");
+    status.code()
+}
+
+/// A million-node list, built by a self-tail-recursive word (so building is
+/// already constant-stack under Slice 6's TCO) and disposed by one `drop`.
+const DEEP_LIST_SRC: &str = "type: List | Nil | Cons v i64 next ^List ;\n\
+: build ( i64 List -- List )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - n acc ^ Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+
+#[test]
+fn deep_list_disposes_in_constant_stack() {
+    // Criterion 8 (R11): a 1,000,000-node list disposes under a 1 MB stack.
+    // Verified to fail before the fused loop existed (R21): the pre-change
+    // compiler segfaults on this program at 1 MB, 8 MB and 64 MB alike, so
+    // the pass cannot be vacuous.
+    assert_eq!(
+        run_stack_bounded_golden("list", DEEP_LIST_SRC),
+        Some(0),
+        "a 1M-node list should dispose in constant stack, not overflow it"
+    );
+}
+
+#[test]
+fn recursive_list_disposes_in_expected_order() {
+    // Criterion 5: a list with a `__spy` per node builds, walks one node off
+    // the front (printing its value, dropping its spy, unwrapping its tail),
+    // and disposes the remainder through the loop. The trace is rooted at the
+    // bare `List` value, not a `^List`, so no line of it depends on the cell
+    // destructor's own free ordering.
+    let stdout = run_owned_traced_golden(
+        "recursive-list",
+        "type: List | Nil | Cons v i64 tag __spy next ^List ;\n\
+: push-front ( List i64 -- List )\n  \
+  | rest v |\n  \
+  v v __spy rest ^ Cons ;\n\
+: step ( List -- List )\n\
+| Nil    Nil\n\
+| Cons   | v t n |  v . t drop n ^>\n\
+;\n\
+: main ( -- )\n  \
+  Nil 3 push-front 2 push-front 1 push-front\n  \
+  step drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\n1\ndrop 1\nfree 32\ndrop 2\nfree 32\ndrop 3\nfree 32\n"
+    );
+}
+
+#[test]
+fn recursive_disposal_is_pre_order() {
+    // Criterion 9 (R10): a node's own spy drops before the next node is even
+    // reached, so the tags come out `1, 2, 3`. Post-order disposal (the
+    // deepest node first, which is what the pre-slice compiler did before R8
+    // reversed the cell ordering) would print `3, 2, 1`, and equal tags could
+    // not tell the two apart.
+    let stdout = run_owned_traced_golden(
+        "pre-order",
+        "type: L | Nil | Cons tag __spy next ^L ;\n\
+: push-front ( L i64 -- L )\n  \
+  | rest v |\n  \
+  v __spy rest ^ Cons ;\n\
+: main ( -- )\n  \
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\n"
+    );
+}
+
+#[test]
+fn recursive_destructor_reads_node_before_overwriting_slot() {
+    // Criterion 10 (R12): the recursive field is declared *first*, with two
+    // distinct spies after it. The loop reuses one frame slot, so the copy-out
+    // of the next node overwrites the current one; emitting the fields in
+    // declaration order instead would drop the spies of whatever node the slot
+    // happened to hold, printing garbage tags (or repeating a node's) while
+    // leaving the alloc/free trace perfectly balanced. Only the tags catch it.
+    let stdout = run_owned_traced_golden(
+        "copyout-order",
+        "type: L | Nil | Cons next ^L a __spy b __spy ;\n\
+: push-front ( L i64 -- L )\n  \
+  | rest v |\n  \
+  rest ^ v __spy v 1 + __spy Cons ;\n\
+: main ( -- )\n  \
+  Nil 5 push-front 3 push-front 1 push-front drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\n\
+drop 1\ndrop 2\nfree 32\ndrop 3\ndrop 4\nfree 32\ndrop 5\ndrop 6\nfree 32\n"
+    );
+}
+
+#[test]
+fn non_recursive_cell_shapes_are_not_treated_as_recursive() {
+    // Criterion 11 (R13/R15): three near misses for the detection pass, each
+    // of which must keep straight-line synthesis. A false positive would blit
+    // the enclosing type's bytes out of a cell that does not hold one, so the
+    // spy tags and the sizes are both load-bearing: `Outer` holds a cell of a
+    // *different* struct, `Twice` is a `^^__spy` whose inner payload is a cell
+    // rather than the enclosing type (the `^^Self` near miss), and `Holder`
+    // holds a cell of an unrelated enum.
+    let stdout = run_owned_traced_golden(
+        "near-miss",
+        "type: Inner t __spy ;\n\
+type: Outer c ^Inner ;\n\
+type: Twice c ^^__spy ;\n\
+type: Payload | A t __spy | B ;\n\
+type: Holder c ^Payload ;\n\
+: main ( -- )\n  \
+  1 __spy Inner ^ Outer drop\n  \
+  2 __spy ^ ^ Twice drop\n  \
+  3 __spy A ^ Holder drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 8\nfree 8\ndrop 1\n\
+alloc 8\nalloc 8\nfree 8\nfree 8\ndrop 2\n\
+alloc 16\nfree 16\ndrop 3\n"
+    );
+}
+
+#[test]
+fn self_recursive_struct_destructor_compiles() {
+    // Criterion 15 (R16): a self-recursive struct is uninhabited (a `^` is
+    // non-null, so building one needs one first), but a destructor is
+    // synthesized for every declared type, so the declaration alone emits a
+    // loop with no exit. That is a legal QBE function, but only if the
+    // trailing `Ret` is skipped: an unconditional seal after the back-edge
+    // emits a duplicate block label and QBE rejects the whole module.
+    let stdout = run_owned_golden(
+        "self-recursive-struct",
+        "type: Cyclic v __spy next ^Cyclic ;\n: main ( -- )\n  0 . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+// Phase 3 slice 3, phase 5: multi-child and mutually recursive types (R17,
+// R18), the documented depth limitations (R14), and the `list.sth` dogfood.
+// A tree node's two `^` fields are both recursive edges (R13's detection
+// still fires per field, not per type), so `recursive_loop_field` (R17)
+// picks the *last* declared one for the loop and the rest fall back to an
+// ordinary recursive drop call.
+
+#[test]
+fn recursive_tree_builds_and_disposes() {
+    // Criterion 12: a 7-node perfect binary tree (tags 1..7, pre-order:
+    // root=1, left subtree rooted at 2 with leaves 4/5, right subtree rooted
+    // at 3 with leaves 6/7) builds and disposes with every tag distinct, so
+    // no drop can be mistaken for a sibling's. R10's pre-order contract still
+    // holds per node (a node's own tag drops before its children are
+    // reached); the *last* field (`right`) is the looped one, so a node's
+    // `left` subtree is fully disposed by an ordinary recursive call before
+    // the loop steps to `right`.
+    let stdout = run_owned_traced_golden(
+        "tree-7",
+        "type: Tree | Leaf | Node tag __spy left ^Tree right ^Tree ;\n\
+: main ( -- )\n  \
+  1 __spy\n  \
+  2 __spy\n    \
+    4 __spy Leaf ^ Leaf ^ Node ^\n    \
+    5 __spy Leaf ^ Leaf ^ Node ^\n    \
+    Node ^\n  \
+  3 __spy\n    \
+    6 __spy Leaf ^ Leaf ^ Node ^\n    \
+    7 __spy Leaf ^ Leaf ^ Node ^\n    \
+    Node ^\n  \
+  Node drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
+alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
+drop 1\nfree 32\ndrop 2\nfree 32\ndrop 4\nfree 32\nfree 32\nfree 32\n\
+drop 5\nfree 32\nfree 32\nfree 32\ndrop 3\nfree 32\ndrop 6\nfree 32\nfree 32\n\
+free 32\ndrop 7\nfree 32\nfree 32\n"
+    );
+}
+
+#[test]
+fn multi_child_destructor_loops_on_last_recursive_field() {
+    // Criterion 13a: a 3-node tree (root=1, left leaf-child=2, right
+    // leaf-child=3) whose fields are declared `tag`, `left`, `right`. Looping
+    // the *last* field (`right`) prints tags `1, 2, 3`: root's own tag drops,
+    // then `left` (non-looped) is fully recursively disposed (tag 2), then
+    // the loop frees root's own cell and steps to `right` (tag 3). Looping
+    // the *first* field instead would recurse `right` before stepping to
+    // `left`, printing `1, 3, 2` (R17 names this exact contrast).
+    let stdout = run_owned_traced_golden(
+        "tree-order",
+        "type: Tree | Leaf | Node tag __spy left ^Tree right ^Tree ;\n\
+: main ( -- )\n  \
+  1 __spy\n  \
+  2 __spy Leaf ^ Leaf ^ Node ^\n  \
+  3 __spy Leaf ^ Leaf ^ Node ^\n  \
+  Node drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
+drop 1\nfree 32\ndrop 2\nfree 32\nfree 32\nfree 32\ndrop 3\nfree 32\nfree 32\n"
+    );
+}
+
+#[test]
+fn deep_right_leaning_tree_disposes_in_constant_stack() {
+    // Criterion 13b: 13a alone would also pass on a compiler that never
+    // builds a multi-child loop at all (it only distinguishes traversal
+    // order); a 1,000,000-node right-leaning tree disposing under a 1 MB
+    // stack is what proves the loop exists, exactly as criterion 8 does for
+    // the list. Each node's `left` is a fresh `Leaf` and `right` is the
+    // growing chain, so the loop (on the last field, `right`) takes the deep
+    // path and the non-looped `left` recursion never grows past depth 1.
+    let src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
+: build ( i64 Tree -- Tree )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - Leaf ^ acc ^ Node build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Leaf build drop ;\n";
+    assert_eq!(
+        run_stack_bounded_golden("right-tree", src),
+        Some(0),
+        "a 1M-node right-leaning tree should dispose in constant stack, not overflow it"
+    );
+}
+
+#[test]
+fn mutually_recursive_types_dispose_on_recursive_path() {
+    // Criterion 14: mutually recursive types keep today's recursive
+    // destructor (R18); no fused loop spans a multi-type cycle. First, a
+    // small A/B chain (base case in `A`, since an all-struct or all-linked
+    // pair with no base variant would be uninhabited per R5) disposes with
+    // the correct trace, alternating tags between the two types. Then a
+    // chain deep enough to overflow a 1 MB stack (300,000 nodes; the direct
+    // list already passes at 1,000,000 under the same bound) proves the
+    // fused-loop path was *not* taken for this shape.
+    let stdout = run_owned_traced_golden(
+        "mutual-small",
+        "type: A | ANil | ACons tag __spy next ^B ;\n\
+type: B | BNil | BCons tag __spy next ^A ;\n\
+: build ( i64 A -- A )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 -\n    \
+    n __spy acc ^ BCons ^\n    \
+    n __spy swap ACons\n    \
+    build\n  \
+  end ;\n\
+: main ( -- )\n  3 ANil build drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
+drop 1\nfree 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 2\nfree 24\n\
+drop 3\nfree 24\ndrop 3\nfree 24\n"
+    );
+
+    let deep_src = "type: A | ANil | ACons tag __spy next ^B ;\n\
+type: B | BNil | BCons tag __spy next ^A ;\n\
+: build ( i64 A -- A )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 -\n    \
+    n __spy acc ^ BCons ^\n    \
+    n __spy swap ACons\n    \
+    build\n  \
+  end ;\n\
+: main ( -- )\n  300000 ANil build drop ;\n";
+    assert_ne!(
+        run_stack_bounded_golden("mutual-deep", deep_src),
+        Some(0),
+        "a mutually recursive chain should still overflow a 1 MB stack: the \
+         fallback fused-loop-less recursive path was proven to be taken"
+    );
+}
+
+#[test]
+fn indirect_recursion_shapes_remain_depth_limited() {
+    // Criterion 16: the limitation boundary is an *asymmetry*, not merely
+    // "disposes at modest depth" (already true pre-slice and passable
+    // vacuously). At 1,000,000 nodes under a 1 MB stack, the directly
+    // self-recursive list exits 0 (already proven by
+    // `deep_list_disposes_in_constant_stack`) while a wrapper-struct list
+    // (the `^` reached through an intervening struct) and a left-leaning
+    // tree (the loop takes the *last* field, so a chain grown through the
+    // *first* field stays on the recursive path) do not.
+    let wrapper_src = "type: Wrap v i64 n ^List ;\n\
+type: List | Nil | Cons w Wrap ;\n\
+: build ( i64 List -- List )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - n acc ^ Wrap Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+    assert_ne!(
+        run_stack_bounded_golden("wrapper-list", wrapper_src),
+        Some(0),
+        "indirection through a wrapper struct should stay depth-limited"
+    );
+
+    let left_leaning_src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
+: build ( i64 Tree -- Tree )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - acc ^ Leaf ^ Node build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Leaf build drop ;\n";
+    assert_ne!(
+        run_stack_bounded_golden("left-tree", left_leaning_src),
+        Some(0),
+        "a left-leaning tree should stay depth-limited: the loop takes the \
+         last field (`right`), not the chain-growing first field (`left`)"
+    );
+}
+
+#[test]
+fn example_list_matches_golden() {
+    // Criterion 17: `examples/list.sth` builds a list, sums the first three
+    // nodes off the front via a consuming walk (`pop`/`sum-first`), then
+    // `drop`s the remaining seven nodes through the fused destructor loop
+    // — both a walk and a disposal, not disposal alone.
+    let (stdout, code) = run_and_capture_stdout("examples/list.sth");
+    assert_eq!(stdout, "6\n");
+    assert_eq!(code, 0);
 }

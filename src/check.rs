@@ -67,16 +67,26 @@ impl Slot {
     }
 }
 
+/// Whether `ty` is one of the two target-width size types (`usize`/`isize`):
+/// both share the D8 literal-coercion carve-out against a bare `i64`
+/// literal, so `match_slot`/`unify_pair` gate on this rather than on `Usize`
+/// alone. `usize` and `isize` never coerce into *each other* here: the guard
+/// only ever fires against `Type::I64`, so mixing the two size types falls
+/// through to a plain mismatch, naming both backticked types.
+fn is_size_type(ty: Type) -> bool {
+    matches!(ty, Type::Usize | Type::Isize)
+}
+
 /// The outcome of matching one `Slot` against a single expected `Type`
 /// (a word-call argument, a declared output slot, or a binary operator's
 /// second operand once the first has picked a target type): exact, D8's
-/// literal coercion into a `usize` position, the specific "needs `>usize`"
-/// diagnostic (X10) for a *computed* value in that position, or a plain
-/// mismatch.
+/// literal coercion into a `usize`/`isize` position, the specific "needs an
+/// explicit conversion" diagnostic (X10) for a *computed* value in that
+/// position, or a plain mismatch.
 enum SlotMatch {
     Exact,
-    LiteralUsize,
-    NeedsUsizeConversion,
+    LiteralSizeType,
+    NeedsSizeConversion,
     Mismatch,
 }
 
@@ -84,11 +94,11 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
     if found.ty == want {
         return SlotMatch::Exact;
     }
-    if want == Type::Usize && found.ty == Type::I64 {
+    if is_size_type(want) && found.ty == Type::I64 {
         return if found.literal {
-            SlotMatch::LiteralUsize
+            SlotMatch::LiteralSizeType
         } else {
-            SlotMatch::NeedsUsizeConversion
+            SlotMatch::NeedsSizeConversion
         };
     }
     SlotMatch::Mismatch
@@ -96,12 +106,13 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
 
 /// The result of unifying two `Slot`s for a homogeneous binary operator
 /// (`+ - * = < > <= >= <> mod and or xor`): the operands' common `Type` once
-/// D8's literal coercion is applied (a `usize` paired with a bare integer
-/// literal unifies to `usize`), the X10 diagnostic's target for a `usize`
-/// paired with a *computed* `i64` instead, or a plain mismatch.
+/// D8's literal coercion is applied (a `usize`/`isize` paired with a bare
+/// integer literal unifies to that size type), the X10 diagnostic's target
+/// type for a size type paired with a *computed* `i64` instead, or a plain
+/// mismatch.
 enum PairMatch {
     Ok(Type),
-    NeedsUsizeConversion,
+    NeedsSizeConversion(Type),
     Mismatch,
 }
 
@@ -110,9 +121,9 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
         return PairMatch::Ok(a.ty);
     }
     match (a.ty, b.ty) {
-        (Type::Usize, Type::I64) if b.literal => PairMatch::Ok(Type::Usize),
-        (Type::I64, Type::Usize) if a.literal => PairMatch::Ok(Type::Usize),
-        (Type::Usize, Type::I64) | (Type::I64, Type::Usize) => PairMatch::NeedsUsizeConversion,
+        (w, Type::I64) if is_size_type(w) && b.literal => PairMatch::Ok(w),
+        (Type::I64, w) if is_size_type(w) && a.literal => PairMatch::Ok(w),
+        (w, Type::I64) | (Type::I64, w) if is_size_type(w) => PairMatch::NeedsSizeConversion(w),
         _ => PairMatch::Mismatch,
     }
 }
@@ -497,13 +508,20 @@ struct RecursionState {
 }
 
 /// The frontend `Type` of a field, mapped to a graph node (a scalar has no
-/// edge).
+/// edge). By-value containment is the only edge kind this graph models: a
+/// struct field, enum variant field or array element of type `T` makes `T`
+/// part of the enclosing type's size, so a cycle through any of them is
+/// infinite size. `OwnedCell` is excluded **deliberately, not by
+/// fall-through**: a `^T` field is a heap pointer, not an inline copy of
+/// `T`, so it can close a cycle without making the type infinite, and the
+/// recursion rule is exactly "every cycle passes through at least one `^`".
 fn type_node(ty: &Type) -> Option<TypeNode> {
     match ty {
         Type::Struct(id, _) => Some(TypeNode::Struct(id.index())),
         Type::Enum(id, _) => Some(TypeNode::Enum(id.index())),
         Type::Array(id, _) => Some(TypeNode::Array(id.index())),
-        _ => None,
+        Type::OwnedCell(_, _) => None,
+        Type::Int(_) | Type::Float(_) | Type::Bool | Type::Usize | Type::Isize | Type::Spy => None,
     }
 }
 
@@ -835,11 +853,11 @@ fn check_outputs(
     }
     for (found, want) in final_stack.iter().zip(declared) {
         match match_slot(*found, *want) {
-            SlotMatch::Exact | SlotMatch::LiteralUsize => {}
-            SlotMatch::NeedsUsizeConversion => {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            SlotMatch::NeedsSizeConversion => {
                 return Err(format!(
-                    "error: type mismatch in `{}` (line {})\n  body leaves a computed `i64` where the declaration requires `usize`: convert it explicitly with `>usize` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
-                    word.name, line, effect_str(&word.effect),
+                    "error: type mismatch in `{}` (line {})\n  body leaves a computed `i64` where the declaration requires `{}`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
+                    word.name, line, want, want, effect_str(&word.effect),
                 ));
             }
             SlotMatch::Mismatch => {
@@ -1527,19 +1545,20 @@ fn check_linear_locals_consumed(
     }
 }
 
-/// A `usize` position (a binary operator's other operand, a word-call
-/// argument, or a declared output) fed a *computed* (non-literal) `i64`
-/// (X10): unlike a bare integer literal, a computed value doesn't
-/// silently coerce, since Sooth has no comptime interpreter to fold it
-/// and confirm it fits; names the missing `>usize` conversion explicitly.
-fn usize_conversion_needed_error(ctx: &Ctx, span: Span, op: &str) -> String {
+/// A `usize`/`isize` position (a binary operator's other operand, a
+/// word-call argument, or a declared output) fed a *computed* (non-literal)
+/// `i64` (X10): unlike a bare integer literal, a computed value doesn't
+/// silently coerce, since Sooth has no comptime interpreter to fold it and
+/// confirm it fits; names the missing `>usize`/`>isize` conversion
+/// explicitly, naming whichever size type `target` is.
+fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` mixes `usize` with a computed `i64`: convert it explicitly with `>usize` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
-            name, span.line, op, effect_str(effect),
+            "error: type mismatch in `{}` (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
+            name, span.line, op, target, target, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: type mismatch: `{op}` mixes `usize` with a computed `i64`: convert it explicitly with `>usize` first"
+            "error: type mismatch: `{op}` mixes `{target}` with a computed `i64`: convert it explicitly with `>{target}` first"
         ),
     }
 }
@@ -1681,9 +1700,9 @@ fn check_term(
             for (i, want) in sig.inputs.iter().enumerate() {
                 let found = stack[base + i];
                 match match_slot(found, *want) {
-                    SlotMatch::Exact | SlotMatch::LiteralUsize => {}
-                    SlotMatch::NeedsUsizeConversion => {
-                        return Err(usize_conversion_needed_error(ctx, span, name));
+                    SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                    SlotMatch::NeedsSizeConversion => {
+                        return Err(size_conversion_needed_error(ctx, span, name, *want));
                     }
                     SlotMatch::Mismatch => {
                         return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
@@ -1748,7 +1767,8 @@ fn check_term(
                 // A merged slot is a coercible literal only if *both* arms
                 // leave a literal there: a value computed on either runtime
                 // path is computed after the merge, so it can't silently fill
-                // a `usize` position without `>usize` (D8/X10).
+                // a `usize`/`isize` position without an explicit conversion
+                // (D8/X10).
                 merged.push(Slot {
                     ty: t_then.ty,
                     literal: t_then.literal && t_else.literal,
@@ -1794,14 +1814,15 @@ fn check_operator(
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     // Unify a homogeneous binary op's operand pair, honoring D8's literal
-    // coercion (`Ok`); `Err(true)` is the `usize`/computed-`i64` X10 case,
-    // `Err(false)` is a plain mismatch the caller reports with its own
-    // op-specific diagnostic.
-    let unify = |a: Slot, b: Slot| -> Result<Type, bool> {
+    // coercion (`Ok`); `Err(Some(target))` is the size-type/computed-`i64`
+    // X10 case, naming which size type (`usize`/`isize`) needed the explicit
+    // conversion; `Err(None)` is a plain mismatch the caller reports with its
+    // own op-specific diagnostic.
+    let unify = |a: Slot, b: Slot| -> Result<Type, Option<Type>> {
         match unify_pair(a, b) {
             PairMatch::Ok(ty) => Ok(ty),
-            PairMatch::NeedsUsizeConversion => Err(true),
-            PairMatch::Mismatch => Err(false),
+            PairMatch::NeedsSizeConversion(target) => Err(Some(target)),
+            PairMatch::Mismatch => Err(None),
         }
     };
     match name {
@@ -1814,12 +1835,9 @@ fn check_operator(
             if !a.ty.is_numeric() || !b.ty.is_numeric() {
                 return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
-            let ty = unify(a, b).map_err(|needs_usize| {
-                if needs_usize {
-                    usize_conversion_needed_error(ctx, span, name)
-                } else {
-                    operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty)
-                }
+            let ty = unify(a, b).map_err(|size_target| match size_target {
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
+                None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
             stack.push(Slot::computed(ty));
@@ -1845,12 +1863,9 @@ fn check_operator(
             if !a.ty.is_int() || !b.ty.is_int() {
                 return Err(mod_requires_int_error(ctx, span, a.ty, b.ty));
             }
-            let ty = unify(a, b).map_err(|needs_usize| {
-                if needs_usize {
-                    usize_conversion_needed_error(ctx, span, name)
-                } else {
-                    mod_requires_int_error(ctx, span, a.ty, b.ty)
-                }
+            let ty = unify(a, b).map_err(|size_target| match size_target {
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
+                None => mod_requires_int_error(ctx, span, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
             stack.push(Slot::computed(ty));
@@ -1864,12 +1879,9 @@ fn check_operator(
             if !(a.ty.is_int() || a.ty.is_bool()) || !(b.ty.is_int() || b.ty.is_bool()) {
                 return Err(bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
-            let ty = unify(a, b).map_err(|needs_usize| {
-                if needs_usize {
-                    usize_conversion_needed_error(ctx, span, name)
-                } else {
-                    bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty)
-                }
+            let ty = unify(a, b).map_err(|size_target| match size_target {
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
+                None => bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
             stack.push(Slot::computed(ty));
@@ -1908,12 +1920,9 @@ fn check_operator(
             if !a.ty.is_numeric() || !b.ty.is_numeric() {
                 return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
-            unify(a, b).map_err(|needs_usize| {
-                if needs_usize {
-                    usize_conversion_needed_error(ctx, span, name)
-                } else {
-                    operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty)
-                }
+            unify(a, b).map_err(|size_target| match size_target {
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
+                None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
             stack.push(Slot::computed(Type::Bool));
@@ -2084,14 +2093,16 @@ fn check_array_index(
 ) -> Result<(), String> {
     match match_slot(index, Type::Usize) {
         SlotMatch::Exact => Ok(()),
-        SlotMatch::LiteralUsize => {
+        SlotMatch::LiteralSizeType => {
             let idx = index.int_val.expect("a literal slot carries its value");
             if idx < 0 || idx >= i64::from(count) {
                 return Err(array_index_out_of_range_error(ctx, span, count, idx));
             }
             Ok(())
         }
-        SlotMatch::NeedsUsizeConversion => Err(usize_conversion_needed_error(ctx, span, op)),
+        SlotMatch::NeedsSizeConversion => {
+            Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
+        }
         SlotMatch::Mismatch => Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty)),
     }
 }
@@ -2181,9 +2192,9 @@ fn check_array_word(
             let elem = arrays[id.index()].element;
             check_array_index(index, count, ctx, span, "set")?;
             match match_slot(value, elem) {
-                SlotMatch::Exact | SlotMatch::LiteralUsize => {}
-                SlotMatch::NeedsUsizeConversion => {
-                    return Err(usize_conversion_needed_error(ctx, span, "set"));
+                SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                SlotMatch::NeedsSizeConversion => {
+                    return Err(size_conversion_needed_error(ctx, span, "set", elem));
                 }
                 SlotMatch::Mismatch => {
                     return Err(type_mismatch_error(ctx, span, "set", elem, value.ty));
@@ -2994,6 +3005,29 @@ mod tests {
     }
 
     #[test]
+    fn check_isize_mixed_with_usize_is_error() {
+        // `usize` and `isize` are sibling size types but do not coerce
+        // into each other; mixing them is a plain type mismatch naming both
+        // backticked types.
+        let src = ": w ( -- bool ) 5 >usize 3 >isize < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`usize`"), "unexpected message: {err}");
+        assert!(err.contains("`isize`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_isize_declared_output_needs_conversion_is_error() {
+        // X10 at a declared-output position, mirroring
+        // check_usize_declared_output_needs_conversion_is_error: a computed
+        // `i64` doesn't silently satisfy a declared `isize` output, and the
+        // message names the backticked `isize` form rather than `usize`.
+        let src = ": w ( -- isize ) 1 1 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`isize`"), "unexpected message: {err}");
+        assert!(err.contains(">isize"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn check_usize_branch_merge_keeps_computed_arm_non_coercible_is_error() {
         // A literal in one arm and a computed value in the other must NOT
         // merge to a coercible literal: on the computed arm's runtime path a
@@ -3270,34 +3304,36 @@ mod tests {
     }
 
     #[test]
-    fn check_struct_direct_recursion_is_error_not_hang() {
-        // X3/M5: a directly self-referential struct is a located error, and
-        // this test itself is proof the checker terminated rather than hung.
+    fn check_recursion_by_value_self_cycle_is_error() {
+        // X3/M5: a directly self-referential struct (no `^` anywhere
+        // on the cycle) is an error naming the full path (a bare string,
+        // no span), and this test itself is proof the checker terminated
+        // rather than hung.
         let err = check_src("type: Loop next Loop ;").unwrap_err();
         assert!(
             err.contains("recursive struct"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("Loop"), "unexpected message: {err}");
+        assert!(err.contains("Loop -> Loop"), "unexpected message: {err}");
     }
 
     #[test]
-    fn check_struct_mutual_recursion_is_error_not_hang() {
-        // X3/M5: a mutually-recursive pair of structs, names both in the cycle.
+    fn check_recursion_by_value_mutual_cycle_is_error() {
+        // X3/M5: a mutually-recursive pair of structs, no `^`
+        // anywhere, names the full path A -> B -> A.
         let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
         assert!(
             err.contains("recursive struct"),
             "unexpected message: {err}"
         );
-        assert!(err.contains('A'), "unexpected message: {err}");
-        assert!(err.contains('B'), "unexpected message: {err}");
+        assert!(err.contains("A -> B -> A"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_enum_direct_recursion_is_error_not_hang() {
         // X3/M5: a directly self-referential enum (a variant field of its own
-        // type) is a located error naming the cycle, and this test's return
-        // is proof the DFS terminated rather than hung.
+        // type) is an error naming the cycle (bare, no span), and this
+        // test's return is proof the DFS terminated rather than hung.
         let err = check_src("type: Loop | Wrap next Loop | End ;").unwrap_err();
         assert!(err.contains("recursive enum"), "unexpected message: {err}");
         assert!(err.contains("Loop"), "unexpected message: {err}");
@@ -3310,6 +3346,34 @@ mod tests {
         assert!(err.contains("recursive enum"), "unexpected message: {err}");
         assert!(err.contains('A'), "unexpected message: {err}");
         assert!(err.contains('B'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_recursion_cell_cycle_in_struct_field_is_ok() {
+        // A `^` edge through a struct field is legal, not just through
+        // an enum variant payload -- the rule is about size finiteness, not
+        // idiom.
+        check_src("type: Node v i64 next ^Node ;").unwrap();
+    }
+
+    #[test]
+    fn check_recursion_cell_cycle_in_enum_variant_is_ok() {
+        // The same `^` cycle acceptance in enum variant position,
+        // mirroring check_recursion_cell_cycle_in_struct_field_is_ok.
+        check_src("type: List | Nil | Cons v i64 next ^List ;").unwrap();
+    }
+
+    #[test]
+    fn check_recursion_array_element_cell_is_cut_then_rejected_as_linear() {
+        // The `^` edge is cut inside an array element too, so this
+        // definition survives the recursion rule and reaches the linear
+        // array-element rule instead of "recursive array definition".
+        let err = check_src("type: Node kids [^Node 4] ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^Node`"), "unexpected message: {err}");
     }
 
     #[test]

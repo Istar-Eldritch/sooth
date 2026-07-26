@@ -1,0 +1,42 @@
+\ A singly linked list: build it, sum the first few nodes off the front
+\ (a consuming walk), then drop whatever's left. The `drop` disposes the
+\ list's tail via the fused iterative destructor, not recursion, so it
+\ stays constant-stack no matter how long the tail is.
+
+type: List | Nil | Cons v i64 next ^List ;
+type: Popped rest List val i64 ;
+type: Summed rest List total i64 ;
+
+: push-front ( List i64 -- List )
+  | rest v |
+  v rest ^ Cons ;
+
+: build ( i64 List -- List )
+  | n acc |
+  n 0 = if
+    acc
+  else
+    n 1 - acc n push-front build
+  end ;
+
+: pop ( List -- Popped )
+| Nil   Nil 0 Popped
+| Cons  | v next | next ^> v Popped
+;
+
+: sum-first ( List i64 i64 -- Summed )
+  | l k acc |
+  k 0 = if
+    l acc Summed
+  else
+    l pop Popped>
+    acc +
+    k 1 -
+    swap
+    sum-first
+  end ;
+
+: main ( -- )
+  10 Nil build
+  3 0 sum-first Summed>
+  . drop ;

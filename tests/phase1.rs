@@ -796,3 +796,39 @@ fn repl_quit_frees_residual_owned() {
         "a residual owned cell should be freed at `:quit`"
     );
 }
+
+// Phase 3 Slice 3, phase 5 (criterion 18): a residual directly self-recursive
+// value at `:quit` goes through `dispose_residual`'s ordinary `emit_drop`
+// path, which is exactly the synthesized destructor call site every other
+// `drop` uses — so this exercises the fused loop (R11) from the REPL rather
+// than only from a compiled `main`, needing no production change beyond what
+// phase 4 already built.
+#[test]
+fn repl_quit_frees_residual_recursive_value() {
+    let out = run_session_traced(
+        &[
+            "type: List | Nil | Cons tag __spy next ^List ;",
+            "1 __spy Nil ^ Cons",
+            "2 __spy swap ^ Cons",
+            ":quit",
+        ],
+        true,
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type List",
+            "alloc 24",
+            "stack: <List>",
+            "alloc 24",
+            "stack: <List>",
+            "drop 2",
+            "free 24",
+            "drop 1",
+            "free 24",
+        ],
+        "a residual recursive list should dispose node-by-node through the \
+         fused loop, top node's tag first (pre-order)"
+    );
+}

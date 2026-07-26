@@ -120,6 +120,11 @@ pub enum IrType {
     /// its register class (`l` today) and unsigned ops the same way it does for
     /// a `u64`, but the *width* flows from the parameter (R15).
     Usize,
+    /// The target-width *signed* integer, mirroring `Usize`: same
+    /// word-width-derived size/align (`norm_scalar_ww`), but the backend
+    /// derives its ops and printing from a signed `i64`-like type rather than
+    /// an unsigned `u64`-like one.
+    Isize,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -167,6 +172,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // `IrType` carries only the `OwnedCellId` so it stays `Copy`.
         Type::OwnedCell(id, _) => IrType::OwnedCell(id),
         Type::Usize => IrType::Usize,
+        Type::Isize => IrType::Isize,
         Type::Spy => IrType::Spy,
     }
 }
@@ -353,6 +359,7 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Int { bits, .. } => (bits / 8) as u32,
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
+        IrType::Isize => word_width,
         // A cell is a pointer, so its width defers to `Ptr`'s convention.
         IrType::Ptr | IrType::OwnedCell(_) => 8,
         // A spy is its `i64` tag.
@@ -895,11 +902,45 @@ pub fn synthesize_aggregate_destructors(
         .collect()
 }
 
+/// The index of the `^Self` field a fused destructor loop descends, or
+/// `None` for a field list with no direct recursive edge. A fresh pass over
+/// `Registries`, not a reuse of the checker's cycle graph: that graph cuts
+/// `^` edges entirely, but this needs to see exactly them.
+///
+/// A field of type `^T` is a recursive edge iff the cell's payload is the
+/// enclosing type itself. Indirection through a wrapper struct, or a `^^Self`
+/// whose inner payload is a cell rather than the type, is not a direct edge
+/// and stays on the recursive destructor path with its depth limit.
+///
+/// A field list may carry several recursive edges (a tree node's children).
+/// The loop descends the **last** one in declaration order; the others are
+/// ordinary linear fields and get an ordinary recursive drop call via
+/// `emit_drop`'s ambient `OwnedCell` handling, same as any other field.
+/// Looping the last child rather than the first is what makes a
+/// right-leaning shape constant-stack and a left-leaning one still O(depth)
+/// (documented, not fixed).
+fn recursive_loop_field(fields: &[FieldLayout], self_ty: IrType, cells: &Cells) -> Option<usize> {
+    fields
+        .iter()
+        .enumerate()
+        .filter(
+            |(_, f)| matches!(f.ty, IrType::OwnedCell(c) if cells.payload[c.index()] == self_ty),
+        )
+        .map(|(i, _)| i)
+        .next_back()
+}
+
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
 /// that type: drop each linear field, in declaration order. Built via a
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
 /// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
 /// is disposed" stays in one place.
+///
+/// A directly self-recursive struct (a `^Self` field) is disposed by one
+/// fused loop instead of a mutually recursive `cell_drop`/`struct_drop` pair.
+/// Such a struct has no base case, so its loop is exit-less and the trailing
+/// `Ret` is skipped; the shape is uninhabited, so this is about not crashing
+/// the emitter rather than about a program that runs.
 fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
@@ -910,21 +951,37 @@ fn synthesize_struct_destructor(
         structs,
         enums,
         arrays,
-        ..
+        cells,
     } = regs;
+    let self_ty = IrType::Struct(id);
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
-    let param = b.fresh_value(IrType::Struct(id));
+    let param = b.fresh_value(self_ty);
     let fields = structs.layouts[id.index()].fields.clone();
-    for field in fields {
-        if field_is_linear(field.ty, structs, enums, arrays) {
-            let v = b.field_value(param, field);
+    let looped = recursive_loop_field(&fields, self_ty, cells);
+    let node = match looped {
+        Some(_) => b.begin_loop(&[param])[0],
+        None => param,
+    };
+    for (fi, field) in fields.iter().enumerate() {
+        // The looped field is read last, after every other read of this
+        // node, so it is skipped here instead of dropped in place.
+        if Some(fi) != looped && field_is_linear(field.ty, structs, enums, arrays) {
+            let v = b.field_value(node, *field);
             b.emit_drop(v);
         }
     }
-    b.seal_block(Terminator::Ret(None));
+    if let Some(fi) = looped {
+        b.emit_recursive_step(node, fields[fi], self_ty);
+        b.finalize_loop();
+    }
+    // An exit-less loop already sealed its block on the back-edge, and a
+    // second seal would emit a duplicate `BlockId`.
+    if !b.terminated {
+        b.seal_block(Terminator::Ret(None));
+    }
     IrFunc {
         name: struct_drop_symbol(id),
-        params: vec![IrType::Struct(id)],
+        params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
         value_types: b.value_types,
@@ -940,6 +997,14 @@ fn synthesize_struct_destructor(
 /// fields are linear (an empty block that just returns), so the dispatch
 /// shape stays uniform regardless of which variants happen to carry a linear
 /// field.
+///
+/// If any variant carries a `^Self` field, the whole destructor becomes one
+/// fused loop: the dispatch reads the loop-carried node instead of the
+/// param, a variant with a recursive field back-edges to the header after
+/// freeing its cell, and a variant without one returns. That is the base
+/// case, so an inhabited recursive enum (`Nil`/`Cons`) disposes in constant
+/// stack; other shapes (indirect cycles, `^^Self`, mutually recursive types)
+/// stay on the recursive path with its depth limit.
 fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
@@ -950,40 +1015,65 @@ fn synthesize_enum_destructor(
         structs,
         enums,
         arrays,
-        ..
+        cells,
     } = regs;
+    let self_ty = IrType::Enum(id);
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
-    let param = b.fresh_value(IrType::Enum(id));
+    let param = b.fresh_value(self_ty);
     let payload_offset = enums.layouts[id.index()].payload_offset;
-    let variant_ids = b.dispatch_on_tag(param, id);
+    let variants = enums.layouts[id.index()].variants.clone();
+    let looped: Vec<Option<usize>> = variants
+        .iter()
+        .map(|v| recursive_loop_field(&v.fields, self_ty, cells))
+        .collect();
+    let fused = looped.iter().any(Option::is_some);
+    let node = match fused {
+        true => b.begin_loop(&[param])[0],
+        false => param,
+    };
+    let variant_ids = b.dispatch_on_tag(node, id);
 
     for (vi, &block) in variant_ids.iter().enumerate() {
         b.start_block(block);
-        let fields = enums.layouts[id.index()].variants[vi].fields.clone();
-        for field in &fields {
-            if field_is_linear(field.ty, structs, enums, arrays) {
-                let adjusted = FieldLayout {
-                    offset: payload_offset + field.offset,
-                    ..*field
-                };
-                let v = b.field_value(param, adjusted);
+        b.terminated = false;
+        let fields = &variants[vi].fields;
+        let adjust = |field: &FieldLayout| FieldLayout {
+            offset: payload_offset + field.offset,
+            ..*field
+        };
+        for (fi, field) in fields.iter().enumerate() {
+            // The looped field is read last, after every other read of
+            // this node, so it is skipped here instead of dropped in place.
+            if Some(fi) != looped[vi] && field_is_linear(field.ty, structs, enums, arrays) {
+                let v = b.field_value(node, adjust(field));
                 b.emit_drop(v);
             }
         }
-        b.seal_block(Terminator::Ret(None));
+        if let Some(fi) = looped[vi] {
+            b.emit_recursive_step(node, adjust(&fields[fi]), self_ty);
+        }
+        // A variant that back-edged is already sealed.
+        if !b.terminated {
+            b.seal_block(Terminator::Ret(None));
+        }
+    }
+    if fused {
+        b.finalize_loop();
     }
 
     IrFunc {
         name: enum_drop_symbol(id),
-        params: vec![IrType::Enum(id)],
+        params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
         value_types: b.value_types,
     }
 }
 
-/// Drop the payload first if it is linear, then free the cell, mirroring
-/// `synthesize_struct_destructor`.
+/// Copy the payload out (if linear), free the cell, then drop the copied-out
+/// payload. The block is freed before the payload's own destructor runs, so
+/// the free must come after the copyout (`load_owned_payload` never touches
+/// the block again) but before the drop.
 fn synthesize_cell_destructor(
     id: OwnedCellId,
     env: &HashMap<String, Arity>,
@@ -999,10 +1089,8 @@ fn synthesize_cell_destructor(
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(IrType::OwnedCell(id));
     let payload_ty = cells.payload[id.index()];
-    if field_is_linear(payload_ty, structs, enums, arrays) {
-        let payload = b.load_owned_payload(param, payload_ty);
-        b.emit_drop(payload);
-    }
+    let is_linear = field_is_linear(payload_ty, structs, enums, arrays);
+    let payload = is_linear.then(|| b.load_owned_payload(param, payload_ty));
     let size = b.value_size(payload_ty);
     let size_v = b.fresh_value(IrType::I64);
     b.push_instr(Instr::Const(size_v, size as i64));
@@ -1011,6 +1099,9 @@ fn synthesize_cell_destructor(
         FREE_SYMBOL.to_string(),
         vec![param, size_v],
     ));
+    if let Some(payload) = payload {
+        b.emit_drop(payload);
+    }
     b.seal_block(Terminator::Ret(None));
     IrFunc {
         name: cell_drop_symbol(id),
@@ -1922,6 +2013,32 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
+    /// One iteration of a fused destructor loop, descending `node`'s
+    /// `^Self` field: copy the next node out of the cell, free the cell, and
+    /// back-edge to the header carrying the copy.
+    ///
+    /// **Every read of `node` must already be emitted.** `push_alloc` hoists
+    /// the copy-out's `Alloc` into the entry block, so there is one frame slot
+    /// reused by every iteration and the copy-out blits the next node over the
+    /// memory the current one occupies. A field load, tag read or sibling drop
+    /// emitted after this call would read the wrong node, and would do so with
+    /// the alloc/free trace still perfectly balanced.
+    fn emit_recursive_step(&mut self, node: Value, field: FieldLayout, self_ty: IrType) {
+        let cell = self.field_value(node, field);
+        let next = self.load_owned_payload(cell, self_ty);
+        let size = self.value_size(self_ty);
+        let size_v = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Const(size_v, size as i64));
+        self.push_instr(Instr::Call(
+            None,
+            FREE_SYMBOL.to_string(),
+            vec![cell, size_v],
+        ));
+        self.back_edges.push((self.cur_id, vec![next]));
+        self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
+        self.terminated = true;
+    }
+
     /// Store `val` (of `payload_ty`) into the cell at `cell_ptr`: the mirror
     /// of `load_owned_payload`. A scalar payload is a width-exact
     /// `FieldStore`; an aggregate is a `Blit` from its frame slot; a
@@ -2708,14 +2825,18 @@ mod tests {
     }
 
     #[test]
-    fn word_width_parameter_sizes_usize_not_a_literal_eight() {
-        // Criterion 2 (structural): `usize` size/align derives from the word
-        // width parameter, not a hardcoded `8`. At the default width it is 8;
-        // flipping the parameter to 4 changes the derived size of both a bare
-        // `usize` and an aggregate that embeds one, proving no stray literal.
+    fn word_width_parameter_sizes_size_types_not_a_literal_eight() {
+        // Criterion 2 (structural): both size types' size/align derive from the
+        // word width parameter, not a hardcoded `8`. At the default width it is
+        // 8; flipping the parameter to 4 changes the derived size of a bare
+        // `usize`/`isize` and of an aggregate that embeds one, proving no stray
+        // literal.
         assert_eq!(scalar_size_align(IrType::Usize), (8, 8));
         assert_eq!(scalar_size_align_ww(IrType::Usize, 8), (8, 8));
         assert_eq!(scalar_size_align_ww(IrType::Usize, 4), (4, 4));
+        assert_eq!(scalar_size_align(IrType::Isize), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Isize, 8), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Isize, 4), (4, 4));
 
         // A struct with two `usize` fields and an array of `usize`: both resize
         // with the parameter.
@@ -4231,11 +4352,12 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_cell_destructor_copies_out_a_linear_aggregate_payload_before_freeing() {
-        // R5/R13: an aggregate payload's drop glue runs on a copy blitted out
-        // of the cell, and both precede the free. The `^__spy` golden covers
-        // the scalar payload at runtime; this pins the aggregate path, where
-        // the copy-out must complete before the destructor reads the copy.
+    fn synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload() {
+        // An aggregate payload is copied out of the cell (a Blit), then
+        // the block is freed, and only then does the copy's own drop
+        // glue run. The `^__spy` golden covers the scalar payload at
+        // runtime; this pins the aggregate path, where the copy-out must
+        // still complete before anything else touches the block or the copy.
         let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds ^ drop ;");
         let dtor = ir
             .funcs
@@ -4260,12 +4382,12 @@ mod tests {
                 .iter()
                 .map(|(_, sym)| sym.as_str())
                 .collect::<Vec<_>>(),
-            vec!["sooth_struct_drop_0", FREE_SYMBOL],
-            "the payload's own destructor runs, then the cell frees"
+            vec![FREE_SYMBOL, "sooth_struct_drop_0"],
+            "the cell frees, then the payload's own destructor runs"
         );
         assert!(
             blit_at < calls[0].0,
-            "the payload must be copied out before its destructor runs: blit at {blit_at}, drop at {}",
+            "the payload must be copied out before the block is freed: blit at {blit_at}, free at {}",
             calls[0].0
         );
     }

@@ -9,7 +9,7 @@ use std::fmt::Write;
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
     Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, SPY_DROP_SYMBOL,
-    TRACE_ALLOC_ENV,
+    TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -215,6 +215,7 @@ fn width(ty: IrType) -> &'static str {
         // `usize` is a target-width unsigned integer; on the 8-byte QBE target
         // it fills the `l` register (its width flows from `WORD_WIDTH`, R15).
         IrType::Usize => "l",
+        IrType::Isize => "l",
         IrType::Ptr => "l",
         // A spy is its `i64` tag in a register; only the frontend distinguishes
         // it (to emit the destructor call on `drop`).
@@ -252,6 +253,7 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Float { bits: 32 } => "s".to_string(),
         IrType::Float { .. } => "d".to_string(),
         IrType::Usize => "l".to_string(),
+        IrType::Isize => "l".to_string(),
         IrType::Ptr => "l".to_string(),
         IrType::Spy => "l".to_string(),
         IrType::OwnedCell(_) => "l".to_string(),
@@ -279,6 +281,7 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Float { bits: 32 } => ("s", "loads"),
         IrType::Float { .. } => ("d", "loadd"),
         IrType::Usize => ("l", "loadl"),
+        IrType::Isize => ("l", "loadl"),
         IrType::Ptr => ("l", "loadl"),
         IrType::Spy => ("l", "loadl"),
         IrType::OwnedCell(_) => ("l", "loadl"),
@@ -298,6 +301,7 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Float { bits: 32 } => "stores",
         IrType::Float { .. } => "stored",
         IrType::Usize => "storel",
+        IrType::Isize => "storel",
         IrType::Ptr => "storel",
         IrType::Spy => "storel",
         IrType::OwnedCell(_) => "storel",
@@ -501,14 +505,26 @@ fn ty_of(value_types: &[IrType], v: Value) -> IrType {
 }
 
 /// Normalize a scalar for the bits/signedness-inspecting arms (conversion,
-/// `Rem`): `usize` is a target-width unsigned integer, so on the 8-byte QBE
-/// target it behaves exactly like a `u64` (R15). Every other type is
-/// unchanged; the `width` register class already agrees (`l`).
+/// `Rem`, `Cmp`, `Shl`/`Shr`) at the default target word width. Thin wrapper
+/// over `norm_scalar_ww`, mirroring `scalar_size_align`/`scalar_size_align_ww`
+/// (ir.rs).
 fn norm_scalar(ty: IrType) -> IrType {
+    norm_scalar_ww(ty, WORD_WIDTH)
+}
+
+/// `usize`/`isize` are target-width integers, so on a `word_width`-byte QBE
+/// target they behave exactly like a `u64`/`i64` of that width; the bits
+/// come from the parameter, never a hardcoded `64`. Every other type is
+/// unchanged; the `width` register class already agrees (`l`).
+fn norm_scalar_ww(ty: IrType, word_width: u32) -> IrType {
     match ty {
         IrType::Usize => IrType::Int {
-            bits: 64,
+            bits: (word_width * 8) as u8,
             signed: false,
+        },
+        IrType::Isize => IrType::Int {
+            bits: (word_width * 8) as u8,
+            signed: true,
         },
         // A spy is its `i64` tag, so the spy constructor's relabel `Conv`
         // (R6) lands in the same-width integer arm and emits a plain `copy`.
@@ -676,7 +692,7 @@ fn emit_instr(
             // semantics for both literal and runtime counts).
             let ty = ty_of(value_types, *v);
             let w = width(ty);
-            let signed = matches!(ty, IrType::Int { signed: true, .. });
+            let signed = matches!(norm_scalar(ty), IrType::Int { signed: true, .. });
             let m = match op {
                 BinOp::Shl => "shl",
                 BinOp::Shr if signed => "sar",
@@ -717,7 +733,7 @@ fn emit_instr(
                 // `div` is emitted only for floats (no integer `/`, R16); it
                 // runs at the operand's `s`/`d` width like the other arms.
                 BinOp::Div => "div",
-                BinOp::Rem if matches!(ty, IrType::Usize | IrType::Int { signed: false, .. }) => {
+                BinOp::Rem if matches!(norm_scalar(ty), IrType::Int { signed: false, .. }) => {
                     "urem"
                 }
                 BinOp::Rem => "rem",
@@ -744,7 +760,7 @@ fn emit_instr(
             let operand = ty_of(value_types, *a);
             let ow = width(operand);
             let is_float = matches!(operand, IrType::Float { .. });
-            let signed = matches!(operand, IrType::Int { signed: true, .. });
+            let signed = matches!(norm_scalar(operand), IrType::Int { signed: true, .. });
             let w = width(ty_of(value_types, *v));
             // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}`/`cle{s,d}`/
             // `cne{s,d}` straight to `comis{s,d}` + `sete`/`setb`/`setbe`/
@@ -886,6 +902,9 @@ fn emit_instr(
             // `usize` prints unsigned decimal (`%lu`), like a `u64`: the value
             // fills the `l` register on this target, so no widening is needed.
             IrType::Usize => writeln!(out, "\tcall $printf(l $ufmt, l {}, ...)", val(*v)),
+            // `isize` prints signed decimal (`%ld`), like an `i64`: same
+            // no-widening reasoning as `usize`, but routed to `$fmt`.
+            IrType::Isize => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
             IrType::Spy => {
                 unreachable!("__spy is not a printable scalar; checker rejects it (R16)")
@@ -1104,6 +1123,51 @@ mod tests {
         );
         assert!(
             il.contains("call $printf(l $ufmt, l "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn norm_scalar_ww_follows_word_width_for_both_size_types() {
+        // Neither size type carries a literal 64; both derive bits from the
+        // `word_width` parameter.
+        assert_eq!(
+            norm_scalar_ww(IrType::Usize, 4),
+            IrType::Int {
+                bits: 32,
+                signed: false
+            }
+        );
+        assert_eq!(
+            norm_scalar_ww(IrType::Isize, 4),
+            IrType::Int {
+                bits: 32,
+                signed: true
+            }
+        );
+        assert_eq!(
+            norm_scalar_ww(IrType::Usize, 8),
+            IrType::Int {
+                bits: 64,
+                signed: false
+            }
+        );
+        assert_eq!(
+            norm_scalar_ww(IrType::Isize, 8),
+            IrType::Int {
+                bits: 64,
+                signed: true
+            }
+        );
+    }
+
+    #[test]
+    fn emit_print_on_isize_uses_fmt_signed() {
+        // `.` on an `isize` prints signed decimal (`$fmt`/`%ld`), unlike
+        // `usize`'s `$ufmt`.
+        let il = emit_src(": w ( -- ) 1 >isize . ;");
+        assert!(
+            il.contains("call $printf(l $fmt, l "),
             "unexpected IL: {il}"
         );
     }
