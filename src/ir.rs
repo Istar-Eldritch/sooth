@@ -216,10 +216,9 @@ fn enum_drop_symbol(id: EnumId) -> String {
     format!("sooth_enum_drop_{}", id.index())
 }
 
-/// The synthesized per-cell destructor symbol (R8, Phase 4): every cell gets
-/// one, unlike `struct_drop_symbol`/`enum_drop_symbol` which only cover
-/// linear types, because disposal must always free the cell regardless of
-/// whether its payload happens to be linear.
+/// The synthesized per-cell destructor symbol (R8, Phase 4): mirrors
+/// `struct_drop_symbol`/`enum_drop_symbol`, one uniform naming scheme across
+/// all three kinds.
 fn cell_drop_symbol(id: OwnedCellId) -> String {
     format!("sooth_cell_drop_{}", id.index())
 }
@@ -1003,11 +1002,9 @@ fn synthesize_enum_destructor(
 /// R5/R8 (Phase 4): synthesize owning-cell `id`'s destructor, called by `drop`
 /// on any value of that type: drop the payload first if it is linear (R5),
 /// then free the cell (R8), mirroring `synthesize_struct_destructor`. Reuses
-/// `load_owned_payload` (the same copy-out `^>` uses, R13) so the payload is
-/// materialised before the cell is freed rather than aliasing freed storage.
-/// Every cell gets a destructor, not only ones whose payload is linear
-/// (unlike the struct/enum filters above), because disposal always frees the
-/// cell regardless of the payload's own linearity.
+/// `load_owned_payload` (the same copy-out `^>` uses, R13) for uniformity
+/// with `^>` rather than out of necessity: the payload's destructor returns
+/// before the free runs, so dropping in place would read live storage too.
 #[allow(clippy::too_many_arguments)] // one cell's synthesis inputs; a bundle would obscure them
 fn synthesize_cell_destructor(
     id: OwnedCellId,
@@ -4263,8 +4260,7 @@ mod tests {
         // R5/R13: an aggregate payload's drop glue runs on a copy blitted out
         // of the cell, and both precede the free. The `^__spy` golden covers
         // the scalar payload at runtime; this pins the aggregate path, where
-        // dropping in place would hand the struct destructor storage that the
-        // free then releases underneath it.
+        // the copy-out must complete before the destructor reads the copy.
         let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds ^ drop ;");
         let dtor = ir
             .funcs

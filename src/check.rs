@@ -3412,6 +3412,18 @@ mod tests {
     }
 
     #[test]
+    fn array_of_struct_holding_owned_is_error() {
+        // Keeps `emit_drop`'s linear-array `unreachable!` guard valid now that
+        // cells are a second linear type: an array whose element only holds a
+        // cell transitively must be rejected here too, or lowering would reach
+        // that arm with an array needing drop glue.
+        let err = check_src("type: Holds c ^i64 ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
+            .unwrap_err();
+        assert!(err.contains("linear array elements are not supported yet"));
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn check_struct_and_enum_duplicate_name_across_registries_is_error() {
         // X2: a name used by one struct and one enum names that type.
         let err = check_src("type: Dup x i64 ; type: Dup | V ;").unwrap_err();
