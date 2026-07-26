@@ -83,8 +83,9 @@ convincing, phase 1 should move to whichever slice first calls `isize`.
   assumption into the new type, which is what word-width-neutrality exists to prevent. The
   change is a behavioural no-op on the only existing target, so it is pinned by a unit test
   calling `norm_scalar_ww` directly with an explicit flipped width — exactly how
-  `word_width_parameter_sizes_usize_not_a_literal_eight` (@ir.rs:2711-2726) already pins the
-  equivalent claim for layout.
+  `word_width_parameter_sizes_size_types_not_a_literal_eight` (@ir.rs:2711-2726, renamed from
+  `..._sizes_usize_...` when it grew the `Isize` cases) already pins the equivalent claim for
+  layout.
 
 ### The recursion rule (pinning existing behaviour)
 

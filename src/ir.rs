@@ -2715,14 +2715,18 @@ mod tests {
     }
 
     #[test]
-    fn word_width_parameter_sizes_usize_not_a_literal_eight() {
-        // Criterion 2 (structural): `usize` size/align derives from the word
-        // width parameter, not a hardcoded `8`. At the default width it is 8;
-        // flipping the parameter to 4 changes the derived size of both a bare
-        // `usize` and an aggregate that embeds one, proving no stray literal.
+    fn word_width_parameter_sizes_size_types_not_a_literal_eight() {
+        // Criterion 2 (structural): both size types' size/align derive from the
+        // word width parameter, not a hardcoded `8`. At the default width it is
+        // 8; flipping the parameter to 4 changes the derived size of a bare
+        // `usize`/`isize` and of an aggregate that embeds one, proving no stray
+        // literal.
         assert_eq!(scalar_size_align(IrType::Usize), (8, 8));
         assert_eq!(scalar_size_align_ww(IrType::Usize, 8), (8, 8));
         assert_eq!(scalar_size_align_ww(IrType::Usize, 4), (4, 4));
+        assert_eq!(scalar_size_align(IrType::Isize), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Isize, 8), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Isize, 4), (4, 4));
 
         // A struct with two `usize` fields and an array of `usize`: both resize
         // with the parameter.

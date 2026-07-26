@@ -1760,7 +1760,8 @@ fn check_term(
                 // A merged slot is a coercible literal only if *both* arms
                 // leave a literal there: a value computed on either runtime
                 // path is computed after the merge, so it can't silently fill
-                // a `usize` position without `>usize` (D8/X10).
+                // a `usize`/`isize` position without an explicit conversion
+                // (D8/X10).
                 merged.push(Slot {
                     ty: t_then.ty,
                     literal: t_then.literal && t_else.literal,
@@ -1827,7 +1828,7 @@ fn check_operator(
             if !a.ty.is_numeric() || !b.ty.is_numeric() {
                 return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
-            let ty = unify(a, b).map_err(|needs_usize| match needs_usize {
+            let ty = unify(a, b).map_err(|size_target| match size_target {
                 Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
@@ -1855,7 +1856,7 @@ fn check_operator(
             if !a.ty.is_int() || !b.ty.is_int() {
                 return Err(mod_requires_int_error(ctx, span, a.ty, b.ty));
             }
-            let ty = unify(a, b).map_err(|needs_usize| match needs_usize {
+            let ty = unify(a, b).map_err(|size_target| match size_target {
                 Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => mod_requires_int_error(ctx, span, a.ty, b.ty),
             })?;
@@ -1871,7 +1872,7 @@ fn check_operator(
             if !(a.ty.is_int() || a.ty.is_bool()) || !(b.ty.is_int() || b.ty.is_bool()) {
                 return Err(bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
-            let ty = unify(a, b).map_err(|needs_usize| match needs_usize {
+            let ty = unify(a, b).map_err(|size_target| match size_target {
                 Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
@@ -1912,7 +1913,7 @@ fn check_operator(
             if !a.ty.is_numeric() || !b.ty.is_numeric() {
                 return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
-            unify(a, b).map_err(|needs_usize| match needs_usize {
+            unify(a, b).map_err(|size_target| match size_target {
                 Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
