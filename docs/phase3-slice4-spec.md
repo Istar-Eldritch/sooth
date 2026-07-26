@@ -179,7 +179,16 @@ Verified by building and running programs, not by reading code.
 
   // Shared by both Struct's own fields and one Enum variant's fields.
   fn expand_fields(fields, target, visited) -> Option<Vec<PathStep>> {
-      // reverse declaration order; first candidate whose sub-walk succeeds wins
+      // A direct `^target` field is tried, in reverse order, before any other
+      // field. Without this tier a later-declared field that reaches target
+      // only indirectly wins the scan below, lengthening the path and, under
+      // phase 1's gate, defusing a loop that fuses today.
+      for field in fields.rev() {
+          if let OwnedCell(c) = field.ty && cells.payload[c] == target {
+              return Some(vec![Unwrap{field, cell: c}]);
+          }
+      }
+      // then reverse declaration order; first candidate whose sub-walk succeeds wins
       for field in fields.rev() {
           match field.ty {
               OwnedCell(c) =>
@@ -391,14 +400,19 @@ Verified by building and running programs, not by reading code.
    left unwired — an unwired private function fails `cargo clippy -- -D warnings`'
    dead-code lint under the project's definition of green): use the discovered path
    only when it is **shape-identical to what `recursive_loop_field` already finds today**
-   — a bare `[Unwrap]` (direct struct self-recursion), or a single `[Branch]` whose
-   *every* `Some` variant is itself exactly `[Unwrap]` (direct enum self-recursion, one
-   per variant, today's `Vec<Option<usize>>` shape) — and fall back to ordinary
-   recursive `emit_drop` otherwise until phase 2 lands the general loop-body codegen.
+   — a bare `[Unwrap]` (direct struct self-recursion), or a single `[Branch]`, gated
+   **per variant**: each variant whose continuation is exactly `[Unwrap]` loops, exactly
+   today's `Vec<Option<usize>>` shape — and fall back to ordinary recursive `emit_drop`
+   otherwise until phase 2 lands the general loop-body codegen.
    **Gating on the flat `Vec<PathStep>`'s length alone is wrong**: every enum-rooted
    path (the wrapper-struct list, `^^Self`, the enum/enum mutual pair) is a single
    top-level `Branch` step, i.e. length 1, so a naive length check would wrongly route
    all of them through this phase's unchanged path instead of falling back.
+   **Failing the whole `Branch` when any `Some` variant is longer than `[Unwrap]` is
+   also wrong**, and was this document's own error before implementation caught it:
+   `type: Wrap v i64 n ^E ; type: E | Nil | Direct d ^E | Indirect w Wrap ;` fuses
+   `Direct` today, and a wholesale gate defuses it on its sibling's account — verified
+   as a 1,000,000-node SIGSEGV against a wholesale gate where the base commit exits 0.
 2. **Generalize loop codegen to walk a path of any length (R5–R10), applied uniformly to
    every synthesized destructor.** Extend the loop-body emission to walk an arbitrary
    `Vec<PathStep>`: byval field projections via `field_value`, non-continuing field
@@ -509,7 +523,7 @@ user-definable destructor bodies (Phase 3 Slice 7); growable buffers and `Vec` (
         "expand's Enum case tries every variant independently using the Struct rule on that variant's fields, seeded with a COPY of visited so sibling variants cannot poison each other, and keeps EVERY variant that yields a path (not at most one) as a Branch { enum_id, variants } step, since an enum's variants are mutually exclusive at runtime and are not D1's branching concern",
         "expand's OwnedCell case closes the path if the payload is the target, else recurses into the payload and prepends an Unwrap{field, cell} step naming both the field index and the cell",
         "Scope the visited set per path attempt (pushed on entry, popped on return) so an abandoned branch cannot poison a sibling branch still being tried",
-        "Wire recursive_disposal_path into synthesize_struct_destructor and synthesize_enum_destructor in this same phase: use the path only when it is shape-identical to what recursive_loop_field already finds today (a bare [Unwrap], or a single Branch whose every Some variant is itself exactly [Unwrap]) -- NOT merely when the flat Vec<PathStep> has length 1, since every enum-rooted path (wrapper-struct, ^^Self, enum/enum mutual) is a single top-level Branch and would wrongly pass a naive length-1 check -- and fall back to ordinary recursive emit_drop otherwise, so the function is never dead code under -D warnings and no existing golden's behaviour changes"
+        "Wire recursive_disposal_path into synthesize_struct_destructor and synthesize_enum_destructor in this same phase: use the path only when it is shape-identical to what recursive_loop_field already finds today (a bare [Unwrap], or a single Branch gated per variant, each variant whose continuation is exactly [Unwrap] looping independently of its siblings -- a wholesale gate over the Branch defuses a direct variant whose sibling reaches Self only indirectly, which fuses today) -- NOT merely when the flat Vec<PathStep> has length 1, since every enum-rooted path (wrapper-struct, ^^Self, enum/enum mutual) is a single top-level Branch and would wrongly pass a naive length-1 check -- and fall back to ordinary recursive emit_drop otherwise, so the function is never dead code under -D warnings and no existing golden's behaviour changes"
       ],
       "tests": [
         "recursive_disposal_path_finds_indirect_nested_mutual_and_composed_cycles",

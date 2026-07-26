@@ -1028,8 +1028,7 @@ fn expand_path(
 /// this tier, declaring an indirect-but-successful field after a direct one
 /// flips which edge the reverse scan below picks, silently lengthening the
 /// fused loop's path and moving an already-constant-stack shape onto
-/// `direct_loop_field`'s fallback (recursive, not fused) — see the
-/// destructors phase-1 spec regression note for the shape that exposed this.
+/// `direct_loop_field`'s fallback (recursive, not fused).
 ///
 /// Reverse order generalizes the old direct-edge rule's last-field tie-break
 /// to every struct level of the walk. This is D1's one restriction: a struct
@@ -1100,28 +1099,25 @@ fn direct_loop_field(path: Option<&[PathStep]>) -> Option<usize> {
 }
 
 /// The per-variant `^Self` field indices an enum's fused loop descends, under
-/// the same gate: one top-level tag dispatch whose *every* continuing variant
-/// is a lone `Unwrap`. Gating on the flat path's length would be wrong — every
-/// enum-rooted path is a single `Branch`, length 1, however long its variants'
-/// continuations are. A `Branch` with any longer continuation falls back
-/// wholesale, so no variant of such an enum loops either.
+/// the same gate applied per variant: one top-level tag dispatch, and each
+/// variant whose continuation is a lone `Unwrap` loops. Gating on the flat
+/// path's length would be wrong — every enum-rooted path is a single `Branch`,
+/// length 1, however long its variants' continuations are.
+///
+/// The gate is per variant, not wholesale over the `Branch`: a variant with a
+/// direct `^Self` field fuses today even when a *sibling* variant reaches
+/// `Self` only indirectly, so failing the whole enum on the sibling's longer
+/// continuation would defuse a working loop. The longer continuation itself
+/// still falls back to ordinary recursive disposal until the general path
+/// walker lands.
 fn direct_loop_fields(path: Option<&[PathStep]>, variant_count: usize) -> Vec<Option<usize>> {
-    let unfused = vec![None; variant_count];
     let Some([PathStep::Branch { variants, .. }]) = path else {
-        return unfused;
+        return vec![None; variant_count];
     };
-    let looped: Vec<Option<usize>> = variants
+    variants
         .iter()
         .map(|v| direct_loop_field(v.as_deref()))
-        .collect();
-    let every_continuation_is_direct = variants
-        .iter()
-        .zip(&looped)
-        .all(|(variant, field)| variant.is_some() == field.is_some());
-    match every_continuation_is_direct {
-        true => looped,
-        false => unfused,
-    }
+        .collect()
 }
 
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
@@ -4941,21 +4937,27 @@ mod tests {
         assert_eq!(p.path(p.struct_ty("Plain")), None);
 
         // The bait is the *last* field, which is where the reverse-order scan
-        // starts: a greedy search that committed to it would miss the genuine
-        // edge two fields earlier, so this is what proves the walk backtracks.
+        // starts, and the genuine edge is indirect, so the direct-field tier
+        // cannot short-circuit past it: the scan must try `bait`, walk into
+        // `Bait` and `Leafy`, fail, and back up to `good`. A greedy search
+        // that committed to the first cell field it saw would return `None`.
         let p = Probe::new(
             "type: Leafy v i64 ;\n\
              type: Bait c ^Leafy ;\n\
-             type: Node good ^Node bait ^Bait ;\n\
+             type: Hop n ^Node ;\n\
+             type: Node good Hop bait ^Bait ;\n\
              : main ( -- ) ;",
         );
         let node = p.struct_ty("Node");
         assert_eq!(
             p.path(node),
-            Some(vec![PathStep::Unwrap {
-                field: Some(0),
-                cell: p.cell(node),
-            }])
+            Some(vec![
+                PathStep::Project { field: 0 },
+                PathStep::Unwrap {
+                    field: Some(0),
+                    cell: p.cell(node),
+                },
+            ])
         );
 
         // `^^Other`: the walk does step through the inner cell (that is how
@@ -5008,5 +5010,19 @@ mod tests {
             }])
         );
         assert_eq!(direct_loop_field(p.path(list).as_deref()), Some(0));
+
+        // The same trap one level up, between an enum's variants: `Direct`
+        // fuses today, and must keep fusing even though its sibling reaches
+        // `Self` only through `Wrap`. A gate that failed the whole `Branch`
+        // on the sibling's longer continuation would defuse `Direct` too.
+        let p = Probe::new(
+            "type: Wrap v i64 n ^E ;\n\
+             type: E | Nil | Direct d ^E | Indirect w Wrap ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(
+            direct_loop_fields(p.path(p.enum_ty("E")).as_deref(), 3),
+            vec![None, Some(0), None]
+        );
     }
 }
