@@ -3858,6 +3858,51 @@ mod tests {
     }
 
     #[test]
+    fn check_owned_cell_underflow_is_error_for_all_three_words() {
+        // `^`, `^>`, `^|>` each underflow the same way as any other word.
+        for (op, src) in [
+            ("^", ": w ( -- ^i64 ) ^ ;"),
+            ("^>", ": w ( -- i64 ) ^> ;"),
+            ("^|>", ": w ( -- i64 ) ^|> ;"),
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains(&format!("`{op}`")),
+                "{op}: unexpected message: {err}"
+            );
+            assert!(
+                err.contains("needs 1 values"),
+                "{op}: unexpected message: {err}"
+            );
+            assert!(err.contains("holds 0"), "{op}: unexpected message: {err}");
+        }
+    }
+
+    #[test]
+    fn check_unwrap_of_non_cell_is_error() {
+        // `^>` on a plain `i64` names the word and the offending type.
+        let err = check_src(": w ( -- i64 ) 5 ^> ;").unwrap_err();
+        assert!(err.contains("`^>`"), "unexpected message: {err}");
+        assert!(
+            err.contains("requires an owning-cell operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("found `i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_peek_of_non_cell_is_error() {
+        // `^|>` on a plain `bool` names the word and the offending type.
+        let err = check_src(": w ( -- bool bool ) true ^|> ;").unwrap_err();
+        assert!(err.contains("`^|>`"), "unexpected message: {err}");
+        assert!(
+            err.contains("requires an owning-cell operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("found `bool`"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn is_copy_struct_is_linear_iff_a_field_is_transitively() {
         // R7/R8 (Phase 2): a struct with no linear field is Copy; one with a
         // linear field (direct or nested) is linear, transitively.

@@ -2317,13 +2317,32 @@ fn owned_unwrap_returns_payload_and_frees_once() {
 }
 
 #[test]
+fn owned_unwrap_sub_word_scalar_is_width_exact() {
+    // R13: a sub-word payload's `FieldLoad`/`FieldStore` is width-exact, not
+    // padded to a word; `^u8` allocates and frees exactly 1 byte, unlike the
+    // 8-byte `^i64` case above.
+    let stdout = run_owned_traced_golden("unwrap-u8", ": main ( -- )\n  200 >u8 ^ ^> . ;\n");
+    assert_eq!(stdout, "alloc 1\nfree 1\n200\n");
+}
+
+#[test]
 fn owned_unwrap_aggregate_copies_out_before_free() {
     // Criterion 5b: unwrap materialises an aggregate payload before releasing
-    // the cell (R13); a field read after the free is correct only if the copy
-    // really happened before the free.
+    // the cell (R13); a bare field read right after the free could pass by
+    // luck (whether the allocator's free() bookkeeping happens to clobber the
+    // read offset). Interposing a second same-size allocation between the
+    // free and the read forces the issue: glibc's tcache reuses a freed
+    // block LIFO within its size class, so if unwrap had aliased the cell
+    // instead of copying out, this second `Point`-sized alloc would
+    // deterministically clobber it before `p` is read.
     let stdout = run_owned_golden(
         "unwrap-aggregate",
-        "type: Point x i64 y i64 ;\n: main ( -- )\n  1 2 Point ^ ^> Point>y . ;\n",
+        "type: Point x i64 y i64 ;\n\
+: use ( Point -- )\n  \
+  | p |\n  \
+  3 4 Point ^ ^> drop\n  \
+  p Point>y . ;\n\
+: main ( -- )\n  1 2 Point ^ ^> use ;\n",
     );
     assert_eq!(stdout, "2\n");
 }

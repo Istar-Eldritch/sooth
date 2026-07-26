@@ -236,8 +236,16 @@ free shim directly rather than going through drop glue), can land earlier.
 
 - Confirm a cell on the residual REPL stack is freed at `:quit` via `dispose_residual`
   (@repl.rs:477); expected to need no production change beyond P1's session registry.
+- **Production-change carve-out (Phase 3 review finding)**: `format_stack` (@repl.rs:180)
+  has no `Type::OwnedCell` arm, so a live cell on the residual stack falls into the
+  scalar catch-all and prints as a raw heap address (nondeterministic, so it can't be
+  asserted in a golden). Every other non-printable aggregate (`Struct`/`Enum`/`Array`)
+  gets a `<Name>` placeholder arm instead; `OwnedCell` already carries its rendered name
+  inline, so add a matching `<^i64>`-style arm. This is a small production change beyond
+  the session registry, and criterion 15's golden should assert the placeholder string,
+  not a value.
 - **Exit**: criteria 15 and 21 pass. Green.
-- **Changes**: `tests/phase1.rs`, `tests/phase0.rs`.
+- **Changes**: `src/repl.rs`, `tests/phase1.rs`, `tests/phase0.rs`.
 
 ## Criterion → test map
 

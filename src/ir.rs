@@ -3940,6 +3940,48 @@ mod tests {
     }
 
     #[test]
+    fn lower_owned_cell_unwrap_scalar_loads_before_freeing() {
+        // R13: `^>` must materialise the payload before calling `sooth_free`,
+        // so the freed pointer is never handed to the stack.
+        let ir = lower_src(": w ( -- i64 ) 5 ^ ^> ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        let load_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::FieldLoad(..)))
+            .expect("a FieldLoad");
+        let free_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Call(None, sym, _) if sym == FREE_SYMBOL))
+            .expect("a free call");
+        assert!(
+            load_at < free_at,
+            "scalar payload must load before the cell frees: load at {load_at}, free at {free_at}"
+        );
+    }
+
+    #[test]
+    fn lower_owned_cell_unwrap_aggregate_blits_before_freeing() {
+        // The aggregate counterpart of the scalar case above (R13): the copy-out
+        // `Blit` must precede `sooth_free`, never aliasing the freed cell.
+        let ir = lower_src("type: Point x i64 y i64 ; : w ( -- Point ) 1 2 Point ^ ^> ;");
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let is = instrs(w);
+        let blit_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Blit(..)))
+            .expect("a Blit");
+        let free_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Call(None, sym, _) if sym == FREE_SYMBOL))
+            .expect("a free call");
+        assert!(
+            blit_at < free_at,
+            "aggregate payload must blit out before the cell frees: blit at {blit_at}, free at {free_at}"
+        );
+    }
+
+    #[test]
     fn struct_linearity_agrees_across_the_checker_and_both_lowering_folds() {
         // Linearity is decided in three places over the same field lists:
         // `check::is_copy` walks `Type`, `ensure_struct` folds `IrType` inline
