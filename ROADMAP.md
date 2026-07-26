@@ -307,7 +307,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    symmetrically). Bootstrap (1a): a **test-only builtin linear primitive** (a drop-spy
    with a print-on-drop destructor tagged by an `i64`) gives the analysis teeth before
    heap exists; it is not user-facing surface and dissolves into an ordinary type once
-   `drop` is overridable (a polymorphic word, Phase 4). Aggregates are in scope via
+   `drop` is overridable (destructor bodies in slice 6, polymorphic dispatch in Phase 4). Aggregates are in scope via
    destructure-whole (no partial moves): `S>fi` stays consuming and drops the non-extracted
    fields, `S|>fi` is a non-consuming Copy-field peek (forbidden on linear fields), `S<fi`
    drops the overwritten field; the compiler synthesises recursive/tag-dispatched drop
@@ -339,8 +339,17 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    letting nested-path ergonomics get solved twice.
 5. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
-6. **Resources as linear values (fds, hosted).** The Phase 3 exit dogfood: open/read/close
-   files, with the compiler catching a deliberate double-use and a forgotten `close`.
+6. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The
+   Phase 3 exit dogfood: open/read/close files, with the compiler catching a deliberate
+   double-use and a forgotten `close`. **This slice is where a user can first attach their
+   own cleanup code to a type**, rather than only inheriting disposal by composition. It
+   lands here, not earlier and not in Phase 4, because a mechanism wants two dissimilar
+   real clients to be designed against: `free` (pointer + size) from slice 2 and `close`
+   (an integer handle, and it can fail) from this one. Designing it in slice 2 from the
+   buffer alone would be guessing. Open questions to settle here, not before: whether a
+   user destructor runs *before* or *instead of* the synthesized field glue, and how a
+   destructor body is stopped from dropping its own receiver and recursing forever. Note
+   this is destructor *bodies* only; `drop` becoming a polymorphic word is still Phase 4.
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
 
