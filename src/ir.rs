@@ -843,7 +843,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// type. The REPL redefines these per line; safe because type redefinition is
 /// rejected, so every generation's glue is identical. If type redefinition is
 /// ever allowed, add a generation suffix, matching word symbols.
-#[allow(clippy::too_many_arguments)]
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -908,7 +907,6 @@ pub fn synthesize_aggregate_destructors(
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
 /// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
 /// is disposed" stays in one place.
-#[allow(clippy::too_many_arguments)]
 fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
@@ -946,7 +944,6 @@ fn synthesize_struct_destructor(
 /// fields are linear (an empty block that just returns), so the dispatch
 /// shape stays uniform regardless of which variants happen to carry a linear
 /// field.
-#[allow(clippy::too_many_arguments)]
 fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
@@ -988,7 +985,6 @@ fn synthesize_enum_destructor(
 
 /// Drop the payload first if it is linear, then free the cell, mirroring
 /// `synthesize_struct_destructor`.
-#[allow(clippy::too_many_arguments)]
 fn synthesize_cell_destructor(
     id: OwnedCellId,
     env: &HashMap<String, Arity>,
@@ -1210,7 +1206,6 @@ pub fn lower_line(
 /// Lower a single word body against an external env/resolver. The REPL uses
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
 /// so a definition compiles against previously-loaded words.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
@@ -1343,7 +1338,6 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
-    #[allow(clippy::too_many_arguments)]
     fn new(
         env: &'a HashMap<String, Arity>,
         resolve: Resolver<'a>,

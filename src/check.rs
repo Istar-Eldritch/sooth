@@ -690,7 +690,6 @@ pub fn check_def(
 /// Infer the net effect of a bare line: simulate the typed stack from
 /// `entry_stack` (the carried slot types) and return the resulting typed stack.
 /// A type mismatch or underflow against the carried stack is a reported error.
-#[allow(clippy::too_many_arguments)]
 pub fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
@@ -1000,7 +999,6 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1087,7 +1085,6 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
-#[allow(clippy::too_many_arguments)]
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
