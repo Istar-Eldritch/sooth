@@ -3305,9 +3305,10 @@ mod tests {
 
     #[test]
     fn check_recursion_by_value_self_cycle_is_error() {
-        // X3/M5/R3/R7: a directly self-referential struct (no `^` anywhere
-        // on the cycle) is a located error naming the full path, and this
-        // test itself is proof the checker terminated rather than hung.
+        // X3/M5: a directly self-referential struct (no `^` anywhere
+        // on the cycle) is an error naming the full path (a bare string,
+        // no span), and this test itself is proof the checker terminated
+        // rather than hung.
         let err = check_src("type: Loop next Loop ;").unwrap_err();
         assert!(
             err.contains("recursive struct"),
@@ -3318,7 +3319,7 @@ mod tests {
 
     #[test]
     fn check_recursion_by_value_mutual_cycle_is_error() {
-        // X3/M5/R3/R7: a mutually-recursive pair of structs, no `^`
+        // X3/M5: a mutually-recursive pair of structs, no `^`
         // anywhere, names the full path A -> B -> A.
         let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
         assert!(
@@ -3331,8 +3332,8 @@ mod tests {
     #[test]
     fn check_enum_direct_recursion_is_error_not_hang() {
         // X3/M5: a directly self-referential enum (a variant field of its own
-        // type) is a located error naming the cycle, and this test's return
-        // is proof the DFS terminated rather than hung.
+        // type) is an error naming the cycle (bare, no span), and this
+        // test's return is proof the DFS terminated rather than hung.
         let err = check_src("type: Loop | Wrap next Loop | End ;").unwrap_err();
         assert!(err.contains("recursive enum"), "unexpected message: {err}");
         assert!(err.contains("Loop"), "unexpected message: {err}");

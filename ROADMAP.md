@@ -81,7 +81,7 @@ allocation trace gated on `SOOTH_TRACE_ALLOC`, on stdout so program order equals
 order, silent by default.
 **Phase 3 Slice 3 (recursive/heap data + `isize`) is complete**: a type cycle is legal iff
 it passes through at least one `^` (struct field or enum variant payload, no positional
-restriction), while a by-value cycle stays a located error; `isize`, a signed mirror of
+restriction), while a by-value cycle stays a bare, span-less error; `isize`, a signed mirror of
 `usize`; disposal is reversed to free-before-drop-payload and made pre-order; and a
 directly self-recursive type (list or tree) gets one fused iterative destructor loop
 instead of recursive `cell_drop`/`struct_drop`/`enum_drop` calls, giving constant-stack
@@ -375,7 +375,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    stays over threshold on its own real parameters regardless.
 3. **Recursive/heap data + `isize`.** ✅ done. A type cycle is legal iff every cycle passes
    through at least one `^`, in struct field or enum variant payload position alike (no
-   positional restriction); a by-value cycle keeps its existing located error. Disposal is
+   positional restriction); a by-value cycle keeps its existing bare, span-less error. Disposal is
    reversed to free-the-cell-before-dropping-the-payload (uniformity, not a correctness
    requirement) and made pre-order (a node's own fields drop and its cell frees before
    descending). A directly self-recursive type gets one fused iterative destructor loop
