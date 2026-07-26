@@ -85,8 +85,8 @@ fn is_size_type(ty: Type) -> bool {
 /// position, or a plain mismatch.
 enum SlotMatch {
     Exact,
-    LiteralUsize,
-    NeedsUsizeConversion,
+    LiteralSizeType,
+    NeedsSizeConversion,
     Mismatch,
 }
 
@@ -96,9 +96,9 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
     }
     if is_size_type(want) && found.ty == Type::I64 {
         return if found.literal {
-            SlotMatch::LiteralUsize
+            SlotMatch::LiteralSizeType
         } else {
-            SlotMatch::NeedsUsizeConversion
+            SlotMatch::NeedsSizeConversion
         };
     }
     SlotMatch::Mismatch
@@ -112,7 +112,7 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
 /// mismatch.
 enum PairMatch {
     Ok(Type),
-    NeedsUsizeConversion(Type),
+    NeedsSizeConversion(Type),
     Mismatch,
 }
 
@@ -123,7 +123,7 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
     match (a.ty, b.ty) {
         (w, Type::I64) if is_size_type(w) && b.literal => PairMatch::Ok(w),
         (Type::I64, w) if is_size_type(w) && a.literal => PairMatch::Ok(w),
-        (w, Type::I64) | (Type::I64, w) if is_size_type(w) => PairMatch::NeedsUsizeConversion(w),
+        (w, Type::I64) | (Type::I64, w) if is_size_type(w) => PairMatch::NeedsSizeConversion(w),
         _ => PairMatch::Mismatch,
     }
 }
@@ -846,8 +846,8 @@ fn check_outputs(
     }
     for (found, want) in final_stack.iter().zip(declared) {
         match match_slot(*found, *want) {
-            SlotMatch::Exact | SlotMatch::LiteralUsize => {}
-            SlotMatch::NeedsUsizeConversion => {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            SlotMatch::NeedsSizeConversion => {
                 return Err(format!(
                     "error: type mismatch in `{}` (line {})\n  body leaves a computed `i64` where the declaration requires `{}`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
                     word.name, line, want, want, effect_str(&word.effect),
@@ -1544,7 +1544,7 @@ fn check_linear_locals_consumed(
 /// silently coerce, since Sooth has no comptime interpreter to fold it and
 /// confirm it fits; names the missing `>usize`/`>isize` conversion
 /// explicitly, naming whichever size type `target` is.
-fn usize_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
+fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
@@ -1693,9 +1693,9 @@ fn check_term(
             for (i, want) in sig.inputs.iter().enumerate() {
                 let found = stack[base + i];
                 match match_slot(found, *want) {
-                    SlotMatch::Exact | SlotMatch::LiteralUsize => {}
-                    SlotMatch::NeedsUsizeConversion => {
-                        return Err(usize_conversion_needed_error(ctx, span, name, *want));
+                    SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                    SlotMatch::NeedsSizeConversion => {
+                        return Err(size_conversion_needed_error(ctx, span, name, *want));
                     }
                     SlotMatch::Mismatch => {
                         return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
@@ -1813,7 +1813,7 @@ fn check_operator(
     let unify = |a: Slot, b: Slot| -> Result<Type, Option<Type>> {
         match unify_pair(a, b) {
             PairMatch::Ok(ty) => Ok(ty),
-            PairMatch::NeedsUsizeConversion(target) => Err(Some(target)),
+            PairMatch::NeedsSizeConversion(target) => Err(Some(target)),
             PairMatch::Mismatch => Err(None),
         }
     };
@@ -1828,7 +1828,7 @@ fn check_operator(
                 return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
             let ty = unify(a, b).map_err(|needs_usize| match needs_usize {
-                Some(target) => usize_conversion_needed_error(ctx, span, name, target),
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
@@ -1856,7 +1856,7 @@ fn check_operator(
                 return Err(mod_requires_int_error(ctx, span, a.ty, b.ty));
             }
             let ty = unify(a, b).map_err(|needs_usize| match needs_usize {
-                Some(target) => usize_conversion_needed_error(ctx, span, name, target),
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => mod_requires_int_error(ctx, span, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
@@ -1872,7 +1872,7 @@ fn check_operator(
                 return Err(bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
             let ty = unify(a, b).map_err(|needs_usize| match needs_usize {
-                Some(target) => usize_conversion_needed_error(ctx, span, name, target),
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => bitwise_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
@@ -1913,7 +1913,7 @@ fn check_operator(
                 return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
             }
             unify(a, b).map_err(|needs_usize| match needs_usize {
-                Some(target) => usize_conversion_needed_error(ctx, span, name, target),
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
@@ -2085,15 +2085,15 @@ fn check_array_index(
 ) -> Result<(), String> {
     match match_slot(index, Type::Usize) {
         SlotMatch::Exact => Ok(()),
-        SlotMatch::LiteralUsize => {
+        SlotMatch::LiteralSizeType => {
             let idx = index.int_val.expect("a literal slot carries its value");
             if idx < 0 || idx >= i64::from(count) {
                 return Err(array_index_out_of_range_error(ctx, span, count, idx));
             }
             Ok(())
         }
-        SlotMatch::NeedsUsizeConversion => {
-            Err(usize_conversion_needed_error(ctx, span, op, Type::Usize))
+        SlotMatch::NeedsSizeConversion => {
+            Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
         }
         SlotMatch::Mismatch => Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty)),
     }
@@ -2184,9 +2184,9 @@ fn check_array_word(
             let elem = arrays[id.index()].element;
             check_array_index(index, count, ctx, span, "set")?;
             match match_slot(value, elem) {
-                SlotMatch::Exact | SlotMatch::LiteralUsize => {}
-                SlotMatch::NeedsUsizeConversion => {
-                    return Err(usize_conversion_needed_error(ctx, span, "set", elem));
+                SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                SlotMatch::NeedsSizeConversion => {
+                    return Err(size_conversion_needed_error(ctx, span, "set", elem));
                 }
                 SlotMatch::Mismatch => {
                     return Err(type_mismatch_error(ctx, span, "set", elem, value.ty));

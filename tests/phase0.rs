@@ -1217,11 +1217,18 @@ fn isize_round_trips_arithmetic_and_conversion() {
     // value, an `isize`->`i64` conversion, type-directed `.` printing signed
     // (a negative result must print as negative, unlike `usize`'s `%lu`), and
     // a bare literal coercing into an `isize` position without `>isize` (D8).
+    // Comparisons and the shift both include a negative operand so a
+    // wrongly-unsigned codegen arm (falling through past `Isize`) would flip
+    // the result instead of silently agreeing with the signed answer.
     let src = ": main ( -- )\n\
   2 3 + >isize 4 >isize + .\n\
   3 >isize 10 >isize - .\n\
   3 >isize 5 >isize < .\n\
   5 >isize 3 >isize < .\n\
+  0 >isize 5 >isize - 1 >isize < .\n\
+  0 >isize 5 >isize - 0 >isize > .\n\
+  0 >isize 8 >isize - 1 shr .\n\
+  0 >isize 7 >isize - 2 >isize mod .\n\
   7 >isize >i64 1 + .\n\
   9 >isize dup . drop ;\n";
     let path = std::env::temp_dir().join(format!("sooth-isize-tower-{}.sth", std::process::id()));
@@ -1229,7 +1236,7 @@ fn isize_round_trips_arithmetic_and_conversion() {
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    assert_eq!(stdout, "9\n-7\ntrue\nfalse\n8\n9\n");
+    assert_eq!(stdout, "9\n-7\ntrue\nfalse\ntrue\nfalse\n-4\n-1\n8\n9\n");
     assert_eq!(code, 0);
 }
 

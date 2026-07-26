@@ -505,8 +505,8 @@ fn ty_of(value_types: &[IrType], v: Value) -> IrType {
 }
 
 /// Normalize a scalar for the bits/signedness-inspecting arms (conversion,
-/// `Rem`) at the default target word width. Thin wrapper over
-/// `norm_scalar_ww`, mirroring `scalar_size_align`/`scalar_size_align_ww`
+/// `Rem`, `Cmp`, `Shl`/`Shr`) at the default target word width. Thin wrapper
+/// over `norm_scalar_ww`, mirroring `scalar_size_align`/`scalar_size_align_ww`
 /// (ir.rs).
 fn norm_scalar(ty: IrType) -> IrType {
     norm_scalar_ww(ty, WORD_WIDTH)
@@ -692,7 +692,7 @@ fn emit_instr(
             // semantics for both literal and runtime counts).
             let ty = ty_of(value_types, *v);
             let w = width(ty);
-            let signed = matches!(ty, IrType::Int { signed: true, .. });
+            let signed = matches!(norm_scalar(ty), IrType::Int { signed: true, .. });
             let m = match op {
                 BinOp::Shl => "shl",
                 BinOp::Shr if signed => "sar",
@@ -733,7 +733,7 @@ fn emit_instr(
                 // `div` is emitted only for floats (no integer `/`, R16); it
                 // runs at the operand's `s`/`d` width like the other arms.
                 BinOp::Div => "div",
-                BinOp::Rem if matches!(ty, IrType::Usize | IrType::Int { signed: false, .. }) => {
+                BinOp::Rem if matches!(norm_scalar(ty), IrType::Int { signed: false, .. }) => {
                     "urem"
                 }
                 BinOp::Rem => "rem",
@@ -760,7 +760,7 @@ fn emit_instr(
             let operand = ty_of(value_types, *a);
             let ow = width(operand);
             let is_float = matches!(operand, IrType::Float { .. });
-            let signed = matches!(operand, IrType::Int { signed: true, .. });
+            let signed = matches!(norm_scalar(operand), IrType::Int { signed: true, .. });
             let w = width(ty_of(value_types, *v));
             // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}`/`cle{s,d}`/
             // `cne{s,d}` straight to `comis{s,d}` + `sete`/`setb`/`setbe`/
