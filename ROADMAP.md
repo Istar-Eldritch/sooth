@@ -396,22 +396,26 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    A **zipper** (focus + stored path of one-hole steps) remains a sharper future exercise
    for the recursive drop glue, and the one shape slice 5's second-class references
    provably cannot express, since the path must be stored; not attempted this slice.
-4. **Generalized recursive disposal (the Slice 3 follow-on).** Not yet locked. Slice 3's
-   fused destructor loop covers only direct self-recursion, on a single type, looping the
-   *last* recursive field and recursing the rest. Slice 3's own "Out of scope" note names
-   three distinct gaps left open, not built: **indirect cycles** through an intervening
-   struct (a wrapper type whose cell payload is a *different* type that eventually cycles
-   back), **`^^Self`** (a cell of a cell of the enclosing type, excluded by
-   `recursive_loop_field`'s exact-match predicate), and **multi-type cycles** (mutually
-   recursive types, where no fused loop today spans more than one declared type). Separately,
-   **worklist-based disposal for branching structures** would let every recursive field of a
-   multi-child type dispose in constant stack rather than only the last one — today a
-   left-leaning tree is still O(depth), an asymmetry driven by field order rather than by
-   anything principled. The first design decision is whether these are one slice or several:
-   the cycle-generalization work needs real graph analysis (no SCC code exists anywhere in
-   the repo yet) and loop codegen that spans more than one declared type, while worklist
-   disposal needs a growable structure that allocates *during* disposal, a new collision with
-   the OOM trap that Slice 2/3 never had to face.
+4. **Generalized recursive disposal, cycle generalization (the Slice 3 follow-on).** Not
+   yet locked. Slice 3's fused destructor loop covers only direct self-recursion, on a
+   single type, looping the *last* recursive field and recursing the rest. Slice 3's own
+   "Out of scope" note names three distinct gaps left open, not built, and all three reuse
+   the existing malloc/free and loop machinery (no new runtime primitive, only smarter
+   detection and a loop body generalized across shapes): **indirect cycles** through an
+   intervening struct (a wrapper type whose cell payload is a *different* type that
+   eventually cycles back), **`^^Self`** (a cell of a cell of the enclosing type, excluded
+   by `recursive_loop_field`'s exact-match predicate), and **multi-type cycles** (mutually
+   recursive types, where no fused loop today spans more than one declared type). Every
+   value these types can build is a tree, never an actual runtime cycle: `^T` ownership is
+   exclusive (no aliasing), and struct/enum setters (`S<fi`) are purely functional
+   (`( S Ti -- S )`, a whole-value transform, never a write through a pointer), so there is
+   no way to construct a back-reference into an already-built cell. Disposal therefore never
+   needs a visited-set or double-free guard here; the gap is detection and loop-codegen
+   reach, not aliasing safety. That stops being true once Slice 6's opt-in RC lands, since
+   shared ownership is exactly what makes a real reference cycle constructible (and, without
+   a `Weak` type, leak). **Worklist-based disposal for branching structures moved to Phase 6**
+   (see there): it needs a growable pending-pointer structure and a new OOM-during-disposal
+   interaction, neither of which this slice's gaps require.
 5. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
    checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
    the escape checker keeping refs from being stored or escaping scope. Comes after heap
@@ -501,6 +505,19 @@ wrappers). Tag every stdlib word with the layer it needs.
 library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
+
+**Worklist-based disposal for branching structures (moved from Phase 3 Slice 4).** A
+multi-child recursive type's synthesized destructor loops only its *last* recursive field
+and recurses the rest, so a left-leaning tree still disposes in O(depth); a worklist would
+let every child dispose iteratively instead. Waits for here because it needs a growable
+pending-pointer structure to hold onto siblings while descending, which is exactly the
+`alloc` layer's job (the same reasoning that sends Phase 4's escaping quotations to the
+`alloc` layer's uniform-runtime-stack fallback), and because a fallible push wants an
+optional to report through, which only exists after Phase 4's generics. Building a private
+version of either inside a Phase 3 destructor would be guessing at both. If the fixed-size
+bound turns out to be enough, the `fixed` layer's ringbuffer covers it without waiting for
+`alloc`. No dogfood forces this earlier: the first real pressure is Phase 9's self-hosted
+AST, a genuinely deep branching structure.
 
 ### Phase 7 — Concurrency (library)  `[M]`
 
