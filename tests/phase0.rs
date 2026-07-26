@@ -2587,3 +2587,171 @@ fn caret_field_suffix_is_unknown_word() {
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("^|>x"), "unexpected message: {err}");
 }
+
+// Phase 3 slice 3: recursion through `^` and the fused iterative destructor
+// (R11-R16). A directly self-recursive type disposes in one loop over the
+// reused frame slot instead of a `cell_drop`/`enum_drop` pair per node.
+
+/// Like `run_owned_memory_bounded_golden`, but bounding the *stack* rather
+/// than the address space: 1 MB via `ulimit -s`, the budget a per-node
+/// recursive destructor blows long before a million nodes. Returns the exit
+/// code, or `None` when the child died by signal (a stack overflow is a
+/// SIGSEGV, which the shared `run_binary` would `expect` away as a panic
+/// naming the wrong thing).
+fn run_stack_bounded_golden(tag: &str, src: &str) -> Option<i32> {
+    let path = std::env::temp_dir().join(format!("sooth-deep-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    // `exec` replaces the shell, so the child's signal death propagates as the
+    // shell's own status rather than being flattened into an exit code.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -s 1024 && exec \"{}\"", binary.display()))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .status()
+        .expect("binary should run");
+    status.code()
+}
+
+/// A million-node list, built by a self-tail-recursive word (so building is
+/// already constant-stack under Slice 6's TCO) and disposed by one `drop`.
+const DEEP_LIST_SRC: &str = "type: List | Nil | Cons v i64 next ^List ;\n\
+: build ( i64 List -- List )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - n acc ^ Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+
+#[test]
+fn deep_list_disposes_in_constant_stack() {
+    // Criterion 8 (R11): a 1,000,000-node list disposes under a 1 MB stack.
+    // Verified to fail before the fused loop existed (R21): the pre-change
+    // compiler segfaults on this program at 1 MB, 8 MB and 64 MB alike, so
+    // the pass cannot be vacuous.
+    assert_eq!(
+        run_stack_bounded_golden("list", DEEP_LIST_SRC),
+        Some(0),
+        "a 1M-node list should dispose in constant stack, not overflow it"
+    );
+}
+
+#[test]
+fn recursive_list_disposes_in_expected_order() {
+    // Criterion 5: a list with a `__spy` per node builds, walks one node off
+    // the front (printing its value, dropping its spy, unwrapping its tail),
+    // and disposes the remainder through the loop. The trace is rooted at the
+    // bare `List` value, not a `^List`, so no line of it depends on the cell
+    // destructor's own free ordering.
+    let stdout = run_owned_traced_golden(
+        "recursive-list",
+        "type: List | Nil | Cons v i64 tag __spy next ^List ;\n\
+: push-front ( List i64 -- List )\n  \
+  | rest v |\n  \
+  v v __spy rest ^ Cons ;\n\
+: step ( List -- List )\n\
+| Nil    Nil\n\
+| Cons   | v t n |  v . t drop n ^>\n\
+;\n\
+: main ( -- )\n  \
+  Nil 3 push-front 2 push-front 1 push-front\n  \
+  step drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\n1\ndrop 1\nfree 32\ndrop 2\nfree 32\ndrop 3\nfree 32\n"
+    );
+}
+
+#[test]
+fn recursive_disposal_is_pre_order() {
+    // Criterion 9 (R10): a node's own spy drops before the next node is even
+    // reached, so the tags come out `1, 2, 3`. Post-order disposal (the
+    // deepest node first, which is what the pre-slice compiler did before R8
+    // reversed the cell ordering) would print `3, 2, 1`, and equal tags could
+    // not tell the two apart.
+    let stdout = run_owned_traced_golden(
+        "pre-order",
+        "type: L | Nil | Cons tag __spy next ^L ;\n\
+: push-front ( L i64 -- L )\n  \
+  | rest v |\n  \
+  v __spy rest ^ Cons ;\n\
+: main ( -- )\n  \
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\n"
+    );
+}
+
+#[test]
+fn recursive_destructor_reads_node_before_overwriting_slot() {
+    // Criterion 10 (R12): the recursive field is declared *first*, with two
+    // distinct spies after it. The loop reuses one frame slot, so the copy-out
+    // of the next node overwrites the current one; emitting the fields in
+    // declaration order instead would drop the spies of whatever node the slot
+    // happened to hold, printing garbage tags (or repeating a node's) while
+    // leaving the alloc/free trace perfectly balanced. Only the tags catch it.
+    let stdout = run_owned_traced_golden(
+        "copyout-order",
+        "type: L | Nil | Cons next ^L a __spy b __spy ;\n\
+: push-front ( L i64 -- L )\n  \
+  | rest v |\n  \
+  rest ^ v __spy v 1 + __spy Cons ;\n\
+: main ( -- )\n  \
+  Nil 5 push-front 3 push-front 1 push-front drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\n\
+drop 1\ndrop 2\nfree 32\ndrop 3\ndrop 4\nfree 32\ndrop 5\ndrop 6\nfree 32\n"
+    );
+}
+
+#[test]
+fn non_recursive_cell_shapes_are_not_treated_as_recursive() {
+    // Criterion 11 (R13/R15): three near misses for the detection pass, each
+    // of which must keep straight-line synthesis. A false positive would blit
+    // the enclosing type's bytes out of a cell that does not hold one, so the
+    // spy tags and the sizes are both load-bearing: `Outer` holds a cell of a
+    // *different* struct, `Twice` is a `^^__spy` whose inner payload is a cell
+    // rather than the enclosing type (the `^^Self` near miss), and `Holder`
+    // holds a cell of an unrelated enum.
+    let stdout = run_owned_traced_golden(
+        "near-miss",
+        "type: Inner t __spy ;\n\
+type: Outer c ^Inner ;\n\
+type: Twice c ^^__spy ;\n\
+type: Payload | A t __spy | B ;\n\
+type: Holder c ^Payload ;\n\
+: main ( -- )\n  \
+  1 __spy Inner ^ Outer drop\n  \
+  2 __spy ^ ^ Twice drop\n  \
+  3 __spy A ^ Holder drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 8\nfree 8\ndrop 1\n\
+alloc 8\nalloc 8\nfree 8\nfree 8\ndrop 2\n\
+alloc 16\nfree 16\ndrop 3\n"
+    );
+}
+
+#[test]
+fn self_recursive_struct_destructor_compiles() {
+    // Criterion 15 (R16): a self-recursive struct is uninhabited (a `^` is
+    // non-null, so building one needs one first), but a destructor is
+    // synthesized for every declared type, so the declaration alone emits a
+    // loop with no exit. That is a legal QBE function, but only if the
+    // trailing `Ret` is skipped: an unconditional seal after the back-edge
+    // emits a duplicate block label and QBE rejects the whole module.
+    let stdout = run_owned_golden(
+        "self-recursive-struct",
+        "type: Cyclic v __spy next ^Cyclic ;\n: main ( -- )\n  0 . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
