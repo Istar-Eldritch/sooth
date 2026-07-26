@@ -4233,6 +4233,72 @@ mod tests {
         assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
     }
 
+    #[test]
+    fn lower_appends_a_destructor_func_for_every_cell_even_a_copy_payload() {
+        // R8: unlike the struct/enum filters above, *every* cell gets a
+        // destructor, because `drop` on a cell must free it whatever its
+        // payload is. `^i64`'s payload is Copy and it still gets one.
+        let ir = lower_src(": w ( -- ) 5 ^ drop ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_cell_drop_0")
+            .expect("a Copy-payload cell still gets a destructor");
+        let calls: Vec<&String> = instrs(dtor)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, _) => Some(sym),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![FREE_SYMBOL],
+            "a Copy payload frees and nothing else"
+        );
+    }
+
+    #[test]
+    fn synthesized_cell_destructor_copies_out_a_linear_aggregate_payload_before_freeing() {
+        // R5/R13: an aggregate payload's drop glue runs on a copy blitted out
+        // of the cell, and both precede the free. The `^__spy` golden covers
+        // the scalar payload at runtime; this pins the aggregate path, where
+        // dropping in place would hand the struct destructor storage that the
+        // free then releases underneath it.
+        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds ^ drop ;");
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_cell_drop_0")
+            .expect("a destructor was synthesized for the cell");
+        let is = instrs(dtor);
+        let blit_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Blit(..)))
+            .expect("a copy-out Blit");
+        let calls: Vec<(usize, &String)> = is
+            .iter()
+            .enumerate()
+            .filter_map(|(at, i)| match i {
+                Instr::Call(None, sym, _) => Some((at, sym)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            calls
+                .iter()
+                .map(|(_, sym)| sym.as_str())
+                .collect::<Vec<_>>(),
+            vec!["sooth_struct_drop_0", FREE_SYMBOL],
+            "the payload's own destructor runs, then the cell frees"
+        );
+        assert!(
+            blit_at < calls[0].0,
+            "the payload must be copied out before its destructor runs: blit at {blit_at}, drop at {}",
+            calls[0].0
+        );
+    }
+
     // Phase 3 Slice 1, Phase 4: the synthesized enum destructor's own tag
     // dispatch (structural, not full-stdout: `tests/phase0.rs` covers the
     // 2-variant runtime behavior; these pin the shapes it doesn't reach).

@@ -2429,14 +2429,15 @@ fn owned_alloc_dispose_loop_stays_within_memory_bound() {
 
 #[test]
 fn peek_owned_copy_payload_keeps_cell_live() {
-    // Criterion 6: peek twice then dispose; both peeked values are correct
-    // and equal (proving the cell stayed live and unchanged across two
-    // peeks), and the transcript shows exactly one `free`.
+    // Criterion 6: peek twice then dispose; the first peeked value is printed
+    // (pinning it against garbage, not just against the second peek), the two
+    // peeks are then asserted equal (proving the cell stayed live and
+    // unchanged across them), and the transcript shows exactly one `free`.
     let stdout = run_owned_traced_golden(
         "peek-twice",
-        ": main ( -- )\n  5 ^ ^|> swap ^|> rot = . drop ;\n",
+        ": main ( -- )\n  5 ^ ^|> swap ^|> rot dup . = . drop ;\n",
     );
-    assert_eq!(stdout, "alloc 8\ntrue\nfree 8\n");
+    assert_eq!(stdout, "alloc 8\n5\ntrue\nfree 8\n");
 }
 
 #[test]
