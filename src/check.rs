@@ -2212,9 +2212,10 @@ fn check_array_word(
 /// ( ^T -- ^T T )` is a non-consuming peek, restricted to a `Copy` payload
 /// (R14) exactly like `S|>fi`. Matched by **exact name only** (R12b): `^>x`
 /// and `^|>x` don't match any arm here and fall through to the ordinary
-/// unknown-word error. Must run before `check_struct_peek_word`, whose
-/// `"^|>".split_once("|>")` would otherwise probe a struct named `^` with an
-/// empty field name.
+/// unknown-word error. Running before `check_struct_peek_word` is defensive
+/// only: `"^|>".split_once("|>")` probes a struct named `^`, but that probe
+/// returns `None` on a registry miss and R12a makes `^` undeclarable, so the
+/// order is unobservable (swapping the two arms keeps the suite green).
 fn check_owned_cell_word(
     name: &str,
     span: Span,

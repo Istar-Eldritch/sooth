@@ -104,9 +104,13 @@ prose was a rationale rather than a specification.
   the backend rather than erroring. Only the `^` slice of it is fixed here.
 - **R12b (new; round 2 A3)** — The three cell words match by **exact name only**. `^>x` and
   `^|>x` (which a user will write by analogy with `Point>x`) each lex as one word and must
-  produce the ordinary unknown-word error, not be reinterpreted. The cell-peek arm must be
-  exact-matched or run before `check_struct_peek_word`, because `"^|>".split_once("|>")` yields
-  `("^", "")` and would otherwise be probed as struct `^` with an empty field.
+  produce the ordinary unknown-word error, not be reinterpreted. **Exact-name matching is what
+  carries this**; the ordering half of the original claim was withdrawn in Phase 5. The worry
+  was that `"^|>".split_once("|>")` yields `("^", "")` and would be probed as struct `^` with an
+  empty field, but `check_struct_peek_word` returns `None` on a registry miss and R12a makes `^`
+  undeclarable, so the probe can never hit. Verified by swapping the two arms: the whole suite
+  stays green. Keep the cell arm first as cheap defence, but no test guards the order, because
+  no behaviour depends on it.
 - **R13 (round 1)** — **Unwrap materialises the payload before releasing the cell.** The freed
   pointer is never handed to the stack. By payload shape:
   - **scalar** (including `i64`, `__spy`, and a **nested cell**, which is pointer-width): a
@@ -146,7 +150,9 @@ prose was a rationale rather than a specification.
   The print path (@qbe.rs:798) must be `unreachable!`, since the checker rejects printing a
   cell. Cell size **defers to `Ptr`'s existing convention** (currently hardcoded 8 at
   @ir.rs:325, already recorded to retrofit to the word-width parameter alongside `Ptr`); the
-  cell must not introduce a second, independent width assumption.
+  cell must not introduce a second, independent width assumption. The REPL residual's cell
+  arm is **not** such a site: `format_stack` counts 8-byte carried cells (`carried_slot_bytes`
+  = 8 for every scalar), so its `cell += 1` holds whatever width `Ptr` retrofits to.
 - **R18 (deferred)** — Consolidating the `structs`/`enums`/`arrays` registries into one borrow
   is **not** done here. The original justification was wrong: because R4 makes `is_copy` return
   `false` with no payload lookup, its arity is unchanged and there is no forcing function. The
@@ -235,15 +241,21 @@ free shim directly rather than going through drop glue), can land earlier.
 ### Phase 5 — REPL residual disposal and regression sweep
 
 - Confirm a cell on the residual REPL stack is freed at `:quit` via `dispose_residual`
-  (@repl.rs:477); expected to need no production change beyond P1's session registry.
+  (@repl.rs:477); the disposal path itself needs no production change beyond P1's session
+  registry.
 - **Production-change carve-out (Phase 3 review finding)**: `format_stack` (@repl.rs:180)
   has no `Type::OwnedCell` arm, so a live cell on the residual stack falls into the
   scalar catch-all and prints as a raw heap address (nondeterministic, so it can't be
   asserted in a golden). Every other non-printable aggregate (`Struct`/`Enum`/`Array`)
   gets a `<Name>` placeholder arm instead; `OwnedCell` already carries its rendered name
-  inline, so add a matching `<^i64>`-style arm. This is a small production change beyond
+  inline, so add a matching `<^i64>`-style arm. This is a real production change beyond
   the session registry, and criterion 15's golden should assert the placeholder string,
-  not a value.
+  not a value. It is strictly a **Phase 3** obligation (the arm is needed the moment `^`
+  is constructible at the REPL), landed here; commit 6fbddc1's message claims the arm but
+  its diff never touches `src/repl.rs`, so do not audit this by commit message.
+- Criterion 21's golden is an **exact-name regression pin, not an arm-ordering guard**, and
+  nothing else guards the ordering either: see R12b, whose ordering clause is withdrawn
+  here as unobservable. Do not add a test for it; there is no failure mode to pin.
 - **Exit**: criteria 15 and 21 pass. Green.
 - **Changes**: `src/repl.rs`, `tests/phase1.rs`, `tests/phase0.rs`.
 
@@ -287,7 +299,7 @@ Inherited house rules, binding here:
 | 18 | **Gate off by default**: construct and drop with `SOOTH_TRACE_ALLOC` unset emits only the program's own output. Without this, a regression inverting the gate ships green | `alloc_trace_is_silent_when_unset` (P3) |
 | 19 | `^` is reserved: `type: ^ …`, `: ^ …`, and a local named `^` are each located errors (R12a) | `reserved_caret_type_name_is_error` + `..._word_name_...` + `..._local_...` (P1) |
 | 20 | Lexer claims hold: `^\|>` is one token, `^^i64` is one token, `^[u8 4]` splits at the bracket (R12) | lexer unit asserts beside the existing `\|>` glue tests (P1, lexer-level) |
-| 21 | `^>x` and `^\|>x` produce the ordinary unknown-word error, not a reinterpretation (R12b) | `caret_field_suffix_is_unknown_word` (P5) |
+| 21 | `^>x` and `^\|>x` produce the ordinary unknown-word error, not a reinterpretation (R12b) | `caret_field_suffix_is_unknown_word` (P5); covers exact-name matching only, R12b's ordering half being unobservable |
 
 ## Why criterion 14 is not a runtime golden
 
@@ -316,6 +328,6 @@ Phase 6's `alloc` layer.
   {"phase":2,"focus":"Allocation machinery with nothing calling it yet: the allocate/free shim wrapping malloc/free as a compiler-emitted helper following the drop-spy precedent (no user-facing FFI), emitted unconditionally; the trace gated on the SOOTH_TRACE_ALLOC environment variable, checked per event via getenv (not cached, since caching needs the mutable-global path that has no precedent in the emitter) and written to STDOUT via printf rather than stderr, because printf is stdio-buffered while the emitter's stderr path is unbuffered dprintf and the harness captures the streams separately, so only one stdio stream makes program order equal transcript order; the event format is exactly one line per event, 'alloc <size>' and 'free <size>', with no addresses so transcripts stay assertable; a NULL-return trap calling exit(1) rather than abort so a test observes Some(1); and the max(size,1) adjustment so a zero-sized payload never reaches malloc(0). Add the IrType variant and EVERY IrType::Spy-parallel match arm (about fourteen), critically field_is_linear and layout_field_is_linear returning TRUE for a cell, without which a struct or enum containing one is never marked linear and three criteria silently pass while doing nothing. Add the trace-reading test helpers.","difficulty":"hard","changes":["src/backend/qbe.rs","src/ir.rs","tests/phase0.rs","tests/phase1.rs"],"tests":["src/backend/qbe.rs","tests/phase0.rs"],"exit":"unit-level: the emitted IL contains the shim, the gated trace, and the NULL check plus exit(1) trap call (criterion 14); green; no regression"},
   {"phase":3,"focus":"The three access words: ^ as ( T -- ^T ), ^> as ( ^T -- T ) which frees the cell, and ^|> as a non-consuming ( ^T -- ^T T ) peek restricted to Copy payloads with a compile error naming the type on a linear payload. The three match by exact name only, so ^>x and ^|>x give the ordinary unknown-word error, and the cell-peek arm is exact-matched or ordered before check_struct_peek_word since '^|>'.split_once('|>') yields ('^',''). Construction stores a scalar payload, blits an aggregate payload from its frame slot, and writes nothing for a zero-sized payload; unwrap MATERIALISES the payload before releasing the cell (a Load for a scalar including a nested cell, a fresh frame Alloc plus a Blit for an aggregate, neither for a zero-sized payload) so the freed pointer is never handed to the stack; peek of an aggregate allocates a fresh frame slot and blits out rather than aliasing the cell. Phase 3 must not drop a cell: emit_drop still ends in a catch-all, so a drop here would compile to a silent leak until phase 4 adds the arm.","changes":["src/check.rs","src/ir.rs","tests/phase0.rs"],"tests":["tests/phase0.rs","src/check.rs"],"exit":"criteria 2, 3, 3b, 4, 5, 5b, 7, 9, 18 pass; green; no regression"},
   {"phase":4,"focus":"Drop glue and the allocation-observing goldens: an emit_drop arm for the cell plus a synthesized per-type destructor that drops a linear payload FIRST and then frees, an ordering the single-stream trace makes observable and therefore contractual. drop stays a Call to a per-type symbol with no new Instr or Terminator variant. Confirm emit_drop's linear-array unreachable guard remains valid now that a new linear type exists. Goldens assert exact ordered stdout transcripts, with sizes chosen to discriminate (nested cells use ^^[u8 24] so inner and outer differ, and the zero-sized case asserts alloc 1 to witness the max(size,1) adjustment that glibc would otherwise mask); criterion 1b is the sole exception, running with the gate off under a 64 MB RLIMIT_AS so a fake free necessarily trips the trap.","changes":["src/ir.rs","src/backend/qbe.rs","tests/phase0.rs"],"tests":["tests/phase0.rs","src/ir.rs"],"exit":"criteria 1, 1b, 6, 8, 9b, 10, 11, 12, 13, 17 pass; green; no regression"},
-  {"phase":5,"focus":"REPL residual disposal and the regression sweep: confirm a cell left on the residual REPL stack is freed at :quit through the existing dispose_residual path, expected to need no production change beyond phase 1's session-persistent registry, then verify all 14 examples produce byte-identical stdout and no pre-existing test regresses.","changes":["tests/phase1.rs","tests/phase0.rs"],"tests":["tests/phase1.rs","tests/phase0.rs"],"exit":"criteria 15 and 21 pass; green"}
+  {"phase":5,"focus":"REPL residual disposal and the regression sweep: confirm a cell left on the residual REPL stack is freed at :quit through the existing dispose_residual path, which needs no production change beyond phase 1's session-persistent registry, plus the one carve-out production change of a Type::OwnedCell placeholder arm in format_stack (without it a residual cell prints a nondeterministic raw heap address and criterion 15's golden cannot assert an exact transcript), then verify all 14 examples produce byte-identical stdout and no pre-existing test regresses.","changes":["src/repl.rs","tests/phase1.rs","tests/phase0.rs"],"tests":["src/repl.rs","tests/phase1.rs","tests/phase0.rs"],"exit":"criteria 15 and 21 pass; green"}
 ]}
 ```

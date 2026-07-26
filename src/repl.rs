@@ -203,7 +203,9 @@ pub fn format_stack(
                 // A cell slot renders as its `<^T>` placeholder rather than
                 // the live heap address it holds (R10: an address defeats an
                 // exact transcript, and here it would be a nondeterministic
-                // one at that). One pointer-width cell, mirroring `Ptr`.
+                // one at that). It advances one 8-byte carried cell like any
+                // other scalar (`carried_slot_bytes` = 8), not a pointer's
+                // width, so this is not a second width site to retrofit.
                 vals.push(format!("<{name}>"));
                 cell += 1;
             }
@@ -796,7 +798,7 @@ mod tests {
     #[test]
     fn format_stack_cell_slot_shows_placeholder_and_offsets_past_it() {
         use crate::ast::OwnedCellId;
-        // A cell slot (one pointer-width cell), then a scalar slot. The cell
+        // A cell slot (one carried cell), then a scalar slot. The cell
         // renders as its `<^i64>` placeholder reading no heap bytes, and the
         // trailing scalar reads the cell *past* it, not `index * 8`.
         let cell_ty = Type::OwnedCell(OwnedCellId::from_index(0), "^i64");
