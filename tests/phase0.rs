@@ -2523,3 +2523,18 @@ fn peek_aggregate_does_not_alias_cell() {
     );
     assert_eq!(stdout, "alloc 4\nfree 4\n9\n");
 }
+
+#[test]
+fn caret_field_suffix_is_unknown_word() {
+    // Criterion 21 (R12b): `^>x` and `^|>x` lex as one word each and match
+    // none of the three exact cell-word spellings, so they fall through to
+    // the ordinary unknown-word error rather than being reinterpreted as a
+    // struct peek/field access by analogy with `Point>x`/`Point|>x`.
+    let err = linear_check_error(": main ( -- )\n  5 ^ ^>x ;\n");
+    assert!(err.contains("unknown word"), "unexpected message: {err}");
+    assert!(err.contains("^>x"), "unexpected message: {err}");
+
+    let err = linear_check_error(": main ( -- )\n  5 ^ ^|>x ;\n");
+    assert!(err.contains("unknown word"), "unexpected message: {err}");
+    assert!(err.contains("^|>x"), "unexpected message: {err}");
+}

@@ -779,3 +779,20 @@ fn repl_quit_disposes_residual_linear_enum() {
         "a residual linear enum should be disposed at `:quit`, tag-dispatched"
     );
 }
+
+// Phase 3 Slice 2 (criterion 15): a `^T` cell left on the residual REPL stack
+// is freed at `:quit` through the same `dispose_residual` path as `__spy` and
+// the struct/enum cases above, needing no production change beyond Phase 1's
+// session-persistent cell registry. The trace is gated on, so the transcript
+// is asserted exactly, `alloc` at construction then `free` at `:quit`.
+
+#[test]
+fn repl_quit_frees_residual_owned() {
+    let out = run_session_traced(&["5 ^", ":quit"], true);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["alloc 8", "stack: <^i64>", "free 8"],
+        "a residual owned cell should be freed at `:quit`"
+    );
+}

@@ -199,6 +199,14 @@ pub fn format_stack(
                 let size = array_layouts[id.index()].size as usize;
                 cell += size.div_ceil(8);
             }
+            Type::OwnedCell(_, name) => {
+                // A cell slot renders as its `<^T>` placeholder rather than
+                // the live heap address it holds (R10: an address defeats an
+                // exact transcript, and here it would be a nondeterministic
+                // one at that). One pointer-width cell, mirroring `Ptr`.
+                vals.push(format!("<{name}>"));
+                cell += 1;
+            }
             _ => {
                 let v = buf[cell];
                 vals.push(match ty {
