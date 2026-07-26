@@ -2755,3 +2755,203 @@ fn self_recursive_struct_destructor_compiles() {
     );
     assert_eq!(stdout, "0\n");
 }
+
+// Phase 3 slice 3, phase 5: multi-child and mutually recursive types (R17,
+// R18), the documented depth limitations (R14), and the `list.sth` dogfood.
+// A tree node's two `^` fields are both recursive edges (R13's detection
+// still fires per field, not per type), so `recursive_loop_field` (R17)
+// picks the *last* declared one for the loop and the rest fall back to an
+// ordinary recursive drop call.
+
+#[test]
+fn recursive_tree_builds_and_disposes() {
+    // Criterion 12: a 7-node perfect binary tree (tags 1..7, pre-order:
+    // root=1, left subtree rooted at 2 with leaves 4/5, right subtree rooted
+    // at 3 with leaves 6/7) builds and disposes with every tag distinct, so
+    // no drop can be mistaken for a sibling's. R10's pre-order contract still
+    // holds per node (a node's own tag drops before its children are
+    // reached); the *last* field (`right`) is the looped one, so a node's
+    // `left` subtree is fully disposed by an ordinary recursive call before
+    // the loop steps to `right`.
+    let stdout = run_owned_traced_golden(
+        "tree-7",
+        "type: Tree | Leaf | Node tag __spy left ^Tree right ^Tree ;\n\
+: main ( -- )\n  \
+  1 __spy\n  \
+  2 __spy\n    \
+    4 __spy Leaf ^ Leaf ^ Node ^\n    \
+    5 __spy Leaf ^ Leaf ^ Node ^\n    \
+    Node ^\n  \
+  3 __spy\n    \
+    6 __spy Leaf ^ Leaf ^ Node ^\n    \
+    7 __spy Leaf ^ Leaf ^ Node ^\n    \
+    Node ^\n  \
+  Node drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
+alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
+drop 1\nfree 32\ndrop 2\nfree 32\ndrop 4\nfree 32\nfree 32\nfree 32\n\
+drop 5\nfree 32\nfree 32\nfree 32\ndrop 3\nfree 32\ndrop 6\nfree 32\nfree 32\n\
+free 32\ndrop 7\nfree 32\nfree 32\n"
+    );
+}
+
+#[test]
+fn multi_child_destructor_loops_on_last_recursive_field() {
+    // Criterion 13a: a 3-node tree (root=1, left leaf-child=2, right
+    // leaf-child=3) whose fields are declared `tag`, `left`, `right`. Looping
+    // the *last* field (`right`) prints tags `1, 2, 3`: root's own tag drops,
+    // then `left` (non-looped) is fully recursively disposed (tag 2), then
+    // the loop frees root's own cell and steps to `right` (tag 3). Looping
+    // the *first* field instead would recurse `right` before stepping to
+    // `left`, printing `1, 3, 2` (R17 names this exact contrast).
+    let stdout = run_owned_traced_golden(
+        "tree-order",
+        "type: Tree | Leaf | Node tag __spy left ^Tree right ^Tree ;\n\
+: main ( -- )\n  \
+  1 __spy\n  \
+  2 __spy Leaf ^ Leaf ^ Node ^\n  \
+  3 __spy Leaf ^ Leaf ^ Node ^\n  \
+  Node drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\nalloc 32\n\
+drop 1\nfree 32\ndrop 2\nfree 32\nfree 32\nfree 32\ndrop 3\nfree 32\nfree 32\n"
+    );
+}
+
+#[test]
+fn deep_right_leaning_tree_disposes_in_constant_stack() {
+    // Criterion 13b: 13a alone would also pass on a compiler that never
+    // builds a multi-child loop at all (it only distinguishes traversal
+    // order); a 1,000,000-node right-leaning tree disposing under a 1 MB
+    // stack is what proves the loop exists, exactly as criterion 8 does for
+    // the list. Each node's `left` is a fresh `Leaf` and `right` is the
+    // growing chain, so the loop (on the last field, `right`) takes the deep
+    // path and the non-looped `left` recursion never grows past depth 1.
+    let src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
+: build ( i64 Tree -- Tree )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - Leaf ^ acc ^ Node build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Leaf build drop ;\n";
+    assert_eq!(
+        run_stack_bounded_golden("right-tree", src),
+        Some(0),
+        "a 1M-node right-leaning tree should dispose in constant stack, not overflow it"
+    );
+}
+
+#[test]
+fn mutually_recursive_types_dispose_on_recursive_path() {
+    // Criterion 14: mutually recursive types keep today's recursive
+    // destructor (R18); no fused loop spans a multi-type cycle. First, a
+    // small A/B chain (base case in `A`, since an all-struct or all-linked
+    // pair with no base variant would be uninhabited per R5) disposes with
+    // the correct trace, alternating tags between the two types. Then a
+    // chain deep enough to overflow a 1 MB stack (300,000 nodes; the direct
+    // list already passes at 1,000,000 under the same bound) proves the
+    // fused-loop path was *not* taken for this shape.
+    let stdout = run_owned_traced_golden(
+        "mutual-small",
+        "type: A | ANil | ACons tag __spy next ^B ;\n\
+type: B | BNil | BCons tag __spy next ^A ;\n\
+: build ( i64 A -- A )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 -\n    \
+    n __spy acc ^ BCons ^\n    \
+    n __spy swap ACons\n    \
+    build\n  \
+  end ;\n\
+: main ( -- )\n  3 ANil build drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
+drop 1\nfree 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 2\nfree 24\n\
+drop 3\nfree 24\ndrop 3\nfree 24\n"
+    );
+
+    let deep_src = "type: A | ANil | ACons tag __spy next ^B ;\n\
+type: B | BNil | BCons tag __spy next ^A ;\n\
+: build ( i64 A -- A )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 -\n    \
+    n __spy acc ^ BCons ^\n    \
+    n __spy swap ACons\n    \
+    build\n  \
+  end ;\n\
+: main ( -- )\n  300000 ANil build drop ;\n";
+    assert_ne!(
+        run_stack_bounded_golden("mutual-deep", deep_src),
+        Some(0),
+        "a mutually recursive chain should still overflow a 1 MB stack: the \
+         fallback fused-loop-less recursive path was proven to be taken"
+    );
+}
+
+#[test]
+fn indirect_recursion_shapes_remain_depth_limited() {
+    // Criterion 16: the limitation boundary is an *asymmetry*, not merely
+    // "disposes at modest depth" (already true pre-slice and passable
+    // vacuously). At 1,000,000 nodes under a 1 MB stack, the directly
+    // self-recursive list exits 0 (already proven by
+    // `deep_list_disposes_in_constant_stack`) while a wrapper-struct list
+    // (the `^` reached through an intervening struct) and a left-leaning
+    // tree (the loop takes the *last* field, so a chain grown through the
+    // *first* field stays on the recursive path) do not.
+    let wrapper_src = "type: Wrap v i64 n ^List ;\n\
+type: List | Nil | Cons w Wrap ;\n\
+: build ( i64 List -- List )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - n acc ^ Wrap Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+    assert_ne!(
+        run_stack_bounded_golden("wrapper-list", wrapper_src),
+        Some(0),
+        "indirection through a wrapper struct should stay depth-limited"
+    );
+
+    let left_leaning_src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
+: build ( i64 Tree -- Tree )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - acc ^ Leaf ^ Node build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Leaf build drop ;\n";
+    assert_ne!(
+        run_stack_bounded_golden("left-tree", left_leaning_src),
+        Some(0),
+        "a left-leaning tree should stay depth-limited: the loop takes the \
+         last field (`right`), not the chain-growing first field (`left`)"
+    );
+}
+
+#[test]
+fn example_list_matches_golden() {
+    // Criterion 17: `examples/list.sth` builds a list, sums the first three
+    // nodes off the front via a consuming walk (`pop`/`sum-first`), then
+    // `drop`s the remaining seven nodes through the fused destructor loop
+    // — both a walk and a disposal, not disposal alone.
+    let (stdout, code) = run_and_capture_stdout("examples/list.sth");
+    assert_eq!(stdout, "6\n");
+    assert_eq!(code, 0);
+}

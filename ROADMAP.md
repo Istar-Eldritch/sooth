@@ -57,9 +57,10 @@ bytecode loop with a backward branch, exercising the whole typed core at once (a
 ~1.1M dispatch steps. It shipped with **zero compiler machinery** (no `src/` change), which
 is itself the exit verdict: the typed core is sufficient to write a real interpreter.
 **Phase 2 is complete.** The old Slice 8 (`Copy` marker + optional / non-null pointer) was
-dissolved into Phase 3: in a heap-free phase the `Copy` marker has no non-`Copy` type to
-reject and pointers have nothing to point at, so `Copy`/linear, pointers, recursive/heap
-data, and drop all move to Phase 3, where their first real clients live.
+dissolved: in a heap-free phase the `Copy` marker has no non-`Copy` type to reject and
+pointers have nothing to point at, so `Copy`/linear, pointers, recursive/heap data, and
+drop moved to Phase 3. Optional / non-null pointers had no compiler-known type to attach
+to (Phase 3's cells are always non-null) and moved further out, to Phase 4's generics.
 **Phase 3 Slice 1 (linear analysis + move-by-default + `dup` gated on `Copy` + explicit
 `drop`) is complete**: move tracking on linear locals (a `Live`/`Moved`/`MaybeMoved`
 lattice reconciled at branch joins), `dup`/`over` rejected on non-`Copy` types, `drop`
@@ -78,8 +79,19 @@ A single global allocator sits behind a compiler-emitted `malloc`/`free` shim wi
 that exits non-zero and a `max(size,1)` adjustment. Disposal is observable through an
 allocation trace gated on `SOOTH_TRACE_ALLOC`, on stdout so program order equals transcript
 order, silent by default.
-**Next action: Phase 3 Slice 3** (recursive/heap data + optional / non-null pointers +
-`isize`). Not yet locked.
+**Phase 3 Slice 3 (recursive/heap data + `isize`) is complete**: a type cycle is legal iff
+it passes through at least one `^` (struct field or enum variant payload, no positional
+restriction), while a by-value cycle stays a located error; `isize`, a signed mirror of
+`usize`; disposal is reversed to free-before-drop-payload and made pre-order; and a
+directly self-recursive type (list or tree) gets one fused iterative destructor loop
+instead of recursive `cell_drop`/`struct_drop`/`enum_drop` calls, giving constant-stack
+disposal (verified at 1M+ nodes under a 1MB stack) for that shape specifically —
+indirect cycles, `^^Self`, and mutually recursive types keep the recursive path and its
+depth limit. The OOM trap stays: there is still no compiler-known optional/non-null
+pointer type to return failure through (that needs Phase 4's generics), so this was
+never this slice's revisit to make. `examples/list.sth` dogfoods it.
+**Next action: Phase 3 Slice 4** (second-class references + parameter conventions). Not
+yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -207,10 +219,12 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    bytecode, exercising the whole typed core (arrays, `usize`, enums/clauses, structs,
    and the self-tail-call dispatch loop from Slice 6). Shipped as `examples/vm.sth` with
    zero compiler machinery. ✅ done.
-The old **Slice 8** (`Copy` marker + optional / non-null pointer) is **dissolved into
-Phase 3**: with no heap and no linear type in Phase 2, the marker had nothing to reject and
-pointers had nothing to point at. `Copy`/linear, pointers, recursive/heap data, and drop now
-land together in Phase 3, where their first real clients exist. See the Phase 3 slice plan.
+The old **Slice 8** (`Copy` marker + optional / non-null pointer) is **dissolved**: with no
+heap and no linear type in Phase 2, the marker had nothing to reject and pointers had
+nothing to point at. `Copy`/linear, pointers, recursive/heap data, and drop land in Phase
+3, where their first real clients exist; optional/non-null pointers had no compiler-known
+type to attach to there either and land in Phase 4's generics instead. See the Phase 3
+slice plan.
 
 Numeric axes carved out of Slice 2 have all landed: **floats** and **bitwise operators**
 (`and`/`or`/`xor`/`not`/`shl`/`shr`, type-directed right shift), both merged to `main`. The
@@ -359,18 +373,27 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    bundled: `arrays`/`cells` are `&mut` there (interned during checking) while
    `structs`/`enums` are `&`, so there is no single handle, and its highest-arity function
    stays over threshold on its own real parameters regardless.
-3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
-   content, now with a home: recursive enums/structs need the heap indirection slice 2
-   provides. **Revisit slice 2's OOM-traps-and-aborts decision here**: this is the slice
-   that introduces optional / non-null pointers, so it is the first point at which a failed
-   allocation can be *returned* rather than aborted, and the trap was explicitly a
-   placeholder for that. Dogfood: a linked list or tree that builds, walks, and is
-   explicitly freed.
-   A **zipper** (focus + stored path of one-hole steps) is the sharper dogfood candidate:
-   it exercises the recursive drop glue harder than a list, and it is the one shape
-   slice 4's second-class references provably cannot express, since the path must be
-   stored. Hand-write the step sum for one type before considering compiler-generated
-   one-hole types.
+3. **Recursive/heap data + `isize`.** ✅ done. A type cycle is legal iff every cycle passes
+   through at least one `^`, in struct field or enum variant payload position alike (no
+   positional restriction); a by-value cycle keeps its existing located error. Disposal is
+   reversed to free-the-cell-before-dropping-the-payload (uniformity, not a correctness
+   requirement) and made pre-order (a node's own fields drop and its cell frees before
+   descending). A directly self-recursive type gets one fused iterative destructor loop
+   (looping the *last* recursive field in declaration order, recursing any others) instead
+   of mutually recursive `cell_drop`/`struct_drop`/`enum_drop` calls, giving verified
+   constant-stack disposal at 1M+ nodes under a 1MB stack for that shape only — indirect
+   cycles, `^^Self`, and mutually recursive types keep the recursive path and its depth
+   limit, which is a documented limitation, not a bug. `isize`, a signed mirror of `usize`.
+   **Slice 2's OOM-trap-and-abort decision stays closed, not revisited**: an earlier plan
+   assumed this slice would introduce a compiler-known optional/non-null pointer type for a
+   failed allocation to return through; there is no such type here or anywhere before Phase
+   4's generics (a compiler-synthesized per-payload `Option` is exactly what generics would
+   delete), so the allocator has nothing privileged to return and the trap stays. Dogfood:
+   `examples/list.sth`, a linked list that builds, walks (sums via a non-consuming or
+   consuming pass), and disposes what remains via the fused loop.
+   A **zipper** (focus + stored path of one-hole steps) remains a sharper future exercise
+   for the recursive drop glue, and the one shape slice 4's second-class references
+   provably cannot express, since the path must be stored; not attempted this slice.
 4. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
    checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
    the escape checker keeping refs from being stored or escaping scope. Comes after heap

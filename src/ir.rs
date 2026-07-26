@@ -911,14 +911,23 @@ pub fn synthesize_aggregate_destructors(
 /// enclosing type itself. Indirection through a wrapper struct, or a `^^Self`
 /// whose inner payload is a cell rather than the type, is not a direct edge
 /// and stays on the recursive destructor path with its depth limit (R14).
-/// Two or more recursive edges in one field list (a tree node) also stay off
-/// the loop here: picking one to descend and recursing the rest is R17's job.
+///
+/// R17: a field list may carry several recursive edges (a tree node's
+/// children). The loop descends the **last** one in declaration order; the
+/// others are ordinary linear fields and get an ordinary recursive drop call
+/// via `emit_drop`'s ambient `OwnedCell` handling, same as any other field.
+/// Looping the last child rather than the first is what makes a
+/// right-leaning shape constant-stack and a left-leaning one still O(depth)
+/// (documented, not fixed, under R14).
 fn recursive_loop_field(fields: &[FieldLayout], self_ty: IrType, cells: &Cells) -> Option<usize> {
-    let mut edges = fields.iter().enumerate().filter(
-        |(_, f)| matches!(f.ty, IrType::OwnedCell(c) if cells.payload[c.index()] == self_ty),
-    );
-    let (only, _) = edges.next()?;
-    edges.next().is_none().then_some(only)
+    fields
+        .iter()
+        .enumerate()
+        .filter(
+            |(_, f)| matches!(f.ty, IrType::OwnedCell(c) if cells.payload[c.index()] == self_ty),
+        )
+        .map(|(i, _)| i)
+        .next_back()
 }
 
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
