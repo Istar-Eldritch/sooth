@@ -36,12 +36,14 @@ Verified by building and running programs, not by reading code.
 **Why `isize` lands here with no in-slice consumer.** `ROADMAP.md` names pointer
 differences as `isize`'s only motivation, and this slice explicitly puts pointer
 arithmetic out of scope, so R1/R2 add a type nothing in this slice calls — exactly the
-kind of speculative addition CLAUDE.md warns against. The justification is narrower than
-"future-proofing": `isize` is the ROADMAP's own promised counterpart to `usize` (both were
-introduced together in the Slice 5 entry as "`usize` and likely `isize`"), it closes a
-legible, already-named gap in the integer tower rather than opening a new one, and its
-cost is genuinely small — mirroring a type that already exists, not designing one. If this
-reasoning does not hold, phase 1 should move to whichever slice first calls it.
+kind of speculative addition CLAUDE.md warns against. **Reviewed and this is the honest
+state of it, not fully resolved**: the ROADMAP passage cited in an earlier draft
+("`usize` and likely `isize`") is real, but two *other* ROADMAP lines defer `isize`
+specifically *because* it has no consumer until pointer differences exist — the exact
+condition this slice does not meet. The justification that survives is narrower: `isize`
+is cheap because it mirrors a type that already exists rather than designing one, and it
+is already named in the ROADMAP as arriving with recursive data. If that is not
+convincing, phase 1 should move to whichever slice first calls `isize`.
 
 - **R1** — `isize` is a signed, target-width integer, mirroring `usize` including a
   distinct `IrType::Isize` variant, so the two sibling types are represented
@@ -53,23 +55,36 @@ reasoning does not hold, phase 1 should move to whichever slice first calls it.
   pairs (@check.rs:113-115), and `usize_conversion_needed_error` (@check.rs:1535), whose
   message hardcodes `>usize`. Mixing `usize` and `isize` is a plain type mismatch.
   Printing routes to the signed format, not `$ufmt` (@qbe.rs:888).
-  **Correction after review**: an earlier draft warned that backend `_ =>` catch-alls would
-  hide missed sites. That is false — the `IrType` matches at @qbe.rs:217, 254, 281, 509,
-  720 and 888 are all **exhaustive**, so rustc flags every one when the variant is added
-  (the `_ =>` at @qbe.rs:300 belongs to `alloc_op`, which matches on a `u32` alignment, not
-  on `IrType`). Adding the variant is therefore *safer* than described. The one genuine
-  catch-all is `norm_scalar`'s `other => other`, which would silently pass `Isize` through
-  unnormalized — and that is exactly the function R2 rewrites.
+  **Correction after a second review pass**: an earlier draft got this audit wrong twice in
+  a row, once by overstating the risk and once, in fixing that, by understating it and
+  misnaming a function. The verified picture: `width` (@qbe.rs:206), `member_ty`
+  (@qbe.rs:245), `field_load_op` (@qbe.rs:264) and `field_store_op` (@qbe.rs:294) are all
+  genuinely **exhaustive** `match ty` over every `IrType` variant with no wildcard, so
+  rustc forces an `Isize` arm into each the moment the variant exists (the earlier
+  draft's "`qbe.rs:300` belongs to `alloc_op`" was wrong; `:300` is `field_store_op`'s
+  `Usize` arm, and `alloc_op` starts at `:312`). **Not** forced, and needing manual
+  verification: `norm_scalar` (@qbe.rs:508, `other => other`, the function R2 rewrites);
+  the `BinOp::Rem` arm's `matches!(ty, IrType::Usize | IrType::Int { signed: false, .. })`
+  guard (@qbe.rs:720), which is not an `IrType` match at all, so `Isize` silently falls to
+  the plain `"rem"` arm below it — correct for a signed type today, by construction rather
+  than by rustc's enforcement, so verify it rather than trust the guard. Four more sites
+  have a catch-all but are benign because they delegate to an already-exhaustive decision:
+  `qbe_abi_ty` (@qbe.rs:233, `_ => width(ty)`), `sub_word` (@qbe.rs:325, `_ => None`, and
+  `Isize` is never a sub-word int any more than `Usize` is), and the `Instr::Load`/`Store`
+  register-class defaults (@qbe.rs:936, :959, `_ => ("l", "loadl")`, correct for `Isize`
+  exactly because it shares `Usize`'s register class).
 - **R2** — `norm_scalar` (@qbe.rs:508) hardcodes `bits: 64` for `Usize`, contradicting its
   own word-width comment, and it **takes no width parameter**, so "correct it" is not
-  expressible without a signature change. It gains a `word_width` parameter following the
-  established `_ww` convention (`scalar_size_align_ww` @ir.rs:350, `build_registries_ww`
-  @ir.rs:430), and both `Usize` and `Isize` derive their width from it. Mirroring without
-  this would propagate a latent 64-bit assumption into the new type, which is what
-  word-width-neutrality exists to prevent. The change is a behavioural no-op on the only
-  existing target, so it is pinned by a unit test that passes an explicit flipped width —
-  exactly how `word_width_parameter_sizes_usize_not_a_literal_eight` (@ir.rs:2711-2726)
-  already pins the equivalent claim for layout.
+  expressible without a signature change. Following the established convention exactly
+  (`scalar_size_align` @ir.rs:341 is a thin wrapper calling `scalar_size_align_ww(ty,
+  WORD_WIDTH)` @ir.rs:350), `norm_scalar` becomes a wrapper over a new `norm_scalar_ww(ty,
+  word_width)`, and both `Usize` and `Isize` derive their width from the parameter rather
+  than the hardcoded `64`. Mirroring without this would propagate a latent 64-bit
+  assumption into the new type, which is what word-width-neutrality exists to prevent. The
+  change is a behavioural no-op on the only existing target, so it is pinned by a unit test
+  calling `norm_scalar_ww` directly with an explicit flipped width — exactly how
+  `word_width_parameter_sizes_usize_not_a_literal_eight` (@ir.rs:2711-2726) already pins the
+  equivalent claim for layout.
 
 ### The recursion rule (pinning existing behaviour)
 
@@ -219,8 +234,8 @@ reasoning does not hold, phase 1 should move to whichever slice first calls it.
 - **R15** — **Non-recursive destructors keep straight-line synthesis**, unchanged apart
   from R8's ordering. They are the overwhelming majority and must not acquire loop
   machinery.
-- **R16** — `synthesize_struct_destructor` (@ir.rs:928) and `synthesize_enum_destructor`
-  (@ir.rs:970) call `seal_block(Terminator::Ret(None))` unconditionally; `lower_word` guards
+- **R16** — `synthesize_struct_destructor` (@ir.rs:903) and `synthesize_enum_destructor`
+  (@ir.rs:943) call `seal_block(Terminator::Ret(None))` unconditionally; `lower_word` guards
   with `if !b.terminated` (@ir.rs:1261) because a body ending in a back edge is already
   sealed. Phase 4 **must add that guard**, or a duplicate `BlockId` reaches the emitter.
   A self-recursive *struct* destructor is an exit-less loop and hits this immediately. The
@@ -317,9 +332,9 @@ spec states the expected transcript so implementation cannot ratify whatever it 
 | # | criterion | test |
 |---|---|---|
 | 1 | `isize` declares, computes, prints signed, converts to/from `i64` | `isize_round_trips_arithmetic_and_conversion` |
-| 1b | `norm_scalar(Usize, 4)` is `Int { bits: 32, signed: false }` and `norm_scalar(Isize, 4)` is `Int { bits: 32, signed: true }`, plus the 8-byte cases (R2). Unit test: no non-64-bit target exists, so no program behaviour can distinguish this | `norm_scalar_follows_word_width_for_both_size_types` |
+| 1b | `norm_scalar_ww(Usize, 4)` is `Int { bits: 32, signed: false }` and `norm_scalar_ww(Isize, 4)` is `Int { bits: 32, signed: true }`, plus the 8-byte cases (R2). Unit test calling the `_ww` form directly: no non-64-bit target exists, so no program behaviour can distinguish this | `norm_scalar_ww_follows_word_width_for_both_size_types` |
 | 1c | mixing `usize` and `isize` is a located error naming both backticked types (R1) | `check_isize_mixed_with_usize_is_error` |
-| 1d | an `isize`-declared output needs an explicit conversion, with the message naming the `isize` form rather than the hardcoded `>usize` (R1) | `check_isize_declared_output_needs_conversion_is_error` |
+| 1d | an `isize`-declared output needs an explicit conversion, with the message naming the backticked `` `isize` `` form rather than the hardcoded `>usize` — the precedent test (`check_usize_declared_output_needs_conversion_is_error` @check.rs) does not itself assert backticks, but R20 requires them for every diagnostic this slice touches (R1) | `check_isize_declared_output_needs_conversion_is_error` |
 | 2 | by-value self-recursion is rejected naming the cycle (R7's carve-out: unbackticked, unlocated, unchanged from today) | `check_recursion_by_value_self_cycle_is_error` |
 | 3 | by-value **mutual** recursion is rejected naming the full path `A -> B -> A` (the genuinely uncovered case; self-recursion is already partly covered) | `check_recursion_by_value_mutual_cycle_is_error` |
 | 4 | a `^` cycle through a **struct field** is accepted (R4) | `check_recursion_cell_cycle_in_struct_field_is_ok` |
@@ -394,7 +409,7 @@ destructor bodies (Slice 6); growable buffers and `Vec` (Phase 6 `alloc`).
       ],
       "tests": [
         "isize_round_trips_arithmetic_and_conversion",
-        "norm_scalar_follows_word_width_for_both_size_types",
+        "norm_scalar_ww_follows_word_width_for_both_size_types",
         "check_isize_mixed_with_usize_is_error",
         "check_isize_declared_output_needs_conversion_is_error"
       ],
@@ -467,7 +482,7 @@ destructor bodies (Slice 6); growable buffers and `Vec` (Phase 6 `alloc`).
         "Leave mutually recursive types on the recursive destructor path",
         "Record the wrapper-struct, double-cell, left-leaning-tree and mutually-recursive shapes as depth-limited, in tests and in any user-facing note",
         "Add examples/list.sth: build, walk (sum), then drop the remainder, not disposal alone",
-        "Rewrite ROADMAP.md:80 and the slice-3 entry, which still name optional/non-null pointers as this slice's job and frame the OOM revisit as introducing them"
+        "Rewrite ROADMAP.md's Phase 2 completion note, the Slice 8 dissolution note, and the Slice 3 entry and next-action line, all of which still name optional/non-null pointers as a Phase 3 deliverable or frame the OOM revisit as introducing them"
       ],
       "tests": [
         "recursive_tree_builds_and_disposes",
