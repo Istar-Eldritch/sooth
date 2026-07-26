@@ -148,8 +148,8 @@ and buffer cases reading well, which is where most real use will land.
   (and merely unread outside tests) or gated; always-emitted is simpler and keeps one code
   path, but must not change observable stdout for existing goldens.
 - **Drop ordering with a linear payload** (D4) is observable and therefore a contract:
-  payload first, then free. Pin it in a golden, do not let it fall out of implementation
-  order.
+  free first, then the payload (reversed in Phase 3 Slice 3, R8, for uniformity across every
+  cell). Pin it in a golden, do not let it fall out of implementation order.
 - **`Owned` of a zero-sized payload**, if such a type is constructible, needs a defined
   answer rather than a `malloc(0)` accident.
 - **OOM is hard to test** without exhausting memory. A huge single allocation is the

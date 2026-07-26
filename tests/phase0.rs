@@ -2472,12 +2472,26 @@ fn peek_owned_copy_payload_keeps_cell_live() {
 }
 
 #[test]
-fn owned_linear_payload_drops_before_free() {
-    // Criterion 8: `^__spy` disposal. The transcript is `drop 7` *then*
-    // `free 8`, one stdout stream so the order is real (R5: the payload
-    // drops before the cell frees).
+fn owned_linear_payload_frees_before_dropping_payload() {
+    // Criterion 8: `^__spy` disposal. The transcript is `free 8` *then*
+    // `drop 7`, one stdout stream so the order is real (R8: the cell frees
+    // before the payload's own destructor runs).
     let stdout = run_owned_traced_golden("spy-payload", ": main ( -- )\n  7 __spy ^ drop ;\n");
-    assert_eq!(stdout, "alloc 8\ndrop 7\nfree 8\n");
+    assert_eq!(stdout, "alloc 8\nfree 8\ndrop 7\n");
+}
+
+#[test]
+fn owned_aggregate_payload_frees_before_dropping_fields() {
+    // Criterion 6: R8 ordering for an aggregate payload (a struct with a
+    // linear field) held in a cell, the `Blit`-into-a-frame-slot arm of
+    // `load_owned_payload`, where freeing early is most likely to bite. The
+    // cell frees (`free 16`) before the copied-out struct's own destructor
+    // drops its linear field (`drop 1`).
+    let stdout = run_owned_traced_golden(
+        "aggregate-payload",
+        "type: Holds a __spy b i64 ;\n: main ( -- )\n  1 __spy 2 Holds ^ drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 16\nfree 16\ndrop 1\n");
 }
 
 #[test]
@@ -2508,13 +2522,13 @@ false if 9 ^ Full else Empty end drop ;\n",
 }
 
 #[test]
-fn nested_owned_frees_inner_before_outer() {
+fn nested_owned_frees_outer_before_inner() {
     // Criterion 11: `^^[u8 24]`. The inner and outer sizes are deliberately
     // distinct (24 vs. the pointer-width 8) so the transcript order proves
-    // the inner cell frees *before* the outer one; equal sizes could not
+    // the outer cell frees *before* the inner one (R8); equal sizes could not
     // distinguish that from the reverse.
     let stdout = run_owned_traced_golden("nested", ": main ( -- )\n  0 >u8 24 fill ^ ^ drop ;\n");
-    assert_eq!(stdout, "alloc 24\nalloc 8\nfree 24\nfree 8\n");
+    assert_eq!(stdout, "alloc 24\nalloc 8\nfree 8\nfree 24\n");
 }
 
 #[test]

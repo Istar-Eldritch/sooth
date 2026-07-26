@@ -8,7 +8,7 @@ From [`phase3-slice2-brief.md`](./phase3-slice2-brief.md); D1-D10 locked except 
 - **R2** — Compiler-known type constructor, **not generics**: `Type::OwnedCell(OwnedCellId, name)` + an interned `Vec<OwnedCellDecl>` deduped by shape, mirroring `ArrayDecl`/`intern_array_type`. Rendered name carried inline so diagnostics print `^i64` with no lookup. Builtins checked ad hoc at the call site. No type variables (Phase 4 owns those).
 - **R3 (tripwire)** — Second ad-hoc constructor after arrays. A third is the signal to switch to Phase 4 generics instead.
 - **R4** — `^T` is always linear; `is_copy` returns `false` unconditionally, signature unchanged. Linearity propagates transitively via Slice 1's rules.
-- **R5** — A cell may hold a linear payload (`^__spy`). Disposal drops the payload first, then frees. Observable via R10, therefore contractual.
+- **R5** — A cell may hold a linear payload (`^__spy`). Disposal frees the cell first, then drops the payload (reversed in Phase 3 Slice 3, R8; the ordering choice is uniformity across every cell, not a constraint of this slice).
 - **R6** — Single global allocator interface conceptually in `core`: `allocate(n) -> ptr`, `free(ptr, n)`. Not per-value.
 - **R7** — One implementation: a compiler-emitted shim wrapping `malloc`/`free`, following `emit_spy_drop`. No user-facing FFI. Expected to become bound foreign words once Phase 6 lands FFI-to-libc.
 - **R8** — Destructor is compiler-known. `drop` stays a `Call` to a per-type symbol (Slice 1 R16): an `emit_drop` arm plus a `synthesize_aggregate_destructors` case. No new `Instr`/`Terminator` variant.
@@ -35,7 +35,7 @@ D9's silent counter was unimplementable (nothing can read it, no mutable-global 
   | construct | `^` | `( T -- ^T )` |
   | unwrap | `^>` | `( ^T -- T )`, frees the cell |
   | peek | `^\|>` | `( ^T -- ^T T )`, Copy payload only |
-  | dispose | `drop` | frees, dropping a linear payload first |
+  | dispose | `drop` | frees the cell, then drops a linear payload (Phase 3 Slice 3, R8) |
 
   `^` was unused in `.sth` source and is not a delimiter, so `^i64` scans as one word, `^[u8 1024]` splits at the bracket, `^|>` survives the peek-glue rule, and `^>` cannot enter the conversion-word path (which needs `>` first). **No lexer change required.**
 - **R12a** — `^`, `^>`, `^|>`, and any name with a leading `^`, are reserved at all three declaration sites (`:` word, `type:` name, local binding), with a located error naming the spelling. Required, not belt-and-braces: Sooth has no identifier validation (`expect_word_any()`), so `type: ^ x i64 ;` type-checked clean and generated words colliding exactly with the cell spellings, which the builtin arms would silently shadow. Out of scope: the general pre-existing bug that any non-identifier name crashes the backend.
@@ -63,7 +63,7 @@ Sequencing rule: a golden observing an allocation or free cannot land before the
 1. **The `^T` type** (`426ea1a4`, `9a6c32a8`): `Type` variant + interned registry threaded like `arrays` incl. REPL session persistence; the `^` type-position parse rule (strip the leading `^`-run; empty remainder expects a following type expression, otherwise resolve the remainder as a type name) in every type position including `parse_field_type_expr` and the REPL typedef line, without which `type: Buf b ^[u8 4] ;` fails to parse; `is_copy` false; R12a reserved names (extended in the follow-up to enum variants and slots). Unit-level exit, no `^` value exists yet. *ast.rs, parser.rs, check.rs, ir.rs, repl.rs, lexer.rs (tests).*
 2. **Allocation machinery, nothing calling it** (`3fcb37ec`, `f4985f89`) *(hard)*: shim, gated stdout trace, NULL trap, `max(size,1)`, `IrType` variant and all Spy-parallel arms, trace-reading test helpers. The trace was the genuinely new part. *backend/qbe.rs, ir.rs, tests/phase0.rs, tests/phase1.rs.*
 3. **The three access words** (`bcb75ddd`, `6fbddc12`): constructor, unwrap, Copy-only peek with the copy-in/copy-out rules for all four payload shapes. *check.rs, ir.rs, backend/qbe.rs, repl.rs, tests/phase0.rs.*
-4. **Drop glue and the trace goldens** (`af95650e`, `3a50070a`, `8f9fee25`): `emit_drop` arm plus synthesized per-type destructor dropping a linear payload first; `emit_drop`'s linear-array `unreachable!` guard reconfirmed. *ir.rs, check.rs, tests/phase0.rs.*
+4. **Drop glue and the trace goldens** (`af95650e`, `3a50070a`, `8f9fee25`): `emit_drop` arm plus synthesized per-type destructor (originally dropping a linear payload before freeing; reversed in Phase 3 Slice 3, R8); `emit_drop`'s linear-array `unreachable!` guard reconfirmed. *ir.rs, check.rs, tests/phase0.rs.*
 5. **REPL residual disposal + regression sweep** (`c705dc8a`, `2cf3759f`, `0cab03fb`): `dispose_residual` needed no change beyond P1's registry, but a **carve-out production change** was required: `format_stack` had no `OwnedCell` arm, so a residual cell printed a raw heap address; it now prints a `<^i64>` placeholder like other non-printable aggregates, and criterion 15 asserts the placeholder. Strictly a Phase 3 obligation, landed here (commit `6fbddc1`'s message claims the arm but its diff never touches `src/repl.rs`; do not audit by commit message). *repl.rs, tests/phase0.rs, tests/phase1.rs.*
 
 ## Criterion → test map
@@ -82,11 +82,11 @@ Goldens are runnable native binaries (`tests/phase0.rs`) or REPL sessions (`test
 | 5b | Unwrap of an aggregate: field read after the free is correct (R13) | `owned_unwrap_aggregate_copies_out_before_free` (P3) |
 | 6 | Peek twice then dispose: values correct and equal, exactly one `free` | `peek_owned_copy_payload_keeps_cell_live` (P4) |
 | 7 | Peek of a linear payload is a compile error | `peek_owned_linear_payload_is_error` (P3) |
-| 8 | `^__spy` disposal: `drop 7` then `free 8`, one stream so the order is real | `owned_linear_payload_drops_before_free` (P4) |
+| 8 | `^__spy` disposal: `free 8` then `drop 7`, one stream so the order is real (reversed in Phase 3 Slice 3, R8) | `owned_linear_payload_frees_before_dropping_payload` (P4) |
 | 9 | Struct containing a cell is linear: `dup` errors naming the struct | `struct_containing_owned_is_linear` (P3) |
 | 9b | Dropping that struct frees the cell | `dropping_struct_with_owned_frees_cell` (P4) |
 | 10 | Enum variant carrying a cell behind an `if`: cell-carrying variant frees once, other variant zero times | `enum_variant_with_owned_frees_on_drop` (P4) |
-| 11 | `^^[u8 24]`: distinct sizes (24/8) prove inner freed before outer, which equal sizes could not | `nested_owned_frees_inner_before_outer` (P4) |
+| 11 | `^^[u8 24]`: distinct sizes (24/8) prove outer freed before inner, which equal sizes could not (reversed in Phase 3 Slice 3, R8) | `nested_owned_frees_outer_before_inner` (P4) |
 | 12 | Zero-sized payload traces `alloc 1`/`free 1`, witnessing `max(size,1)` (glibc's `malloc(0)` is non-NULL, so a count-only test would pass with the adjustment deleted) | `owned_zero_sized_payload_allocs_one_byte` (P4) |
 | 13 | `^[u8 N]` construct/peek/`get`/`drop`, one pair; then peek an aggregate, dispose, read the copy (R14 non-aliasing) | `owned_byte_buffer_peek_get_and_free_once` + `peek_aggregate_does_not_alias_cell` (P4) |
 | 14 | Emitted IL contains the NULL check and `exit(1)` trap call | `emitted_alloc_shim_has_null_trap` (P2, emitter-level) |

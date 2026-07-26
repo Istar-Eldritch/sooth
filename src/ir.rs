@@ -989,8 +989,10 @@ fn synthesize_enum_destructor(
     }
 }
 
-/// Drop the payload first if it is linear, then free the cell, mirroring
-/// `synthesize_struct_destructor`.
+/// Copy the payload out (if linear), free the cell, then drop the copied-out
+/// payload. The block is freed before the payload's own destructor runs, so
+/// the free must come after the copyout (`load_owned_payload` never touches
+/// the block again) but before the drop.
 fn synthesize_cell_destructor(
     id: OwnedCellId,
     env: &HashMap<String, Arity>,
@@ -1006,10 +1008,8 @@ fn synthesize_cell_destructor(
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(IrType::OwnedCell(id));
     let payload_ty = cells.payload[id.index()];
-    if field_is_linear(payload_ty, structs, enums, arrays) {
-        let payload = b.load_owned_payload(param, payload_ty);
-        b.emit_drop(payload);
-    }
+    let is_linear = field_is_linear(payload_ty, structs, enums, arrays);
+    let payload = is_linear.then(|| b.load_owned_payload(param, payload_ty));
     let size = b.value_size(payload_ty);
     let size_v = b.fresh_value(IrType::I64);
     b.push_instr(Instr::Const(size_v, size as i64));
@@ -1018,6 +1018,9 @@ fn synthesize_cell_destructor(
         FREE_SYMBOL.to_string(),
         vec![param, size_v],
     ));
+    if let Some(payload) = payload {
+        b.emit_drop(payload);
+    }
     b.seal_block(Terminator::Ret(None));
     IrFunc {
         name: cell_drop_symbol(id),
@@ -4242,11 +4245,12 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_cell_destructor_copies_out_a_linear_aggregate_payload_before_freeing() {
-        // R5/R13: an aggregate payload's drop glue runs on a copy blitted out
-        // of the cell, and both precede the free. The `^__spy` golden covers
-        // the scalar payload at runtime; this pins the aggregate path, where
-        // the copy-out must complete before the destructor reads the copy.
+    fn synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload() {
+        // R8/R13: an aggregate payload is copied out of the cell (a Blit),
+        // then the block is freed, and only then does the copy's own drop
+        // glue run. The `^__spy` golden covers the scalar payload at
+        // runtime; this pins the aggregate path, where the copy-out must
+        // still complete before anything else touches the block or the copy.
         let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds ^ drop ;");
         let dtor = ir
             .funcs
@@ -4271,12 +4275,12 @@ mod tests {
                 .iter()
                 .map(|(_, sym)| sym.as_str())
                 .collect::<Vec<_>>(),
-            vec!["sooth_struct_drop_0", FREE_SYMBOL],
-            "the payload's own destructor runs, then the cell frees"
+            vec![FREE_SYMBOL, "sooth_struct_drop_0"],
+            "the cell frees, then the payload's own destructor runs"
         );
         assert!(
             blit_at < calls[0].0,
-            "the payload must be copied out before its destructor runs: blit at {blit_at}, drop at {}",
+            "the payload must be copied out before the block is freed: blit at {blit_at}, free at {}",
             calls[0].0
         );
     }
