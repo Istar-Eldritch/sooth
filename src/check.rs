@@ -3363,10 +3363,10 @@ mod tests {
     }
 
     #[test]
-    fn check_recursion_array_element_behind_cell_is_still_a_value_edge() {
-        // R6: an array element is a by-value edge even when the array field
-        // is itself reached behind a `^`; only the cell edge is cut, so
-        // `^Node` inside the array cannot launder the indirection.
+    fn check_recursion_array_element_cell_is_cut_then_rejected_as_linear() {
+        // R6: the `^` edge is cut inside an array element too, so this
+        // definition survives the recursion rule and reaches the linear
+        // array-element rule instead of "recursive array definition".
         let err = check_src("type: Node kids [^Node 4] ;").unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
