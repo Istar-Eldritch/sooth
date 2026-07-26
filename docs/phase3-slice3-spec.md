@@ -1,53 +1,155 @@
+# Phase 3 Slice 3 — Recursive heap data + `isize` (as built)
+
+From [`phase3-slice3-brief.md`](./phase3-slice3-brief.md). Base: `main` at Slice 2, 654 tests
+green. Delivered across 10 commits (`b0f6883` … `6cd5615`).
+
+## Problem statement
+
+Recon on the base commit found every recursive shape already building and disposing
+correctly with balanced traces: recursive enums, recursive structs, binary trees, mutually
+recursive types, the wrapper-struct list, and `^^Self`. `type_node` already excluded
+`OwnedCell` from the by-value cycle graph (incidentally, and untested), and by-value
+recursion was already rejected. **Destructor stack depth was the one real defect**: a
+100,000-node list segfaulted under a 1 MB and an 8 MB stack alike, only clearing at 64 MB.
+So most of this slice pins already-correct behaviour with tests rather than building it; the
+actual new work is the fused destructor loop that fixes the depth defect, plus `isize`
+(cheap to add because it mirrors `usize`, though it ships with no consumer this slice).
+
 ## What shipped
 
-**`isize` (R1, R2)** — `Type::Isize` / `IrType::Isize` as a signed target-width mirror of `usize`; mixing the two is a plain type mismatch; printing routes to `$fmt`, not `$ufmt`. `norm_scalar` became a wrapper over `norm_scalar_ww(ty, word_width)` (`src/backend/qbe.rs:511`), so neither size type carries a literal `64`.
+**`isize`** — `Type::Isize` / `IrType::Isize`, a signed target-width mirror of `usize`;
+mixing the two is a plain type mismatch, and printing routes to `$fmt`, not `$ufmt`.
+`norm_scalar` became a wrapper over `norm_scalar_ww(ty, word_width)`, so neither size type
+carries a literal `64`.
 
-**Recursion rule (R3–R7)** — pinned, not changed. A type cycle is legal iff every cycle passes through at least one `^`, in struct-field and enum-variant position alike (R4). `type_node` now excludes `OwnedCell` deliberately with a comment (`src/check.rs:512`) rather than by fall-through. No uninhabitedness detection (R5); array elements stay by-value edges and `[^T N]` stays rejected by Slice 2's linear-element rule (R6). The by-value cycle diagnostic is unchanged: bare string, no span, unbackticked names (R7's carve-out from R20).
+**Recursion rule** — pinned, not changed: a type cycle is legal iff every cycle passes
+through at least one `^`, in struct-field and enum-variant position alike. `type_node` now
+excludes `OwnedCell` deliberately, with a comment, instead of by fall-through. No
+uninhabitedness detection; array elements stay by-value edges, so `[^T N]` is still rejected
+by Slice 2's linear-element rule. The by-value cycle diagnostic is unchanged: a bare string,
+no span, unbackticked names — a deliberate carve-out, not an oversight.
 
-**Disposal ordering (R8–R10)** — globally reversed: every owning cell frees its block *before* dropping the copied-out payload, and disposal is pre-order (a node's own fields drop and its cell frees before descending). Sound because `load_owned_payload` copies the payload out before the block is touched, for every shape including nested `^^T`. The enumerated Slice 2 revision (R9) landed in the same phase: two `tests/phase0.rs` goldens and one `src/ir.rs` unit test inverted, with names, doc comments and assertion messages rewritten, plus `src/ir.rs:985`, `ROADMAP.md:73`, `docs/phase3-slice2-spec.md` and `docs/phase3-slice2-brief.md`.
+**Disposal ordering** — reversed globally: every owning cell frees its block *before*
+dropping the copied-out payload, and disposal is pre-order (a node's own fields drop and its
+cell frees before descending). Sound because `load_owned_payload` copies the payload out
+before the block is touched, for every shape including nested `^^T`. This also inverted two
+Slice 2 goldens and their doc comments, since Slice 2 had shipped the opposite order.
 
-**Fused iterative destructor (R11–R18)** — `recursive_loop_field` (`src/ir.rs:922`) is a purpose-built pass over `Registries`; it does not reuse the checker's graph, which deletes exactly the `^` edges it needs (R13). A field of type `^T` is a recursive edge iff the cell's payload is the enclosing type. Directly self-recursive structs and enums get one loop via `begin_loop`/`finalize_loop`; `emit_recursive_step` (`src/ir.rs:2025`) handles the non-looped edges. The copyout-ordering invariant holds (R12): every read of the current node is emitted before the copyout that overwrites the reused, entry-hoisted frame slot. The trailing `seal_block` is guarded on `b.terminated`, so a self-recursive struct's exit-less loop does not emit a duplicate `BlockId` (R16). Multi-child types loop on the **last** recursive field and recurse the others (R17). Mutually recursive types stay on the recursive path (R18). Non-recursive destructors keep straight-line synthesis (R15).
+**Fused iterative destructor** — the core new mechanism. `recursive_loop_field` is a fresh
+pass over `Registries` rather than a reuse of the checker's cycle graph, which cuts `^` edges
+entirely instead of detecting them: a field of type `^T` is a recursive edge iff the cell's
+payload is the enclosing type itself. A directly self-recursive struct or enum gets one loop
+via `begin_loop`/`finalize_loop`; `emit_recursive_step` handles the recursive edge, and any
+non-looped edges keep an ordinary recursive drop call.
 
-**Allocation failure (R19, R19b)** — trap stays; no allocator code touched. `ROADMAP.md` rewritten so it no longer claims this slice introduces optional / non-null pointers; those move to Phase 4 generics.
+The load-bearing invariant is copyout ordering: **every read of the current node must be
+emitted before the copyout that overwrites the reused, entry-hoisted frame slot.** This can't
+be caught by counting allocs and frees — the loop still allocates and frees exactly the right
+number of times even if a field read happens after the copyout, it just reads garbage (a
+stale or repeated node's data) while the trace stays perfectly balanced. The suite only
+catches a violation by tagging every node distinctly and asserting the full ordered
+transcript, never a count.
 
-## Documented limitation (R14)
+The trailing `seal_block` is guarded on whether the block already terminated, so a
+self-recursive struct's exit-less loop (the shape is uninhabited — `^` is non-null, so
+building one needs one first — but a destructor is still synthesized for every declared
+type) doesn't emit a duplicate block label, which QBE would reject outright. Multi-child
+types (a tree node with two `^` fields) loop on the **last** declared recursive field and
+recurse the others via the ordinary path; looping the last child rather than the first is
+what makes a right-leaning shape constant-stack while a left-leaning one stays O(depth).
+Mutually recursive types stay on the recursive path entirely — no fused loop spans a
+multi-type cycle. Non-recursive destructors keep straight-line synthesis.
 
-Constant-stack disposal is guaranteed **only** for directly self-recursive types. Still O(depth), verified as such: indirect cycles through an intervening struct, `^^Self` (excluded by construction, the phi type would not match), left-leaning / non-loop children, mutually recursive types, and the non-direct cycles of a mixed type.
+**Allocation failure** — trap stays; no allocator code touched. `ROADMAP.md` no longer
+claims this slice introduces optional/non-null pointers; those move to Phase 4's generics.
 
-## Criterion → test map (as landed)
+## Documented limitation
 
-| # | criterion | test |
-|---|---|---|
-| 1 | `isize` declares, computes, prints signed, converts to/from `i64` | `isize_round_trips_arithmetic_and_conversion` |
-| 1b | both size types follow word width at 4 and 8 bytes | `norm_scalar_ww_follows_word_width_for_both_size_types` (+ `scalar_size_align_ww` cases in `src/ir.rs`) |
-| 1c/1d | `usize`/`isize` mix is an error; declared `isize` output needs explicit conversion | `check_isize_mixed_with_usize_is_error`, `check_isize_declared_output_needs_conversion_is_error` |
-| 2/3 | by-value self and mutual cycles rejected, naming the path | `check_recursion_by_value_self_cycle_is_error`, `check_recursion_by_value_mutual_cycle_is_error` |
-| 4 | `^` cycle accepted in struct field and enum variant | `check_recursion_cell_cycle_in_struct_field_is_ok`, `check_recursion_cell_cycle_in_enum_variant_is_ok` |
-| 4b | array element stays a value edge; `[^T N]` rejected | `check_recursion_array_element_cell_is_cut_then_rejected_as_linear`, existing `check_value_recursion_through_array_element_is_error` |
-| 5/6/7 | R8/R9 ordering across scalar, aggregate, nested and unit-test shapes | `recursive_list_disposes_in_expected_order`, `owned_aggregate_payload_frees_before_dropping_fields`, `owned_linear_payload_frees_before_dropping_payload`, `nested_owned_frees_outer_before_inner`, `synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload` |
-| 8 | 1M-node list disposes under `ulimit -s 1024`, exit 0 | `deep_list_disposes_in_constant_stack` |
-| 9/10 | pre-order disposal; copyout invariant via distinct per-node tags | `recursive_disposal_is_pre_order`, `recursive_destructor_reads_node_before_overwriting_slot` |
-| 11 | detection pass does not false-positive on three near-miss shapes | `non_recursive_cell_shapes_are_not_treated_as_recursive` |
-| 12/13a/13b | tree disposal; loop takes the last field; 1M right-leaning tree at 1 MB | `recursive_tree_builds_and_disposes`, `multi_child_destructor_loops_on_last_recursive_field`, `deep_right_leaning_tree_disposes_in_constant_stack` |
-| 14 | mutual pair disposes correctly, and a 300k chain overflows at 1 MB, proving the fallback | `mutually_recursive_types_dispose_on_recursive_path` |
-| 15 | self-recursive struct (uninhabited, exit-less) compiles | `self_recursive_struct_destructor_compiles` |
-| 16 | limitation boundary asserted as an asymmetry at 1M / 1 MB | `indirect_recursion_shapes_remain_depth_limited` |
-| 17/18 | `examples/list.sth` golden; REPL disposes a residual recursive value at `:quit` | `example_list_matches_golden`, `repl_quit_frees_residual_recursive_value` |
-| 19 | 14 prior examples byte-identical | existing suite |
+Constant-stack disposal is guaranteed only for directly self-recursive types. Indirect
+cycles through an intervening struct, `^^Self` (excluded by construction — the phi type
+wouldn't match), left-leaning/non-loop children, mutually recursive types, and the
+non-direct cycles of a mixed type are all still O(depth), verified as such rather than
+assumed.
 
-Trace goldens assert full stdout with `assert_eq!`, distinct `__spy` tags per node (a balanced alloc/free trace cannot catch the copyout bug). Stack-bounded criteria use a `run_stack_bounded_golden` helper returning the exit status instead of unwrapping it, since a SIGSEGV would otherwise panic in the harness. R21 discharged: the base compiler segfaults at 100k nodes even at 64 MB.
+## Implementation
+
+1. **`isize`** (`b0f6883`, `50996e0`, `35c28bc`) — the scalar type across `ast.rs`/`ir.rs`/
+   `backend/qbe.rs`, then generalizing the `usize`-named coercion/diagnostic plumbing in
+   `check.rs` (parameterised rather than duplicated: `is_size_type`,
+   `SlotMatch::{LiteralSizeType, NeedsSizeConversion}`, `PairMatch::NeedsSizeConversion(Type)`,
+   `size_conversion_needed_error(target)`), and hardening three QBE signedness guards
+   (`Shl`/`Shr`, `Rem`, `Cmp`) that had been trusting `IrType::Usize` directly instead of
+   normalizing first.
+2. **Recursion rule, pinned with tests** (`c597cef`, `2218465`, `5028847`) — `type_node`'s
+   `OwnedCell` exclusion made explicit (an exhaustive match, not a fall-through arm), plus the
+   by-value-cycle/`^`-cycle/array-element tests the recon above already found true.
+3. **Disposal order reversed** (`0d3bb76`, `112f8da`) — `synthesize_cell_destructor` frees
+   before dropping the copied-out payload; the two affected Slice 2 goldens, their doc
+   comments, and the ROADMAP wording describing the old order were updated together.
+4. **Fused iterative destructors** (`a2f04a8`) — `recursive_loop_field`, the loop-fused
+   `synthesize_struct_destructor`/`synthesize_enum_destructor`, and
+   `FuncBuilder::emit_recursive_step`/`finalize_loop`.
+5. **Slice completion** (`6cd5615`) — pre-order disposal goldens, the tree/multi-child/
+   mutual/constant-stack goldens, `examples/list.sth`, and the ROADMAP rewrite.
+
+## Enduring criteria
+
+The goldens live in `tests/phase0.rs`, `tests/phase1.rs`, and `src/check.rs`; this is what
+makes them trustworthy rather than a list of names:
+
+- **`isize` round-trips and diverges correctly from `usize`**: declares, computes, prints
+  signed, converts to/from `i64`; both size types derive their width from the `word_width`
+  parameter, never a hardcoded `64`; mixing the two, or leaving a computed value where a
+  declared `isize` output is expected, is an error naming the backticked type.
+- **The recursion rule**: a by-value self- or mutual cycle is still rejected, naming the
+  full path; a `^` edge breaks the cycle in both struct-field and enum-variant position; a
+  `^` edge inside an array element does *not* count, since arrays are Slice 2's
+  linear-element territory, not the recursion rule's.
+- **Disposal ordering and the copyout hazard**: every disposal is pre-order, and every
+  owning cell frees before its payload drops — proved with distinct per-node tags asserted
+  as a full ordered transcript, since a plain alloc/free count cannot distinguish correct
+  disposal from the copyout-hazard bug (a stale or duplicated node's data read after the
+  slot was overwritten, with the trace still perfectly balanced).
+- **The detection pass doesn't false-fire**: three near-miss shapes (a cell of a *different*
+  aggregate, `^^Self` where the inner payload is a cell rather than the enclosing type, a
+  cell of an unrelated enum) all keep straight-line synthesis, verified by both trace and
+  size.
+- **Constant-stack disposal is proven, not asserted**: a 1,000,000-node list and a
+  1,000,000-node right-leaning tree both dispose under a 1 MB stack (`ulimit -s 1024`), exit
+  0. These two are the real proof that the loop exists — a small fixed-size tree whose tags
+  come out in the right order only proves the loop descends the *last* field, not that
+  looping happens at all; a compiler with no fused loop whatsoever would still pass that
+  test. The two 1M-node, 1 MB-stack goldens are the ones a non-fused compiler cannot pass.
+- **The pre-change compiler actually fails this**: run against the base commit (before the
+  fused loop), the 1M-node list golden segfaults at a 1 MB, 8 MB, *and* 64 MB stack alike,
+  so the constant-stack criteria discharge a real defect rather than passing vacuously.
+- **The boundary is real, not silent**: mutually recursive types and other indirect shapes
+  stay on the recursive path and its depth limit — asserted as an asymmetry (a small chain
+  disposes correctly; a 300k-node chain overflows a 1 MB stack the same way the pre-fix list
+  did) rather than merely documented.
+- **No regression**: all 14 pre-existing examples stay byte-identical, plus
+  `examples/list.sth` (builds 10 nodes, consumes 3 via `pop`/`sum-first`, prints `6`, drops
+  the remaining 7 through the fused loop) and a REPL `:quit` disposing a residual recursive
+  value.
 
 ## Deviations from the spec
 
-- The `usize`-named coercion plumbing was **parameterised, not duplicated**: `is_size_type`, `SlotMatch::{LiteralSizeType, NeedsSizeConversion}`, `PairMatch::NeedsSizeConversion(Type)`, `size_conversion_needed_error(target)`.
-- Criterion 4b's test is named `check_recursion_array_element_cell_is_cut_then_rejected_as_linear`, and criterion 4 gained a second test for the enum-variant half.
-- `examples/list.sth` builds 10 nodes, consumes 3 via `pop`/`sum-first`, prints `6`, then drops the remaining 7 through the loop.
-- **Stale wording**: `ROADMAP.md:84` calls the by-value cycle diagnostic "located". It is not (R7); `visit_recursion` still returns a bare span-less string. Worth a one-line fix.
+- The `usize`-named coercion plumbing was parameterised, not duplicated (Implementation,
+  item 1).
+- `examples/list.sth` builds 10 nodes, consumes 3, prints `6`, then drops the remaining 7
+  through the loop; the brief left the exact shape of the dogfood open.
 
 ## Coverage gaps, stated
 
-R13 has no direct criterion (criterion 11 is its proxy). There is still **no OOM-trap runtime test anywhere in the suite**; the `LD_PRELOAD` technique remains recorded but unwritten, so "allocator unchanged" rests on the example sweep.
+The recursive-edge detection pass (`recursive_loop_field`) has no test that targets it
+directly; the near-miss golden above is its proxy. There is still no OOM-trap runtime test
+anywhere in the suite; the `LD_PRELOAD` technique remains recorded but unwritten, so
+"allocator unchanged" rests on the example sweep.
 
 ## Out of scope (unchanged)
 
-Fused loops for indirect recursion and `^^Self` (the natural follow-on). Worklist disposal for branching structures. Fused loops over multi-type cycles. Compiler-provided `Option`/nullable pointers and returning allocation failure (Phase 4 generics). Pointer arithmetic and differences. Zippers. Second-class refs (Slice 4), refcounting (Slice 5), user destructor bodies (Slice 6), `Vec` (Phase 6).
+Fused loops for indirect recursion and `^^Self` (the natural follow-on). Worklist disposal
+for branching structures. Fused loops over multi-type cycles. Compiler-provided
+`Option`/nullable pointers and returning allocation failure (Phase 4 generics). Pointer
+arithmetic and differences. Zippers. Second-class refs (Slice 4), refcounting (Slice 5),
+user destructor bodies (Slice 6), `Vec` (Phase 6).
