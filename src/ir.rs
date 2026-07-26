@@ -902,32 +902,206 @@ pub fn synthesize_aggregate_destructors(
         .collect()
 }
 
-/// The index of the `^Self` field a fused destructor loop descends, or
-/// `None` for a field list with no direct recursive edge. A fresh pass over
-/// `Registries`, not a reuse of the checker's cycle graph: that graph cuts
-/// `^` edges entirely, but this needs to see exactly them.
+/// One step of the route a fused destructor loop walks from a type back to
+/// itself (R2). A tree, not a flat list: an enum's variants are mutually
+/// exclusive at runtime, so each may independently continue toward `Self`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PathStep {
+    /// Project a `Struct`/`Enum` field of the current aggregate byval
+    /// (`field_value`, no free).
+    Project { field: usize },
+    /// Materialize a `^T` field's payload and free the cell
+    /// (`load_owned_payload` + `free`). `field` is `None` when the current
+    /// type *is* the cell (the inner step of `^^Self`) rather than an
+    /// aggregate holding it; a struct can hold two fields of the same cell
+    /// type, so the index is not derivable from `cell`.
+    Unwrap {
+        field: Option<usize>,
+        cell: OwnedCellId,
+    },
+    /// The path reached an enum, at the entry type or any intermediate point
+    /// alike: dispatch on its tag. `None` for a variant that does not
+    /// continue toward `Self` (drop its fields, leave the loop); `Some` for
+    /// one that does, via its own further steps. More than one variant may
+    /// continue: a tagged value is only ever one variant, so this is not the
+    /// simultaneously-live multi-edge case D1 narrows. Always the last step of
+    /// the sequence containing it, since what follows a dispatch lives inside
+    /// each variant's own continuation.
+    Branch {
+        enum_id: EnumId,
+        variants: Vec<Option<Vec<PathStep>>>,
+    },
+}
+
+/// The route a fused destructor loop walks from `self_ty` back to `self_ty`,
+/// or `None` for a type on no cycle. A fresh pass over `Registries`, not a
+/// reuse of the checker's cycle graph: that graph cuts `^` edges entirely,
+/// but this needs to see exactly them.
 ///
-/// A field of type `^T` is a recursive edge iff the cell's payload is the
-/// enclosing type itself. Indirection through a wrapper struct, or a `^^Self`
-/// whose inner payload is a cell rather than the type, is not a direct edge
-/// and stays on the recursive destructor path with its depth limit.
+/// The search starts at `expand_path`, never `find_path`: `self_ty` is seeded
+/// into `visited`, and `find_path`'s trivial `current == target` match would
+/// otherwise succeed before `self_ty`'s own fields were ever examined. Only a
+/// *subsequent* arrival back at `self_ty`, via at least one step, is a cycle.
+fn recursive_disposal_path(self_ty: IrType, regs: Registries) -> Option<Vec<PathStep>> {
+    expand_path(self_ty, self_ty, &mut vec![self_ty], regs)
+}
+
+/// One recursive hop of the walk: the trivial-match and cycle-prune checks
+/// that must fire for every hop but not for the outermost one (hence the
+/// split from `expand_path`). The target check precedes the prune check
+/// because the entry type is itself in `visited`.
+fn find_path(
+    current: IrType,
+    target: IrType,
+    visited: &mut Vec<IrType>,
+    regs: Registries,
+) -> Option<Vec<PathStep>> {
+    if current == target {
+        return Some(Vec::new());
+    }
+    if visited.contains(&current) {
+        return None;
+    }
+    visited.push(current);
+    let found = expand_path(current, target, visited, regs);
+    visited.pop();
+    found
+}
+
+/// Search `current`'s own structure for a continuation toward `target`. A
+/// cell counts as a type in its own right, so `^^Self` steps through the
+/// inner cell rather than treating it as a dead end.
+fn expand_path(
+    current: IrType,
+    target: IrType,
+    visited: &mut Vec<IrType>,
+    regs: Registries,
+) -> Option<Vec<PathStep>> {
+    match current {
+        IrType::Struct(id) => {
+            let fields = &regs.structs.layouts[id.index()].fields;
+            expand_fields(fields, target, visited, regs)
+        }
+        IrType::Enum(id) => {
+            let variants: Vec<Option<Vec<PathStep>>> = regs.enums.layouts[id.index()]
+                .variants
+                .iter()
+                .map(|v| {
+                    // A copy of `visited` per variant: one variant's
+                    // abandoned attempt must not poison a sibling's search.
+                    let mut seen = visited.clone();
+                    expand_fields(&v.fields, target, &mut seen, regs)
+                })
+                .collect();
+            variants.iter().any(Option::is_some).then(|| {
+                vec![PathStep::Branch {
+                    enum_id: id,
+                    variants,
+                }]
+            })
+        }
+        // `cells.payload[c] == target` needs no case of its own: `find_path`
+        // matches it and returns an empty tail, which this prepend turns into
+        // a lone `Unwrap`.
+        IrType::OwnedCell(c) => find_path(regs.cells.payload[c.index()], target, visited, regs)
+            .map(|rest| {
+                prepend(
+                    PathStep::Unwrap {
+                        field: None,
+                        cell: c,
+                    },
+                    rest,
+                )
+            }),
+        _ => None,
+    }
+}
+
+/// Try one struct's fields, or one enum variant's, in reverse declaration
+/// order; the first candidate whose own sub-walk reaches `target` wins.
+/// Backtracking, not a syntactic guess: a field is only chosen once a
+/// complete path through it is known to exist.
 ///
-/// A field list may carry several recursive edges (a tree node's children).
-/// The loop descends the **last** one in declaration order; the others are
-/// ordinary linear fields and get an ordinary recursive drop call via
-/// `emit_drop`'s ambient `OwnedCell` handling, same as any other field.
-/// Looping the last child rather than the first is what makes a
-/// right-leaning shape constant-stack and a left-leaning one still O(depth)
-/// (documented, not fixed).
-fn recursive_loop_field(fields: &[FieldLayout], self_ty: IrType, cells: &Cells) -> Option<usize> {
-    fields
+/// Reverse order generalizes the old direct-edge rule's last-field tie-break
+/// to every struct level of the walk. This is D1's one restriction: a struct
+/// with two fields that could each reach `target` picks exactly one, since
+/// both may be live in one node instance at once (Phase 6's worklist case).
+/// The non-chosen fields are dropped like any other field, not marked.
+/// Looping the last child rather than the first is what makes a right-leaning
+/// shape constant-stack and a left-leaning one still O(depth) (documented,
+/// not fixed). Arrays are absent deliberately (R11): `[^T N]` is rejected
+/// outright, so an array can never launder an edge.
+fn expand_fields(
+    fields: &[FieldLayout],
+    target: IrType,
+    visited: &mut Vec<IrType>,
+    regs: Registries,
+) -> Option<Vec<PathStep>> {
+    for (fi, field) in fields.iter().enumerate().rev() {
+        match field.ty {
+            IrType::OwnedCell(c) => {
+                let payload = regs.cells.payload[c.index()];
+                if let Some(rest) = find_path(payload, target, visited, regs) {
+                    return Some(prepend(
+                        PathStep::Unwrap {
+                            field: Some(fi),
+                            cell: c,
+                        },
+                        rest,
+                    ));
+                }
+            }
+            IrType::Struct(_) | IrType::Enum(_) => {
+                if let Some(rest) = find_path(field.ty, target, visited, regs) {
+                    return Some(prepend(PathStep::Project { field: fi }, rest));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn prepend(step: PathStep, rest: Vec<PathStep>) -> Vec<PathStep> {
+    let mut path = vec![step];
+    path.extend(rest);
+    path
+}
+
+/// The `^Self` field index a struct's fused loop descends, gated to the one
+/// shape today's codegen can emit: a lone `Unwrap` of a field whose cell
+/// holds the struct itself. Any longer path falls back to ordinary recursive
+/// disposal until the general path walker lands.
+fn direct_loop_field(path: Option<&[PathStep]>) -> Option<usize> {
+    match path? {
+        [PathStep::Unwrap { field, .. }] => *field,
+        _ => None,
+    }
+}
+
+/// The per-variant `^Self` field indices an enum's fused loop descends, under
+/// the same gate: one top-level tag dispatch whose *every* continuing variant
+/// is a lone `Unwrap`. Gating on the flat path's length would be wrong — every
+/// enum-rooted path is a single `Branch`, length 1, however long its variants'
+/// continuations are. A `Branch` with any longer continuation falls back
+/// wholesale, so no variant of such an enum loops either.
+fn direct_loop_fields(path: Option<&[PathStep]>, variant_count: usize) -> Vec<Option<usize>> {
+    let unfused = vec![None; variant_count];
+    let Some([PathStep::Branch { variants, .. }]) = path else {
+        return unfused;
+    };
+    let looped: Vec<Option<usize>> = variants
         .iter()
-        .enumerate()
-        .filter(
-            |(_, f)| matches!(f.ty, IrType::OwnedCell(c) if cells.payload[c.index()] == self_ty),
-        )
-        .map(|(i, _)| i)
-        .next_back()
+        .map(|v| direct_loop_field(v.as_deref()))
+        .collect();
+    let every_continuation_is_direct = variants
+        .iter()
+        .zip(&looped)
+        .all(|(variant, field)| variant.is_some() == field.is_some());
+    match every_continuation_is_direct {
+        true => looped,
+        false => unfused,
+    }
 }
 
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
@@ -951,13 +1125,14 @@ fn synthesize_struct_destructor(
         structs,
         enums,
         arrays,
-        cells,
+        ..
     } = regs;
     let self_ty = IrType::Struct(id);
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(self_ty);
     let fields = structs.layouts[id.index()].fields.clone();
-    let looped = recursive_loop_field(&fields, self_ty, cells);
+    let path = recursive_disposal_path(self_ty, regs);
+    let looped = direct_loop_field(path.as_deref());
     let node = match looped {
         Some(_) => b.begin_loop(&[param])[0],
         None => param,
@@ -1015,17 +1190,15 @@ fn synthesize_enum_destructor(
         structs,
         enums,
         arrays,
-        cells,
+        ..
     } = regs;
     let self_ty = IrType::Enum(id);
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(self_ty);
     let payload_offset = enums.layouts[id.index()].payload_offset;
     let variants = enums.layouts[id.index()].variants.clone();
-    let looped: Vec<Option<usize>> = variants
-        .iter()
-        .map(|v| recursive_loop_field(&v.fields, self_ty, cells))
-        .collect();
+    let path = recursive_disposal_path(self_ty, regs);
+    let looped = direct_loop_fields(path.as_deref(), variants.len());
     let fused = looped.iter().any(Option::is_some);
     let node = match fused {
         true => b.begin_loop(&[param])[0],
@@ -2572,6 +2745,79 @@ mod tests {
             &module.owned_cells,
         )
         .1
+    }
+
+    /// A probe program's four registries, owned so `recursive_disposal_path`
+    /// can be called on any of its types by name.
+    struct Probe {
+        structs: Structs,
+        enums: Enums,
+        arrays: Arrays,
+        cells: Cells,
+    }
+
+    impl Probe {
+        fn new(src: &str) -> Probe {
+            let tokens = lex(src).unwrap();
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            let (structs, enums, arrays, cells) = build_registries(
+                &module.structs,
+                &module.enums,
+                &module.arrays,
+                &module.owned_cells,
+            );
+            Probe {
+                structs,
+                enums,
+                arrays,
+                cells,
+            }
+        }
+
+        fn struct_ty(&self, name: &str) -> IrType {
+            let idx = self
+                .structs
+                .layouts
+                .iter()
+                .position(|l| l.name == name)
+                .expect("declared struct");
+            IrType::Struct(StructId::from_index(idx))
+        }
+
+        fn enum_ty(&self, name: &str) -> IrType {
+            let idx = self
+                .enums
+                .layouts
+                .iter()
+                .position(|l| l.name == name)
+                .expect("declared enum");
+            IrType::Enum(EnumId::from_index(idx))
+        }
+
+        /// The interned cell holding `payload`, so an expected `Unwrap` names
+        /// its cell by what it points at rather than by a guessed index.
+        fn cell(&self, payload: IrType) -> OwnedCellId {
+            let idx = self
+                .cells
+                .payload
+                .iter()
+                .position(|&p| p == payload)
+                .expect("interned cell");
+            OwnedCellId::from_index(idx)
+        }
+
+        fn path(&self, ty: IrType) -> Option<Vec<PathStep>> {
+            recursive_disposal_path(
+                ty,
+                Registries {
+                    structs: &self.structs,
+                    enums: &self.enums,
+                    arrays: &self.arrays,
+                    cells: &self.cells,
+                },
+            )
+        }
     }
 
     fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
@@ -4446,5 +4692,277 @@ mod tests {
             })
             .collect();
         assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+    }
+    // Phase 3 Slice 4, phase 1: the generalized recursive-disposal path
+    // (criterion 1). Detection only: these shapes still fall back to ordinary
+    // recursive disposal until the general loop walker lands, so there is no
+    // observable runtime behaviour to golden yet.
+
+    #[test]
+    fn recursive_disposal_path_finds_indirect_nested_mutual_and_composed_cycles() {
+        // The wrapper-struct list: the cell is one byval struct hop away from
+        // the enum that owns it, so the path is a tag dispatch, a projection
+        // into `Wrap`, then the unwrap.
+        let p = Probe::new(
+            "type: Wrap v i64 next ^List ;\n\
+             type: List | Nil | Cons w Wrap ;\n\
+             : main ( -- ) ;",
+        );
+        let list = p.enum_ty("List");
+        assert_eq!(
+            p.path(list),
+            Some(vec![PathStep::Branch {
+                enum_id: EnumId::from_index(0),
+                variants: vec![
+                    None,
+                    Some(vec![
+                        PathStep::Project { field: 0 },
+                        PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(list),
+                        },
+                    ]),
+                ],
+            }])
+        );
+        // The same cycle rooted at `Wrap` instead: one rotation of it, the
+        // dispatch now mid-path (R6 gives every type on the cycle its own
+        // loop, entered from its own shape).
+        assert_eq!(
+            p.path(p.struct_ty("Wrap")),
+            Some(vec![
+                PathStep::Unwrap {
+                    field: Some(1),
+                    cell: p.cell(list),
+                },
+                PathStep::Branch {
+                    enum_id: EnumId::from_index(0),
+                    variants: vec![None, Some(vec![PathStep::Project { field: 0 }])],
+                },
+            ])
+        );
+
+        // `^^Self`: the outer unwrap names the field, the inner one cannot
+        // (the current type *is* the cell at that point).
+        let p = Probe::new(
+            "type: L | Nil | Cons n i64 next ^^L ;\n\
+             : main ( -- ) ;",
+        );
+        let l = p.enum_ty("L");
+        let inner = p.cell(l);
+        assert_eq!(
+            p.path(l),
+            Some(vec![PathStep::Branch {
+                enum_id: EnumId::from_index(0),
+                variants: vec![
+                    None,
+                    Some(vec![
+                        PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(IrType::OwnedCell(inner)),
+                        },
+                        PathStep::Unwrap {
+                            field: None,
+                            cell: inner,
+                        },
+                    ]),
+                ],
+            }])
+        );
+
+        // The mutual A/B chain, from both directions: `A` dispatches at entry,
+        // `B` (a plain struct, no tag of its own) dispatches mid-path.
+        let p = Probe::new(
+            "type: A | ANil | ACons x i64 next ^B ;\n\
+             type: B y i64 z ^A ;\n\
+             : main ( -- ) ;",
+        );
+        let (a, b) = (p.enum_ty("A"), p.struct_ty("B"));
+        assert_eq!(
+            p.path(a),
+            Some(vec![PathStep::Branch {
+                enum_id: EnumId::from_index(0),
+                variants: vec![
+                    None,
+                    Some(vec![
+                        PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(b),
+                        },
+                        PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(a),
+                        },
+                    ]),
+                ],
+            }])
+        );
+        assert_eq!(
+            p.path(b),
+            Some(vec![
+                PathStep::Unwrap {
+                    field: Some(1),
+                    cell: p.cell(a),
+                },
+                PathStep::Branch {
+                    enum_id: EnumId::from_index(0),
+                    variants: vec![
+                        None,
+                        Some(vec![PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(b),
+                        }]),
+                    ],
+                },
+            ])
+        );
+
+        // Composition: a wrapper struct sitting inside a two-type cycle, so
+        // one path threads three unwraps through three distinct types.
+        let p = Probe::new(
+            "type: P q ^W ;\n\
+             type: W m i64 next ^Q ;\n\
+             type: Q r ^P ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(
+            p.path(p.struct_ty("P")),
+            Some(vec![
+                PathStep::Unwrap {
+                    field: Some(0),
+                    cell: p.cell(p.struct_ty("W")),
+                },
+                PathStep::Unwrap {
+                    field: Some(1),
+                    cell: p.cell(p.struct_ty("Q")),
+                },
+                PathStep::Unwrap {
+                    field: Some(0),
+                    cell: p.cell(p.struct_ty("P")),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn recursive_disposal_path_finds_multi_variant_and_enum_enum_mutual_cycles() {
+        // Two independently recursive variants: both continue, because an
+        // enum's variants are mutually exclusive at runtime and so are not
+        // D1's simultaneously-live branching case (R2/R3). Collapsing to one
+        // would regress a program that already disposes in constant stack.
+        let p = Probe::new(
+            "type: T | Nil | X n i64 next ^T | Y m i64 next ^T ;\n\
+             : main ( -- ) ;",
+        );
+        let t = p.enum_ty("T");
+        let step = vec![PathStep::Unwrap {
+            field: Some(1),
+            cell: p.cell(t),
+        }];
+        assert_eq!(
+            p.path(t),
+            Some(vec![PathStep::Branch {
+                enum_id: EnumId::from_index(0),
+                variants: vec![None, Some(step.clone()), Some(step)],
+            }])
+        );
+        // This shape is fused today, one back-edge per recursive variant, and
+        // the phase-1 gate must keep both of them.
+        assert_eq!(
+            direct_loop_fields(p.path(t).as_deref(), 3),
+            vec![None, Some(1), Some(1)],
+        );
+
+        // The enum/enum mutual pair: two nested `Branch` steps, the inner one
+        // dispatched partway along the path rather than at the entry.
+        let p = Probe::new(
+            "type: A | ANil | ACons x i64 next ^B ;\n\
+             type: B | BNil | BCons y i64 next ^A ;\n\
+             : main ( -- ) ;",
+        );
+        let (a, b) = (p.enum_ty("A"), p.enum_ty("B"));
+        assert_eq!(
+            p.path(a),
+            Some(vec![PathStep::Branch {
+                enum_id: EnumId::from_index(0),
+                variants: vec![
+                    None,
+                    Some(vec![
+                        PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(b),
+                        },
+                        PathStep::Branch {
+                            enum_id: EnumId::from_index(1),
+                            variants: vec![
+                                None,
+                                Some(vec![PathStep::Unwrap {
+                                    field: Some(1),
+                                    cell: p.cell(a),
+                                }]),
+                            ],
+                        },
+                    ]),
+                ],
+            }])
+        );
+        // A continuation longer than a lone unwrap is not today's shape, so
+        // the gate falls back wholesale rather than fusing part of it.
+        assert_eq!(
+            direct_loop_fields(p.path(a).as_deref(), 2),
+            vec![None, None]
+        );
+    }
+
+    #[test]
+    fn recursive_disposal_path_rejects_non_cyclic_and_misleading_shapes() {
+        // No cell at all: nothing to walk.
+        let p = Probe::new("type: Plain x i64 y __spy ;\n: main ( -- ) ;");
+        assert_eq!(p.path(p.struct_ty("Plain")), None);
+
+        // The bait is the *last* field, which is where the reverse-order scan
+        // starts: a greedy search that committed to it would miss the genuine
+        // edge two fields earlier, so this is what proves the walk backtracks.
+        let p = Probe::new(
+            "type: Leafy v i64 ;\n\
+             type: Bait c ^Leafy ;\n\
+             type: Node good ^Node bait ^Bait ;\n\
+             : main ( -- ) ;",
+        );
+        let node = p.struct_ty("Node");
+        assert_eq!(
+            p.path(node),
+            Some(vec![PathStep::Unwrap {
+                field: Some(0),
+                cell: p.cell(node),
+            }])
+        );
+
+        // `^^Other`: the walk does step through the inner cell (that is how
+        // `^^Self` is found at all), and still bottoms out in a dead end.
+        let p = Probe::new(
+            "type: Other v i64 ;\n\
+             type: Twice c ^^Other ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(p.path(p.struct_ty("Twice")), None);
+
+        // Two unrelated self-recursive types: each finds its own edge and
+        // neither path wanders into the other type.
+        let p = Probe::new(
+            "type: R1 n ^R1 ;\n\
+             type: R2 n ^R2 ;\n\
+             : main ( -- ) ;",
+        );
+        for name in ["R1", "R2"] {
+            let ty = p.struct_ty(name);
+            assert_eq!(
+                p.path(ty),
+                Some(vec![PathStep::Unwrap {
+                    field: Some(0),
+                    cell: p.cell(ty),
+                }])
+            );
+        }
     }
 }
