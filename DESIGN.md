@@ -213,8 +213,12 @@ shuffled by `swap`/`rot`, so a borrow checker is the worst possible fit here and
 deliberately avoided. Affine values plus non-escaping refs give most of the safety
 with none of the lifetime apparatus.
 
-Pointers are non-null by default; nullability is an explicit optional type. The
-return stack is hidden or balance-checked; raw return addresses are never exposed.
+Pointers (`^T`) are non-null by default: there is no compiler-known optional/nullable
+pointer type, now or planned before Phase 4's generics. Nullability, when a program
+wants it, is an ordinary user-defined two-variant enum (a `Some`/`None`-shaped ADT falls
+out of Slice 4's enums for free); a compiler-synthesized `Option` would be exactly the
+throwaway machinery generics exist to replace, so it is never built. The return stack is
+hidden or balance-checked; raw return addresses are never exposed.
 FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 (same discipline as Rust std over libc), and only exists at the hosted layer.
 
@@ -335,10 +339,11 @@ The same rule extends to integer width: **the IR never assumes a 64-bit machine 
 Word, pointer, and `usize`/`isize` width are a target parameter, not a constant, exactly as
 `Ptr[T]` is opaque. This is not abstract tidiness: the committed rv32 target (above) has
 32-bit pointers and makes `i64`/`u64` double-word there (synthesised as register pairs in
-the frontend), so `usize` is genuinely 32-bit there. `usize`/`isize` are
-target-width types introduced with fixed-size arrays (Phase 2, Slice 5), where indexing is
-their first real consumer; they resolve to 64-bit on current targets but must never be
-*assumed* 64-bit in shared IR. A corollary worth revisiting under a 32-bit target: the
+the frontend), so `usize` is genuinely 32-bit there. `usize` is a target-width type
+introduced with fixed-size arrays (Phase 2, Slice 5), where indexing is its first real
+consumer; `isize` mirrors it but waited for Phase 3 Slice 3, since it had no consumer
+until recursive/heap data existed. Both resolve to 64-bit on current targets but must
+never be *assumed* 64-bit in shared IR. A corollary worth revisiting under a 32-bit target: the
 current "integer literals default to `i64`" stance is 64-bit-centric, since on rv32 the
 natural machine word is 32-bit, not `i64`.
 

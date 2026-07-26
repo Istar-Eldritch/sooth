@@ -185,8 +185,8 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    inline `match` keyword); Result/Either fall out as ordinary monomorphic enums. Variants are
    not standalone types (a variant constructor yields the enum); a clause consumes the
    scrutinee and pushes the variant's fields onto the stack (linear destructor dispatch);
-   exhaustive-only, no `_` wildcard yet; no recursive enums (infinite size is a located error,
-   since recursion needs a pointer, which arrives in Phase 3). Also **renames the control-flow closer `then` ->
+   exhaustive-only, no `_` wildcard yet; no recursive enums (infinite size is a bare,
+   span-less error, since recursion needs a pointer, which arrives in Phase 3). Also **renames the control-flow closer `then` ->
    `end`** (`if … else … end`), unifying it, and extends **top-of-scope `| … |` locals** to
    clause bodies (bind names at the top of a word body or a clause body, extent = that scope;
    no mid-body binding, no closer: factor a word instead). Design locked in
@@ -265,9 +265,10 @@ struct; nesting via juxtaposed accessor calls; all structs trivially `Copy` (byt
 `dup`, no-op `drop`); size-aware carried-stack marshalling generalized to per-slot
 byte sizes across both the word-call boundary and the REPL line boundary; a REPL
 struct-placeholder display (`<TypeName>`); sharp located diagnostics for an unknown
-field type, a duplicate type name, a recursive (infinite-size) struct, constructor
-arity/type mismatch, an accessor applied to the wrong type, `.`/`=`/arithmetic on a
-struct, and a malformed declaration; a zero-field unit struct; and the
+field type, a duplicate type name, constructor arity/type mismatch, an accessor applied
+to the wrong type, `.`/`=`/arithmetic on a struct, and a malformed declaration (a
+recursive (infinite-size) struct is the one exception: bare and span-less, not located);
+a zero-field unit struct; and the
 `examples/vectors.sth` dogfood (`Vec2`/`Segment`, `sub`/`len2`/`span`/`shift-x`),
 running both as a native binary and in the REPL.
 
@@ -284,7 +285,7 @@ locals (extent = the clause); the control-flow closer rename **`then` -> `end`**
 (behaviour-preserving, migrated across every live example/test/doc); a D8 variant-name
 pre-pass disambiguating `|` as clause-marker vs. locals-delimiter, with a variant-named
 local/parameter rejected as a sharp error; combined struct+enum recursion detection (a
-struct field may be an enum and vice versa, but a value-cycle is a located compile
+struct field may be an enum and vice versa, but a value-cycle is a bare, span-less compile
 error, never a hang); `.`/`=`/arithmetic on an enum are sharp located errors; a REPL
 `<TypeName>` placeholder display; and size-aware carried-stack marshalling generalized
 to enum slots across both the word-call and REPL-line boundary. The `examples/shapes.sth`
