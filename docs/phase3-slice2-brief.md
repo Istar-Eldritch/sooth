@@ -67,20 +67,36 @@ Prerequisite state: Slice 1 is merged (`f8c48da`). 588 tests green.
   stack-threading is exactly why the ROADMAP put heap before refs; second-class refs stay
   deferred to Slice 4.
 
-## Surface syntax (recommended; confirm before implementing)
+## Surface syntax (CONFIRMED)
 
-Mirror the struct-word family, which the user already knows:
+The owning cell is spelled with a `^` sigil, in both type and term position:
 
 | operation | spelling | effect |
 |---|---|---|
-| construct | `Owned` | `( T -- Owned[T] )`, moves the value onto the heap |
-| unwrap (consuming) | `Owned>` | `( Owned[T] -- T )`, frees the cell |
-| peek (non-consuming) | `Owned\|>` | `( Owned[T] -- Owned[T] T )`, **Copy payload only** |
+| type | `^T` | `^i64`, `^Point`, `^[u8 1024]`, `^^i64` |
+| construct | `^` | `( T -- ^T )`, moves the value onto the heap |
+| unwrap (consuming) | `^>` | `( ^T -- T )`, frees the cell |
+| peek (non-consuming) | `^\|>` | `( ^T -- ^T T )`, **Copy payload only** |
 | dispose | `drop` | frees the cell, dropping a linear payload first |
 
-Type spelling is `Owned[i64]`, `Owned[Point]`, `Owned[[u8 1024]]`. This reuses the
-bracket convention arrays already established, and the `>` / `|>` convention Slice 1
-established, so the only genuinely new token shape is `Name[Type]` in type position.
+Chosen over a `Owned[T]` word form, and over `Owned<T>`, for composition: `^` nests
+*with* the leading-bracket array convention rather than against it, so owned-of-array and
+array-of-owned read as mirrors (`^[u8 1024]` vs `[^i64 4]`), and `^^i64` stays legible where
+`Owned[Owned[i64]]` does not. `Owned<T>` was rejected on lexing: `<`/`>` are not delimiters
+while `[`/`]` are, so `Owned<[u8 1024]>` would tokenise into six pieces ending in a bare `>`
+indistinguishable from the comparison operator, i.e. one syntax with two token shapes
+depending on its payload. Making `<`/`>` delimiters is not available: it would break `<=`,
+`>=`, `<>`, the `>usize` conversion prefix, and every `Point>x`/`Point<x` struct word.
+
+Verified free and unambiguous against the current tree: `^` appears in no `.sth` source and
+is not an operator (bitwise ops are `and`/`or`/`xor`/`shl`/`shr`); `^` is not a delimiter so
+`^i64` scans as one word while `^[u8 1024]` splits at the bracket into `^` plus a type
+expression; and `^|>` survives Slice 1's peek-glue rule (`|` joins when a word char precedes
+and `>` follows) as a single token.
+
+The cost accepted: a bare `^` is terse to the point of being easy to miss on a line, and the
+sigil is less self-documenting than a word. Taken deliberately in exchange for the nesting
+and buffer cases reading well, which is where most real use will land.
 
 ## Work by stage
 
