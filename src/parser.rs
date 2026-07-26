@@ -14,8 +14,8 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    is_reserved_caret_name, ArrayDecl, Clause, EnumDecl, Line, Module, OwnedCellDecl, Span,
-    StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    ArrayDecl, Clause, EnumDecl, Line, Module, OwnedCellDecl, Span, StackEffect, StructDecl, Term,
+    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 
@@ -92,6 +92,15 @@ pub fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
         "error: `{name}` is reserved for the owning-cell syntax (`^`, `^>`, `^|>`) and cannot be used as a {kind} name at line {}, col {}",
         span.line, span.col
     )
+}
+
+/// R12a: whether `name` collides with the owning-cell syntax (`^`, `^>`,
+/// `^|>`) or would shadow/be shadowed by it: any name beginning with `^` is
+/// reserved. Sooth has no notion of an identifier — a `type:`/`:` name or a
+/// local binding is otherwise just a bare word — so this is a plain prefix
+/// check, not a fixed set of three spellings.
+pub fn is_reserved_caret_name(name: &str) -> bool {
+    name.starts_with('^')
 }
 
 /// Collect variant `(name, span)` pairs from an enum `type:` body: the word

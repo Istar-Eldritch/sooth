@@ -207,15 +207,6 @@ pub fn intern_owned_cell_type(cells: &mut Vec<OwnedCellDecl>, payload: Type) -> 
     Type::OwnedCell(id, name_static)
 }
 
-/// R12a: whether `name` collides with the owning-cell syntax (`^`, `^>`,
-/// `^|>`) or would shadow/be shadowed by it: any name beginning with `^` is
-/// reserved. Sooth has no notion of an identifier — a `type:`/`:` name or a
-/// local binding is otherwise just a bare word — so this is a plain prefix
-/// check, not a fixed set of three spellings.
-pub fn is_reserved_caret_name(name: &str) -> bool {
-    name.starts_with('^')
-}
-
 /// A small `Copy` index into `Module::arrays`, mirroring `StructId`/`EnumId`.
 /// Two `Type::Array` values are equal iff they name the same interned shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

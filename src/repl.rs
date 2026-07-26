@@ -329,7 +329,7 @@ impl Session {
             Some((Token::Word(w), span)) => (w.clone(), *span),
             _ => return Err("parse error: `type:` must be followed by a type name".to_string()),
         };
-        if crate::ast::is_reserved_caret_name(&name) {
+        if parser::is_reserved_caret_name(&name) {
             return Err(parser::reserved_caret_name_error("type", &name, span));
         }
         if parser::typedef_line_is_enum(tokens) {
@@ -386,7 +386,7 @@ impl Session {
         let variant_names = parser::enum_variant_names(tokens);
         if let Some((vname, vspan)) = variant_names
             .iter()
-            .find(|(n, _)| crate::ast::is_reserved_caret_name(n))
+            .find(|(n, _)| parser::is_reserved_caret_name(n))
         {
             return Err(parser::reserved_caret_name_error("variant", vname, *vspan));
         }
