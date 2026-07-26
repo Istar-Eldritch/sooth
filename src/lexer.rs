@@ -336,4 +336,38 @@ mod tests {
             vec![Token::Pipe, Token::Word("Circle".into())]
         );
     }
+
+    #[test]
+    fn lex_owning_cell_peek_word_glues_into_one_token() {
+        // R12/criterion 20: `^|>` survives the `S|>fi` peek-glue rule as one
+        // token, the same way `Point|>x` does.
+        let tokens = lex("^|>").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Word("^|>".into())]);
+    }
+
+    #[test]
+    fn lex_nested_owning_cell_scalar_type_is_one_token() {
+        // R12/criterion 20: `^` is not a delimiter, so `^^i64` lexes as a
+        // single word (the parser's R19 rule then splits the leading `^`-run
+        // from the remainder).
+        let tokens = lex("^^i64").unwrap();
+        assert_eq!(words(&tokens), vec![Token::Word("^^i64".into())]);
+    }
+
+    #[test]
+    fn lex_owning_cell_array_type_splits_at_bracket() {
+        // R12/criterion 20: `[` is a delimiter, so `^[u8 4]` splits into a
+        // bare `^`-run word followed by the usual array-type tokens.
+        let tokens = lex("^[u8 4]").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::Word("^".into()),
+                Token::LBracket,
+                Token::Word("u8".into()),
+                Token::Int(4),
+                Token::RBracket,
+            ]
+        );
+    }
 }

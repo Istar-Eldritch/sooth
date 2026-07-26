@@ -25,6 +25,10 @@ pub struct Module {
     /// (`intern_array_type`), not by a name pre-pass: an array shape has no
     /// declared name to scan for ahead of parsing.
     pub arrays: Vec<ArrayDecl>,
+    /// The per-program interned owning-cell registry: one entry per distinct
+    /// payload-type shape, indexed by `OwnedCellId` and deduped structurally.
+    /// Unlike `arrays` there is no count: a cell holds exactly one value.
+    pub owned_cells: Vec<OwnedCellDecl>,
 }
 
 impl Module {
@@ -40,6 +44,12 @@ impl Module {
     /// registry. Thin wrapper over the free `intern_array_type`.
     pub fn intern_array_type(&mut self, element: Type, count: u32) -> Type {
         intern_array_type(&mut self.arrays, element, count)
+    }
+
+    /// Intern an owning-cell payload shape against this module's owned-cell
+    /// registry. Thin wrapper over the free `intern_owned_cell_type`.
+    pub fn intern_owned_cell_type(&mut self, payload: Type) -> Type {
+        intern_owned_cell_type(&mut self.owned_cells, payload)
     }
 }
 
@@ -143,6 +153,50 @@ pub struct ArrayDecl {
     pub element: Type,
     pub count: u32,
     pub name_static: &'static str,
+}
+
+/// A registered owning-cell type: its payload type and the leaked `&'static
+/// str` spelling `^T` every `Type::OwnedCell` naming it carries directly.
+/// Deduped structurally by payload shape; unlike `ArrayDecl` there is no
+/// count, since a cell holds exactly one value.
+#[derive(Debug)]
+pub struct OwnedCellDecl {
+    pub payload: Type,
+    pub name_static: &'static str,
+}
+
+/// A small `Copy` index into `Module::owned_cells`, mirroring `ArrayId`. Two
+/// `Type::OwnedCell` values are equal iff they name the same interned shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct OwnedCellId(pub(crate) usize);
+
+impl OwnedCellId {
+    /// Mint an `OwnedCellId` for a registry position; crate-internal so an id
+    /// is always tied to a real `owned_cells` registry entry.
+    pub(crate) fn from_index(idx: usize) -> OwnedCellId {
+        OwnedCellId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// Intern an owning-cell payload shape into `cells`, deduping structurally:
+/// two calls with the same payload type return the same `OwnedCellId`.
+/// Mirrors `intern_array_type`.
+pub fn intern_owned_cell_type(cells: &mut Vec<OwnedCellDecl>, payload: Type) -> Type {
+    if let Some(idx) = cells.iter().position(|d| d.payload == payload) {
+        return Type::OwnedCell(OwnedCellId::from_index(idx), cells[idx].name_static);
+    }
+    let name = format!("^{}", payload.name());
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let id = OwnedCellId::from_index(cells.len());
+    cells.push(OwnedCellDecl {
+        payload,
+        name_static,
+    });
+    Type::OwnedCell(id, name_static)
 }
 
 /// A small `Copy` index into `Module::arrays`, mirroring `StructId`/`EnumId`.
@@ -257,6 +311,11 @@ pub enum Type {
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
     Array(ArrayId, &'static str),
+    /// A single-value owning heap cell: a compiler-known type constructor,
+    /// not a generic, one interned registry entry per concrete payload
+    /// shape. Mirrors `Type::Array`. Always linear regardless of payload;
+    /// see `is_copy`.
+    OwnedCell(OwnedCellId, &'static str),
     /// The target-width unsigned integer (D7): distinct from every fixed-width
     /// `uN` in `INT_TYPES`, its size/align comes from the target word-width
     /// parameter (IR-side, Phase 3), never a hardcoded width here. The
@@ -393,6 +452,7 @@ impl Type {
             Type::Struct(_, name) => name,
             Type::Enum(_, name) => name,
             Type::Array(_, name) => name,
+            Type::OwnedCell(_, name) => name,
             Type::Usize => "usize",
             Type::Spy => SPY_NAME,
         }
@@ -547,6 +607,7 @@ mod tests {
             }],
             enums: Vec::new(),
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
         }
     }
 
@@ -601,6 +662,7 @@ mod tests {
                 span: Span::default(),
             }],
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
         }
     }
 
@@ -652,6 +714,7 @@ mod tests {
                 span: Span::default(),
             }],
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),

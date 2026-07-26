@@ -13,7 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ast::{
-    ArrayDecl, EnumDecl, Line, Span, StructDecl, Term, TermKind, Type, VariantDecl, WordDef,
+    ArrayDecl, EnumDecl, Line, OwnedCellDecl, Span, StructDecl, Term, TermKind, Type, VariantDecl,
+    WordDef,
 };
 use crate::check::{self, Sig};
 use crate::driver;
@@ -191,12 +192,17 @@ pub fn format_stack(
                 cell += size.div_ceil(8);
             }
             Type::Array(id, name) => {
-                // An array slot renders as its `<[T N]>` placeholder (D10),
+                // An array slot renders as its `<[T N]>` placeholder,
                 // reusing the aggregate-placeholder path, and advances the
                 // buffer by its inline aggregate's cell span.
                 vals.push(format!("<{name}>"));
                 let size = array_layouts[id.index()].size as usize;
                 cell += size.div_ceil(8);
+            }
+            Type::OwnedCell(_, name) => {
+                // An address is nondeterministic, so print a placeholder.
+                vals.push(format!("<{name}>"));
+                cell += 1;
             }
             _ => {
                 let v = buf[cell];
@@ -234,6 +240,9 @@ pub struct Session {
     /// index stays stable across lines. Grows as array type expressions and
     /// `fill` shapes resolve; shared by the checker and the layout builder.
     arrays: Vec<ArrayDecl>,
+    /// The interned owning-cell registry, mirroring `arrays`: grows as `^T`
+    /// type expressions resolve, persisting across lines in the same session.
+    owned_cells: Vec<OwnedCellDecl>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct or enum), so the
     /// buffer is byte-addressable and slot offsets are computed from `types`,
@@ -255,6 +264,7 @@ impl Session {
             structs: Vec::new(),
             enums: Vec::new(),
             arrays: Vec::new(),
+            owned_cells: Vec::new(),
             buf: Vec::new(),
             top: 0,
             types: Vec::new(),
@@ -287,8 +297,13 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
-        let line =
-            parser::parse_line_with_structs(&tokens, &self.structs, &self.enums, &mut self.arrays)?;
+        let line = parser::parse_line_with_structs(
+            &tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+        )?;
         match line {
             Line::Def(word) => self.eval_def(word, writer),
             Line::Expr(terms) => self.eval_expr(&terms, writer),
@@ -309,6 +324,9 @@ impl Session {
             Some((Token::Word(w), span)) => (w.clone(), *span),
             _ => return Err("parse error: `type:` must be followed by a type name".to_string()),
         };
+        if parser::is_reserved_caret_name(&name) {
+            return Err(parser::reserved_caret_name_error("type", &name, span));
+        }
         if parser::typedef_line_is_enum(tokens) {
             self.eval_enum_typedef(tokens, name.clone(), span)?;
         } else {
@@ -331,12 +349,17 @@ impl Session {
             fields: Vec::new(),
             span,
         });
-        let result =
-            parser::parse_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
-                .and_then(|fields| {
-                    self.structs[idx].fields = fields;
-                    check::check_types(&self.structs, &self.enums, &self.arrays)
-                });
+        let result = parser::parse_typedef_line(
+            tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+        )
+        .and_then(|fields| {
+            self.structs[idx].fields = fields;
+            check::check_types(&self.structs, &self.enums, &self.arrays)
+        });
         if let Err(e) = result {
             self.structs.pop();
             return Err(e);
@@ -355,7 +378,14 @@ impl Session {
         name: String,
         span: Span,
     ) -> Result<(), String> {
-        let variants = parser::enum_variant_names(tokens)
+        let variant_names = parser::enum_variant_names(tokens);
+        if let Some((vname, vspan)) = variant_names
+            .iter()
+            .find(|(n, _)| parser::is_reserved_caret_name(n))
+        {
+            return Err(parser::reserved_caret_name_error("variant", vname, *vspan));
+        }
+        let variants = variant_names
             .into_iter()
             .map(|(vname, vspan)| VariantDecl {
                 name: vname.clone(),
@@ -371,14 +401,19 @@ impl Session {
             variants,
             span,
         });
-        let result =
-            parser::parse_enum_typedef_line(tokens, &self.structs, &self.enums, &mut self.arrays)
-                .and_then(|variant_fields| {
-                    for (vidx, fields) in variant_fields.into_iter().enumerate() {
-                        self.enums[idx].variants[vidx].fields = fields;
-                    }
-                    check::check_types(&self.structs, &self.enums, &self.arrays)
-                });
+        let result = parser::parse_enum_typedef_line(
+            tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+        )
+        .and_then(|variant_fields| {
+            for (vidx, fields) in variant_fields.into_iter().enumerate() {
+                self.enums[idx].variants[vidx].fields = fields;
+            }
+            check::check_types(&self.structs, &self.enums, &self.arrays)
+        });
         if let Err(e) = result {
             self.enums.pop();
             return Err(e);
@@ -391,7 +426,14 @@ impl Session {
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(&word, &self.enums, &env, &mut self.arrays, &self.structs)?;
+        check::check_def(
+            &word,
+            &self.enums,
+            &env,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &self.structs,
+        )?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);
@@ -402,12 +444,19 @@ impl Session {
         // derived from the typed env (RK2): ir needs only counts + output type.
         env.insert(name.clone(), sig.clone());
         let ir_lower_env = ir_arity_env(&env);
-        let (structs, enums, arrays) =
-            ir::build_registries(&self.structs, &self.enums, &self.arrays);
+        let (structs, enums, arrays, cells) =
+            ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
         let funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            let mut func =
-                ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays);
+            let mut func = ir::lower_word(
+                &word,
+                &ir_lower_env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+                &cells,
+            );
             func.name = symbol.clone();
             let mut funcs = vec![func];
             // R12: this module must carry its own struct/enum destructors
@@ -421,6 +470,7 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
+                &cells,
             ));
             funcs
         };
@@ -507,6 +557,7 @@ impl Session {
             &self.types,
             &env,
             &mut self.arrays,
+            &mut self.owned_cells,
             &self.structs,
             &self.enums,
         )?;
@@ -516,8 +567,8 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let (structs, enums, arrays) =
-            ir::build_registries(&self.structs, &self.enums, &self.arrays);
+        let (structs, enums, arrays, cells) =
+            ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
         let (func, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
             let (func, m, out_bytes) = ir::lower_line(
@@ -530,6 +581,7 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
+                &cells,
             );
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`
@@ -540,6 +592,7 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
+                &cells,
             );
             (func, m, out_bytes, aggregate_destructors)
         };
@@ -738,6 +791,19 @@ mod tests {
     }
 
     #[test]
+    fn format_stack_cell_slot_shows_placeholder_and_offsets_past_it() {
+        use crate::ast::OwnedCellId;
+        // A cell slot (one carried cell), then a scalar slot. The cell
+        // renders as its `<^i64>` placeholder reading no heap bytes, and the
+        // trailing scalar reads the cell *past* it, not `index * 8`.
+        let cell_ty = Type::OwnedCell(OwnedCellId::from_index(0), "^i64");
+        assert_eq!(
+            format_stack(&[123, 99], &[cell_ty, Type::I64], &[], &[], &[]),
+            "stack: <^i64> 99"
+        );
+    }
+
+    #[test]
     fn format_stack_unsigned_slot_displays_unsigned_not_negative() {
         // A `u64` with the high bit set stores a negative `i64` bit pattern;
         // display must render its unsigned value, not that negative number.
@@ -774,5 +840,18 @@ mod tests {
         assert_eq!(next_generation(env.get("sq")), 0);
         env.insert("sq".to_string(), entry(0));
         assert_eq!(next_generation(env.get("sq")), 1);
+    }
+
+    #[test]
+    fn eval_line_reserved_caret_variant_name_is_error() {
+        // R12a at REPL scope: a variant name is a word-generating declaration
+        // site too, mirroring the module-parser pre-pass check.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("type: E | ^ x i64 | B y i64 ;", &mut out)
+            .unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
     }
 }

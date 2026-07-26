@@ -11,8 +11,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl,
-    StructId, Term, TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
+    intern_array_type, intern_owned_cell_type, ArrayDecl, Clause, EnumDecl, EnumId, Module,
+    OwnedCellDecl, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type, VariantDecl,
+    WordBody, WordDef, SPY_NAME,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -154,6 +155,8 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
             .flat_map(|v| v.fields.iter())
             .all(|(_, field_ty)| is_copy(*field_ty, structs, enums, arrays)),
         Type::Array(id, _) => is_copy(arrays[id.index()].element, structs, enums, arrays),
+        // Always linear regardless of payload, so no payload lookup here.
+        Type::OwnedCell(_, _) => false,
         _ => true,
     }
 }
@@ -324,17 +327,17 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         &module.arrays,
     )?;
 
-    // Split the borrow so a word body can intern into `arrays` while reading
-    // `words`/`enums`/`structs`.
+    // Split the borrow so a word body can intern into `arrays`/`owned_cells`
+    // while reading `words`/`enums`/`structs`.
     let Module {
         words,
         structs,
         enums,
         arrays,
-        ..
+        owned_cells,
     } = module;
     for word in words.iter() {
-        check_word(word, enums, &env, arrays, structs)?;
+        check_word(word, enums, &env, arrays, owned_cells, structs)?;
     }
     Ok(())
 }
@@ -676,21 +679,24 @@ pub fn check_def(
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env, arrays, structs)
+    check_word(word, enums, &env, arrays, cells, structs)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
 /// `entry_stack` (the carried slot types) and return the resulting typed stack.
 /// A type mismatch or underflow against the carried stack is a reported error.
+#[allow(clippy::too_many_arguments)]
 pub fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
 ) -> Result<Vec<Type>, String> {
@@ -703,6 +709,7 @@ pub fn infer_line(
         &Ctx::Line { structs, enums },
         env,
         arrays,
+        cells,
         &mut Moves::default(),
         false,
     )?;
@@ -993,11 +1000,13 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
@@ -1009,12 +1018,15 @@ fn check_word(
     }
     match &word.body {
         WordBody::Terms { locals, terms } => {
-            check_terms_word(word, enums, locals, terms, env, arrays, structs)
+            check_terms_word(word, enums, locals, terms, env, arrays, cells, structs)
         }
-        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays, structs),
+        WordBody::Clauses(clauses) => {
+            check_clause_word(word, enums, clauses, env, arrays, cells, structs)
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1022,6 +1034,7 @@ fn check_terms_word(
     terms: &[Term],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let inputs = word.effect.inputs.len();
@@ -1062,7 +1075,7 @@ fn check_terms_word(
         enums,
     };
     let mut moves = Moves::new(&local_types, structs, enums, arrays);
-    let final_stack = check_terms(terms, initial, &ctx, env, arrays, &mut moves, true)?;
+    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut moves, true)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
@@ -1074,12 +1087,14 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
+#[allow(clippy::too_many_arguments)]
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
     clauses: &[Clause],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
@@ -1129,6 +1144,7 @@ fn check_clause_word(
             &declared,
             env,
             arrays,
+            cells,
             structs,
         )?;
     }
@@ -1143,7 +1159,7 @@ fn check_clause_word(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)] // one clause's checking inputs; a bundle would obscure them
+#[allow(clippy::too_many_arguments)]
 fn check_clause_body(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1153,6 +1169,7 @@ fn check_clause_body(
     declared: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut seen_locals = HashSet::new();
@@ -1201,6 +1218,7 @@ fn check_clause_body(
         &ctx,
         env,
         arrays,
+        cells,
         &mut moves,
         true,
     )?;
@@ -1570,29 +1588,41 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
 /// both arms of a final `if`) sits on the self-tail-call back-edge. The rule
 /// mirrors `tail_position_calls`/`lower_terms`; all three must stay in
 /// lockstep.
+#[allow(clippy::too_many_arguments)]
 fn check_terms(
     terms: &[Term],
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     moves: &mut Moves,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let last = terms.len().wrapping_sub(1);
     for (i, term) in terms.iter().enumerate() {
-        stack = check_term(term, stack, ctx, env, arrays, moves, tail && i == last)?;
+        stack = check_term(
+            term,
+            stack,
+            ctx,
+            env,
+            arrays,
+            cells,
+            moves,
+            tail && i == last,
+        )?;
     }
     Ok(stack)
 }
 
-#[allow(clippy::too_many_arguments)] // the walker's threaded state; a bundle would obscure it
+#[allow(clippy::too_many_arguments)]
 fn check_term(
     term: &Term,
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     moves: &mut Moves,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
@@ -1634,6 +1664,10 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
+                return Ok(stack);
+            }
+            if let Some(stack) = check_owned_cell_word(name, span, &mut stack, ctx, arrays, cells)?
+            {
                 return Ok(stack);
             }
             if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays)? {
@@ -1686,11 +1720,20 @@ fn check_term(
                 ctx,
                 env,
                 arrays,
+                cells,
                 &mut then_moves,
                 tail,
             )?;
-            let else_stack =
-                check_terms(else_branch, stack, ctx, env, arrays, &mut else_moves, tail)?;
+            let else_stack = check_terms(
+                else_branch,
+                stack,
+                ctx,
+                env,
+                arrays,
+                cells,
+                &mut else_moves,
+                tail,
+            )?;
             *moves = Moves::join(then_moves, else_moves);
             if then_stack.len() != else_stack.len() {
                 return Err(branch_mismatch_error(
@@ -1937,6 +1980,40 @@ fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> S
     }
 }
 
+/// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
+/// word and the offending operand type, mirroring `array_word_operand_error`.
+fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` requires an owning-cell operand, found `{found}`")
+        }
+    }
+}
+
+/// `^|>` on a linear payload: the cell stays live afterward, so peeking
+/// would leave a second, unowned reference to a resource the cell still
+/// owns. `^>` (consuming unwrap) is the workaround.
+fn peek_of_linear_owned_payload_error(
+    ctx: &Ctx,
+    span: Span,
+    cell_ty: Type,
+    payload: Type,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `^|>` a linear payload in `{}` (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
+            name, span.line, cell_ty, payload, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `^|>` a linear payload: `{cell_ty}` holds a payload of type `{payload}`, which is linear and has no `Copy` instance"
+        ),
+    }
+}
+
 /// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
 /// error naming the length `N` and the offending index.
 fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64) -> String {
@@ -2117,6 +2194,70 @@ fn check_array_word(
             }
             stack.truncate(n - 3);
             stack.push(Slot::computed(array_ty));
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// The three owning-cell access words: `^ ( T -- ^T )` constructs a cell,
+/// `^> ( ^T -- T )` consumes it and yields the payload, `^|> ( ^T -- ^T T )`
+/// is a non-consuming peek restricted to a `Copy` payload. Matched by exact
+/// name only, so `^>x`/`^|>x` fall through to the ordinary unknown-word error.
+fn check_owned_cell_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    cells: &mut Vec<OwnedCellDecl>,
+) -> Result<Option<Vec<Slot>>, String> {
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+    match name {
+        "^" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("^", 1, n));
+            }
+            let payload = stack[n - 1].ty;
+            let cell_ty = intern_owned_cell_type(cells, payload);
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(cell_ty));
+        }
+        "^>" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("^>", 1, n));
+            }
+            let Type::OwnedCell(id, _) = stack[n - 1].ty else {
+                return Err(owned_cell_word_operand_error(
+                    ctx,
+                    span,
+                    "^>",
+                    stack[n - 1].ty,
+                ));
+            };
+            let payload = cells[id.index()].payload;
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(payload));
+        }
+        "^|>" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("^|>", 1, n));
+            }
+            let cell_ty = stack[n - 1].ty;
+            let Type::OwnedCell(id, _) = cell_ty else {
+                return Err(owned_cell_word_operand_error(ctx, span, "^|>", cell_ty));
+            };
+            let payload = cells[id.index()].payload;
+            if !is_copy(payload, ctx.structs(), ctx.enums(), arrays) {
+                return Err(peek_of_linear_owned_payload_error(
+                    ctx, span, cell_ty, payload,
+                ));
+            }
+            // Non-consuming: the cell stays, the payload copy is pushed atop it.
+            stack.push(Slot::computed(payload));
         }
         _ => return Ok(None),
     }
@@ -3016,7 +3157,15 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        infer_line(&terms, entry, &builtin_table(), &mut Vec::new(), &[], &[])
+        infer_line(
+            &terms,
+            entry,
+            &builtin_table(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+            &[],
+        )
     }
 
     #[test]
@@ -3228,6 +3377,48 @@ mod tests {
     #[test]
     fn check_no_linear_array_elements_copy_element_is_ok() {
         check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
+    }
+
+    #[test]
+    fn array_of_owned_is_error() {
+        let err = check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn owned_of_linear_array_is_error() {
+        let err = check_src(": w ( ^[__spy 2] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn nested_array_of_owned_is_error() {
+        let err = check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn array_of_struct_holding_owned_is_error() {
+        // Keeps `emit_drop`'s linear-array `unreachable!` guard valid now that
+        // cells are a second linear type: an array whose element only holds a
+        // cell transitively must be rejected here too, or lowering would reach
+        // that arm with an array needing drop glue.
+        let err = check_src("type: Holds c ^i64 ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
+            .unwrap_err();
+        assert!(err.contains("linear array elements are not supported yet"));
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -3666,6 +3857,59 @@ mod tests {
             );
         }
         assert!(!is_copy(Type::Spy, &[], &[], &[]));
+    }
+
+    #[test]
+    fn is_copy_owned_cell_is_never_copy_regardless_of_payload() {
+        // R4: always linear, no payload lookup, even over a Copy payload.
+        let mut cells = Vec::new();
+        let ty = crate::ast::intern_owned_cell_type(&mut cells, Type::I64);
+        assert!(!is_copy(ty, &[], &[], &[]));
+    }
+
+    #[test]
+    fn check_owned_cell_underflow_is_error_for_all_three_words() {
+        // `^`, `^>`, `^|>` each underflow the same way as any other word.
+        for (op, src) in [
+            ("^", ": w ( -- ^i64 ) ^ ;"),
+            ("^>", ": w ( -- i64 ) ^> ;"),
+            ("^|>", ": w ( -- i64 ) ^|> ;"),
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains(&format!("`{op}`")),
+                "{op}: unexpected message: {err}"
+            );
+            assert!(
+                err.contains("needs 1 values"),
+                "{op}: unexpected message: {err}"
+            );
+            assert!(err.contains("holds 0"), "{op}: unexpected message: {err}");
+        }
+    }
+
+    #[test]
+    fn check_unwrap_of_non_cell_is_error() {
+        // `^>` on a plain `i64` names the word and the offending type.
+        let err = check_src(": w ( -- i64 ) 5 ^> ;").unwrap_err();
+        assert!(err.contains("`^>`"), "unexpected message: {err}");
+        assert!(
+            err.contains("requires an owning-cell operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("found `i64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_peek_of_non_cell_is_error() {
+        // `^|>` on a plain `bool` names the word and the offending type.
+        let err = check_src(": w ( -- bool bool ) true ^|> ;").unwrap_err();
+        assert!(err.contains("`^|>`"), "unexpected message: {err}");
+        assert!(
+            err.contains("requires an owning-cell operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("found `bool`"), "unexpected message: {err}");
     }
 
     #[test]

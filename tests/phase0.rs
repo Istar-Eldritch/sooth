@@ -7,10 +7,27 @@ use std::path::Path;
 use sooth::{check, driver, lexer, parser};
 
 fn run_and_capture_stdout(path: &str) -> (String, i32) {
+    run_binary(path, false)
+}
+
+/// Compile and run with the allocation trace enabled (R10). The trace shares
+/// stdout with the program's own output, so the caller reads one transcript in
+/// program order: `alloc <size>`/`free <size>` lines interleaved with whatever
+/// the program printed.
+fn run_and_capture_traced_stdout(path: &str) -> (String, i32) {
+    run_binary(path, true)
+}
+
+fn run_binary(path: &str, trace: bool) -> (String, i32) {
     let binary = driver::build(Path::new(path)).expect("build should succeed");
-    let output = std::process::Command::new(&binary)
-        .output()
-        .expect("binary should run");
+    let mut cmd = std::process::Command::new(&binary);
+    // The gate is set or cleared explicitly, so an ambient value in the caller's
+    // environment can neither hide a trace nor add one.
+    match trace {
+        true => cmd.env(sooth::ir::TRACE_ALLOC_ENV, "1"),
+        false => cmd.env_remove(sooth::ir::TRACE_ALLOC_ENV),
+    };
+    let output = cmd.output().expect("binary should run");
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
         output
@@ -18,6 +35,16 @@ fn run_and_capture_stdout(path: &str) -> (String, i32) {
             .code()
             .expect("process should exit normally, not die by signal"),
     )
+}
+
+#[test]
+fn alloc_trace_stays_empty_for_a_program_that_never_allocates() {
+    // The allocator shim, its trap and its trace are emitted unconditionally (the
+    // drop-spy precedent), so a program that constructs no cell never calls them:
+    // even with the gate on, its transcript is only its own output.
+    let (stdout, code) = run_and_capture_traced_stdout("examples/gcd.sth");
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
 }
 
 #[test]
@@ -2207,4 +2234,311 @@ fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
         "unexpected message: {err}"
     );
     assert!(err.contains("`Holds`"), "unexpected message: {err}");
+}
+
+// Phase 3 Slice 2: the three owning-cell access words (`^ ^> ^|>`). A
+// runtime golden uses a temp `.sth` file exactly like the linear-core section
+// above; a trace-observing golden additionally sets `SOOTH_TRACE_ALLOC` via
+// `run_and_capture_traced_stdout`. Phase 3 constructs and unwraps a cell but
+// never `drop`s one (that's Phase 4's drop-glue arm), so every golden here
+// disposes via `^>`.
+
+fn run_owned_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "owned-cell golden `{tag}` should exit 0");
+    stdout
+}
+
+fn run_owned_traced_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_traced_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "owned-cell golden `{tag}` should exit 0");
+    stdout
+}
+
+#[test]
+fn unconsumed_owned_is_error() {
+    // Criterion 2: forgetting to dispose a cell is a compile error, exactly
+    // like a bare `__spy` (R4: `^T` is always linear).
+    let err = linear_check_error(": main ( -- )\n  5 ^ ;\n");
+    assert!(
+        err.contains("linear value left on the stack"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn dup_of_owned_is_error() {
+    // Criterion 3: `dup` of `^i64` errors even though the *payload* (`i64`)
+    // is Copy, proving the cell itself is linear regardless of what it holds
+    // (R4).
+    let err = linear_check_error(": main ( -- )\n  5 ^ dup ;\n");
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn over_of_owned_is_error() {
+    // Criterion 3b: `over` copies its second slot, gated the same way.
+    let err = linear_check_error(": main ( -- )\n  5 ^ 1 over ;\n");
+    assert!(err.contains("cannot `over`"), "unexpected message: {err}");
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn use_after_move_of_owned_is_error() {
+    // Criterion 4: the second mention errors and names the site of the
+    // first, mirroring the `__spy` case.
+    let err = linear_check_error(
+        ": main ( -- )\n  5 ^ hold ;\n\
+: hold ( ^i64 -- )\n  | s |\n  s ^> drop\n  s ^> drop ;\n",
+    );
+    assert!(err.contains("use after move"), "unexpected message: {err}");
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    assert!(
+        err.contains("moved at line 5, col 3"),
+        "the diagnostic should name the move site: {err}"
+    );
+}
+
+#[test]
+fn owned_unwrap_returns_payload_and_frees_once() {
+    // Criterion 5: unwrap returns the payload value; the transcript is
+    // exactly one `alloc` (construct) then one `free` (unwrap) at the scalar
+    // `i64` payload's 8-byte size.
+    let stdout = run_owned_traced_golden("unwrap-scalar", ": main ( -- )\n  5 ^ ^> . ;\n");
+    assert_eq!(stdout, "alloc 8\nfree 8\n5\n");
+}
+
+#[test]
+fn owned_unwrap_sub_word_scalar_is_width_exact() {
+    // R13: a sub-word payload's `FieldLoad`/`FieldStore` is width-exact, not
+    // padded to a word; `^u8` allocates and frees exactly 1 byte, unlike the
+    // 8-byte `^i64` case above.
+    let stdout = run_owned_traced_golden("unwrap-u8", ": main ( -- )\n  200 >u8 ^ ^> . ;\n");
+    assert_eq!(stdout, "alloc 1\nfree 1\n200\n");
+}
+
+#[test]
+fn owned_unwrap_aggregate_copies_out_before_free() {
+    // Criterion 5b: unwrap materialises an aggregate payload before releasing
+    // the cell (R13); a bare field read right after the free could pass by
+    // luck (whether the allocator's free() bookkeeping happens to clobber the
+    // read offset). Interposing a second same-size allocation between the
+    // free and the read forces the issue: glibc's tcache reuses a freed
+    // block LIFO within its size class, so if unwrap had aliased the cell
+    // instead of copying out, this second `Point`-sized alloc would
+    // deterministically clobber it before `p` is read.
+    let stdout = run_owned_golden(
+        "unwrap-aggregate",
+        "type: Point x i64 y i64 ;\n\
+: use ( Point -- )\n  \
+  | p |\n  \
+  3 4 Point ^ ^> drop\n  \
+  p Point>y . ;\n\
+: main ( -- )\n  1 2 Point ^ ^> use ;\n",
+    );
+    assert_eq!(stdout, "2\n");
+}
+
+#[test]
+fn peek_owned_linear_payload_is_error() {
+    // Criterion 7: `^|>` on a linear payload is a compile error naming the
+    // payload's type (R11/R14); `^__spy` proves it via the drop-spy.
+    let err = linear_check_error(": main ( -- )\n  7 __spy ^ ^|> ;\n");
+    assert!(err.contains("cannot `^|>`"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn struct_containing_owned_is_linear() {
+    // Criterion 9: a struct with a cell field is linear (R4 propagates
+    // transitively via Slice 1's rules); `dup` on it errors naming the
+    // struct, not the cell.
+    let err = linear_check_error("type: Box v ^i64 ;\n: main ( -- )\n  5 ^ Box dup ;\n");
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Box`"), "unexpected message: {err}");
+}
+
+#[test]
+fn alloc_trace_is_silent_when_unset() {
+    // Criterion 18: the gate is off by default (unset); a program that
+    // constructs and disposes a cell prints only its own output, none of the
+    // trace. Without this, a regression inverting the gate ships green.
+    let stdout = run_owned_golden("gate-off", ": main ( -- )\n  5 ^ ^> . ;\n");
+    assert_eq!(stdout, "5\n");
+}
+
+// Phase 4: drop glue (`emit_drop`'s `OwnedCell` arm plus a synthesized
+// per-cell destructor, R5/R8) and the allocation-observing goldens it makes
+// possible. Every golden below is free to `drop` a cell, unlike Phase 3's.
+
+fn run_owned_memory_bounded_golden(tag: &str, src: &str) -> i32 {
+    let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    // Criterion 1b: gate off (the env var is removed, not just unset in this
+    // process) under a 64 MB `RLIMIT_AS` (`ulimit -v`, in KB): a fake free
+    // (a leak) grows unbounded across ~100k iterations and necessarily trips
+    // the limit, while a genuine free-per-iteration loop stays comfortably
+    // within it. Unlike criterion 14's OOM trap, this doesn't need to
+    // distinguish a NULL `malloc` from a live one, only survive; see the
+    // spec's "why criterion 14 is not a runtime golden" for why that
+    // distinction specifically is unsound to probe at runtime.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -v 65536 && exec \"{}\"", binary.display()))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .status()
+        .expect("binary should run");
+    status
+        .code()
+        .expect("process should exit normally, not die by signal")
+}
+
+#[test]
+fn owned_alloc_and_drop_traces_one_pair() {
+    // Criterion 1: construct then `drop` (not `^>`): the transcript is
+    // exactly one `alloc` and one `free`, at the `i64` payload's 8-byte size.
+    let stdout = run_owned_traced_golden("drop-scalar", ": main ( -- )\n  5 ^ drop ;\n");
+    assert_eq!(stdout, "alloc 8\nfree 8\n");
+}
+
+#[test]
+fn owned_alloc_dispose_loop_stays_within_memory_bound() {
+    // Criterion 1b: ~100k construct-and-dispose iterations of a `[u8 1024]`
+    // cell under a 64 MB `RLIMIT_AS`, gate off. Mirrors `countdown.sth`'s
+    // tail-call -> loop shape (constant stack), so the outer loop itself
+    // never grows memory; only a broken `free` (a real leak, or a fake one)
+    // would.
+    let src = ": loop-owned ( i64 -- )\n  dup 0 = if\n    drop\n  else\n    0 >u8 1024 fill ^ drop\n    1 - loop-owned\n  end ;\n\
+: main ( -- )\n  100000 loop-owned ;\n";
+    let code = run_owned_memory_bounded_golden("mem-bound", src);
+    assert_eq!(
+        code, 0,
+        "a real free-per-iteration loop should stay within the 64 MB bound"
+    );
+}
+
+#[test]
+fn peek_owned_copy_payload_keeps_cell_live() {
+    // Criterion 6: peek twice then dispose; the first peeked value is printed
+    // (pinning it against garbage, not just against the second peek), the two
+    // peeks are then asserted equal (proving the cell stayed live and
+    // unchanged across them), and the transcript shows exactly one `free`.
+    let stdout = run_owned_traced_golden(
+        "peek-twice",
+        ": main ( -- )\n  5 ^ ^|> swap ^|> rot dup . = . drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 8\n5\ntrue\nfree 8\n");
+}
+
+#[test]
+fn owned_linear_payload_drops_before_free() {
+    // Criterion 8: `^__spy` disposal. The transcript is `drop 7` *then*
+    // `free 8`, one stdout stream so the order is real (R5: the payload
+    // drops before the cell frees).
+    let stdout = run_owned_traced_golden("spy-payload", ": main ( -- )\n  7 __spy ^ drop ;\n");
+    assert_eq!(stdout, "alloc 8\ndrop 7\nfree 8\n");
+}
+
+#[test]
+fn dropping_struct_with_owned_frees_cell() {
+    // Criterion 9b: dropping a struct containing a cell field frees the
+    // cell (the struct destructor's synthesized drop of its linear field).
+    let stdout = run_owned_traced_golden(
+        "struct-with-cell",
+        "type: Box v ^i64 ;\n: main ( -- )\n  5 ^ Box drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 8\nfree 8\n");
+}
+
+#[test]
+fn enum_variant_with_owned_frees_on_drop() {
+    // Criterion 10: an enum variant carrying a cell, built behind an `if` so
+    // the active variant is a runtime fact, not a compile-time one. Dropping
+    // the cell-carrying variant frees exactly once; dropping the *other*
+    // variant frees zero times. Both are asserted in one transcript: only
+    // one alloc/free pair appears, from the `Full` branch.
+    let stdout = run_owned_traced_golden(
+        "enum-variant",
+        "type: Item | Empty | Full v ^i64 ;\n\
+: main ( -- )\n  true if 5 ^ Full else Empty end drop\n  \
+false if 9 ^ Full else Empty end drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 8\nfree 8\n");
+}
+
+#[test]
+fn nested_owned_frees_inner_before_outer() {
+    // Criterion 11: `^^[u8 24]`. The inner and outer sizes are deliberately
+    // distinct (24 vs. the pointer-width 8) so the transcript order proves
+    // the inner cell frees *before* the outer one; equal sizes could not
+    // distinguish that from the reverse.
+    let stdout = run_owned_traced_golden("nested", ": main ( -- )\n  0 >u8 24 fill ^ ^ drop ;\n");
+    assert_eq!(stdout, "alloc 24\nalloc 8\nfree 24\nfree 8\n");
+}
+
+#[test]
+fn owned_zero_sized_payload_allocs_one_byte() {
+    // Criterion 12: a zero-sized (`Unit`) payload. The transcript shows
+    // `alloc 1`/`free 1`, witnessing R15's `max(size, 1)` adjustment;
+    // asserting the *size* (not just a count) matters, since glibc's
+    // `malloc(0)` returns non-NULL and would pass a count-only test even if
+    // the adjustment were deleted.
+    let stdout = run_owned_traced_golden(
+        "zero-sized",
+        "type: Unit ;\n: main ( -- )\n  Unit ^ drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 1\nfree 1\n");
+}
+
+#[test]
+fn owned_byte_buffer_peek_get_and_free_once() {
+    // Criterion 13: `^[u8 N]` constructed from a filled array, peeked, a
+    // byte `get` off the peeked copy, then `drop`; exactly one alloc/free.
+    let stdout = run_owned_traced_golden(
+        "byte-buffer",
+        ": main ( -- )\n  7 >u8 4 fill ^ ^|> 0 get . drop drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 4\n7\nfree 4\n");
+}
+
+#[test]
+fn peek_aggregate_does_not_alias_cell() {
+    // Criterion 13 (continued): peek an aggregate, dispose the cell, *then*
+    // read the peeked copy. If `^|>` had aliased the cell instead of copying
+    // out (R14), the read after `drop` would see freed memory; reading the
+    // right value after the free proves it didn't.
+    let stdout = run_owned_traced_golden(
+        "peek-no-alias",
+        ": main ( -- )\n  9 >u8 4 fill ^ ^|> swap drop 0 get . drop ;\n",
+    );
+    assert_eq!(stdout, "alloc 4\nfree 4\n9\n");
+}
+
+#[test]
+fn caret_field_suffix_is_unknown_word() {
+    // Criterion 21 (R12b): `^>x` and `^|>x` lex as one word each and match
+    // none of the three exact cell-word spellings, so they fall through to
+    // the ordinary unknown-word error. This pins the exact-name matching only,
+    // *not* R12b's arm-ordering clause, which turns out to be unobservable:
+    // `check_struct_peek_word` returns `None` for any name whose struct half
+    // misses the registry, and R12a makes a struct named `^` undeclarable, so
+    // swapping the two arms leaves the whole suite green. No test can guard
+    // that ordering because nothing depends on it.
+    let err = linear_check_error(": main ( -- )\n  5 ^ ^>x ;\n");
+    assert!(err.contains("unknown word"), "unexpected message: {err}");
+    assert!(err.contains("^>x"), "unexpected message: {err}");
+
+    let err = linear_check_error(": main ( -- )\n  5 ^ ^|>x ;\n");
+    assert!(err.contains("unknown word"), "unexpected message: {err}");
+    assert!(err.contains("^|>x"), "unexpected message: {err}");
 }
