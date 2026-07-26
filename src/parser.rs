@@ -1684,6 +1684,10 @@ mod tests {
         let err = parse_src("type: ^ x i64 ;").unwrap_err();
         assert!(err.contains("reserved"), "unexpected message: {err}");
         assert!(err.contains('^'), "unexpected message: {err}");
+        assert!(
+            err.contains("line 1, col 7"),
+            "the error should be located: {err}"
+        );
     }
 
     #[test]
@@ -1732,6 +1736,10 @@ mod tests {
         let err = parse_src(": w ( i64 -- i64 ) | ^ | ^ ;").unwrap_err();
         assert!(err.contains("reserved"), "unexpected message: {err}");
         assert!(err.contains('^'), "unexpected message: {err}");
+        assert!(
+            err.contains("line 1, col 22"),
+            "the error should be located: {err}"
+        );
     }
 
     #[test]
