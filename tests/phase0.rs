@@ -2759,9 +2759,9 @@ fn self_recursive_struct_destructor_compiles() {
 // Phase 3 slice 3, phase 5: multi-child and mutually recursive types (R17,
 // R18), the documented depth limitations (R14), and the `list.sth` dogfood.
 // A tree node's two `^` fields are both recursive edges (R13's detection
-// still fires per field, not per type), so `recursive_loop_field` (R17)
-// picks the *last* declared one for the loop and the rest fall back to an
-// ordinary recursive drop call.
+// still fires per field, not per type), so the reverse-declaration-order walk
+// (R17) picks the *last* declared one for the loop and the rest fall back to
+// an ordinary recursive drop call.
 
 #[test]
 fn recursive_tree_builds_and_disposes() {
@@ -2850,14 +2850,14 @@ fn deep_right_leaning_tree_disposes_in_constant_stack() {
 
 #[test]
 fn mutually_recursive_types_dispose_on_recursive_path() {
-    // Criterion 14: mutually recursive types keep today's recursive
-    // destructor (R18); no fused loop spans a multi-type cycle. First, a
-    // small A/B chain (base case in `A`, since an all-struct or all-linked
-    // pair with no base variant would be uninhabited per R5) disposes with
-    // the correct trace, alternating tags between the two types. Then a
-    // chain deep enough to overflow a 1 MB stack (300,000 nodes; the direct
-    // list already passes at 1,000,000 under the same bound) proves the
-    // fused-loop path was *not* taken for this shape.
+    // Criterion 14, half of it inverted by Phase 3 Slice 4. A small A/B
+    // chain (base case in `A`, since an all-struct or all-linked pair with
+    // no base variant would be uninhabited per R5) disposes with the same
+    // trace as before, alternating tags between the two types: the
+    // generalized loop walks the cycle in the same pre-order the recursive
+    // path did. The deep chain, which Slice 3 asserted *must* overflow a 1 MB
+    // stack, now exits 0 — one fused loop per participating type spans the
+    // whole two-type cycle, which is Slice 4's point.
     let stdout = run_owned_traced_golden(
         "mutual-small",
         "type: A | ANil | ACons tag __spy next ^B ;\n\
@@ -2894,24 +2894,22 @@ type: B | BNil | BCons tag __spy next ^A ;\n\
     build\n  \
   end ;\n\
 : main ( -- )\n  300000 ANil build drop ;\n";
-    assert_ne!(
+    assert_eq!(
         run_stack_bounded_golden("mutual-deep", deep_src),
         Some(0),
-        "a mutually recursive chain should still overflow a 1 MB stack: the \
-         fallback fused-loop-less recursive path was proven to be taken"
+        "a mutually recursive chain should dispose in constant stack"
     );
 }
 
 #[test]
 fn indirect_recursion_shapes_remain_depth_limited() {
-    // Criterion 16: the limitation boundary is an *asymmetry*, not merely
-    // "disposes at modest depth" (already true pre-slice and passable
-    // vacuously). At 1,000,000 nodes under a 1 MB stack, the directly
-    // self-recursive list exits 0 (already proven by
-    // `deep_list_disposes_in_constant_stack`) while a wrapper-struct list
-    // (the `^` reached through an intervening struct) and a left-leaning
-    // tree (the loop takes the *last* field, so a chain grown through the
-    // *first* field stays on the recursive path) do not.
+    // Criterion 16, half of it inverted by Phase 3 Slice 4: indirection
+    // through a wrapper struct is a route the generalized loop now walks, so
+    // that list exits 0 at 1,000,000 nodes under a 1 MB stack. The
+    // left-leaning tree still does not, and is now the sole surviving proof
+    // that D1's one-edge narrowing held: a struct level picks exactly one
+    // recursive field (the last), so a chain grown through the *first* stays
+    // on the ordinary recursive path.
     let wrapper_src = "type: Wrap v i64 n ^List ;\n\
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
@@ -2922,10 +2920,11 @@ type: List | Nil | Cons w Wrap ;\n\
     n 1 - n acc ^ Wrap Cons build\n  \
   end ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
-    assert_ne!(
+    assert_eq!(
         run_stack_bounded_golden("wrapper-list", wrapper_src),
         Some(0),
-        "indirection through a wrapper struct should stay depth-limited"
+        "a wrapper-struct list should dispose in constant stack: the byval \
+         hop is a step on the path, not a dead end"
     );
 
     let left_leaning_src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
@@ -2942,6 +2941,238 @@ type: List | Nil | Cons w Wrap ;\n\
         Some(0),
         "a left-leaning tree should stay depth-limited: the loop takes the \
          last field (`right`), not the chain-growing first field (`left`)"
+    );
+}
+
+// Phase 3 slice 4: the fused loop generalizes from a direct `^Self` field to
+// a whole *path* back to the type, so a wrapper struct, a `^^Self`, and a
+// multi-type cycle each dispose in one loop of their own. Criteria 2-4c and
+// 8-9; the small-N traces below are correctness-preservation (all three
+// shapes already produced them on the recursive path), so only the
+// constant-stack goldens prove a loop exists at all.
+
+#[test]
+fn wrapper_struct_recursive_list_disposes_in_expected_order() {
+    // Criterion 2: the `^List` sits inside `Wrap`, one byval hop off the
+    // enum's variant, so the path is `Cons -> Project(w) -> Unwrap(next)`.
+    // `Wrap` declares its cell field *before* its spy (R12), so emitting
+    // `Wrap`'s fields in declaration order would free the next node's cell
+    // before dropping this node's spy — the copy-out would then overwrite the
+    // slot the spy is read from, printing a repeated or garbage tag with the
+    // alloc/free trace still balanced.
+    let stdout = run_owned_traced_golden(
+        "wrapper-list-order",
+        "type: Wrap next ^List tag __spy ;\n\
+type: List | Nil | Cons w Wrap ;\n\
+: push-front ( List i64 -- List )\n  \
+  | rest v |\n  \
+  rest ^ v __spy Wrap Cons ;\n\
+: main ( -- )\n  \
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\n\
+drop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\n"
+    );
+}
+
+#[test]
+fn double_cell_recursive_list_disposes_in_expected_order() {
+    // Criterion 3: `^^L` is two `Unwrap` steps in one iteration, and only the
+    // second is hazardous (R8): the first strips `^^L` to `^L`, a scalar
+    // `FieldLoad` with no frame slot, while the second blits the whole node
+    // into the reused slot. The cell field is declared before the spy, so a
+    // declaration-order emission would drop the wrong node's spy. The two
+    // free sizes differ (8 for the outer pointer cell, 24 for the node
+    // itself), which pins that both unwraps free their own cell exactly once.
+    let stdout = run_owned_traced_golden(
+        "double-cell-list",
+        "type: L | Nil | Cons next ^^L tag __spy ;\n\
+: push-front ( L i64 -- L )\n  \
+  | rest v |\n  \
+  rest ^ ^ v __spy Cons ;\n\
+: main ( -- )\n  \
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 8\nalloc 24\nalloc 8\nalloc 24\nalloc 8\n\
+drop 1\nfree 8\nfree 24\ndrop 2\nfree 8\nfree 24\ndrop 3\nfree 8\nfree 24\n"
+    );
+}
+
+/// An A/B cycle whose `A` level declares its recursive field *before* its spy
+/// and whose `B` level declares it after, so one ordering trap is live at each
+/// level whichever end the disposal starts from. A-node tags are `n * 10`,
+/// B-node tags `n`, so every node in the chain is distinguishable.
+const MUTUAL_CHAIN_TYPES: &str = "type: A | ANil | ACons next ^B tag __spy ;\n\
+type: B | BNil | BCons tag __spy next ^A ;\n\
+: build ( i64 A -- A )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 -\n    \
+    n __spy acc ^ BCons ^\n    \
+    n 10 * __spy ACons\n    \
+    build\n  \
+  end ;\n";
+
+#[test]
+fn mutual_recursive_chain_disposes_from_both_directions() {
+    // Criterion 4: the same chain disposed as an `A` and as a `B`. Neither
+    // destructor calls the other (R6): each discovers the same cycle rotated
+    // to start at its own type, so `drop_B` dispatches on `B`'s tag first and
+    // on `A`'s mid-loop, and `drop_A` the reverse. The traces differ only by
+    // that rotation — tags interleave `10, 1, 20, 2, 30, 3` either way, with
+    // the B-rooted one prefixed by its own head node.
+    let stdout = run_owned_traced_golden(
+        "mutual-from-a",
+        &format!("{MUTUAL_CHAIN_TYPES}: main ( -- )\n  3 ANil build drop ;\n"),
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
+drop 10\nfree 24\ndrop 1\nfree 24\n\
+drop 20\nfree 24\ndrop 2\nfree 24\n\
+drop 30\nfree 24\ndrop 3\nfree 24\n"
+    );
+
+    // Rooted at `B`: an extra head node (tag 0) wrapping the same chain, so
+    // disposal enters through `drop_B`'s own loop. This is the direction that
+    // discriminates against the rejected "`drop_B` just calls `drop_A`"
+    // design, which would recurse one native frame per node.
+    let stdout = run_owned_traced_golden(
+        "mutual-from-b",
+        &format!(
+            "{MUTUAL_CHAIN_TYPES}: main ( -- )\n  \
+  3 ANil build ^ 0 __spy swap BCons drop ;\n"
+        ),
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\nalloc 24\n\
+drop 0\nfree 24\n\
+drop 10\nfree 24\ndrop 1\nfree 24\n\
+drop 20\nfree 24\ndrop 2\nfree 24\n\
+drop 30\nfree 24\ndrop 3\nfree 24\n"
+    );
+}
+
+#[test]
+fn multi_variant_recursive_enum_disposes_in_expected_order() {
+    // Criterion 4b: two variants reach `Self` independently, and each gets
+    // its own back-edge — an enum's variants are mutually exclusive at
+    // runtime, so this is not D1's simultaneously-live branching case. `X`
+    // declares its cell before its spy and `Y` after, so each arm's own field
+    // ordering is trapped. This small trace alone cannot catch a collapse to
+    // one looping variant (the other would merely recurse and print the same
+    // thing); `deep_multi_variant_enum_disposes_in_constant_stack` is what
+    // proves both arms loop.
+    let stdout = run_owned_traced_golden(
+        "multi-variant",
+        "type: T | Nil | X next ^T tag __spy | Y tag __spy next ^T ;\n\
+: push-x ( T i64 -- T )\n  | rest v |  rest ^ v __spy X ;\n\
+: push-y ( T i64 -- T )\n  | rest v |  v __spy rest ^ Y ;\n\
+: main ( -- )\n  \
+  Nil 4 push-y 3 push-x 2 push-y 1 push-x drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\nalloc 24\nalloc 24\n\
+drop 1\nfree 24\ndrop 2\nfree 24\ndrop 3\nfree 24\ndrop 4\nfree 24\n"
+    );
+}
+
+#[test]
+fn deep_multi_variant_enum_disposes_in_constant_stack() {
+    // Criterion 4c: 1,000,000 alternating `X`/`Y` nodes under a 1 MB stack.
+    // Unlike criteria 5-7 this shape already passed on the base commit (the
+    // old per-variant detection gave each variant its own back-edge too), so
+    // it is a preservation golden: it fails the moment the generalized
+    // `Branch` keeps only one `Some` variant, since every second node would
+    // then recurse.
+    let src = "type: T | Nil | X next ^T v i64 | Y v i64 next ^T ;\n\
+: build ( i64 T -- T )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 2 mod 0 = if\n      \
+      n 1 - acc ^ n X build\n    \
+    else\n      \
+      n 1 - n acc ^ Y build\n    \
+    end\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+    assert_eq!(
+        run_stack_bounded_golden("multi-variant-deep", src),
+        Some(0),
+        "both recursive variants should back-edge, not just one"
+    );
+}
+
+#[test]
+fn all_struct_recursive_cycle_destructor_compiles() {
+    // Criterion 8: Slice 3's exit-less loop, generalized to a two-type cycle.
+    // Neither `P` nor `Q` has a base case, so each destructor is a loop with
+    // no `Ret` at all; sealing one anyway after the back-edge emits a
+    // duplicate block label and `qbe` rejects the whole module. Both types
+    // are uninhabited (a `^` is non-null, so building one needs the other
+    // first), so this proves compilation, not disposal.
+    let stdout = run_owned_golden(
+        "all-struct-cycle",
+        "type: P q ^Q ;\ntype: Q r ^P ;\n: main ( -- )\n  0 . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn all_struct_cycle_with_wrapper_hop_destructor_compiles() {
+    // Criterion 8, second sub-shape: the same exit-less cycle with a byval
+    // wrapper hop in it, so `W`'s own loop ends on a `Project` rather than an
+    // `Unwrap` and its back-edge carries an interior pointer into the slot
+    // the previous unwrap wrote (R7).
+    let stdout = run_owned_golden(
+        "all-struct-cycle-hop",
+        "type: P q ^Q ;\ntype: Q w W ;\ntype: W p ^P ;\n: main ( -- )\n  0 . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn intermediate_dispatch_with_base_case_declared_first_terminates_correctly() {
+    // Criterion 9: `B` is a plain struct, so its loop dispatches on `A`'s tag
+    // *mid-path*, and each block that dispatch starts needs the
+    // reset-then-check discipline (R10). Tags 1/2/3 alternate between the two
+    // levels, and the two free sizes distinguish an `A` cell (24) from a `B`
+    // cell (16). Both variant orders are exercised, because only the second
+    // actually drifts: with `ANil` declared first (the shape the spec names)
+    // no arm has yet back-edged when the terminating arm is emitted, so
+    // deleting the per-arm `terminated` reset leaves this half green.
+    let base_first = "type: A | ANil | ACons x __spy next ^B ;\n\
+type: B y __spy z ^A ;\n\
+: main ( -- )\n  \
+  1 __spy 2 __spy 3 __spy ANil ^ B ^ ACons ^ B drop ;\n";
+    let expected = "alloc 24\nalloc 16\nalloc 24\n\
+drop 1\nfree 24\ndrop 2\nfree 16\ndrop 3\nfree 24\n";
+    assert_eq!(
+        run_owned_traced_golden("mid-dispatch-base-first", base_first),
+        expected
+    );
+
+    // The continuing variant declared *first*: its arm back-edges and leaves
+    // the builder marked terminated, so without the reset the terminating
+    // arm's block is never sealed at all and `qbe` rejects the module with
+    // `block @blk3 is used undefined` — a build failure, not a wrong trace.
+    let continuing_first = "type: A | ACons x __spy next ^B | ANil ;\n\
+type: B y __spy z ^A ;\n\
+: main ( -- )\n  \
+  1 __spy 2 __spy 3 __spy ANil ^ B ^ ACons ^ B drop ;\n";
+    assert_eq!(
+        run_owned_traced_golden("mid-dispatch-continuing-first", continuing_first),
+        expected
     );
 }
 

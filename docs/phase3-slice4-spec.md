@@ -332,14 +332,25 @@ Verified by building and running programs, not by reading code.
   today (an all-struct pair, no enum, no base case — Slice 3's exit-less shape,
   generalized to a two-type cycle) and must still compile to one exit-less loop per
   type without a duplicate block label; separately, `type: A | ANil | ACons x i64 next
-  ^B ; type: B y i64 z ^A ;`, where `A`'s **terminating** variant (`ANil`) happens to be
-  declared **before** its continuing variant, must still terminate `B`'s loop correctly
-  — this ordering is buildable today and is exactly the shape where forgetting the
-  reset-then-check discipline at the intermediate dispatch produces a duplicate
-  `BlockId`, which `qbe` rejects outright (`multiple definitions of block @start`,
-  verified against a hand-constructed case). Whether a given generalized loop is
-  exit-less now depends on whether *any* enum anywhere on the discovered path has a
-  reachable terminating variant, not on the entry type's own kind alone.
+  ^B ; type: B y i64 z ^A ;` must still terminate `B`'s loop correctly.
+
+  **Corrected during phase 2 by drifting the implemented code:** the variant order this
+  paragraph named is the *harmless* one. With the terminating variant (`ANil`) declared
+  **first**, no arm has back-edged yet when it is emitted, so deleting the per-arm
+  `terminated` reset leaves that shape compiling and the whole suite green. The order
+  that actually reproduces the hazard is the **continuing variant first** (`type: A |
+  ACons x __spy next ^B | ANil ;`): its arm back-edges and leaves the builder marked
+  terminated, so the following base-case arm is never sealed at all and `qbe` rejects
+  the module with `block @blk3 is used undefined` — a missing block, not a duplicate
+  one. The duplicate-`BlockId` failure is real but sits elsewhere: it is a path ending
+  in a `Branch` inside a *struct* destructor, whose trailing `if !terminated { seal }`
+  would seal the last dispatch arm's block a second time unless the whole `Branch`
+  reports itself terminated to its caller. Criterion 9's golden covers both variant
+  orders and both failure modes; each was confirmed to fail under its own drift.
+
+  Whether a given generalized loop is exit-less now depends on whether *any* enum
+  anywhere on the discovered path has a reachable terminating variant, not on the entry
+  type's own kind alone.
 - **R11 — Arrays remain by-value edges, unchanged.** `[^T N]` is still rejected by
   Slice 2's linear-array-element rule, so an array cannot launder any of this slice's
   indirection either. No new work; the detection walk (R3) has no `Array` case for
@@ -427,18 +438,15 @@ Verified by building and running programs, not by reading code.
   list, both directions of the mutual A/B pair, and an enum with two independently
   recursive variants (proving `Branch`'s multi-`Some` case actually codegens, not only
   detects) all use the fused loop after this phase.
-3. **Constant-stack proofs, near-miss regression, the two Slice 3 golden inversions,
-   dogfood, and the ROADMAP correction** (composition and the multi-variant-enum runtime
-   proof are delivered in phases 1-2 above, not repeated here).
-   - Invert `mutually_recursive_types_dispose_on_recursive_path`'s deep assertion
-     (tests/phase0.rs:2852) from `assert_ne!(…, Some(0))` to `assert_eq!(…, Some(0))`,
-     rewriting its comment; the small-chain trace in the same test may also need its
-     expected order updated once the fused loop changes disposal order for that shape —
-     verify against the actual implementation rather than assuming the old order
-     survives.
-   - Invert `indirect_recursion_shapes_remain_depth_limited`'s wrapper-list assertion
-     (tests/phase0.rs:2906) the same way; **keep its left-leaning-tree assertion
-     unchanged** — that is the surviving proof D1's one-edge narrowing held.
+3. **Constant-stack proofs, near-miss regression, dogfood, and the ROADMAP correction**
+   (composition and the multi-variant-enum runtime proof are delivered in phases 1-2
+   above; **so are both Slice 3 golden inversions** — phase 2's codegen makes those two
+   assertions false the moment it lands, so leaving them to phase 3 would mean shipping
+   phase 2 with a red suite. Both were inverted in phase 2's commit: the deep assertions
+   only, and the mutual case's small-chain trace was verified unchanged, since the
+   generalized loop walks that cycle in the same pre-order the recursive path did.
+   `indirect_recursion_shapes_remain_depth_limited`'s left-leaning-tree assertion was
+   left untouched, as the surviving proof D1's one-edge narrowing held.)
    - Add the three 1,000,000-node constant-stack goldens (wrapper-struct list, `^^Self`
      list, mutual chain from **both** `drop_A` and `drop_B`, as two separate assertions
      since the `drop_B`-rooted one is R6's only proof), each verified against the base
@@ -490,7 +498,7 @@ compiler that never builds a multi-child loop at all."
 | 6 | **1,000,000-node `^^Self` list disposes under `ulimit -s 1024`, exit 0**, same conditions | `deep_double_cell_list_disposes_in_constant_stack` |
 | 7 | **1,000,000-node mutual A/B chain disposes under `ulimit -s 1024`, exit 0, from both `drop_A` and `drop_B` as two separate assertions** (the `drop_B`-rooted one is R6's sole proof that the two loops are independent, not a call across the cycle), same conditions, plus one memory-bounded (`ulimit -v`) variant for any one of the three shapes (R14) | `deep_mutual_chain_disposes_in_constant_stack_from_a`, `deep_mutual_chain_disposes_in_constant_stack_from_b`, `deep_recursive_chain_disposes_within_bounded_memory` |
 | 8 | the exit-less loop case extends to an all-struct **two-type** cycle (`type: P q ^Q ; type: Q r ^P ;`) and does not crash the emitter (R10); a second sub-shape adds a byval wrapper hop into the all-struct cycle, `type: P q ^Q ; type: Q w W ; type: W p ^P ;`, stressing the reset-then-check discipline at a byval-reached level too; both sub-shapes are uninhabited (no enum, no base case anywhere on the path), so this criterion proves compilation only, not disposal | `all_struct_recursive_cycle_destructor_compiles`, `all_struct_cycle_with_wrapper_hop_destructor_compiles` |
-| 9 | a base-case variant declared **before** its continuing sibling (`type: A | ANil | ACons x i64 next ^B ; type: B y i64 z ^A ;`,`ANil` first) still terminates `B`'s mid-loop dispatch correctly — the concrete shape that reproduces R10's duplicate-block hazard if the reset-then-check discipline is missed at the intermediate dispatch | `intermediate_dispatch_with_base_case_declared_first_terminates_correctly` |
+| 9 | a mid-loop dispatch terminates correctly with the base-case variant declared on **either side** of its continuing sibling (R10's `A`/`B` pair, spy-tagged so the trace is observable, in both variant orders) — per R10's correction, only the continuing-first order actually reproduces the hazard, so both are asserted | `intermediate_dispatch_with_base_case_declared_first_terminates_correctly` |
 | 10 | no regression: all prior examples and REPL goldens byte-identical, full suite green, **except** the two Slice 3 boundary assertions this slice deliberately inverts (`mutually_recursive_types_dispose_on_recursive_path`'s deep case, `indirect_recursion_shapes_remain_depth_limited`'s wrapper-list case) | existing suite, with those two updated in place |
 
 ## Explicitly out of scope

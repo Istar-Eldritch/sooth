@@ -1027,8 +1027,8 @@ fn expand_path(
 /// a *later*-declared field also reaches `target`, only indirectly. Without
 /// this tier, declaring an indirect-but-successful field after a direct one
 /// flips which edge the reverse scan below picks, silently lengthening the
-/// fused loop's path and moving an already-constant-stack shape onto
-/// `direct_loop_field`'s fallback (recursive, not fused).
+/// fused loop's path with an extra unwrap step and hoisted slot per level of
+/// indirection, for a shape that a direct edge would have reached in one.
 ///
 /// Reverse order generalizes the old direct-edge rule's last-field tie-break
 /// to every struct level of the walk. This is D1's one restriction: a struct
@@ -1087,85 +1087,40 @@ fn prepend(step: PathStep, rest: Vec<PathStep>) -> Vec<PathStep> {
     path
 }
 
-/// The `^Self` field index a struct's fused loop descends, gated to the one
-/// shape today's codegen can emit: a lone `Unwrap` of a field whose cell
-/// holds the struct itself. Any longer path falls back to ordinary recursive
-/// disposal until the general path walker lands.
-fn direct_loop_field(path: Option<&[PathStep]>) -> Option<usize> {
-    match path? {
-        [PathStep::Unwrap { field, .. }] => *field,
-        _ => None,
-    }
-}
-
-/// The per-variant `^Self` field indices an enum's fused loop descends, under
-/// the same gate applied per variant: one top-level tag dispatch, and each
-/// variant whose continuation is a lone `Unwrap` loops. Gating on the flat
-/// path's length would be wrong — every enum-rooted path is a single `Branch`,
-/// length 1, however long its variants' continuations are.
-///
-/// The gate is per variant, not wholesale over the `Branch`: a variant with a
-/// direct `^Self` field fuses today even when a *sibling* variant reaches
-/// `Self` only indirectly, so failing the whole enum on the sibling's longer
-/// continuation would defuse a working loop. The longer continuation itself
-/// still falls back to ordinary recursive disposal until the general path
-/// walker lands.
-fn direct_loop_fields(path: Option<&[PathStep]>, variant_count: usize) -> Vec<Option<usize>> {
-    let Some([PathStep::Branch { variants, .. }]) = path else {
-        return vec![None; variant_count];
-    };
-    variants
-        .iter()
-        .map(|v| direct_loop_field(v.as_deref()))
-        .collect()
-}
-
 /// R12: synthesize struct `id`'s destructor, called by `drop` on any value of
 /// that type: drop each linear field, in declaration order. Built via a
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
 /// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
 /// is disposed" stays in one place.
 ///
-/// A directly self-recursive struct (a `^Self` field) is disposed by one
-/// fused loop instead of a mutually recursive `cell_drop`/`struct_drop` pair.
-/// Such a struct has no base case, so its loop is exit-less and the trailing
-/// `Ret` is skipped; the shape is uninhabited, so this is about not crashing
-/// the emitter rather than about a program that runs.
+/// A struct on a disposal cycle (a `^Self` field, or a longer route back to
+/// itself through other types) is disposed by one fused loop that walks the
+/// whole route, instead of a mutually recursive `cell_drop`/`struct_drop`
+/// chain. An all-struct cycle has no base case, so its loop is exit-less and
+/// the trailing `Ret` is skipped; such a shape is uninhabited, so that is
+/// about not crashing the emitter rather than about a program that runs.
 fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
 ) -> IrFunc {
-    let Registries {
-        structs,
-        enums,
-        arrays,
-        ..
-    } = regs;
+    let structs = regs.structs;
     let self_ty = IrType::Struct(id);
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(self_ty);
     let fields = structs.layouts[id.index()].fields.clone();
-    let path = recursive_disposal_path(self_ty, regs);
-    let looped = direct_loop_field(path.as_deref());
-    let node = match looped {
-        Some(_) => b.begin_loop(&[param])[0],
-        None => param,
-    };
-    for (fi, field) in fields.iter().enumerate() {
-        // The looped field is read last, after every other read of this
-        // node, so it is skipped here instead of dropped in place.
-        if Some(fi) != looped && field_is_linear(field.ty, structs, enums, arrays) {
-            let v = b.field_value(node, *field);
-            b.emit_drop(v);
+    match recursive_disposal_path(self_ty, regs) {
+        // A struct's own path always starts at one of its own fields: only an
+        // enum expands into a `Branch`, and this level is not one.
+        Some(path) => {
+            let node = b.begin_loop(&[param])[0];
+            b.emit_field_level(node, &fields, &path, self_ty);
+            b.finalize_loop();
         }
+        None => b.drop_level_fields(param, &fields, None),
     }
-    if let Some(fi) = looped {
-        b.emit_recursive_step(node, fields[fi], self_ty);
-        b.finalize_loop();
-    }
-    // An exit-less loop already sealed its block on the back-edge, and a
+    // A back-edge or a dispatch arm already sealed the final block, and a
     // second seal would emit a duplicate `BlockId`.
     if !b.terminated {
         b.seal_block(Terminator::Ret(None));
@@ -1189,65 +1144,36 @@ fn synthesize_struct_destructor(
 /// shape stays uniform regardless of which variants happen to carry a linear
 /// field.
 ///
-/// If any variant carries a `^Self` field, the whole destructor becomes one
-/// fused loop: the dispatch reads the loop-carried node instead of the
-/// param, a variant with a recursive field back-edges to the header after
-/// freeing its cell, and a variant without one returns. That is the base
-/// case, so an inhabited recursive enum (`Nil`/`Cons`) disposes in constant
-/// stack; other shapes (indirect cycles, `^^Self`, mutually recursive types)
-/// stay on the recursive path with its depth limit.
+/// If the enum is on a disposal cycle, the whole destructor becomes one fused
+/// loop: the dispatch reads the loop-carried node instead of the param, a
+/// variant that continues toward `Self` walks its own route and back-edges to
+/// the header, and a variant that does not returns. That is the base case, so
+/// an inhabited recursive enum (`Nil`/`Cons`) disposes in constant stack,
+/// however long the route back to itself is.
 fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
 ) -> IrFunc {
-    let Registries {
-        structs,
-        enums,
-        arrays,
-        ..
-    } = regs;
+    let enums = regs.enums;
     let self_ty = IrType::Enum(id);
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(self_ty);
-    let payload_offset = enums.layouts[id.index()].payload_offset;
-    let variants = enums.layouts[id.index()].variants.clone();
-    let path = recursive_disposal_path(self_ty, regs);
-    let looped = direct_loop_fields(path.as_deref(), variants.len());
-    let fused = looped.iter().any(Option::is_some);
-    let node = match fused {
-        true => b.begin_loop(&[param])[0],
-        false => param,
-    };
-    let variant_ids = b.dispatch_on_tag(node, id);
-
-    for (vi, &block) in variant_ids.iter().enumerate() {
-        b.start_block(block);
-        b.terminated = false;
-        let fields = &variants[vi].fields;
-        let adjust = |field: &FieldLayout| FieldLayout {
-            offset: payload_offset + field.offset,
-            ..*field
-        };
-        for (fi, field) in fields.iter().enumerate() {
-            // The looped field is read last, after every other read of
-            // this node, so it is skipped here instead of dropped in place.
-            if Some(fi) != looped[vi] && field_is_linear(field.ty, structs, enums, arrays) {
-                let v = b.field_value(node, adjust(field));
-                b.emit_drop(v);
-            }
+    match recursive_disposal_path(self_ty, regs) {
+        // An enum's own path is always one top-level `Branch` (`expand_path`
+        // builds no other shape for an enum), so the loop's whole body is
+        // that dispatch.
+        Some(path) => {
+            let node = b.begin_loop(&[param])[0];
+            b.emit_path_steps(node, &path, self_ty);
+            b.finalize_loop();
         }
-        if let Some(fi) = looped[vi] {
-            b.emit_recursive_step(node, adjust(&fields[fi]), self_ty);
+        // No cycle: the same dispatch, every variant a base case.
+        None => {
+            let base_cases = vec![None; enums.layouts[id.index()].variants.len()];
+            b.emit_branch(param, id, &base_cases, self_ty);
         }
-        // A variant that back-edged is already sealed.
-        if !b.terminated {
-            b.seal_block(Terminator::Ret(None));
-        }
-    }
-    if fused {
-        b.finalize_loop();
     }
 
     IrFunc {
@@ -2202,29 +2128,148 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// One iteration of a fused destructor loop, descending `node`'s
-    /// `^Self` field: copy the next node out of the cell, free the cell, and
-    /// back-edge to the header carrying the copy.
+    /// Drop every linear field of one aggregate level (a struct's own fields,
+    /// or an enum variant's, offsets already adjusted) except `skip`, the
+    /// field the disposal path continues through (R5). The continuing field
+    /// is read after every other read of this level, so it is skipped here
+    /// rather than dropped in place.
+    fn drop_level_fields(&mut self, base: Value, fields: &[FieldLayout], skip: Option<usize>) {
+        for (fi, field) in fields.iter().enumerate() {
+            if Some(fi) != skip && field_is_linear(field.ty, self.structs, self.enums, self.arrays)
+            {
+                let v = self.field_value(base, *field);
+                self.emit_drop(v);
+            }
+        }
+    }
+
+    /// One `Unwrap` step: copy the cell's payload out and free the cell.
     ///
-    /// **Every read of `node` must already be emitted.** `push_alloc` hoists
-    /// the copy-out's `Alloc` into the entry block, so there is one frame slot
-    /// reused by every iteration and the copy-out blits the next node over the
-    /// memory the current one occupies. A field load, tag read or sibling drop
-    /// emitted after this call would read the wrong node, and would do so with
-    /// the alloc/free trace still perfectly balanced.
-    fn emit_recursive_step(&mut self, node: Value, field: FieldLayout, self_ty: IrType) {
-        let cell = self.field_value(node, field);
-        let next = self.load_owned_payload(cell, self_ty);
-        let size = self.value_size(self_ty);
+    /// **Every read of data held in the payload's frame slot must already be
+    /// emitted.** `push_alloc` hoists the copy-out's `Alloc` into the entry
+    /// block, so one slot per step site is reused by every iteration and the
+    /// copy-out blits the next value over the memory the current one occupies
+    /// (R8). A field load, tag read or sibling drop emitted after this call
+    /// would read the wrong value, and would do so with the alloc/free trace
+    /// still perfectly balanced. A scalar payload (the inner step of `^^Self`)
+    /// takes `load_owned_payload`'s plain-`FieldLoad` branch, has no slot, and
+    /// so has no ordering hazard of its own.
+    fn emit_unwrap(&mut self, cell_ptr: Value, cell: OwnedCellId) -> Value {
+        let payload_ty = self.cells.payload[cell.index()];
+        let next = self.load_owned_payload(cell_ptr, payload_ty);
+        let size = self.value_size(payload_ty);
         let size_v = self.fresh_value(IrType::I64);
         self.push_instr(Instr::Const(size_v, size as i64));
         self.push_instr(Instr::Call(
             None,
             FREE_SYMBOL.to_string(),
-            vec![cell, size_v],
+            vec![cell_ptr, size_v],
         ));
-        self.back_edges.push((self.cur_id, vec![next]));
-        self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
+        next
+    }
+
+    /// Emit the rest of a fused destructor loop's iteration from `cur`, whose
+    /// own `IrType` names the level the next step reads. An empty `steps` is
+    /// the end of one full trip around the path (R7): `cur` is a fresh value
+    /// of the loop's own type, so it back-edges to the header.
+    fn emit_path_steps(&mut self, cur: Value, steps: &[PathStep], self_ty: IrType) {
+        let Some(first) = steps.first() else {
+            self.back_edges.push((self.cur_id, vec![cur]));
+            self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
+            self.terminated = true;
+            return;
+        };
+        match *first {
+            // `cur` is itself the cell (the inner step of `^^Self`).
+            PathStep::Unwrap { field: None, cell } => {
+                let next = self.emit_unwrap(cur, cell);
+                self.emit_path_steps(next, &steps[1..], self_ty);
+            }
+            PathStep::Branch {
+                enum_id,
+                ref variants,
+            } => self.emit_branch(cur, enum_id, variants, self_ty),
+            PathStep::Project { .. } | PathStep::Unwrap { field: Some(_), .. } => {
+                // Only a struct level is reached with a field step still
+                // pending: an enum expands into a `Branch`, and a cell into a
+                // fieldless `Unwrap`.
+                let IrType::Struct(id) = self.value_type(cur) else {
+                    unreachable!("a field step reads a struct level")
+                };
+                let fields = self.structs.layouts[id.index()].fields.clone();
+                self.emit_field_level(cur, &fields, steps, self_ty);
+            }
+        }
+    }
+
+    /// Emit `steps` from the aggregate level (`base`, `fields`) their first
+    /// step reads: drop that level's other fields (R5), then take the
+    /// continuing field byval (`Project`) or through its cell (`Unwrap`).
+    fn emit_field_level(
+        &mut self,
+        base: Value,
+        fields: &[FieldLayout],
+        steps: &[PathStep],
+        self_ty: IrType,
+    ) {
+        let (first, rest) = steps.split_first().expect("a level's path is non-empty");
+        let (fi, cell) = match *first {
+            PathStep::Project { field } => (field, None),
+            PathStep::Unwrap {
+                field: Some(field),
+                cell,
+            } => (field, Some(cell)),
+            _ => unreachable!("a level's path starts at one of its own fields"),
+        };
+        self.drop_level_fields(base, fields, Some(fi));
+        let field = self.field_value(base, fields[fi]);
+        let next = match cell {
+            Some(cell) => self.emit_unwrap(field, cell),
+            None => field,
+        };
+        self.emit_path_steps(next, rest, self_ty);
+    }
+
+    /// Dispatch on `node`'s tag and emit each variant's own continuation: a
+    /// variant that does not continue toward `Self` drops its fields and
+    /// leaves the loop, one that does walks its own steps and back-edges
+    /// (R5). More than one variant may continue, and each back-edges
+    /// independently (R2).
+    ///
+    /// Every variant block resets `terminated` right after `start_block`, so
+    /// the trailing seal fires for a base case and is skipped for a block a
+    /// back-edge or a nested dispatch already sealed (R10). All arms end
+    /// sealed and nothing follows a dispatch in the same sequence, so the
+    /// whole `Branch` reports itself terminated to its own caller.
+    fn emit_branch(
+        &mut self,
+        node: Value,
+        id: EnumId,
+        variants: &[Option<Vec<PathStep>>],
+        self_ty: IrType,
+    ) {
+        let payload_offset = self.enums.layouts[id.index()].payload_offset;
+        let layouts = self.enums.layouts[id.index()].variants.clone();
+        let blocks = self.dispatch_on_tag(node, id);
+        for (vi, &block) in blocks.iter().enumerate() {
+            self.start_block(block);
+            self.terminated = false;
+            let fields: Vec<FieldLayout> = layouts[vi]
+                .fields
+                .iter()
+                .map(|field| FieldLayout {
+                    offset: payload_offset + field.offset,
+                    ..*field
+                })
+                .collect();
+            match &variants[vi] {
+                Some(steps) => self.emit_field_level(node, &fields, steps, self_ty),
+                None => self.drop_level_fields(node, &fields, None),
+            }
+            if !self.terminated {
+                self.seal_block(Terminator::Ret(None));
+            }
+        }
         self.terminated = true;
     }
 
@@ -4882,12 +4927,6 @@ mod tests {
                 variants: vec![None, Some(step.clone()), Some(step)],
             }])
         );
-        // This shape is fused today, one back-edge per recursive variant, and
-        // the phase-1 gate must keep both of them.
-        assert_eq!(
-            direct_loop_fields(p.path(t).as_deref(), 3),
-            vec![None, Some(1), Some(1)],
-        );
 
         // The enum/enum mutual pair: two nested `Branch` steps, the inner one
         // dispatched partway along the path rather than at the entry.
@@ -4921,12 +4960,6 @@ mod tests {
                     ]),
                 ],
             }])
-        );
-        // A continuation longer than a lone unwrap is not today's shape, so
-        // the gate falls back wholesale rather than fusing part of it.
-        assert_eq!(
-            direct_loop_fields(p.path(a).as_deref(), 2),
-            vec![None, None]
         );
     }
 
@@ -4990,12 +5023,11 @@ mod tests {
 
     #[test]
     fn recursive_disposal_path_prefers_direct_field_over_later_indirect_one() {
-        // `a` is a direct `^Self` field, today's fusable shape; `b` is
-        // declared after it and also reaches `Self`, but only by way of
-        // `Wrap`'s own cell field. Without a preferred tier for direct
-        // fields, the reverse scan tries `b` first and finds it succeeds,
-        // silently swapping in the longer path and defusing a loop that
-        // fused before path-finding generalized past direct edges.
+        // `a` is a direct `^Self` field; `b` is declared after it and also
+        // reaches `Self`, but only by way of `Wrap`'s own cell field. Without
+        // a preferred tier for direct fields, the reverse scan tries `b`
+        // first and finds it succeeds, silently swapping in the longer route
+        // and lengthening every iteration of the fused loop.
         let p = Probe::new(
             "type: Wrap v i64 n ^List ;\n\
              type: List a ^List b Wrap ;\n\
@@ -5009,20 +5041,35 @@ mod tests {
                 cell: p.cell(list),
             }])
         );
-        assert_eq!(direct_loop_field(p.path(list).as_deref()), Some(0));
 
-        // The same trap one level up, between an enum's variants: `Direct`
-        // fuses today, and must keep fusing even though its sibling reaches
-        // `Self` only through `Wrap`. A gate that failed the whole `Branch`
-        // on the sibling's longer continuation would defuse `Direct` too.
+        // The same trap one level up, between an enum's variants: each
+        // variant picks its own edge independently, `Direct`'s direct one and
+        // `Indirect`'s route through `Wrap`.
         let p = Probe::new(
             "type: Wrap v i64 n ^E ;\n\
              type: E | Nil | Direct d ^E | Indirect w Wrap ;\n\
              : main ( -- ) ;",
         );
+        let e = p.enum_ty("E");
         assert_eq!(
-            direct_loop_fields(p.path(p.enum_ty("E")).as_deref(), 3),
-            vec![None, Some(0), None]
+            p.path(e),
+            Some(vec![PathStep::Branch {
+                enum_id: EnumId::from_index(0),
+                variants: vec![
+                    None,
+                    Some(vec![PathStep::Unwrap {
+                        field: Some(0),
+                        cell: p.cell(e),
+                    }]),
+                    Some(vec![
+                        PathStep::Project { field: 0 },
+                        PathStep::Unwrap {
+                            field: Some(1),
+                            cell: p.cell(e),
+                        },
+                    ]),
+                ],
+            }])
         );
     }
 }
