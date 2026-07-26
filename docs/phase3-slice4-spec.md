@@ -78,8 +78,9 @@ Verified by building and running programs, not by reading code.
 - **R1 — One pass, not two.** `recursive_loop_field` is replaced by a general path-finding
   function (working name `recursive_disposal_path`, ir.rs, beside where
   `recursive_loop_field` lives today) that subsumes it entirely. Direct self-recursion
-  (today's only detected shape) becomes the length-1 special case of the general
-  algorithm, not a separately maintained fast path.
+  (today's only detected shape) becomes the base case of the general algorithm (R2's
+  bare `[Unwrap]` or single-`Branch`-of-`Unwrap`-only-variants shape), not a separately
+  maintained fast path.
 - **R2 — The path is a *tree* of typed steps, not a flat list, because an enum's
   variants are mutually exclusive at runtime and each may independently continue toward
   `Self`.** A `PathStep` is one of:
@@ -103,8 +104,20 @@ Verified by building and running programs, not by reading code.
     dispatch in the same linear sequence, since what happens next is entirely captured
     within each variant's own nested step sequence.
 
-  A direct `^Self` field is `[Unwrap]`. The wrapper-struct case is `[Project, Unwrap]`.
-  `^^Self` is `[Unwrap, Unwrap]`. The mutual A/B case, from `B`'s side, is
+  All three probe entry types (`List`, `L`) are enums, so their actual top-level path is
+  a single `Branch` step (one entry-level tag dispatch, R3): `List`'s top-level path is
+  `[Branch { enum_id: List, variants: [Nil: None, Cons: Some([Project, Unwrap])] }]`, and
+  the `[Project, Unwrap]` shown below is that `Branch`'s `Cons`-variant continuation, not
+  a bare top-level path on its own. This matters for phase 1's length gate (see Delivery
+  phases): a bare `[Unwrap]` (a directly self-recursive *struct*, no tag of its own) and
+  a `[Branch]` whose every `Some` variant is itself exactly `[Unwrap]` (a directly
+  self-recursive *enum*, today's other shape) are the two forms phase 1 must recognize as
+  unchanged from today; a `Branch` with any longer variant continuation is not.
+
+  So: a direct `^Self` struct field's whole path is `[Unwrap]`. The wrapper-struct case's
+  `Cons`-variant continuation is `[Project, Unwrap]`. `^^Self`'s `Cons`-variant
+  continuation is `[Unwrap, Unwrap]`. The mutual A/B case, from `B`'s side (a struct, so
+  no entry `Branch` of its own), has whole path
   `[Unwrap(z, A-cell), Branch { enum_id: A, variants: [ANil: None, ACons:
   Some([Unwrap(next, B-cell)])] }]`. The existing pre-slice golden this slice inverts
   (`mutually_recursive_types_dispose_on_recursive_path`, tests/phase0.rs:2852) in fact
@@ -128,6 +141,9 @@ Verified by building and running programs, not by reading code.
 
   ```text
   fn find_path(current, target, visited) -> Option<Vec<PathStep>> {
+      // target-match MUST precede the visited-prune check: the entry type is seeded
+      // into `visited` (see below), so reversing the order of these two checks makes
+      // every search return None unconditionally.
       if current == target { return Some(vec![]); }   // reachable only via a prior Unwrap
       if visited.contains(current) { return None; }    // dead end into an unrelated cycle
       visited.push(current);
@@ -136,40 +152,47 @@ Verified by building and running programs, not by reading code.
       result
   }
 
+  // visited: Vec<IrType>, not Vec<StructId>/Vec<EnumId> — an OwnedCell counts as a
+  // type in its own right (^^Self pushes the inner cell's own IrType::OwnedCell).
   fn expand(current, target, visited) -> Option<Vec<PathStep>> {
       match current {
-          Struct(s) => {
-              // reverse declaration order; first candidate whose sub-walk succeeds wins
-              for field in s.fields.rev() {
-                  match field.ty {
-                      OwnedCell(c) =>
-                          if let Some(rest) = find_path(cells.payload[c], target, visited) {
-                              return Some(prepend(Unwrap{field, cell: c}, rest));
-                          },
-                      Struct(_) | Enum(_) =>
-                          if let Some(rest) = find_path(field.ty, target, visited) {
-                              return Some(prepend(Project{field}, rest));
-                          },
-                      _ => {}
-                  }
-              }
-              None
-          }
+          Struct(s) => expand_fields(s.fields, target, visited),
           Enum(e) => {
               // every variant tried independently; ALL successes are kept (R2)
               let variants = e.variants.map(|v| {
-                  // v's own fields searched with the Struct rule above, using a COPY of
-                  // visited seeded from this point, so one variant's failed attempt
-                  // cannot poison a sibling variant's search
+                  // v's own fields searched by expand_fields, using a COPY of visited
+                  // seeded from this point, so one variant's failed attempt cannot
+                  // poison a sibling variant's search
                   expand_fields(v.fields, target, visited.clone())
               });
               if variants.any(is_some) { Some(vec![Branch{enum_id: e, variants}]) } else { None }
           }
           OwnedCell(c) =>
-              if cells.payload[c] == target { Some(vec![Unwrap{field: NONE, cell: c}]) }
-              else { find_path(cells.payload[c], target, visited).map(|rest| prepend(Unwrap{cell: c}, rest)) },
+              // cells.payload[c] == target is not a separate case: find_path's own
+              // target-match check already handles it and returns Some(vec![]), which
+              // this prepend then turns into Some(vec![Unwrap{cell: c, field: NONE}])
+              find_path(cells.payload[c], target, visited).map(|rest| prepend(Unwrap{cell: c, field: NONE}, rest)),
           _ => None,
       }
+  }
+
+  // Shared by both Struct's own fields and one Enum variant's fields.
+  fn expand_fields(fields, target, visited) -> Option<Vec<PathStep>> {
+      // reverse declaration order; first candidate whose sub-walk succeeds wins
+      for field in fields.rev() {
+          match field.ty {
+              OwnedCell(c) =>
+                  if let Some(rest) = find_path(cells.payload[c], target, visited) {
+                      return Some(prepend(Unwrap{field, cell: c}, rest));
+                  },
+              Struct(_) | Enum(_) =>
+                  if let Some(rest) = find_path(field.ty, target, visited) {
+                      return Some(prepend(Project{field}, rest));
+                  },
+              _ => {}
+          }
+      }
+      None
   }
   ```
 
@@ -248,17 +271,24 @@ Verified by building and running programs, not by reading code.
   `back_edges` (ir.rs:1378-1397), so nested loops are not representable. The path's
   length is fixed and known at codegen time (R3 produces it once, statically); the loop
   body is the path's steps emitted in order — byval projections, field drops, tag
-  dispatches, cell unwraps — ending with the back-edge feeding the final cell-unwrap's
-  result to the header phi, exactly as today's single-step case does.
+  dispatches, cell unwraps — ending with the back-edge feeding the final step's result to
+  the header phi, exactly as today's single-step case does. **A path does not always end
+  in a cell unwrap.** Criterion 8's byval-wrapper-hop shape (`W`'s own destructor, path
+  `[Unwrap, Unwrap, Project]`) ends in a `Project`: the back-edge then carries an
+  *interior pointer* into whichever aggregate slot that `Project` reads from
+  (`field_aggregate_value`, ir.rs:2160, is an alias, not a copy), and the next
+  iteration's reads through the phi are reads of that slot, subject to R8's ordering
+  invariant exactly as any other slot read is.
 - **R8 — The copyout-ordering invariant generalizes to every *aggregate* cell-unwrap
   step in the path, independently.** Each distinct aggregate type (`Struct`/`Enum`)
   visited within one loop iteration gets its own hoisted frame slot via `push_alloc`
   (ir.rs:1480), reused every iteration for that type; the loop-carried phi's own type is
   only one such slot when the path touches more than one aggregate type (the mutual A/B
   case hoists two: one sized for `A`, one for `B`). Every read of data held in a given
-  slot — a byval projection out of it, a field drop, a tag dispatch on it — must be
-  emitted before the cell-unwrap step that overwrites that slot, checked independently
-  per slot. **`^^Self` has exactly one such hazardous step, not two**: its *first*
+  slot — a byval projection out of it, a field drop, a tag dispatch on it, **or the
+  header phi's own value when a path ends in a `Project` (R7) rather than an `Unwrap`,
+  since the phi then holds an interior pointer into that slot** — must be emitted before
+  the cell-unwrap step that overwrites that slot, checked independently per slot. **`^^Self` has exactly one such hazardous step, not two**: its *first*
   unwrap (the field's own `^^Self` cell, stripping down to `^Self`) reads a scalar
   pointer via a plain `FieldLoad` (ir.rs:1998-2014, the non-aggregate branch of
   `load_owned_payload`) with no frame slot and therefore no copyout hazard; only the
@@ -334,10 +364,15 @@ Verified by building and running programs, not by reading code.
 - The linear spine holds: exactly-once, no auto-drop, forgetting is a compile error.
 - `core` stays `no_std`. No in-process JIT, no comptime interpreter.
 - No new ad-hoc type constructor; `^` and `[T N]` remain the only two.
-- D1 from the brief: the loop still descends exactly one recursive edge per node at any
-  given struct level (R3's last-tried-first-success rule), and rejects branching through
-  an enum outright rather than resolving it; genuine multi-child branching disposal
-  stays Phase 6's.
+- D1 from the brief: at any given **struct** level, exactly one recursive edge is
+  chosen (R3's last-tried-first-success rule); a struct with two simultaneously-live
+  recursive fields is the genuine multi-edge-per-node case, and it still falls back to
+  ordinary recursion for the non-chosen field, unchanged. An **enum**'s variants are
+  mutually exclusive at runtime, not simultaneously live, so multiple independently
+  recursive variants (R2's `Branch`) are explicitly **not** this restriction and are not
+  rejected — doing so would be a regression, not scope discipline (see R2/R3). Genuine
+  multi-child branching disposal (more than one recursive edge live in a single struct
+  instance at once) stays Phase 6's.
 
 ## Delivery phases
 
@@ -354,9 +389,15 @@ Verified by building and running programs, not by reading code.
    `synthesize_struct_destructor`/`synthesize_enum_destructor` in this same phase (not
    left unwired — an unwired private function fails `cargo clippy -- -D warnings`'
    dead-code lint under the project's definition of green): use the discovered path
-   when its length is 1 (identical to today's single-step behaviour, so no existing
-   goldens move), and fall back to ordinary recursive `emit_drop` for any longer path
-   until phase 2 lands the general loop-body codegen.
+   only when it is **shape-identical to what `recursive_loop_field` already finds today**
+   — a bare `[Unwrap]` (direct struct self-recursion), or a single `[Branch]` whose
+   *every* `Some` variant is itself exactly `[Unwrap]` (direct enum self-recursion, one
+   per variant, today's `Vec<Option<usize>>` shape) — and fall back to ordinary
+   recursive `emit_drop` otherwise until phase 2 lands the general loop-body codegen.
+   **Gating on the flat `Vec<PathStep>`'s length alone is wrong**: every enum-rooted
+   path (the wrapper-struct list, `^^Self`, the enum/enum mutual pair) is a single
+   top-level `Branch` step, i.e. length 1, so a naive length check would wrongly route
+   all of them through this phase's unchanged path instead of falling back.
 2. **Generalize loop codegen to walk a path of any length (R5–R10), applied uniformly to
    every synthesized destructor.** Extend the loop-body emission to walk an arbitrary
    `Vec<PathStep>`: byval field projections via `field_value`, non-continuing field
@@ -428,7 +469,8 @@ compiler that never builds a multi-child loop at all."
 | 2 | wrapper-struct list builds, disposes with distinct `__spy` tags per node in the correct order, at small N, with the cell field declared **before** its `__spy` field to trap declaration-order emission (R12) — correctness-preserving, not a mechanism proof | `wrapper_struct_recursive_list_disposes_in_expected_order` |
 | 3 | `^^Self` list builds, disposes with distinct `__spy` tags per node, verifying the **single** hazardous (second) cell-unwrap step reads before its copyout (R8), with the cell field declared before the `__spy` field (R12) — correctness-preserving, not a mechanism proof | `double_cell_recursive_list_disposes_in_expected_order` |
 | 4 | mutual A/B chain disposes correctly from **both** `drop_A` and a `drop_B`-rooted golden, with distinct tags per node, and with the recursive field declared **before** the spy fields at at least one level to trap declaration-order emission (R12) — correctness-preserving, not a mechanism proof | `mutual_recursive_chain_disposes_from_both_directions` |
-| 4b | an enum with **two independently recursive variants** disposes correctly at small N with distinct tags, proving `Branch`'s multi-`Some` case (R2/R3) actually codegens, not only detects — the concrete runtime proof for the B1/B2 regression round 2 found | `multi_variant_recursive_enum_disposes_in_expected_order` |
+| 4b | an enum with **two independently recursive variants** disposes correctly at small N with distinct tags, proving `Branch`'s multi-`Some` case (R2/R3) actually codegens, not only detects. **This small-N trace alone does not catch a collapse-to-one-variant regression** (it produces the same small-N output either way); the deep golden below is what actually proves both variants loop | `multi_variant_recursive_enum_disposes_in_expected_order` |
+| 4c | **1,000,000-node alternating-variant chain disposes under `ulimit -s 1024`, exit 0** — verified to **already pass on the base commit** (confirmed empirically in round 3 review), so unlike criteria 5-7 this is a **preservation** golden, not an R13 mechanism proof: its job is to prove the new generalized codegen doesn't regress an already-working shape, not to discharge a pre-change failure | `deep_multi_variant_enum_disposes_in_constant_stack` |
 | 5 | **1,000,000-node wrapper-struct list disposes under `ulimit -s 1024`, exit 0**, via a self-tail-recursive builder (R14), verified to SIGSEGV on the pre-change compiler on this exact program (R13) | `deep_wrapper_struct_list_disposes_in_constant_stack` |
 | 6 | **1,000,000-node `^^Self` list disposes under `ulimit -s 1024`, exit 0**, same conditions | `deep_double_cell_list_disposes_in_constant_stack` |
 | 7 | **1,000,000-node mutual A/B chain disposes under `ulimit -s 1024`, exit 0, from both `drop_A` and `drop_B` as two separate assertions** (the `drop_B`-rooted one is R6's sole proof that the two loops are independent, not a call across the cycle), same conditions, plus one memory-bounded (`ulimit -v`) variant for any one of the three shapes (R14) | `deep_mutual_chain_disposes_in_constant_stack_from_a`, `deep_mutual_chain_disposes_in_constant_stack_from_b`, `deep_recursive_chain_disposes_within_bounded_memory` |
@@ -439,9 +481,12 @@ compiler that never builds a multi-child loop at all."
 ## Explicitly out of scope
 
 Worklist-based disposal for branching structures (moved to Phase 6; needs a growable
-heap structure and a fallible-push story this slice's simple-cycle shapes don't need).
-Branching through an intermediate **enum** with more than one continuing variant (R3;
-struct-level branching is resolved by the existing last-field rule, not rejected).
+heap structure and a fallible-push story this slice's simple-cycle shapes don't need):
+concretely, a **struct** with more than one simultaneously-live recursive field (only
+one is chosen, R3's last-tried-first-success rule; the rest fall back to ordinary
+recursion, unchanged). An **enum** with more than one independently recursive variant is
+**not** this restriction and is explicitly in scope (R2/R3's `Branch`), since the
+variants are mutually exclusive at runtime rather than simultaneously live.
 Compiler-provided `Option`/`Result` or any synthesized nullable-pointer type (Phase 4
 generics). Pointer arithmetic and pointer differences. Second-class refs and
 `let`/`inout`/`sink`/`set` (Phase 3 Slice 5); reference counting (Phase 3 Slice 6);
@@ -463,14 +508,14 @@ user-definable destructor bodies (Phase 3 Slice 7); growable buffers and `Vec` (
         "expand's Enum case tries every variant independently using the Struct rule on that variant's fields, seeded with a COPY of visited so sibling variants cannot poison each other, and keeps EVERY variant that yields a path (not at most one) as a Branch { enum_id, variants } step, since an enum's variants are mutually exclusive at runtime and are not D1's branching concern",
         "expand's OwnedCell case closes the path if the payload is the target, else recurses into the payload and prepends an Unwrap{field, cell} step naming both the field index and the cell",
         "Scope the visited set per path attempt (pushed on entry, popped on return) so an abandoned branch cannot poison a sibling branch still being tried",
-        "Wire recursive_disposal_path into synthesize_struct_destructor and synthesize_enum_destructor in this same phase: use the path when its length is 1 (identical to today), fall back to ordinary recursive emit_drop for any longer path until phase 2, so the function is never dead code under -D warnings and no existing golden's behaviour changes"
+        "Wire recursive_disposal_path into synthesize_struct_destructor and synthesize_enum_destructor in this same phase: use the path only when it is shape-identical to what recursive_loop_field already finds today (a bare [Unwrap], or a single Branch whose every Some variant is itself exactly [Unwrap]) -- NOT merely when the flat Vec<PathStep> has length 1, since every enum-rooted path (wrapper-struct, ^^Self, enum/enum mutual) is a single top-level Branch and would wrongly pass a naive length-1 check -- and fall back to ordinary recursive emit_drop otherwise, so the function is never dead code under -D warnings and no existing golden's behaviour changes"
       ],
       "tests": [
         "recursive_disposal_path_finds_indirect_nested_mutual_and_composed_cycles",
         "recursive_disposal_path_finds_multi_variant_and_enum_enum_mutual_cycles",
         "recursive_disposal_path_rejects_non_cyclic_and_misleading_shapes"
       ],
-      "exit": "recursive_disposal_path correctly identifies the path for the wrapper-struct, ^^Self, mutual A/B (both directions), composed, two-independently-recursive-variant, and enum/enum mutual probe shapes (keeping EVERY variant that yields a path, not at most one), correctly returns None for non-recursive types and the misleading/near-miss cases including a dead-end-last-field wrapper that a greedy (non-backtracking) search would fail, and is wired into both destructor synthesis functions with no behavioural change yet for any length > 1 path; existing Slice 3 tests stay green unchanged; suite (including clippy -D warnings) green"
+      "exit": "recursive_disposal_path correctly identifies the path for the wrapper-struct, ^^Self, mutual A/B (both directions), composed, two-independently-recursive-variant, and enum/enum mutual probe shapes (keeping EVERY variant that yields a path, not at most one), correctly returns None for non-recursive types and the misleading/near-miss cases including a dead-end-last-field wrapper that a greedy (non-backtracking) search would fail, and is wired into both destructor synthesis functions using the shape-identity gate (not a flat length check) so no shape besides today's direct struct/enum self-recursion changes behaviour yet; existing Slice 3 tests stay green unchanged; suite (including clippy -D warnings) green"
     },
     {
       "phase": 2,
@@ -480,17 +525,19 @@ user-definable destructor bodies (Phase 3 Slice 7); growable buffers and `Vec` (
         "Extend the loop-body emission to walk a Vec<PathStep> of any length: byval field projections via field_value (no free), non-continuing field drops via emit_drop at every path level (entry and intermediate alike), mid-path tag dispatch via dispatch_on_tag with every non-continuing variant dropping its own fields and terminating the loop",
         "Apply the reset-then-check terminated discipline (b.terminated = false immediately after every freshly-started block, checked before the trailing seal_block(Ret)) at every tag dispatch the path introduces, not only the entry dispatch",
         "Give each distinct aggregate type visited within one iteration its own hoisted frame slot via push_alloc, and enforce the copyout-ordering invariant independently per slot; note ^^Self's inner cell-unwrap has no slot and no ordering hazard since load_owned_payload's scalar branch is a plain FieldLoad",
-        "Remove phase 1's length-1 gate: recursive_disposal_path's result is used at whatever length it returns, for every synthesized destructor uniformly, so drop_A and drop_B each independently discover and emit their own rotated loop with no special-casing for the mutual shape"
+        "Remove phase 1's shape-identity gate: recursive_disposal_path's result is used whatever shape it returns, for every synthesized destructor uniformly, so drop_A and drop_B each independently discover and emit their own rotated loop with no special-casing for the mutual shape"
       ],
       "tests": [
         "wrapper_struct_recursive_list_disposes_in_expected_order",
         "double_cell_recursive_list_disposes_in_expected_order",
+        "mutual_recursive_chain_disposes_from_both_directions",
         "multi_variant_recursive_enum_disposes_in_expected_order",
+        "deep_multi_variant_enum_disposes_in_constant_stack",
         "all_struct_recursive_cycle_destructor_compiles",
         "all_struct_cycle_with_wrapper_hop_destructor_compiles",
         "intermediate_dispatch_with_base_case_declared_first_terminates_correctly"
       ],
-      "exit": "The wrapper-struct list, the ^^Self list, and an enum with two independently recursive variants (both back-edging via their own Branch arm, not just one) all dispose via the fused loop with correctly ordered __spy traces; an all-struct two-type cycle, with and without a byval wrapper hop, compiles without a duplicate block label; a base-case variant declared before its continuing sibling still terminates a mid-loop dispatch correctly"
+      "exit": "The wrapper-struct list, the ^^Self list, the mutual A/B pair from both directions, and an enum with two independently recursive variants (both back-edging via their own Branch arm, not just one, confirmed at 1,000,000 nodes under ulimit -s 1024 as a preservation golden since this shape already passes on the base commit) all dispose via the fused loop with correctly ordered __spy traces; an all-struct two-type cycle, with and without a byval wrapper hop, compiles without a duplicate block label; a base-case variant declared before its continuing sibling still terminates a mid-loop dispatch correctly"
     },
     {
       "phase": 3,
