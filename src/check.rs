@@ -3394,22 +3394,31 @@ mod tests {
     #[test]
     fn array_of_owned_is_error() {
         let err = check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
-        assert!(err.contains("linear array elements are not supported yet"));
-        assert!(err.contains("^i64"));
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
     }
 
     #[test]
     fn owned_of_linear_array_is_error() {
         let err = check_src(": w ( ^[__spy 2] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
-        assert!(err.contains("linear array elements are not supported yet"));
-        assert!(err.contains("__spy"));
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`__spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn nested_array_of_owned_is_error() {
         let err = check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
-        assert!(err.contains("linear array elements are not supported yet"));
-        assert!(err.contains("^i64"));
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
     }
 
     #[test]
