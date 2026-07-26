@@ -794,6 +794,19 @@ mod tests {
     }
 
     #[test]
+    fn format_stack_cell_slot_shows_placeholder_and_offsets_past_it() {
+        use crate::ast::OwnedCellId;
+        // A cell slot (one pointer-width cell), then a scalar slot. The cell
+        // renders as its `<^i64>` placeholder reading no heap bytes, and the
+        // trailing scalar reads the cell *past* it, not `index * 8`.
+        let cell_ty = Type::OwnedCell(OwnedCellId::from_index(0), "^i64");
+        assert_eq!(
+            format_stack(&[123, 99], &[cell_ty, Type::I64], &[], &[], &[]),
+            "stack: <^i64> 99"
+        );
+    }
+
+    #[test]
     fn format_stack_unsigned_slot_displays_unsigned_not_negative() {
         // A `u64` with the high bit set stores a negative `i64` bit pattern;
         // display must render its unsigned value, not that negative number.
