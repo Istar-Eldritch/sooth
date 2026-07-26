@@ -327,9 +327,7 @@ pub enum Type {
     Usize,
     /// The target-width *signed* integer, mirroring `Usize` exactly: same
     /// word-width-derived size/align, same D8 literal-coercion carve-out, but
-    /// prints and computes as signed. Named in the ROADMAP as arriving
-    /// alongside recursive heap data; its pointer-difference consumer is a
-    /// later slice.
+    /// prints and computes as signed.
     Isize,
     /// The test-only linear drop-spy primitive, spelled `__spy`: carries an
     /// `i64` tag, and its compiler-known destructor prints `drop <tag>`, so
