@@ -902,23 +902,23 @@ pub fn synthesize_aggregate_destructors(
         .collect()
 }
 
-/// Phase 4's own recursion pass (R13): the index of the `^Self` field a fused
-/// destructor loop descends, or `None` for a field list with no direct
-/// recursive edge. Deliberately *not* the checker's cycle graph, which cuts
-/// exactly the `^` edges this needs to see (R3).
+/// The index of the `^Self` field a fused destructor loop descends, or
+/// `None` for a field list with no direct recursive edge. A fresh pass over
+/// `Registries`, not a reuse of the checker's cycle graph: that graph cuts
+/// `^` edges entirely, but this needs to see exactly them.
 ///
 /// A field of type `^T` is a recursive edge iff the cell's payload is the
 /// enclosing type itself. Indirection through a wrapper struct, or a `^^Self`
 /// whose inner payload is a cell rather than the type, is not a direct edge
-/// and stays on the recursive destructor path with its depth limit (R14).
+/// and stays on the recursive destructor path with its depth limit.
 ///
-/// R17: a field list may carry several recursive edges (a tree node's
-/// children). The loop descends the **last** one in declaration order; the
-/// others are ordinary linear fields and get an ordinary recursive drop call
-/// via `emit_drop`'s ambient `OwnedCell` handling, same as any other field.
+/// A field list may carry several recursive edges (a tree node's children).
+/// The loop descends the **last** one in declaration order; the others are
+/// ordinary linear fields and get an ordinary recursive drop call via
+/// `emit_drop`'s ambient `OwnedCell` handling, same as any other field.
 /// Looping the last child rather than the first is what makes a
 /// right-leaning shape constant-stack and a left-leaning one still O(depth)
-/// (documented, not fixed, under R14).
+/// (documented, not fixed).
 fn recursive_loop_field(fields: &[FieldLayout], self_ty: IrType, cells: &Cells) -> Option<usize> {
     fields
         .iter()
@@ -936,11 +936,11 @@ fn recursive_loop_field(fields: &[FieldLayout], self_ty: IrType, cells: &Cells) 
 /// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
 /// is disposed" stays in one place.
 ///
-/// R11: a directly self-recursive struct (a `^Self` field) is disposed by one
+/// A directly self-recursive struct (a `^Self` field) is disposed by one
 /// fused loop instead of a mutually recursive `cell_drop`/`struct_drop` pair.
 /// Such a struct has no base case, so its loop is exit-less and the trailing
-/// `Ret` is skipped (R16); the shape is uninhabited (R5), so this is about not
-/// crashing the emitter rather than about a program that runs.
+/// `Ret` is skipped; the shape is uninhabited, so this is about not crashing
+/// the emitter rather than about a program that runs.
 fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
@@ -963,7 +963,7 @@ fn synthesize_struct_destructor(
         None => param,
     };
     for (fi, field) in fields.iter().enumerate() {
-        // R12: the looped field is read last, after every other read of this
+        // The looped field is read last, after every other read of this
         // node, so it is skipped here instead of dropped in place.
         if Some(fi) != looped && field_is_linear(field.ty, structs, enums, arrays) {
             let v = b.field_value(node, *field);
@@ -974,7 +974,7 @@ fn synthesize_struct_destructor(
         b.emit_recursive_step(node, fields[fi], self_ty);
         b.finalize_loop();
     }
-    // R16: an exit-less loop already sealed its block on the back-edge, and a
+    // An exit-less loop already sealed its block on the back-edge, and a
     // second seal would emit a duplicate `BlockId`.
     if !b.terminated {
         b.seal_block(Terminator::Ret(None));
@@ -998,12 +998,13 @@ fn synthesize_struct_destructor(
 /// shape stays uniform regardless of which variants happen to carry a linear
 /// field.
 ///
-/// R11: if any variant carries a `^Self` field, the whole destructor becomes
-/// one fused loop: the dispatch reads the loop-carried node instead of the
+/// If any variant carries a `^Self` field, the whole destructor becomes one
+/// fused loop: the dispatch reads the loop-carried node instead of the
 /// param, a variant with a recursive field back-edges to the header after
-/// freeing its cell, and a variant without one returns. That is the base case,
-/// so an inhabited recursive enum (`Nil`/`Cons`) disposes in constant stack
-/// (R14 lists the shapes that do not).
+/// freeing its cell, and a variant without one returns. That is the base
+/// case, so an inhabited recursive enum (`Nil`/`Cons`) disposes in constant
+/// stack; other shapes (indirect cycles, `^^Self`, mutually recursive types)
+/// stay on the recursive path with its depth limit.
 fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
@@ -1041,7 +1042,7 @@ fn synthesize_enum_destructor(
             ..*field
         };
         for (fi, field) in fields.iter().enumerate() {
-            // R12: the looped field is read last, after every other read of
+            // The looped field is read last, after every other read of
             // this node, so it is skipped here instead of dropped in place.
             if Some(fi) != looped[vi] && field_is_linear(field.ty, structs, enums, arrays) {
                 let v = b.field_value(node, adjust(field));
@@ -1051,7 +1052,7 @@ fn synthesize_enum_destructor(
         if let Some(fi) = looped[vi] {
             b.emit_recursive_step(node, adjust(&fields[fi]), self_ty);
         }
-        // R16: a variant that back-edged is already sealed.
+        // A variant that back-edged is already sealed.
         if !b.terminated {
             b.seal_block(Terminator::Ret(None));
         }
@@ -2012,7 +2013,7 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// R11/R12: one iteration of a fused destructor loop, descending `node`'s
+    /// One iteration of a fused destructor loop, descending `node`'s
     /// `^Self` field: copy the next node out of the cell, free the cell, and
     /// back-edge to the header carrying the copy.
     ///
@@ -4352,8 +4353,8 @@ mod tests {
 
     #[test]
     fn synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload() {
-        // R8/R13: an aggregate payload is copied out of the cell (a Blit),
-        // then the block is freed, and only then does the copy's own drop
+        // An aggregate payload is copied out of the cell (a Blit), then
+        // the block is freed, and only then does the copy's own drop
         // glue run. The `^__spy` golden covers the scalar payload at
         // runtime; this pins the aggregate path, where the copy-out must
         // still complete before anything else touches the block or the copy.

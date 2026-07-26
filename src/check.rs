@@ -67,12 +67,12 @@ impl Slot {
     }
 }
 
-/// Whether `ty` is one of the two target-width size types (`usize`/`isize`,
-/// R1): both share the D8 literal-coercion carve-out against a bare `i64`
+/// Whether `ty` is one of the two target-width size types (`usize`/`isize`):
+/// both share the D8 literal-coercion carve-out against a bare `i64`
 /// literal, so `match_slot`/`unify_pair` gate on this rather than on `Usize`
 /// alone. `usize` and `isize` never coerce into *each other* here: the guard
 /// only ever fires against `Type::I64`, so mixing the two size types falls
-/// through to a plain mismatch, naming both backticked types (R1).
+/// through to a plain mismatch, naming both backticked types.
 fn is_size_type(ty: Type) -> bool {
     matches!(ty, Type::Usize | Type::Isize)
 }
@@ -512,7 +512,7 @@ struct RecursionState {
 /// struct field, enum variant field or array element of type `T` makes `T`
 /// part of the enclosing type's size, so a cycle through any of them is
 /// infinite size. `OwnedCell` is excluded **deliberately, not by
-/// fall-through** (R3): a `^T` field is a heap pointer, not an inline copy of
+/// fall-through**: a `^T` field is a heap pointer, not an inline copy of
 /// `T`, so it can close a cycle without making the type infinite, and the
 /// recursion rule is exactly "every cycle passes through at least one `^`".
 fn type_node(ty: &Type) -> Option<TypeNode> {
@@ -3006,7 +3006,7 @@ mod tests {
 
     #[test]
     fn check_isize_mixed_with_usize_is_error() {
-        // R1: `usize` and `isize` are sibling size types but do not coerce
+        // `usize` and `isize` are sibling size types but do not coerce
         // into each other; mixing them is a plain type mismatch naming both
         // backticked types.
         let src = ": w ( -- bool ) 5 >usize 3 >isize < ;";
@@ -3350,7 +3350,7 @@ mod tests {
 
     #[test]
     fn check_recursion_cell_cycle_in_struct_field_is_ok() {
-        // R3/R4: a `^` edge through a struct field is legal, not just through
+        // A `^` edge through a struct field is legal, not just through
         // an enum variant payload -- the rule is about size finiteness, not
         // idiom.
         check_src("type: Node v i64 next ^Node ;").unwrap();
@@ -3358,14 +3358,14 @@ mod tests {
 
     #[test]
     fn check_recursion_cell_cycle_in_enum_variant_is_ok() {
-        // R3/R4: the same `^` cycle acceptance in enum variant position,
+        // The same `^` cycle acceptance in enum variant position,
         // mirroring check_recursion_cell_cycle_in_struct_field_is_ok.
         check_src("type: List | Nil | Cons v i64 next ^List ;").unwrap();
     }
 
     #[test]
     fn check_recursion_array_element_cell_is_cut_then_rejected_as_linear() {
-        // R6: the `^` edge is cut inside an array element too, so this
+        // The `^` edge is cut inside an array element too, so this
         // definition survives the recursion rule and reaches the linear
         // array-element rule instead of "recursive array definition".
         let err = check_src("type: Node kids [^Node 4] ;").unwrap_err();

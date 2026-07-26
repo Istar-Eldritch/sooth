@@ -513,8 +513,8 @@ fn norm_scalar(ty: IrType) -> IrType {
 }
 
 /// `usize`/`isize` are target-width integers, so on a `word_width`-byte QBE
-/// target they behave exactly like a `u64`/`i64` of that width (R15); the
-/// bits come from the parameter, never a hardcoded `64`. Every other type is
+/// target they behave exactly like a `u64`/`i64` of that width; the bits
+/// come from the parameter, never a hardcoded `64`. Every other type is
 /// unchanged; the `width` register class already agrees (`l`).
 fn norm_scalar_ww(ty: IrType, word_width: u32) -> IrType {
     match ty {
@@ -1129,8 +1129,8 @@ mod tests {
 
     #[test]
     fn norm_scalar_ww_follows_word_width_for_both_size_types() {
-        // R2 (criterion 1b): neither size type carries a literal 64; both
-        // derive bits from the `word_width` parameter.
+        // Neither size type carries a literal 64; both derive bits from the
+        // `word_width` parameter.
         assert_eq!(
             norm_scalar_ww(IrType::Usize, 4),
             IrType::Int {
