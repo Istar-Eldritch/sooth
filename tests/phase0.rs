@@ -1209,6 +1209,30 @@ fn usize_arithmetic_comparison_and_conversion_native() {
     assert_eq!(code, 0);
 }
 
+// Phase 3 slice 3, phase 1 (R1): `isize` mirrors `usize` end to end.
+
+#[test]
+fn isize_round_trips_arithmetic_and_conversion() {
+    // Criterion 1: `isize` arithmetic and comparison, `>isize` on a computed
+    // value, an `isize`->`i64` conversion, type-directed `.` printing signed
+    // (a negative result must print as negative, unlike `usize`'s `%lu`), and
+    // a bare literal coercing into an `isize` position without `>isize` (D8).
+    let src = ": main ( -- )\n\
+  2 3 + >isize 4 >isize + .\n\
+  3 >isize 10 >isize - .\n\
+  3 >isize 5 >isize < .\n\
+  5 >isize 3 >isize < .\n\
+  7 >isize >i64 1 + .\n\
+  9 >isize dup . drop ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-isize-tower-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+
+    assert_eq!(stdout, "9\n-7\ntrue\nfalse\n8\n9\n");
+    assert_eq!(code, 0);
+}
+
 #[test]
 fn fill_constructs_and_get_reads_every_element_back_native() {
     // Criterion 3: `fill` an `[i64 N]`, then read every element back via

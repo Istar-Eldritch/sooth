@@ -120,6 +120,11 @@ pub enum IrType {
     /// its register class (`l` today) and unsigned ops the same way it does for
     /// a `u64`, but the *width* flows from the parameter (R15).
     Usize,
+    /// The target-width *signed* integer, mirroring `Usize`: same
+    /// word-width-derived size/align (`norm_scalar_ww`), but the backend
+    /// derives its ops and printing from a signed `i64`-like type rather than
+    /// an unsigned `u64`-like one.
+    Isize,
     /// Opaque handle (backend-neutral-IR invariant): a native pointer under QBE,
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
@@ -167,6 +172,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // `IrType` carries only the `OwnedCellId` so it stays `Copy`.
         Type::OwnedCell(id, _) => IrType::OwnedCell(id),
         Type::Usize => IrType::Usize,
+        Type::Isize => IrType::Isize,
         Type::Spy => IrType::Spy,
     }
 }
@@ -353,6 +359,7 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Int { bits, .. } => (bits / 8) as u32,
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
+        IrType::Isize => word_width,
         // A cell is a pointer, so its width defers to `Ptr`'s convention.
         IrType::Ptr | IrType::OwnedCell(_) => 8,
         // A spy is its `i64` tag.
