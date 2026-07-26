@@ -217,6 +217,10 @@ free shim directly rather than going through drop glue), can land earlier.
 
 - Constructor, consuming unwrap, Copy-only peek (R11, R12, R12b), with the copy-in / copy-out
   rules (R13, R14) for all four payload shapes.
+- The constructor must type the allocator `Call`'s destination as the cell directly. It must
+  **not** relabel a `Ptr` result with a `Conv` the way the spy constructor does: `norm_scalar`
+  (@qbe.rs:522) is the one `IrType::Spy` arm Phase 2 deliberately left without a cell
+  counterpart, so a `Conv` on a cell reaches `emit_conv`'s numeric-endpoints `unreachable!`.
 - **Exit**: criteria 2, 3, 3b, 4, 5, 5b, 7, 9, 18 pass. Green; no regression.
 - **Changes**: `src/check.rs`, `src/ir.rs`, `tests/phase0.rs`.
 

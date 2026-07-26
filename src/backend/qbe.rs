@@ -588,7 +588,8 @@ fn emit_spy_drop(out: &mut String) {
 /// apply it, so `free` reports the same size `allocate` requested. Without it a
 /// zero-sized payload reaches `malloc(0)`, which may return NULL and fire the
 /// trap on a correct program; the adjustment also keeps every cell's address
-/// distinct, so free-once stays meaningful.
+/// distinct, so free-once stays meaningful. The caller's size parameter must be
+/// named `%n`; this reads it directly rather than taking it as an argument.
 fn emit_size_adjust(out: &mut String) {
     out.push_str("\t%zero =l ceql %n, 0\n");
     out.push_str("\t%adj =l add %n, %zero\n");
