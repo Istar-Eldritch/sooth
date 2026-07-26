@@ -2235,3 +2235,123 @@ fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
     );
     assert!(err.contains("`Holds`"), "unexpected message: {err}");
 }
+
+// Phase 3 Slice 2: the three owning-cell access words (`^ ^> ^|>`). A
+// runtime golden uses a temp `.sth` file exactly like the linear-core section
+// above; a trace-observing golden additionally sets `SOOTH_TRACE_ALLOC` via
+// `run_and_capture_traced_stdout`. Phase 3 constructs and unwraps a cell but
+// never `drop`s one (that's Phase 4's drop-glue arm), so every golden here
+// disposes via `^>`.
+
+fn run_owned_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "owned-cell golden `{tag}` should exit 0");
+    stdout
+}
+
+fn run_owned_traced_golden(tag: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let (stdout, code) = run_and_capture_traced_stdout(path.to_str().unwrap());
+    std::fs::remove_file(&path).ok();
+    assert_eq!(code, 0, "owned-cell golden `{tag}` should exit 0");
+    stdout
+}
+
+#[test]
+fn unconsumed_owned_is_error() {
+    // Criterion 2: forgetting to dispose a cell is a compile error, exactly
+    // like a bare `__spy` (R4: `^T` is always linear).
+    let err = linear_check_error(": main ( -- )\n  5 ^ ;\n");
+    assert!(
+        err.contains("linear value left on the stack"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn dup_of_owned_is_error() {
+    // Criterion 3: `dup` of `^i64` errors even though the *payload* (`i64`)
+    // is Copy, proving the cell itself is linear regardless of what it holds
+    // (R4).
+    let err = linear_check_error(": main ( -- )\n  5 ^ dup ;\n");
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn over_of_owned_is_error() {
+    // Criterion 3b: `over` copies its second slot, gated the same way.
+    let err = linear_check_error(": main ( -- )\n  5 ^ 1 over ;\n");
+    assert!(err.contains("cannot `over`"), "unexpected message: {err}");
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+}
+
+#[test]
+fn use_after_move_of_owned_is_error() {
+    // Criterion 4: the second mention errors and names the site of the
+    // first, mirroring the `__spy` case.
+    let err = linear_check_error(
+        ": main ( -- )\n  5 ^ hold ;\n\
+: hold ( ^i64 -- )\n  | s |\n  s ^> drop\n  s ^> drop ;\n",
+    );
+    assert!(err.contains("use after move"), "unexpected message: {err}");
+    assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    assert!(
+        err.contains("moved at line 5, col 3"),
+        "the diagnostic should name the move site: {err}"
+    );
+}
+
+#[test]
+fn owned_unwrap_returns_payload_and_frees_once() {
+    // Criterion 5: unwrap returns the payload value; the transcript is
+    // exactly one `alloc` (construct) then one `free` (unwrap) at the scalar
+    // `i64` payload's 8-byte size.
+    let stdout = run_owned_traced_golden("unwrap-scalar", ": main ( -- )\n  5 ^ ^> . ;\n");
+    assert_eq!(stdout, "alloc 8\nfree 8\n5\n");
+}
+
+#[test]
+fn owned_unwrap_aggregate_copies_out_before_free() {
+    // Criterion 5b: unwrap materialises an aggregate payload before releasing
+    // the cell (R13); a field read after the free is correct only if the copy
+    // really happened before the free.
+    let stdout = run_owned_golden(
+        "unwrap-aggregate",
+        "type: Point x i64 y i64 ;\n: main ( -- )\n  1 2 Point ^ ^> Point>y . ;\n",
+    );
+    assert_eq!(stdout, "2\n");
+}
+
+#[test]
+fn peek_owned_linear_payload_is_error() {
+    // Criterion 7: `^|>` on a linear payload is a compile error naming the
+    // payload's type (R11/R14); `^__spy` proves it via the drop-spy.
+    let err = linear_check_error(": main ( -- )\n  7 __spy ^ ^|> ;\n");
+    assert!(err.contains("cannot `^|>`"), "unexpected message: {err}");
+    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+}
+
+#[test]
+fn struct_containing_owned_is_linear() {
+    // Criterion 9: a struct with a cell field is linear (R4 propagates
+    // transitively via Slice 1's rules); `dup` on it errors naming the
+    // struct, not the cell.
+    let err = linear_check_error("type: Box v ^i64 ;\n: main ( -- )\n  5 ^ Box dup ;\n");
+    assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+    assert!(err.contains("`Box`"), "unexpected message: {err}");
+}
+
+#[test]
+fn alloc_trace_is_silent_when_unset() {
+    // Criterion 18: the gate is off by default (unset); a program that
+    // constructs and disposes a cell prints only its own output, none of the
+    // trace. Without this, a regression inverting the gate ships green.
+    let stdout = run_owned_golden("gate-off", ": main ( -- )\n  5 ^ ^> . ;\n");
+    assert_eq!(stdout, "5\n");
+}

@@ -1015,7 +1015,7 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, Arrays, Enums, IrModule, Structs};
+    use crate::ir::{lower, lower_line, Arrays, Cells, Enums, IrModule, Structs};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
@@ -1047,6 +1047,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -1195,6 +1196,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         let il = emit(&IrModule {
             funcs: vec![func],

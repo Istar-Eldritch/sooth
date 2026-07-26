@@ -421,7 +421,14 @@ impl Session {
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(&word, &self.enums, &env, &mut self.arrays, &self.structs)?;
+        check::check_def(
+            &word,
+            &self.enums,
+            &env,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &self.structs,
+        )?;
 
         let generation = next_generation(self.env.get(&name));
         let symbol = mangled_symbol(&name, generation);
@@ -432,12 +439,19 @@ impl Session {
         // derived from the typed env (RK2): ir needs only counts + output type.
         env.insert(name.clone(), sig.clone());
         let ir_lower_env = ir_arity_env(&env);
-        let (structs, enums, arrays) =
-            ir::build_registries(&self.structs, &self.enums, &self.arrays);
+        let (structs, enums, arrays, cells) =
+            ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
         let funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            let mut func =
-                ir::lower_word(&word, &ir_lower_env, &resolve, &structs, &enums, &arrays);
+            let mut func = ir::lower_word(
+                &word,
+                &ir_lower_env,
+                &resolve,
+                &structs,
+                &enums,
+                &arrays,
+                &cells,
+            );
             func.name = symbol.clone();
             let mut funcs = vec![func];
             // R12: this module must carry its own struct/enum destructors
@@ -451,6 +465,7 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
+                &cells,
             ));
             funcs
         };
@@ -537,6 +552,7 @@ impl Session {
             &self.types,
             &env,
             &mut self.arrays,
+            &mut self.owned_cells,
             &self.structs,
             &self.enums,
         )?;
@@ -546,8 +562,8 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let (structs, enums, arrays) =
-            ir::build_registries(&self.structs, &self.enums, &self.arrays);
+        let (structs, enums, arrays, cells) =
+            ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
         let (func, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
             let (func, m, out_bytes) = ir::lower_line(
@@ -560,6 +576,7 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
+                &cells,
             );
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`
@@ -570,6 +587,7 @@ impl Session {
                 &structs,
                 &enums,
                 &arrays,
+                &cells,
             );
             (func, m, out_bytes, aggregate_destructors)
         };

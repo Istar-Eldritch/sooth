@@ -11,8 +11,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Clause, EnumDecl, EnumId, Module, Span, StackEffect, StructDecl,
-    StructId, Term, TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
+    intern_array_type, intern_owned_cell_type, ArrayDecl, Clause, EnumDecl, EnumId, Module,
+    OwnedCellDecl, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type, VariantDecl,
+    WordBody, WordDef, SPY_NAME,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -328,17 +329,17 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         &module.arrays,
     )?;
 
-    // Split the borrow so a word body can intern into `arrays` while reading
-    // `words`/`enums`/`structs`.
+    // Split the borrow so a word body can intern into `arrays`/`owned_cells`
+    // while reading `words`/`enums`/`structs`.
     let Module {
         words,
         structs,
         enums,
         arrays,
-        ..
+        owned_cells,
     } = module;
     for word in words.iter() {
-        check_word(word, enums, &env, arrays, structs)?;
+        check_word(word, enums, &env, arrays, owned_cells, structs)?;
     }
     Ok(())
 }
@@ -680,21 +681,24 @@ pub fn check_def(
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env, arrays, structs)
+    check_word(word, enums, &env, arrays, cells, structs)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
 /// `entry_stack` (the carried slot types) and return the resulting typed stack.
 /// A type mismatch or underflow against the carried stack is a reported error.
+#[allow(clippy::too_many_arguments)] // a bare line's checking inputs; a bundle would obscure them
 pub fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
 ) -> Result<Vec<Type>, String> {
@@ -707,6 +711,7 @@ pub fn infer_line(
         &Ctx::Line { structs, enums },
         env,
         arrays,
+        cells,
         &mut Moves::default(),
         false,
     )?;
@@ -997,11 +1002,13 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)] // one word's checking inputs; a bundle would obscure them
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
@@ -1013,12 +1020,15 @@ fn check_word(
     }
     match &word.body {
         WordBody::Terms { locals, terms } => {
-            check_terms_word(word, enums, locals, terms, env, arrays, structs)
+            check_terms_word(word, enums, locals, terms, env, arrays, cells, structs)
         }
-        WordBody::Clauses(clauses) => check_clause_word(word, enums, clauses, env, arrays, structs),
+        WordBody::Clauses(clauses) => {
+            check_clause_word(word, enums, clauses, env, arrays, cells, structs)
+        }
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one word's checking inputs; a bundle would obscure them
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1026,6 +1036,7 @@ fn check_terms_word(
     terms: &[Term],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let inputs = word.effect.inputs.len();
@@ -1066,7 +1077,7 @@ fn check_terms_word(
         enums,
     };
     let mut moves = Moves::new(&local_types, structs, enums, arrays);
-    let final_stack = check_terms(terms, initial, &ctx, env, arrays, &mut moves, true)?;
+    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut moves, true)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
@@ -1078,12 +1089,14 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
+#[allow(clippy::too_many_arguments)] // one clause-style word's checking inputs; a bundle would obscure them
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
     clauses: &[Clause],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
@@ -1133,6 +1146,7 @@ fn check_clause_word(
             &declared,
             env,
             arrays,
+            cells,
             structs,
         )?;
     }
@@ -1157,6 +1171,7 @@ fn check_clause_body(
     declared: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut seen_locals = HashSet::new();
@@ -1205,6 +1220,7 @@ fn check_clause_body(
         &ctx,
         env,
         arrays,
+        cells,
         &mut moves,
         true,
     )?;
@@ -1574,18 +1590,29 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
 /// both arms of a final `if`) sits on the self-tail-call back-edge. The rule
 /// mirrors `tail_position_calls`/`lower_terms`; all three must stay in
 /// lockstep.
+#[allow(clippy::too_many_arguments)] // the walker's threaded state; a bundle would obscure it
 fn check_terms(
     terms: &[Term],
     mut stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     moves: &mut Moves,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let last = terms.len().wrapping_sub(1);
     for (i, term) in terms.iter().enumerate() {
-        stack = check_term(term, stack, ctx, env, arrays, moves, tail && i == last)?;
+        stack = check_term(
+            term,
+            stack,
+            ctx,
+            env,
+            arrays,
+            cells,
+            moves,
+            tail && i == last,
+        )?;
     }
     Ok(stack)
 }
@@ -1597,6 +1624,7 @@ fn check_term(
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
     moves: &mut Moves,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
@@ -1638,6 +1666,10 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
+                return Ok(stack);
+            }
+            if let Some(stack) = check_owned_cell_word(name, span, &mut stack, ctx, arrays, cells)?
+            {
                 return Ok(stack);
             }
             if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays)? {
@@ -1690,11 +1722,20 @@ fn check_term(
                 ctx,
                 env,
                 arrays,
+                cells,
                 &mut then_moves,
                 tail,
             )?;
-            let else_stack =
-                check_terms(else_branch, stack, ctx, env, arrays, &mut else_moves, tail)?;
+            let else_stack = check_terms(
+                else_branch,
+                stack,
+                ctx,
+                env,
+                arrays,
+                cells,
+                &mut else_moves,
+                tail,
+            )?;
             *moves = Moves::join(then_moves, else_moves);
             if then_stack.len() != else_stack.len() {
                 return Err(branch_mismatch_error(
@@ -1941,6 +1982,42 @@ fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> S
     }
 }
 
+/// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
+/// word and the offending operand type, mirroring `array_word_operand_error`.
+fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` requires an owning-cell operand, found `{found}`")
+        }
+    }
+}
+
+/// `^|> ( ^T -- ^T T )` (R11/R14) applied to a linear payload: unlike `S|>fi`
+/// (whose field is Copy-gated the same way), the cell stays live afterward, so
+/// peeking would leave a second, unowned reference to a resource the cell
+/// still owns; there is no reference machinery to make that legal. `^>`
+/// (consuming unwrap) is the workaround.
+fn peek_of_linear_owned_payload_error(
+    ctx: &Ctx,
+    span: Span,
+    cell_ty: Type,
+    payload: Type,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `^|>` a linear payload in `{}` (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
+            name, span.line, cell_ty, payload, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `^|>` a linear payload: `{cell_ty}` holds a payload of type `{payload}`, which is linear and has no `Copy` instance"
+        ),
+    }
+}
+
 /// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
 /// error naming the length `N` and the offending index.
 fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64) -> String {
@@ -2121,6 +2198,77 @@ fn check_array_word(
             }
             stack.truncate(n - 3);
             stack.push(Slot::computed(array_ty));
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// The three owning-cell access words (R11, R12, R12b): `^ ( T -- ^T )`
+/// constructs a cell around whatever type sits on top of the stack (generic
+/// over the payload shape, like `fill`, dispatching on the concrete operand
+/// type rather than a fixed env signature); `^> ( ^T -- T )` consumes the
+/// cell and yields the payload (frees the cell at lowering time, R13); `^|>
+/// ( ^T -- ^T T )` is a non-consuming peek, restricted to a `Copy` payload
+/// (R14) exactly like `S|>fi`. Matched by **exact name only** (R12b): `^>x`
+/// and `^|>x` don't match any arm here and fall through to the ordinary
+/// unknown-word error. Must run before `check_struct_peek_word`, whose
+/// `"^|>".split_once("|>")` would otherwise probe a struct named `^` with an
+/// empty field name.
+fn check_owned_cell_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    cells: &mut Vec<OwnedCellDecl>,
+) -> Result<Option<Vec<Slot>>, String> {
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+    match name {
+        "^" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("^", 1, n));
+            }
+            let payload = stack[n - 1].ty;
+            let cell_ty = intern_owned_cell_type(cells, payload);
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(cell_ty));
+        }
+        "^>" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("^>", 1, n));
+            }
+            let Type::OwnedCell(id, _) = stack[n - 1].ty else {
+                return Err(owned_cell_word_operand_error(
+                    ctx,
+                    span,
+                    "^>",
+                    stack[n - 1].ty,
+                ));
+            };
+            let payload = cells[id.index()].payload;
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(payload));
+        }
+        "^|>" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("^|>", 1, n));
+            }
+            let cell_ty = stack[n - 1].ty;
+            let Type::OwnedCell(id, _) = cell_ty else {
+                return Err(owned_cell_word_operand_error(ctx, span, "^|>", cell_ty));
+            };
+            let payload = cells[id.index()].payload;
+            if !is_copy(payload, ctx.structs(), ctx.enums(), arrays) {
+                return Err(peek_of_linear_owned_payload_error(
+                    ctx, span, cell_ty, payload,
+                ));
+            }
+            // Non-consuming: the cell stays, the payload copy is pushed atop it.
+            stack.push(Slot::computed(payload));
         }
         _ => return Ok(None),
     }
@@ -3020,7 +3168,15 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
-        infer_line(&terms, entry, &builtin_table(), &mut Vec::new(), &[], &[])
+        infer_line(
+            &terms,
+            entry,
+            &builtin_table(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+            &[],
+        )
     }
 
     #[test]

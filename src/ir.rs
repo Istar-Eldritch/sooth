@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::ast::{
-    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellId, StructDecl, StructId, Term,
-    TermKind, Type, WordBody, WordDef, SPY_NAME,
+    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, StructDecl,
+    StructId, Term, TermKind, Type, WordBody, WordDef, SPY_NAME,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -384,8 +384,21 @@ impl Structs {
     /// needs the full `build_registries` (its enums must be present to size
     /// the field, D9).
     pub fn from_structs(structs: &[StructDecl]) -> Structs {
-        build_registries(structs, &[], &[]).0
+        build_registries(structs, &[], &[], &[]).0
     }
+}
+
+/// The IR's view of a program's owning cells: the per-`OwnedCellId` payload
+/// `IrType`, mirroring `Arrays`. Unlike `Structs`/`Enums`/`Arrays` there is no
+/// separate layout struct: a cell is always a pointer (its width defers to
+/// `Ptr`'s convention, R17), so only the payload type is needed to decide a
+/// construct/unwrap/peek's copy-in/copy-out shape (scalar load/store,
+/// aggregate alloc+blit, or nothing for a zero-sized payload); the payload's
+/// own size/align resolve through the struct/enum/array registries it may
+/// itself point into.
+#[derive(Debug, Default)]
+pub struct Cells {
+    pub payload: Vec<IrType>,
 }
 
 /// Build the struct and enum layout + generated-word registries from a
@@ -399,8 +412,9 @@ pub fn build_registries(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
-) -> (Structs, Enums, Arrays) {
-    build_registries_ww(structs, enums, arrays, WORD_WIDTH)
+    cells: &[OwnedCellDecl],
+) -> (Structs, Enums, Arrays, Cells) {
+    build_registries_ww(structs, enums, arrays, cells, WORD_WIDTH)
 }
 
 /// `build_registries` with an explicit target word width (R15). Production
@@ -411,8 +425,9 @@ pub fn build_registries_ww(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
     word_width: u32,
-) -> (Structs, Enums, Arrays) {
+) -> (Structs, Enums, Arrays, Cells) {
     let mut lb = LayoutBuilder {
         structs,
         enums,
@@ -470,6 +485,8 @@ pub fn build_registries_ww(
         }
     }
 
+    let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();
+
     (
         Structs {
             layouts: struct_layouts,
@@ -481,6 +498,9 @@ pub fn build_registries_ww(
         },
         Arrays {
             layouts: array_layouts,
+        },
+        Cells {
+            payload: cell_payloads,
         },
     )
 }
@@ -785,7 +805,12 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
-    let (structs, enums, arrays) = build_registries(&module.structs, &module.enums, &module.arrays);
+    let (structs, enums, arrays, cells) = build_registries(
+        &module.structs,
+        &module.enums,
+        &module.arrays,
+        &module.owned_cells,
+    );
     let env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -802,14 +827,14 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays))
+        .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays, &cells))
         .collect();
 
     // R12: append a synthesized destructor for every linear struct/enum type
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
     funcs.extend(synthesize_aggregate_destructors(
-        &env, &resolve, &structs, &enums, &arrays,
+        &env, &resolve, &structs, &enums, &arrays, &cells,
     ));
 
     Ok(IrModule {
@@ -824,12 +849,14 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// type. The REPL redefines these per line; safe because type redefinition is
 /// rejected, so every generation's glue is identical. If type redefinition is
 /// ever allowed, add a generation suffix, matching word symbols.
+#[allow(clippy::too_many_arguments)] // one module's synthesis inputs; a bundle would obscure them
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     structs: &Structs,
     enums: &Enums,
     arrays: &Arrays,
+    cells: &Cells,
 ) -> Vec<IrFunc> {
     let struct_destructors = structs
         .layouts
@@ -844,6 +871,7 @@ pub fn synthesize_aggregate_destructors(
                 structs,
                 enums,
                 arrays,
+                cells,
             )
         });
     let enum_destructors = enums
@@ -859,6 +887,7 @@ pub fn synthesize_aggregate_destructors(
                 structs,
                 enums,
                 arrays,
+                cells,
             )
         });
     struct_destructors.chain(enum_destructors).collect()
@@ -869,6 +898,7 @@ pub fn synthesize_aggregate_destructors(
 /// bare `FuncBuilder` (no locals, no tail-call machinery) reusing the same
 /// `field_value`/`emit_drop` a `drop`, `S>fi`, and `S<fi` use, so "how a field
 /// is disposed" stays in one place.
+#[allow(clippy::too_many_arguments)] // one struct's synthesis inputs; a bundle would obscure them
 fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
@@ -876,8 +906,9 @@ fn synthesize_struct_destructor(
     structs: &Structs,
     enums: &Enums,
     arrays: &Arrays,
+    cells: &Cells,
 ) -> IrFunc {
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
     let param = b.fresh_value(IrType::Struct(id));
     let fields = structs.layouts[id.index()].fields.clone();
     for field in fields {
@@ -905,6 +936,7 @@ fn synthesize_struct_destructor(
 /// fields are linear (an empty block that just returns), so the dispatch
 /// shape stays uniform regardless of which variants happen to carry a linear
 /// field.
+#[allow(clippy::too_many_arguments)] // one enum's synthesis inputs; a bundle would obscure them
 fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
@@ -912,8 +944,9 @@ fn synthesize_enum_destructor(
     structs: &Structs,
     enums: &Enums,
     arrays: &Arrays,
+    cells: &Cells,
 ) -> IrFunc {
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
     let param = b.fresh_value(IrType::Enum(id));
     let payload_offset = enums.layouts[id.index()].payload_offset;
     let variant_ids = b.dispatch_on_tag(param, id);
@@ -981,10 +1014,11 @@ pub fn lower_line(
     structs: &Structs,
     enums: &Enums,
     arrays: &Arrays,
+    cells: &Cells,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, String::new());
+    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -1129,6 +1163,7 @@ pub fn lower_line(
 /// Lower a single word body against an external env/resolver. The REPL uses
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
 /// so a definition compiles against previously-loaded words.
+#[allow(clippy::too_many_arguments)] // one word's lowering inputs; a bundle would obscure them
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
@@ -1136,6 +1171,7 @@ pub(crate) fn lower_word(
     structs: &Structs,
     enums: &Enums,
     arrays: &Arrays,
+    cells: &Cells,
 ) -> IrFunc {
     let params: Vec<IrType> = word
         .effect
@@ -1145,7 +1181,15 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, word.name.clone());
+    let mut b = FuncBuilder::new(
+        env,
+        resolve,
+        structs,
+        enums,
+        arrays,
+        cells,
+        word.name.clone(),
+    );
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -1205,6 +1249,7 @@ struct FuncBuilder<'a> {
     structs: &'a Structs,
     enums: &'a Enums,
     arrays: &'a Arrays,
+    cells: &'a Cells,
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
@@ -1251,12 +1296,14 @@ struct FuncBuilder<'a> {
 }
 
 impl<'a> FuncBuilder<'a> {
+    #[allow(clippy::too_many_arguments)] // the builder's threaded state; a bundle would obscure it
     fn new(
         env: &'a HashMap<String, Arity>,
         resolve: Resolver<'a>,
         structs: &'a Structs,
         enums: &'a Enums,
         arrays: &'a Arrays,
+        cells: &'a Cells,
         cur_word_name: String,
     ) -> Self {
         FuncBuilder {
@@ -1265,6 +1312,7 @@ impl<'a> FuncBuilder<'a> {
             structs,
             enums,
             arrays,
+            cells,
             cur_word_name,
             header: None,
             header_phis: Vec::new(),
@@ -1541,6 +1589,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Print(v));
             }
             "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
+            "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
             // The spy constructor `( i64 -- __spy )` is identity at runtime
             // (R6): the tag *is* the value. It emits no call, only the same
             // `Conv` relabel a same-width conversion uses, so the result value
@@ -1793,6 +1842,134 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(v);
             }
             _ => unreachable!("lower_array_word only handles fill/get/set/len"),
+        }
+    }
+
+    /// The `OwnedCellId` whose payload shape is `payload`: `^`'s target shape,
+    /// already interned by the checker (R11), found by structural match on
+    /// the combined registry, mirroring `array_id_of`.
+    fn cell_id_of(&self, payload: IrType) -> OwnedCellId {
+        let idx = self
+            .cells
+            .payload
+            .iter()
+            .position(|&p| p == payload)
+            .expect("^'s payload shape is interned by the checker");
+        OwnedCellId::from_index(idx)
+    }
+
+    /// Alloc a fresh frame slot for aggregate `ty` (a `Struct`/`Enum`/`Array`),
+    /// dispatching to the matching per-kind helper. Shared by a cell's
+    /// unwrap/peek, which must never alias the cell's own storage (R14).
+    fn alloc_aggregate(&mut self, ty: IrType) -> Value {
+        match ty {
+            IrType::Struct(id) => self.alloc_struct(id),
+            IrType::Enum(id) => self.alloc_enum(id),
+            IrType::Array(id) => self.alloc_array(id),
+            _ => unreachable!("alloc_aggregate: not an aggregate IrType"),
+        }
+    }
+
+    /// Copy `payload_ty`'s value out of `cell_ptr` (R13/R14): a scalar payload
+    /// (including a nested cell, pointer-width like `Spy`) is a width-exact
+    /// `FieldLoad` directly off the cell pointer; an aggregate payload gets a
+    /// fresh frame `Alloc` and a `Blit` out, **never aliasing the cell** (a
+    /// later `drop`/`free` must not leave the caller holding a dangling
+    /// interior pointer); a zero-sized aggregate allocs (mirroring a bare
+    /// zero-field struct elsewhere) but blits nothing.
+    fn load_owned_payload(&mut self, cell_ptr: Value, payload_ty: IrType) -> Value {
+        match payload_ty {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                let dst = self.alloc_aggregate(payload_ty);
+                let size = self.value_size(payload_ty);
+                if size > 0 {
+                    self.push_instr(Instr::Blit(cell_ptr, dst, size));
+                }
+                dst
+            }
+            _ => {
+                let v = self.fresh_value(payload_ty);
+                self.push_instr(Instr::FieldLoad(v, cell_ptr));
+                v
+            }
+        }
+    }
+
+    /// Store `val` (of `payload_ty`) into the cell at `cell_ptr`: the mirror
+    /// of `load_owned_payload` (R14). A scalar payload is a width-exact
+    /// `FieldStore`; an aggregate is a `Blit` from its frame slot; a
+    /// zero-sized payload writes nothing.
+    fn store_owned_payload(&mut self, cell_ptr: Value, val: Value, payload_ty: IrType) {
+        match payload_ty {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                let size = self.value_size(payload_ty);
+                if size > 0 {
+                    self.push_instr(Instr::Blit(val, cell_ptr, size));
+                }
+            }
+            _ => self.push_instr(Instr::FieldStore(cell_ptr, val)),
+        }
+    }
+
+    /// Lower one of the three owning-cell access words (R11-R14): `^`
+    /// allocates a cell sized to the popped payload's byte size and stores
+    /// the payload in (a scalar `FieldStore`, an aggregate `Blit`, nothing for
+    /// a zero-sized payload); `^>` is the mirror of construction plus release
+    /// — it **materialises the payload before freeing the cell** (R13), so
+    /// the freed pointer is never handed to the stack; `^|>` is `^>`'s
+    /// non-consuming sibling, leaving the cell live. The raw byte size passed
+    /// to `sooth_alloc`/`sooth_free` may be 0 (a zero-sized payload); the
+    /// shim itself applies the `max(size, 1)` adjustment (R15), so the IR
+    /// never special-cases it.
+    fn lower_owned_cell_word(&mut self, name: &str) {
+        match name {
+            "^" => {
+                let payload_val = self.stack.pop().expect("^: payload");
+                let payload_ty = self.value_type(payload_val);
+                let id = self.cell_id_of(payload_ty);
+                let size = self.value_size(payload_ty);
+                let size_v = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(size_v, size as i64));
+                let ptr = self.fresh_value(IrType::OwnedCell(id));
+                self.push_instr(Instr::Call(
+                    Some(ptr),
+                    ALLOC_SYMBOL.to_string(),
+                    vec![size_v],
+                ));
+                self.store_owned_payload(ptr, payload_val, payload_ty);
+                self.stack.push(ptr);
+            }
+            "^>" => {
+                let cell = self.stack.pop().expect("^>: cell");
+                let id = match self.value_type(cell) {
+                    IrType::OwnedCell(id) => id,
+                    _ => unreachable!("checked: ^>'s operand is a cell"),
+                };
+                let payload_ty = self.cells.payload[id.index()];
+                let val = self.load_owned_payload(cell, payload_ty);
+                let size = self.value_size(payload_ty);
+                let size_v = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(size_v, size as i64));
+                self.push_instr(Instr::Call(
+                    None,
+                    FREE_SYMBOL.to_string(),
+                    vec![cell, size_v],
+                ));
+                self.stack.push(val);
+            }
+            "^|>" => {
+                // Non-consuming (R11): the cell stays on the stack, the
+                // payload copy is pushed atop it.
+                let cell = *self.stack.last().expect("^|>: cell");
+                let id = match self.value_type(cell) {
+                    IrType::OwnedCell(id) => id,
+                    _ => unreachable!("checked: ^|>'s operand is a cell"),
+                };
+                let payload_ty = self.cells.payload[id.index()];
+                let val = self.load_owned_payload(cell, payload_ty);
+                self.stack.push(val);
+            }
+            _ => unreachable!("lower_owned_cell_word only handles ^/^>/^|>"),
         }
     }
 
@@ -2246,7 +2423,13 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
-        build_registries(&module.structs, &module.enums, &module.arrays).1
+        build_registries(
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+        )
+        .1
     }
 
     fn layout<'a>(s: &'a Structs, name: &str) -> &'a StructLayout {
@@ -2286,6 +2469,7 @@ mod tests {
         let structs = Structs::default();
         let enums = Enums::default();
         let arrays = Arrays::default();
+        let cells = Cells::default();
         let resolve: Resolver = &|_name: &str| unreachable!("not called");
         let b = FuncBuilder::new(
             &env,
@@ -2293,6 +2477,7 @@ mod tests {
             &structs,
             &enums,
             &arrays,
+            &cells,
             "loop-word".to_string(),
         );
         assert_eq!(b.cur_word_name, "loop-word");
@@ -2385,6 +2570,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -2406,6 +2592,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -2473,7 +2660,13 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
-        build_registries(&module.structs, &module.enums, &module.arrays).2
+        build_registries(
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+        )
+        .2
     }
 
     fn module_of(src: &str) -> Module {
@@ -2496,8 +2689,10 @@ mod tests {
         // A struct with two `usize` fields and an array of `usize`: both resize
         // with the parameter.
         let m = module_of(": w ( [usize 4] -- ) drop ;\ntype: Cursor a usize b usize ;");
-        let (s8, _, a8) = build_registries_ww(&m.structs, &m.enums, &m.arrays, 8);
-        let (s4, _, a4) = build_registries_ww(&m.structs, &m.enums, &m.arrays, 4);
+        let (s8, _, a8, _) =
+            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, 8);
+        let (s4, _, a4, _) =
+            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, 4);
         assert_eq!(s8.layouts[0].size, 16, "two usize fields at width 8");
         assert_eq!(s4.layouts[0].size, 8, "two usize fields at width 4");
         assert_eq!(a8.layouts[0].size, 32, "[usize 4] at width 8");
@@ -2661,6 +2856,7 @@ mod tests {
             &s,
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
@@ -2688,6 +2884,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -2725,6 +2922,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -2757,6 +2955,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -2838,6 +3037,7 @@ mod tests {
             &Structs::default(),
             &Enums::default(),
             &Arrays::default(),
+            &Cells::default(),
         );
         let loaded = func
             .blocks
@@ -3085,7 +3285,16 @@ mod tests {
         let structs = Structs::default();
         let enums = Enums::default();
         let arrays = Arrays::default();
-        let mut b = FuncBuilder::new(&env, &resolve, &structs, &enums, &arrays, "w".to_string());
+        let cells = Cells::default();
+        let mut b = FuncBuilder::new(
+            &env,
+            &resolve,
+            &structs,
+            &enums,
+            &arrays,
+            &cells,
+            "w".to_string(),
+        );
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
@@ -3268,12 +3477,17 @@ mod tests {
     fn enum_layout_nested_struct_payload_sized_via_combined_registry() {
         // D9: a variant field of struct type is sized via its layout (16 for a
         // two-f64 Vec2), not `scalar_size_align`.
-        let (structs, enums, _arrays) = {
+        let (structs, enums, _arrays, _cells) = {
             let src = "type: Vec2 x f64 y f64 ; type: Shape | Dot p Vec2 | Unit ;";
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
             check(&mut module).unwrap();
-            build_registries(&module.structs, &module.enums, &module.arrays)
+            build_registries(
+                &module.structs,
+                &module.enums,
+                &module.arrays,
+                &module.owned_cells,
+            )
         };
         let _ = structs;
         let s = enum_layout(&enums, "Shape");
@@ -3287,13 +3501,18 @@ mod tests {
     fn struct_field_of_enum_type_sized_via_combined_registry() {
         // D9: a struct field of enum type is sized via the enum's layout, not
         // `scalar_size_align`; the struct places the next field past it.
-        let (structs, _enums, _arrays) = {
+        let (structs, _enums, _arrays, _cells) = {
             let src =
                 "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ;";
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
             check(&mut module).unwrap();
-            build_registries(&module.structs, &module.enums, &module.arrays)
+            build_registries(
+                &module.structs,
+                &module.enums,
+                &module.arrays,
+                &module.owned_cells,
+            )
         };
         let t = layout(&structs, "Tagged");
         // Shape is 24 bytes align 8: k at 0 (size 24), n (i64) at 24; size 32.
@@ -3375,11 +3594,16 @@ mod tests {
         // the enum's aligned carried size. An empty line carries the one Shape
         // straight through: one prologue blit, one epilogue blit.
         let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;";
-        let (structs, enums, arrays) = {
+        let (structs, enums, arrays, cells) = {
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
             check(&mut module).unwrap();
-            build_registries(&module.structs, &module.enums, &module.arrays)
+            build_registries(
+                &module.structs,
+                &module.enums,
+                &module.arrays,
+                &module.owned_cells,
+            )
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
@@ -3394,6 +3618,7 @@ mod tests {
             &structs,
             &enums,
             &arrays,
+            &cells,
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);
@@ -3450,7 +3675,7 @@ mod tests {
         }
     }
 
-    fn header_block<'a>(func: &'a IrFunc, header: BlockId) -> &'a Block {
+    fn header_block(func: &IrFunc, header: BlockId) -> &Block {
         func.blocks.iter().find(|b| b.id == header).expect("header")
     }
 
@@ -3755,8 +3980,12 @@ mod tests {
             fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
             span: crate::ast::Span::default(),
         });
-        let (structs, enums, arrays) =
-            build_registries(&module.structs, &module.enums, &module.arrays);
+        let (structs, enums, arrays, _cells) = build_registries(
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+        );
         for (idx, layout) in structs.layouts.iter().enumerate() {
             let ty = Type::Struct(StructId::from_index(idx), layout.name);
             assert_eq!(
