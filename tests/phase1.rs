@@ -7,7 +7,22 @@ use std::process::{Command, Stdio};
 /// Run a scripted REPL session (one input line per element of `lines`) and
 /// return the whole captured stdout.
 fn run_session(lines: &[&str]) -> String {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+    run_session_traced(lines, false)
+}
+
+/// Run a scripted session with the allocation trace enabled or disabled (R10).
+/// The trace shares the session's stdout, so an allocation-observing session
+/// reads as one transcript: `alloc <size>`/`free <size>` lines interleaved with
+/// the REPL's own `defined`/`stack:` output.
+fn run_session_traced(lines: &[&str], trace: bool) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_sooth"));
+    // The gate is set or cleared explicitly, so an ambient value in the caller's
+    // environment can neither hide a trace nor add one.
+    match trace {
+        true => cmd.env(sooth::ir::TRACE_ALLOC_ENV, "1"),
+        false => cmd.env_remove(sooth::ir::TRACE_ALLOC_ENV),
+    };
+    let mut child = cmd
         .arg("repl")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -30,6 +45,17 @@ fn run_session(lines: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
+#[test]
+fn alloc_trace_stays_empty_in_a_session_that_never_allocates() {
+    // Each REPL `.so` carries its own copy of the allocator shim and trace, which
+    // is benign for the same reason the spy's copies are: they wrap libc and hold
+    // no state, and the trace's state lives in stdout, not in the module. So a
+    // session that constructs no cell prints no trace even with the gate on.
+    let out = run_session_traced(&[": sq ( i64 -- i64 ) | n | n n * ;", "5 sq"], true);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["defined sq", "stack: 25"]);
 }
 
 #[test]

@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::ast::{
-    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, StructDecl, StructId, Term, TermKind,
-    Type, WordBody, WordDef, SPY_NAME,
+    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellId, StructDecl, StructId, Term,
+    TermKind, Type, WordBody, WordDef, SPY_NAME,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -35,6 +35,24 @@ pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
 /// emits the definition; the IR references it by name so both sides agree on
 /// one symbol, exactly like `OOB_TRAP_SYMBOL`.
 pub const SPY_DROP_SYMBOL: &str = "sooth_spy_drop";
+
+/// The heap allocator's acquire half (R6/R7): `allocate(n) -> ptr`, a
+/// compiler-emitted shim over `malloc` that traps on a NULL return and requests
+/// `max(n, 1)` bytes (R15). Referenced by name like `SPY_DROP_SYMBOL`; the
+/// language never sees libc, only this interface.
+pub const ALLOC_SYMBOL: &str = "sooth_alloc";
+
+/// The heap allocator's release half (R6/R7): `free(ptr, n)`. The size is not
+/// needed by `free` itself; it is what the allocation trace reports, and what a
+/// future non-`malloc` allocator would need.
+pub const FREE_SYMBOL: &str = "sooth_free";
+
+/// The environment variable gating the allocation trace (R10). When unset or
+/// empty the allocator shim prints nothing, because `^` is user surface and a
+/// real program must stay silent; when set, every acquire/release prints one
+/// `alloc <size>`/`free <size>` line to stdout. Named here rather than in the
+/// backend so the emitter and the tests that read the trace cannot drift.
+pub const TRACE_ALLOC_ENV: &str = "SOOTH_TRACE_ALLOC";
 
 #[derive(Debug, Default)]
 pub struct IrModule {
@@ -115,6 +133,13 @@ pub enum IrType {
     /// IR: `drop` reads a value's `IrType` to decide whether to emit the
     /// destructor call, and an `i64` tag must not become one by accident.
     Spy,
+    /// An owning heap cell `^T` (R17), keyed by the `OwnedCellId` of its
+    /// interned payload shape. A pointer everywhere the backend touches it (its
+    /// width defers to `Ptr`'s convention, never a second independent
+    /// assumption), but distinct from `Ptr` in the IR for the same reason `Spy`
+    /// is distinct from `Int`: `drop` dispatches on a value's `IrType`, and
+    /// dispatch must not key off a bare pointer.
+    OwnedCell(OwnedCellId),
 }
 
 impl IrType {
@@ -143,11 +168,9 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The element stride/size lives in the module's `ArrayLayout`
         // registry; the `IrType` carries only the `ArrayId` so it stays `Copy`.
         Type::Array(id, _) => IrType::Array(id),
-        // Phase 1: no `IrType::Cell` variant exists yet (R17 adds it in
-        // Phase 2, alongside every parallel match arm); a bare pointer is a
-        // safe stand-in since no `^` value can be constructed or lowered
-        // until Phase 3.
-        Type::OwnedCell(_, _) => IrType::Ptr,
+        // The payload shape lives in the module's owning-cell registry; the
+        // `IrType` carries only the `OwnedCellId` so it stays `Copy`.
+        Type::OwnedCell(id, _) => IrType::OwnedCell(id),
         Type::Usize => IrType::Usize,
         Type::Spy => IrType::Spy,
     }
@@ -173,6 +196,8 @@ pub struct StructLayout {
 fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
     match ty {
         IrType::Spy => true,
+        // R4: a cell is linear whatever its payload, so no payload lookup.
+        IrType::OwnedCell(_) => true,
         IrType::Struct(id) => structs.layouts[id.index()].is_linear,
         IrType::Enum(id) => enums.layouts[id.index()].is_linear,
         IrType::Array(id) => arrays.layouts[id.index()].is_linear,
@@ -327,7 +352,9 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Int { bits, .. } => (bits / 8) as u32,
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
-        IrType::Ptr => 8,
+        // A cell is a pointer, so its width defers to `Ptr`'s convention (both
+        // retrofit to the word-width parameter together, R17).
+        IrType::Ptr | IrType::OwnedCell(_) => 8,
         // A spy is its `i64` tag.
         IrType::Spy => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
@@ -590,6 +617,8 @@ impl LayoutBuilder<'_> {
     fn layout_field_is_linear(&self, ty: IrType) -> bool {
         match ty {
             IrType::Spy => true,
+            // R4: a cell is linear whatever its payload, so no payload lookup.
+            IrType::OwnedCell(_) => true,
             IrType::Struct(id) => {
                 self.struct_memo[id.index()]
                     .as_ref()
@@ -1018,6 +1047,14 @@ pub fn lower_line(
             // destructor (the REPL's residual disposal path, R6).
             IrType::Spy => {
                 let v = b.fresh_value(IrType::Spy);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
+            // A carried cell slot loads its pointer but keeps its `OwnedCell`
+            // `IrType`, for the same reason a spy slot does: a later `drop`, or
+            // the REPL's residual disposal, must still find the destructor.
+            IrType::OwnedCell(id) => {
+                let v = b.fresh_value(IrType::OwnedCell(id));
                 b.push_instr(Instr::Load(v, ptr));
                 stack.push(v);
             }
@@ -3661,6 +3698,23 @@ mod tests {
     }
 
     #[test]
+    fn struct_with_owned_cell_field_is_linear_and_pointer_sized() {
+        // R4/R17: a cell is linear whatever its payload, so a struct holding one
+        // is linear and gets drop glue; its field is a pointer, sized by the
+        // same convention as `Ptr` rather than a second width assumption.
+        let ir = lower_src("type: Boxed b ^i64 ; : w ( -- ) ;");
+        let layout = &ir.structs[0];
+        assert!(layout.is_linear, "a cell field makes its struct linear");
+        assert_eq!((layout.size, layout.align), (8, 8));
+        assert!(
+            matches!(layout.fields[0].ty, IrType::OwnedCell(_)),
+            "a cell field keeps its own `IrType`, not a bare `Ptr`: {:?}",
+            layout.fields[0].ty
+        );
+        assert_eq!(scalar_size_align(layout.fields[0].ty), (8, 8));
+    }
+
+    #[test]
     fn struct_linearity_agrees_across_the_checker_and_both_lowering_folds() {
         // Linearity is decided in three places over the same field lists:
         // `check::is_copy` walks `Type`, `ensure_struct` folds `IrType` inline
@@ -3677,6 +3731,9 @@ mod tests {
                    type: StructInEnum | Some h Holds | None ; \
                    type: EnumInEnum | Inner i EnumInStruct | Outer ; \
                    type: PlainArr xs [i64 4] ; \
+                   type: Boxed b ^i64 ; \
+                   type: BoxedPlain p ^Plain ; \
+                   type: MaybeBoxed | Full b ^i64 | Empty ; \
                    : w ( -- ) ;";
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();

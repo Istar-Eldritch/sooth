@@ -7,10 +7,27 @@ use std::path::Path;
 use sooth::{check, driver, lexer, parser};
 
 fn run_and_capture_stdout(path: &str) -> (String, i32) {
+    run_binary(path, false)
+}
+
+/// Compile and run with the allocation trace enabled (R10). The trace shares
+/// stdout with the program's own output, so the caller reads one transcript in
+/// program order: `alloc <size>`/`free <size>` lines interleaved with whatever
+/// the program printed.
+fn run_and_capture_traced_stdout(path: &str) -> (String, i32) {
+    run_binary(path, true)
+}
+
+fn run_binary(path: &str, trace: bool) -> (String, i32) {
     let binary = driver::build(Path::new(path)).expect("build should succeed");
-    let output = std::process::Command::new(&binary)
-        .output()
-        .expect("binary should run");
+    let mut cmd = std::process::Command::new(&binary);
+    // The gate is set or cleared explicitly, so an ambient value in the caller's
+    // environment can neither hide a trace nor add one.
+    match trace {
+        true => cmd.env(sooth::ir::TRACE_ALLOC_ENV, "1"),
+        false => cmd.env_remove(sooth::ir::TRACE_ALLOC_ENV),
+    };
+    let output = cmd.output().expect("binary should run");
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
         output
@@ -18,6 +35,16 @@ fn run_and_capture_stdout(path: &str) -> (String, i32) {
             .code()
             .expect("process should exit normally, not die by signal"),
     )
+}
+
+#[test]
+fn alloc_trace_stays_empty_for_a_program_that_never_allocates() {
+    // The allocator shim, its trap and its trace are emitted unconditionally (the
+    // drop-spy precedent), so a program that constructs no cell never calls them:
+    // even with the gate on, its transcript is only its own output.
+    let (stdout, code) = run_and_capture_traced_stdout("examples/gcd.sth");
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
 }
 
 #[test]

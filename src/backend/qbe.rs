@@ -8,8 +8,19 @@ use std::fmt::Write;
 
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
-    Terminator, Value, OOB_TRAP_SYMBOL, SPY_DROP_SYMBOL,
+    Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, SPY_DROP_SYMBOL,
+    TRACE_ALLOC_ENV,
 };
+
+/// The failed-allocation trap (R9): reached only from the allocator shim's NULL
+/// branch, so unlike `OOB_TRAP_SYMBOL` the IR never names it and it stays
+/// backend-private.
+const OOM_TRAP_SYMBOL: &str = "sooth_oom_trap";
+
+/// The allocation trace's gated print helper (R10), shared by both halves of the
+/// allocator so the gate is decided in exactly one place. Backend-private for
+/// the same reason as `OOM_TRAP_SYMBOL`.
+const TRACE_EVENT_SYMBOL: &str = "sooth_trace_event";
 
 /// The backend's view of a program's aggregate layouts: the struct and enum
 /// registries, threaded as one `Copy` handle so a nested-aggregate member/ABI
@@ -47,6 +58,20 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     // the same `printf` path `.` uses, so a golden can assert drop count and
     // order interleaved with ordinary output.
     out.push_str("data $spyfmt = { b \"drop %ld\\n\", b 0 }\n");
+    // The allocation trace's two event lines and its gating environment variable
+    // (R10). One line per event, size only and no address, so a golden can
+    // assert an exact ordered transcript; both go to stdout through the same
+    // `printf` the spy and `.` use, which is what makes program order equal
+    // transcript order (the emitter's stderr path is unbuffered `dprintf`, so a
+    // cross-stream assertion would have no order to observe at all).
+    out.push_str("data $allocfmt = { b \"alloc %ld\\n\", b 0 }\n");
+    out.push_str("data $freefmt = { b \"free %ld\\n\", b 0 }\n");
+    writeln!(out, "data $tracenv = {{ b \"{TRACE_ALLOC_ENV}\", b 0 }}").unwrap();
+    // The failed-allocation message (R9): stderr, then a nonzero exit, exactly
+    // like the out-of-bounds trap.
+    out.push_str(
+        "data $oomfmt = { b \"sooth: out of memory (allocation of %ld bytes failed)\\n\", b 0 }\n",
+    );
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
     // array type (D9, R20) then references an already-declared `:E`/`:arr_N`.
@@ -67,6 +92,10 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     }
     emit_oob_trap(&mut out);
     emit_spy_drop(&mut out);
+    emit_alloc_shim(&mut out);
+    emit_free_shim(&mut out);
+    emit_oom_trap(&mut out);
+    emit_trace_event(&mut out);
     Ok(out)
 }
 
@@ -197,6 +226,9 @@ fn width(ty: IrType) -> &'static str {
         // A spy is its `i64` tag in a register; only the frontend distinguishes
         // it (to emit the destructor call on `drop`).
         IrType::Spy => "l",
+        // An owning cell is its heap pointer in a register; only the frontend
+        // distinguishes it (to emit the free on `drop`).
+        IrType::OwnedCell(_) => "l",
         // A struct/enum/array value is a pointer in a register (`l`); its
         // aggregate `:S`/`:E`/`:A` type is only spelled in ABI positions.
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => "l",
@@ -229,6 +261,7 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Usize => "l".to_string(),
         IrType::Ptr => "l".to_string(),
         IrType::Spy => "l".to_string(),
+        IrType::OwnedCell(_) => "l".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
@@ -255,6 +288,7 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Usize => ("l", "loadl"),
         IrType::Ptr => ("l", "loadl"),
         IrType::Spy => ("l", "loadl"),
+        IrType::OwnedCell(_) => ("l", "loadl"),
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
@@ -273,6 +307,7 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Usize => "storel",
         IrType::Ptr => "storel",
         IrType::Spy => "storel",
+        IrType::OwnedCell(_) => "storel",
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
@@ -548,6 +583,84 @@ fn emit_spy_drop(out: &mut String) {
     out.push_str("}\n");
 }
 
+/// Emit the R15 size adjustment into `%adj`: a size is non-negative, so
+/// `n + (n == 0)` is a branch-free `max(n, 1)`. Both halves of the allocator
+/// apply it, so `free` reports the same size `allocate` requested. Without it a
+/// zero-sized payload reaches `malloc(0)`, which may return NULL and fire the
+/// trap on a correct program; the adjustment also keeps every cell's address
+/// distinct, so free-once stays meaningful.
+fn emit_size_adjust(out: &mut String) {
+    out.push_str("\t%zero =l ceql %n, 0\n");
+    out.push_str("\t%adj =l add %n, %zero\n");
+}
+
+/// Emit the allocator's acquire half (R6/R7): a compiler-emitted shim over
+/// `malloc`, following the `emit_spy_drop` precedent rather than exposing any
+/// user-facing FFI (Phase 6 re-expresses it as bound foreign words). A NULL
+/// return traps (R9); a successful one traces (R10) and returns the pointer.
+fn emit_alloc_shim(out: &mut String) {
+    writeln!(out, "\nfunction l ${ALLOC_SYMBOL}(l %n) {{").unwrap();
+    out.push_str("@start\n");
+    emit_size_adjust(out);
+    out.push_str("\t%p =l call $malloc(l %adj)\n");
+    out.push_str("\t%isnull =w ceql %p, 0\n");
+    out.push_str("\tjnz %isnull, @oom, @ok\n");
+    out.push_str("@oom\n");
+    writeln!(out, "\tcall ${OOM_TRAP_SYMBOL}(l %adj)").unwrap();
+    out.push_str("\thlt\n");
+    out.push_str("@ok\n");
+    writeln!(out, "\tcall ${TRACE_EVENT_SYMBOL}(l $allocfmt, l %adj)").unwrap();
+    out.push_str("\tret %p\n");
+    out.push_str("}\n");
+}
+
+/// Emit the allocator's release half (R6/R7): `free(ptr, n)`. `malloc`'s `free`
+/// needs no size, but the interface carries one because the trace reports it and
+/// a future non-`malloc` allocator would need it.
+fn emit_free_shim(out: &mut String) {
+    writeln!(out, "\nfunction ${FREE_SYMBOL}(l %p, l %n) {{").unwrap();
+    out.push_str("@start\n");
+    emit_size_adjust(out);
+    out.push_str("\tcall $free(l %p)\n");
+    writeln!(out, "\tcall ${TRACE_EVENT_SYMBOL}(l $freefmt, l %adj)").unwrap();
+    out.push_str("\tret\n");
+    out.push_str("}\n");
+}
+
+/// Emit the failed-allocation trap (R9): the out-of-bounds trap's shape, down to
+/// `exit(1)` rather than `abort`, so a test observes `Some(1)` instead of death
+/// by signal. It must not fall through, so the block ends in `hlt`.
+fn emit_oom_trap(out: &mut String) {
+    writeln!(out, "\nfunction ${OOM_TRAP_SYMBOL}(l %n) {{").unwrap();
+    out.push_str("@start\n");
+    out.push_str("\tcall $dprintf(w 2, l $oomfmt, l %n, ...)\n");
+    out.push_str("\tcall $exit(w 1)\n");
+    out.push_str("\thlt\n");
+    out.push_str("}\n");
+}
+
+/// Emit the allocation trace's gated print (R10): `getenv` per event, not cached,
+/// because caching would need a mutable global data symbol that has no precedent
+/// in the emitter, and this is test-only telemetry where the cost is irrelevant.
+/// An unset *or* empty value prints nothing, so a real program using `^` stays
+/// silent by default.
+fn emit_trace_event(out: &mut String) {
+    writeln!(out, "\nfunction ${TRACE_EVENT_SYMBOL}(l %fmt, l %n) {{").unwrap();
+    out.push_str("@start\n");
+    out.push_str("\t%e =l call $getenv(l $tracenv)\n");
+    out.push_str("\t%unset =w ceql %e, 0\n");
+    out.push_str("\tjnz %unset, @off, @set\n");
+    out.push_str("@set\n");
+    out.push_str("\t%c =w loadub %e\n");
+    out.push_str("\tjnz %c, @on, @off\n");
+    out.push_str("@on\n");
+    out.push_str("\tcall $printf(l %fmt, l %n, ...)\n");
+    out.push_str("\tret\n");
+    out.push_str("@off\n");
+    out.push_str("\tret\n");
+    out.push_str("}\n");
+}
+
 fn emit_instr(
     out: &mut String,
     instr: &Instr,
@@ -797,6 +910,9 @@ fn emit_instr(
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
             IrType::Spy => {
                 unreachable!("__spy is not a printable scalar; checker rejects it (R16)")
+            }
+            IrType::OwnedCell(_) => {
+                unreachable!("a cell is not a printable scalar; checker rejects it")
             }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
@@ -1872,6 +1988,131 @@ mod tests {
         assert!(
             il.contains("call $sooth_spy_drop(l "),
             "expected `drop` to call the destructor: {il}"
+        );
+    }
+
+    /// The text of the emitted `function` whose header line starts with `header`,
+    /// up to its closing brace. Every module carries several runtime helpers, and
+    /// more than one of them `exit(1)`s, so an assertion about one helper has to
+    /// be pinned to that helper rather than to the whole module.
+    fn func_body<'a>(il: &'a str, header: &str) -> &'a str {
+        let start = il
+            .find(header)
+            .unwrap_or_else(|| panic!("no `{header}` in IL: {il}"));
+        let rest = &il[start..];
+        let end = rest.find("\n}").expect("a function body ends in `}`");
+        &rest[..end]
+    }
+
+    #[test]
+    fn emitted_alloc_shim_has_null_trap() {
+        // Criterion 14 (R9), deliberately emitter-level: a runtime golden would
+        // need a memory limit low enough to fail a small `malloc` but high enough
+        // to exec, which does not exist reliably. The shim checks `malloc`'s
+        // return against NULL and branches to a trap that exits nonzero, so no
+        // NULL ever reaches a dereference. `exit(1)`, not `abort`, so a future
+        // test observes `Some(1)` rather than death by signal.
+        let il = emit_src(": main ( -- ) 5 . ;");
+        let alloc = func_body(&il, "function l $sooth_alloc(l %n)");
+        assert!(
+            alloc.contains("%isnull =w ceql %p, 0"),
+            "expected a NULL check on malloc's return: {alloc}"
+        );
+        assert!(
+            alloc.contains("jnz %isnull, @oom, @ok"),
+            "expected the NULL branch to reach the trap: {alloc}"
+        );
+        assert!(
+            alloc.contains("call $sooth_oom_trap(l %adj)"),
+            "expected the trap call: {alloc}"
+        );
+        let trap = func_body(&il, "function $sooth_oom_trap(l %n)");
+        assert!(
+            trap.contains("$dprintf(w 2, l $oomfmt"),
+            "the trap message goes to stderr: {trap}"
+        );
+        assert!(
+            trap.contains("call $exit(w 1)"),
+            "the trap exits nonzero rather than aborting: {trap}"
+        );
+        assert!(
+            trap.contains("hlt"),
+            "the trap must not fall through: {trap}"
+        );
+    }
+
+    #[test]
+    fn emitted_alloc_trace_is_gated_on_the_env_var() {
+        // R10: the trace is gated on `SOOTH_TRACE_ALLOC`, read per event (caching
+        // it would need a mutable global, which has no precedent here), with an
+        // empty value counting as unset so a real program using `^` stays silent.
+        // It prints through `printf` to stdout, never `dprintf` to stderr: one
+        // stdio stream is what makes program order equal transcript order.
+        let il = emit_src(": main ( -- ) 5 . ;");
+        assert!(
+            il.contains("data $tracenv = { b \"SOOTH_TRACE_ALLOC\", b 0 }"),
+            "expected the gating variable's name: {il}"
+        );
+        let trace = func_body(&il, "function $sooth_trace_event(l %fmt, l %n)");
+        assert!(
+            trace.contains("call $getenv(l $tracenv)"),
+            "expected a per-event `getenv`: {trace}"
+        );
+        assert!(
+            trace.contains("jnz %unset, @off, @set"),
+            "an unset variable prints nothing: {trace}"
+        );
+        assert!(
+            trace.contains("%c =w loadub %e") && trace.contains("jnz %c, @on, @off"),
+            "an empty value prints nothing either: {trace}"
+        );
+        assert!(
+            trace.contains("call $printf(l %fmt, l %n, ...)"),
+            "the trace prints one line per event to stdout: {trace}"
+        );
+        assert!(
+            !trace.contains("dprintf"),
+            "the trace must not go to stderr: {trace}"
+        );
+    }
+
+    #[test]
+    fn emitted_alloc_and_free_shims_agree_on_the_adjusted_size() {
+        // R6/R7/R15: one global allocator behind `allocate(n)`/`free(ptr, n)`,
+        // emitted as a shim over libc (no user-facing FFI). Both halves apply
+        // `max(n, 1)` as `n + (n == 0)`, so `free` reports the size `allocate`
+        // requested and a zero-sized payload never reaches `malloc(0)`, which may
+        // return NULL and would fire the trap on a correct program. Each traces
+        // its own event, giving the transcript its `alloc`/`free` lines.
+        let il = emit_src(": main ( -- ) 5 . ;");
+        assert!(
+            il.contains("data $allocfmt = { b \"alloc %ld\\n\", b 0 }")
+                && il.contains("data $freefmt = { b \"free %ld\\n\", b 0 }"),
+            "expected one size-only line format per event: {il}"
+        );
+        let alloc = func_body(&il, "function l $sooth_alloc(l %n)");
+        let free = func_body(&il, "function $sooth_free(l %p, l %n)");
+        for body in [alloc, free] {
+            assert!(
+                body.contains("%zero =l ceql %n, 0") && body.contains("%adj =l add %n, %zero"),
+                "expected the max(n, 1) adjustment: {body}"
+            );
+        }
+        assert!(
+            alloc.contains("call $malloc(l %adj)") && alloc.contains("ret %p"),
+            "expected a malloc of the adjusted size: {alloc}"
+        );
+        assert!(
+            alloc.contains("call $sooth_trace_event(l $allocfmt, l %adj)"),
+            "expected the alloc event: {alloc}"
+        );
+        assert!(
+            free.contains("call $free(l %p)"),
+            "expected the libc free: {free}"
+        );
+        assert!(
+            free.contains("call $sooth_trace_event(l $freefmt, l %adj)"),
+            "expected the free event: {free}"
         );
     }
 
