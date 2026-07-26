@@ -993,7 +993,7 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, Arrays, Cells, Enums, IrModule, Structs};
+    use crate::ir::{lower, lower_line, Arrays, Cells, Enums, IrModule, Registries, Structs};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
@@ -1022,10 +1022,12 @@ mod tests {
             &entry_types,
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -1171,10 +1173,12 @@ mod tests {
             &[f64_ty],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         let il = emit(&IrModule {
             funcs: vec![func],

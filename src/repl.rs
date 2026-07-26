@@ -446,17 +446,15 @@ impl Session {
         let ir_lower_env = ir_arity_env(&env);
         let (structs, enums, arrays, cells) =
             ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
+        let regs = ir::Registries {
+            structs: &structs,
+            enums: &enums,
+            arrays: &arrays,
+            cells: &cells,
+        };
         let funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            let mut func = ir::lower_word(
-                &word,
-                &ir_lower_env,
-                &resolve,
-                &structs,
-                &enums,
-                &arrays,
-                &cells,
-            );
+            let mut func = ir::lower_word(&word, &ir_lower_env, &resolve, regs);
             func.name = symbol.clone();
             let mut funcs = vec![func];
             // R12: this module must carry its own struct/enum destructors
@@ -467,10 +465,7 @@ impl Session {
             funcs.extend(ir::synthesize_aggregate_destructors(
                 &ir_lower_env,
                 &resolve,
-                &structs,
-                &enums,
-                &arrays,
-                &cells,
+                regs,
             ));
             funcs
         };
@@ -569,6 +564,12 @@ impl Session {
         let seq = self.seq;
         let (structs, enums, arrays, cells) =
             ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
+        let regs = ir::Registries {
+            structs: &structs,
+            enums: &enums,
+            arrays: &arrays,
+            cells: &cells,
+        };
         let (func, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
             let (func, m, out_bytes) = ir::lower_line(
@@ -578,22 +579,13 @@ impl Session {
                 &self.types,
                 &ir_lower_env,
                 &resolve,
-                &structs,
-                &enums,
-                &arrays,
-                &cells,
+                regs,
             );
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`
             // with an undefined `sooth_struct_drop_N`/`sooth_enum_drop_N`.
-            let aggregate_destructors = ir::synthesize_aggregate_destructors(
-                &ir_lower_env,
-                &resolve,
-                &structs,
-                &enums,
-                &arrays,
-                &cells,
-            );
+            let aggregate_destructors =
+                ir::synthesize_aggregate_destructors(&ir_lower_env, &resolve, regs);
             (func, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the

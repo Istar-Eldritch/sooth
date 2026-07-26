@@ -395,6 +395,18 @@ pub struct Cells {
     pub payload: Vec<IrType>,
 }
 
+/// The four registries bundled as one `Copy` handle, so lowering and
+/// destructor synthesis pass one argument instead of four (mirrors the
+/// backend's `Layouts`). The registries stay logically separate types; this
+/// only co-locates references to them.
+#[derive(Debug, Clone, Copy)]
+pub struct Registries<'a> {
+    pub structs: &'a Structs,
+    pub enums: &'a Enums,
+    pub arrays: &'a Arrays,
+    pub cells: &'a Cells,
+}
+
 /// Build the struct and enum layout + generated-word registries from a
 /// program's declarations (the build path passes `&module.structs` /
 /// `&module.enums`, the REPL passes its accumulated registries). The layout
@@ -817,19 +829,23 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         })
         .collect();
     let resolve = |name: &str| name.to_string();
+    let regs = Registries {
+        structs: &structs,
+        enums: &enums,
+        arrays: &arrays,
+        cells: &cells,
+    };
 
     let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve, &structs, &enums, &arrays, &cells))
+        .map(|w| lower_word(w, &env, &resolve, regs))
         .collect();
 
     // R12: append a synthesized destructor for every linear struct/enum type
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
-    funcs.extend(synthesize_aggregate_destructors(
-        &env, &resolve, &structs, &enums, &arrays, &cells,
-    ));
+    funcs.extend(synthesize_aggregate_destructors(&env, &resolve, regs));
 
     Ok(IrModule {
         funcs,
@@ -846,55 +862,32 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-    structs: &Structs,
-    enums: &Enums,
-    arrays: &Arrays,
-    cells: &Cells,
+    regs: Registries,
 ) -> Vec<IrFunc> {
+    let Registries {
+        structs,
+        enums,
+        cells,
+        ..
+    } = regs;
     let struct_destructors = structs
         .layouts
         .iter()
         .enumerate()
         .filter(|(_, layout)| layout.is_linear)
         .map(|(idx, _)| {
-            synthesize_struct_destructor(
-                StructId::from_index(idx),
-                env,
-                resolve,
-                structs,
-                enums,
-                arrays,
-                cells,
-            )
+            synthesize_struct_destructor(StructId::from_index(idx), env, resolve, regs)
         });
     let enum_destructors = enums
         .layouts
         .iter()
         .enumerate()
         .filter(|(_, layout)| layout.is_linear)
-        .map(|(idx, _)| {
-            synthesize_enum_destructor(
-                EnumId::from_index(idx),
-                env,
-                resolve,
-                structs,
-                enums,
-                arrays,
-                cells,
-            )
-        });
+        .map(|(idx, _)| synthesize_enum_destructor(EnumId::from_index(idx), env, resolve, regs));
     // Every cell gets a destructor, not just those whose filter would
     // require a linear payload: `drop` on any cell must free it.
     let cell_destructors = cells.payload.iter().enumerate().map(|(idx, _)| {
-        synthesize_cell_destructor(
-            OwnedCellId::from_index(idx),
-            env,
-            resolve,
-            structs,
-            enums,
-            arrays,
-            cells,
-        )
+        synthesize_cell_destructor(OwnedCellId::from_index(idx), env, resolve, regs)
     });
     struct_destructors
         .chain(enum_destructors)
@@ -911,12 +904,15 @@ fn synthesize_struct_destructor(
     id: StructId,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-    structs: &Structs,
-    enums: &Enums,
-    arrays: &Arrays,
-    cells: &Cells,
+    regs: Registries,
 ) -> IrFunc {
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
+    let Registries {
+        structs,
+        enums,
+        arrays,
+        ..
+    } = regs;
+    let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(IrType::Struct(id));
     let fields = structs.layouts[id.index()].fields.clone();
     for field in fields {
@@ -948,12 +944,15 @@ fn synthesize_enum_destructor(
     id: EnumId,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-    structs: &Structs,
-    enums: &Enums,
-    arrays: &Arrays,
-    cells: &Cells,
+    regs: Registries,
 ) -> IrFunc {
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
+    let Registries {
+        structs,
+        enums,
+        arrays,
+        ..
+    } = regs;
+    let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(IrType::Enum(id));
     let payload_offset = enums.layouts[id.index()].payload_offset;
     let variant_ids = b.dispatch_on_tag(param, id);
@@ -989,12 +988,15 @@ fn synthesize_cell_destructor(
     id: OwnedCellId,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-    structs: &Structs,
-    enums: &Enums,
-    arrays: &Arrays,
-    cells: &Cells,
+    regs: Registries,
 ) -> IrFunc {
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
+    let Registries {
+        structs,
+        enums,
+        arrays,
+        cells,
+    } = regs;
+    let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(IrType::OwnedCell(id));
     let payload_ty = cells.payload[id.index()];
     if field_is_linear(payload_ty, structs, enums, arrays) {
@@ -1046,7 +1048,6 @@ fn synthesize_cell_destructor(
 /// (the number of buffer bytes the epilogue actually wrote), so the caller
 /// sizes its buffer from the same numbers the wrapper uses rather than from a
 /// separately-computed depth that could in principle diverge.
-#[allow(clippy::too_many_arguments)]
 pub fn lower_line(
     seq: u64,
     terms: &[Term],
@@ -1054,14 +1055,11 @@ pub fn lower_line(
     entry_types: &[Type],
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-    structs: &Structs,
-    enums: &Enums,
-    arrays: &Arrays,
-    cells: &Cells,
+    regs: Registries,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
-    let mut b = FuncBuilder::new(env, resolve, structs, enums, arrays, cells, String::new());
+    let mut b = FuncBuilder::new(env, resolve, regs, String::new());
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -1210,10 +1208,7 @@ pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
-    structs: &Structs,
-    enums: &Enums,
-    arrays: &Arrays,
-    cells: &Cells,
+    regs: Registries,
 ) -> IrFunc {
     let params: Vec<IrType> = word
         .effect
@@ -1223,15 +1218,7 @@ pub(crate) fn lower_word(
         .collect();
     let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
 
-    let mut b = FuncBuilder::new(
-        env,
-        resolve,
-        structs,
-        enums,
-        arrays,
-        cells,
-        word.name.clone(),
-    );
+    let mut b = FuncBuilder::new(env, resolve, regs, word.name.clone());
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -1341,12 +1328,15 @@ impl<'a> FuncBuilder<'a> {
     fn new(
         env: &'a HashMap<String, Arity>,
         resolve: Resolver<'a>,
-        structs: &'a Structs,
-        enums: &'a Enums,
-        arrays: &'a Arrays,
-        cells: &'a Cells,
+        regs: Registries<'a>,
         cur_word_name: String,
     ) -> Self {
+        let Registries {
+            structs,
+            enums,
+            arrays,
+            cells,
+        } = regs;
         FuncBuilder {
             env,
             resolve,
@@ -2509,10 +2499,12 @@ mod tests {
         let b = FuncBuilder::new(
             &env,
             resolve,
-            &structs,
-            &enums,
-            &arrays,
-            &cells,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+            },
             "loop-word".to_string(),
         );
         assert_eq!(b.cur_word_name, "loop-word");
@@ -2602,10 +2594,12 @@ mod tests {
             &[Type::I64, Type::I64],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -2624,10 +2618,12 @@ mod tests {
             &[],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -2888,10 +2884,12 @@ mod tests {
             &[vec2],
             &env,
             &resolve,
-            &s,
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &s,
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
@@ -2916,10 +2914,12 @@ mod tests {
             &[Type::I64, Type::I64],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -2954,10 +2954,12 @@ mod tests {
             &[u8_ty],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -2987,10 +2989,12 @@ mod tests {
             &[],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -3069,10 +3073,12 @@ mod tests {
             &[f64_ty],
             &env,
             &resolve,
-            &Structs::default(),
-            &Enums::default(),
-            &Arrays::default(),
-            &Cells::default(),
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+            },
         );
         let loaded = func
             .blocks
@@ -3324,10 +3330,12 @@ mod tests {
         let mut b = FuncBuilder::new(
             &env,
             &resolve,
-            &structs,
-            &enums,
-            &arrays,
-            &cells,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+            },
             "w".to_string(),
         );
         let x = b.fresh_value(u8);
@@ -3650,10 +3658,12 @@ mod tests {
             &[shape],
             &env,
             &resolve,
-            &structs,
-            &enums,
-            &arrays,
-            &cells,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+            },
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);
