@@ -93,11 +93,16 @@ resource: a heap cell whose destructor actually frees memory.
 ### Phase 2 — The `Owned[T]` type: interning, classification, surface spelling
 
 - `Type::Owned` + an owned-cell registry with dedup-by-shape interning (R1, R2).
-- `Owned[T]` in type position through lexer/parser/ast (R12). Check whether `Name[` needs a
-  targeted lexing rule the way Slice 1's `S|>fi` did, and re-verify existing examples.
+- `Owned[T]` in type position through parser/ast (R12). **No lexer change is needed, and
+  this was verified against the current lexer, not assumed**: `[` is already a hard
+  delimiter (@lexer.rs:22, emitted at :84), so `Owned[i64]` scans as `Word("Owned")`,
+  `LBracket`, `Word("i64")`, `RBracket`, making the bracket purely a parser concern; and
+  Slice 1's peek glue (@lexer.rs:96-111) joins `|` into the current word when a word char
+  precedes it and `>` follows, so `Owned|>` already scans as a single word. Re-verify
+  existing examples regardless.
 - `is_copy` returns `false` for `Owned` unconditionally (R4); transitive propagation through
   structs/enums follows from Slice 1 at no extra cost.
-- **Changes**: `src/lexer.rs`, `src/parser.rs`, `src/ast.rs`, `src/check.rs`, `tests/phase0.rs`.
+- **Changes**: `src/parser.rs`, `src/ast.rs`, `src/check.rs`, `tests/phase0.rs`.
 - **Exit**: criteria 3 and 9 pass; green; no regression.
 
 ### Phase 3 — Allocation: the shim, the counter, the OOM trap  *(hard)*
@@ -163,7 +168,7 @@ from Slice 1 and binding here:
 ```json
 {"phases":[
   {"phase":1,"focus":"Prerequisite refactor with zero behaviour change: fold the separate structs/enums/arrays registry parameters into a single Registry borrow threaded through the checker and lowerer. is_copy is already a 4-parameter signature across ~15 call sites and adding an Owned registry would make it five; consolidating once must leave the signature smaller than it is today.","changes":["src/check.rs","src/ir.rs","src/repl.rs","src/ast.rs"],"tests":["src/check.rs","src/ir.rs"],"exit":"zero behaviour diff; all 588 existing tests pass unchanged; fmt/clippy clean"},
-  {"phase":2,"focus":"The Owned[T] type as a compiler-known type constructor (NOT generics, no type variables): a Type::Owned variant plus an owned-cell registry with dedup-by-shape interning mirroring ArrayDecl/intern_array_type; the Owned[T] spelling in type position through lexer/parser/ast, checking whether Name[ needs a targeted lexing rule as S|>fi did; and is_copy returning false for Owned unconditionally so linearity propagates transitively through structs and enums via Slice 1's existing rules.","changes":["src/lexer.rs","src/parser.rs","src/ast.rs","src/check.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 3 and 9 (classification half) pass; green; no regression"},
+  {"phase":2,"focus":"The Owned[T] type as a compiler-known type constructor (NOT generics, no type variables): a Type::Owned variant plus an owned-cell registry with dedup-by-shape interning mirroring ArrayDecl/intern_array_type; the Owned[T] spelling in type position through parser/ast, which needs NO lexer change (verified: '[' is already a hard delimiter so Owned[i64] lexes as Word/LBracket/Word/RBracket, and Slice 1's peek glue already makes Owned|> scan as one word); and is_copy returning false for Owned unconditionally so linearity propagates transitively through structs and enums via Slice 1's existing rules.","changes":["src/parser.rs","src/ast.rs","src/check.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 3 and 9 (classification half) pass; green; no regression"},
   {"phase":3,"focus":"Allocation machinery: emit the allocate/free shim wrapping malloc/free as a compiler-emitted helper following the drop-spy printf precedent (no user-facing FFI), the test-only alloc/free counter that makes disposal golden-observable without changing stdout for existing goldens, and the trap-and-abort path when malloc returns NULL. Map the cell's IrType to pointer width while keeping Ptr[T] opaque and never assumed to be u64.","difficulty":"hard","changes":["src/backend/qbe.rs","src/ir.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criterion 1 passes asserting exact counts; the OOM trap path exists and is exercised as far as is non-flaky; green; no regression"},
   {"phase":4,"focus":"The three access words mirroring the struct-word family: Owned as ( T -- Owned[T] ), Owned> as ( Owned[T] -- T ) which frees the cell, and Owned|> as a non-consuming ( Owned[T] -- Owned[T] T ) peek restricted to Copy payloads, with a compile error naming the type when the payload is linear. Effects are computed ad hoc at the call site from the concrete payload type.","changes":["src/check.rs","src/ir.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 5, 6, 7, 10 pass; green; no regression"},
   {"phase":5,"focus":"Drop glue: an emit_drop arm for the cell plus a synthesized per-type destructor that drops a linear payload FIRST and then frees the cell, an ordering that is observable and therefore contractual. drop stays a Call to a per-type symbol with no new Instr or Terminator variant.","changes":["src/ir.rs","src/backend/qbe.rs","tests/phase0.rs"],"tests":["tests/phase0.rs"],"exit":"criteria 2, 4, 8 pass with criterion 8's ordering pinned by interleaved observable output; green; no regression"},
