@@ -373,7 +373,14 @@ impl Session {
         name: String,
         span: Span,
     ) -> Result<(), String> {
-        let variants = parser::enum_variant_names(tokens)
+        let variant_names = parser::enum_variant_names(tokens);
+        if let Some((vname, vspan)) = variant_names
+            .iter()
+            .find(|(n, _)| crate::ast::is_reserved_caret_name(n))
+        {
+            return Err(parser::reserved_caret_name_error("variant", vname, *vspan));
+        }
+        let variants = variant_names
             .into_iter()
             .map(|(vname, vspan)| VariantDecl {
                 name: vname.clone(),
@@ -797,5 +804,18 @@ mod tests {
         assert_eq!(next_generation(env.get("sq")), 0);
         env.insert("sq".to_string(), entry(0));
         assert_eq!(next_generation(env.get("sq")), 1);
+    }
+
+    #[test]
+    fn eval_line_reserved_caret_variant_name_is_error() {
+        // R12a at REPL scope: a variant name is a word-generating declaration
+        // site too, mirroring the module-parser pre-pass check.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("type: E | ^ x i64 | B y i64 ;", &mut out)
+            .unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
     }
 }

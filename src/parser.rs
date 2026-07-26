@@ -64,7 +64,13 @@ fn prepass_type_decls(
                         return Err(reserved_caret_name_error("type", name, *span));
                     }
                     let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
-                        TypeDeclKind::Enum(scan_variant_names(tokens, i + 2))
+                        let variants = scan_variant_names(tokens, i + 2);
+                        if let Some((vname, vspan)) =
+                            variants.iter().find(|(n, _)| is_reserved_caret_name(n))
+                        {
+                            return Err(reserved_caret_name_error("variant", vname, *vspan));
+                        }
+                        TypeDeclKind::Enum(variants)
                     } else {
                         TypeDeclKind::Struct
                     };
@@ -523,8 +529,17 @@ impl<'t> Parser<'t> {
         }
         // An owning-cell type is likewise nameless (R12a reserves every
         // `^`-led word from local/slot-name position), so it too is
-        // recognised before the name-then-optional-`:type` read.
+        // recognised before the name-then-optional-`:type` read. But a
+        // `^`-led word immediately followed by `:` is the *name* half of a
+        // `name : type` slot (R7), not a bare owning-cell type expression;
+        // report the reserved-name error here rather than falling through to
+        // `parse_type_expr`, which would try to resolve the `:` itself as an
+        // unknown type name.
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
+            if matches!(self.tokens.get(self.pos + 1), Some((Token::Word(w), _)) if w == ":") {
+                let (name, span) = self.expect_word_any_spanned()?;
+                return Err(reserved_caret_name_error("slot", &name, span));
+            }
             let ty = self.parse_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
         }
@@ -567,17 +582,35 @@ impl<'t> Parser<'t> {
     /// remainder as a type name directly. Each stripped `^` wraps the result
     /// in one more interned owning-cell layer, innermost first, so `^^i64` is
     /// two layers over `i64` and `^[u8 4]` is one layer over `[u8 4]`. A bare
-    /// `^`-run with nothing following (remainder empty and no further type
-    /// expression, e.g. end of input or a delimiter) surfaces as the ordinary
-    /// located "expected a word"/`[`-vs-word error from the recursive call.
+    /// `^`-run followed by `--` (the stack-effect separator) is a dedicated
+    /// located error naming the `^`-run itself; any other bare `^`-run with
+    /// nothing following surfaces as the ordinary located "expected a
+    /// word"/`[`-vs-word error from the recursive call.
     fn parse_owning_cell_type_expr(&mut self) -> Result<Type, String> {
         let (word, span) = self.expect_word_any_spanned()?;
         let run_len = word.chars().take_while(|&c| c == '^').count();
         let remainder = &word[run_len..];
         let mut inner = if remainder.is_empty() {
+            // A bare `^`-run followed by `--` has no following type
+            // expression to recurse into, and `--` is the stack-effect
+            // separator, never a type name; without this check it falls
+            // through to `resolve_type` and blames `--` as an unknown type.
+            if matches!(self.peek(), Some((Token::Word(w), _)) if w == "--") {
+                return Err(format!(
+                    "error: owning-cell type `{word}` has no payload type at line {}, col {} (write `{word}T` for some type T)",
+                    span.line, span.col
+                ));
+            }
             self.parse_type_expr()?
         } else {
-            self.resolve_type(remainder, span)?
+            // `span` names the whole word (e.g. `^Nope` starts at the `^`);
+            // point at the remainder's own column so the error names and
+            // locates the same text.
+            let remainder_span = Span {
+                line: span.line,
+                col: span.col + run_len as u32,
+            };
+            self.resolve_type(remainder, remainder_span)?
         };
         for _ in 0..run_len {
             inner = crate::ast::intern_owned_cell_type(self.owned_cells, inner);
@@ -1613,14 +1646,37 @@ mod tests {
 
     #[test]
     fn parse_bare_caret_with_no_payload_is_error() {
-        let result = parse_src(": w ( ^ -- ) ;");
-        assert!(result.is_err());
+        let err = parse_src(": w ( ^ -- ) ;").unwrap_err();
+        assert!(
+            err.contains("no payload type") && err.contains('^'),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_bare_double_caret_with_no_payload_is_error() {
+        let err = parse_src(": w ( ^^ -- ) ;").unwrap_err();
+        assert!(
+            err.contains("no payload type") && err.contains("^^"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
     fn parse_bare_caret_field_with_no_payload_is_error() {
-        let result = parse_src("type: Bad b ^ ;");
-        assert!(result.is_err());
+        let err = parse_src("type: Bad b ^ ;").unwrap_err();
+        assert!(err.contains("expected a word"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_owning_cell_unknown_payload_type_names_remainder_not_whole_word() {
+        // The `^` sits at col 7, `Nope` at col 8; the error must name and
+        // locate the same text rather than blaming `Nope` at the `^`'s span.
+        let err = parse_src(": w ( ^Nope -- ) ;").unwrap_err();
+        assert!(
+            err.contains("unknown type `Nope`") && err.contains("col 8"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
@@ -1649,6 +1705,26 @@ mod tests {
         let err = parse_src(": ^|> ( -- ) ;").unwrap_err();
         assert!(err.contains("reserved"), "unexpected message: {err}");
         assert!(err.contains("^|>"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_variant_name_is_error() {
+        // A variant name is a word-generating declaration site too: an enum
+        // variant named `^` would otherwise become a callable constructor
+        // colliding exactly with the cell's own `^` spelling (R12a).
+        let err = parse_src("type: E | ^ x i64 | B y i64 ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn reserved_caret_named_slot_is_error() {
+        // The name-then-`:type` slot form is a local binding too; without
+        // this check `^` intercepted as a bare type expression and the `:`
+        // surfaced as an unrelated "unknown type" error.
+        let err = parse_src(": w ( ^ : i64 -- ) drop ;").unwrap_err();
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+        assert!(err.contains('^'), "unexpected message: {err}");
     }
 
     #[test]
