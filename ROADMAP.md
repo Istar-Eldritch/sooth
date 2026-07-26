@@ -68,7 +68,17 @@ destructure-whole struct/enum aggregates (`S>fi` drop-the-rest, the non-consumin
 `S|>fi` Copy-field peek, `S<fi` drop-on-overwrite) with synthesized recursive/
 tag-dispatched drop glue, a located error for a linear value across a Slice 6
 back-edge, and REPL `:quit` disposing residual linear values LIFO.
-**Next action: Phase 3 Slice 2** (heap + owning pointer + allocator). Not yet locked.
+**Phase 3 Slice 2 (heap + owning pointer + allocator) is complete**: `^T`, a compiler-known
+single heap cell, always linear, propagating linearity transitively into structs and enums and
+able to hold a linear payload (dropped before the cell is freed). `^` constructs, `^>` unwraps
+and frees, `^|>` peeks a Copy payload; unwrap materialises the payload before releasing the
+cell and peek copies out rather than aliasing, so neither hands a freed pointer to the stack.
+A single global allocator sits behind a compiler-emitted `malloc`/`free` shim with an OOM trap
+that exits non-zero and a `max(size,1)` adjustment. Disposal is observable through an
+allocation trace gated on `SOOTH_TRACE_ALLOC`, on stdout so program order equals transcript
+order, silent by default.
+**Next action: Phase 3 Slice 3** (recursive/heap data + optional / non-null pointers +
+`isize`). Not yet locked.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -314,34 +324,36 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    glue. Deferred: loop-carried linear values across the Slice 6 back-edge (a later slice).
    Dogfood: a deliberate second-use is a compile error, a forgotten value is a compile
    error, and a destructor runs exactly once at its explicit `drop`.
-2. **Heap + owning pointer + allocator.** The first linear type with a real destructor
-   (`free`), building on slice 1's drop machinery. Locked decisions: the heap primitive is
-   **`Owned[T]`, a single heap cell** (Box-shaped, not a sized buffer), because slice 3's
+2. **Heap + owning pointer + allocator.** ✅ done. The first linear type with a real
+   destructor, spelled `^T`: a single heap cell, not a sized buffer, because slice 3's
    recursive data needs the *indirection* and a growable buffer wants Phase 6's `alloc`
-   layer; a fixed-capacity heap buffer then composes for free as `Owned[[u8 N]]`, with the
-   size in the type. `Owned[T]` is a **compiler-known type constructor, not generics**: one
-   interned entry per concrete payload, builtin words checked ad hoc at the call site,
-   exactly as `[T N]` arrays already work (there are no type variables in the type system,
-   and Phase 4 still owns adding them). **Tripwire**: `Owned` is the *second* such ad-hoc
-   type constructor; if slice 3 wants a third, that is the signal the special-casing has
-   become the mechanism and Phase 4's generics should subsume all of them rather than sit
-   alongside. Allocation is a **single global allocator behind an interface in `core`**
-   (`allocate(n)` / `free(ptr, n)`), deliberately not parameterized per value: a swappable
-   global (Rust `#[global_allocator]`-style) is cheap to retrofit later because it changes
-   no value's representation, whereas per-value allocators change all of them. Access
-   words mirror slice 1's struct words (consuming unwrap, non-consuming Copy-only peek), so
-   no new access idiom is invented and second-class refs stay deferred to slice 4.
-   **OOM traps and aborts** for now, reusing the bounds-check trap pattern, since optional
-   pointers (slice 3) and Result (Phase 5) do not exist yet. **Testability**: `free` is
-   silent where the drop-spy printed, so this slice needs the same trick one level down, a
-   **test-only alloc/free counter** in the runtime shim, letting goldens assert the counts
-   balance and catch both leaks and double-frees. Dogfood: an owned heap cell, freed by an
-   explicit `drop` at end of scope.
-   **Rework expected**: the allocator arrives as a **compiler-emitted shim** wrapping
-   `malloc`/`free` (the same way slice 1's backend emits the drop-spy's `printf` helper),
-   because the language has no user-facing FFI yet. Once Phase 6 lands FFI-to-libc via safe
-   wrappers, this shim should be re-expressed as ordinary bound foreign words and stop being
-   a backend special case.
+   layer. A fixed-capacity heap buffer composes as `^[u8 N]`, size in the type. `^T` is a
+   **compiler-known type constructor, not generics** (one interned entry per concrete
+   payload, builtin words checked ad hoc at the call site, exactly as `[T N]` arrays work).
+   **Tripwire**: `^` is the *second* such ad-hoc type constructor; a third is the signal that
+   the special-casing has become the mechanism and Phase 4's generics should subsume all of
+   them. Allocation is a single global allocator, deliberately not parameterized per value,
+   since a swappable global is cheap to retrofit later while per-value allocators change every
+   value's representation. See [the brief](./docs/phase3-slice2-brief.md) and
+   [the spec](./docs/phase3-slice2-spec.md) for the full decision record.
+   **Known limitation, and where it will first hurt**: because a cell is linear and slice 1
+   rejects linear array elements, there is **no collection of resources** in this slice, and
+   the restriction attaches to the array type itself, so nesting does not launder it
+   (`^[^i64 4]` is rejected too). Lifting it needs an element-wise drop loop in the
+   synthesized destructor. First real pressure is slice 6, if a set of file handles is wanted
+   rather than one at a time.
+   **Rework expected, two items.** The allocator is a **compiler-emitted shim** wrapping
+   `malloc`/`free` (as slice 1's backend emits the drop-spy's `printf` helper), because there
+   is no user-facing FFI yet; once Phase 6 lands FFI-to-libc, it should become ordinary bound
+   foreign words rather than a backend special case. And the trace's gate is a `getenv` **per
+   allocation and per free**, so it sits on the permanent allocator path in release builds,
+   not merely a test path; caching it needs a mutable global, which has no precedent in the
+   emitter.
+   **Deferred cleanup now overdue**: threading a fourth registry took
+   `#[allow(clippy::too_many_arguments)]` from 3 to 14 sites, all passing the same
+   `structs`/`enums`/`arrays`/`cells` bundle with nothing consuming a subset. The IR backend
+   already has the pattern (a `Copy` `Layouts` handle). Bundling removes 11 suppressions and
+   ~60 lines of pure threading; doing it before slice 3 avoids a fifteenth.
 3. **Recursive/heap data + optional / non-null pointers + `isize`.** The dissolved Slice 8
    content, now with a home: recursive enums/structs need the heap indirection slice 2
    provides. **Revisit slice 2's OOM-traps-and-aborts decision here**: this is the slice
