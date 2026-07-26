@@ -508,13 +508,20 @@ struct RecursionState {
 }
 
 /// The frontend `Type` of a field, mapped to a graph node (a scalar has no
-/// edge).
+/// edge). By-value containment is the only edge kind this graph models: a
+/// struct field, enum variant field or array element of type `T` makes `T`
+/// part of the enclosing type's size, so a cycle through any of them is
+/// infinite size. `OwnedCell` is excluded **deliberately, not by
+/// fall-through** (R3): a `^T` field is a heap pointer, not an inline copy of
+/// `T`, so it can close a cycle without making the type infinite, and the
+/// recursion rule is exactly "every cycle passes through at least one `^`".
 fn type_node(ty: &Type) -> Option<TypeNode> {
     match ty {
         Type::Struct(id, _) => Some(TypeNode::Struct(id.index())),
         Type::Enum(id, _) => Some(TypeNode::Enum(id.index())),
         Type::Array(id, _) => Some(TypeNode::Array(id.index())),
-        _ => None,
+        Type::OwnedCell(_, _) => None,
+        Type::Int(_) | Type::Float(_) | Type::Bool | Type::Usize | Type::Isize | Type::Spy => None,
     }
 }
 
@@ -3337,6 +3344,49 @@ mod tests {
         assert!(err.contains("recursive enum"), "unexpected message: {err}");
         assert!(err.contains('A'), "unexpected message: {err}");
         assert!(err.contains('B'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_recursion_by_value_self_cycle_is_error() {
+        // R3/R7: a struct field that is literally the enclosing type (no `^`
+        // anywhere on the cycle) is still rejected, and the diagnostic keeps
+        // its existing unbackticked, unlocated shape (R7's carve-out).
+        let err = check_src("type: Bad next Bad ;").unwrap_err();
+        assert!(
+            err.contains("recursive struct"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("Bad -> Bad"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_recursion_by_value_mutual_cycle_is_error() {
+        // R3/R7: a mutual by-value cycle with no `^` anywhere names the full
+        // path A -> B -> A, the genuinely uncovered case (criterion 3).
+        let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
+        assert!(
+            err.contains("recursive struct"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("A -> B -> A"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_recursion_cell_cycle_in_struct_field_is_ok() {
+        // R3/R4: a `^` edge through a struct field is legal, not just through
+        // an enum variant payload -- the rule is about size finiteness, not
+        // idiom.
+        check_src("type: Node v i64 next ^Node ;").unwrap();
+    }
+
+    #[test]
+    fn check_recursion_array_element_is_a_value_edge() {
+        // R6: an array element stays a by-value edge even when the array is
+        // itself reached behind a `^`; only the cell edge is cut, not
+        // everything downstream of one.
+        let err = check_src("type: Node kids [Node 4] ;").unwrap_err();
+        assert!(err.contains("recursive"), "unexpected message: {err}");
+        assert!(err.contains("Node"), "should name the cycle: {err}");
     }
 
     #[test]
