@@ -70,9 +70,10 @@ tag-dispatched drop glue, a located error for a linear value across a Slice 6
 back-edge, and REPL `:quit` disposing residual linear values LIFO.
 **Phase 3 Slice 2 (heap + owning pointer + allocator) is complete**: `^T`, a compiler-known
 single heap cell, always linear, propagating linearity transitively into structs and enums and
-able to hold a linear payload (the cell is freed before the payload is dropped). `^` constructs, `^>` unwraps
-and frees, `^|>` peeks a Copy payload; unwrap materialises the payload before releasing the
-cell and peek copies out rather than aliasing, so neither hands a freed pointer to the stack.
+able to hold a linear payload (the cell is freed before the payload is dropped). `^`
+constructs, `^>` unwraps and frees, `^|>` peeks a Copy payload; unwrap materialises the
+payload before releasing the cell and peek copies out rather than aliasing, so neither
+hands a freed pointer to the stack.
 A single global allocator sits behind a compiler-emitted `malloc`/`free` shim with an OOM trap
 that exits non-zero and a `max(size,1)` adjustment. Disposal is observable through an
 allocation trace gated on `SOOTH_TRACE_ALLOC`, on stdout so program order equals transcript
