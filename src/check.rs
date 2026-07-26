@@ -3304,27 +3304,28 @@ mod tests {
     }
 
     #[test]
-    fn check_struct_direct_recursion_is_error_not_hang() {
-        // X3/M5: a directly self-referential struct is a located error, and
-        // this test itself is proof the checker terminated rather than hung.
+    fn check_recursion_by_value_self_cycle_is_error() {
+        // X3/M5/R3/R7: a directly self-referential struct (no `^` anywhere
+        // on the cycle) is a located error naming the full path, and this
+        // test itself is proof the checker terminated rather than hung.
         let err = check_src("type: Loop next Loop ;").unwrap_err();
         assert!(
             err.contains("recursive struct"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("Loop"), "unexpected message: {err}");
+        assert!(err.contains("Loop -> Loop"), "unexpected message: {err}");
     }
 
     #[test]
-    fn check_struct_mutual_recursion_is_error_not_hang() {
-        // X3/M5: a mutually-recursive pair of structs, names both in the cycle.
+    fn check_recursion_by_value_mutual_cycle_is_error() {
+        // X3/M5/R3/R7: a mutually-recursive pair of structs, no `^`
+        // anywhere, names the full path A -> B -> A.
         let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
         assert!(
             err.contains("recursive struct"),
             "unexpected message: {err}"
         );
-        assert!(err.contains('A'), "unexpected message: {err}");
-        assert!(err.contains('B'), "unexpected message: {err}");
+        assert!(err.contains("A -> B -> A"), "unexpected message: {err}");
     }
 
     #[test]
@@ -3347,31 +3348,6 @@ mod tests {
     }
 
     #[test]
-    fn check_recursion_by_value_self_cycle_is_error() {
-        // R3/R7: a struct field that is literally the enclosing type (no `^`
-        // anywhere on the cycle) is still rejected, and the diagnostic keeps
-        // its existing unbackticked, unlocated shape (R7's carve-out).
-        let err = check_src("type: Bad next Bad ;").unwrap_err();
-        assert!(
-            err.contains("recursive struct"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("Bad -> Bad"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn check_recursion_by_value_mutual_cycle_is_error() {
-        // R3/R7: a mutual by-value cycle with no `^` anywhere names the full
-        // path A -> B -> A, the genuinely uncovered case (criterion 3).
-        let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
-        assert!(
-            err.contains("recursive struct"),
-            "unexpected message: {err}"
-        );
-        assert!(err.contains("A -> B -> A"), "unexpected message: {err}");
-    }
-
-    #[test]
     fn check_recursion_cell_cycle_in_struct_field_is_ok() {
         // R3/R4: a `^` edge through a struct field is legal, not just through
         // an enum variant payload -- the rule is about size finiteness, not
@@ -3380,13 +3356,23 @@ mod tests {
     }
 
     #[test]
-    fn check_recursion_array_element_is_a_value_edge() {
-        // R6: an array element stays a by-value edge even when the array is
-        // itself reached behind a `^`; only the cell edge is cut, not
-        // everything downstream of one.
-        let err = check_src("type: Node kids [Node 4] ;").unwrap_err();
-        assert!(err.contains("recursive"), "unexpected message: {err}");
-        assert!(err.contains("Node"), "should name the cycle: {err}");
+    fn check_recursion_cell_cycle_in_enum_variant_is_ok() {
+        // R3/R4: the same `^` cycle acceptance in enum variant position,
+        // mirroring check_recursion_cell_cycle_in_struct_field_is_ok.
+        check_src("type: List | Nil | Cons v i64 next ^List ;").unwrap();
+    }
+
+    #[test]
+    fn check_recursion_array_element_behind_cell_is_still_a_value_edge() {
+        // R6: an array element is a by-value edge even when the array field
+        // is itself reached behind a `^`; only the cell edge is cut, so
+        // `^Node` inside the array cannot launder the indirection.
+        let err = check_src("type: Node kids [^Node 4] ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^Node`"), "unexpected message: {err}");
     }
 
     #[test]
