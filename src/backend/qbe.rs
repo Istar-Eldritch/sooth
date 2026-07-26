@@ -67,17 +67,20 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     );
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
-    // array type then references an already-declared `:E`/`:arr_N`. Structs
-    // are the only aggregates whose QBE type spells its members, so they come
-    // last and rely on declaration order among themselves.
+    // array type then references an already-declared `:E`/`:arr_N`. Structs are
+    // the only aggregates whose QBE type spells its members, so a struct nested
+    // by value inside another must already be defined when QBE reaches the
+    // outer struct's `type` line (QBE resolves aggregate names in one pass,
+    // no forward references); `topo_sorted_structs` emits them in containment
+    // order rather than assuming source-declaration order already is one.
     for layout in &ir.enums {
         emit_enum_type(&mut out, layout);
     }
     for (idx, layout) in ir.arrays.iter().enumerate() {
         emit_array_type(&mut out, idx, layout);
     }
-    for layout in &ir.structs {
-        emit_struct_type(&mut out, layout, layouts);
+    for idx in topo_sorted_structs(&ir.structs) {
+        emit_struct_type(&mut out, &ir.structs[idx], layouts);
     }
     for func in &ir.funcs {
         out.push('\n');
@@ -106,7 +109,33 @@ fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: Layouts) {
     writeln!(out, "type :{} = {{ {} }}", layout.name, members.join(", ")).unwrap();
 }
 
-/// Emit an enum's QBE aggregate type as an alignment-annotated opaque byte
+/// Order struct indices (into `ir.structs`, keyed by `StructId`) so a struct
+/// nested by value inside another is always emitted before it: a DFS
+/// postorder over the by-value containment edges (`IrType::Struct` fields).
+/// `check.rs` rejects illegal by-value cycles at check time, so this graph is
+/// guaranteed acyclic and the recursion always terminates; `emitted` also
+/// guards the ordinary (non-cyclic) diamond case where two structs share a
+/// common nested struct, so that struct is emitted once, not once per user.
+fn topo_sorted_structs(structs: &[StructLayout]) -> Vec<usize> {
+    fn visit(idx: usize, structs: &[StructLayout], emitted: &mut [bool], order: &mut Vec<usize>) {
+        if emitted[idx] {
+            return;
+        }
+        emitted[idx] = true;
+        for field in &structs[idx].fields {
+            if let IrType::Struct(id) = field.ty {
+                visit(id.index(), structs, emitted, order);
+            }
+        }
+        order.push(idx);
+    }
+    let mut order = Vec::with_capacity(structs.len());
+    let mut emitted = vec![false; structs.len()];
+    for idx in 0..structs.len() {
+        visit(idx, structs, &mut emitted, &mut order);
+    }
+    order
+}
 /// blob `type :Name = align A { b N }` (R15): the payload has no single member
 /// layout across variants, so the aggregate is sized/aligned only, and every
 /// access is offset-driven (explicit `PtrOffset` + width-exact field ops +
@@ -1939,6 +1968,24 @@ mod tests {
         assert!(
             il.contains("type :Segment = { :Vec2, :Vec2 }"),
             "expected nested aggregate members: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_struct_declared_before_its_nested_member_still_orders_member_first() {
+        let il = emit_src("type: Outer v Inner ; type: Inner x i64 ;");
+        let inner_pos = il.find("type :Inner").expect("missing Inner decl");
+        let outer_pos = il.find("type :Outer").expect("missing Outer decl");
+        assert!(inner_pos < outer_pos, "Inner must be emitted before Outer");
+    }
+
+    #[test]
+    fn emit_struct_shared_nested_member_emits_it_exactly_once() {
+        let il = emit_src("type: Outer1 v Inner ; type: Outer2 v Inner ; type: Inner x i64 ;");
+        assert_eq!(
+            il.matches("type :Inner").count(),
+            1,
+            "Inner emitted more than once"
         );
     }
 
