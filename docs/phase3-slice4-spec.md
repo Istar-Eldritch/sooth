@@ -290,12 +290,13 @@ Verified by building and running programs, not by reading code.
   iteration's reads through the phi are reads of that slot, subject to R8's ordering
   invariant exactly as any other slot read is.
 - **R8 — The copyout-ordering invariant generalizes to every *aggregate* cell-unwrap
-  step in the path, independently.** Each distinct aggregate type (`Struct`/`Enum`)
-  visited within one loop iteration gets its own hoisted frame slot via `push_alloc`
-  (ir.rs:1480), reused every iteration for that type; the loop-carried phi's own type is
-  only one such slot when the path touches more than one aggregate type (the mutual A/B
-  case hoists two: one sized for `A`, one for `B`). Every read of data held in a given
-  slot — a byval projection out of it, a field drop, a tag dispatch on it, **or the
+  step in the path, independently.** Each *unwrap site* (not each distinct aggregate
+  type) gets its own hoisted frame slot via `push_alloc` (ir.rs:1480), reused every
+  iteration for that site; the mutual A/B case hoists two slots, one sized for `A` and
+  one for `B`, and a path that unwraps the same enum type at two different sites (e.g.
+  a `Branch` with two `Some` variants each unwrapping that enum) likewise hoists two
+  identical slots rather than sharing one — a constant-frame redundancy, not a
+  correctness issue. Every read of data held in a given slot — a byval projection out of it, a field drop, a tag dispatch on it, **or the
   header phi's own value when a path ends in a `Project` (R7) rather than an `Unwrap`,
   since the phi then holds an interior pointer into that slot** — must be emitted before
   the cell-unwrap step that overwrites that slot, checked independently per slot. **`^^Self` has exactly one such hazardous step, not two**: its *first*
@@ -470,6 +471,11 @@ Verified by building and running programs, not by reading code.
      cycles, `^^Self`, and mutually recursive types keep the recursive path and its
      depth limit," and the Next-action line that still lists worklist-based branching
      disposal as part of Slice 4 (superseded by the `6f22576` move to Phase 6).
+   - Both Slice 3 assertions phase 2 inverted (`indirect_recursion_shapes_remain_depth_limited`,
+     `mutually_recursive_types_dispose_on_recursive_path`) now have names that describe
+     the pre-inversion behaviour, not what they assert today. Rename both (and update
+     the criterion→test map and every other reference in this document) to describe
+     the constant-stack behaviour they now prove.
 
 ## Criterion → test map
 
