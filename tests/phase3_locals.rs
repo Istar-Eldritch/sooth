@@ -324,6 +324,25 @@ fn misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant() {
 }
 
 #[test]
+fn check_clause_word_reports_non_exhaustive_before_body_type_error() {
+    // Undeclared deviation (Phase 3 Slice 5 review, B6): exhaustiveness was
+    // hoisted ahead of body checking (required so a misspelt variant
+    // swallowed as a binding still reports its missing sibling, see
+    // misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant),
+    // and that reorders diagnostic priority for every clause-style word, not
+    // only the misspelling case: `C` is missing and `A`'s body leaves the
+    // wrong output type, and non-exhaustive must win.
+    let err = check_error(
+        "type: E | A | B | C ;\n\
+: w ( E -- i64 )\n  | A\n  true\n  | B\n  3\n;\n",
+    );
+    assert!(
+        err.contains("non-exhaustive clause-style `w`") && err.contains("missing variant `C`"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
 fn repl_line_binds_a_local() {
     // Criterion 17: a REPL line binds a local and uses it within the line.
     let out = run_session(&["5 | a | a a * ."]);

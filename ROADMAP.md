@@ -457,9 +457,9 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    existing needs-N-holds-M underflow shape, with the frame floor context-dependent: a
    word's declared inputs, or a REPL line's current session-stack depth); a linear value
    left unconsumed at its block's terminator is now caught there, naming the scope that
-   ended, rather than only at word end. The checker's `Ctx::Word` locals map stops being a
-   precomputed immutable borrow and evolves as terms are walked, saved and restored at
-   block entry/exit — the slice's main structural change. No new IR instruction: a binding
+   ended, rather than only at word end. The checker's `Ctx::Word` locals map is gone entirely:
+   names now live in an independently threaded `&mut Scope`, evolving as terms are walked
+   and saved/restored at block entry/exit — the slice's main structural change. No new IR instruction: a binding
    lowers to a pop off the lowering stack plus an insert into the locals map, truncated at
    block exit, since values are SSA and simply outlive the name; a mid-body binding inside
    a self-tail-recursive arm needs no new header phi, its extent ending at the arm's

@@ -13,7 +13,7 @@ are prerequisites for Slice 6: a bare REPL line forms no place, so it can take n
   no longer carries a `locals` field: entry locals are just a leading `Bind`. `Clause.locals`
   stays a field (clause payload binding is part of the pattern, not a body term). The
   entry-position diagnostic survives the unification, keyed off a leading `Bind`
-  (src/check.rs:1122, message at :1125).
+  (src/check.rs:1121, message at :1124).
 - **R2 — extent is the rest of the enclosing block** (word body, clause body, `if`/`else`
   arm). No closing token. Sibling arms may each bind the same name.
 - **R4/R5 — rejections.** Re-binding a name in scope is a located error, applied uniformly
@@ -30,11 +30,12 @@ are prerequisites for Slice 6: a bare REPL line forms no place, so it can take n
   a threaded `&mut Scope` (`bound: Vec<(String, Type)>` plus `Moves`), innermost-last so
   leaving a block truncates to its entry depth (src/check.rs:248-292).
 - **R10 — no new `Instr`.** Lowering pops from the lowering stack into a
-  `Vec<(String, ValueId)>` locals list and truncates at block exit (src/ir.rs:1704-1710).
+  `Vec<(String, Value)>` locals list and truncates at block exit (src/ir.rs:1704-1710).
 - **R11 — nothing crosses a back edge.** Confirmed: a mid-body name's extent ends at the
   block terminator where the tail call sits, so no header phi is added.
-- **Dogfood.** `examples/vm.sth`'s `build` uses a mid-body binding; the `build-into` helper
-  that existed only as a binding site is gone, output byte-identical. ROADMAP/DESIGN updated.
+- **Dogfood.** `examples/vm.sth`'s `run` word names the first `vm-pop` result mid-body in
+  its `Add`/`Sub`/`Mul`/`Store` clauses instead of shuffling it into position with
+  `swap`/`over`/`rot`, output byte-identical. ROADMAP/DESIGN updated.
 
 ## Deviations from the spec as written
 
@@ -50,6 +51,28 @@ are prerequisites for Slice 6: a bare REPL line forms no place, so it can take n
   independently of `Ctx`, so both contexts share one mechanism and `Ctx` stays purely the
   error-message context. Consequently **src/repl.rs needed no change**: a `Bind` is an
   ordinary term over the session stack.
+- **The spec's `build`/`build-into` dogfood was unsatisfiable.** `build-into` never existed
+  in `examples/vm.sth` at the base commit; the name came from the brief's narrative about a
+  different slice's drafts, and `build` itself has no binding site to rewrite. `run` was
+  dogfooded instead (see above).
+- **R8's variant-name-collision restriction is global, not clause-body-scoped.**
+  `reject_variant_local` fires from the shared `TermKind::Bind` handling, so a local may not
+  be named after any registered variant in a plain word body either, not only in a clause
+  body. Not a regression (the base commit already refused it at entry, via a
+  "clause-style body" error), but wider than the rule's name suggests.
+- **`check_clause_word` hoisted its exhaustiveness loop ahead of body-checking**, so a
+  clause-style word that is both non-exhaustive and has a body type error in a present
+  clause now reports non-exhaustive first (previously the body error, since exhaustiveness
+  ran after). Required so a misspelt variant swallowed as a binding (D8) still reports its
+  missing sibling instead of the swollen clause's own arity failure; the reordering is a
+  side effect that reaches every clause-style word, pinned by
+  `check_clause_word_reports_non_exhaustive_before_body_type_error`.
+- **The original spec's headline REPL dogfood contradicted its own R7.** The three-line
+  session `1 2 3` / `| a b |` / `a b + .` cannot work: R7 makes line locals die with the
+  line, so line 2's binding is gone before line 3 reads it. The implementation correctly
+  chose R7 over the example. Corrected, working dogfood (one line, so the binding and its
+  use share a scope): `1 2 3 | a b | a b + .` prints `5` and leaves `1` on the session
+  stack, having reached the `2` and `3` an earlier line left.
 
 ## Load-bearing invariants held
 
@@ -72,7 +95,17 @@ asserted on its specific message.
 | clause bodies bind; the variant-name collision and misspelling diagnostics | `mid_body_binding_in_clause_body_binds`, `clause_body_binding_named_for_a_variant_is_error`, `clause_body_binding_named_for_a_variant_of_the_same_enum_is_error`, `misspelt_variant_in_clause_list_notes_the_binding_read`, `misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant` |
 | REPL: binds, reaches earlier lines, session-depth floor, rollback, no name carryover | `repl_line_binds_a_local`, `repl_line_binding_reaches_earlier_line_values`, `repl_line_binding_more_than_the_session_stack_holds_is_error`, `failed_repl_line_after_binding_leaves_stack_intact`, `repl_line_locals_do_not_survive_to_next_line` |
 | back edge and dogfood | `mid_body_binding_in_self_tail_recursive_word_loops_correctly`, `vm_with_mid_body_binding_matches_previous_output` |
-| existing goldens survive locals-as-a-term | `goldens_still_compile_with_locals_as_a_term` |
+| non-exhaustive/body-error diagnostic ordering | `check_clause_word_reports_non_exhaustive_before_body_type_error` |
+
+## Residual risks
+
+- **`Moves::join` indexes a `HashMap` directly** (`else_arm.states[name]`, src/check.rs:231)
+  and is safe only by construction: `leave_block` always equalises the two arms' key sets
+  (by removing exactly the names each arm bound past the join's `depth`) before the join
+  runs. A future arm-like construct that binds a name without a matching `leave_block`
+  would panic instead of mis-checking. Not changed: nothing in this slice or its tests
+  exercises that condition, and CLAUDE.md's convention is not to add handling for a
+  condition that cannot occur.
 
 ## Out of scope (unchanged)
 
@@ -80,5 +113,5 @@ Closures, a closing token, locals surviving across REPL lines, destructuring, in
 mutable rebinding, type annotations in a binding. Everything about references is Slice 6,
 including the three Slice 6 rules whose reasoning this slice invalidates (R6's "live for
 the whole word body", R8's "a parameter is never itself left over", R10's vacuity argument)
-and the aggregate-local aliasing hole at src/ir.rs:1709, still unobservable without
-in-place mutation.
+and the aggregate-local aliasing hole in `FuncBuilder::lower_call`'s locals lookup, still
+unobservable without in-place mutation.
