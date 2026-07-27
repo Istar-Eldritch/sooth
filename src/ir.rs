@@ -1033,8 +1033,8 @@ fn expand_path(
 /// Reverse order generalizes the old direct-edge rule's last-field tie-break
 /// to every struct level of the walk. This is the one restriction on a
 /// struct with two fields that could each reach `target`: it picks exactly
-/// one, since both may be live in one node instance at once (a worklist
-/// case). The non-chosen fields are dropped like any other field, not
+/// one, since both may be live in one node instance at once (Phase 6's
+/// worklist case). The non-chosen fields are dropped like any other field, not
 /// marked. Looping the last child rather than the first is what makes a
 /// right-leaning shape constant-stack and a left-leaning one still O(depth)
 /// (documented, not fixed). Arrays are absent deliberately: `[^T N]` is
