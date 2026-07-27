@@ -66,12 +66,6 @@ fn parse_error(src: &str) -> String {
     parser::parse(&tokens).expect_err("parsing should fail")
 }
 
-fn check_ok(src: &str) {
-    let tokens = lexer::lex(src).expect("lexing should succeed");
-    let mut module = parser::parse(&tokens).expect("parsing should succeed");
-    check::check(&mut module).expect("check should succeed");
-}
-
 #[test]
 fn mid_body_binding_consumes_from_the_stack() {
     // Criterion 1: `| a b |` pops two values where it appears, leaving the `1`
@@ -141,15 +135,14 @@ fn binding_more_values_than_frame_holds_is_error() {
 #[test]
 fn binding_cannot_reach_beneath_declared_inputs() {
     // Criterion 7: `inner`'s frame is its one declared input, so its binding
-    // cannot reach the `1` the caller left beneath it.
-    let err = check_error(
-        ": inner ( i64 -- i64 )\n  1 drop | a b |\n  a b + ;\n\
-: main ( -- ) 1 2 inner . ;\n",
-    );
+    // cannot reach beneath it, regardless of what a caller might have left on
+    // the stack (checking is per-word, so no caller is needed to prove this).
+    let err = check_error(": inner ( i64 -- i64 )\n  1 drop | a b |\n  a b + ;\n");
     assert!(
-        err.contains("needs 2 values, but the stack holds 1"),
+        err.contains("`| a b |` needs 2 values, but the stack holds 1"),
         "unexpected message: {err}"
     );
+    assert!(err.contains("line 2"), "the error should locate it: {err}");
 }
 
 #[test]
@@ -192,6 +185,26 @@ fn unconsumed_linear_local_errors_at_block_end() {
 }
 
 #[test]
+fn linear_local_bound_in_arm_and_moved_on_one_nested_path_is_error() {
+    // R6: `s` is bound inside the outer arm (not the word body), so its extent
+    // is closed by that arm's `leave_block`, not the word-end check. A nested
+    // `if` consumes it on one path only, joining to `MaybeMoved`; the outer
+    // arm's own end must still catch it, with the `every_path` wording and
+    // the outer arm's terminator, not the word-end message.
+    let err = check_error(
+        ": w ( bool bool -- )\n  if\n    7 __spy | s |\n    if s drop else 1 . end\n  else\n    0 . end ;\n: main ( -- ) true true w ;\n",
+    );
+    assert!(
+        err.contains("is not consumed on every path"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("scope ends at the `else` on line 5, col 3"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
 fn linear_local_bound_and_consumed_in_arm_is_accepted() {
     // Criterion 10: R6 adds a place where forgetting is caught, not a place
     // where something is dropped for you; disposing it in the arm is fine, and
@@ -214,16 +227,6 @@ fn empty_binding_with_no_names_is_error() {
         err.contains("line 2, col 3"),
         "the error should locate it: {err}"
     );
-}
-
-#[test]
-fn goldens_still_compile_with_locals_as_a_term() {
-    // The entry form is now an ordinary binding term (R3's unification), so the
-    // Phase 0 goldens that use it are the regression check on that path.
-    for example in ["examples/lerp.sth", "examples/gcd.sth"] {
-        let src = std::fs::read_to_string(Path::new(example)).expect("example should be readable");
-        check_ok(&src);
-    }
 }
 
 #[test]
