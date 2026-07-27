@@ -383,3 +383,51 @@ fn repl_line_locals_do_not_survive_to_next_line() {
         lines[2]
     );
 }
+
+#[test]
+fn mid_body_binding_in_self_tail_recursive_word_loops_correctly() {
+    // Criterion 21 (R11): a mid-body binding inside a self-tail-recursive
+    // `if` arm loops correctly across 100,000 back-edges. Naming both the
+    // accumulator and the counter mid-body lets the arm recompute both and
+    // tail-call with them in the right order, without ever holding the
+    // bound `acc`/`n` live across the back-edge (their extent ends at the
+    // arm's `sum-to` tail call, which sits at the terminator). The IR-level
+    // structure (no extra header phi) is covered by
+    // `lower_mid_body_binding_adds_no_header_phi` in `src/ir.rs`; this is
+    // the runtime golden that the loop still computes the right answer.
+    let (stdout, code) = run_src(
+        "mid-body-binding-self-tail",
+        ": sum-to ( i64 i64 -- i64 )\n\
+  dup 0 > if\n\
+    | acc n |\n\
+    acc n +\n\
+    n 1 -\n\
+    sum-to\n\
+  else\n\
+    drop\n\
+  end ;\n\
+: main ( -- )\n\
+  0 100000 sum-to . ;\n",
+    );
+    assert_eq!(stdout, "5000050000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn vm_with_mid_body_binding_matches_previous_output() {
+    // Criterion 23: `examples/vm.sth`'s `run` word (Phase 3 Slice 5) names
+    // the second `vm-pop` result mid-body in its `Add`/`Sub`/`Mul`/`Store`
+    // clauses instead of shuffling it into position with `swap`/`over`/
+    // `rot`. The rewrite must be output-preserving: same sum-1..100_000
+    // bytecode program, same `5000050000` result as before the rewrite.
+    let binary = sooth::driver::build(Path::new("examples/vm.sth")).expect("build should succeed");
+    let output = std::process::Command::new(&binary)
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("binary should run");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        "5000050000\n"
+    );
+    assert_eq!(output.status.code(), Some(0));
+}

@@ -56,7 +56,11 @@ Concatenative, Forth-flavoured, with two non-negotiable ergonomics that Forth
 lacks: statically-checked stack effects and named locals.
 
 `gcd`, to fix the shape. `| a b |` binds the top items left-to-right in the same
-order as the effect comment, and a word calls itself directly (no `recurse`):
+order as the effect comment, and a word calls itself directly (no `recurse`). A
+binding is a term, not just an entry declaration: `| names |` is legal at any point
+in a body, popping that many values off the stack where it appears, with its extent
+running to the end of the enclosing block (a word body, a clause body, or an
+`if`/`else` arm) rather than the whole word:
 
 ```forth
 : gcd ( int int -- int )

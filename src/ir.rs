@@ -4206,6 +4206,22 @@ mod tests {
     }
 
     #[test]
+    fn lower_mid_body_binding_adds_no_header_phi() {
+        // Criterion 22 (R11): a mid-body binding inside a self-tail-recursive
+        // arm has its extent end at the arm's terminator, where the back-edge
+        // sits, so no name is live across it and the header still carries
+        // exactly one phi per loop-carried (input-arity) slot, unaffected by
+        // the binding.
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > if | x | 1 - x go else drop end ;");
+        let f = &ir.funcs[0];
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(phis.len(), 2, "one header phi per loop-carried slot");
+        assert!(phis.iter().all(|arms| arms.len() == 2));
+        assert_eq!(jmps_to(f, header), 2);
+    }
+
+    #[test]
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact *`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.

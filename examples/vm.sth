@@ -13,6 +13,10 @@
 \ `VmPop` struct, destructured inline by the caller with the generated
 \ `VmPop>` word — same idiom as `Stack`/`Popped` in `examples/stack.sth`.
 \ `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same way.
+\
+\ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the second
+\ `vm-pop` result with a mid-body `| ... |` binding instead of shuffling it
+\ into position with `swap`/`over`/`rot`.
 
 type: Op
 | Push v i64
@@ -69,25 +73,25 @@ type: VmPop vm Vm val i64 ;
     fetch Fetched> run
 | Add   | vm |
     vm vm-pop VmPop>          \ vm' b
-    swap vm-pop VmPop>        \ b vm'' a
-    rot                        \ vm'' a b
-    +
+    | b |                      \ names b, so the second pop needs no swap/rot
+    vm-pop VmPop>              \ vm'' a
+    b +
     vm-push
     bump-pc
     fetch Fetched> run
 | Sub   | vm |
     vm vm-pop VmPop>
-    swap vm-pop VmPop>
-    rot
-    -
+    | b |
+    vm-pop VmPop>
+    b -
     vm-push
     bump-pc
     fetch Fetched> run
 | Mul   | vm |
     vm vm-pop VmPop>
-    swap vm-pop VmPop>
-    rot
-    *
+    | b |
+    vm-pop VmPop>
+    b *
     vm-push
     bump-pc
     fetch Fetched> run
@@ -98,10 +102,8 @@ type: VmPop vm Vm val i64 ;
     fetch Fetched> run
 | Store | vm addr |
     vm vm-pop VmPop>           \ vm' x
-    over Vm>mem                 \ vm' x mem
-    addr                         \ vm' x mem addr
-    rot                          \ vm' mem addr x
-    set
+    | v x |                    \ names both, so the setter needs no over/rot
+    v v Vm>mem addr x set
     Vm<mem
     bump-pc
     fetch Fetched> run
