@@ -872,7 +872,7 @@ impl<'t> Parser<'t> {
     }
 
     /// Parse a clause's body terms, stopping at `;` or a `|` that opens the
-    /// next clause (D8's lookahead, applied at every `|` per R8/R15, not only
+    /// next clause (D8's lookahead, applied at every `|` per R8, not only
     /// the first). Any other `|` is an ordinary mid-body binding term,
     /// parsed by `parse_term` like any other position.
     fn parse_clause_body_terms(&mut self) -> Result<Vec<Term>, String> {

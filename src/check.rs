@@ -825,6 +825,21 @@ fn is_registered_variant(name: &str, enums: &[EnumDecl]) -> bool {
         .any(|e| e.variants.iter().any(|v| v.name == name))
 }
 
+/// D8's clause-vs-binding disambiguation is global (`is_variant_name` scans
+/// every enum in scope), so a `|` followed by a registered variant is always
+/// reparsed as opening the next clause, never read as a binding (R8). When
+/// that reparse produces an unknown-variant or duplicate-clause error, this
+/// note names the ambiguity so the fix is legible.
+fn clause_variant_ambiguity_note(name: &str, enums: &[EnumDecl]) -> String {
+    if is_registered_variant(name, enums) {
+        format!(
+            "\n  note: `| {name}` opens a clause here; a clause-body binding may not lead with a variant name"
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// A parameter / word-entry / clause-body binding name equal to a registered
 /// variant name is a sharp error (D8 backstop, X12): it would make the
 /// clause-vs-locals `|` disambiguation ambiguous.
@@ -1172,7 +1187,14 @@ fn check_clause_word(
         .collect();
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
 
+    // Validate every clause's variant identity and uniqueness before checking
+    // any body (R8): a clause-body binding that leads with a registered
+    // variant name is silently reparsed as the next clause, and if that
+    // reparse produces an unknown-variant or duplicate-clause problem, it
+    // must be reported before a downstream sibling body is checked against
+    // the terms the reparse ate out from under it.
     let mut seen: HashMap<&str, ()> = HashMap::new();
+    let mut variant_indices = Vec::with_capacity(clauses.len());
     for clause in clauses {
         let Some(vi) = enum_decl
             .variants
@@ -1180,16 +1202,27 @@ fn check_clause_word(
             .position(|v| v.name == clause.variant)
         else {
             return Err(format!(
-                "error: unknown variant `{}` of enum `{}` in clause-style `{}` (line {})",
-                clause.variant, enum_name, word.name, clause.span.line
+                "error: unknown variant `{}` of enum `{}` in clause-style `{}` (line {}){}",
+                clause.variant,
+                enum_name,
+                word.name,
+                clause.span.line,
+                clause_variant_ambiguity_note(&clause.variant, enums),
             ));
         };
         if seen.insert(clause.variant.as_str(), ()).is_some() {
             return Err(format!(
-                "error: duplicate clause for variant `{}` of enum `{}` in `{}` (line {})",
-                clause.variant, enum_name, word.name, clause.span.line
+                "error: duplicate clause for variant `{}` of enum `{}` in `{}` (line {}){}",
+                clause.variant,
+                enum_name,
+                word.name,
+                clause.span.line,
+                clause_variant_ambiguity_note(&clause.variant, enums),
             ));
         }
+        variant_indices.push(vi);
+    }
+    for (clause, &vi) in clauses.iter().zip(&variant_indices) {
         check_clause_body(
             word,
             enums,

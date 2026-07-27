@@ -246,7 +246,8 @@ fn clause_body_binding_named_for_a_variant_is_error() {
     // registered variant of some enum is always read as the next clause, since
     // the disambiguation is global (D8). Here `Blob` names no variant of
     // `Shape`, so the misread clause fails with the existing, located
-    // unknown-variant diagnostic rather than silently binding.
+    // unknown-variant diagnostic, now with a note naming the ambiguity rather
+    // than silently binding.
     let err = check_error(
         "type: Shape | Circle r f64 | Rect w f64 h f64 ;\ntype: Other | Blob b i64 ;\n\
 : area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * | Blob bogus ;\n",
@@ -254,6 +255,33 @@ fn clause_body_binding_named_for_a_variant_is_error() {
     assert!(err.contains("unknown variant"), "unexpected message: {err}");
     assert!(err.contains("`Blob`"), "unexpected message: {err}");
     assert!(err.contains("`Shape`"), "unexpected message: {err}");
+    assert!(
+        err.contains("opens a clause here") && err.contains("may not lead with a variant name"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn clause_body_binding_named_for_a_variant_of_the_same_enum_is_error() {
+    // Same failure as above, but `Circle` names a variant of the scrutinee
+    // enum itself, so the reparse produces a second `Circle` clause: a
+    // duplicate, not an unknown variant. Without hoisting the duplicate-clause
+    // check ahead of body-checking, `Rect`'s truncated body (the reparse ate
+    // its `| Blob bogus` tail as a bogus fourth clause) would fail its own
+    // arity check first, misattributing the error to the wrong clause.
+    let err = check_error(
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
+: area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * | Circle bogus ;\n",
+    );
+    assert!(
+        err.contains("duplicate clause"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Circle`"), "unexpected message: {err}");
+    assert!(
+        err.contains("opens a clause here") && err.contains("may not lead with a variant name"),
+        "unexpected message: {err}"
+    );
 }
 
 #[test]
@@ -271,6 +299,22 @@ fn repl_line_binding_reaches_earlier_line_values() {
     let out = run_session(&["1 2 3", "| a b | a b + ."]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines, vec!["stack: 1 2 3", "5", "stack: 1"]);
+}
+
+#[test]
+fn repl_line_binding_more_than_the_session_stack_holds_is_error() {
+    // R5: the REPL frame floor is the session stack depth, not a declared
+    // input list, so binding more than that depth holds is the same located
+    // underflow shape as anywhere else, naming the REPL's stack rather than a
+    // word's declared effect.
+    let out = run_session(&["| a b |"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 1, "unexpected output:\n{out}");
+    assert!(
+        lines[0].contains("stack underflow: needs 2 values, but the stack holds 0"),
+        "unexpected message: {}",
+        lines[0]
+    );
 }
 
 #[test]
