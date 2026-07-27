@@ -3,7 +3,11 @@
 Design input: [the brief](./phase3-slice5-brief.md). Base: `main` @ `a66c47a`, 700 tests green.
 Second draft: addresses review round 1 (soundness, criteria, consistency — 19 findings) and
 five decisions made by the project owner in response, cited inline as **D1**-**D5**. Third
-draft: three further amendments, cited inline as **Amendment A/B/C**.
+draft: three further amendments, cited inline as **Amendment A/B/C**. Fourth draft: addresses
+review round 2 (soundness — 7 blockers plus numerous minors/nits, sectioned A-G in that
+review) and four further decisions made by the project owner in response, cited inline as
+**Decision A**-**Decision D**; round-2 findings are cited by the review's own labels (e.g.
+**A1**, **C2**, **G1**).
 
 At the base commit, ROADMAP.md:438-442 named this slice "second-class references + parameter
 conventions (`let`/`inout`/`sink`/`set`) + escape checking", title on 438. The conventions half
@@ -96,43 +100,138 @@ slice's reference-mode accessors (R21) — a separate, later, mechanical concern
 delivery phase (4) and its own stated fallback, not a change to phases 1-3's typing rules. A
 parallel family of reference-mode accessor words is added instead — every one of them takes an
 already-reference-typed value (from R2 or from another projection) and yields a *narrower*
-reference, never a plain value:
+reference, never a plain value.
 
-| shape | word | effect | on `&!` receiver |
-|---|---|---|---|
-| struct field | `S&|>fi` (one per struct/field, mirrors the existing `S|>fi` Copy-peek naming) | `( &S -- &Ti )` | `( &!S -- &!Ti )` |
-| array element | `&|>` (generic, like `get`) | `( &[T N] usize -- &T )` | `( &![T N] usize -- &!T )`, same runtime bounds trap as `get` |
-| cell payload | `&^` (generic, like `^|>`; the first draft used the reversed spelling, flipped here so every reference-mode accessor leads with the ampersand, uniformly) | `( &^T -- &T )` | `( &!^T -- &!T )` |
+**Decision A: one spelling per shape *per mutability*, and the pipe is dropped.** Round 2 (A5)
+caught the second draft's single-spelling-per-shape design lying about its own arity: `S&|>fi`
+echoed `S|>fi`, the existing **non-consuming, two-output** Copy-peek (`( S -- S field )`), but
+the reference-mode accessor is a **one-output, consuming** operation — the exact confusion the
+B2 fix (below) was written to kill for `get`, reintroduced one level up by the naming itself.
+The fix is to split every accessor by mutability into two distinct, fixed-arity words and drop
+the `|`, which also removes any interaction with the lexer's `| locals |` delimiter
+special-casing:
 
-Every reference-mode accessor's arity is fixed and readable from its spelling (one reference in,
-one narrower reference out); only the shared-vs-mutable qualifier is inferred from the receiver.
-This is the whole of D3/D4's "reference-ness explicit, mutability inherited" rule, and it is
-what closes the two forks the first draft left open:
+| shape | shared word | shared effect | mutable word | mutable effect |
+|---|---|---|---|---|
+| struct field | `T&>fi` (one per struct/field) | `( &S -- &Ti )` | `T&!>fi` (one per struct/field) | `( &!S -- &!Ti )` |
+| array element | `&>` (generic, like `get`) | `( &[T N] usize -- &T )` | `&!>` (generic, like `get`) | `( &![T N] usize -- &!T )`, same runtime bounds trap as `get` |
+| cell payload | `&^` (generic, like `^|>`) | `( &^T -- &T )` | `&!^` (generic, like `^|>`) | `( &!^T -- &!T )` |
+
+All six spellings lex as single tokens on the base commit (measured, one probe per spelling:
+`: main ( -- ) <w> ;` for `&>`, `&!>`, `&^`, `&!^`, and a struct-specific probe for
+`Buf&>len`/`Buf&!>len`, each producing exactly one `unknown word` diagnostic rather than a
+token-sequence parse error). This supersedes the second draft's "mutability inherited from the
+receiver" rule outright, not merely its spelling: mutability is now explicit in the token
+itself, so a reader gets the whole signature — reference-ness *and* mutability *and* arity —
+from the word alone, with nothing left to infer from context. Every reference-mode accessor's
+arity is fixed and readable from its spelling (one reference in, one narrower reference out) and
+now so is its mutability. This closes the two forks the first draft left open, and A5's naming
+fork besides:
 
 - **B1 fixed**: the first draft typed `@` only as `( &T -- T )`, so `b Buf>len` (yielding
-  `&!usize` under the old `S>fi`-on-a-reference reading) had nowhere to go. `S&|>fi` never
-  exists in an ambiguous arity, and R4 below types `@` for both `&T` and `&!T` directly, so no
-  reference ever needs an implicit `&!T -> &T` coercion (which would in any case have collided
-  with R5's "no `&` while an `&!` is live" — taking the coercion *is* taking a `&`).
+  `&!usize` under the old `S>fi`-on-a-reference reading) had nowhere to go. `T&>fi`/`T&!>fi`
+  never exist in an ambiguous arity, and R4 below types `@` for both `&T` and `&!T` directly, so
+  no reference ever needs an implicit `&!T -> &T` coercion (which would in any case have
+  collided with R5's "no `&` while an `&!` is live" — taking the coercion *is* taking a `&`).
 - **B2 fixed**: the first draft read `get`'s existing two-output, non-consuming value form
   ("`get` on `&[T N]`... yields `&T`") as if it were the same word with one output instead. It
-  is not the same word. `&|>` is a distinct, fixed-arity word; `get` keeps its own signature
-  unchanged and is never applied to a reference.
+  is not the same word. `&>`/`&!>` are distinct, fixed-arity words; `get` keeps its own
+  signature unchanged and is never applied to a reference.
+- **A5 fixed**: `T&>fi`/`T&!>fi` no longer echo `S|>fi`'s name for a differently-shaped
+  operation. The two families now share only the struct/field-name convention, not an implied
+  arity.
 
-**Projection through a `&!` consumes the parent reference (D3/D4).** `S&|>fi`, `&|>`, and `&^`
-each take their reference argument off the stack the way every word takes its arguments off the
-stack — ordinary consumption, not a special rule. Combined with R5's reborrow allowance (naming
-a `&!` *local* does not move it, so the same local can be projected from again once the derived
-reference is gone), this makes a mutable projection chain linear by construction: at any moment
-there is exactly one live reference in a chain rooted at a given borrow, because deriving the
-next one used up the previous one. This is what retires the nested-borrow exemption the first
-draft's R5/R7 pairing needed (**B4**): R7's disjointness scan never has to reason about a
-reference *and* the local it was reborrowed from being simultaneously "live", because a
-reference derived by projection is a different, newer `Value` than the reborrow it consumed,
-and the reborrow is gone the instant the projection runs. It also means **R11's root list needs
-no reference-typed case** (**B3**): the only thing R2's postfix `&`/`&!` is ever applied to is
-a plain aggregate local, never to a value that is already a reference, so R11's whitelist
-(struct/enum/array/cell) stays exactly as first drafted.
+**Projection through a `&!` consumes the parent reference, and — separately — suspends the
+place it was reborrowed from (Decision B, replacing the second draft's "linear by
+construction" claim).** `T&>fi`/`T&!>fi`, `&>`/`&!>`, and `&^`/`&!^` each take their reference
+argument off the stack the way every word takes its arguments off the stack — ordinary
+consumption, not a special rule. Round 2 (C2) showed that consuming the parent *value* is not
+by itself enough to make a mutable projection chain linear, because naming a `&!` local is a
+**reborrow**, and a reborrow manufactures a fresh parent independent of whatever was derived
+from the previous one:
+
+```forth
+: two-live ( &!Buf -- )
+  | b |
+  b Buf&!>len        \ [&!usize] — reborrow #1 consumed by the projection, derived ref live
+  b Buf&!>len        \ [&!usize, &!usize] — reborrow #2, while #1's derived ref is still live
+  1 +! 1 +! ;
+```
+
+Each reborrow of `b` *is* consumed by its own projection, exactly as the second draft's
+mechanism describes — and the program still manufactures two simultaneously live `&!usize`
+into the same field, because nothing about "the reborrow got consumed" says anything about
+what it was *turned into* still being live. The rule this slice actually needs is stated over
+the **place**, not the reborrow value: **taking a mutable reference derived from a place
+suspends that place for as long as any reference derived from it (by any number of projection
+steps) is live; naming the place again during that window is a located error**, symmetric with
+R5's existing rule that consuming a place while a borrow of it is live is an error. R6's
+consumption-point scan is restated below to key on the place and its outstanding derivations —
+whether anything currently traces its provenance back to that place — rather than on whether
+some stack slot or locals-map entry literally *is* the reborrow's own `Value`; `two-live` is
+rejected the moment the second `b` is named, because the first reborrow's derived `&!usize` is
+still outstanding against `b`'s place.
+
+This narrows what the second draft called "exclusivity falls out structurally" (**B4**) to the
+claim round 2 says it can actually support: **R7's disjointness scan never has to reason about
+a reborrow and a reference derived from *that same* reborrow being simultaneously live**,
+because the suspend rule above already rejects taking a second reborrow while the first's
+derivation is outstanding — R7 only ever sees one live derivation chain per place at a time.
+The broader claim ("retires the nested-borrow exemption", "linear by construction") is cut; the
+linearity is enforced, by the suspend rule, not free of enforcement. `push-byte`'s own hand-trace
+(below) is the positive case: each of its three reborrows of `b` is fully consumed — down to a
+plain value or a further-derived reference that is itself fully consumed — before the next one
+is taken, so the place is never suspended at the point of a subsequent reborrow, and the program
+is accepted.
+
+**The suspend rule is mutable-only (Decision B).** `&T` is `Copy`, so a *shared* projection
+composes freely: a live `&T` parent alongside a reference derived from it (`a & dup Buf&>len`,
+say) is fine and must stay legal — shared references carry no exclusivity, so there is nothing
+for a suspend to protect. Only a `&!`-rooted derivation suspends its place.
+
+It also still means **R11's root list needs no reference-typed case** (**B3**): the only thing
+R2's postfix `&`/`&!` is ever applied to is a plain aggregate local, never to a value that is
+already a reference, so R11's whitelist (struct/enum/array/cell) stays exactly as first
+drafted — that part of the second draft's reasoning did not depend on the linearity claim C2
+falsifies, and survives it.
+
+**Name reservation (round 2, F2).** Nothing in the base commit reserves an `&`-led name: a
+local named `&!` compiles and runs today (measured: `: f ( i64 -- ) | &! | &! drop ;` produces a
+working object file, only failing to *link* for the unrelated reason that the probe defines no
+`main` word), and a `type:` named `&!Buf` is accepted by the parser, then fails at the QBE
+backend with an unescaped-symbol error (`invalid character & (38)`) — a pre-existing, separate
+bug this slice does not fix, but whose exposure this reservation prevents. This slice adds the
+identical machinery the owning-cell syntax already has: `is_reserved_caret_name`/
+`reserved_caret_name_error` (src/parser.rs:85-103) reject any name beginning with `^` at every
+declaration site (`type:` name, `:` word name, local binding, the REPL's own `type:` path); the
+same shape is added for `&`, rejecting any name beginning with `&` at the same four sites.
+Separately, `@`, `!`, and `+!` are exact-name builtins, not prefix-reserved, and — unlike `^` —
+nothing in the base commit protects *any* builtin exact name from shadowing today (measured:
+`: drop ( i64 -- ) . ;` and `: ! ( i64 -- ) drop ;` both compile with no diagnostic), so this is
+genuinely new machinery, not a mirror of an existing check: a `:` word declaration using exactly
+`@`, `!`, or `+!` as its name is a located shadowing-rejection error, added specifically because
+those three names would otherwise silently change meaning to every future caller the moment
+this slice introduces them as builtins.
+
+**Type-position splitting is three cases, not one (round 2, F3).** `&`, `!`, and `^` are not
+lexer delimiters, but `[` is, so `&T`/`&!T` in type position spells three different token
+shapes and needs three parsing cases: a bare `&!Buf` arrives as one `Word` token and must split
+*within* itself (measured: lexes as a single unknown-word token, never a token sequence); a
+composed `&!^List` also arrives as one `Word` token, splits within itself down to the remainder
+`^List`, and that remainder must be handed to the *existing* caret splitter
+(`parse_owning_cell_type_expr`, src/parser.rs:584-609), not to `resolve_type` directly, since
+`^List` is itself an owning-cell type expression one level down; `&![u8 64]` splits *across*
+tokens (`Word("&!")` then `LBracket`, measured directly) because `[` already is a delimiter, so
+recursing into the ongoing token stream — exactly `parse_owning_cell_type_expr`'s existing
+empty-remainder case — handles it without new machinery. The `&`/`&!` splitter mirrors
+`parse_owning_cell_type_expr`'s two-case shape (empty remainder recurses into the stream;
+non-empty remainder resolves the substring) and adds the one case `^`'s splitter does not need:
+a non-empty remainder that itself begins with `^` is handed to the caret splitter, not to
+`resolve_type`. This is not hypothetical: nothing in the dogfood ever spells `&!^List` as
+literal source text, but `walk`'s `Cons` clause binds `next` at exactly that type by inference
+(R17), so any signature a programmer writes by hand in this shape (`: helper ( &!^List -- )
+... ;`) must parse the same way, and the splitter earns its third case the first time R17 is
+used at all, not only in a contrived example.
 
 **R4 — Access through a reference: `@`, `!`, `+!`.**
 
@@ -143,15 +242,33 @@ a plain aggregate local, never to a value that is already a reference, so R11's 
   reference carries no exclusivity, so there is nothing to protect a concurrent reader from).
 - `+!` adds in place, `( &!T T -- )`, `T` an integer type. Sugar for fetch-add-store, kept
   because the alternative spelling needs two sequential borrows of the same place plus a `swap`.
-- **All three are restricted to a `Copy` *scalar* `T`, not merely `Copy` `T` (round 1 minor
-  11).** `is_copy` makes an all-scalar-field struct like `Vec2 { x i64 y i64 }` `Copy`, so
-  `v & @` type-checks under a bare Copy restriction with `T = Vec2`, an aggregate. R12's `@`
-  lowering is `FieldLoad`, and `field_load_op` (src/backend/qbe.rs:295) `unreachable!`s on an
-  aggregate at line 318 ("an aggregate field is copied by blit, not scalar-loaded");
-  `field_store_op` (src/backend/qbe.rs:323) mirrors it at line 338. Fetching or storing a Copy
-  *aggregate* through a reference is therefore a located compile error, not merely an
-  unimplemented case — the panic is a real reachable path without this restriction, since no
-  criterion needed a Copy-aggregate case and nothing else in the checker excludes it.
+- **Restricted to `Copy` `T`; a Copy *aggregate* is a real, first-class case, not a rejection
+  (Decision D, resolving round 2 G1).** `is_copy` makes an all-scalar-field struct like
+  `Vec2 { x i64 y i64 }`, or an all-scalar-payload enum like `examples/vm.sth`'s `Op`, `Copy`.
+  R12's `@` lowering for a *scalar* `T` is `FieldLoad`, and `field_load_op`
+  (src/backend/qbe.rs:295) `unreachable!`s on an aggregate at line 318 ("an aggregate field is
+  copied by blit, not scalar-loaded"); `field_store_op` (src/backend/qbe.rs:323) mirrors it at
+  line 338. The second draft (round 1 minor 11) closed this by restricting `@`/`!`/`+!` to
+  Copy-*scalar* `T` only, rejecting a Copy aggregate as a located compile error — but that made
+  `@`/`!` a strict subset of `get`/`set`, which read/write a Copy aggregate element
+  (`examples/vm.sth`'s `[Op 13]`) without difficulty, so `get`/`set` could not actually be
+  retired (R21's own headline example, `vm.sth:58`'s `get`, is exactly this case). Decision D
+  lifts the restriction for the aggregate case instead of leaving it rejected: `@` on a Copy
+  *aggregate* `T` lowers to `Alloc` (a fresh destination slot, sized and aligned from `T`'s
+  layout) followed by `Blit` (a byte-copy from the field/element address into that slot); `!`
+  on a Copy aggregate `T` lowers to `Blit` alone (a byte-copy from the stored value's address
+  into the field/element address). Both instructions already exist (`Alloc` src/ir.rs:750,
+  `Blit` src/ir.rs:754, both already used this way by `set`'s own array-element lowering,
+  src/ir.rs:2062-2063) and are already used for exactly this shape of copy, so R12's
+  no-new-`Instr`-variant claim survives unchanged — this is a new lowering arm over an existing
+  instruction pair, not new IR. There is no linearity story to write for this case, and this is
+  not an open question left for later: the value is `Copy` by construction, and duplicating a
+  `Copy` value is safe by definition, full stop. This also does not disturb the no-`alloc`/
+  no-`blit` structural criterion (criterion 6, `push-byte`'s own body): that criterion is about
+  `push-byte`'s element type `u8`, which is scalar regardless of this change, so the ceiling it
+  asserts is unaffected. The restriction that remains is scalar-vs-aggregate no longer matters;
+  what still matters, unchanged, is Copy-vs-linear (next bullet) — `@`/`!`/`+!` stay rejected on
+  a linear `T` exactly as before, aggregate or not.
 - Fetching or storing a **linear** `T` through a reference is a separate, pre-existing rejection
   from the plain Copy check: it would either produce a second owner of one object (fetch) or
   silently leak the overwritten value (store, since nothing auto-drops) — both soundness rules,
@@ -159,28 +276,48 @@ a plain aggregate local, never to a value that is already a reference, so R11's 
   src/ir.rs:2465) is the precedent for lifting the store restriction later; left out here
   because no criterion needs it.
 
-**R5 — Exclusivity is the entire aliasing rule.** At most one live `&!` to a place, and no `&`
-to a place while an `&!` to it is live. Everything else is a consequence, not a separate rule,
-and must not be implemented as one:
+**R5 — Exclusivity is the entire aliasing rule, and it is symmetric (Decision C, resolving
+round 2 C1).** At most one live `&!` to a place; no `&` to a place while a `&!` to it is live;
+and — the direction the second draft omitted — no `&!` to a place while a `&` to it is live.
+Round 2 (C1) found the second draft stated only the first two: "no `&` to a place while an `&!`
+to it is live" has no converse, so `a & a &!` was legal by the letter of the rule, producing a
+live shared reference and a live mutable reference to the same place simultaneously — exactly
+the aliasing R5 exists to prevent, and worse once `dup` is added (`a & dup` makes two live
+shared refs, then a `&!` makes the violation obvious). R5 now states both orders explicitly.
+Criterion 7's single test name (`shared_borrow_alongside_mutable_is_error`) is order-ambiguous
+and would almost certainly be written in the order the second draft already covered; it is
+split below into one test per order so the fix has independent evidence, not just prose.
+Everything else is a consequence, not a separate rule, and must not be implemented as one:
 
 - `&T` is `Copy` (shared references carry no exclusivity constraint).
 - `&!T` is not `Copy`.
 - `dup` on a `&!` is rejected **by R5**, since it would produce two live mutable references to
   one place.
 - Naming a `&!` local is a **reborrow**, not a move. Without this a mutable helper would kill
-  its own parameter on first use, and the dogfood's `push-byte` names `b` three times.
+  its own parameter on first use, and the dogfood's `push-byte` names `b` three times. A
+  reborrow is itself subject to the suspend rule above (Decision B): naming `b` again while a
+  reference derived from its *previous* reborrow is still outstanding is the same R5 violation,
+  not a separate case.
 - Two live `&!` rooted at *different* places never conflict — R5 is per-place, and nothing about
   it is a single global "one mutable reference at a time" counter. `copy-byte`'s two-borrow
   call (`&!Buf` into `dst`, `&Buf` into `src`, two different locals) exercises exactly this.
 
-**R6 — The borrow check fires at consumption points, not via a liveness pass.** When a place is
-moved, dropped, or borrowed in a way R5 forbids, scan the virtual stack (`stack: Vec<Value>`)
-and the locals map (`locals: HashMap<String, Value>`) for a slot holding a reference derived
-from that place, and reject with a located error naming both the place and the conflicting
-borrow. Both structures are exact at compile time, so this is a scan, not an analysis. A
-reference is **live** from the instruction that creates it until the term that consumes its
-slot; a reference-typed *local* is live for the whole word body (see R8 for what happens to it
-at the body's end, since it is neither `Copy` nor linear).
+**R6 — The borrow check fires at consumption points, keyed on the place and its outstanding
+derivations, not via a liveness pass (restated for Decision B).** When a place is moved,
+dropped, or (re)borrowed in a way R5 forbids, the check must answer "does anything currently on
+the virtual stack (`stack: Vec<Value>`) or in the locals map (`locals: HashMap<String, Value>`)
+trace its provenance back to this place, through any number of projection steps", not merely
+"is some slot's `Value` literally equal to a reference taken directly from this place". Round 2
+(C2) is why the stronger form is necessary: a projection's result is a *new* `Value`, and a
+naive scan for "the reborrow itself" misses a `&!usize` two projection steps removed from a
+place that is nonetheless still live against it (the `two-live` example above). Provenance is
+cheap to track — R3's projections already know their own operand — and every place that can
+conflict (move, dispose, new borrow) consults the same predicate. Both `stack` and `locals` are
+exact compile-time structures, so this is a scan over threaded provenance, not an analysis.
+Reject with a located error naming both the place and the conflicting borrow. A reference is
+**live** from the instruction that creates it until the term that consumes its slot; a
+reference-typed *local* is live for the whole word body (see R8 for what happens to it at the
+body's end, since it is neither `Copy` nor linear).
 
 Rejected alternative: last-use (NLL-style) liveness. More precise, materially more machinery,
 and no criterion in this slice needs the precision.
@@ -191,6 +328,9 @@ measured cost is one `swap` in the dogfood's `push-byte`, sequencing the two pro
 first is fully consumed (down to a plain value or a further-derived reference that is itself
 consumed) before the second is taken — never holding both at once. This is a stated limitation
 with its own criterion, so it is behaviour rather than an accident, and it is additive later.
+R17's reference-mode clause payload bindings are a narrow, named exemption from this rule, not
+a second case of it — see R17 for why fan-out from one scrutinee is sound where this rule is
+conservative.
 
 **R8 — Escape is prevented structurally, by five positional rejections over transitive
 containment.** A type that **transitively contains** a reference — the reference itself, a
