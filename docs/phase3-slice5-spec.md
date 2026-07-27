@@ -91,8 +91,8 @@ preserving the `Value` id). It loses because it cannot use locals at all (naming
 moves it) and because the two-borrow call degenerates to `& rot & rot swap`. It is purely
 additive later.
 
-**R3 — Accessor words project through a reference, mutability inherited, reference-ness
-explicit in the spelling (D3/D4).** `fill` and `len` are **not renamed and not changed**, full
+**R3 — Accessor words project through a reference, with a distinct spelling per shape *and*
+per mutability (D3/D4, Decision A).** `fill` and `len` are **not renamed and not changed**, full
 stop. `get` and `set` keep their existing value-form signatures **unchanged through this
 slice's own phases (1-3)**: no signature here changes meaning, which is what keeps R20's
 additive-work claim true. Amendment B marks `get`/`set` themselves **superseded** by this
@@ -367,7 +367,8 @@ is legal in a field and on an output side once built. `check_array_word`'s `"fil
 so `r 4 fill` built `[&Buf 4]` with the same consequence. Both holes close by rejecting *at the
 construction site* (`^`'s and `fill`'s own arms reject a payload/element that transitively
 contains a reference) rather than only at declaration sites, which is why the rule is now five
-positions phrased over containment instead of three phrased over syntax.
+positions over compiled code (six counting D4's REPL case below) phrased over containment
+instead of three phrased over syntax.
 
 Combined with place-only creation (R2) and R11 (only an aggregate local can be a borrow root, so
 a reference can never be the *only* handle to something whose lifetime it controls), a reference
