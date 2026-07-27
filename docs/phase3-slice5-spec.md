@@ -750,50 +750,68 @@ the surrounding prose's existing voice:
 ## Delivery phases
 
 1. **Reference types, places, projection, access, and every escape/root rejection needed for
-   this phase's lowering to be total.** `&T`/`&!T` in the type system; `&`/`&!` as postfix
-   borrow operators on a local (R2); the `S&|>fi`/`&|>`/`&^` accessor family projecting through
-   a reference with inherited mutability (R3); `@`/`!`/`+!` with R4's Copy-*scalar* restriction,
-   typing `@` for both `&T` and `&!T`; R11's scalar-local rejection; R8's five transitive-
-   containment rejections (struct field, enum payload, array element via `fill`, cell payload
-   via `^`, effect output) paired with the input-side accept-case; R8's reference-`drop`-is-a-
-   no-op rule; R12's lowering, including the `&T`/`&!T` -> `IrType::Ptr` mapping. Checking here
-   is types plus these specific soundness rules, not yet the borrow-conflict machinery (R5-R7,
-   R9-R10) — those are phase 2/3. **Round 1 (criteria E3) moved R11, R8's rejections, and the
-   drop-no-op rule here from a later phase**: without them, phase 1's lowering has cases with
-   nothing to lower to (an unaddressable scalar local) or a silent soundness hole a later
-   phase's diagnostics would only report on, never prevent, at this commit. State explicitly in
-   the phase-1 commit message: **at this commit, R5/R6/R7/R9/R10 do not exist yet, so a program
-   using two conflicting borrows, or a borrow crossing a back-edge unsafely, is *accepted* by
-   the phase-1 compiler.** That is deliberate and temporary, not an oversight to be rediscovered
-   at review.
-   Exit: criteria 1 through 6, 13, and 15 (accept/reject at the type level; escape at the five
+   this phase's lowering to be total.** `&T`/`&!T` in the type system, including a `RefId`
+   registry (an interned `(inner, mutable)` pair, mirroring `Array`/`OwnedCell`, round 2 E1) and
+   the two soundness answers (`is_copy` true for `&T`/false for `&!T`; every `is_linear`-shaped
+   predicate false for both) rather than leaving them as unstated consequences of "`ir_type_of`
+   gains two arms"; `&`/`&!` as postfix borrow operators on a local (R2), with the `^`-style
+   name reservation mirrored for `&`-led names and a dedicated shadowing rejection for the
+   exact names `@`/`!`/`+!` (round 2 F2); the type-position splitter for `&T`/`&!T`, its three
+   cases including handing a `^`-led remainder to the existing caret splitter (round 2 F3); the
+   `T&>fi`/`T&!>fi`/`&>`/`&!>`/`&^`/`&!^` accessor family, one spelling per shape *per
+   mutability* (Decision A), projecting through a reference and suspending its root place for
+   the mutable forms (R3, Decision B); `@`/`!`/`+!` with R4's Copy restriction, now covering a
+   Copy aggregate via `Alloc`+`Blit`/`Blit` as well as a Copy scalar (Decision D), typing `@`
+   for both `&T` and `&!T`; R11's scalar-local rejection; R8's six transitive-containment
+   rejections (struct field, enum payload, array element via `fill`, cell payload via `^`,
+   effect output, and a reference surviving to the end of a REPL line, round 2 D4) paired with
+   the input-side accept-case narrowed to a top-level reference type (round 2 D3); R8's
+   reference-`drop`-is-a-no-op rule; R12's lowering, including the `&T`/`&!T` -> `IrType::Ptr`
+   mapping. Checking here is types plus these specific soundness rules, not yet the
+   borrow-conflict machinery (R5-R7, R9-R10) — those are phase 2/3. **Round 1 (criteria E3)
+   moved R11, R8's rejections, and the drop-no-op rule here from a later phase**: without them,
+   phase 1's lowering has cases with nothing to lower to (an unaddressable scalar local) or a
+   silent soundness hole a later phase's diagnostics would only report on, never prevent, at
+   this commit. State explicitly in the phase-1 commit message: **at this commit,
+   R5/R6/R7/R9/R10 do not exist yet, so a program using two conflicting borrows, or a borrow
+   crossing a back-edge unsafely, is *accepted* by the phase-1 compiler.** That is deliberate
+   and temporary, not an oversight to be rediscovered at review.
+   Exit: criteria 1 through 6, 13, and 15 (accept/reject at the type level; escape at the six
    positions; drop-as-no-op; the accessor family; `push-byte`/`byte-at` compile, run, and
    produce the right bytes; `push-byte`'s emitted body contains no `alloc`/`blit` while a
    rebuild-style control word in the same test module still does; a callee's mutation through a
    `&!` parameter is visible to the caller).
-2. **The borrow rules and their diagnostics.** R5 exclusivity (including the different-places
-   accept-case), R6's consumption-point scan (over both the stack and the locals map, and over
-   the moved/dropped/conflicting-borrow trio of consumption points), R7's disjointness
-   rejection and its sequenced-workaround accept-case. Every rejection lands with its located
-   error and its diagnostic golden.
+2. **The borrow rules and their diagnostics.** R5 exclusivity in both symmetric directions
+   (Decision C: `&` while a `&!` is live, and `&!` while a `&` is live, each its own test, plus
+   the different-places accept-case), R6's consumption-point scan keyed on a place's outstanding
+   derivations rather than literal `Value` identity (Decision B, so a reborrow taken while a
+   projection derived from the *previous* reborrow is still live is rejected, over both the
+   stack and the locals map, and over the moved/dropped/conflicting-borrow trio of consumption
+   points), R7's disjointness rejection and its sequenced-workaround accept-case. Every
+   rejection lands with its located error and its diagnostic golden.
    Exit: criteria 7 through 9.
 3. **Loops, joins, reference-mode enum elimination, the full dogfood, and the documentation
    corrections.** R9's back-edge rules from both sides; R10's join rule with both the
    disagreement and agreement accept-case; R17's reference-mode clause elimination (typing was
    phase 1's accessor-family work in spirit, but the back-edge interaction that makes it worth
-   having is exercised here); the full dogfood end to end including `walk`; recording R16's
-   answer into ROADMAP.md's parked design question (the DESIGN.md:134/208-214 amendment, D2,
-   and ROADMAP.md:438-443's title/body correction, Amendment A, are already applied and need no
-   further phase-3 work — only the design-question passage at ROADMAP.md:444-450 still needs
-   R16's answer written into it); R20's additive-work regression check.
+   having is exercised here), including threading the scrutinee's `EnumId` from the checked
+   frontend `Type` into `lower_clauses` rather than re-deriving it from the lowered `IrType`
+   (round 2 B4, closing the reachable `unreachable!` a `&!Enum` scrutinee would otherwise hit),
+   the R7 exemption for one clause's statically-disjoint payload bindings (round 2 B1/B2), and
+   consuming the scrutinee reference at dispatch rather than leaving it a surplus value (round 2
+   B3); the full dogfood end to end including `walk`; recording R16's answer into ROADMAP.md's
+   parked design question (the DESIGN.md:134/208-214 amendment, D2, and ROADMAP.md:438-443's
+   title/body correction, Amendment A, are already applied and need no further phase-3 work —
+   only the design-question passage at ROADMAP.md:444-450 still needs R16's answer written into
+   it); R20's additive-work regression check.
    Exit: criteria 10, 11, 12, 14, and 16.
 4. **`get`/`set` migration and removal (Amendment B), or the stated fallback.** Migrate every
-   existing `get`/`set` call site to `&|> @`/`&|> !` (R21), then delete both words. Re-verified
-   scope (grepping the whole word, excluding comments and test-name string literals like
-   `"get-drops-rest"`/`"set-drops-overwritten"`, which the brief-stage estimate of 28/7/6 `get`
-   and 15 `set` did not exclude, and which undercounts `tests/phase1.rs` in particular, whose
-   REPL-session goldens pack many clauses — and many `get`/`set` calls — onto one source line):
-   `get` appears 20 times in `tests/phase0.rs`, 5 in `tests/phase1.rs`, 2 in
+   existing `get`/`set` call site to `&>`/`&!>` composed with `@`/`!` (R21), then delete both
+   words. Re-verified scope (grepping the whole word, excluding comments and test-name string
+   literals like `"get-drops-rest"`/`"set-drops-overwritten"`, which the brief-stage estimate
+   of 28/7/6 `get` and 15 `set` did not exclude, and which undercounts `tests/phase1.rs` in
+   particular, whose REPL-session goldens pack many clauses — and many `get`/`set` calls — onto
+   one source line): `get` appears 20 times in `tests/phase0.rs`, 5 in `tests/phase1.rs`, 2 in
    `examples/stack.sth`, and 3 in `examples/vm.sth` (30 total); `set` appears 17 times in
    `tests/phase0.rs`, 16 in `tests/phase1.rs`, 1 in `examples/stack.sth`, and 15 in
    `examples/vm.sth` (49 total, and this file's count for `vm.sth` alone matches the brief-stage
@@ -802,20 +820,36 @@ the surrounding prose's existing voice:
    whole-array copy-back) is **deleted**, not rewritten, once the equivalent behaviour is
    already covered by this slice's own reference-mode goldens (criteria 3 and 4); a call site
    where `get`/`set` is incidental plumbing inside a larger test or example is **rewritten** to
-   use `&|> @`/`&|> !`.
+   use `&>`/`&!>` composed with `@`/`!`.
 
-   **Recorded blocker, to be solved here rather than discovered here:** `examples/vm.sth`'s
-   assembler (`build`) threads its `[Op 13]` array purely on the stack through a chain of
-   thirteen `set` calls (`Halt 13 fill`, then twelve `index value set`) — the array is never
-   named as a local anywhere in `build`. `&|> !` requires a place (R2/R11: a reference is taken
-   from a local), and R15 declines to relax top-of-scope-only binding, so this call site cannot
-   migrate token-for-token. `build` must be restructured to bind the array as a local: `Op`'s
-   variants carry only scalar payload fields (`i64`/`usize`), so `[Op 13]` is `Copy`
-   (`is_copy`, src/check.rs:156, recurses element-wise), and each of the twelve replacement
-   calls can take a fresh, independent `&!` borrow of the same local, none overlapping —
-   `| arr | ... arr &! 0 >usize 0 >usize Load &|> ! ...`, one borrow per instruction. Since
-   `examples/vm.sth` is Phase 2's exit dogfood, this restructuring is the highest-risk part of
-   the migration and the most likely trigger for the fallback below.
+   **Two problems previously blocked this migration; Decision D resolves the type-level one
+   (round 2 G1), leaving only the place-level one (unchanged from the prior draft).**
+   `examples/vm.sth`'s assembler (`build`) threads its `[Op 13]` array purely on the stack
+   through a chain of thirteen `set` calls (`Halt 13 fill`, then twelve `index value set`,
+   vm.sth:140-152) — the array is never named as a local anywhere in `build`, and `fetch`'s read
+   (vm.sth:58) has the same shape. That **place problem** is unchanged: `&!>` requires a place
+   (R2/R11: a reference is taken from a local), and R15 declines to relax top-of-scope-only
+   binding, so these call sites cannot migrate token-for-token without first binding the array
+   as a local. `build` must be restructured: `Op`'s variants carry only scalar payload fields
+   (`i64`/`usize`), so `[Op 13]` is `Copy` (`is_copy`, src/check.rs:156, recurses element-wise),
+   and each of the twelve replacement calls can take a fresh, independent `&!` borrow of the
+   same local, none overlapping — `| arr | ... arr &! <index> &!> <value> ! ... arr ;`, one
+   borrow per instruction, `arr` returned at the end to match `build`'s declared
+   `( -- [Op 13] )`. The second, previously separate, **type problem** (round 2 G1) is that the
+   second draft's R4 rejected `@`/`!` on any Copy *aggregate*, and `Op` is exactly that, so
+   `&!> !` could not express a `build` write or `&> @` a `fetch` read at all, regardless of
+   place — Decision D removes this restriction (R4 above), so the only remaining work is the
+   mechanical restructuring, not a soundness gap. Round 2 also caught the prior draft's own
+   proposed replacement line mis-ordered: `arr &! 0 >usize 0 >usize Load &|> !` leaves
+   `[&![Op 13], usize, Op]` when the (old-spelling) projection word runs, handing it an `Op`
+   value where it wants a `usize` index. The corrected order projects to the element reference
+   *before* constructing the value to store: `arr &! 0 >usize &!> 0 >usize Load !` — `arr &!`
+   (`[&!arr]`), `0 >usize` (the index, `[&!arr, 0_usize]`), `&!>` (projects, consuming both,
+   `[&!Op]`), `0 >usize Load` (constructs the `Op::Load(0)` value to store, `[&!Op, Op::Load(0)]`),
+   `!` (stores, `[]`). Since `examples/vm.sth` is Phase 2's exit dogfood, this restructuring
+   remains the highest-risk part of the migration and the most likely trigger for the fallback
+   below, now for mechanical-scope reasons (thirteen call sites across `build`, plus `fetch`'s
+   and the two other `get` reads) rather than because any call site was provably unmigratable.
 
    **Stated fallback, a real decision point, not an aspiration:** if phases 1-3 run long, this
    phase is deferred to Phase 3 Slice 6 and `get`/`set` **stay**, superseded in documentation
