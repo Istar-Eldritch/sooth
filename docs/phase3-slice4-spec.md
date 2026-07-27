@@ -108,8 +108,8 @@ exists at disposal time.
    assertions false the moment it lands, so deferring them would ship a red suite. Deep
    assertions only; the mutual case's small-chain trace was verified unchanged (the
    generalized loop walks the cycle in the same pre-order the recursive path did), and
-   `indirect_recursion_shapes_remain_depth_limited`'s left-leaning-tree assertion was left
-   untouched as the surviving proof D1 held.
+   `wrapper_indirection_disposes_in_constant_stack_left_leaning_tree_stays_depth_limited`'s
+   left-leaning-tree assertion was left untouched as the surviving proof D1 held.
 3. **Proofs and docs** (`e5b6e97e`): the 1,000,000-node constant-stack goldens (each
    verified to SIGSEGV on the base commit per R13, each with a self-tail-recursive builder
    per R14, plus one `ulimit -v` variant), near-miss/backtracking regression, and the
@@ -145,10 +145,7 @@ loop exists.
 
 ## Known follow-up
 
-`mutually_recursive_types_dispose_on_recursive_path` and
-`indirect_recursion_shapes_remain_depth_limited` still carry names describing their
-*pre-inversion* behaviour. The rename was specced for phase 3 and was **not** done. No
-example dogfood was added either: the 1,000,000-node goldens discharge the constant-stack
+No example dogfood was added: the 1,000,000-node goldens discharge the constant-stack
 claim and the byte-identical example sweep was judged not worth the slowdown.
 
 ## Out of scope

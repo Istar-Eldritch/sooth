@@ -2410,22 +2410,25 @@ fn alloc_trace_is_silent_when_unset() {
 // per-cell destructor, R5/R8) and the allocation-observing goldens it makes
 // possible. Every golden below is free to `drop` a cell, unlike Phase 3's.
 
-fn run_owned_memory_bounded_golden(tag: &str, src: &str) -> i32 {
+fn run_owned_memory_bounded_golden(tag: &str, src: &str, limit_kb: u64) -> i32 {
     let path = std::env::temp_dir().join(format!("sooth-owned-{tag}-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let binary = driver::build(&path).expect("build should succeed");
     std::fs::remove_file(&path).ok();
-    // Criterion 1b: gate off (the env var is removed, not just unset in this
-    // process) under a 64 MB `RLIMIT_AS` (`ulimit -v`, in KB): a fake free
-    // (a leak) grows unbounded across ~100k iterations and necessarily trips
-    // the limit, while a genuine free-per-iteration loop stays comfortably
+    // Gate off (the env var is removed, not just unset in this process)
+    // under a `limit_kb` `RLIMIT_AS` (`ulimit -v`, in KB): repeated leaked
+    // memory grows unbounded across iterations and necessarily trips the
+    // limit, while a genuine free-per-iteration loop stays comfortably
     // within it. Unlike criterion 14's OOM trap, this doesn't need to
     // distinguish a NULL `malloc` from a live one, only survive; see the
     // spec's "why criterion 14 is not a runtime golden" for why that
     // distinction specifically is unsound to probe at runtime.
     let status = std::process::Command::new("sh")
         .arg("-c")
-        .arg(format!("ulimit -v 65536 && exec \"{}\"", binary.display()))
+        .arg(format!(
+            "ulimit -v {limit_kb} && exec \"{}\"",
+            binary.display()
+        ))
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .status()
         .expect("binary should run");
@@ -2451,7 +2454,7 @@ fn owned_alloc_dispose_loop_stays_within_memory_bound() {
     // would.
     let src = ": loop-owned ( i64 -- )\n  dup 0 = if\n    drop\n  else\n    0 >u8 1024 fill ^ drop\n    1 - loop-owned\n  end ;\n\
 : main ( -- )\n  100000 loop-owned ;\n";
-    let code = run_owned_memory_bounded_golden("mem-bound", src);
+    let code = run_owned_memory_bounded_golden("mem-bound", src, 65536);
     assert_eq!(
         code, 0,
         "a real free-per-iteration loop should stay within the 64 MB bound"
@@ -2899,7 +2902,7 @@ fn deep_right_leaning_tree_disposes_in_constant_stack() {
 }
 
 #[test]
-fn mutually_recursive_types_dispose_on_recursive_path() {
+fn mutually_recursive_types_dispose_in_constant_stack() {
     // Criterion 14, half of it inverted by Phase 3 Slice 4. A small A/B
     // chain (base case in `A`, since an all-struct or all-linked pair with
     // no base variant would be uninhabited per R5) disposes with the same
@@ -2952,7 +2955,7 @@ type: B | BNil | BCons tag __spy next ^A ;\n\
 }
 
 #[test]
-fn indirect_recursion_shapes_remain_depth_limited() {
+fn wrapper_indirection_disposes_in_constant_stack_left_leaning_tree_stays_depth_limited() {
     // Criterion 16, half of it inverted by Phase 3 Slice 4: indirection
     // through a wrapper struct is a route the generalized loop now walks, so
     // that list exits 0 at 1,000,000 nodes under a 1 MB stack. The
@@ -3322,11 +3325,15 @@ fn deep_mutual_chain_disposes_in_constant_stack_from_b() {
 
 #[test]
 fn deep_recursive_chain_disposes_within_bounded_memory() {
-    // Criterion 7's memory-bounded variant (R14): the wrapper-struct list's
-    // builder is itself constant-stack (Slice 6 TCO), so this measures
-    // disposal, not construction; a real free-per-node loop stays within a
-    // 64 MB `RLIMIT_AS` for 1,000,000 24-byte-ish nodes, while a leaked
-    // (never-freed) chain of that size would not.
+    // A single build-then-drop can't discriminate a leak from a real free:
+    // the whole chain exists at once during construction either way, so
+    // both peak at the same size. Churn instead: build and drop a
+    // 10,000-node chain 1,000 times through a self-tail-recursive driver.
+    // A genuine free-per-node loop's peak stays flat across iterations
+    // (measured ~2.8 MB here); a leak would instead accumulate all 10M
+    // nodes built across the run (~290 MB, measured from the same per-node
+    // cost). The 8 MB bound below sits comfortably above the real case and
+    // an order of magnitude below what a leak would need.
     let src = "type: Wrap v i64 n ^List ;\n\
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
@@ -3336,11 +3343,18 @@ type: List | Nil | Cons w Wrap ;\n\
   else\n    \
     n 1 - n acc ^ Wrap Cons build\n  \
   end ;\n\
-: main ( -- )\n  1000000 Nil build drop ;\n";
-    let code = run_owned_memory_bounded_golden("deep-mem-bound", src);
+: churn ( i64 -- )\n  \
+  dup 0 = if\n    \
+    drop\n  \
+  else\n    \
+    10000 Nil build drop\n    \
+    1 - churn\n  \
+  end ;\n\
+: main ( -- )\n  1000 churn ;\n";
+    let code = run_owned_memory_bounded_golden("deep-mem-bound", src, 8192);
     assert_eq!(
         code, 0,
-        "a real free-per-node disposal loop should stay within the 64 MB bound"
+        "1,000 churns of a 10,000-node chain should stay within the 8 MB bound"
     );
 }
 
