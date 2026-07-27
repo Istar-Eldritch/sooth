@@ -892,9 +892,32 @@ fallback) and is a call-site audit plus a suite-still-passes check, not a single
 The brief carries the original dogfood source, and the brief is edited in this revision only
 for its three stale `ROADMAP.md` citations (two instances of line 452, one of line 447, both
 corrected per B1 above; per the pipeline's scope for a citation-only pass) — it is **not**
-updated for D3/D4's new accessor spellings, so its literal source is now stale (`^&`, plain
-`Buf>data`/`get` applied to a reference, `new`/`dispose`). This section is the authoritative,
-current version; an implementer works from here, not from the brief's literal code.
+updated for D3/D4's or this round's Decision A accessor spellings, or for round 2's A1/A2
+fixes, so its literal source is now stale in three ways (`^&`, plain `Buf>data`/`get` applied
+to a reference, `new`/`dispose`; the second-draft accessor spellings; and `main`'s mid-body
+`| a b |` and bare `i64` literals). This section is the authoritative, current version; an
+implementer works from here, not from the brief's literal code.
+
+**Round 2 A1 (blocker): the previous revision's `main` does not compile, and this revision
+restructures it rather than patching the trace around the bug.** `main ( -- ) new new | a b |
+...` binds locals *mid-body*, against zero declared inputs — R15 states plainly that locals
+bind only at word entry against declared inputs, and the prior revision's own hand-trace then
+asserted the opposite of what it had just stated (measured: `new new | a b | ...` produces
+`parse error: unexpected token Pipe`, exactly as the recon section's own scalar-local probe
+already demonstrated for a simpler program). The fix is the one R15 already implies: a helper
+word that declares the two buffers as inputs. `main` becomes a two-line caller; `run` carries
+the body and the local binding, now legal because `run` declares exactly two inputs and binds
+exactly two locals.
+
+**Round 2 A2 (blocker): `72`/`90` are `i64` literals where `push-byte` declares `u8`, and
+need `>u8`.** D8's bare-literal coercion is gated on `is_size_type` — `usize`/`isize` only — so
+there is no `i64`-to-`u8` literal coercion (measured: `72 takeu8` against a `( u8 -- )` word
+is a located type-mismatch error). `new`'s own body already writes `0 >u8` correctly, which is
+what makes the previous revision's two bare literals an inconsistency inside the same dogfood
+rather than a new problem; both call sites below now write `72 >u8`/`90 >u8`. `byte-at`'s
+index argument is unaffected: `usize` is on the bare-literal coercion carve-out, so `a & 2
+byte-at` needs no conversion (verified: a bare literal against a declared `usize` parameter
+type-checks with no coercion word).
 
 ```forth
 type: Buf  data ^[u8 64]  len usize ;
@@ -904,27 +927,30 @@ type: Buf  data ^[u8 64]  len usize ;
 
 : push-byte ( &!Buf u8 -- )
   | b x |
-  b Buf&|>len @              \ ( -- usize )
-  b Buf&|>data &^ swap       \ ( -- &!u8[64] usize )
-  &|> x !                    \ ( -- ), stores x through the derived &!u8
-  b Buf&|>len 1 +! ;
+  b Buf&!>len @              \ ( -- usize )
+  b Buf&!>data &!^ swap      \ ( -- &![u8 64] usize )
+  &!> x !                    \ ( -- ), stores x through the derived &!u8
+  b Buf&!>len 1 +! ;
 
 : byte-at ( &Buf usize -- u8 )
   | b i |
-  b Buf&|>data &^ i &|> @ ;
+  b Buf&>data &^ i &> @ ;
 
 : copy-byte ( &!Buf &Buf usize -- )
   | dst src i |
   dst src i byte-at push-byte ;
 
-: main ( -- )
-  new new | a b |
-  a &! 72 push-byte
-  b &! 90 push-byte
+: run ( Buf Buf -- )
+  | a b |
+  a &! 72 >u8 push-byte
+  b &! 90 >u8 push-byte
   a &! b & 0 copy-byte
   a & 2 byte-at .
   a drop
   b drop ;
+
+: main ( -- )
+  new new run ;
 ```
 
 And R17's motivating case, over the existing `List` (`examples/list.sth`):
@@ -934,63 +960,79 @@ And R17's motivating case, over the existing `List` (`examples/list.sth`):
   | Nil
   | Cons | v next |
       v 1 +!
-      next &^ walk
+      next &!^ walk
   ;
 ```
 
-### Hand-trace of `push-byte`, `byte-at`, `copy-byte`, and `main`
+### Hand-trace of `push-byte`, `byte-at`, `copy-byte`, `run`, and `main`
 
 `push-byte ( &!Buf u8 -- )`, `b : &!Buf`, `x : u8`:
 
 | term | stack after |
 |---|---|
 | `b` (reborrow, R5) | `[&!Buf]` |
-| `Buf&|>len` (consumes the reborrow, R3) | `[&!usize]` |
+| `Buf&!>len` (consumes the reborrow, R3) | `[&!usize]` |
 | `@` (R4, typed for `&!T`) | `[usize]` |
-| `b` (second reborrow — the first was fully consumed by `@` already) | `[usize, &!Buf]` |
-| `Buf&|>data` | `[usize, &!^[u8 64]]` |
-| `&^` (R3, inherits `&!`) | `[usize, &![u8 64]]` |
+| `b` (second reborrow — the first's derived `&!usize` was fully consumed by `@` already, so `b`'s place is not suspended, Decision B) | `[usize, &!Buf]` |
+| `Buf&!>data` | `[usize, &!^[u8 64]]` |
+| `&!^` (R3, mutable cell projection) | `[usize, &![u8 64]]` |
 | `swap` (R7's one-`swap` cost) | `[&![u8 64], usize]` |
-| `&|>` — `( &![T N] usize -- &!T )` | `[&!u8]` |
+| `&!>` — `( &![T N] usize -- &!T )` | `[&!u8]` |
 | `x` (Copy local, no move) | `[&!u8, u8]` |
 | `!` (R4) | `[]` |
-| `b` (third reborrow — the second was fully consumed by `&|>`/`!` already) | `[&!Buf]` |
-| `Buf&|>len` | `[&!usize]` |
+| `b` (third reborrow — the second's derived chain was fully consumed by `&!>` then `!` already) | `[&!Buf]` |
+| `Buf&!>len` | `[&!usize]` |
 | `1` | `[&!usize, i64(1)]` |
 | `+!` | `[]` |
 
-Ends `[]`, matching the declared `( &!Buf u8 -- )`. `b` is named three times, never
-simultaneously live in two derived forms (R7's discipline), and expires silently at the word's
-end (R8) with no `drop`.
+Ends `[]`, matching the declared `( &!Buf u8 -- )`. `b` is named three times; at each
+subsequent naming, nothing derived from the previous reborrow is still live, so `b`'s place is
+never suspended at the point of a new reborrow (Decision B) and R7's disjointness rule never
+has to reason about two live derivations from `b` at once (the narrow claim R3/C2 leaves
+standing). `b` expires silently at the word's end (R8) with no `drop`.
 
-`byte-at ( &Buf usize -- u8 )`, `b : &Buf`, `i : usize`: `b` (`[&Buf]`) `Buf&|>data`
-(`[&^[u8 64]]`, shared inherited) `&^` (`[&[u8 64]]`) `i` (`[&[u8 64], usize]`) `&|>`
-(`[&u8]`, shared inherited) `@` (`[u8]`). Ends `[u8]`, matching the declared output.
+`byte-at ( &Buf usize -- u8 )`, `b : &Buf`, `i : usize`: `b` (`[&Buf]`) `Buf&>data`
+(`[&^[u8 64]]`, shared struct projection) `&^` (`[&[u8 64]]`, shared cell projection) `i`
+(`[&[u8 64], usize]`) `&>` (`[&u8]`, shared array-element projection) `@` (`[u8]`). Ends
+`[u8]`, matching the declared output. Every projection here is shared, so Decision B's suspend
+rule never engages at all (it is mutable-only); the shared family composes exactly as freely as
+any other `Copy` value.
 
 `copy-byte ( &!Buf &Buf usize -- )`, locals `dst : &!Buf`, `src : &Buf`, `i : usize`: naming
 `dst src i` pushes `[&!Buf, &Buf, usize]`; `byte-at` consumes the top two (`&Buf`, `usize`,
 matching its declared input), pushing `[&!Buf, u8]`; `push-byte` consumes both, pushing `[]`.
 Ends `[]`, matching the declared output.
 
-`main ( -- )`: `new new` pushes `[Buf, Buf]`; `| a b |` binds `a` to the first, `b` to the
-second (leftmost name to the deepest value, matching every other binding in the language),
-leaving `[]`. `a &! 72 push-byte` borrows `a` (R2, R11: `a` is a struct local), pushes the u8
-literal, calls `push-byte`; `a`'s `data` cell now holds `72` at index 0 and `len` is `1`. `b &!
-90 push-byte` does the same for `b`: index 0 is `90`, `len` is `1`. `a &! b & 0 copy-byte`
-borrows `a` mutably and `b` sharedly (R5: different places, no conflict) and reads `b`'s byte 0
-(`90`) into `a` at its current `len` (`1`), so `a`'s `len` becomes `2` and index 1 is `90`. `a &
-2 byte-at .` reads index 2 of `a`, which `new`'s zero-fill left untouched (only indices 0 and 1
-were ever written), so it prints `0`. `a drop` and `b drop` dispose both owned buffers (freeing
-their `data` cells). Ends `[]`, matching `( -- )`; R20's regression check is unaffected since
-this is a new file, not an edit to an existing one.
+`run ( Buf Buf -- )`, locals `a : Buf`, `b : Buf` (R15: `run` declares two inputs and binds
+exactly two locals, unlike the previous revision's zero-input `main`): naming `a`/`b` never
+moves them outright — `Buf` is linear (its `data` field is a cell), but `&`/`&!` borrow *from*
+a place without consuming the local itself (R2), so `a` and `b` remain nameable again later in
+the body, up to the point each is finally `drop`ped. `a &! 72 >u8 push-byte` borrows `a` (R2,
+R11: `a` is a struct local), converts the literal, calls `push-byte`; `a`'s `data` cell now
+holds `72` at index 0 and `len` is `1`. `b &! 90 >u8 push-byte` does the same for `b`: index 0
+is `90`, `len` is `1`. `a &! b & 0 copy-byte` borrows `a` mutably and `b` sharedly — different
+places, so Decision C's symmetric rule does not fire either direction — and reads `b`'s byte 0
+(`90`) into `a` at its current `len` (`1`), so `a`'s `len` becomes `2` and index 1 is `90`.
+`a & 2 byte-at .` reads index 2 of `a`, which `new`'s zero-fill left untouched (only indices 0
+and 1 were ever written), so it prints `0`. `a drop` and `b drop` dispose both owned buffers
+(freeing their `data` cells) — this is the point `a`/`b` are actually consumed, once, matching
+the linear rule. Ends `[]`, matching `run`'s declared `( Buf Buf -- )`.
 
-`walk`'s clause-mode dispatch (R17) over `&!List`: the `Nil` clause has no payload and an empty
-body. The `Cons` clause binds `v : &!i64`, `next : &!^List` (mutability inherited from the
-`&!List` scrutinee). `v` (reborrow) `1` `+!` mutates the node's value in place and leaves `[]`;
-`next` (reborrow) `&^` (inherits `&!`, T = `List`) yields `&!List` whose provenance traces back
-to `walk`'s own parameter, so the tail call `walk` is a legal R9 back-edge. Every node's `v`
-field is incremented exactly once as the walk recurses, in constant stack (R9, criterion 10),
-and `walk` never frees or moves the list it walks — ownership stays with whoever calls it.
+`main ( -- )`: `new new` pushes `[Buf, Buf]`; `run` consumes both, matching its declared input,
+leaving `[]`. Ends `[]`, matching `( -- )`; R20's regression check is unaffected since this is
+a new file, not an edit to an existing one.
+
+`walk`'s clause-mode dispatch (R17) over `&!List`: the scrutinee reference is consumed by the
+dispatch itself (round 2 B3), not left as a surplus value. The `Nil` clause has no payload and
+an empty body. The `Cons` clause binds `v : &!i64`, `next : &!^List` simultaneously (mutability
+inherited from the `&!List` scrutinee; both live at once is R17's statically-disjoint-fields
+exemption from R7, round 2 B1/B2, since `v` and `next` are two distinct, statically known fields
+of one `Cons` variant, never aliasing each other). `v` (reborrow) `1` `+!` mutates the node's
+value in place and leaves `[]`; `next` (reborrow) `&!^` (mutable cell projection, `T = List`)
+yields `&!List` whose provenance traces back to `walk`'s own parameter, so the tail call `walk`
+is a legal R9 back-edge. Every node's `v` field is incremented exactly once as the walk
+recurses, in constant stack (R9, criterion 10), and `walk` never frees or moves the list it
+walks — ownership stays with whoever calls it.
 
 ## Explicitly out of scope
 
