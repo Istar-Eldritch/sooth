@@ -332,15 +332,17 @@ R17's reference-mode clause payload bindings are a narrow, named exemption from 
 a second case of it — see R17 for why fan-out from one scrutinee is sound where this rule is
 conservative.
 
-**R8 — Escape is prevented structurally, by five positional rejections over transitive
-containment.** A type that **transitively contains** a reference — the reference itself, a
-struct with a reference-typed field (directly or nested), an enum variant carrying one, an
-array of them, or a cell over one — is a located compile error in: a struct field declaration,
-an enum variant payload declaration, an array element (via `fill`), a cell payload (via `^`),
-and the **output** side of a declared effect signature. A reference on the **input** side of an
+**R8 — Escape is prevented structurally, by six positional rejections over transitive
+containment (five over compiled code, one over the REPL's cross-line storage — D4 below).** A
+type that **transitively contains** a reference — the reference itself, a struct with a
+reference-typed field (directly or nested), an enum variant carrying one, an array of them, or
+a cell over one — is a located compile error in: a struct field declaration, an enum variant
+payload declaration, an array element (via `fill`), a cell payload (via `^`), the **output**
+side of a declared effect signature, and (D4) a value surviving to the end of a REPL line that
+would be carried into the session's inter-line stack. A reference on the **input** side of an
 effect is fine (R2 already establishes the only source of a reference is a local borrow inside
-some frame, so a parameter reference is unremarkable) and is accepted, tested alongside the
-rejections rather than left implicit.
+some frame, so a parameter reference is unremarkable) and is accepted, narrowly (D3 below),
+tested alongside the rejections rather than left implicit.
 
 Round 1 (soundness B5) found the first draft's three-position version had two holes precisely
 because it enumerated *positions* rather than closing over *type constructors*: `check_owned_cell_word`'s
@@ -356,6 +358,40 @@ positions phrased over containment instead of three phrased over syntax.
 Combined with place-only creation (R2) and R11 (only an aggregate local can be a borrow root, so
 a reference can never be the *only* handle to something whose lifetime it controls), a reference
 cannot outlive its referent, so no lifetime apparatus is needed.
+
+**Three round-2 hardening notes on R8 (D2, D3, D4), none of which change R8's outcome:**
+
+- **D2 — `set` is a second array-element construction site R8 doesn't name in its own prose.**
+  R8 phrases the array rejection as "an array element (via `fill`)", but `set ( [T N] usize T
+  -- [T N] )` also writes an element and survives phases 1-3 unmentioned. It is closed only
+  *transitively*: `fill`'s own construction-site rejection already means a `[&Buf 4]` value can
+  never exist to call `set` on in the first place, so there is nothing for `set` to leak. State
+  that reasoning here rather than leaving `set` looking like an unguarded second site: R8's
+  rejection is at every *construction* site (`fill`, `^`), and `set` is a *mutation* site over an
+  already-legal array, which cannot be reference-typed if it was never constructible as one.
+- **D3 — narrow the input-side accept-case to a literal top-level reference.** R8's accept-case
+  ("a reference on the input side of an effect is fine") is phrased over the type at the top
+  level, but read as literally as the rejection bullets above it, `: evil ( [&Buf 4] -- )` and
+  `: evil2 ( ^&Buf -- )` would also be accepted declarations, since nothing in R8's own text
+  narrows the carve-out below the position level for the accept side specifically. Both are
+  uninhabited today — D1's construction-site rejections mean no value of either type can ever
+  be built to pass in — so there is no live exploit, but the carve-out is stated narrowly here
+  regardless: an effect's *input* side accepts a type that **is itself** `&T`/`&!T` at the top
+  level, not a type that merely contains one nested inside an array or cell, so the accept-case
+  stays closed if a future slice adds another aggregate constructor that this slice's two
+  construction-site rejections don't already cover.
+- **D4 — the REPL's carried stack is a storage position R8 must reject explicitly, not by
+  accident.** `Session` persists the inter-line stack as raw 8-byte cells plus a per-slot `Type`
+  (src/repl.rs:246-251). A reference landing there would be a dangling pointer silently
+  surviving into the next line — R12 maps a reference to `IrType::Ptr`, an 8-byte cell, so
+  nothing about the storage format would reject it. It is unreachable *today* only by an
+  accident this slice must not rely on: `Ctx::Line` has no locals at all
+  (`Ctx::Line { .. } => None`, src/check.rs:285/306), so R2's local-only place can never fire
+  inside a REPL line, and R8 is never asked the question. That is a fact about the REPL's
+  current shape, not a guarantee — R8 gains an explicit sixth rejection: a reference-typed value
+  surviving to the end of a REPL line (i.e. a value that would be carried into `Session`'s
+  buffer) is a located error, with its own golden, rather than a safety property that happens to
+  hold today for an unrelated reason.
 
 *On DESIGN.md's "no borrow checker" claim.* At the base commit, DESIGN.md:134 read "There is no
 borrow checker" and DESIGN.md:211-212 read that a borrow checker "is the worst possible fit
@@ -435,11 +471,30 @@ including in ABI positions: `IrType::Ptr` already exists (src/ir.rs:131) exactly
 ("a native pointer under QBE, a linear-memory offset under a future WASM lowering") and both
 `width` and `qbe_abi_ty` already spell it `l` (src/backend/qbe.rs:248, and via the `_ =>
 width(ty)` fallthrough at src/backend/qbe.rs:264+) with no change needed to either function —
-only `ir_type_of` gains the two new `Type` arms. Cell projection's `Load` (R3, `&^`) loads a
-pointer value whose `IrType` is `Ptr`, exactly the existing `OwnedCell` shape (src/ir.rs:1337),
+only `ir_type_of` gains the two new `Type` arms. Cell projection's `Load` (R3, `&^`/`&!^`) loads
+a pointer value whose `IrType` is `Ptr`, exactly the existing `OwnedCell` shape (src/ir.rs:1337),
 never an `Int`, so `Load`'s doc comment ("`dst: Int = *ptr`", src/ir.rs:743) describes the
 *instruction*, not a constraint on the destination's `IrType` — the same reading Slice 2's own
 cell-unwrap lowering already relies on.
+
+**Round 2 (E1): "only `ir_type_of` gains two arms" understates the work, and the missing part
+is a soundness answer, not a mechanical one.** `Type` is matched exhaustively at many sites
+(`is_copy`, every `is_linear`-shaped predicate, the surplus-value check, and further sites this
+spec does not enumerate), and adding `&T`/`&!T` as new `Type` variants means each of those
+matches gains an arm whose *answer* the checker depends on for correctness, not merely an arm
+that must exist to satisfy exhaustiveness: `is_copy` must return `true` for `&T` and `false` for
+`&!T` (this is R5's "`&T` is `Copy`, `&!T` is not" bullet, restated as a checker obligation, not
+just prose), and every `is_linear`-shaped predicate must return `false` for both (a reference is
+neither `Copy` nor linear, R8's third-category treatment above) — getting either wrong would
+silently misclassify a reference as duplicable-and-droppable or as needing the linear
+drop-tracking machinery, either of which is a soundness bug, not a missing case. Separately, and
+consistent with the tripwire paragraph in the invariants section below: a reference needs an
+interned `RefId` registry — an `(inner: Type, mutable: bool)` pair, mirroring `Array`'s and
+`OwnedCell`'s existing `(Id, &'static str)` registries — the moment a parameterized reference
+type needs to render its own name (an error message, a `T&>fi`/`T&!>fi` accessor's generated
+name). Phase 1's changes list is updated below to name `is_copy`/the linearity predicates and
+the `RefId` registry explicitly, rather than leaving them implied by "`ir_type_of` gains two
+arms".
 
 **R13 — Mutation through a reference emits no rebuild.** The measurable form of the recon-2
 table: the emitted body of the dogfood's `push-byte` contains no `alloc` and no `blit`.
@@ -471,18 +526,35 @@ rather than only living in this prose.
 
 **R17 — Reference-mode enum elimination (D1).** When a word's declared top input is a reference
 to an enum (`&Enum` or `&!Enum`), the existing clause-style whole-word form (`| Variant ... |
-Variant ... ;`) applies in **reference mode**, same syntax, three differences from the
-value-mode form:
+Variant ... ;`) applies in **reference mode**, same syntax, four differences from the
+value-mode form (the fourth added this round, Decision B/round 2 B1-B3):
 
-- The scrutinee is **borrowed, not consumed**: reading the discriminant through the reference is
-  a tag `FieldLoad` (no new IR instruction, consistent with R12), and the enum value itself is
-  never freed or moved by the dispatch.
+- The scrutinee is **borrowed and consumed by the dispatch** (round 2 B3, see below), not owned
+  and not freed: reading the discriminant through the reference is a tag `FieldLoad` (no new IR
+  instruction, consistent with R12), and the enum value itself is never freed or moved by the
+  dispatch — only the reference *value* is consumed, the same way any reference argument to any
+  word is consumed by that word.
 - Each clause's payload bindings are **references inheriting the scrutinee's mutability**: a
   `Cons v i64 next ^List` clause under a `&!List` scrutinee binds `v : &!i64` and
   `next : &!^List`, exactly as a struct-field projection under `&!` would (R3).
 - **No clause may consume a payload binding.** A payload binding is a reference like any other;
   moving it out (rather than projecting through it or feeding it to `@`/`!`/`+!`) is a located
   error, the same rule R4 already applies to a fetched/stored `T`.
+- **A single clause's payload bindings are exempt from R7 (round 2 B1/B2, Decision B).** A
+  clause binds every field of one variant **simultaneously**, in one dispatch step, not by
+  repeated reborrow-then-project — there is no root local name to reborrow from at all, since
+  clause-style words have no word-entry `| … |` and the scrutinee is an anonymous input. Round 2
+  found this is a genuine fan-out that neither R5/R6's suspend rule nor R7's disjointness rule,
+  as stated for the reborrow-and-project case, has a rule for: `Cons`'s `v : &!i64` and
+  `next : &!^List` are two simultaneously live `&!` rooted at one referent, which R7 would
+  otherwise conservatively reject. The exemption is narrow and stated explicitly, not a silent
+  gap: the fields bound by one clause are **statically disjoint** fields of one variant (the
+  checker knows the full field layout of `Cons` at the point it binds `v`/`next`, the same static
+  knowledge R7 defers exploiting for the *general* projection case), so binding them all as
+  simultaneously-live references is sound by construction, and is exempted from R7 on exactly
+  that basis — disjointness that is *statically known*, not merely asserted. This is a principled,
+  narrow carve-out for one dispatch mechanism, not a hole in R7's general conservatism; R7 itself
+  is unchanged for the reborrow-and-project case everything else in this spec uses.
 
 This resolves the first draft's flagship gap (round 1 soundness B7): `: walk ( &!List -- ) ...
 walk ;` is repeatedly the motivating example for R9's back-edge rule, but clause-style
@@ -495,13 +567,44 @@ is now:
   | Nil
   | Cons | v next |
       v 1 +!
-      next &^ walk
+      next &!^ walk
   ;
 ```
 
-`v`'s reborrow is fully consumed by `+!` before `next` is named, and `next &^` derives a
+`v`'s reborrow is fully consumed by `+!` before `next` is named, and `next &!^` derives a
 `&!List` whose provenance traces back to `walk`'s own parameter (R9's ancestor-frame case), so
 the recursive `walk` call is a legal back-edge exactly as it would be for a struct.
+
+**Round 2 B3: the scrutinee reference slot is consumed at dispatch, not left as a surplus
+value.** Value-mode clause elimination removes the scrutinee from the stack before binding
+payloads (`stack_below = params[..params.len() - 1]`, src/ir.rs:2679); reference mode does the
+same with the reference value, so every clause body of `walk ( &!List -- )` starts from `[]`
+below its own payload bindings and the word's declared `( &!List -- )` is checked exactly as
+value mode's `( List -- )` would be — if reference mode instead left the scrutinee reference on
+the stack through every clause, the surplus-value check (R8) would fire at every clause exit
+(the measured shape for a leftover value is "body leaves 1 values, but ( … ) declares 0
+outputs"), which is not what R17 specifies. Consuming the scrutinee reference is consistent with
+R3 ("projection... consumes its reference argument") and with dispatch being, mechanically, one
+projection per payload field off the same reference operand.
+
+**Round 2 B4: `lower_clauses`'s `EnumId` must be threaded from the checked frontend type, not
+re-derived from the lowered scrutinee's `IrType`.** `lower_clauses` currently derives the
+`EnumId` via `self.value_type(scrutinee)` with `_ => unreachable!("checked: a clause word's top
+input is an enum")` (src/ir.rs:2680-2682). Under R12 a `&!List` scrutinee lowers to
+`IrType::Ptr`, not `IrType::Enum(id)`, so this `unreachable!` becomes a **reachable panic** the
+first time reference-mode dispatch reaches this function, unless the `EnumId` is threaded down
+from the already-checked frontend `Type` (which knows the concrete enum regardless of whether it
+arrived by value or by reference) rather than re-derived from the lowered IR value. This is
+added to phase 3's changes list below (R17's own phase) as required lowering work, not left as
+an implicit consequence of "no new IR instruction".
+
+**Round 2 B4 (minor): a one-variant enum's dispatch never reads the tag, so a golden asserting
+the tag `FieldLoad` needs at least two variants.** `dispatch_on_tag` short-circuits to a bare
+`Jmp` with no tag read when the enum has exactly one variant (src/ir.rs:2436). `List`
+(`examples/list.sth`) has two (`Nil`/`Cons`), so `walk`'s own golden is not vacuous on this
+axis, but the phase-3 test author should not construct a *new*, minimal one-variant enum for a
+tag-read assertion and expect it to observe a `FieldLoad` — noted here so the gap is not
+rediscovered as a test failure.
 
 The mode follows the declared scrutinee type, which is explicit in the signature (`&!List` vs
 `List`), so choosing reference mode is never implicit or type-directed in a way that would
