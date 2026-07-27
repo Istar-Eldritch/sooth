@@ -1478,8 +1478,8 @@ mod tests {
 
     #[test]
     fn parse_clause_body_mid_body_pipe_produces_bind_term() {
-        // Phase 2: the D8 lookahead applies at every `|` in a clause body, not
-        // only the first, so a later `|` not followed by a known variant is an
+        // The D8 lookahead applies at every `|` in a clause body, not only
+        // the first, so a later `|` not followed by a known variant is an
         // ordinary mid-body binding term rather than a clause boundary.
         let module = parse_src(
             "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n             : area ( Shape -- f64 ) | Circle dup | r | r * | Rect | w h | w h * ;",

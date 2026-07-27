@@ -101,7 +101,8 @@ fn local_bound_in_if_arm_is_not_visible_after_end() {
 #[test]
 fn name_bound_in_one_arm_can_be_rebound_in_sibling_arm() {
     // Criterion 4: the first `v`'s extent ended at `else`, so the second is a
-    // fresh binding, not the re-binding R4 rejects. Proves teardown happens.
+    // fresh binding, not the re-binding R4 rejects. Proves IR-side teardown
+    // happens (each arm's locals truncate at its exit).
     let (stdout, code) = run_src(
         "sibling-arm-rebind",
         ": pick ( bool -- i64 )\n  if 1 | v | v 10 * else 2 | v | v 100 * end ;\n\n\
