@@ -79,7 +79,7 @@ because naming a linear local moves it (`moves.take`, src/check.rs:1670) before 
 nothing in the codebase inspects the *preceding* term the way that form would require. **D3/D4**
 resolves this by retiring the projection-path form outright rather than building the backward
 parser folding it would need: **R3**'s accessor family projects through an *already-borrowed*
-reference, so the same result (`&!usize` for one field of `a`) is reached as `a &! Buf&|>len`
+reference, so the same result (`&!usize` for one field of `a`) is reached as `a &! Buf&!>len`
 — borrow the whole local first, then project through the reference with an ordinary word. A
 place is therefore exactly a local name, R2's postfix operator is applied to it exactly once
 per borrow, and every deeper reference is a projection (R3), not a second application of `&`/`&!`.
@@ -450,7 +450,7 @@ rule is smaller and no criterion needs the imprecision.
 a local of struct, enum, array, or cell type. A local of scalar type is a located compile error
 ("borrow a field or an aggregate"). This deletes the spill obligation from the brief's D5
 entirely: by recon 3 scalars are SSA temporaries with no address, and giving them memory homes
-is real work no criterion needs. A projection whose *result* is scalar (`b Buf&|>len` yielding
+is real work no criterion needs. A projection whose *result* is scalar (`b Buf&!>len` yielding
 `&!usize`) is unaffected, since the referent is a field inside an aggregate that already has a
 slot, and — per R3's consequence above — the list stays exactly struct/enum/array/cell, with no
 reference-typed case needed, since R2 is never applied to an already-reference value.
@@ -1059,12 +1059,12 @@ branching disposal (Phase 6).
       "phase": 1,
       "focus": "reference-types-places-projection-access",
       "difficulty": "hard",
-      "summary": "Add &T/&!T mapped to IrType::Ptr, postfix &/&! on locals, the S&|>fi/&|>/&^ accessor family with inherited mutability, @/!/+! with Copy-scalar restrictions typed for both &T and &!T, R11's scalar-local rejection, R8's five escape rejections plus drop-as-no-op, and the surplus-value rule for a leftover reference on the stack.",
+      "summary": "Add &T/&!T mapped to IrType::Ptr with a RefId registry and correct is_copy/is_linear answers, name reservation for &-led names and shadowing rejection for @/!/+!, the three-case &T/&!T type-position splitter, postfix &/&! on locals with the place-suspend rule for mutable projections, the T&>fi/T&!>fi/&>/&!>/&^/&!^ accessor family split by mutability, @/!/+! typed for both &T and &!T and covering a Copy aggregate via Alloc+Blit as well as a Copy scalar, R11's scalar-local rejection, R8's six escape rejections (five over compiled code plus the REPL carried-stack case) plus drop-as-no-op, and the surplus-value rule for a leftover reference on the stack.",
       "changes": [
-        "src/lexer.rs, src/parser.rs: `&` and `&!` as postfix borrow operators on a local; `&T`/`&!T` in type position; `S&|>fi`, `&|>`, `&^`, `@`, `!`, `+!` as words",
-        "src/check.rs: reference types in the type lattice; R2's local-only place; the S&|>fi/&|>/&^ accessor family with inherited mutability, each consuming its reference argument; R4's Copy-scalar restriction on @/!/+!, @ typed for both &T and &!T; R11's scalar-local rejection; R8's five transitive-containment rejections (struct field, enum payload, fill's array element, ^'s cell payload, effect output) plus the effect-input accept-case; the surplus-value rule treating a leftover &!T on the stack like any non-Copy value while a reference local expires silently",
-        "src/ir.rs: ir_type_of gains &T/&!T -> IrType::Ptr; lower S&|>fi to PtrOffset, &|> to ElemAddr, &^ to a Load of the stored pointer, @ to FieldLoad, ! to FieldStore, +! to FieldLoad+Bin(Add)+FieldStore; drop of a reference emits no destructor call",
-        "no new Instr variant (R12)"
+        "src/lexer.rs, src/parser.rs: `&` and `&!` as postfix borrow operators on a local; `&T`/`&!T` in type position with its three splitting cases (bare, `^`-composed, `[`-delimited); `T&>fi`, `T&!>fi`, `&>`, `&!>`, `&^`, `&!^`, `@`, `!`, `+!` as words; `&`-led name reservation mirroring `is_reserved_caret_name`/`reserved_caret_name_error`; a shadowing rejection for the exact names `@`, `!`, `+!`",
+        "src/check.rs: reference types in the type lattice with an interned RefId (inner, mutable) registry; is_copy true for &T/false for &!T and every is_linear-shaped predicate false for both; R2's local-only place; the T&>fi/T&!>fi/&>/&!>/&^/&!^ accessor family split by mutability, each consuming its reference argument and suspending its root place for the mutable forms; R4's Copy restriction on @/!/+!, @ typed for both &T and &!T, now covering a Copy aggregate as well as a Copy scalar; R11's scalar-local rejection; R8's six transitive-containment rejections (struct field, enum payload, fill's array element, ^'s cell payload, effect output, REPL carried-stack survival) plus the effect-input accept-case narrowed to a top-level reference type; the surplus-value rule treating a leftover &!T on the stack like any non-Copy value while a reference local expires silently",
+        "src/ir.rs: ir_type_of gains &T/&!T -> IrType::Ptr; lower T&>fi/T&!>fi to PtrOffset, &>/&!> to ElemAddr, &^/&!^ to a Load of the stored pointer, @ to FieldLoad (Copy scalar) or Alloc+Blit (Copy aggregate), ! to FieldStore (Copy scalar) or Blit (Copy aggregate), +! to FieldLoad+Bin(Add)+FieldStore; drop of a reference emits no destructor call",
+        "no new Instr variant (R12); Alloc and Blit already exist and are already used this way by set's own array-element lowering"
       ],
       "tests": [
         "borrow_of_place_is_accepted",
@@ -1077,12 +1077,13 @@ branching disposal (Phase 6).
         "access_through_reference_reads_and_writes",
         "increment_through_mutable_reference_adds_in_place",
         "fetch_or_store_of_linear_payload_is_error",
-        "fetch_or_store_of_copy_aggregate_is_error",
+        "fetch_or_store_of_copy_aggregate_reads_and_writes",
         "reference_in_struct_field_is_error",
         "reference_in_enum_payload_is_error",
         "reference_as_array_element_is_error",
         "reference_in_cell_payload_is_error",
         "reference_returned_from_word_is_error",
+        "reference_surviving_repl_line_is_error",
         "reference_in_effect_input_is_accepted",
         "drop_of_reference_frees_nothing",
         "mutation_through_reference_emits_no_rebuild",
@@ -1097,15 +1098,17 @@ branching disposal (Phase 6).
       "phase": 2,
       "focus": "borrow-rules-and-diagnostics",
       "difficulty": "hard",
-      "summary": "Exclusivity as the single per-place aliasing rule, the consumption-point scan over both the stack and locals map, and the disjointness rejection with its sequenced-workaround accept-case.",
+      "summary": "Exclusivity as the single, symmetric per-place aliasing rule, the consumption-point scan keyed on a place's outstanding derivations rather than literal Value identity, and the disjointness rejection with its sequenced-workaround accept-case.",
       "changes": [
-        "src/check.rs: R5 exclusivity (at most one live &! per place, no & alongside a live &!, per-place not global), with &-is-Copy and &!-is-not derived from it rather than stated separately",
-        "src/check.rs: R6 consumption-point scan over the virtual stack and the locals map, firing on move, dispose, and conflicting-borrow, no liveness pass",
+        "src/check.rs: R5 exclusivity, both directions (at most one live &! per place; no & alongside a live &!; no &! alongside a live &; per-place not global), with &-is-Copy and &!-is-not derived from it rather than stated separately",
+        "src/check.rs: R6 consumption-point scan over the virtual stack and the locals map, keyed on a place's outstanding derivations (provenance traced through projection, not literal Value equality), firing on move, dispose, and conflicting-borrow (including a reborrow taken while a projection derived from the previous reborrow is still live), no liveness pass",
         "src/check.rs: R7 disjointness rejection as a stated limitation with its own diagnostic"
       ],
       "tests": [
         "two_live_mutable_borrows_is_error",
-        "shared_borrow_alongside_mutable_is_error",
+        "shared_borrow_while_mutable_live_is_error",
+        "mutable_borrow_while_shared_live_is_error",
+        "reborrow_while_projected_reference_still_live_is_error",
         "dup_of_mutable_reference_is_error",
         "two_live_mutable_borrows_to_different_places_is_accepted",
         "shared_reference_is_copy",
@@ -1117,7 +1120,7 @@ branching disposal (Phase 6).
         "disjoint_field_borrows_are_conservatively_rejected",
         "sequenced_borrows_of_two_fields_are_accepted"
       ],
-      "exit": "Criteria 7 to 9. Every borrow rule produces its specific located error, and the accept-cases (different-places, reborrow, Copy shared reference, move/dispose after borrow ends, sequenced disjoint fields) are all accepted."
+      "exit": "Criteria 7 to 9. Every borrow rule produces its specific located error in both R5 directions plus the reborrow-suspend case, and the accept-cases (different-places, reborrow after full consumption, Copy shared reference, move/dispose after borrow ends, sequenced disjoint fields) are all accepted."
     },
     {
       "phase": 3,
@@ -1127,8 +1130,9 @@ branching disposal (Phase 6).
       "changes": [
         "src/check.rs: R9 back-edge rules (a reference parameter, or a reference derived from one by projection, may cross; a reference to a current-scope local may not; a currently-borrowed local may not be loop-carried)",
         "src/check.rs: R10 borrow state must agree at a branch join, both the disagreement rejection and the agreement accept-case",
-        "src/check.rs: R17 reference-mode clause elimination when a word's top input is &Enum/&!Enum: borrow the scrutinee instead of consuming it, bind clause payloads as references inheriting mutability, reject a clause body that consumes a payload binding",
-        "examples/ or tests/: the dogfood buffer program (push-byte/byte-at/copy-byte/main) and the walk word over &!List with the two-borrow copy-byte call",
+        "src/check.rs: R17 reference-mode clause elimination when a word's top input is &Enum/&!Enum: consume the scrutinee reference at dispatch (not left as a surplus value), bind clause payloads as references inheriting mutability and exempt from R7's disjointness rule (statically disjoint fields of one variant), reject a clause body that consumes a payload binding",
+        "src/ir.rs: lower_clauses threads the scrutinee's EnumId from the checked frontend Type rather than re-deriving it from the lowered scrutinee's IrType, closing the reachable unreachable! a &!Enum scrutinee would otherwise hit",
+        "examples/ or tests/: the dogfood buffer program (push-byte/byte-at/copy-byte/run/main) and the walk word over &!List with the two-borrow copy-byte call",
         "tests/: a regression check asserting `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` contains only additions (R20)",
         "ROADMAP.md: title/body already corrected by Amendment A (438-443); record the slice as done and write R16's answer into the parked design question at 444-450"
       ],
@@ -1149,17 +1153,17 @@ branching disposal (Phase 6).
       "phase": 4,
       "focus": "get-set-migration-and-removal",
       "difficulty": "hard",
-      "summary": "Migrate every get/set call site to &|> @ / &|> ! (R21), restructuring examples/vm.sth's stack-threaded assembler to bind its array as a local, then delete both words; or, per R20's stated fallback, defer to Phase 3 Slice 6 and leave both words in place.",
+      "summary": "Migrate every get/set call site to &>/&!> composed with @/! (R21), restructuring examples/vm.sth's stack-threaded assembler to bind its array as a local, then delete both words; or, per R20's stated fallback, defer to Phase 3 Slice 6 and leave both words in place. Decision D already resolved the type-level blocker (a Copy-aggregate element, e.g. vm.sth's Op) that would otherwise make this phase unimplementable; only the mechanical place/ordering restructuring remains.",
       "changes": [
-        "tests/phase0.rs, tests/phase1.rs: migrate get/set call sites used as incidental plumbing to &|> @ / &|> !; delete call sites that exist specifically to test get/set's own behavior (bounds trap, non-consuming shape, whole-array copy-back), since criteria 3/4's reference-mode goldens already cover the equivalent",
+        "tests/phase0.rs, tests/phase1.rs: migrate get/set call sites used as incidental plumbing to &>/&!> composed with @/!; delete call sites that exist specifically to test get/set's own behavior (bounds trap, non-consuming shape, whole-array copy-back), since criteria 3/4's reference-mode goldens already cover the equivalent",
         "examples/stack.sth: migrate its one set and two get call sites",
-        "examples/vm.sth: restructure build (currently a stack-threaded chain of thirteen set calls with no local) to bind its [Op 13] array as a local so &|> ! has a place to project from, then migrate every get/set call site",
+        "examples/vm.sth: restructure build (currently a stack-threaded chain of thirteen set calls with no local) to bind its [Op 13] array as a local so &!> ! has a place to project from, then migrate every get/set call site, including fetch's and the other reads, using the corrected operand order (project to the element reference before constructing the value to store)",
         "src/check.rs, src/ir.rs, src/parser.rs, src/lexer.rs: remove the get and set words entirely once every call site is migrated"
       ],
       "tests": [
         "get_and_set_are_removed_and_call_sites_migrated"
       ],
-      "exit": "Criterion 17. get and set no longer exist as words; every prior call site is either migrated to &|> @ / &|> ! or deleted as redundant; the full suite passes with the itemized migration diff as its only change. If the fallback is taken instead, this phase is not attempted and the deferral is recorded in the phase-3 commit."
+      "exit": "Criterion 17. get and set no longer exist as words; every prior call site is either migrated to &>/&!> composed with @/! or deleted as redundant; the full suite passes with the itemized migration diff as its only change. If the fallback is taken instead, this phase is not attempted and the deferral is recorded in the phase-3 commit."
     }
   ]
 }
