@@ -71,7 +71,7 @@ result, or a projection expression — it is a located compile error.
 The first draft additionally let a place be "a projection path rooted at a local name"
 (`a Buf>len &!`, meaning "borrow just this field"). Round 1 (soundness minor 8) showed that
 form is unreachable as specified: `&`/`&!` cannot be ordinary words dispatched on the stack top,
-because naming a linear local moves it (src/check.rs:1673) before any such word could run, and
+because naming a linear local moves it (`moves.take`, src/check.rs:1670) before any such word could run, and
 nothing in the codebase inspects the *preceding* term the way that form would require. **D3/D4**
 resolves this by retiring the projection-path form outright rather than building the backward
 parser folding it would need: **R3**'s accessor family projects through an *already-borrowed*
