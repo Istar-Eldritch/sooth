@@ -242,6 +242,16 @@ used at all, not only in a contrived example.
   reference carries no exclusivity, so there is nothing to protect a concurrent reader from).
 - `+!` adds in place, `( &!T T -- )`, `T` an integer type. Sugar for fetch-add-store, kept
   because the alternative spelling needs two sequential borrows of the same place plus a `swap`.
+  **Round 2 (minor A3): `T` is inferred from the receiver, and D8's bare-literal coercion
+  applies exactly as it does anywhere else `T` is inferred rather than declared** — typing
+  `+!`/`!` via `match_slot`/`unify_pair` (the same mechanism an ordinary declared-parameter
+  call site uses) means the coercion carve-out (`usize`/`isize` bare literals only, no bare
+  `i64`-to-narrower coercion) is not a new rule for this position, it is the existing rule
+  applied where `T` happens to come from a reference's pointee rather than from a `:` word's
+  declared signature. This is why `b Buf&!>len 1 +!` (`T = usize`, inferred) accepts the bare
+  literal `1` while `push-byte`'s `x !` needed `72 >u8` upstream (`T = u8`, inferred, and `u8`
+  is not on the carve-out) — both follow from the same rule, stated here explicitly so a
+  reader does not have to infer it from the dogfood alone.
 - **Restricted to `Copy` `T`; a Copy *aggregate* is a real, first-class case, not a rejection
   (Decision D, resolving round 2 G1).** `is_copy` makes an all-scalar-field struct like
   `Vec2 { x i64 y i64 }`, or an all-scalar-payload enum like `examples/vm.sth`'s `Op`, `Copy`.
@@ -498,13 +508,29 @@ arms".
 
 **R13 — Mutation through a reference emits no rebuild.** The measurable form of the recon-2
 table: the emitted body of the dogfood's `push-byte` contains no `alloc` and no `blit`.
+**Round 2 (nit E2): criterion 6's instruction-count ceiling must budget for the bounds guard.**
+`push-byte`'s array-element projection (`&!>`) has a *computed* index (from `Buf&!>len @`, not
+a literal), so `bounds_check` (src/ir.rs:2341-2358) emits a `Cmp`, a `Jnz`, a trap block, and a
+`Call sooth_oob_trap` in addition to the address-arithmetic-plus-store shape — a literal index
+would skip the guard entirely. This does not affect the no-`alloc`/no-`blit` assertion itself,
+only the numeric ceiling a phase-1 implementer sets for "how many instructions is too many":
+set the ceiling from `push-byte`'s own measured shape (bounds guard included), not from an
+idealized reference-only body that has none.
 
 **R14 — No parameter-convention keywords.** `let`, `inout`, `sink`, and `set` are not added.
 The reference type is the convention: `&Buf` is what `let Buf` would have meant and `&!Buf` is
 what `inout Buf` would have meant. `sink` is the unannotated default, so **no existing signature
 changes meaning and no existing code migrates**. `set` is cut twice over: stack returns are a
 better out-parameter than a mutable hole, and `set` is already a user-callable array word in
-`examples/stack.sth`.
+`examples/stack.sth`. **Round 2 (minor G3): the "stack returns" half of that argument is
+currently unsupported by the compiler, and this slice does not fix it.** A user-defined word
+with two outputs is a **reachable panic** on the base commit today (measured: `: w ( -- i64 i64
+) 1 2 ;` called from `main` panics in `print` at src/ir.rs:1825, and a two-output struct
+destructure panics in `drop` at src/ir.rs:1749) — `get`'s own two outputs work only because
+`get` lowers inline as a checker/IR special case, not as an ordinary multi-output `Call`. This
+is a pre-existing gap, out of this slice's scope to fix, but R14's cited alternative should not
+be read as already available; the argument for cutting `set` stands on its other, independent
+leg (`set` is already a user-callable array word) regardless.
 
 **R15 — Top-of-scope locals are not relaxed.** Recon 4 makes mid-body `| |` a parse error, so a
 projection cannot be named where it is most wanted. The dogfood works without it at the cost of
@@ -654,6 +680,18 @@ until it says nothing:
 Conflating the two would let a mechanical vocabulary change quietly stand in for "no signature
 changed meaning", which is the opposite of what R14 is for; keeping them distinct is what makes
 the additive property falsifiable on its own regardless of whether phase 4 ever lands.
+
+**Round 2 (minor G2): criterion 16's own test, `regression_diff_shows_only_additions`, must be
+retired at phase 4 if that phase is reached, not left in the suite to permanently fail.** The
+test asserts the phase-3 diff is addition-only; phase 4 is *specified* to modify
+`examples/stack.sth`, `examples/vm.sth`, `tests/phase0.rs`, and `tests/phase1.rs`, so the same
+assertion would turn red the moment phase 4 lands, even though R20 above already explains that
+the *claim* the test demonstrates closes at phase 3 and is unaffected by phase 4. Phase 4's own
+commit therefore deletes or retires `regression_diff_shows_only_additions` (its job is done,
+and phase 4's itemized call-site audit is a different, non-automatic check by design, not a
+replacement assertion of the same shape) rather than leaving it in the suite to fail on every
+subsequent build. If the fallback is taken instead, the test is untouched and stays passing
+indefinitely, since no file it watches is ever modified.
 
 ### Superseded vocabulary (Amendment B)
 
@@ -1158,7 +1196,8 @@ branching disposal (Phase 6).
         "tests/phase0.rs, tests/phase1.rs: migrate get/set call sites used as incidental plumbing to &>/&!> composed with @/!; delete call sites that exist specifically to test get/set's own behavior (bounds trap, non-consuming shape, whole-array copy-back), since criteria 3/4's reference-mode goldens already cover the equivalent",
         "examples/stack.sth: migrate its one set and two get call sites",
         "examples/vm.sth: restructure build (currently a stack-threaded chain of thirteen set calls with no local) to bind its [Op 13] array as a local so &!> ! has a place to project from, then migrate every get/set call site, including fetch's and the other reads, using the corrected operand order (project to the element reference before constructing the value to store)",
-        "src/check.rs, src/ir.rs, src/parser.rs, src/lexer.rs: remove the get and set words entirely once every call site is migrated"
+        "src/check.rs, src/ir.rs, src/parser.rs, src/lexer.rs: remove the get and set words entirely once every call site is migrated",
+        "tests/: retire regression_diff_shows_only_additions (round 2 G2), its addition-only assertion having already served its purpose at phase 3 and now permanently falsified by this phase's own specified edits"
       ],
       "tests": [
         "get_and_set_are_removed_and_call_sites_migrated"
