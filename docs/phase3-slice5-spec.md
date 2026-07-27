@@ -2,15 +2,20 @@
 
 Design input: [the brief](./phase3-slice5-brief.md). Base: `main` @ `a66c47a`, 700 tests green.
 Second draft: addresses review round 1 (soundness, criteria, consistency — 19 findings) and
-five decisions made by the project owner in response, cited inline as **D1**-**D5**.
+five decisions made by the project owner in response, cited inline as **D1**-**D5**. Third
+draft: three further amendments, cited inline as **Amendment A/B/C**.
 
-ROADMAP.md:438-442 names this slice "second-class references + parameter conventions
-(`let`/`inout`/`sink`/`set`) + escape checking", title on 438. The conventions half is deleted
-rather than built (R14); the slice is reference types, places, and escape checking.
-ROADMAP.md:438's title is corrected as part of the final delivery phase. (The first draft cited
-line 452, which is Slice 7 — resources as linear values + user-definable destructor bodies —
-and would have rewritten the wrong slice's title; corrected throughout this document and in
-the brief.)
+At the base commit, ROADMAP.md:438-442 named this slice "second-class references + parameter
+conventions (`let`/`inout`/`sink`/`set`) + escape checking", title on 438. The conventions half
+is deleted rather than built (R14); the slice is reference types, places, and escape checking.
+(The first draft cited line 452, which was Slice 7 — resources as linear values +
+user-definable destructor bodies — and would have rewritten the wrong slice's title; corrected
+in the prior round throughout this document and in the brief.) **Amendment A applies the
+correction directly to ROADMAP.md, in this same revision**, rather than deferring it to a
+delivery phase: the title now reads "Second-class references + places + escape checking", with
+the Hylo parameter-convention framing removed, and it now spans ROADMAP.md:438-443 (one line
+longer than the base commit's 438-442, which shifts every citation below it in the file by one
+line — re-verified and corrected throughout this revision).
 
 ## Context: what is already true on the base commit
 
@@ -83,11 +88,15 @@ moves it) and because the two-borrow call degenerates to `& rot & rot swap`. It 
 additive later.
 
 **R3 — Accessor words project through a reference, mutability inherited, reference-ness
-explicit in the spelling (D3/D4).** `get`, `set`, `fill`, and `len` are **not renamed and not
-changed**: their value-form signatures are exactly as before this slice, which is what keeps
-R20's zero-migration claim true. A parallel family of reference-mode accessor words is added
-instead — every one of them takes an already-reference-typed value (from R2 or from another
-projection) and yields a *narrower* reference, never a plain value:
+explicit in the spelling (D3/D4).** `fill` and `len` are **not renamed and not changed**, full
+stop. `get` and `set` keep their existing value-form signatures **unchanged through this
+slice's own phases (1-3)**: no signature here changes meaning, which is what keeps R20's
+additive-work claim true. Amendment B marks `get`/`set` themselves **superseded** by this
+slice's reference-mode accessors (R21) — a separate, later, mechanical concern with its own
+delivery phase (4) and its own stated fallback, not a change to phases 1-3's typing rules. A
+parallel family of reference-mode accessor words is added instead — every one of them takes an
+already-reference-typed value (from R2 or from another projection) and yields a *narrower*
+reference, never a plain value:
 
 | shape | word | effect | on `&!` receiver |
 |---|---|---|---|
@@ -307,16 +316,18 @@ projection cannot be named where it is most wanted. The dogfood works without it
 one `swap`, the same cost already accepted under R7. Relaxing binding is a parser and scoping
 change orthogonal to references and would widen the slice.
 
-**R16 — The question ROADMAP.md:443 parks for this slice, answered.** (The first draft cited
-line 447, which is mid-sentence inside the parked question; the question and its "Design
-question this slice's brief must answer" marker run 443-449, marker on 443.) `inout`
-projections **do** subsume a reified take/fill pair (`S/fi` yielding a residual `∂S/∂fi`,
-refilled exactly once) for every statically known path, because a projection is the same
-residual made implicit and lexically bounded, and it covers whole-value borrows too. No residual
-form is added. Reified residuals remain worth having only where the focus must escape, which is
-Slice 3's zipper; R8 forbids storing a reference, so the zipper waits for Slice 6's RC rather
-than for a residual type. This answer is recorded in delivery phase 3's changes list so it
-lands with the ROADMAP correction rather than only living in this prose.
+**R16 — The question ROADMAP.md's parked design question answers, answered.** (The first draft
+cited line 447, which is mid-sentence inside the parked question; the question and its "Design
+question this slice's brief must answer" marker ran 443-449, marker on 443, at the base commit
+— now 444-450, marker on 444, after Amendment A's one-line-longer Slice 5 title/body edit
+above it, re-verified against the current file.) `inout` projections **do** subsume a reified
+take/fill pair (`S/fi` yielding a residual `∂S/∂fi`, refilled exactly once) for every
+statically known path, because a projection is the same residual made implicit and lexically
+bounded, and it covers whole-value borrows too. No residual form is added. Reified residuals
+remain worth having only where the focus must escape, which is Slice 3's zipper; R8 forbids
+storing a reference, so the zipper waits for Slice 6's RC rather than for a residual type. This
+answer is recorded in delivery phase 3's changes list so it lands with the ROADMAP correction
+rather than only living in this prose.
 
 **R17 — Reference-mode enum elimination (D1).** When a word's declared top input is a reference
 to an enum (`&Enum` or `&!Enum`), the existing clause-style whole-word form (`| Variant ... |
@@ -376,12 +387,57 @@ addition to the goldens listed below, per CLAUDE.md's existing convention.
 failed. Turning silent failure into a sharp error is the point, so the error text and its
 location are part of the spec.
 
-**R20 — Zero migration is demonstrated, not asserted, by a concrete diff check.** R14's claim
-that no existing signature changes meaning holds only if the existing suite passes unmodified,
-with a mechanism that actually checks it rather than a claim in prose: delivery phase 3 runs
-`git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` and asserts every
-line is an addition (`A`), never a modification (`M`) of a pre-existing file — an added file
-(the dogfood, criterion tests) is fine, an edited one is the regression this exists to catch.
+**R20 — Two migration claims, kept distinct so the additive one stays falsifiable on its own
+(Amendment C).** The task that produced this revision originally called this requirement "zero
+migration"; Amendment B's `get`/`set` removal (R21, delivery phase 4) falsifies that literal
+claim by design, so the requirement is restated as two separate claims instead of loosened
+until it says nothing:
+
+- **The reference feature itself is purely additive** and changes no existing signature's
+  meaning (R14). Demonstrated, not asserted, by a concrete mechanism: delivery phase 3 runs
+  `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` and asserts
+  every line is an addition (`A`), never a modification (`M`), of a pre-existing file — an
+  added file (the dogfood, criterion tests) is fine, an edited one is the regression this
+  exists to catch. This claim **closes at phase 3** and does not depend on phase 4 happening at
+  all; it stays true even if phase 4's fallback is taken and `get`/`set` never move.
+- **`get`/`set`'s removal is a separate, subsequent, mechanical migration** (R21, delivery
+  phase 4), and its diff is *expected*, not a violation of the claim above. Phase 4 has its own
+  regression check, different in kind from phase 3's: the suite must still pass, but the diff
+  over `examples/` and `tests/phase{0,1}.rs` is expected to be non-empty, itemized by phase 4's
+  own call-site audit (migrated to `&|> @`/`&|> !`, or deleted as redundant with an existing
+  reference-mode golden), and reviewed as a real diff rather than waved through by a check that
+  only counts additions.
+
+Conflating the two would let a mechanical vocabulary change quietly stand in for "no signature
+changed meaning", which is the opposite of what R14 is for; keeping them distinct is what makes
+the additive property falsifiable on its own regardless of whether phase 4 ever lands.
+
+### Superseded vocabulary (Amendment B)
+
+**R21 — `get` and `set` are superseded by `&|> @` and `&|> !`.** Not renamed, not changed, in
+phases 1-3 (R3): marked superseded here, with their replacements documented, and migrated away
+from and removed in delivery phase 4 below, if that phase is reached (R20's fallback). The case
+for supersession:
+
+- `get ( [T N] usize -- [T N] T )` is non-consuming and two-output because Slice 1 gave it no
+  other way to leave the array live; every call site that only wants to read one element pays
+  for it with an immediate `swap drop` to discard the re-pushed array. `examples/vm.sth:58`
+  (`vm Vm>prog vm Vm>pc get swap drop`) and `:95` (`vm vm Vm>mem addr get swap drop`) are the
+  measured cost: two words of pure plumbing at every read. `&|> @` (borrow the array once,
+  project to the element, fetch) reads the same value with no re-pushed array to discard,
+  because the reference the read consumes is a narrower reference, not the array itself.
+- `set ( [T N] usize T -- [T N] )` writes by taking the whole array and handing back a whole
+  new one — functionally correct, and exactly the rebuild-per-mutation cost R13 exists to
+  eliminate for structs, just for arrays instead. `&|> !` (borrow the array, project to the
+  element, store) mutates the one element in place.
+- Net vocabulary shrinks: two words with an awkward arity (`get`'s two outputs, `set`'s
+  whole-array threading) collapse into compositions of the same primitives (`&|>`, `@`, `!`)
+  every other accessor in this slice already uses. This is the same argument R13 makes for
+  structs, applied to arrays a slice late because arrays predate references.
+
+`fill` (constructs an array from a Copy element and a count) and `len` (reads the compile-time
+constant size) have no reference-mode replacement to be superseded by — neither reads nor writes
+a single element — and stay untouched, not merely deferred; R21 names only `get`/`set`.
 
 ## Load-bearing invariants (must survive)
 
@@ -405,8 +461,9 @@ line is an addition (`A`), never a modification (`M`) of a pre-existing file —
   parameterized reference type needs to render its own name — the *only* things genuinely absent
   are ownership, allocation, and a destructor, which is a real difference but not the tripwire's
   actual criterion. The sequencing argument, stated honestly instead: references are needed now,
-  in Phase 3, and generics are Phase 4; Phase 4's planned ad-hoc dispatch (ROADMAP.md:487-489 —
-  static overloading over statically-known input types, plus open multimethods) is expected to
+  in Phase 3, and generics are Phase 4; Phase 4's planned ad-hoc dispatch (ROADMAP.md:488-490
+  after Amendment A's one-line Slice 5 shift — static overloading over statically-known input
+  types, plus open multimethods) is expected to
   eventually subsume both the reference type constructors themselves and R3's explicit
   reference-mode accessor spellings, once a word can be overloaded on whether its receiver is
   `T`, `&T`, or `&!T` rather than needing a distinct name per case. That expectation is recorded
@@ -468,17 +525,57 @@ the surrounding prose's existing voice:
    corrections.** R9's back-edge rules from both sides; R10's join rule with both the
    disagreement and agreement accept-case; R17's reference-mode clause elimination (typing was
    phase 1's accessor-family work in spirit, but the back-edge interaction that makes it worth
-   having is exercised here); the full dogfood end to end including `walk`; R16's answer and
-   R20's concrete zero-migration diff check; the ROADMAP.md:438 title correction (the
-   DESIGN.md:134/208-214 amendment, D2, is already applied and needs no further phase-3 work).
+   having is exercised here); the full dogfood end to end including `walk`; recording R16's
+   answer into ROADMAP.md's parked design question (the DESIGN.md:134/208-214 amendment, D2,
+   and ROADMAP.md:438-443's title/body correction, Amendment A, are already applied and need no
+   further phase-3 work — only the design-question passage at ROADMAP.md:444-450 still needs
+   R16's answer written into it); R20's additive-work regression check.
    Exit: criteria 10, 11, 12, 14, and 16.
+4. **`get`/`set` migration and removal (Amendment B), or the stated fallback.** Migrate every
+   existing `get`/`set` call site to `&|> @`/`&|> !` (R21), then delete both words. Re-verified
+   scope (grepping the whole word, excluding comments and test-name string literals like
+   `"get-drops-rest"`/`"set-drops-overwritten"`, which the brief-stage estimate of 28/7/6 `get`
+   and 15 `set` did not exclude, and which undercounts `tests/phase1.rs` in particular, whose
+   REPL-session goldens pack many clauses — and many `get`/`set` calls — onto one source line):
+   `get` appears 20 times in `tests/phase0.rs`, 5 in `tests/phase1.rs`, 2 in
+   `examples/stack.sth`, and 3 in `examples/vm.sth` (30 total); `set` appears 17 times in
+   `tests/phase0.rs`, 16 in `tests/phase1.rs`, 1 in `examples/stack.sth`, and 15 in
+   `examples/vm.sth` (49 total, and this file's count for `vm.sth` alone matches the brief-stage
+   estimate exactly). Not every call site migrates the same way: a test written specifically to
+   exercise `get`'s or `set`'s own behaviour (its bounds trap, its non-consuming shape, its
+   whole-array copy-back) is **deleted**, not rewritten, once the equivalent behaviour is
+   already covered by this slice's own reference-mode goldens (criteria 3 and 4); a call site
+   where `get`/`set` is incidental plumbing inside a larger test or example is **rewritten** to
+   use `&|> @`/`&|> !`.
+
+   **Recorded blocker, to be solved here rather than discovered here:** `examples/vm.sth`'s
+   assembler (`build`) threads its `[Op 13]` array purely on the stack through a chain of
+   thirteen `set` calls (`Halt 13 fill`, then twelve `index value set`) — the array is never
+   named as a local anywhere in `build`. `&|> !` requires a place (R2/R11: a reference is taken
+   from a local), and R15 declines to relax top-of-scope-only binding, so this call site cannot
+   migrate token-for-token. `build` must be restructured to bind the array as a local: `Op`'s
+   variants carry only scalar payload fields (`i64`/`usize`), so `[Op 13]` is `Copy`
+   (`is_copy`, src/check.rs:156, recurses element-wise), and each of the twelve replacement
+   calls can take a fresh, independent `&!` borrow of the same local, none overlapping —
+   `| arr | ... arr &! 0 >usize 0 >usize Load &|> ! ...`, one borrow per instruction. Since
+   `examples/vm.sth` is Phase 2's exit dogfood, this restructuring is the highest-risk part of
+   the migration and the most likely trigger for the fallback below.
+
+   **Stated fallback, a real decision point, not an aspiration:** if phases 1-3 run long, this
+   phase is deferred to Phase 3 Slice 6 and `get`/`set` **stay**, superseded in documentation
+   (R21) only. This is not a failure state: R21 already gives every future reader the
+   replacement mapping regardless of whether phase 4 ever lands, and R20's additive-work claim
+   does not depend on phase 4 happening at all.
+   Exit: criterion 17, or an explicit deferral recorded in the phase-3 commit if the fallback
+   is taken instead.
 
 ## Criterion → test map
 
 Goldens live in `tests/phase0.rs`, except the two structural criteria (13, 14), which assert on
-emitted code and belong in unit tests beside `backend/qbe.rs`, and R17's typing-only criterion
-(12), which may live beside R17's own checker code if no runtime observation is needed for the
-accept half.
+emitted code and belong in unit tests beside `backend/qbe.rs`, R17's typing-only criterion (12),
+which may live beside R17's own checker code if no runtime observation is needed for the accept
+half, and criterion 17, which is conditional on delivery phase 4 being reached at all (R20's
+fallback) and is a call-site audit plus a suite-still-passes check, not a single golden.
 
 | # | criterion | test | phase |
 |---|---|---|---|
@@ -497,7 +594,8 @@ accept half.
 | 13 | **structural**: a mutation a callee makes through a `&!` parameter is visible in the caller (proves `&!T` lowers to `IrType::Ptr`, not a by-value aggregate) | `mutation_through_reference_parameter_is_visible_to_caller` | 1 |
 | 14 | the dogfood runs end to end and prints the expected byte, including the two-borrow `copy-byte` call and the `walk` word over `&!List` | `reference_dogfood_prints_expected_bytes` | 3 |
 | 15 | a leftover reference on the *stack* without a `drop` is a surplus-value error; a reference *local* that is never explicitly dropped is accepted (it expires silently at scope end) | `unused_reference_is_surplus_value_error`, `reference_local_expires_without_drop` | 1 |
-| 16 | no regression: the full existing suite passes, and `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` shows only additions, no modifications, demonstrating R14/R20's zero-migration claim concretely rather than by assertion | existing suite, unmodified; `regression_diff_shows_only_additions` | 3 |
+| 16 | no regression: the full existing suite passes, and `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` shows only additions, no modifications, demonstrating R14/R20's additive-work claim concretely rather than by assertion | existing suite, unmodified; `regression_diff_shows_only_additions` | 3 |
+| 17 | `get` and `set` are removed and every migrated call site uses `&|> @`/`&|> !` instead; the existing suite passes, with the migration diff over `examples/` and `tests/phase{0,1}.rs` itemized as either a call-site rewrite or the deletion of a now-redundant `get`/`set`-specific test, never a silent change to what a test proves. Under R20's fallback both words survive unmigrated and this criterion is explicitly not attempted, recorded in the phase-3/4 commit rather than left ambiguous | `get_and_set_are_removed_and_call_sites_migrated` (fallback: not attempted) | 4 |
 
 ## Dogfood, as this revision specifies it
 
@@ -693,14 +791,14 @@ branching disposal (Phase 6).
       "phase": 3,
       "focus": "loops-joins-reference-mode-enums-dogfood-and-docs",
       "difficulty": "standard",
-      "summary": "Back-edge rules from both sides, the branch-join rule with its accept-case, reference-mode clause elimination over an enum, the full dogfood including walk, the concrete zero-migration diff check, and the ROADMAP title correction (DESIGN.md is already amended, D2, no phase-3 action needed).",
+      "summary": "Back-edge rules from both sides, the branch-join rule with its accept-case, reference-mode clause elimination over an enum, the full dogfood including walk, and the additive-work regression check (DESIGN.md is already amended and ROADMAP.md's title/body already corrected, D2/Amendment A, no phase-3 action needed beyond recording R16's answer into ROADMAP.md).",
       "changes": [
         "src/check.rs: R9 back-edge rules (a reference parameter, or a reference derived from one by projection, may cross; a reference to a current-scope local may not; a currently-borrowed local may not be loop-carried)",
         "src/check.rs: R10 borrow state must agree at a branch join, both the disagreement rejection and the agreement accept-case",
         "src/check.rs: R17 reference-mode clause elimination when a word's top input is &Enum/&!Enum: borrow the scrutinee instead of consuming it, bind clause payloads as references inheriting mutability, reject a clause body that consumes a payload binding",
         "examples/ or tests/: the dogfood buffer program (push-byte/byte-at/copy-byte/main) and the walk word over &!List with the two-borrow copy-byte call",
         "tests/: a regression check asserting `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` contains only additions (R20)",
-        "ROADMAP.md: correct line 438's slice title to reference types + places + escape checking, and record the slice as done; record R16's answer"
+        "ROADMAP.md: title/body already corrected by Amendment A (438-443); record the slice as done and write R16's answer into the parked design question at 444-450"
       ],
       "tests": [
         "reference_parameter_crosses_back_edge_in_constant_stack",
@@ -714,6 +812,22 @@ branching disposal (Phase 6).
         "regression_diff_shows_only_additions"
       ],
       "exit": "Criteria 10 to 12, 14, and 16. The dogfood runs end to end, a reference parameter walks a long list in constant stack while mutating through the reference, and the full existing suite passes with the regression diff check confirming no modification to any pre-existing example or test file."
+    },
+    {
+      "phase": 4,
+      "focus": "get-set-migration-and-removal",
+      "difficulty": "hard",
+      "summary": "Migrate every get/set call site to &|> @ / &|> ! (R21), restructuring examples/vm.sth's stack-threaded assembler to bind its array as a local, then delete both words; or, per R20's stated fallback, defer to Phase 3 Slice 6 and leave both words in place.",
+      "changes": [
+        "tests/phase0.rs, tests/phase1.rs: migrate get/set call sites used as incidental plumbing to &|> @ / &|> !; delete call sites that exist specifically to test get/set's own behavior (bounds trap, non-consuming shape, whole-array copy-back), since criteria 3/4's reference-mode goldens already cover the equivalent",
+        "examples/stack.sth: migrate its one set and two get call sites",
+        "examples/vm.sth: restructure build (currently a stack-threaded chain of thirteen set calls with no local) to bind its [Op 13] array as a local so &|> ! has a place to project from, then migrate every get/set call site",
+        "src/check.rs, src/ir.rs, src/parser.rs, src/lexer.rs: remove the get and set words entirely once every call site is migrated"
+      ],
+      "tests": [
+        "get_and_set_are_removed_and_call_sites_migrated"
+      ],
+      "exit": "Criterion 17. get and set no longer exist as words; every prior call site is either migrated to &|> @ / &|> ! or deleted as redundant; the full suite passes with the itemized migration diff as its only change. If the fallback is taken instead, this phase is not attempted and the deferral is recorded in the phase-3 commit."
     }
   ]
 }

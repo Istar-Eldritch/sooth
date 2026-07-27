@@ -435,11 +435,12 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    branching structures stays moved to Phase 6** (see there): it needs a growable
    pending-pointer structure and a new OOM-during-disposal interaction, neither of which
    this slice's gaps required.
-5. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
-   checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
-   the escape checker keeping refs from being stored or escaping scope. Comes after heap
-   because "hand the value back" already works by threading it through the stack. Dogfood:
-   in-place mutation of an owned buffer through `inout`.
+5. **Second-class references + places + escape checking.** Pass a borrow (`&`/`&!`), mutate
+   in place, no move; the escape checker keeps refs from being stored or escaping scope. The
+   reference *type* is the convention, not a Hylo-style `let`/`inout`/`sink`/`set` (the
+   interface here is a stack effect, not named parameters), so no existing signature changes
+   meaning. Comes after heap because "hand the value back" already works by threading it
+   through the stack. Dogfood: in-place mutation of an owned buffer through a `&!` reference.
    **Design question this slice's brief must answer:** do `inout` projections into nested
    fields subsume a reified take/fill pair (`S/fi` yielding a residual `∂S/∂fi`, refilled
    exactly once)? A second-class projection is the same residual, made implicit and
