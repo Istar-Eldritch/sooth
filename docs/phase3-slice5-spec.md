@@ -109,7 +109,11 @@ the reference-mode accessor is a **one-output, consuming** operation — the exa
 B2 fix (below) was written to kill for `get`, reintroduced one level up by the naming itself.
 The fix is to split every accessor by mutability into two distinct, fixed-arity words and drop
 the `|`, which also removes any interaction with the lexer's `| locals |` delimiter
-special-casing:
+special-casing, and moots round 2's nit F4 along the way: the second draft's `&|>` spelling
+lexed a bare typo `x &|` as `Word("&")` + `Pipe` (a misleading "unexpected token Pipe" error
+for what was probably meant as the accessor), and dropping `|` from every spelling removes the
+character the typo could even be made of — there is no `&`-then-`Pipe` shape left to mistype
+into:
 
 | shape | shared word | shared effect | mutable word | mutable effect |
 |---|---|---|---|---|
