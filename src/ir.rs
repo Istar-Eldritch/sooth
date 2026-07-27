@@ -4205,20 +4205,42 @@ mod tests {
         );
     }
 
+    /// The header phi structure that matters for R11: how many phis, how many
+    /// arms each has, and how many jumps target the header. Deliberately
+    /// ignores the carried `Value`s themselves, since those differ between
+    /// two independently-lowered programs even when the shape is identical.
+    fn header_phi_shape(func: &IrFunc, header: BlockId) -> (usize, Vec<usize>, usize) {
+        let phis = header_phis(header_block(func, header));
+        let phi_count = phis.len();
+        let arm_counts = phis.iter().map(|arms| arms.len()).collect();
+        (phi_count, arm_counts, jmps_to(func, header))
+    }
+
     #[test]
     fn lower_mid_body_binding_adds_no_header_phi() {
         // Criterion 22 (R11): a mid-body binding inside a self-tail-recursive
         // arm has its extent end at the arm's terminator, where the back-edge
         // sits, so no name is live across it and the header still carries
         // exactly one phi per loop-carried (input-arity) slot, unaffected by
-        // the binding.
-        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > if | x | 1 - x go else drop end ;");
-        let f = &ir.funcs[0];
-        let header = loop_header(f);
-        let phis = header_phis(header_block(f, header));
-        assert_eq!(phis.len(), 2, "one header phi per loop-carried slot");
-        assert!(phis.iter().all(|arms| arms.len() == 2));
-        assert_eq!(jmps_to(f, header), 2);
+        // the binding. Proved by comparing against a binding-free equivalent:
+        // if a bound name ever leaked a phi onto the header, this source's
+        // shape would diverge from the one below instead of both trivially
+        // satisfying the same hard-coded numbers.
+        let with_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if | x | 1 - x go else drop end ;");
+        let without_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+        let f1 = &with_binding.funcs[0];
+        let f2 = &without_binding.funcs[0];
+        let header1 = loop_header(f1);
+        let header2 = loop_header(f2);
+        let shape1 = header_phi_shape(f1, header1);
+        let shape2 = header_phi_shape(f2, header2);
+        assert_eq!(
+            shape1, shape2,
+            "a mid-body binding must not change the header's phi structure"
+        );
+        assert_eq!(shape1.0, 2, "one header phi per loop-carried slot");
     }
 
     #[test]

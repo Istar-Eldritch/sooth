@@ -14,7 +14,7 @@
 \ `VmPop>` word — same idiom as `Stack`/`Popped` in `examples/stack.sth`.
 \ `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same way.
 \
-\ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the second
+\ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the first
 \ `vm-pop` result with a mid-body `| ... |` binding instead of shuffling it
 \ into position with `swap`/`over`/`rot`.
 
@@ -73,7 +73,7 @@ type: VmPop vm Vm val i64 ;
     fetch Fetched> run
 | Add   | vm |
     vm vm-pop VmPop>          \ vm' b
-    | b |                      \ names b, so the second pop needs no swap/rot
+    | b |
     vm-pop VmPop>              \ vm'' a
     b +
     vm-push
@@ -102,7 +102,7 @@ type: VmPop vm Vm val i64 ;
     fetch Fetched> run
 | Store | vm addr |
     vm vm-pop VmPop>           \ vm' x
-    | v x |                    \ names both, so the setter needs no over/rot
+    | v x |
     v v Vm>mem addr x set
     Vm<mem
     bump-pc

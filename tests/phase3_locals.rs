@@ -416,10 +416,15 @@ fn mid_body_binding_in_self_tail_recursive_word_loops_correctly() {
 #[test]
 fn vm_with_mid_body_binding_matches_previous_output() {
     // Criterion 23: `examples/vm.sth`'s `run` word (Phase 3 Slice 5) names
-    // the second `vm-pop` result mid-body in its `Add`/`Sub`/`Mul`/`Store`
+    // the first `vm-pop` result mid-body in its `Add`/`Sub`/`Mul`/`Store`
     // clauses instead of shuffling it into position with `swap`/`over`/
     // `rot`. The rewrite must be output-preserving: same sum-1..100_000
     // bytecode program, same `5000050000` result as before the rewrite.
+    let source = std::fs::read_to_string("examples/vm.sth").expect("read vm.sth");
+    assert!(
+        source.contains("| b |") && source.contains("| v x |"),
+        "examples/vm.sth should still carry the mid-body bindings the dogfood is named for"
+    );
     let binary = sooth::driver::build(Path::new("examples/vm.sth")).expect("build should succeed");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
