@@ -485,9 +485,7 @@ impl<'t> Parser<'t> {
                     } else {
                         Vec::new()
                     };
-                    let body = self.parse_terms("`;` or `|`", |tok| {
-                        matches!(tok, Token::Semicolon | Token::Pipe)
-                    })?;
+                    let body = self.parse_clause_body_terms()?;
                     clauses.push(Clause {
                         variant,
                         locals,
@@ -871,6 +869,23 @@ impl<'t> Parser<'t> {
             }
         }
         Ok(names)
+    }
+
+    /// Parse a clause's body terms, stopping at `;` or a `|` that opens the
+    /// next clause (D8's lookahead, applied at every `|` per R8/R15, not only
+    /// the first). Any other `|` is an ordinary mid-body binding term,
+    /// parsed by `parse_term` like any other position.
+    fn parse_clause_body_terms(&mut self) -> Result<Vec<Term>, String> {
+        let mut terms = Vec::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.eof_error("`;` or `|`")),
+                Some((Token::Semicolon, _)) => break,
+                Some((Token::Pipe, _)) if self.at_clause_start() => break,
+                _ => terms.push(self.parse_term()?),
+            }
+        }
+        Ok(terms)
     }
 
     fn parse_terms(
@@ -1443,6 +1458,26 @@ mod tests {
         assert!(clauses[0].locals.is_empty());
         assert_eq!(clauses[1].variant, "Rect");
         assert_eq!(clauses[1].locals, ["w", "h"]);
+    }
+
+    #[test]
+    fn parse_clause_body_mid_body_pipe_produces_bind_term() {
+        // Phase 2: the D8 lookahead applies at every `|` in a clause body, not
+        // only the first, so a later `|` not followed by a known variant is an
+        // ordinary mid-body binding term rather than a clause boundary.
+        let module = parse_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n             : area ( Shape -- f64 ) | Circle dup | r | r * | Rect | w h | w h * ;",
+        )
+        .unwrap();
+        let area = module.words.iter().find(|w| w.name == "area").unwrap();
+        let clauses = clauses_body(area);
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0].variant, "Circle");
+        assert!(clauses[0].locals.is_empty());
+        assert_eq!(clauses[0].body.len(), 4, "expected dup, the bind, and r, *");
+        assert!(
+            matches!(clauses[0].body[1].kind, TermKind::Bind(ref names) if names == &["r".to_string()])
+        );
     }
 
     #[test]

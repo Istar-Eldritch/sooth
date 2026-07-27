@@ -1,9 +1,38 @@
 //! Phase 3 Slice 5 goldens: `| names |` is a term, legal at any point in a
 //! body, with its extent running to the end of the enclosing block.
 
+use std::io::Write;
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 use sooth::{check, lexer, parser};
+
+/// Run a scripted REPL session (one input line per element of `lines`) and
+/// return the whole captured stdout, mirroring `tests/phase1.rs`'s helper.
+fn run_session(lines: &[&str]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("repl")
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("repl should spawn");
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    let script = lines.join("\n") + "\n";
+    stdin
+        .write_all(script.as_bytes())
+        .expect("writing stdin should succeed");
+    drop(stdin);
+    let output = child.wait_with_output().expect("repl should exit cleanly");
+    assert!(
+        output.status.success(),
+        "repl exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
 
 /// Compile and run `src`, returning its stdout and exit code. `name`
 /// distinguishes the temp source (and so the emitted binary) per test, since
@@ -195,4 +224,83 @@ fn goldens_still_compile_with_locals_as_a_term() {
         let src = std::fs::read_to_string(Path::new(example)).expect("example should be readable");
         check_ok(&src);
     }
+}
+
+#[test]
+fn mid_body_binding_in_clause_body_binds() {
+    // Criterion 15: a clause body may bind partway through, not only at its
+    // leading `|`. `Circle`'s arm binds `r` after a `dup`, mid-body.
+    let (stdout, code) = run_src(
+        "mid-body-binding-in-clause-body",
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;\n\
+: area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * ;\n\n\
+: main ( -- )\n  2.0 Circle area .\n  3.0 4.0 Rect area . ;\n",
+    );
+    assert_eq!(stdout, "4\n12\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn clause_body_binding_named_for_a_variant_is_error() {
+    // Criterion 16 (R8): a mid-clause-body `|` whose leading name is a
+    // registered variant of some enum is always read as the next clause, since
+    // the disambiguation is global (D8). Here `Blob` names no variant of
+    // `Shape`, so the misread clause fails with the existing, located
+    // unknown-variant diagnostic rather than silently binding.
+    let err = check_error(
+        "type: Shape | Circle r f64 | Rect w f64 h f64 ;\ntype: Other | Blob b i64 ;\n\
+: area ( Shape -- f64 )\n  | Circle\n  dup\n  | r |\n  r *\n  | Rect\n  | w h |\n  w h * | Blob bogus ;\n",
+    );
+    assert!(err.contains("unknown variant"), "unexpected message: {err}");
+    assert!(err.contains("`Blob`"), "unexpected message: {err}");
+    assert!(err.contains("`Shape`"), "unexpected message: {err}");
+}
+
+#[test]
+fn repl_line_binds_a_local() {
+    // Criterion 17: a REPL line binds a local and uses it within the line.
+    let out = run_session(&["5 | a | a a * ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["25", "stack: (empty)"]);
+}
+
+#[test]
+fn repl_line_binding_reaches_earlier_line_values() {
+    // Criterion 18 (R7/D6): the frame floor at a REPL line is the session
+    // stack depth, so a binding may consume values an earlier line left.
+    let out = run_session(&["1 2 3", "| a b | a b + ."]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, vec!["stack: 1 2 3", "5", "stack: 1"]);
+}
+
+#[test]
+fn failed_repl_line_after_binding_leaves_stack_intact() {
+    // Criterion 19: existing REPL transactionality (a failing line never
+    // commits) still holds once the line binds a name before failing.
+    let out = run_session(&["1 2 3", "| a b | a b + unknown-word", "1 2 3"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "unexpected output:\n{out}");
+    assert_eq!(lines[0], "stack: 1 2 3");
+    assert!(
+        lines[1].contains("unknown word") && lines[1].contains("unknown-word"),
+        "unexpected message: {}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "stack: 1 2 3 1 2 3");
+}
+
+#[test]
+fn repl_line_locals_do_not_survive_to_next_line() {
+    // Criterion 20 (D7): a line's locals are scoped to the line; the next
+    // line sees no such name, only the session stack it left behind.
+    let out = run_session(&["1 2 3", "| a b |", "a"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "unexpected output:\n{out}");
+    assert_eq!(lines[0], "stack: 1 2 3");
+    assert_eq!(lines[1], "stack: 1");
+    assert!(
+        lines[2].contains("unknown word") && lines[2].contains("`a`"),
+        "unexpected message: {}",
+        lines[2]
+    );
 }
