@@ -647,7 +647,7 @@ until it says nothing:
   phase 4), and its diff is *expected*, not a violation of the claim above. Phase 4 has its own
   regression check, different in kind from phase 3's: the suite must still pass, but the diff
   over `examples/` and `tests/phase{0,1}.rs` is expected to be non-empty, itemized by phase 4's
-  own call-site audit (migrated to `&|> @`/`&|> !`, or deleted as redundant with an existing
+  own call-site audit (migrated to `&!> @`/`&!> !`, or deleted as redundant with an existing
   reference-mode golden), and reviewed as a real diff rather than waved through by a check that
   only counts additions.
 
@@ -657,26 +657,35 @@ the additive property falsifiable on its own regardless of whether phase 4 ever 
 
 ### Superseded vocabulary (Amendment B)
 
-**R21 — `get` and `set` are superseded by `&|> @` and `&|> !`.** Not renamed, not changed, in
-phases 1-3 (R3): marked superseded here, with their replacements documented, and migrated away
-from and removed in delivery phase 4 below, if that phase is reached (R20's fallback). The case
-for supersession:
+**R21 — `get` and `set` are superseded by `&!> @` (or `&> @` for a read-only borrow) and
+`&!> !`.** Not renamed, not changed, in phases 1-3 (R3): marked superseded here, with their
+replacements documented, and migrated away from and removed in delivery phase 4 below, if that
+phase is reached (R20's fallback). The case for supersession:
 
 - `get ( [T N] usize -- [T N] T )` is non-consuming and two-output because Slice 1 gave it no
   other way to leave the array live; every call site that only wants to read one element pays
   for it with an immediate `swap drop` to discard the re-pushed array. `examples/vm.sth:58`
   (`vm Vm>prog vm Vm>pc get swap drop`) and `:95` (`vm vm Vm>mem addr get swap drop`) are the
-  measured cost: two words of pure plumbing at every read. `&|> @` (borrow the array once,
+  measured cost: two words of pure plumbing at every read. `&> @` (borrow the array once,
   project to the element, fetch) reads the same value with no re-pushed array to discard,
   because the reference the read consumes is a narrower reference, not the array itself.
 - `set ( [T N] usize T -- [T N] )` writes by taking the whole array and handing back a whole
   new one — functionally correct, and exactly the rebuild-per-mutation cost R13 exists to
-  eliminate for structs, just for arrays instead. `&|> !` (borrow the array, project to the
-  element, store) mutates the one element in place.
-- Net vocabulary shrinks: two words with an awkward arity (`get`'s two outputs, `set`'s
-  whole-array threading) collapse into compositions of the same primitives (`&|>`, `@`, `!`)
-  every other accessor in this slice already uses. This is the same argument R13 makes for
-  structs, applied to arrays a slice late because arrays predate references.
+  eliminate for structs, just for arrays instead. `&!> !` (borrow the array mutably, project to
+  the element, store) mutates the one element in place.
+- **Net vocabulary shrinks: true only once Decision D lands (round 2 G1).** Round 2 found this
+  bullet false as first drafted: `examples/vm.sth`'s `prog`/`build` arrays hold `Op`, an
+  all-scalar-payload enum and therefore a `Copy` *aggregate*, and the second draft's R4
+  restricted `@`/`!` to Copy *scalar* `T` only — so `&>`/`&!>` composed with `@`/`!` were
+  strictly *less* expressive than `get`/`set`, which read/write any Copy element including an
+  aggregate one, and `get`/`set` could not in fact be retired. Decision D lifts exactly this
+  restriction (R4 above): `@`/`!` on a Copy aggregate now lower via `Alloc`+`Blit`/`Blit` alone,
+  so `&>`/`&!>` composed with `@`/`!` are no longer a narrower tool than `get`/`set` for any
+  array this codebase has, and the vocabulary genuinely shrinks: two words with an awkward arity
+  (`get`'s two outputs, `set`'s whole-array threading) collapse into compositions of the same
+  primitives (`&>`/`&!>`, `@`, `!`) every other accessor in this slice already uses. This is the
+  same argument R13 makes for structs, applied to arrays a slice late because arrays predate
+  references.
 
 `fill` (constructs an array from a Copy element and a count) and `len` (reads the compile-time
 constant size) have no reference-mode replacement to be superseded by — neither reads nor writes
@@ -688,10 +697,12 @@ a single element — and stay untouched, not merely deferred; R21 names only `ge
   instruction, maps every reference to the existing `IrType::Ptr`, and R2 exposes no pointer
   arithmetic, so a WASM lowering stays possible.
 - The linear spine holds: exactly-once, no auto-drop, forgetting is a compile error. References
-  do not weaken it, because they never own: R4's Copy-*scalar* restriction on `@`/`!`/`+!` is
-  what stops a borrow from manufacturing a second owner or leaking an overwritten one, and R8
-  stops a reference outliving its referent. `&!T`'s own disposal (neither `Copy` nor linear) is
-  stated explicitly in R8 rather than left to fall through the existing two categories silently.
+  do not weaken it, because they never own: R4's Copy restriction on `@`/`!`/`+!` (now covering
+  a Copy aggregate as well as a Copy scalar, Decision D) is what stops a borrow from
+  manufacturing a second owner or leaking an overwritten one — the restriction that matters is
+  Copy-vs-linear, not scalar-vs-aggregate — and R8 stops a reference outliving its referent.
+  `&!T`'s own disposal (neither `Copy` nor linear) is stated explicitly in R8 rather than left
+  to fall through the existing two categories silently.
 - `core` stays `no_std`. No in-process JIT, no comptime interpreter.
 - **The Slice 2 tripwire is acknowledged as tripped, deliberately, not argued away (D5).**
   docs/phase3-slice2-spec.md:9 reads "Second ad-hoc constructor after arrays. A third is the
@@ -704,14 +715,16 @@ a single element — and stay untouched, not merely deferred; R21 names only `ge
   parameterized reference type needs to render its own name — the *only* things genuinely absent
   are ownership, allocation, and a destructor, which is a real difference but not the tripwire's
   actual criterion. The sequencing argument, stated honestly instead: references are needed now,
-  in Phase 3, and generics are Phase 4; Phase 4's planned ad-hoc dispatch (ROADMAP.md:488-490
-  after Amendment A's one-line Slice 5 shift — static overloading over statically-known input
-  types, plus open multimethods) is expected to
+  in Phase 3, and generics are Phase 4; Phase 4's planned ad-hoc dispatch (ROADMAP.md:488-491
+  after Amendment A's one-line Slice 5 shift, corrected from the second draft's 488-490 by
+  round 2's citation audit (G4) — static overloading over statically-known input types, plus
+  open multimethods) is expected to
   eventually subsume both the reference type constructors themselves and R3's explicit
   reference-mode accessor spellings, once a word can be overloaded on whether its receiver is
   `T`, `&T`, or `&!T` rather than needing a distinct name per case. That expectation is recorded
   here as a **revisit trigger**: when Phase 4's dispatch work lands, re-examine whether `&`/`&!`
-  and the `S&|>fi`/`&|>`/`&^` family should collapse into overloads of `S>fi`/`get`/`^|>`.
+  and the `T&>fi`/`T&!>fi`/`&>`/`&!>`/`&^`/`&!^` family should collapse into overloads of
+  `S>fi`/`get`/`^|>`.
 
 ## DESIGN.md amendment (D2)
 
