@@ -1,7 +1,9 @@
 # Phase 3 Slice 6 — Reference types, places, escape checking (spec)
 
 Design input: [the brief](./phase3-slice6-brief.md). Base: `main` @ `a66c47a`, 700 tests green.
-Second draft: addresses review round 1 (soundness, criteria, consistency — 19 findings) and
+Second draft: addresses review round 1 (soundness, criteria, consistency — three reports, roughly
+54 findings between them (18 soundness + 21 criteria + 15 consistency), not the 19 an earlier
+draft's header understated it as, N-13 round 3 audit) and
 five decisions made by the project owner in response, cited inline as **D1**-**D5**. Third
 draft: three further amendments, cited inline as **Amendment A/B/C**. Fourth draft: addresses
 review round 2 (soundness — 7 blockers plus numerous minors/nits, sectioned A-G in that
