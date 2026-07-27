@@ -1,4 +1,4 @@
-# Phase 3 Slice 5 — Reference types, places, escape checking (brief)
+# Phase 3 Slice 6 — Reference types, places, escape checking (brief)
 
 Slice 1 made every linear value move on use, and Slice 2 put aggregates behind `^`. Together
 those close off in-place mutation: a struct containing a `^` is linear, so the
@@ -7,9 +7,12 @@ set Stack<items`) becomes a use-after-move, and the only remaining way to change
 to destructure the whole aggregate and rebuild it at every level. This slice adds non-owning
 references so a word can read or mutate a value it does not own.
 
-ROADMAP.md:438 calls this slice "second-class references + parameter conventions
-(`let`/`inout`/`sink`/`set`) + escape checking". The conventions half does not survive contact
-with the language (D2 below); the slice is reference types + places + escape checking.
+**At the base commit**, ROADMAP.md:438 named this slice "second-class references + parameter
+conventions (`let`/`inout`/`sink`/`set`) + escape checking" (N-4, round 3 audit: stated in the
+past tense now, since the spec's Amendment A already corrected the title in place, and this
+slice has since renumbered from Slice 5 to Slice 6 with a further ROADMAP.md edit — see the
+spec for the current text and line numbers). The conventions half does not survive contact with
+the language (D2 below); the slice is reference types + places + escape checking.
 
 Prerequisite state: Slice 4 merged (`a66c47a`), 700 tests green.
 
@@ -124,13 +127,15 @@ backend-neutral invariant a WASM lowering depends on.
   implementation.
 - **Branch joins.** Borrow state has to agree at a join the way types already unify. Needs a
   lattice, presumably mirroring Slice 1's `Live`/`Moved`/`MaybeMoved`.
-- **The question ROADMAP.md:443 parks for this brief**, recorded formally: projections subsume
-  a reified take/fill pair (`S/fi` yielding `∂S/∂fi`) for every statically known path, since a
-  projection is the same residual made implicit and lexically bounded. Reified residuals remain
-  worth having only where the focus must escape, which is Slice 3's zipper, and that wants
-  Slice 6's RC rather than a reference.
-- **ROADMAP.md:438's title is wrong** once D2 lands and should be corrected to reference types
-  - places + escape checking.
+- **The question ROADMAP.md parks for this brief** (N-5, round 3 audit: at the base commit this
+  was line 443; the spec tracks its current location, which has moved twice since — once for
+  Amendment A's title correction, once for this revision's general-locals insertion), recorded
+  formally: projections subsume a reified take/fill pair (`S/fi` yielding `∂S/∂fi`) for every
+  statically known path, since a projection is the same residual made implicit and lexically
+  bounded. Reified residuals remain worth having only where the focus must escape, which is
+  Slice 3's zipper, and that wants this slice's own RC follow-on rather than a reference.
+- **ROADMAP.md:438's title was wrong** (N-4b, round 3 audit: this is no longer a to-do — D2's
+  correction landed via the spec's Amendment A, in the same revision that first raised it).
 
 ## Dogfood
 

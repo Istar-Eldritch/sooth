@@ -1,13 +1,23 @@
-# Phase 3 Slice 5 — Reference types, places, escape checking (spec)
+# Phase 3 Slice 6 — Reference types, places, escape checking (spec)
 
-Design input: [the brief](./phase3-slice5-brief.md). Base: `main` @ `a66c47a`, 700 tests green.
+Design input: [the brief](./phase3-slice6-brief.md). Base: `main` @ `a66c47a`, 700 tests green.
 Second draft: addresses review round 1 (soundness, criteria, consistency — 19 findings) and
 five decisions made by the project owner in response, cited inline as **D1**-**D5**. Third
 draft: three further amendments, cited inline as **Amendment A/B/C**. Fourth draft: addresses
 review round 2 (soundness — 7 blockers plus numerous minors/nits, sectioned A-G in that
 review) and four further decisions made by the project owner in response, cited inline as
 **Decision A**-**Decision D**; round-2 findings are cited by the review's own labels (e.g.
-**A1**, **C2**, **G1**).
+**A1**, **C2**, **G1**). Fifth draft: addresses review round 3 (soundness, criteria, and an
+audit of the prior two fix passes) and a further set of owner decisions: **Decision E**
+switches the borrow operator from postfix to prefix (`&a`/`&!a`, not `a &`/`a &!`); delivery
+phase 4 (`get`/`set` migration and removal) is cut, its criterion and test retired, and
+R20/R21 reworked so both words stay documented as superseded with their removal deferred to a
+later slice; Decision D's justification is replaced, since it no longer exists to unblock a
+phase this revision cuts; a newly-inserted ROADMAP.md slice, **general locals** (mid-body
+`| names |` binding plus REPL-line locals), is recorded as this slice's prerequisite, which is
+also why this slice renumbers from **Slice 5 to Slice 6**; and the aggregate-local aliasing
+hole round 3 found twice independently is recorded as an explicitly open question, not decided
+here. Round-3 findings are cited by the review's own labels (e.g. **A1**, **N-6**).
 
 At the base commit, ROADMAP.md:438-442 named this slice "second-class references + parameter
 conventions (`let`/`inout`/`sink`/`set`) + escape checking", title on 438. The conventions half
@@ -15,11 +25,16 @@ is deleted rather than built (R14); the slice is reference types, places, and es
 (The first draft cited line 452, which was Slice 7 — resources as linear values +
 user-definable destructor bodies — and would have rewritten the wrong slice's title; corrected
 in the prior round throughout this document and in the brief.) **Amendment A applies the
-correction directly to ROADMAP.md, in this same revision**, rather than deferring it to a
-delivery phase: the title now reads "Second-class references + places + escape checking", with
-the Hylo parameter-convention framing removed, and it now spans ROADMAP.md:438-443 (one line
-longer than the base commit's 438-442, which shifts every citation below it in the file by one
-line — re-verified and corrected throughout this revision).
+correction directly to ROADMAP.md**, rather than deferring it to a delivery phase: the title
+read "Second-class references + places + escape checking", with the Hylo parameter-convention
+framing removed, and spanned ROADMAP.md:438-443 (one line longer than the base commit's
+438-442, which shifted every citation below it in the file by one line at the time). **This
+fifth draft's own ROADMAP.md edit inserts a new slice, "General locals," immediately before
+this one** (see the prerequisite note below) — itself a prerequisite for this slice — which
+renumbers this slice from Slice 5 to **Slice 6** and shifts every ROADMAP.md citation in this
+document by a further 16 lines: the title/body now spans ROADMAP.md:454-459 and the parked
+design question spans 460-466, both re-verified against the current file rather than carried
+forward by arithmetic.
 
 ## Context: what is already true on the base commit
 
@@ -67,22 +82,46 @@ projecting through an existing reference (R3, R17); they are ordinary types in t
 including inside an effect signature's *input* side (R8 forbids the output side and every
 other storage position).
 
-**R2 — A borrow is taken from a local, postfix.** A **place**, for this slice, is a local name.
-`&` yields `&T` and `&!` yields `&!T`, both postfix, matching `^`'s existing postfix form
-(`rest ^`). Applied to anything that is not a local name — a computed value, a literal, a word
-result, or a projection expression — it is a located compile error.
+**R2 — A borrow is taken from a local, prefix (Decision E).** A **place**, for this slice, is
+a local name. `&` yields `&T` and `&!` yields `&!T`, both **prefix**: `&a`/`&!a`, not
+`a &`/`a &!`. Applied to anything that is not a local name — a computed value, a literal, a
+word result, or a projection expression — it is a located compile error.
+
+**Decision E: prefix, not postfix (resolving round 2 soundness minor 8).** The second draft
+made `&`/`&!` postfix, matching `^`'s existing postfix form (`rest ^`). Round 2 (soundness
+minor 8) showed a postfix `&`/`&!` cannot be an ordinary word: naming a linear local moves it
+(`moves.take`, src/check.rs:1670) before any following word could run, so a postfix `<local>
+&!` would need the parser to fold backward into one place term, and nothing in the codebase
+inspects a preceding term that way. Prefix removes the problem entirely: `&a` and `&!a` each
+lex as a **single token** (measured: both produce one `unknown word` diagnostic on the base
+commit, never a token-sequence parse error), so the checker resolves a borrow in one step,
+exactly like any other word — no backward-folding parser machinery is needed. Prefix is also
+more concatenative, not less: `&!a` is an atom that pushes a borrow and consumes nothing from
+the stack, exactly as `a` is an atom that pushes a value, whereas postfix `a &!` was the form
+that broke the model, needing to inspect the term that preceded it. Two details worth stating
+explicitly: the sigil binds tightly, so `& a` (with a space) is **two tokens**, not a borrow —
+and the same tightness runs the other way (round 1 nit 16): whitespace matters on *both* sides,
+so a local immediately followed by another word with no space, e.g. `a&!` typed as one run, is
+a *single* unknown-word token (`a&!`), not the two tokens `a` then `&!`; the sigil must always
+be its own separate token, glued to nothing; and a reference-typed **parameter** needs no sigil
+at all — if `b : &!Buf` arrived as an input,
+the body writes `b`, not `&!b`, since `b` already names a reference. The sigil unambiguously
+means "borrow an *owned* local", never "this local's static type happens to be a reference".
+This does not change any projection spelling (`T&>fi`, `T&!>fi`, `&>`, `&!>`, `&^`, `&!^`),
+which stay exactly as Decision A defined them — only the base borrow operator moves from
+postfix to prefix.
 
 The first draft additionally let a place be "a projection path rooted at a local name"
-(`a Buf>len &!`, meaning "borrow just this field"). Round 1 (soundness minor 8) showed that
-form is unreachable as specified: `&`/`&!` cannot be ordinary words dispatched on the stack top,
-because naming a linear local moves it (`moves.take`, src/check.rs:1670) before any such word could run, and
-nothing in the codebase inspects the *preceding* term the way that form would require. **D3/D4**
-resolves this by retiring the projection-path form outright rather than building the backward
-parser folding it would need: **R3**'s accessor family projects through an *already-borrowed*
-reference, so the same result (`&!usize` for one field of `a`) is reached as `a &! Buf&!>len`
-— borrow the whole local first, then project through the reference with an ordinary word. A
-place is therefore exactly a local name, R2's postfix operator is applied to it exactly once
-per borrow, and every deeper reference is a projection (R3), not a second application of `&`/`&!`.
+(applying `Buf>len &!` after naming `a`, meaning "borrow just this field"). Round 1 (soundness
+minor 8) showed that form is unreachable as specified, for the same underlying reason Decision
+E now fixes at the root for the base operator too: nothing in the codebase inspects a
+preceding term the way a postfix accessor-path form would require. **D3/D4** resolves this by
+retiring the projection-path form outright rather than building the backward parser folding it
+would need: **R3**'s accessor family projects through an *already-borrowed* reference, so the
+same result (`&!usize` for one field of `a`) is reached as `&!a Buf&!>len` — borrow the whole
+local first, then project through the reference with an ordinary word. A place is therefore
+exactly a local name, R2's prefix operator is applied to it exactly once per borrow, and every
+deeper reference is a projection (R3), not a second application of `&`/`&!`.
 
 The rejected stack-value alternative (`& ( T -- T &T )`) is recorded because it is close: a
 plain word leaving the value below its own reference is tighter for a single borrow and is
@@ -189,12 +228,12 @@ is taken, so the place is never suspended at the point of a subsequent reborrow,
 is accepted.
 
 **The suspend rule is mutable-only (Decision B).** `&T` is `Copy`, so a *shared* projection
-composes freely: a live `&T` parent alongside a reference derived from it (`a & dup Buf&>len`,
+composes freely: a live `&T` parent alongside a reference derived from it (`&a dup Buf&>len`,
 say) is fine and must stay legal — shared references carry no exclusivity, so there is nothing
 for a suspend to protect. Only a `&!`-rooted derivation suspends its place.
 
 It also still means **R11's root list needs no reference-typed case** (**B3**): the only thing
-R2's postfix `&`/`&!` is ever applied to is a plain aggregate local, never to a value that is
+R2's prefix `&`/`&!` is ever applied to is a plain aggregate local, never to a value that is
 already a reference, so R11's whitelist (struct/enum/array/cell) stays exactly as first
 drafted — that part of the second draft's reasoning did not depend on the linearity claim C2
 falsifies, and survives it.
@@ -223,7 +262,7 @@ shapes and needs three parsing cases: a bare `&!Buf` arrives as one `Word` token
 *within* itself (measured: lexes as a single unknown-word token, never a token sequence); a
 composed `&!^List` also arrives as one `Word` token, splits within itself down to the remainder
 `^List`, and that remainder must be handed to the *existing* caret splitter
-(`parse_owning_cell_type_expr`, src/parser.rs:584-609), not to `resolve_type` directly, since
+(`parse_owning_cell_type_expr`, src/parser.rs:583-611), not to `resolve_type` directly, since
 `^List` is itself an owning-cell type expression one level down; `&![u8 64]` splits *across*
 tokens (`Word("&!")` then `LBracket`, measured directly) because `[` already is a delimiter, so
 recursing into the ongoing token stream — exactly `parse_owning_cell_type_expr`'s existing
@@ -257,32 +296,52 @@ used at all, not only in a contrived example.
   is not on the carve-out) — both follow from the same rule, stated here explicitly so a
   reader does not have to infer it from the dogfood alone.
 - **Restricted to `Copy` `T`; a Copy *aggregate* is a real, first-class case, not a rejection
-  (Decision D, resolving round 2 G1).** `is_copy` makes an all-scalar-field struct like
-  `Vec2 { x i64 y i64 }`, or an all-scalar-payload enum like `examples/vm.sth`'s `Op`, `Copy`.
-  R12's `@` lowering for a *scalar* `T` is `FieldLoad`, and `field_load_op`
-  (src/backend/qbe.rs:295) `unreachable!`s on an aggregate at line 318 ("an aggregate field is
-  copied by blit, not scalar-loaded"); `field_store_op` (src/backend/qbe.rs:323) mirrors it at
-  line 338. The second draft (round 1 minor 11) closed this by restricting `@`/`!`/`+!` to
-  Copy-*scalar* `T` only, rejecting a Copy aggregate as a located compile error — but that made
-  `@`/`!` a strict subset of `get`/`set`, which read/write a Copy aggregate element
-  (`examples/vm.sth`'s `[Op 13]`) without difficulty, so `get`/`set` could not actually be
-  retired (R21's own headline example, `vm.sth:58`'s `get`, is exactly this case). Decision D
-  lifts the restriction for the aggregate case instead of leaving it rejected: `@` on a Copy
-  *aggregate* `T` lowers to `Alloc` (a fresh destination slot, sized and aligned from `T`'s
-  layout) followed by `Blit` (a byte-copy from the field/element address into that slot); `!`
-  on a Copy aggregate `T` lowers to `Blit` alone (a byte-copy from the stored value's address
-  into the field/element address). Both instructions already exist (`Alloc` src/ir.rs:750,
-  `Blit` src/ir.rs:754, both already used this way by `set`'s own array-element lowering,
-  src/ir.rs:2062-2063) and are already used for exactly this shape of copy, so R12's
-  no-new-`Instr`-variant claim survives unchanged — this is a new lowering arm over an existing
-  instruction pair, not new IR. There is no linearity story to write for this case, and this is
-  not an open question left for later: the value is `Copy` by construction, and duplicating a
-  `Copy` value is safe by definition, full stop. This also does not disturb the no-`alloc`/
-  no-`blit` structural criterion (criterion 6, `push-byte`'s own body): that criterion is about
-  `push-byte`'s element type `u8`, which is scalar regardless of this change, so the ceiling it
-  asserts is unaffected. The restriction that remains is scalar-vs-aggregate no longer matters;
-  what still matters, unchanged, is Copy-vs-linear (next bullet) — `@`/`!`/`+!` stay rejected on
-  a linear `T` exactly as before, aggregate or not.
+  (Decision D).** **Justification (this revision): `dup` on a Copy aggregate already lowers to
+  exactly this, and it works today.** `lower_call`'s `"dup"` arm (src/ir.rs:1714-1726) allocs a
+  fresh slot and blits the bytes for a Copy `Struct`/`Enum`/`Array` — its own comment reads "A
+  struct or enum is copied by value: alloc a fresh slot and blit the bytes, so mutating the copy
+  leaves the original intact" — and this machinery is exercised on every `dup` of a Copy
+  aggregate in the suite today (verified: `1 2 V dup V> . . V> . .` prints `2 1 2 1`, i.e. the
+  duplicate and the original are independent). Without Decision D, `dup` can duplicate a Copy
+  struct but `@` cannot — an arbitrary hole with no principled explanation, in an operation this
+  slice itself introduces. The restriction was never about safety: `is_copy` returns `false` for
+  anything transitively containing a cell, so no linear value can ever reach this path; the only
+  reason `@`/`!` rejected a Copy aggregate was that they were wired to the scalar lowering path
+  (`FieldLoad`/`FieldStore`, which `unreachable!` on an aggregate at src/backend/qbe.rs:318 and
+  :338) and never to the aggregate one Decision D adds.
+
+  `is_copy` makes an all-scalar-field struct like `Vec2 { x i64 y i64 }`, or an all-scalar-payload
+  enum like `examples/vm.sth`'s `Op`, `Copy`. The second draft (round 1 minor 11) closed the
+  `field_load_op`/`field_store_op` `unreachable!` by restricting `@`/`!`/`+!` to Copy-*scalar* `T`
+  only, rejecting a Copy aggregate as a located compile error — but that made `@`/`!` a strict
+  subset of `get`/`set`, which read/write a Copy aggregate element (`examples/vm.sth`'s
+  `[Op 13]`) without difficulty, so `get`/`set` could not actually be retired (R21's own
+  headline example, `vm.sth:58`'s `get`, is exactly this case) — though R21's removal is now
+  deferred (see below), the hole in `@`/`!` would remain arbitrary regardless of whether `get`/
+  `set` are ever retired. Decision D lifts the restriction for the aggregate case instead of
+  leaving it rejected: `@` on a Copy *aggregate* `T` lowers to `Alloc` (a fresh destination slot,
+  sized and aligned from `T`'s layout) followed by `Blit` (a byte-copy from the field/element
+  address into that slot); `!` on a Copy aggregate `T` lowers to `Blit` alone (a byte-copy from
+  the stored value's address into the field/element address). Both instructions already exist
+  (`Alloc` src/ir.rs:750, `Blit` src/ir.rs:754) and are already used for exactly this shape of
+  copy by `dup`'s own Copy-aggregate arm above, so R12's no-new-`Instr`-variant claim survives
+  unchanged — this is a new lowering arm over an existing instruction pair, not new IR. There is
+  no linearity story to write for this case, and this is not an open question left for later:
+  the value is `Copy` by construction, and duplicating a `Copy` value is safe by definition, full
+  stop. This also does not disturb the no-`alloc`/no-`blit` structural criterion (criterion 6,
+  `push-byte`'s own body): that criterion is about `push-byte`'s element type `u8`, which is
+  scalar regardless of this change, so the ceiling it asserts is unaffected. The restriction that
+  remains is scalar-vs-aggregate no longer matters; what still matters, unchanged, is
+  Copy-vs-linear (next bullet) — `@`/`!`/`+!` stay rejected on a linear `T` exactly as before,
+  aggregate or not.
+
+  **New criterion, closing round 3's A5/soundness finding: the aliasing test.** A behavioural
+  golden that only fetches and stores without a subsequent mutation cannot tell an `Alloc`+`Blit`
+  fetch apart from a lowering that skips the `Alloc` and returns the field address directly —
+  both read and write correctly until the source is mutated after the fetch. Add a golden that
+  fetches a Copy aggregate through `&`, mutates the *original* through `&!`, then prints the
+  *fetched copy* and asserts it still reads its **pre-mutation** value — the whole point of the
+  `Alloc` is that the fetched value is independent of the referent from that moment on.
 - Fetching or storing a **linear** `T` through a reference is a separate, pre-existing rejection
   from the plain Copy check: it would either produce a second owner of one object (fetch) or
   silently leak the overwritten value (store, since nothing auto-drops) — both soundness rules,
@@ -294,14 +353,26 @@ used at all, not only in a contrived example.
 round 2 C1).** At most one live `&!` to a place; no `&` to a place while a `&!` to it is live;
 and — the direction the second draft omitted — no `&!` to a place while a `&` to it is live.
 Round 2 (C1) found the second draft stated only the first two: "no `&` to a place while an `&!`
-to it is live" has no converse, so `a & a &!` was legal by the letter of the rule, producing a
+to it is live" has no converse, so `&a &!a` was legal by the letter of the rule, producing a
 live shared reference and a live mutable reference to the same place simultaneously — exactly
-the aliasing R5 exists to prevent, and worse once `dup` is added (`a & dup` makes two live
-shared refs, then a `&!` makes the violation obvious). R5 now states both orders explicitly.
+the aliasing R5 exists to prevent, and worse once `dup` is added (`&a dup` makes two live
+shared refs, then `&!a` makes the violation obvious). R5 now states both orders explicitly.
 Criterion 7's single test name (`shared_borrow_alongside_mutable_is_error`) is order-ambiguous
 and would almost certainly be written in the order the second draft already covered; it is
 split below into one test per order so the fix has independent evidence, not just prose.
-Everything else is a consequence, not a separate rule, and must not be implemented as one:
+
+**N-9 (round 3 audit): "must not be implemented as one" no longer holds, precisely.** The
+place-suspend rule for a mutable reborrow's outstanding derivations (Decision B) is genuinely
+separate machinery, not a consequence of the bullets below — it is stated in R3, restated as a
+provenance scan in R6, and is what makes exclusivity per-place rather than per-borrow-instant.
+Read this heading as: exclusivity plus the suspend rule together are the aliasing rule for
+values **reached by borrowing a place**; everything below this paragraph other than the
+suspend rule is a consequence of that pair, checked at the same consumption points (R6), and
+need not be implemented separately. R5 does **not** cover two aggregate *values* that alias one
+address with no borrow ever taken — see "Open question: aggregate-local aliasing" below, which
+this revision leaves unresolved.
+
+Consequences of exclusivity plus the suspend rule, not further separate rules:
 
 - `&T` is `Copy` (shared references carry no exclusivity constraint).
 - `&!T` is not `Copy`.
@@ -360,7 +431,7 @@ tested alongside the rejections rather than left implicit.
 
 Round 1 (soundness B5) found the first draft's three-position version had two holes precisely
 because it enumerated *positions* rather than closing over *type constructors*: `check_owned_cell_word`'s
-`"^"` arm (src/check.rs:2225) interns a cell over any payload type with no filter, so `a &! ^`
+`"^"` arm (src/check.rs:2225) interns a cell over any payload type with no filter, so `&!a ^`
 built `^&!Buf` — not itself a reference type, so the old three-position check missed it, and it
 is legal in a field and on an output side once built. `check_array_word`'s `"fill"` arm
 (src/check.rs:2133, the Copy check at 2146) accepts any `Copy` element, and R5 makes `&T` `Copy`,
@@ -395,9 +466,16 @@ cannot outlive its referent, so no lifetime apparatus is needed.
   level, not a type that merely contains one nested inside an array or cell, so the accept-case
   stays closed if a future slice adds another aggregate constructor that this slice's two
   construction-site rejections don't already cover.
+- **N-11 (round 3 audit): the output-side ban has a consequence worth stating plainly.** Because
+  R8 rejects a reference on the **output** side of any declared effect, a projection can never be
+  factored into its own helper word: `: len-of ( &!Buf -- &!usize ) Buf&!>len ;` is rejected, not
+  because the projection itself is wrong, but because `&!usize` on the output side is exactly
+  what R8 bans. This is a real, load-bearing limitation, not a bug — every projection in this
+  slice's dogfood is written inline for this reason — and it belongs here, at the rule that
+  causes it, rather than left for an implementer to discover by trying to factor one out.
 - **D4 — the REPL's carried stack is a storage position R8 must reject explicitly, not by
   accident.** `Session` persists the inter-line stack as raw 8-byte cells plus a per-slot `Type`
-  (src/repl.rs:246-251). A reference landing there would be a dangling pointer silently
+  (src/repl.rs:246-255). A reference landing there would be a dangling pointer silently
   surviving into the next line — R12 maps a reference to `IrType::Ptr`, an 8-byte cell, so
   nothing about the storage format would reject it. It is unreachable *today* only by an
   accident this slice must not rely on: `Ctx::Line` has no locals at all
@@ -454,15 +532,25 @@ nothing live to alias and is unaffected.
 
 **R10 — Branch joins: borrow state must agree.** A place borrowed on one arm and not the other
 is a located error at the join; a place borrowed identically on both arms, or on neither, joins
-cleanly. The existing type unification already does most of the work, since a live reference on
-the stack is part of the stack shape; this requirement is the small remainder covering a borrow
-held in a local, tested on both the disagreement and the agreement side so an over-broad
-"any borrow crossing an `if` is an error" implementation cannot pass by accident. Rejected
-alternative: a `MaybeBorrowed` lattice element mirroring Slice 1's `MaybeMoved`. The conservative
+cleanly. **N-10 (round 3 audit): the case this actually catches, restated, since "a borrow held
+in a local" was shown vacuous given entry-only binding (a reference-typed local is a parameter,
+identical on both arms by construction).** The existing type unification checks that both arms
+leave the *same types* on the stack, and would already reject two arms whose stacks disagree in
+shape (a live reference on one arm, none on the other). What it does **not** check is *which
+place* a live reference's suspension is attributed to: two arms can each leave a stack of
+identical shape (say, both a live `&!usize`) while each arm's value suspends a **different**
+place — one arm derives its reference from local `x`, the other from local `y` — and type
+unification alone has nothing to say about that, since it only compares types, not provenance.
+R10 is the rule that the *suspended-place* bookkeeping must also agree across arms, not just the
+stack's types; that is real content the type-only unification does not supply, tested on both
+the disagreement and the agreement side so an over-broad "any borrow crossing an `if` is an
+error" implementation cannot pass by accident. Rejected alternative: a `MaybeBorrowed` lattice
+element mirroring Slice 1's `MaybeMoved`. The conservative
 rule is smaller and no criterion needs the imprecision.
 
-**R11 — Only aggregate locals may be borrowed.** The root of a place (R2: a local name) must be
-a local of struct, enum, array, or cell type. A local of scalar type is a located compile error
+**R11 — Only aggregate or cell locals may be borrowed** (N-12: retitled from "aggregate" alone,
+since the body always included cell — the title just didn't say so). The root of a place (R2: a
+local name) must be a local of struct, enum, array, or cell type. A local of scalar type is a located compile error
 ("borrow a field or an aggregate"). This deletes the spill obligation from the brief's D5
 entirely: by recon 3 scalars are SSA temporaries with no address, and giving them memory homes
 is real work no criterion needs. A projection whose *result* is scalar (`b Buf&!>len` yielding
@@ -471,9 +559,10 @@ slot, and — per R3's consequence above — the list stays exactly struct/enum/
 reference-typed case needed, since R2 is never applied to an already-reference value.
 
 **R12 — No new IR instruction; a reference is always `IrType::Ptr`.** Struct-field projection
-is `PtrOffset`, array-element projection is `ElemAddr`, cell projection (`&^`) is a `Load` of
-the stored pointer, `@` is `FieldLoad`, `!` is `FieldStore`, `+!` is `FieldLoad` + `Bin(Add)` +
-`FieldStore`. `Ptr` stays opaque; no pointer arithmetic is exposed to the surface language.
+is `PtrOffset`, array-element projection is `ElemAddr`, cell projection (`&^`/`&!^`, N-14: both
+spellings, not just the shared one) is a `Load` of the stored pointer, `@` is `FieldLoad`, `!` is
+`FieldStore`, `+!` is `FieldLoad` + `Bin(Add)` + `FieldStore`. `Ptr` stays opaque; no pointer
+arithmetic is exposed to the surface language.
 
 Round 1 (soundness B6) found the first draft never said what `IrType` a reference maps to, and
 the tempting default is silently wrong: `ir_type_of` (src/ir.rs:154) is a total `Type -> IrType`
@@ -544,9 +633,11 @@ change orthogonal to references and would widen the slice.
 
 **R16 — The question ROADMAP.md's parked design question answers, answered.** (The first draft
 cited line 447, which is mid-sentence inside the parked question; the question and its "Design
-question this slice's brief must answer" marker ran 443-449, marker on 443, at the base commit
-— now 444-450, marker on 444, after Amendment A's one-line-longer Slice 5 title/body edit
-above it, re-verified against the current file.) `inout` projections **do** subsume a reified
+question this slice's brief must answer" marker ran 443-449, marker on 443, at the base commit;
+Amendment A's one-line-longer title/body edit shifted it to 444-450, marker on 444; this
+revision's own general-locals insertion shifts it a further 16 lines, to **460-466, marker on
+460**, re-verified against the current file rather than carried forward by arithmetic.) `inout`
+projections **do** subsume a reified
 take/fill pair (`S/fi` yielding a residual `∂S/∂fi`, refilled exactly once) for every
 statically known path, because a projection is the same residual made implicit and lexically
 bounded, and it covers whole-value borrows too. No residual form is added. Reified residuals
@@ -645,65 +736,58 @@ is the *signature*, and clause syntax itself is unchanged either way.
 ### Test discipline (binding)
 
 **R18 — Every criterion is a runnable golden**, source in to expected stdout or source in to
-expected diagnostic, with two reasoned exceptions: R13 asserts on the emitted module (a runtime
-golden cannot distinguish "mutated in place" from "rebuilt correctly", and eliminating the
-rebuild is the point of the slice), and R12's `IrType::Ptr` mapping is exercised indirectly by
-every other golden rather than asserted on its own (asserting an internal `IrType` choice
-directly would pin an implementation detail no external behaviour depends on; R13's and
-criterion 14's structural/behavioural assertions are what would actually break if the mapping
-regressed). Both structural assertions are unit tests over `backend::qbe::emit`'s output and
-must assert against a single named function body (via `func_body`, mirroring the existing
-`emitted_alloc_shim_has_null_trap` pattern), never a whole-module IL string match. New
-lexer/parser/check/ir code carries its own unit tests beside it (`#[cfg(test)] mod tests`) in
-addition to the goldens listed below, per CLAUDE.md's existing convention.
+expected diagnostic, with **one** reasoned exception: R13 (no-rebuild, criterion 6) asserts on
+the emitted module, since a runtime golden cannot distinguish "mutated in place" from "rebuilt
+correctly", and eliminating the rebuild is the point of the slice. **N-2 (round 3 audit): R12's
+`IrType::Ptr` mapping is not a second exception — it is directly asserted, and the prior draft's
+claim that it is only "exercised indirectly" contradicted its own criterion table.** Criterion
+13 (`mutation_through_reference_parameter_is_visible_to_caller`) exists precisely to assert the
+mapping on its own: a wrong mapping (`&!T` lowered to a by-value aggregate rather than
+`IrType::Ptr`) would make a callee's mutation invisible to the caller, and criterion 13's own
+function-body assertion over the emitted IL is what would actually break if the mapping
+regressed — there is no second, softer criterion standing in for it. Both structural criteria
+(6, 13) are unit tests over `backend::qbe::emit`'s output and must assert against a single
+named function body (via `func_body`, mirroring the existing `emitted_alloc_shim_has_null_trap`
+pattern), never a whole-module IL string match. New lexer/parser/check/ir code carries its own
+unit tests beside it (`#[cfg(test)] mod tests`) in addition to the goldens listed below, per
+CLAUDE.md's existing convention.
 
 **R19 — Every diagnostic criterion asserts the specific error**, not merely that compilation
 failed. Turning silent failure into a sharp error is the point, so the error text and its
 location are part of the spec.
 
-**R20 — Two migration claims, kept distinct so the additive one stays falsifiable on its own
-(Amendment C).** The task that produced this revision originally called this requirement "zero
-migration"; Amendment B's `get`/`set` removal (R21, delivery phase 4) falsifies that literal
-claim by design, so the requirement is restated as two separate claims instead of loosened
-until it says nothing:
+**R20 — The reference feature itself is purely additive**, and changes no existing signature's
+meaning (R14). Demonstrated, not asserted, by a concrete mechanism: delivery phase 3 runs
+`git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` and asserts every
+line is an addition (`A`), never a modification (`M`), of a pre-existing file — an added file
+(the dogfood, this slice's own new test file) is fine, an edited one is the regression this
+exists to catch.
 
-- **The reference feature itself is purely additive** and changes no existing signature's
-  meaning (R14). Demonstrated, not asserted, by a concrete mechanism: delivery phase 3 runs
-  `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` and asserts
-  every line is an addition (`A`), never a modification (`M`), of a pre-existing file — an
-  added file (the dogfood, criterion tests) is fine, an edited one is the regression this
-  exists to catch. This claim **closes at phase 3** and does not depend on phase 4 happening at
-  all; it stays true even if phase 4's fallback is taken and `get`/`set` never move.
-- **`get`/`set`'s removal is a separate, subsequent, mechanical migration** (R21, delivery
-  phase 4), and its diff is *expected*, not a violation of the claim above. Phase 4 has its own
-  regression check, different in kind from phase 3's: the suite must still pass, but the diff
-  over `examples/` and `tests/phase{0,1}.rs` is expected to be non-empty, itemized by phase 4's
-  own call-site audit (migrated to `&!> @`/`&!> !`, or deleted as redundant with an existing
-  reference-mode golden), and reviewed as a real diff rather than waved through by a check that
-  only counts additions.
+**This is now the whole claim, not one of two (fifth draft: delivery phase 4 is cut).** Earlier
+drafts split this into two claims — the feature's own additive property, closing at phase 3, and
+a separate, scheduled `get`/`set` migration-and-removal (Amendment B, delivery phase 4) whose
+expected non-additive diff had to be kept from contaminating the first claim. That split is now
+unnecessary: this revision cuts the `get`/`set` migration outright rather than scheduling it as
+a fourth delivery phase of this slice, or leaving it behind a stated fallback (R21 below gives
+the reason, and it is not the one earlier drafts gave). `get`/`set` stay exactly as they are, in
+every phase this slice delivers; only their documentation changes. There is no second migration
+to keep distinct from the first any more, so there is only one claim, and it is exactly what the
+git-diff check above demonstrates.
 
-Conflating the two would let a mechanical vocabulary change quietly stand in for "no signature
-changed meaning", which is the opposite of what R14 is for; keeping them distinct is what makes
-the additive property falsifiable on its own regardless of whether phase 4 ever lands.
-
-**Round 2 (minor G2): criterion 16's own test, `regression_diff_shows_only_additions`, must be
-retired at phase 4 if that phase is reached, not left in the suite to permanently fail.** The
-test asserts the phase-3 diff is addition-only; phase 4 is *specified* to modify
-`examples/stack.sth`, `examples/vm.sth`, `tests/phase0.rs`, and `tests/phase1.rs`, so the same
-assertion would turn red the moment phase 4 lands, even though R20 above already explains that
-the *claim* the test demonstrates closes at phase 3 and is unaffected by phase 4. Phase 4's own
-commit therefore deletes or retires `regression_diff_shows_only_additions` (its job is done,
-and phase 4's itemized call-site audit is a different, non-automatic check by design, not a
-replacement assertion of the same shape) rather than leaving it in the suite to fail on every
-subsequent build. If the fallback is taken instead, the test is untouched and stays passing
-indefinitely, since no file it watches is ever modified.
+**Round 2 (minor G2), now moot.** That finding worried that `regression_diff_shows_only_additions`
+would need retiring once a delivery phase 4 modified `examples/stack.sth`/`vm.sth` and
+`tests/phase{0,1}.rs`. With phase 4 cut from this slice entirely — not deferred behind a
+fallback, cut — the concern does not arise here: nothing this slice delivers ever modifies a
+pre-existing file, so the test stays green indefinitely as part of this slice. It resurfaces
+only when some later slice actually performs the `get`/`set` migration (R21), at which point
+that slice's own commit is where the retirement belongs, not this one's.
 
 ### Superseded vocabulary (Amendment B)
 
 **R21 — `get` and `set` are superseded by `&!> @` (or `&> @` for a read-only borrow) and
-`&!> !`.** Not renamed, not changed, in phases 1-3 (R3): marked superseded here, with their
-replacements documented, and migrated away from and removed in delivery phase 4 below, if that
-phase is reached (R20's fallback). The case for supersession:
+`&!> !`.** Not renamed, not changed, anywhere in this slice (R3): marked superseded here, with
+their replacements documented, and their migration and removal **explicitly deferred to a later
+slice**, not scheduled as a delivery phase of this one. The case for supersession:
 
 - `get ( [T N] usize -- [T N] T )` is non-consuming and two-output because Slice 1 gave it no
   other way to leave the array live; every call site that only wants to read one element pays
@@ -734,6 +818,104 @@ phase is reached (R20's fallback). The case for supersession:
 constant size) have no reference-mode replacement to be superseded by — neither reads nor writes
 a single element — and stay untouched, not merely deferred; R21 names only `get`/`set`.
 
+**Why the migration is deferred, and it is not the reason earlier drafts gave.** Earlier drafts
+treated this as a scope/risk tradeoff (`examples/vm.sth`'s `build` needing restructuring to bind
+its array as a local before `&!> !` has a place to project from, R15 declining to relax
+top-of-scope binding). That restructuring is real, but it is not what actually blocks the
+migration. **A bare REPL line has no locals at all** (`Ctx::Line { .. } => None`,
+src/check.rs:285 and :306): R2 makes a local the only place a borrow can be taken from, so a
+REPL line can never form a place, never take a borrow, and never use `&>`/`&!>`/`@`/`!` — the
+entire replacement vocabulary — full stop. Verified empirically: `0 4 fill | a | ...` typed as a
+bare REPL line is `parse error: unexpected token Pipe`, while the identical body typed inside a
+`:` word definition at the REPL compiles cleanly. Removing `get`/`set` today would therefore make
+**array element access impossible at REPL line scope** — not merely awkward, unreachable.
+`tests/phase1.rs:585-591` is a live REPL golden whose stated purpose is exercising
+`fill`/`get`/`set`/`len` at REPL scope (the VM dogfood driven entirely from REPL lines);
+deleting `get`/`set` with no replacement reachable from a bare line would delete that capability,
+not migrate it.
+
+This is exactly the blocker the newly-inserted ROADMAP.md general-locals slice (this slice's own
+prerequisite, see "Prerequisite" below) removes: once a REPL line can bind `| names |` the way a
+word body already can, a line can form a place, take a borrow, and use `&>`/`&!>`/`@`/`!` like
+any other scope, and the migration this section documents becomes possible for the first time.
+That is why the migration is **deferred, not abandoned**: it has a concrete unblocking event, a
+later slice's own exit criterion, rather than a vague "maybe later".
+
+### Prerequisite: the general-locals slice (ROADMAP.md, Phase 3 Slice 5)
+
+This slice now has a real prerequisite recorded in ROADMAP.md: **general locals** (mid-body
+`| names |` binding, plus locals at the REPL line), inserted immediately before this slice and
+renumbering it from Slice 5 to Slice 6. **This spec does not assume it lands first, and the
+dogfood below still targets the current language** (top-of-scope-only binding, R15, unchanged)
+— but once mid-body binding exists, three things in this document get simpler, recorded here so
+they are not rediscovered independently later:
+
+- **The dogfood's `run` helper disappears.** `run`'s only reason to exist is to give `main`'s
+  two `Buf` values a binding site (R15, round-2 A1); `main` itself declares no inputs, so it
+  cannot bind locals under today's entry-only rule. With mid-body binding, `main` can bind `a`
+  and `b` directly wherever `new new` leaves them, and `run` folds back into `main`.
+- **`push-byte` can name its intermediate projection instead of re-deriving it.** `push-byte`
+  currently reborrows `b` three times (R7's one-`swap` cost included) because a projection's
+  result cannot be named where it is produced. Mid-body binding lets the array reference
+  produced by `Buf&!>data &!^` be named once and reused, rather than reborrowing `b` a third
+  time to reach `Buf&!>len` again.
+- **R7's disjointness workaround stops needing its extra `swap`.** The `swap` in `push-byte`
+  exists to sequence two projections of `b` so only one is ever live at a time (R7 is
+  conservative about disjoint fields). Naming each projection's result as it is produced removes
+  the need to reorder the stack to keep them sequenced.
+
+None of this is implemented here; it is recorded so the general-locals slice's own brief does
+not have to rediscover why it matters to this one.
+
+## Open question: aggregate-local aliasing (not resolved this revision)
+
+Round 3 found, independently in two places, that **naming an aggregate local does not copy
+it**: `lower_call` pushes the *same* `Value` — a pointer to one frame slot — when a local is
+named ("i64 is Copy; reuse the value id", src/ir.rs:1709), including for a struct/array/enum
+local, while `dup` deep-copies via `Alloc`+`Blit` (src/ir.rs:1714-1726, this revision's own
+Decision D justification above). Independently, a non-consuming aggregate projection
+(`S|>fi`'s `Peek`, src/ir.rs:2378-2386; `get` on an array element, src/ir.rs:2036-2039) pushes
+the **interior address, with no copy**, on the stated justification that "the owning aggregate
+is consumed by the getter/destructure/clause" — which is false for a non-consuming peek. Either
+way, **two distinct locals can denote one region of memory** today. This is pre-existing and
+currently invisible, because nothing mutates in place; this slice's `!`/`+!` make it observable
+for the first time, so this slice is where the question has to be decided, not merely noted:
+
+```forth
+type: V x i64 y i64 ;  type: S a V b i64 ;
+: f ( V V -- ) | p q | p V> . . q V> . . ;
+: main ( -- )
+  1 2 V 3 S
+  S|>a swap S|>a swap drop
+  f ;
+```
+
+verified on this commit to print `2 1 2 1`: `p` and `q` are two aliases of one `V`, and
+mutating through one after this slice's `!` lands would be observed through the other, with no
+rule in R5/R6 noticing, since neither `p` nor `q` was ever borrowed from a *place* — they are
+two plain values that happen to share one address.
+
+**R5's claim to be "the entire aliasing rule" does not hold until this is settled** (see the
+N-9 note at R5, above): R5 governs borrows taken from places; this hole is about two aggregate
+*values* sharing an address with no borrow ever taken. Three candidate resolutions are recorded,
+none chosen:
+
+1. **Naming an aggregate local materialises a copy.** Closes the hole at the point of naming,
+   at the cost of a real, performance-visible `Alloc`+`Blit` every time an aggregate local is
+   named — a cost this slice otherwise works hard to avoid (R13).
+2. **R5 extends to track outstanding aggregate copies of a place**, not just borrows of one, so
+   `p`/`q` above would be rejected as two live aliases of the same place the moment both are
+   named. More machinery than R5 as currently stated, and its interaction with `dup` (which
+   *does* copy) needs working out.
+3. **Borrow roots are restricted** so an aliasable local (one that arrived by a non-consuming
+   peek of another place, rather than being bound at word entry from the stack) cannot be a
+   borrow root at all — narrower than either of the above, and it only closes the hole where a
+   reference is later taken, not the aliasing itself.
+
+This question **gates implementation**: phase 1 cannot ship R4's `!`/`+!` without an answer,
+since they are exactly what makes the aliasing observable. Recorded here, explicitly undecided,
+rather than silently shipped alongside R5 as if it were already covered.
+
 ## Load-bearing invariants (must survive)
 
 - Backend stays QBE; no LLVM. `Ptr[T]` stays opaque, never assumed to be a `u64`. R12 adds no
@@ -758,9 +940,12 @@ a single element — and stay untouched, not merely deferred; R21 names only `ge
   parameterized reference type needs to render its own name — the *only* things genuinely absent
   are ownership, allocation, and a destructor, which is a real difference but not the tripwire's
   actual criterion. The sequencing argument, stated honestly instead: references are needed now,
-  in Phase 3, and generics are Phase 4; Phase 4's planned ad-hoc dispatch (ROADMAP.md:488-491
-  after Amendment A's one-line Slice 5 shift, corrected from the second draft's 488-490 by
-  round 2's citation audit (G4) — static overloading over statically-known input types, plus
+  in Phase 3, and generics are Phase 4; Phase 4's planned ad-hoc dispatch (ROADMAP.md:504-508;
+  round 2's citation audit (G4) corrected 488-490 to 488-492, round 3's audit (N-6) corrected
+  that to 488-492 exactly, and this revision's own ROADMAP.md edits — Amendment A's one-line
+  Slice title shift plus this draft's 16-line general-locals insertion — shift it a further 16
+  lines to 504-508, re-verified against the current file rather than carried forward by
+  arithmetic) — static overloading over statically-known input types, plus
   open multimethods) is expected to
   eventually subsume both the reference type constructors themselves and R3's explicit
   reference-mode accessor spellings, once a word can be overloaded on whether its receiver is
@@ -786,7 +971,7 @@ the surrounding prose's existing voice:
   hand-back via ordinary stack threading) needs no borrow checker of any kind and is unaffected.
 - The "References are second-class" paragraph (base-commit lines 208-214, now 208-221 after the
   amendment) gained several sentences distinguishing the ruled-out *lifetime* apparatus from the
-  narrower exclusivity rule this slice adds, so the paragraph engages Phase 3 Slice 5 directly
+  narrower exclusivity rule this slice adds, so the paragraph engages Phase 3 Slice 6 directly
   instead of reading as flatly contradicted by it. Phase 1-3's checker/IR work (below) proceeds
   against this already-amended DESIGN.md; no phase needs to touch it again.
 
@@ -797,7 +982,7 @@ the surrounding prose's existing voice:
    registry (an interned `(inner, mutable)` pair, mirroring `Array`/`OwnedCell`, round 2 E1) and
    the two soundness answers (`is_copy` true for `&T`/false for `&!T`; every `is_linear`-shaped
    predicate false for both) rather than leaving them as unstated consequences of "`ir_type_of`
-   gains two arms"; `&`/`&!` as postfix borrow operators on a local (R2), with the `^`-style
+   gains two arms"; `&`/`&!` as prefix borrow operators on a local (R2, Decision E), with the `^`-style
    name reservation mirrored for `&`-led names and a dedicated shadowing rejection for the
    exact names `@`/`!`/`+!` (round 2 F2); the type-position splitter for `&T`/`&!T`, its three
    cases including handing a `^`-led remainder to the existing caret splitter (round 2 F3); the
@@ -843,81 +1028,43 @@ the surrounding prose's existing voice:
    the R7 exemption for one clause's statically-disjoint payload bindings (round 2 B1/B2), and
    consuming the scrutinee reference at dispatch rather than leaving it a surplus value (round 2
    B3); the full dogfood end to end including `walk`; recording R16's answer into ROADMAP.md's
-   parked design question (the DESIGN.md:134/208-214 amendment, D2, and ROADMAP.md:438-443's
+   parked design question (the DESIGN.md:134/208-214 amendment, D2, and ROADMAP.md:454-459's
    title/body correction, Amendment A, are already applied and need no further phase-3 work —
-   only the design-question passage at ROADMAP.md:444-450 still needs R16's answer written into
+   only the design-question passage at ROADMAP.md:460-466 still needs R16's answer written into
    it); R20's additive-work regression check.
    Exit: criteria 10, 11, 12, 14, and 16.
-4. **`get`/`set` migration and removal (Amendment B), or the stated fallback.** Migrate every
-   existing `get`/`set` call site to `&>`/`&!>` composed with `@`/`!` (R21), then delete both
-   words. Re-verified scope (grepping the whole word, excluding comments and test-name string
-   literals like `"get-drops-rest"`/`"set-drops-overwritten"`, which the brief-stage estimate
-   of 28/7/6 `get` and 15 `set` did not exclude, and which undercounts `tests/phase1.rs` in
-   particular, whose REPL-session goldens pack many clauses — and many `get`/`set` calls — onto
-   one source line): `get` appears 20 times in `tests/phase0.rs`, 5 in `tests/phase1.rs`, 2 in
-   `examples/stack.sth`, and 3 in `examples/vm.sth` (30 total); `set` appears 17 times in
-   `tests/phase0.rs`, 16 in `tests/phase1.rs`, 1 in `examples/stack.sth`, and 15 in
-   `examples/vm.sth` (49 total, and this file's count for `vm.sth` alone matches the brief-stage
-   estimate exactly). Not every call site migrates the same way: a test written specifically to
-   exercise `get`'s or `set`'s own behaviour (its bounds trap, its non-consuming shape, its
-   whole-array copy-back) is **deleted**, not rewritten, once the equivalent behaviour is
-   already covered by this slice's own reference-mode goldens (criteria 3 and 4); a call site
-   where `get`/`set` is incidental plumbing inside a larger test or example is **rewritten** to
-   use `&>`/`&!>` composed with `@`/`!`.
 
-   **Two problems previously blocked this migration; Decision D resolves the type-level one
-   (round 2 G1), leaving only the place-level one (unchanged from the prior draft).**
-   `examples/vm.sth`'s assembler (`build`) threads its `[Op 13]` array purely on the stack
-   through a chain of thirteen `set` calls (`Halt 13 fill`, then twelve `index value set`,
-   vm.sth:140-152) — the array is never named as a local anywhere in `build`, and `fetch`'s read
-   (vm.sth:58) has the same shape. That **place problem** is unchanged: `&!>` requires a place
-   (R2/R11: a reference is taken from a local), and R15 declines to relax top-of-scope-only
-   binding, so these call sites cannot migrate token-for-token without first binding the array
-   as a local. `build` must be restructured: `Op`'s variants carry only scalar payload fields
-   (`i64`/`usize`), so `[Op 13]` is `Copy` (`is_copy`, src/check.rs:156, recurses element-wise),
-   and each of the twelve replacement calls can take a fresh, independent `&!` borrow of the
-   same local, none overlapping — `| arr | ... arr &! <index> &!> <value> ! ... arr ;`, one
-   borrow per instruction, `arr` returned at the end to match `build`'s declared
-   `( -- [Op 13] )`. The second, previously separate, **type problem** (round 2 G1) is that the
-   second draft's R4 rejected `@`/`!` on any Copy *aggregate*, and `Op` is exactly that, so
-   `&!> !` could not express a `build` write or `&> @` a `fetch` read at all, regardless of
-   place — Decision D removes this restriction (R4 above), so the only remaining work is the
-   mechanical restructuring, not a soundness gap. Round 2 also caught the prior draft's own
-   proposed replacement line mis-ordered: `arr &! 0 >usize 0 >usize Load &|> !` leaves
-   `[&![Op 13], usize, Op]` when the (old-spelling) projection word runs, handing it an `Op`
-   value where it wants a `usize` index. The corrected order projects to the element reference
-   *before* constructing the value to store: `arr &! 0 >usize &!> 0 >usize Load !` — `arr &!`
-   (`[&!arr]`), `0 >usize` (the index, `[&!arr, 0_usize]`), `&!>` (projects, consuming both,
-   `[&!Op]`), `0 >usize Load` (constructs the `Op::Load(0)` value to store, `[&!Op, Op::Load(0)]`),
-   `!` (stores, `[]`). Since `examples/vm.sth` is Phase 2's exit dogfood, this restructuring
-   remains the highest-risk part of the migration and the most likely trigger for the fallback
-   below, now for mechanical-scope reasons (thirteen call sites across `build`, plus `fetch`'s
-   and the two other `get` reads) rather than because any call site was provably unmigratable.
-
-   **Stated fallback, a real decision point, not an aspiration:** if phases 1-3 run long, this
-   phase is deferred to Phase 3 Slice 6 and `get`/`set` **stay**, superseded in documentation
-   (R21) only. This is not a failure state: R21 already gives every future reader the
-   replacement mapping regardless of whether phase 4 ever lands, and R20's additive-work claim
-   does not depend on phase 4 happening at all.
-   Exit: criterion 17, or an explicit deferral recorded in the phase-3 commit if the fallback
-   is taken instead.
+**This slice ends at phase 3. There is no delivery phase 4.** Earlier drafts scheduled the
+`get`/`set` migration and removal here as a fourth phase (Amendment B), with a stated fallback
+if it ran long. This revision cuts it outright rather than carrying a fallback: R21 explains why
+it cannot even be attempted yet (a bare REPL line has no locals to form a place with, so the
+entire replacement vocabulary is unreachable at REPL scope), which is a harder blocker than the
+scope/risk tradeoff (`examples/vm.sth`'s `build` needing restructuring) earlier drafts gave, and
+no amount of care within *this* slice removes it. The migration is recorded (R21) and left for
+the slice that removes the actual blocker (ROADMAP.md's general-locals slice, this slice's own
+prerequisite).
 
 ## Criterion → test map
 
-Goldens live in `tests/phase0.rs`, except the two structural criteria (13, 14), which assert on
-emitted code and belong in unit tests beside `backend/qbe.rs`, R17's typing-only criterion (12),
-which may live beside R17's own checker code if no runtime observation is needed for the accept
-half, and criterion 17, which is conditional on delivery phase 4 being reached at all (R20's
-fallback) and is a call-site audit plus a suite-still-passes check, not a single golden.
+**Goldens for this slice live in a new file, `tests/phase3_refs.rs`, not `tests/phase0.rs`
+(round 3 criteria A1).** Criterion 16 below asserts `tests/phase0.rs` is never modified from the
+base commit; adding a golden to it would make that assertion false by the same commit that adds
+the golden, so every new runtime test in this slice lives in its own file instead, which the
+git-diff watch list (examples/, tests/phase0.rs, tests/phase1.rs) does not track at all — an
+addition invisible to the check is as good as one the check explicitly allows. The two
+**structural** criteria (**6, 13**), which assert on emitted code, belong in unit tests beside
+`backend/qbe.rs` instead, mirroring the existing `emitted_alloc_shim_has_null_trap` pattern.
+R17's typing-only criterion (12) may live beside R17's own checker code if no runtime
+observation is needed for the accept half.
 
 | # | criterion | test | phase |
 |---|---|---|---|
 | 1 | `&`/`&!` on a local yield reference-typed values; applied to a literal, an arithmetic result, or a word result they are located errors | `borrow_of_place_is_accepted`, `borrow_of_non_place_is_error` | 1 |
 | 2 | borrowing a scalar local is a located error; borrowing a scalar *field* through a projection (the field, not the local, is scalar) is accepted | `borrow_of_scalar_local_is_error`, `borrow_of_scalar_field_is_accepted` | 1 |
 | 3 | projection reads correctly through all three shapes with the correct spelling per mutability: struct field (`T&>fi`/`T&!>fi`); array element, incl. the bounds trap (`&>`/`&!>`); cell payload (`&^`/`&!^`); storing through the *shared*-spelled projection (`&^`/`&>`/`T&>fi`'s result) is a located error | `projection_through_field_element_and_cell_reads_correctly`, `element_projection_out_of_bounds_still_traps`, `store_through_shared_reference_is_error` | 1 |
-| 4 | `@`, `!`, `+!` read/write/increment through a reference; `@`/`!` on a linear `T` are located errors; `@`/`!` on a `Copy` **aggregate** `T` (Decision D) read/write correctly via `Alloc`+`Blit`/`Blit`, not a panic and not an error | `access_through_reference_reads_and_writes`, `increment_through_mutable_reference_adds_in_place`, `fetch_or_store_of_linear_payload_is_error`, `fetch_or_store_of_copy_aggregate_reads_and_writes` | 1 |
+| 4 | `@`, `!`, `+!` read/write/increment through a reference; `@`/`!` on a linear `T` are located errors; `@`/`!` on a `Copy` **aggregate** `T` (Decision D) read/write correctly via `Alloc`+`Blit`/`Blit`, not a panic and not an error; the fetched copy is independent of its referent, proven by mutating the source after the fetch | `access_through_reference_reads_and_writes`, `increment_through_mutable_reference_adds_in_place`, `fetch_or_store_of_linear_referent_is_error`, `fetch_or_store_of_copy_aggregate_reads_and_writes`, `fetch_of_copy_aggregate_survives_source_mutation` | 1 |
 | 5 | escape: a reference in a struct field, an enum variant payload, an array element (`fill`), a cell payload (`^`), on an effect's output side, and (D4) surviving to the end of a REPL line, are six located errors; a reference on an effect's *input* side is accepted; `drop` of a reference frees nothing | `reference_in_struct_field_is_error`, `reference_in_enum_payload_is_error`, `reference_as_array_element_is_error`, `reference_in_cell_payload_is_error`, `reference_returned_from_word_is_error`, `reference_surviving_repl_line_is_error`, `reference_in_effect_input_is_accepted`, `drop_of_reference_frees_nothing` | 1 |
-| 6 | **structural**: the emitted body of `push-byte` contains no `alloc` and no `blit` and does contain the address-arithmetic-plus-store shape, under an instruction-count ceiling; a rebuild-style control word in the same module still contains `alloc`/`blit`, proving the assertion is not vacuous | `mutation_through_reference_emits_no_rebuild`, `rebuild_style_equivalent_still_emits_alloc_and_blit` | 1 |
+| 6 | **structural**: the emitted body of `push-byte` contains no `alloc` and no `blit` and does contain the address-arithmetic-plus-store shape, under an instruction-count ceiling; a rebuild-style control word in the same module still contains `alloc`/`blit`, proving the assertion is not vacuous. Pinned to the mangled symbol (`qbe_name` rewrites `-` to `_`, src/backend/qbe.rs:186): assert against `func_body(&il, "export function $push_byte(")` (the header form, src/backend/qbe.rs:578), never `"push-byte"` literally, which cannot match and would make `func_body` panic rather than assert (round 3 criteria A3) | `mutation_through_reference_emits_no_rebuild`, `rebuild_style_equivalent_still_emits_alloc_and_blit` | 1 |
 | 7 | exclusivity, both directions (Decision C): two live `&!` to *one* place, a `&` taken while a `&!` to it is live, a `&!` taken while a `&` to it is live, and `dup` on a `&!` are four located errors; a reborrow taken while a reference *derived by projection* from the previous reborrow is still live is a located error (Decision B, the `two-live` shape); two live `&!` to *different* places is accepted; `&` is `Copy` (names twice, accepted) and naming a `&!` local twice, once the prior derivation is fully consumed, is accepted as a reborrow | `two_live_mutable_borrows_is_error`, `shared_borrow_while_mutable_live_is_error`, `mutable_borrow_while_shared_live_is_error`, `reborrow_while_projected_reference_still_live_is_error`, `dup_of_mutable_reference_is_error`, `two_live_mutable_borrows_to_different_places_is_accepted`, `shared_reference_is_copy`, `naming_mutable_reference_local_reborrows` | 2 |
 | 8 | consuming a place while a borrow of it is live is a located error naming both the place and the borrow, whether the conflicting borrow sits on the virtual stack or in the locals map; disposing a borrowed place is likewise a located error; the same place consumed, or disposed, *after* its borrow is gone is accepted | `move_of_place_borrowed_on_stack_is_error`, `move_of_place_borrowed_in_locals_is_error`, `dispose_of_borrowed_place_is_error`, `move_after_borrow_ends_is_accepted` | 2 |
 | 9 | two references into disjoint fields of one place, held simultaneously, are rejected (stated limitation); sequencing them (fully consuming the first before taking the second) is accepted | `disjoint_field_borrows_are_conservatively_rejected`, `sequenced_borrows_of_two_fields_are_accepted` | 2 |
@@ -928,7 +1075,10 @@ fallback) and is a call-site audit plus a suite-still-passes check, not a single
 | 14 | the dogfood runs end to end and prints the expected byte, including the two-borrow `copy-byte` call and the `walk` word over `&!List` | `reference_dogfood_prints_expected_bytes` | 3 |
 | 15 | a leftover reference on the *stack* without a `drop` is a surplus-value error; a reference *local* that is never explicitly dropped is accepted (it expires silently at scope end) | `unused_reference_is_surplus_value_error`, `reference_local_expires_without_drop` | 1 |
 | 16 | no regression: the full existing suite passes, and `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` shows only additions, no modifications, demonstrating R14/R20's additive-work claim concretely rather than by assertion | existing suite, unmodified; `regression_diff_shows_only_additions` | 3 |
-| 17 | `get` and `set` are removed and every migrated call site uses `&>`/`&!>` composed with `@`/`!` instead; the existing suite passes, with the migration diff over `examples/` and `tests/phase{0,1}.rs` itemized as either a call-site rewrite or the deletion of a now-redundant `get`/`set`-specific test, never a silent change to what a test proves. Under R20's fallback both words survive unmigrated and this criterion is explicitly not attempted, recorded in the phase-3/4 commit rather than left ambiguous | `get_and_set_are_removed_and_call_sites_migrated` (fallback: not attempted) | 4 |
+
+**There is no criterion 17.** The prior draft's criterion 17 (`get`/`set` removal) belonged to
+the delivery phase 4 this revision cuts (R20/R21); it is not renumbered away, simply not part of
+this slice's exit any more. 16 criteria, phases 1 through 3, is the whole of this slice's exit.
 
 ## Dogfood, as this revision specifies it
 
@@ -958,7 +1108,7 @@ there is no `i64`-to-`u8` literal coercion (measured: `72 takeu8` against a `( u
 is a located type-mismatch error). `new`'s own body already writes `0 >u8` correctly, which is
 what makes the previous revision's two bare literals an inconsistency inside the same dogfood
 rather than a new problem; both call sites below now write `72 >u8`/`90 >u8`. `byte-at`'s
-index argument is unaffected: `usize` is on the bare-literal coercion carve-out, so `a & 2
+index argument is unaffected: `usize` is on the bare-literal coercion carve-out, so `&a 2
 byte-at` needs no conversion (verified: a bare literal against a declared `usize` parameter
 type-checks with no coercion word).
 
@@ -985,10 +1135,10 @@ type: Buf  data ^[u8 64]  len usize ;
 
 : run ( Buf Buf -- )
   | a b |
-  a &! 72 >u8 push-byte
-  b &! 90 >u8 push-byte
-  a &! b & 0 copy-byte
-  a & 2 byte-at .
+  &!a 72 >u8 push-byte
+  &!b 90 >u8 push-byte
+  &!a &b 0 copy-byte
+  &a 2 byte-at .
   a drop
   b drop ;
 
@@ -1050,13 +1200,13 @@ Ends `[]`, matching the declared output.
 exactly two locals, unlike the previous revision's zero-input `main`): naming `a`/`b` never
 moves them outright — `Buf` is linear (its `data` field is a cell), but `&`/`&!` borrow *from*
 a place without consuming the local itself (R2), so `a` and `b` remain nameable again later in
-the body, up to the point each is finally `drop`ped. `a &! 72 >u8 push-byte` borrows `a` (R2,
+the body, up to the point each is finally `drop`ped. `&!a 72 >u8 push-byte` borrows `a` (R2,
 R11: `a` is a struct local), converts the literal, calls `push-byte`; `a`'s `data` cell now
-holds `72` at index 0 and `len` is `1`. `b &! 90 >u8 push-byte` does the same for `b`: index 0
-is `90`, `len` is `1`. `a &! b & 0 copy-byte` borrows `a` mutably and `b` sharedly — different
+holds `72` at index 0 and `len` is `1`. `&!b 90 >u8 push-byte` does the same for `b`: index 0
+is `90`, `len` is `1`. `&!a &b 0 copy-byte` borrows `a` mutably and `b` sharedly — different
 places, so Decision C's symmetric rule does not fire either direction — and reads `b`'s byte 0
 (`90`) into `a` at its current `len` (`1`), so `a`'s `len` becomes `2` and index 1 is `90`.
-`a & 2 byte-at .` reads index 2 of `a`, which `new`'s zero-fill left untouched (only indices 0
+`&a 2 byte-at .` reads index 2 of `a`, which `new`'s zero-fill left untouched (only indices 0
 and 1 were ever written), so it prints `0`. `a drop` and `b drop` dispose both owned buffers
 (freeing their `data` cells) — this is the point `a`/`b` are actually consumed, once, matching
 the linear rule. Ends `[]`, matching `run`'s declared `( Buf Buf -- )`.
@@ -1080,18 +1230,91 @@ walks — ownership stays with whoever calls it.
 ## Explicitly out of scope
 
 `& ( T -- T &T )`, the stack-value borrow form (R2; purely additive, revisit if `examples/`
-after Slices 5 and 7 is dominated by build-then-configure pipelines over a single value).
+after Slices 6 and 8 is dominated by build-then-configure pipelines over a single value).
 Path-disjoint borrows (R7). Borrowing a scalar local, and therefore the scalar spill (R11).
-Mid-body local binding (R15). `!` over a linear value with drop-on-overwrite (R4). Reified
-take/fill residuals `∂S/∂fi` (R16). Raw or foreign pointers: `^T` is the owning pointer and
-`&T`/`&!T` the borrowing one, the only client for a third is FFI at the hosted layer (Phase 6),
-`*` is the multiplication word so it is not the spelling, and any future foreign pointer must be
-an opaque handle with no arithmetic, since `p 8 +` would force `Ptr` to be an integer and break
-the backend-neutral invariant a WASM lowering depends on. Collapsing `&`/`&!` and the
-reference-mode accessor family into overloads of the value-form words (D5's revisit trigger;
-waits for Phase 4's ad-hoc dispatch). Reference counting and storable references, including the
-zipper (Phase 3 Slice 6). User-definable destructor bodies (Phase 3 Slice 7). Worklist-based
-branching disposal (Phase 6).
+Mid-body local binding (R15; lands as ROADMAP.md's own general-locals slice, this slice's
+prerequisite, not as part of this slice). `!` over a linear value with drop-on-overwrite (R4).
+Reified take/fill residuals `∂S/∂fi` (R16). Raw or foreign pointers: `^T` is the owning pointer
+and `&T`/`&!T` the borrowing one, the only client for a third is FFI at the hosted layer
+(Phase 6), `*` is the multiplication word so it is not the spelling, and any future foreign
+pointer must be an opaque handle with no arithmetic, since `p 8 +` would force `Ptr` to be an
+integer and break the backend-neutral invariant a WASM lowering depends on. Collapsing `&`/`&!`
+and the reference-mode accessor family into overloads of the value-form words (D5's revisit
+trigger; waits for Phase 4's ad-hoc dispatch). Reference counting and storable references,
+including the zipper (Phase 3 Slice 7). User-definable destructor bodies (Phase 3 Slice 8).
+Worklist-based branching disposal (Phase 6). The `get`/`set` migration and removal itself (R21;
+deferred to whatever later slice picks it up once general locals land). The aggregate-local
+aliasing question above (explicitly gating, not deferred by choice — see that section).
+
+## Outstanding round-3 findings (not applied this revision)
+
+Recorded so they are not lost, not because they are optional. The task that produced this
+revision authorized applying a subset of round 3's findings; these are the rest, listed rather
+than fixed. Several are now entangled with the open aggregate-aliasing question above and
+cannot be resolved independently of it.
+
+- **Vacuous dogfood golden** (r3-soundness #1): the only printed byte (`&a 2 byte-at .`) is
+  index 2, which nothing in the dogfood ever writes. Print the bytes the program actually
+  produced (index 0, index 1, `len`) instead.
+- **`walk` is never called** (r3-soundness #2, criterion 14): the dogfood's `main` never builds
+  a `List` or calls `walk`; criterion 14 requires it. Either grow the dogfood a `List`-building
+  helper with an observable printed result, or split criterion 14 and give `walk` its own
+  golden.
+- **Reference locals must be excluded from `Moves`, and no `is_linear` predicate exists**
+  (r3-soundness #3): linearity is `!is_copy` at roughly 10 sites with differing required
+  answers; `Moves::new` (src/check.rs:198-208) and the back-edge check (src/check.rs:1513-1519)
+  both need an explicit reference-local exclusion or `push-byte`'s own second reborrow and R9's
+  accept-case are rejected as written.
+- **R6's literal provenance predicate over-rejects `push-byte`** (r3-soundness minor): needs
+  "reference-typed values only" and "`@` terminates provenance" stated explicitly.
+- **R5/R6's exclusivity counter vs. a reference local's own content** (r3-soundness minor):
+  state that the counter counts outstanding *derivations*, never the reference the local itself
+  holds.
+- **R3 never states a projected field/payload type may be linear** (r3-soundness minor):
+  `push-byte` needs `Buf&!>data : &!^[u8 64]`, a mutable reference to a linear field; an
+  implementer mirroring R4's Copy gate onto R3 rejects it.
+- **`over` is a second duplication path with the same false diagnostic as `dup`**
+  (r3-soundness minor): both are rejected by the pre-existing Copy gate with a message that
+  claims linearity/resource-ownership, which is false for a reference.
+- **`@`'s `Alloc` is entry-block-hoisted** (r3-soundness minor): a Copy aggregate fetched by `@`
+  inside a self-tail-call loop and carried across the back-edge is clobbered by the next
+  iteration's fetch — pre-existing, reproducible with existing words, out of this slice's scope
+  to fix but worth a note in R4 so criterion 4's golden is not accidentally written inside a
+  loop.
+- **`get`/`&> @` behavioural difference should be stated as deliberate** (r3-soundness minor):
+  `get` on an aggregate element aliases; `&> @` copies. Record it in R21 rather than leaving a
+  future reader to spot the diff unexplained.
+- **The REPL escape golden has no writable program** (r3-criteria A2):
+  `reference_surviving_repl_line_is_error`'s own justification (a REPL line has no locals)
+  means no source text can reach the rejection it names; either drop the golden in favour of a
+  `debug_assert`-style note, or make it a white-box unit test against the carried-slot path
+  directly.
+- **Criterion 10 mostly proves pre-existing TCO** (r3-criteria A4): needs the node count,
+  `ulimit -s 1024`, an asserted post-walk value read back from a *mid-list* node, and a
+  pre-change falsification note, matching `deep_list_disposes_in_constant_stack`'s own
+  convention.
+- **Fail-fast checking makes several bundled criteria one-third effective** (r3-criteria A7):
+  criteria 1, 3, and 4 each bundle multiple rejections into one test program; only the first
+  rejection in each is ever exercised. Split into one program per rejection.
+- **`drop_of_reference_frees_nothing` has no stated observation** (r3-criteria A8): pin it to
+  the existing alloc-trace/spy machinery (`run_owned_traced_golden`, tests/phase0.rs:2444)
+  rather than leaving "program compiles and prints the expected number" as the de facto
+  assertion.
+- **Several rejections have no accept-case, and two rules have no test at all**
+  (r3-criteria B): most pressing, `&`-led name reservation and the `@`/`!`/`+!` shadowing
+  rejection ship with zero tests in any phase; `dup` on a `&!` has no accept-case proving `dup`
+  on a `&T` still works.
+- **Two rules exercised nowhere** (r3-criteria C2): the type-position splitter's third case
+  (a `^`-led remainder) is reachable only via R17's inference, never via a hand-written
+  signature; add a one-line phase-1 parser unit test.
+- **Test-naming sweep** (r3-criteria E): several test names claim a retired form
+  (`borrow_of_scalar_field_is_accepted` should be `projection_to_scalar_field_is_accepted`),
+  assert an audit they cannot perform, or omit the outcome clause. Not applied this revision.
+
+**Now moot, listed so it is not mistaken for still-open:** round 3's phase-4 `build`
+restructuring finding (the A1 mid-body-locals bug repeated in phase 4's `build`, r3-soundness
+blocker #5) no longer applies — delivery phase 4 is cut in this revision, so `build` is never
+restructured here at all.
 
 ## Phases
 
@@ -1102,9 +1325,9 @@ branching disposal (Phase 6).
       "phase": 1,
       "focus": "reference-types-places-projection-access",
       "difficulty": "hard",
-      "summary": "Add &T/&!T mapped to IrType::Ptr with a RefId registry and correct is_copy/is_linear answers, name reservation for &-led names and shadowing rejection for @/!/+!, the three-case &T/&!T type-position splitter, postfix &/&! on locals with the place-suspend rule for mutable projections, the T&>fi/T&!>fi/&>/&!>/&^/&!^ accessor family split by mutability, @/!/+! typed for both &T and &!T and covering a Copy aggregate via Alloc+Blit as well as a Copy scalar, R11's scalar-local rejection, R8's six escape rejections (five over compiled code plus the REPL carried-stack case) plus drop-as-no-op, and the surplus-value rule for a leftover reference on the stack.",
+      "summary": "Add &T/&!T mapped to IrType::Ptr with a RefId registry and correct is_copy/is_linear answers, name reservation for &-led names and shadowing rejection for @/!/+!, the three-case &T/&!T type-position splitter, prefix &/&! on locals with the place-suspend rule for mutable projections, the T&>fi/T&!>fi/&>/&!>/&^/&!^ accessor family split by mutability, @/!/+! typed for both &T and &!T and covering a Copy aggregate via Alloc+Blit as well as a Copy scalar, R11's scalar-local rejection, R8's six escape rejections (five over compiled code plus the REPL carried-stack case) plus drop-as-no-op, and the surplus-value rule for a leftover reference on the stack.",
       "changes": [
-        "src/lexer.rs, src/parser.rs: `&` and `&!` as postfix borrow operators on a local; `&T`/`&!T` in type position with its three splitting cases (bare, `^`-composed, `[`-delimited); `T&>fi`, `T&!>fi`, `&>`, `&!>`, `&^`, `&!^`, `@`, `!`, `+!` as words; `&`-led name reservation mirroring `is_reserved_caret_name`/`reserved_caret_name_error`; a shadowing rejection for the exact names `@`, `!`, `+!`",
+        "src/lexer.rs, src/parser.rs: `&` and `&!` as prefix borrow operators on a local; `&T`/`&!T` in type position with its three splitting cases (bare, `^`-composed, `[`-delimited); `T&>fi`, `T&!>fi`, `&>`, `&!>`, `&^`, `&!^`, `@`, `!`, `+!` as words; `&`-led name reservation mirroring `is_reserved_caret_name`/`reserved_caret_name_error`; a shadowing rejection for the exact names `@`, `!`, `+!`",
         "src/check.rs: reference types in the type lattice with an interned RefId (inner, mutable) registry; is_copy true for &T/false for &!T and every is_linear-shaped predicate false for both; R2's local-only place; the T&>fi/T&!>fi/&>/&!>/&^/&!^ accessor family split by mutability, each consuming its reference argument and suspending its root place for the mutable forms; R4's Copy restriction on @/!/+!, @ typed for both &T and &!T, now covering a Copy aggregate as well as a Copy scalar; R11's scalar-local rejection; R8's six transitive-containment rejections (struct field, enum payload, fill's array element, ^'s cell payload, effect output, REPL carried-stack survival) plus the effect-input accept-case narrowed to a top-level reference type; the surplus-value rule treating a leftover &!T on the stack like any non-Copy value while a reference local expires silently",
         "src/ir.rs: ir_type_of gains &T/&!T -> IrType::Ptr; lower T&>fi/T&!>fi to PtrOffset, &>/&!> to ElemAddr, &^/&!^ to a Load of the stored pointer, @ to FieldLoad (Copy scalar) or Alloc+Blit (Copy aggregate), ! to FieldStore (Copy scalar) or Blit (Copy aggregate), +! to FieldLoad+Bin(Add)+FieldStore; drop of a reference emits no destructor call",
         "no new Instr variant (R12); Alloc and Blit already exist and are already used this way by set's own array-element lowering"
@@ -1119,8 +1342,9 @@ branching disposal (Phase 6).
         "store_through_shared_reference_is_error",
         "access_through_reference_reads_and_writes",
         "increment_through_mutable_reference_adds_in_place",
-        "fetch_or_store_of_linear_payload_is_error",
+        "fetch_or_store_of_linear_referent_is_error",
         "fetch_or_store_of_copy_aggregate_reads_and_writes",
+        "fetch_of_copy_aggregate_survives_source_mutation",
         "reference_in_struct_field_is_error",
         "reference_in_enum_payload_is_error",
         "reference_as_array_element_is_error",
@@ -1175,9 +1399,9 @@ branching disposal (Phase 6).
         "src/check.rs: R10 borrow state must agree at a branch join, both the disagreement rejection and the agreement accept-case",
         "src/check.rs: R17 reference-mode clause elimination when a word's top input is &Enum/&!Enum: consume the scrutinee reference at dispatch (not left as a surplus value), bind clause payloads as references inheriting mutability and exempt from R7's disjointness rule (statically disjoint fields of one variant), reject a clause body that consumes a payload binding",
         "src/ir.rs: lower_clauses threads the scrutinee's EnumId from the checked frontend Type rather than re-deriving it from the lowered scrutinee's IrType, closing the reachable unreachable! a &!Enum scrutinee would otherwise hit",
-        "examples/ or tests/: the dogfood buffer program (push-byte/byte-at/copy-byte/run/main) and the walk word over &!List with the two-borrow copy-byte call",
+        "examples/refs.sth (new file): the dogfood buffer program (push-byte/byte-at/copy-byte/run/main) and the walk word over &!List with the two-borrow copy-byte call; tests/phase3_refs.rs (new file): the golden that runs it and every other criterion test for this slice, kept out of tests/phase0.rs so criterion 16's addition-only check has nothing pre-existing to modify",
         "tests/: a regression check asserting `git diff --name-status a66c47a -- examples/ tests/phase0.rs tests/phase1.rs` contains only additions (R20)",
-        "ROADMAP.md: title/body already corrected by Amendment A (438-443); record the slice as done and write R16's answer into the parked design question at 444-450"
+        "ROADMAP.md: title/body already corrected by Amendment A and this revision's general-locals insertion (454-459); record the slice as done and write R16's answer into the parked design question at 460-466"
       ],
       "tests": [
         "reference_parameter_crosses_back_edge_in_constant_stack",
@@ -1190,24 +1414,7 @@ branching disposal (Phase 6).
         "reference_dogfood_prints_expected_bytes",
         "regression_diff_shows_only_additions"
       ],
-      "exit": "Criteria 10 to 12, 14, and 16. The dogfood runs end to end, a reference parameter walks a long list in constant stack while mutating through the reference, and the full existing suite passes with the regression diff check confirming no modification to any pre-existing example or test file."
-    },
-    {
-      "phase": 4,
-      "focus": "get-set-migration-and-removal",
-      "difficulty": "hard",
-      "summary": "Migrate every get/set call site to &>/&!> composed with @/! (R21), restructuring examples/vm.sth's stack-threaded assembler to bind its array as a local, then delete both words; or, per R20's stated fallback, defer to Phase 3 Slice 6 and leave both words in place. Decision D already resolved the type-level blocker (a Copy-aggregate element, e.g. vm.sth's Op) that would otherwise make this phase unimplementable; only the mechanical place/ordering restructuring remains.",
-      "changes": [
-        "tests/phase0.rs, tests/phase1.rs: migrate get/set call sites used as incidental plumbing to &>/&!> composed with @/!; delete call sites that exist specifically to test get/set's own behavior (bounds trap, non-consuming shape, whole-array copy-back), since criteria 3/4's reference-mode goldens already cover the equivalent",
-        "examples/stack.sth: migrate its one set and two get call sites",
-        "examples/vm.sth: restructure build (currently a stack-threaded chain of thirteen set calls with no local) to bind its [Op 13] array as a local so &!> ! has a place to project from, then migrate every get/set call site, including fetch's and the other reads, using the corrected operand order (project to the element reference before constructing the value to store)",
-        "src/check.rs, src/ir.rs, src/parser.rs, src/lexer.rs: remove the get and set words entirely once every call site is migrated",
-        "tests/: retire regression_diff_shows_only_additions (round 2 G2), its addition-only assertion having already served its purpose at phase 3 and now permanently falsified by this phase's own specified edits"
-      ],
-      "tests": [
-        "get_and_set_are_removed_and_call_sites_migrated"
-      ],
-      "exit": "Criterion 17. get and set no longer exist as words; every prior call site is either migrated to &>/&!> composed with @/! or deleted as redundant; the full suite passes with the itemized migration diff as its only change. If the fallback is taken instead, this phase is not attempted and the deferral is recorded in the phase-3 commit."
+      "exit": "Criteria 10 to 12, 14, and 16. The dogfood runs end to end, a reference parameter walks a long list in constant stack while mutating through the reference, and the full existing suite passes with the regression diff check confirming no modification to any pre-existing example or test file. This is the slice's exit: there is no phase 4."
     }
   ]
 }

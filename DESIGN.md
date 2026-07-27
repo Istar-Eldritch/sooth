@@ -211,7 +211,7 @@ cannot escape their scope. Because they can't escape, no *lifetime* system is
 needed: no lifetime variables, no region annotations, nothing that binds a
 reference's validity to a named scope. Lifetimes attach to named bindings; stack
 values are anonymous and shuffled by `swap`/`rot`, so a lifetime system is the worst
-possible fit here and stays deliberately avoided. Phase 3 Slice 5 adds a narrower
+possible fit here and stays deliberately avoided. Phase 3 Slice 6 adds a narrower
 rule instead: per-place exclusivity (at most one live mutable reference to a place),
 checked at the point each place is consumed rather than by a liveness pass. That is
 not a lifetime system — it never asks how long a reference is allowed to live, only
@@ -539,7 +539,7 @@ rows, no borrow analysis needed to write the compiler in it.
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
 - Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in; second-class
-  refs (Hylo-style), no borrow checker; non-null pointers; hidden/checked return
+  refs (Hylo-style), no lifetime-tracking borrow checker; non-null pointers; hidden/checked return
   stack.
 - Codegen: compile-time virtual stack to native; words as functions.
 - Backend: QBE (small, legible, multi-arch native + C ABI for free); no LLVM. Owning a

@@ -106,8 +106,8 @@ stack at 1M+ nodes under a 1MB stack. A **struct** with more than one simultaneo
 recursive field still narrows to one chosen edge (D1, unchanged); an **enum**'s
 mutually-exclusive variants are not that restriction. Worklist-based disposal for
 branching structures stays out of scope, moved to Phase 6.
-**Next action: Phase 3 Slice 5** (second-class references + parameter conventions
-(`let`/`inout`/`sink`/`set`) + escape checking).
+**Next action: Phase 3 Slice 5** (general locals: mid-body `| names |` binding, and locals
+at the REPL line).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -207,7 +207,13 @@ cycle, each green and runnable). Slices 3+ are a plan, not yet locked specs:
    clause bodies (bind names at the top of a word body or a clause body, extent = that scope;
    no mid-body binding, no closer: factor a word instead). Design locked in
    `docs/phase2-slice4-brief.md`. Prefer-the-stack stays the culture; locals stay opt-in.
-   ✅ done.
+   ✅ done. **The mid-body half of this decision is reversed by Phase 3 Slice 5 (general
+   locals):** specifying the references slice (Phase 3 Slice 6) hit six separate places where
+   the only way to name a projection's result was a word that exists purely as a binding site
+   (`run`, `build-into`), not a meaningful abstraction, so "factor a word instead" failed on
+   its own terms and the restriction is lifted. The **no-closing-token** half stands: a
+   mid-body binding's extent is simply the rest of its enclosing block, and that needs no
+   closer either way.
 5. **Fixed-size arrays** (still heap-free). Introduce **`usize`** (and likely **`isize`** for
    pointer differences) here, as the target-width index/length type, so array indices are
    `usize` from the first use rather than a hardcoded `i64` retrofitted later. Its defining
@@ -409,7 +415,7 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    `examples/list.sth`, a linked list that builds, walks (sums via a non-consuming or
    consuming pass), and disposes what remains via the fused loop.
    A **zipper** (focus + stored path of one-hole steps) remains a sharper future exercise
-   for the recursive drop glue, and the one shape slice 5's second-class references
+   for the recursive drop glue, and the one shape slice 6's second-class references
    provably cannot express, since the path must be stored; not attempted this slice.
 4. **Generalized recursive disposal, cycle generalization (the Slice 3 follow-on).** ✅ done.
    Slice 3's fused destructor loop covered only direct self-recursion, on a single type,
@@ -430,12 +436,22 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    (`S<fi`) are purely functional (`( S Ti -- S )`, a whole-value transform, never a write
    through a pointer), so disposal never needs a visited-set or double-free guard; the fix
    was detection and loop-codegen reach, not aliasing safety. That stops being true once
-   Slice 6's opt-in RC lands, since shared ownership is exactly what makes a real reference
+   Slice 7's opt-in RC lands, since shared ownership is exactly what makes a real reference
    cycle constructible (and, without a `Weak` type, leak). **Worklist-based disposal for
    branching structures stays moved to Phase 6** (see there): it needs a growable
    pending-pointer structure and a new OOM-during-disposal interaction, neither of which
    this slice's gaps required.
-5. **Second-class references + places + escape checking.** Pass a borrow (`&`/`&!`), mutate
+5. **General locals.** `| names |` binding is no longer confined to the top of a word or
+   clause body: it is permitted at any point in a body, popping values off the stack at the
+   point it appears (leftmost name binds the deepest value, exactly like the existing entry
+   binding). Also reaches the **REPL line**, which has no locals at all today (a bare line's
+   checker context carries none) — a REPL line gains the same `| names |` form a word body
+   already has. No new closing token: a mid-body binding's extent is simply the rest of its
+   enclosing block, so there is nothing to mark where it ends. This reverses the mid-body
+   half of Phase 2 Slice 4's "no mid-body binding, no closer: factor a word instead" (see the
+   note there); the no-closing-token half stands, unchanged, for the same reason it always
+   did. Dogfood: a REPL line that binds a local, which cannot be written today.
+6. **Second-class references + places + escape checking.** Pass a borrow (`&`/`&!`), mutate
    in place, no move; the escape checker keeps refs from being stored or escaping scope. The
    reference *type* is the convention, not a Hylo-style `let`/`inout`/`sink`/`set` (the
    interface here is a stack effect, not named parameters), so no existing signature changes
@@ -448,9 +464,9 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    for every statically known path, leaving reified residuals worth having only where the
    focus must escape (slice 3's zipper, as a stdlib type). Answer it here rather than
    letting nested-path ergonomics get solved twice.
-6. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
+7. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
-7. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The
+8. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The
    Phase 3 exit dogfood: open/read/close files, with the compiler catching a deliberate
    double-use and a forgotten `close`. **This slice is where a user can first attach their
    own cleanup code to a type**, rather than only inheriting disposal by composition. It
