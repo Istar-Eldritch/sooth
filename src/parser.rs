@@ -2,15 +2,15 @@
 //!
 //! Grammar (Phase 0, plus the Slice 3/4 `type:` production):
 //!   module   := (worddef | typedef)*
-//!   worddef  := ':' Word '(' effect ')' locals? term* ';'
+//!   worddef  := ':' Word '(' effect ')' term* ';'
 //!   typedef  := struct-typedef | enum-typedef
 //!   struct-typedef := 'type:' Word (Word Word)* ';'
 //!   enum-typedef    := 'type:' Word '|'? variant ('|' variant)* ';'
 //!   variant         := Word (Word Word)*
 //!   effect   := slot* '--' slot*
 //!   slot     := Word (':' Word)?
-//!   locals   := '|' Word* '|'
-//!   term     := Int | Word | if
+//!   binding  := '|' Word+ '|'
+//!   term     := Int | Word | binding | if
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
@@ -432,13 +432,12 @@ impl<'t> Parser<'t> {
         let effect = self.parse_effect()?;
         self.expect(Token::RParen)?;
         // D8: a `|` immediately followed by a known variant name opens a
-        // clause-style body; otherwise the `|` (if any) opens entry-locals.
+        // clause-style body; otherwise a `|` is an ordinary binding term.
         let body = if self.at_clause_start() {
             WordBody::Clauses(self.parse_clauses()?)
         } else {
-            let locals = self.parse_locals_opt()?;
             let terms = self.parse_terms("`;`", |tok| matches!(tok, Token::Semicolon))?;
-            WordBody::Terms { locals, terms }
+            WordBody::Terms { terms }
         };
         self.expect(Token::Semicolon)?;
         Ok(WordDef { name, effect, body })
@@ -830,12 +829,29 @@ impl<'t> Parser<'t> {
         if !matches!(self.peek(), Some((Token::Pipe, _))) {
             return Ok(Vec::new());
         }
+        self.parse_binding_names()
+    }
+
+    /// Parse a `| names |` binding at the current `|`. At least one name is
+    /// required (R1): `| |` is a parse error, not a no-op, so a stray pipe pair
+    /// cannot silently mean nothing.
+    fn parse_binding_names(&mut self) -> Result<Vec<String>, String> {
+        let open = match self.peek() {
+            Some((Token::Pipe, span)) => *span,
+            _ => unreachable!("parse_binding_names is only called at a `|`"),
+        };
         self.pos += 1;
         let mut names = Vec::new();
         loop {
             match self.peek() {
                 Some((Token::Pipe, _)) => {
                     self.pos += 1;
+                    if names.is_empty() {
+                        return Err(format!(
+                            "parse error: `| |` binds nothing at line {}, col {}\n  a binding must name at least one local",
+                            open.line, open.col
+                        ));
+                    }
                     break;
                 }
                 Some((Token::Word(w), span)) => {
@@ -878,6 +894,16 @@ impl<'t> Parser<'t> {
             .peek()
             .cloned()
             .ok_or_else(|| self.eof_error("a term"))?;
+        // R1: a `|` at any term position opens a binding. A `|` that opens a
+        // clause instead is consumed by `parse_clauses`, which never reaches
+        // here.
+        if matches!(tok, Token::Pipe) {
+            let names = self.parse_binding_names()?;
+            return Ok(Term {
+                kind: TermKind::Bind(names),
+                span,
+            });
+        }
         self.pos += 1;
         match tok {
             Token::Int(n) => Ok(Term {
@@ -901,19 +927,24 @@ impl<'t> Parser<'t> {
                     .parse_terms("`else` or `end` (unterminated `if`)", |tok| {
                         is_word(tok, "else") || is_word(tok, "end")
                     })?;
-                let else_branch = if matches!(self.peek(), Some((tok, _)) if is_word(tok, "else")) {
-                    self.pos += 1;
-                    self.parse_terms("`end` (unterminated `if`/`else`)", |tok| {
-                        is_word(tok, "end")
-                    })?
-                } else {
-                    Vec::new()
+                let mut else_span = None;
+                let else_branch = match self.peek() {
+                    Some((tok, at)) if is_word(tok, "else") => {
+                        else_span = Some(*at);
+                        self.pos += 1;
+                        self.parse_terms("`end` (unterminated `if`/`else`)", |tok| {
+                            is_word(tok, "end")
+                        })?
+                    }
+                    _ => Vec::new(),
                 };
-                self.expect_word("end")?;
+                let end_span = self.expect_word("end")?;
                 Ok(Term {
                     kind: TermKind::If {
                         then_branch,
                         else_branch,
+                        else_span,
+                        end_span,
                     },
                     span,
                 })
@@ -960,11 +991,20 @@ mod tests {
         parse(&tokens)
     }
 
-    /// The `(locals, terms)` of a `WordBody::Terms`; panics on a clause body.
-    fn terms_body(word: &WordDef) -> (&[String], &[Term]) {
+    /// The terms of a `WordBody::Terms`; panics on a clause body.
+    fn terms_body(word: &WordDef) -> &[Term] {
         match &word.body {
-            WordBody::Terms { locals, terms } => (locals, terms),
+            WordBody::Terms { terms } => terms,
             WordBody::Clauses(_) => panic!("expected a term body, got clauses"),
+        }
+    }
+
+    /// The names bound by a word's *entry* binding: the leading `Bind` term, if
+    /// the body opens with one.
+    fn entry_locals(word: &WordDef) -> &[String] {
+        match terms_body(word).first().map(|t| &t.kind) {
+            Some(TermKind::Bind(names)) => names,
+            _ => &[],
         }
     }
 
@@ -976,8 +1016,8 @@ mod tests {
 
         let gcd = &module.words[0];
         assert_eq!(gcd.name, "gcd");
-        let (gcd_locals, gcd_body) = terms_body(gcd);
-        assert!(gcd_locals.is_empty());
+        let gcd_body = terms_body(gcd);
+        assert!(entry_locals(gcd).is_empty());
         assert_eq!(gcd.effect.inputs.len(), 2);
         assert_eq!(gcd.effect.outputs.len(), 1);
 
@@ -990,6 +1030,7 @@ mod tests {
             TermKind::If {
                 then_branch,
                 else_branch,
+                ..
             } => {
                 assert_eq!(then_branch.len(), 1);
                 assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "drop"));
@@ -1000,7 +1041,7 @@ mod tests {
 
         let main = &module.words[1];
         assert_eq!(main.name, "main");
-        assert!(terms_body(main).0.is_empty());
+        assert!(entry_locals(main).is_empty());
     }
 
     #[test]
@@ -1008,7 +1049,27 @@ mod tests {
         let src = std::fs::read_to_string("examples/lerp.sth").unwrap();
         let module = parse_src(&src).unwrap();
         let lerp = module.words.iter().find(|w| w.name == "lerp").unwrap();
-        assert_eq!(terms_body(lerp).0, ["a", "b", "t"]);
+        assert_eq!(entry_locals(lerp), ["a", "b", "t"]);
+    }
+
+    #[test]
+    fn parse_mid_body_binding_produces_bind_term() {
+        // R1: a `|` at a term position is a binding term, not a body prologue.
+        let module = parse_src(": w ( -- i64 ) 5 | a | a ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 3);
+        assert!(matches!(body[0].kind, TermKind::IntLit(5)));
+        match &body[1].kind {
+            TermKind::Bind(names) => assert_eq!(names, &["a"]),
+            other => panic!("expected Bind, got {other:?}"),
+        }
+        assert!(matches!(&body[2].kind, TermKind::Call(w) if w == "a"));
+    }
+
+    #[test]
+    fn parse_empty_binding_is_error() {
+        let err = parse_src(": w ( -- ) | | ;").unwrap_err();
+        assert!(err.contains("binds nothing"), "unexpected message: {err}");
     }
 
     #[test]
@@ -1042,7 +1103,7 @@ mod tests {
     #[test]
     fn parse_true_false_are_bool_literals() {
         let module = parse_src(": w ( -- bool bool ) true false ;").unwrap();
-        let (_, body) = terms_body(&module.words[0]);
+        let body = terms_body(&module.words[0]);
         assert!(matches!(body[0].kind, TermKind::BoolLit(true)));
         assert!(matches!(body[1].kind, TermKind::BoolLit(false)));
     }
@@ -1050,7 +1111,7 @@ mod tests {
     #[test]
     fn parse_if_without_else_has_empty_else_branch() {
         let module = parse_src(": w ( i64 -- i64 ) if 1 end ;").unwrap();
-        let (_, body) = terms_body(&module.words[0]);
+        let body = terms_body(&module.words[0]);
         match &body[0].kind {
             TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
             other => panic!("expected If, got {other:?}"),
@@ -1412,7 +1473,7 @@ mod tests {
         )
         .unwrap();
         let sq = module.words.iter().find(|w| w.name == "sq").unwrap();
-        assert_eq!(terms_body(sq).0, ["n"]);
+        assert_eq!(entry_locals(sq), ["n"]);
     }
 
     #[test]

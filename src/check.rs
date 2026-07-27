@@ -183,30 +183,15 @@ enum MoveState {
     MaybeMoved(Span),
 }
 
-/// The move-state of every *linear* local in the scope being checked, threaded
-/// `&mut` through the walker (R14). A Copy local never appears: it carries no
-/// ownership obligation, so mentioning it twice is ordinary reuse.
+/// The move-state of every *linear* name in scope, carried by the `Scope` the
+/// walker threads (R14). A Copy local never appears: it carries no ownership
+/// obligation, so mentioning it twice is ordinary reuse.
 #[derive(Debug, Clone, Default)]
 struct Moves {
     states: HashMap<String, MoveState>,
 }
 
 impl Moves {
-    fn new(
-        locals: &HashMap<String, Type>,
-        structs: &[StructDecl],
-        enums: &[EnumDecl],
-        arrays: &[ArrayDecl],
-    ) -> Moves {
-        Moves {
-            states: locals
-                .iter()
-                .filter(|(_, ty)| !is_copy(**ty, structs, enums, arrays))
-                .map(|(name, _)| (name.clone(), MoveState::Live))
-                .collect(),
-        }
-    }
-
     /// R3 (D2): mentioning a linear local moves its value out. `Ok(())` for a
     /// Copy local (absent from the map) or a first mention; `Err(site)` names
     /// the move that already consumed it.
@@ -259,8 +244,64 @@ impl Moves {
     }
 }
 
+/// The names in scope while a body is walked, innermost-last so that leaving a
+/// block truncates back to its entry depth (R2, R9), paired with the
+/// move-state of the linear ones (R14). Mid-body binding is why this is a
+/// threaded `&mut` value rather than a map computed before the walk: the set of
+/// names in scope changes as terms are visited.
+#[derive(Debug, Clone, Default)]
+struct Scope {
+    bound: Vec<(String, Type)>,
+    moves: Moves,
+}
+
+impl Scope {
+    fn depth(&self) -> usize {
+        self.bound.len()
+    }
+
+    fn local_type(&self, name: &str) -> Option<Type> {
+        self.bound
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, ty)| *ty)
+    }
+
+    /// Bring `name` into scope. A linear value also enters the move-state map,
+    /// so forgetting it is caught at the end of its block (R6).
+    fn bind(&mut self, name: &str, ty: Type, linear: bool) {
+        if linear {
+            self.moves.states.insert(name.to_string(), MoveState::Live);
+        }
+        self.bound.push((name.to_string(), ty));
+    }
+
+    /// Take every name bound past `depth` out of scope, returning the first one
+    /// (name-sorted, so a block leaking two always reports the same one) still
+    /// holding a linear value.
+    fn leave(&mut self, depth: usize) -> Option<(String, Type, MoveState)> {
+        let mut leaked: Vec<(String, Type, MoveState)> = Vec::new();
+        for (name, ty) in self.bound.split_off(depth) {
+            match self.moves.states.remove(&name) {
+                Some(MoveState::Moved(_)) | None => {}
+                Some(state) => leaked.push((name, ty, state)),
+            }
+        }
+        leaked.sort_by(|a, b| a.0.cmp(&b.0));
+        leaked.into_iter().next()
+    }
+}
+
+/// Where a block's extent ended, for the scope-end linearity diagnostic (R6):
+/// a word body or REPL line can only cite a line, while an `if` arm cites the
+/// exact terminator token that closed it.
+enum BlockEnd {
+    Body(u32),
+    Arm { token: &'static str, span: Span },
+}
+
 /// Error context for the shared stack simulation: a full word (with its
-/// declared effect and typed locals) or a bare REPL line (no signature to cite).
+/// declared effect to cite) or a bare REPL line (no signature to cite).
 /// Both carry the struct/enum registries `is_copy` needs to resolve a
 /// `Type::Struct`/`Type::Enum`'s linearity, so `dup`/`over`/back-edge checking
 /// works identically whether the caller is a compiled word or a REPL line.
@@ -268,7 +309,6 @@ enum Ctx<'a> {
     Word {
         name: &'a str,
         effect: &'a StackEffect,
-        locals: &'a HashMap<String, Type>,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
     },
@@ -278,14 +318,18 @@ enum Ctx<'a> {
     },
 }
 
-impl Ctx<'_> {
-    fn local_type(&self, name: &str) -> Option<Type> {
-        match self {
-            Ctx::Word { locals, .. } => locals.get(name).copied(),
-            Ctx::Line { .. } => None,
-        }
+/// The `Ctx` for checking `word`'s body: shared by the body walkers and the
+/// binding-name rejections so all of them cite the same declared effect.
+fn word_ctx<'a>(word: &'a WordDef, structs: &'a [StructDecl], enums: &'a [EnumDecl]) -> Ctx<'a> {
+    Ctx::Word {
+        name: &word.name,
+        effect: &word.effect,
+        structs,
+        enums,
     }
+}
 
+impl Ctx<'_> {
     fn structs(&self) -> &[StructDecl] {
         match self {
             Ctx::Word { structs, .. } | Ctx::Line { structs, .. } => structs,
@@ -718,18 +762,14 @@ pub fn infer_line(
     enums: &[EnumDecl],
 ) -> Result<Vec<Type>, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
-    // A bare line binds no locals (so it has no move-state) and is not a word
-    // body (so nothing in it is in tail position).
-    let final_stack = check_terms(
-        terms,
-        initial,
-        &Ctx::Line { structs, enums },
-        env,
-        arrays,
-        cells,
-        &mut Moves::default(),
-        false,
-    )?;
+    // A line is one block: names it binds die with it, so its end is a scope
+    // end like any other. It is not a word body, so nothing in it is in tail
+    // position.
+    let ctx = Ctx::Line { structs, enums };
+    let mut scope = Scope::default();
+    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut scope, false)?;
+    let line = terms.last().map(|t| t.span.line).unwrap_or(0);
+    leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
     Ok(final_stack.into_iter().map(|s| s.ty).collect())
 }
 
@@ -788,18 +828,20 @@ fn is_registered_variant(name: &str, enums: &[EnumDecl]) -> bool {
 /// A parameter / word-entry / clause-body binding name equal to a registered
 /// variant name is a sharp error (D8 backstop, X12): it would make the
 /// clause-vs-locals `|` disambiguation ambiguous.
-fn reject_variant_local(
-    word_name: &str,
-    name: &str,
-    kind: &str,
-    enums: &[EnumDecl],
-) -> Result<(), String> {
-    if is_registered_variant(name, enums) {
-        return Err(format!(
-            "error: {kind} `{name}` in `{word_name}` collides with the variant name `{name}`"
-        ));
+fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String> {
+    if !is_registered_variant(name, ctx.enums()) {
+        return Ok(());
     }
-    Ok(())
+    Err(match ctx {
+        Ctx::Word {
+            name: word_name, ..
+        } => format!(
+            "error: {kind} `{name}` in `{word_name}` collides with the variant name `{name}`"
+        ),
+        Ctx::Line { .. } => {
+            format!("error: {kind} `{name}` collides with the variant name `{name}`")
+        }
+    })
 }
 
 /// A name repeated in a binding list (`| a a |`) collapses to last-wins when
@@ -807,18 +849,26 @@ fn reject_variant_local(
 /// value held in it) is tracked by nothing and never disposed. Reject
 /// unconditionally, regardless of the bound type.
 fn reject_duplicate_local<'a>(
-    word_name: &str,
+    ctx: &Ctx,
     name: &'a str,
     span: Span,
     seen: &mut HashSet<&'a str>,
 ) -> Result<(), String> {
-    if !seen.insert(name) {
-        return Err(format!(
+    if seen.insert(name) {
+        return Ok(());
+    }
+    Err(match ctx {
+        Ctx::Word {
+            name: word_name, ..
+        } => format!(
             "error: duplicate local `{name}` in `{word_name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
             span.line
-        ));
-    }
-    Ok(())
+        ),
+        Ctx::Line { .. } => format!(
+            "error: duplicate local `{name}` (line {})\n  `{name}` is bound twice; the second binding shadows the first and silently drops it",
+            span.line
+        ),
+    })
 }
 
 /// The output-count / output-type mismatch check shared by a term body and a
@@ -908,6 +958,7 @@ fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
         TermKind::If {
             then_branch,
             else_branch,
+            ..
         } => {
             collect_tail_calls(then_branch, out);
             collect_tail_calls(else_branch, out);
@@ -1027,14 +1078,15 @@ fn check_word(
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
+    let ctx = word_ctx(word, structs, enums);
     for slot in &word.effect.inputs {
         if let Some(name) = &slot.name {
-            reject_variant_local(&word.name, name, "parameter", enums)?;
+            reject_variant_local(&ctx, name, "parameter")?;
         }
     }
     match &word.body {
-        WordBody::Terms { locals, terms } => {
-            check_terms_word(word, enums, locals, terms, env, arrays, cells, structs)
+        WordBody::Terms { terms } => {
+            check_terms_word(word, enums, terms, env, arrays, cells, structs)
         }
         WordBody::Clauses(clauses) => {
             check_clause_word(word, enums, clauses, env, arrays, cells, structs)
@@ -1042,61 +1094,49 @@ fn check_word(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
-    locals: &[String],
     terms: &[Term],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
+    // R3: a binding is an ordinary term, but the *entry* one keeps its own
+    // diagnostic. Only there is the declared effect the frame, so only there
+    // can the message cite it; the generic underflow of R5 covers every other
+    // position.
     let inputs = word.effect.inputs.len();
-
-    if locals.len() > inputs {
-        return Err(format!(
-            "error: stack effect mismatch in `{}`\n  locals bind {} value(s), but only {} input(s) are declared\n  note: declared {}",
-            word.name,
-            locals.len(),
-            inputs,
-            effect_str(&word.effect),
-        ));
-    }
-    let dup_span = terms.first().map(|t| t.span).unwrap_or_default();
-    let mut seen_locals = HashSet::new();
-    for name in locals {
-        reject_variant_local(&word.name, name, "local", enums)?;
-        reject_duplicate_local(&word.name, name, dup_span, &mut seen_locals)?;
+    if let Some(TermKind::Bind(names)) = terms.first().map(|t| &t.kind) {
+        if names.len() > inputs {
+            return Err(format!(
+                "error: stack effect mismatch in `{}`\n  locals bind {} value(s), but only {} input(s) are declared\n  note: declared {}",
+                word.name,
+                names.len(),
+                inputs,
+                effect_str(&word.effect),
+            ));
+        }
     }
 
-    // Locals bind the topmost inputs; the remaining (deepest) inputs stay on the
-    // simulated stack, deepest-first.
-    let split = inputs - locals.len();
-    let initial: Vec<Slot> = word.effect.inputs[..split]
+    // The declared inputs are the word's whole frame: it cannot see beneath
+    // them (R5), and an entry binding pops from them like any other binding.
+    let initial: Vec<Slot> = word
+        .effect
+        .inputs
         .iter()
         .map(|s| Slot::computed(s.ty))
         .collect();
-    let mut local_types = HashMap::new();
-    for (name, slot) in locals.iter().zip(&word.effect.inputs[split..]) {
-        local_types.insert(name.clone(), slot.ty);
-    }
 
-    let ctx = Ctx::Word {
-        name: &word.name,
-        effect: &word.effect,
-        locals: &local_types,
-        structs,
-        enums,
-    };
-    let mut moves = Moves::new(&local_types, structs, enums, arrays);
-    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut moves, true)?;
+    let ctx = word_ctx(word, structs, enums);
+    let mut scope = Scope::default();
+    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut scope, true)?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
     check_outputs(word, &final_stack, &declared, line, structs, enums, arrays)?;
-    check_linear_locals_consumed(word, &local_types, &moves, line)
+    leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
 
 /// Check a clause-style word (D4, D5, D7, M6, R11): the top input must be an
@@ -1187,10 +1227,11 @@ fn check_clause_body(
     cells: &mut Vec<OwnedCellDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
+    let ctx = word_ctx(word, structs, enums);
     let mut seen_locals = HashSet::new();
     for name in &clause.locals {
-        reject_variant_local(&word.name, name, "local", enums)?;
-        reject_duplicate_local(&word.name, name, clause.span, &mut seen_locals)?;
+        reject_variant_local(&ctx, name, "local")?;
+        reject_duplicate_local(&ctx, name, clause.span, &mut seen_locals)?;
     }
 
     // The clause consumes the scrutinee and pushes the variant's fields
@@ -1210,23 +1251,15 @@ fn check_clause_body(
         ));
     }
     let split = initial.len() - n;
-    let mut local_types = HashMap::new();
+    let mut scope = Scope::default();
     for (name, ty) in clause.locals.iter().zip(&initial[split..]) {
-        local_types.insert(name.clone(), *ty);
+        scope.bind(name, *ty, !is_copy(*ty, structs, enums, arrays));
     }
     let stack_after_bind: Vec<Slot> = initial[..split]
         .iter()
         .map(|ty| Slot::computed(*ty))
         .collect();
 
-    let ctx = Ctx::Word {
-        name: &word.name,
-        effect: &word.effect,
-        locals: &local_types,
-        structs,
-        enums,
-    };
-    let mut moves = Moves::new(&local_types, structs, enums, arrays);
     let final_stack = check_terms(
         &clause.body,
         stack_after_bind,
@@ -1234,7 +1267,7 @@ fn check_clause_body(
         env,
         arrays,
         cells,
-        &mut moves,
+        &mut scope,
         true,
     )?;
     let line = clause
@@ -1243,7 +1276,7 @@ fn check_clause_body(
         .map(|t| t.span.line)
         .unwrap_or(clause.span.line);
     check_outputs(word, &final_stack, declared, line, structs, enums, arrays)?;
-    check_linear_locals_consumed(word, &local_types, &moves, line)
+    leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
 
 fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
@@ -1438,32 +1471,60 @@ fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span
 /// R13/R14: a linear local still holding a value at the end of its scope,
 /// either never mentioned or consumed on one branch only. Nothing is
 /// auto-dropped, so this is an error rather than a compiler-inserted disposal.
-fn linear_local_unconsumed_error(word: &WordDef, local: &str, ty: Type, line: u32) -> String {
-    format!(
-        "error: linear value `{}` is never consumed in `{}` (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
-        local,
-        word.name,
-        line,
-        local,
-        ty,
-        effect_str(&word.effect),
-    )
+fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear value `{}` is never consumed in `{}` (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
+            local, name, line, local, ty, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear value `{local}` is never consumed (line {line})\n  `{local}` has type `{ty}`, which is linear: drop it or leave it on the stack (nothing is dropped for you)"
+        ),
+    }
 }
 
 /// R13/R14: a linear local consumed on one `if` arm but not the other. Unlike
 /// `linear_local_unconsumed_error` (never touched at all), this local WAS
 /// disposed on one path; the bug is the other arm forgetting it, so the
 /// message points at the divergence rather than implying nothing happened.
-fn linear_local_maybe_moved_error(word: &WordDef, local: &str, ty: Type, line: u32) -> String {
-    format!(
-        "error: linear value `{}` is not consumed on every path in `{}` (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
-        local,
-        word.name,
-        line,
-        local,
-        ty,
-        effect_str(&word.effect),
-    )
+fn linear_local_maybe_moved_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear value `{}` is not consumed on every path in `{}` (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
+            local, name, line, local, ty, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear value `{local}` is not consumed on every path (line {line})\n  `{local}` has type `{ty}`, which is linear: it is consumed on one `if` arm but not the other, so drop it on every path"
+        ),
+    }
+}
+
+/// R6: a linear value bound inside a block and still holding its value when the
+/// block ended. The word-end twins above can only cite the word; a block ends
+/// at a token, so this one names it, because that token is where the value
+/// became unreachable and the fix belongs before it.
+fn linear_local_out_of_scope_error(
+    ctx: &Ctx,
+    local: &str,
+    ty: Type,
+    every_path: bool,
+    token: &str,
+    span: Span,
+) -> String {
+    let cause = match every_path {
+        true => "is not consumed on every path",
+        false => "is never consumed",
+    };
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear value `{}` {} in `{}` (line {})\n  `{}` has type `{}`, which is linear, and its scope ends at the `{}` on line {}, col {}: consume it before then (nothing is dropped for you)\n  note: declared {}",
+            local, cause, name, span.line, local, ty, token, span.line, span.col, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear value `{local}` {cause} (line {})\n  `{local}` has type `{ty}`, which is linear, and its scope ends at the `{token}` on line {}, col {}: consume it before then (nothing is dropped for you)",
+            span.line, span.line, span.col,
+        ),
+    }
 }
 
 /// R13 (D7): a linear value left on the stack beyond the declared outputs. The
@@ -1505,7 +1566,7 @@ fn check_linear_across_back_edge(
     span: Span,
     callee: &str,
     below_args: &[Slot],
-    moves: &Moves,
+    scope: &Scope,
     arrays: &[ArrayDecl],
 ) -> Result<(), String> {
     if let Some(slot) = below_args
@@ -1514,35 +1575,49 @@ fn check_linear_across_back_edge(
     {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
-    if let Some(local) = moves.unconsumed().first() {
-        let ty = ctx
+    if let Some(local) = scope.moves.unconsumed().first() {
+        let ty = scope
             .local_type(local)
-            .expect("a tracked local has a declared type");
+            .expect("a tracked local is in scope");
         return Err(linear_across_back_edge_error(ctx, span, callee, ty));
     }
     Ok(())
 }
 
-/// R13/R14: every linear local must be consumed exactly once by the end of its
-/// scope. A local still `Live` or `MaybeMoved` is the forgotten-disposal error.
-fn check_linear_locals_consumed(
-    word: &WordDef,
-    locals: &HashMap<String, Type>,
-    moves: &Moves,
-    line: u32,
-) -> Result<(), String> {
-    match moves.unconsumed().first() {
-        Some(local) => {
-            let ty = locals[*local];
-            match moves.states.get(*local) {
-                Some(MoveState::MaybeMoved(_)) => {
-                    Err(linear_local_maybe_moved_error(word, local, ty, line))
-                }
-                _ => Err(linear_local_unconsumed_error(word, local, ty, line)),
-            }
-        }
-        None => Ok(()),
+/// R4: a binding naming something already in scope. For a linear value the
+/// rejection is forced (the earlier binding would become unreachable, and its
+/// value could then never be consumed), and applying it to Copy values too
+/// keeps one rule and one message instead of two.
+fn rebound_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let scope_end = "a name may not be re-bound while it is in scope: the earlier binding would become unreachable, and a linear value in it could then never be consumed";
+    match ctx {
+        Ctx::Word { name: word, .. } => format!(
+            "error: `{name}` is already bound in `{word}` (line {}, col {})\n  {scope_end}",
+            span.line, span.col
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `{name}` is already bound (line {}, col {})\n  {scope_end}",
+            span.line, span.col
+        ),
     }
+}
+
+/// R2/R6: take every name bound past `depth` out of scope, and reject a linear
+/// value still held when the block ended. Nothing is auto-dropped, so leaving a
+/// block is one more place where forgetting a value is *caught*, never a place
+/// where one is disposed for you.
+fn leave_block(ctx: &Ctx, scope: &mut Scope, depth: usize, at: BlockEnd) -> Result<(), String> {
+    let Some((local, ty, state)) = scope.leave(depth) else {
+        return Ok(());
+    };
+    let every_path = matches!(state, MoveState::MaybeMoved(_));
+    Err(match at {
+        BlockEnd::Body(line) if every_path => linear_local_maybe_moved_error(ctx, &local, ty, line),
+        BlockEnd::Body(line) => linear_local_unconsumed_error(ctx, &local, ty, line),
+        BlockEnd::Arm { token, span } => {
+            linear_local_out_of_scope_error(ctx, &local, ty, every_path, token, span)
+        }
+    })
 }
 
 /// A `usize`/`isize` position (a binary operator's other operand, a
@@ -1598,8 +1673,9 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
     }
 }
 
-/// Walk a term sequence. `moves` is the scope's linear-local move-state,
-/// mutated in place as locals are mentioned; `tail` marks the sequence as
+/// Walk a term sequence. `scope` is the names in scope and the move-state of
+/// the linear ones, mutated in place as terms bind and mention names; `tail`
+/// marks the sequence as
 /// occupying its word's tail position, so its final term (and, recursively,
 /// both arms of a final `if`) sits on the self-tail-call back-edge. The rule
 /// mirrors `tail_position_calls`/`lower_terms`; all three must stay in
@@ -1612,7 +1688,7 @@ fn check_terms(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
-    moves: &mut Moves,
+    scope: &mut Scope,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let last = terms.len().wrapping_sub(1);
@@ -1624,7 +1700,7 @@ fn check_terms(
             env,
             arrays,
             cells,
-            moves,
+            scope,
             tail && i == last,
         )?;
     }
@@ -1639,7 +1715,7 @@ fn check_term(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
-    moves: &mut Moves,
+    scope: &mut Scope,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let span = term.span;
@@ -1663,11 +1739,35 @@ fn check_term(
             stack.push(Slot::computed(Type::Bool));
             Ok(stack)
         }
+        TermKind::Bind(names) => {
+            // R1: pop one value per name at this point, leftmost name deepest,
+            // the same shape whether this is the entry binding or a mid-body
+            // one. R5: the frame floor is whatever the stack holds here, which
+            // in a word body is its declared inputs and nothing beneath them.
+            let mut seen = HashSet::new();
+            for name in names {
+                reject_variant_local(ctx, name, "local")?;
+                reject_duplicate_local(ctx, name, span, &mut seen)?;
+                if scope.local_type(name).is_some() {
+                    return Err(rebound_local_error(ctx, span, name));
+                }
+            }
+            if stack.len() < names.len() {
+                let op = format!("| {} |", names.join(" "));
+                return Err(underflow_error(ctx, span, &op, names.len(), stack.len()));
+            }
+            let bound = stack.split_off(stack.len() - names.len());
+            for (name, slot) in names.iter().zip(bound) {
+                let linear = !is_copy(slot.ty, ctx.structs(), ctx.enums(), arrays);
+                scope.bind(name, slot.ty, linear);
+            }
+            Ok(stack)
+        }
         TermKind::Call(name) => {
-            if let Some(ty) = ctx.local_type(name) {
+            if let Some(ty) = scope.local_type(name) {
                 // R3 (D2): mentioning a linear local moves its value out; a
                 // second mention names the site that already consumed it.
-                if let Err(site) = moves.take(name, span) {
+                if let Err(site) = scope.moves.take(name, span) {
                     return Err(use_after_move_error(ctx, span, name, ty, site));
                 }
                 stack.push(Slot::computed(ty));
@@ -1710,7 +1810,7 @@ fn check_term(
                 }
             }
             if tail && ctx.word_name() == Some(name.as_str()) {
-                check_linear_across_back_edge(ctx, span, name, &stack[..base], moves, arrays)?;
+                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
             }
             stack.truncate(base);
             stack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
@@ -1719,6 +1819,8 @@ fn check_term(
         TermKind::If {
             then_branch,
             else_branch,
+            else_span,
+            end_span,
         } => {
             let cond = stack
                 .pop()
@@ -1727,9 +1829,12 @@ fn check_term(
                 return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
             }
             // R14: each arm advances its own copy of the move-state; the join
-            // reconciles them into `MaybeMoved` wherever they disagree.
-            let mut then_moves = moves.clone();
-            let mut else_moves = moves.clone();
+            // reconciles them into `MaybeMoved` wherever they disagree. R2:
+            // each arm is also a block, so a name it binds is gone by the join
+            // and the two arms' name sets agree there again.
+            let depth = scope.depth();
+            let mut then_scope = scope.clone();
+            let mut else_scope = scope.clone();
             let then_stack = check_terms(
                 then_branch,
                 stack.clone(),
@@ -1737,8 +1842,21 @@ fn check_term(
                 env,
                 arrays,
                 cells,
-                &mut then_moves,
+                &mut then_scope,
                 tail,
+            )?;
+            let (then_token, then_at) = match else_span {
+                Some(at) => ("else", *at),
+                None => ("end", *end_span),
+            };
+            leave_block(
+                ctx,
+                &mut then_scope,
+                depth,
+                BlockEnd::Arm {
+                    token: then_token,
+                    span: then_at,
+                },
             )?;
             let else_stack = check_terms(
                 else_branch,
@@ -1747,10 +1865,19 @@ fn check_term(
                 env,
                 arrays,
                 cells,
-                &mut else_moves,
+                &mut else_scope,
                 tail,
             )?;
-            *moves = Moves::join(then_moves, else_moves);
+            leave_block(
+                ctx,
+                &mut else_scope,
+                depth,
+                BlockEnd::Arm {
+                    token: "end",
+                    span: *end_span,
+                },
+            )?;
+            scope.moves = Moves::join(then_scope.moves, else_scope.moves);
             if then_stack.len() != else_stack.len() {
                 return Err(branch_mismatch_error(
                     ctx,
@@ -2452,6 +2579,34 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("body leaves 2 values"));
         assert!(err.contains("declares 1 outputs"));
+    }
+
+    #[test]
+    fn check_block_exit_restores_locals_map() {
+        // R9/R2: the map evolves as terms are walked, and leaving a block
+        // truncates it to its depth at block entry.
+        let mut scope = Scope::default();
+        scope.bind("a", Type::I64, false);
+        let depth = scope.depth();
+        scope.bind("b", Type::I64, false);
+        assert!(scope.local_type("b").is_some());
+
+        assert!(scope.leave(depth).is_none());
+        assert_eq!(scope.depth(), depth);
+        assert_eq!(scope.local_type("a"), Some(Type::I64));
+        assert_eq!(scope.local_type("b"), None);
+
+        // R6: a linear name leaving scope with its value still held is what the
+        // block-end firing site reports.
+        scope.bind("s", Type::Spy, true);
+        let leaked = scope.leave(depth).expect("an unconsumed linear local");
+        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Spy));
+        assert_eq!(leaked.2, MoveState::Live);
+
+        // The same shape end to end: a name is free again in a sibling arm and
+        // after the `if`.
+        check_src(": w ( bool -- )\n  if 1 | x | x . else 2 | x | x . end\n  3 | x | x . ;")
+            .unwrap();
     }
 
     #[test]
