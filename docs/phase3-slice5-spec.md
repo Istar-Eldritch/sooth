@@ -69,8 +69,18 @@ preserved: a line that fails after binding leaves the session stack as it was.
 **R8 — A clause-body binding may not lead with a registered variant name.** The parser
 disambiguates a `|` in a clause body by looking at the next token: a registered variant
 name opens the next clause, anything else opens a binding. Since `is_variant_name` scans
-every enum in scope, not just the scrutinee's, the restriction is global. State it as a
-located parse error rather than letting the binding be silently reparsed as a clause.
+every enum in scope, not just the scrutinee's, the restriction is global. Do not let the
+binding be silently reparsed as a clause with no diagnostic at all.
+
+*Amended in phase 2:* the located parse error this asked for is not implementable. The two
+forms are token-identical, so the parser has no ground to prefer one reading and cannot
+know which was intended; it can only apply the rule and say so. Delivered instead as a
+diagnostic from whichever reading was applied, each carrying a note naming the rule: a `|`
+led by a registered variant is checked as a clause (unknown-variant or duplicate-clause,
+both hoisted ahead of body checking so a reparse cannot misattribute the failure to a
+sibling), and a `|` led by anything else is parsed as a binding (a binding parse error,
+noting that a misspelt variant name reads this way). Exhaustiveness is hoisted alongside
+them, since a misspelt variant swallowed as a binding leaves its sibling clause missing.
 
 **R9 — The checker's locals map must evolve during the walk.** `Ctx::Word` currently holds
 `&'a HashMap<String, Type>` computed before the body is visited. Mid-body binding makes the
@@ -131,7 +141,9 @@ green suite is how it is discharged.
 | 13 | the checker's locals map is restored at block exit | 1 | `check_block_exit_restores_locals_map` (unit, src/check.rs) |
 | 14 | lowering emits no new instruction for a binding | 1 | `lower_binding_emits_no_new_instr` (unit, src/ir.rs) |
 | 15 | a mid-body binding inside a clause body binds | 2 | `mid_body_binding_in_clause_body_binds` |
-| 16 | a clause-body binding leading with a variant name is a located parse error | 2 | `clause_body_binding_named_for_a_variant_is_error` |
+| 16 | a clause-body binding leading with a variant name is a located error naming the rule | 2 | `clause_body_binding_named_for_a_variant_is_error` |
+| 16b | a misspelt variant name reads as a binding, and the diagnostic says so | 2 | `misspelt_variant_in_clause_list_notes_the_binding_read` |
+| 16c | a misspelt variant that parses as a binding reports the missing sibling variant | 2 | `misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant` |
 | 17 | a REPL line binds and uses a local | 2 | `repl_line_binds_a_local` |
 | 18 | a REPL line's binding reaches values left by earlier lines | 2 | `repl_line_binding_reaches_earlier_line_values` |
 | 19 | a REPL line that fails after binding leaves the session stack intact | 2 | `failed_repl_line_after_binding_leaves_stack_intact` |

@@ -256,7 +256,8 @@ fn clause_body_binding_named_for_a_variant_is_error() {
     assert!(err.contains("`Blob`"), "unexpected message: {err}");
     assert!(err.contains("`Shape`"), "unexpected message: {err}");
     assert!(
-        err.contains("opens a clause here") && err.contains("may not lead with a variant name"),
+        err.contains("is read as a clause because")
+            && err.contains("a binding may not lead with one"),
         "unexpected message: {err}"
     );
 }
@@ -279,7 +280,41 @@ fn clause_body_binding_named_for_a_variant_of_the_same_enum_is_error() {
     );
     assert!(err.contains("`Circle`"), "unexpected message: {err}");
     assert!(
-        err.contains("opens a clause here") && err.contains("may not lead with a variant name"),
+        err.contains("is read as a clause because")
+            && err.contains("a binding may not lead with one"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn misspelt_variant_in_clause_list_notes_the_binding_read() {
+    // The reverse of criterion 16, and the commoner typo: a misspelt variant
+    // name is registered nowhere, so D8 reads its `|` as a binding and the
+    // failure surfaces as a binding parse error. The note must say which read
+    // was applied, or the message points at the wrong construct entirely.
+    let err = parse_error(
+        "type: E | A a i64 | B b i64 ;\n\
+: f ( E -- i64 )\n  | A | x | x\n  | Blobby 1\n  | B | y | y ;\n",
+    );
+    assert!(err.contains("line 4"), "unexpected message: {err}");
+    assert!(
+        err.contains("`| Blobby` opens a binding here, not a clause"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant() {
+    // Same typo, but the misread parses cleanly: `| Blobby` binds a local and
+    // the remaining clauses become body terms of the `A` clause, `B` included.
+    // Exhaustiveness runs before the bodies precisely so this reads as a
+    // missing `B`, not as an arity failure inside the swollen `A` body.
+    let err = check_error(
+        "type: E | A a i64 | B b i64 ;\n\
+: f ( E -- i64 )\n  | A | x | x\n  | Blobby\n  | B | y | y ;\n",
+    );
+    assert!(
+        err.contains("non-exhaustive clause-style `f`") && err.contains("missing variant `B`"),
         "unexpected message: {err}"
     );
 }

@@ -826,18 +826,14 @@ fn is_registered_variant(name: &str, enums: &[EnumDecl]) -> bool {
 }
 
 /// D8's clause-vs-binding disambiguation is global (`is_variant_name` scans
-/// every enum in scope), so a `|` followed by a registered variant is always
-/// reparsed as opening the next clause, never read as a binding (R8). When
-/// that reparse produces an unknown-variant or duplicate-clause error, this
-/// note names the ambiguity so the fix is legible.
-fn clause_variant_ambiguity_note(name: &str, enums: &[EnumDecl]) -> String {
-    if is_registered_variant(name, enums) {
-        format!(
-            "\n  note: `| {name}` opens a clause here; a clause-body binding may not lead with a variant name"
-        )
-    } else {
-        String::new()
-    }
+/// every enum in scope), so a `|` followed by a registered variant always
+/// opens the next clause and is never read as a binding (R8). Every clause
+/// the parser produces leads with a registered name, so this note states the
+/// rule that was applied wherever a clause's variant is rejected.
+fn clause_variant_ambiguity_note(name: &str) -> String {
+    format!(
+        "\n  note: `| {name}` is read as a clause because `{name}` is a variant name; a binding may not lead with one"
+    )
 }
 
 /// A parameter / word-entry / clause-body binding name equal to a registered
@@ -1207,7 +1203,7 @@ fn check_clause_word(
                 enum_name,
                 word.name,
                 clause.span.line,
-                clause_variant_ambiguity_note(&clause.variant, enums),
+                clause_variant_ambiguity_note(&clause.variant),
             ));
         };
         if seen.insert(clause.variant.as_str(), ()).is_some() {
@@ -1217,10 +1213,22 @@ fn check_clause_word(
                 enum_name,
                 word.name,
                 clause.span.line,
-                clause_variant_ambiguity_note(&clause.variant, enums),
+                clause_variant_ambiguity_note(&clause.variant),
             ));
         }
         variant_indices.push(vi);
+    }
+    // Exhaustiveness is part of that same pre-pass: a clause body that ate a
+    // sibling's terms (a misspelt variant name reads as a binding, D8) leaves
+    // that sibling missing, and "missing variant `B`" names the real fault
+    // where the swollen body's own arity failure would misattribute it.
+    for variant in &enum_decl.variants {
+        if !seen.contains_key(variant.name.as_str()) {
+            return Err(format!(
+                "error: non-exhaustive clause-style `{}`: missing variant `{}` of enum `{}`",
+                word.name, variant.name, enum_name
+            ));
+        }
     }
     for (clause, &vi) in clauses.iter().zip(&variant_indices) {
         check_clause_body(
@@ -1235,14 +1243,6 @@ fn check_clause_word(
             cells,
             structs,
         )?;
-    }
-    for variant in &enum_decl.variants {
-        if !seen.contains_key(variant.name.as_str()) {
-            return Err(format!(
-                "error: non-exhaustive clause-style `{}`: missing variant `{}` of enum `{}`",
-                word.name, variant.name, enum_name
-            ));
-        }
     }
     Ok(())
 }

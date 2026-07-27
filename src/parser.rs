@@ -882,6 +882,22 @@ impl<'t> Parser<'t> {
                 None => return Err(self.eof_error("`;` or `|`")),
                 Some((Token::Semicolon, _)) => break,
                 Some((Token::Pipe, _)) if self.at_clause_start() => break,
+                Some((Token::Pipe, _)) => {
+                    // D8 found no registered variant after this `|`, so it is
+                    // read as a binding. When that read fails, a misspelt
+                    // variant name is the likelier cause than a malformed
+                    // binding, so name the disambiguation that was applied.
+                    let lead = match self.tokens.get(self.pos + 1) {
+                        Some((Token::Word(w), _)) => Some(w.clone()),
+                        _ => None,
+                    };
+                    terms.push(self.parse_term().map_err(|e| match lead {
+                        Some(name) => format!(
+                            "{e}\n  note: `| {name}` opens a binding here, not a clause, because `{name}` is not a variant name; check its spelling"
+                        ),
+                        None => e,
+                    })?);
+                }
                 _ => terms.push(self.parse_term()?),
             }
         }
