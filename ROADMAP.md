@@ -86,13 +86,28 @@ restriction), while a by-value cycle stays a bare, span-less error; `isize`, a s
 directly self-recursive type (list or tree) gets one fused iterative destructor loop
 instead of recursive `cell_drop`/`struct_drop`/`enum_drop` calls, giving constant-stack
 disposal (verified at 1M+ nodes under a 1MB stack) for that shape specifically —
-indirect cycles, `^^Self`, and mutually recursive types keep the recursive path and its
-depth limit. The OOM trap stays: there is still no compiler-known optional/non-null
-pointer type to return failure through (that needs Phase 4's generics), so this was
-never this slice's revisit to make. `examples/list.sth` dogfoods it.
-**Next action: Phase 3 Slice 4** (generalized recursive disposal, the Slice 3 follow-on:
-indirect cycles, `^^Self`, mutually recursive types, and worklist-based branching
-disposal). Not yet locked; second-class references move to Slice 5.
+indirect cycles, `^^Self`, and mutually recursive types initially kept the recursive path
+and its depth limit, closed the same phase by Slice 4 below. The OOM trap stays: there is
+still no compiler-known optional/non-null pointer type to return failure through (that
+needs Phase 4's generics), so this was never this slice's revisit to make.
+`examples/list.sth` dogfoods it.
+**Phase 3 Slice 4 (generalized recursive disposal) is complete**: `recursive_loop_field`'s
+exact-match detection is replaced by `recursive_disposal_path`, a backtracking walk over
+the static type graph that finds a path of typed steps (`Project`/`Unwrap`/`Branch`) back
+to the entry type through any composition of intervening structs, cells, and enum
+dispatches, keeping every independently recursive enum variant rather than restricting to
+one. The fused loop's codegen walks a path of any length — byval projections, per-level
+field drops, mid-path tag dispatch with the reset-then-check `terminated` discipline
+applied at every dispatch it introduces, and per-aggregate-slot copyout ordering — so a
+wrapper-struct indirection, `^^Self`, and a mutually recursive multi-type cycle each get
+their own fused loop (every type on a cycle synthesizes its own loop from its own shape;
+none calls another's destructor to traverse the shared cycle), all verified in constant
+stack at 1M+ nodes under a 1MB stack. A **struct** with more than one simultaneously-live
+recursive field still narrows to one chosen edge (D1, unchanged); an **enum**'s
+mutually-exclusive variants are not that restriction. Worklist-based disposal for
+branching structures stays out of scope, moved to Phase 6.
+**Next action: Phase 3 Slice 5** (second-class references + parameter conventions
+(`let`/`inout`/`sink`/`set`) + escape checking).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -383,9 +398,9 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    descending). A directly self-recursive type gets one fused iterative destructor loop
    (looping the *last* recursive field in declaration order, recursing any others) instead
    of mutually recursive `cell_drop`/`struct_drop`/`enum_drop` calls, giving verified
-   constant-stack disposal at 1M+ nodes under a 1MB stack for that shape only — indirect
-   cycles, `^^Self`, and mutually recursive types keep the recursive path and its depth
-   limit, which is a documented limitation, not a bug. `isize`, a signed mirror of `usize`.
+   constant-stack disposal at 1M+ nodes under a 1MB stack for that shape at the time; slice
+   4 below generalizes the same loop to indirect cycles, `^^Self`, and mutually recursive
+   types, closing that limitation within this phase. `isize`, a signed mirror of `usize`.
    **Slice 2's OOM-trap-and-abort decision stays closed, not revisited**: an earlier plan
    assumed this slice would introduce a compiler-known optional/non-null pointer type for a
    failed allocation to return through; there is no such type here or anywhere before Phase
@@ -396,26 +411,30 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    A **zipper** (focus + stored path of one-hole steps) remains a sharper future exercise
    for the recursive drop glue, and the one shape slice 5's second-class references
    provably cannot express, since the path must be stored; not attempted this slice.
-4. **Generalized recursive disposal, cycle generalization (the Slice 3 follow-on).** Not
-   yet locked. Slice 3's fused destructor loop covers only direct self-recursion, on a
-   single type, looping the *last* recursive field and recursing the rest. Slice 3's own
-   "Out of scope" note names three distinct gaps left open, not built, and all three reuse
-   the existing malloc/free and loop machinery (no new runtime primitive, only smarter
-   detection and a loop body generalized across shapes): **indirect cycles** through an
-   intervening struct (a wrapper type whose cell payload is a *different* type that
-   eventually cycles back), **`^^Self`** (a cell of a cell of the enclosing type, excluded
-   by `recursive_loop_field`'s exact-match predicate), and **multi-type cycles** (mutually
-   recursive types, where no fused loop today spans more than one declared type). Every
-   value these types can build is a tree, never an actual runtime cycle: `^T` ownership is
-   exclusive (no aliasing), and struct/enum setters (`S<fi`) are purely functional
-   (`( S Ti -- S )`, a whole-value transform, never a write through a pointer), so there is
-   no way to construct a back-reference into an already-built cell. Disposal therefore never
-   needs a visited-set or double-free guard here; the gap is detection and loop-codegen
-   reach, not aliasing safety. That stops being true once Slice 6's opt-in RC lands, since
-   shared ownership is exactly what makes a real reference cycle constructible (and, without
-   a `Weak` type, leak). **Worklist-based disposal for branching structures moved to Phase 6**
-   (see there): it needs a growable pending-pointer structure and a new OOM-during-disposal
-   interaction, neither of which this slice's gaps require.
+4. **Generalized recursive disposal, cycle generalization (the Slice 3 follow-on).** ✅ done.
+   Slice 3's fused destructor loop covered only direct self-recursion, on a single type,
+   looping the *last* recursive field and recursing the rest. `recursive_loop_field`'s
+   exact-match predicate is replaced by `recursive_disposal_path`, a backtracking walk over
+   the static type graph (`Registries`) that finds a path of typed steps
+   (`Project`/`Unwrap`/`Branch`) from a type back to itself through any composition of
+   intervening structs, cells, and enum dispatches, reusing the existing malloc/free and
+   loop machinery (no new runtime primitive). This closes all three gaps Slice 3 left open:
+   **indirect cycles** through an intervening struct (a wrapper type whose cell payload is a
+   *different* type that eventually cycles back), **`^^Self`** (a cell of a cell of the
+   enclosing type), and **multi-type cycles** (mutually recursive types, each getting its
+   own independent fused loop from its own shape, never calling another's destructor to
+   traverse the shared cycle). An enum's independently recursive variants (mutually
+   exclusive at runtime, unlike a struct's simultaneously-live fields) all keep their own
+   back-edge, not just one. Every value these types can build is still a tree, never an
+   actual runtime cycle: `^T` ownership is exclusive (no aliasing), and struct/enum setters
+   (`S<fi`) are purely functional (`( S Ti -- S )`, a whole-value transform, never a write
+   through a pointer), so disposal never needs a visited-set or double-free guard; the fix
+   was detection and loop-codegen reach, not aliasing safety. That stops being true once
+   Slice 6's opt-in RC lands, since shared ownership is exactly what makes a real reference
+   cycle constructible (and, without a `Weak` type, leak). **Worklist-based disposal for
+   branching structures stays moved to Phase 6** (see there): it needs a growable
+   pending-pointer structure and a new OOM-during-disposal interaction, neither of which
+   this slice's gaps required.
 5. **Second-class references + parameter conventions (`let`/`inout`/`sink`/`set`) + escape
    checking.** Hylo mutable value semantics: pass a borrow, mutate in place, no move, with
    the escape checker keeping refs from being stored or escaping scope. Comes after heap

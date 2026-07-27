@@ -2742,6 +2742,56 @@ alloc 16\nfree 16\ndrop 3\n"
 }
 
 #[test]
+fn recursive_disposal_path_backtracks_past_a_misleading_last_field() {
+    // Phase 3 Slice 4, criterion 1's runtime counterpart (R3): `Node`
+    // declares its dead-end cell field (`bait`, into `Leafy` via `Bait`,
+    // never reaching `Node`) *after* its genuine recursive field (`good`),
+    // so the reverse-declaration-order scan tries `bait` first, must walk
+    // into it and fail, and only then backtrack to `good`. A greedy search
+    // that committed to the first cell-typed field it saw would either loop
+    // forever descending `Bait`/`Leafy` or simply miss the real edge and fall
+    // back to ordinary recursion; either way this golden's fused loop would
+    // never fire and `deep_recursive_chain_disposes_within_bounded_memory`'s
+    // sibling shapes are the ones that would actually catch the regression at
+    // scale, but this small trace pins the *order* a false positive on `bait`
+    // would scramble.
+    let stdout = run_owned_traced_golden(
+        "misleading-last-field",
+        "type: Leafy v i64 ;\n\
+type: Bait c ^Leafy ;\n\
+type: Node | End | More good ^Node bait ^Bait tag __spy ;\n\
+: main ( -- )\n  \
+  End ^\n  9 Leafy ^ Bait ^ 1 __spy More ^\n  9 Leafy ^ Bait ^ 2 __spy More\n  drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 32\nalloc 8\nalloc 8\nalloc 32\nalloc 8\nalloc 8\n\
+free 8\nfree 8\ndrop 2\nfree 32\nfree 8\nfree 8\ndrop 1\nfree 32\n"
+    );
+}
+
+#[test]
+fn two_unrelated_self_recursive_types_dispose_independently() {
+    // Phase 3 Slice 4, criterion 1's runtime counterpart (R3): each of two
+    // structurally-unrelated self-recursive types finds and fuses its own
+    // loop; distinct spy tags per type (odd for `R1`, even for `R2`) pin that
+    // neither's disposal wanders into the other's fields.
+    let stdout = run_owned_traced_golden(
+        "two-unrelated-recursive",
+        "type: R1 | End1 | More1 tag __spy next ^R1 ;\n\
+type: R2 | End2 | More2 tag __spy next ^R2 ;\n\
+: main ( -- )\n  \
+  3 __spy End1 ^ More1 1 __spy swap ^ More1 drop\n  \
+  4 __spy End2 ^ More2 2 __spy swap ^ More2 drop ;\n",
+    );
+    assert_eq!(
+        stdout,
+        "alloc 24\nalloc 24\ndrop 1\nfree 24\ndrop 3\nfree 24\n\
+alloc 24\nalloc 24\ndrop 2\nfree 24\ndrop 4\nfree 24\n"
+    );
+}
+
+#[test]
 fn self_recursive_struct_destructor_compiles() {
     // Criterion 15 (R16): a self-recursive struct is uninhabited (a `^` is
     // non-null, so building one needs one first), but a destructor is
@@ -3173,6 +3223,124 @@ type: B y __spy z ^A ;\n\
     assert_eq!(
         run_owned_traced_golden("mid-dispatch-continuing-first", continuing_first),
         expected
+    );
+}
+
+#[test]
+fn deep_wrapper_struct_list_disposes_in_constant_stack() {
+    // Criterion 5: a 1,000,000-node wrapper-struct list disposes under a
+    // 1 MB stack. Verified against the pre-Slice-4 compiler (base commit
+    // `6f22576`) on this exact program: SIGSEGV (139) under the same bound
+    // (R13), since `recursive_loop_field` never looked one byval hop inside
+    // `Wrap` for the cell.
+    let src = "type: Wrap v i64 n ^List ;\n\
+type: List | Nil | Cons w Wrap ;\n\
+: build ( i64 List -- List )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - n acc ^ Wrap Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+    assert_eq!(
+        run_stack_bounded_golden("deep-wrapper-list", src),
+        Some(0),
+        "a 1M-node wrapper-struct list should dispose in constant stack"
+    );
+}
+
+#[test]
+fn deep_double_cell_list_disposes_in_constant_stack() {
+    // Criterion 6: a 1,000,000-node `^^Self` list disposes under a 1 MB
+    // stack. Verified against the base commit on this exact program:
+    // SIGSEGV under the same bound (R13), since `recursive_loop_field` only
+    // ever recognized a `^Self` field directly on the enclosing type, never
+    // a cell nested inside another cell.
+    let src = "type: L | Nil | Cons next ^^L v i64 ;\n\
+: build ( i64 L -- L )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - acc ^ ^ n Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+    assert_eq!(
+        run_stack_bounded_golden("deep-double-cell-list", src),
+        Some(0),
+        "a 1M-node ^^Self list should dispose in constant stack"
+    );
+}
+
+/// The mutual A/B chain used by the two deep constant-stack goldens below:
+/// both `A` and `B` are enums (unlike `MUTUAL_CHAIN_TYPES` above, whose `A`
+/// is a struct), matching the `^Branch`-rooted-in-`Branch` shape R2 names.
+const DEEP_MUTUAL_CHAIN_TYPES: &str = "type: A | ANil | ACons next ^B tag i64 ;\n\
+type: B | BNil | BCons tag i64 next ^A ;\n\
+: build ( i64 A -- A )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 -\n    \
+    n acc ^ BCons ^\n    \
+    n 10 * ACons\n    \
+    build\n  \
+  end ;\n";
+
+#[test]
+fn deep_mutual_chain_disposes_in_constant_stack_from_a() {
+    // Criterion 7: a 1,000,000-node mutual A/B chain disposes under a 1 MB
+    // stack, disposed as an `A`. Verified against the base commit on this
+    // exact program: SIGSEGV under the same bound (R13).
+    let src = format!("{DEEP_MUTUAL_CHAIN_TYPES}: main ( -- )\n  1000000 ANil build drop ;\n");
+    assert_eq!(
+        run_stack_bounded_golden("deep-mutual-from-a", &src),
+        Some(0),
+        "a 1M-node mutual A/B chain should dispose in constant stack from drop_A"
+    );
+}
+
+#[test]
+fn deep_mutual_chain_disposes_in_constant_stack_from_b() {
+    // Criterion 7, `drop_B` direction: R6's sole runtime discriminator
+    // against the rejected "`drop_B` calls the already-synthesized `drop_A`"
+    // design, which would recurse one native frame per node and blow the
+    // same 1 MB stack this golden proves stays flat. An extra `B` head node
+    // wraps the same chain, so disposal enters through `drop_B`'s own loop.
+    let src = format!(
+        "{DEEP_MUTUAL_CHAIN_TYPES}: main ( -- )\n  \
+  1000000 ANil build ^ 0 swap BCons drop ;\n"
+    );
+    assert_eq!(
+        run_stack_bounded_golden("deep-mutual-from-b", &src),
+        Some(0),
+        "a 1M-node mutual A/B chain should dispose in constant stack from drop_B"
+    );
+}
+
+#[test]
+fn deep_recursive_chain_disposes_within_bounded_memory() {
+    // Criterion 7's memory-bounded variant (R14): the wrapper-struct list's
+    // builder is itself constant-stack (Slice 6 TCO), so this measures
+    // disposal, not construction; a real free-per-node loop stays within a
+    // 64 MB `RLIMIT_AS` for 1,000,000 24-byte-ish nodes, while a leaked
+    // (never-freed) chain of that size would not.
+    let src = "type: Wrap v i64 n ^List ;\n\
+type: List | Nil | Cons w Wrap ;\n\
+: build ( i64 List -- List )\n  \
+  | n acc |\n  \
+  n 0 = if\n    \
+    acc\n  \
+  else\n    \
+    n 1 - n acc ^ Wrap Cons build\n  \
+  end ;\n\
+: main ( -- )\n  1000000 Nil build drop ;\n";
+    let code = run_owned_memory_bounded_golden("deep-mem-bound", src);
+    assert_eq!(
+        code, 0,
+        "a real free-per-node disposal loop should stay within the 64 MB bound"
     );
 }
 
