@@ -11,8 +11,8 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::ast::{
-    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, StructDecl,
-    StructId, Term, TermKind, Type, WordBody, WordDef, SPY_NAME,
+    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, RefDecl,
+    StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef, SPY_NAME,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -171,6 +171,14 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The payload shape lives in the module's owning-cell registry; the
         // `IrType` carries only the `OwnedCellId` so it stays `Copy`.
         Type::OwnedCell(id, _) => IrType::OwnedCell(id),
+        // R12: a reference is always the opaque handle, never the referent's
+        // own aggregate type. QBE's C-ABI classification passes a `:Buf`-
+        // spelled parameter *by value*, so a `&!Buf` mapped to
+        // `IrType::Struct` would have a callee mutating a caller-side
+        // temporary. The referent shape the lowerer needs for a projection or
+        // an access is tracked per-`Value` (`FuncBuilder::ref_inner`), not in
+        // the type.
+        Type::Ref(..) => IrType::Ptr,
         Type::Usize => IrType::Usize,
         Type::Isize => IrType::Isize,
         Type::Spy => IrType::Spy,
@@ -391,7 +399,7 @@ impl Structs {
     /// needs the full `build_registries` (its enums must be present to size
     /// the field, D9).
     pub fn from_structs(structs: &[StructDecl]) -> Structs {
-        build_registries(structs, &[], &[], &[]).0
+        build_registries(structs, &[], &[], &[], &[]).0
     }
 }
 
@@ -400,6 +408,15 @@ impl Structs {
 #[derive(Debug, Default)]
 pub struct Cells {
     pub payload: Vec<IrType>,
+}
+
+/// The IR's view of a program's reference types: the per-`RefId` referent
+/// `IrType`. Every reference lowers to `IrType::Ptr` (R12), so this is the
+/// only place the referent shape survives into lowering — it seeds
+/// `FuncBuilder::ref_inner` for a word's reference-typed parameters.
+#[derive(Debug, Default)]
+pub struct Refs {
+    pub referent: Vec<IrType>,
 }
 
 /// The four registries bundled as one `Copy` handle, so lowering and
@@ -412,6 +429,7 @@ pub struct Registries<'a> {
     pub enums: &'a Enums,
     pub arrays: &'a Arrays,
     pub cells: &'a Cells,
+    pub refs: &'a Refs,
 }
 
 /// Build the struct and enum layout + generated-word registries from a
@@ -426,8 +444,9 @@ pub fn build_registries(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
-) -> (Structs, Enums, Arrays, Cells) {
-    build_registries_ww(structs, enums, arrays, cells, WORD_WIDTH)
+    refs: &[RefDecl],
+) -> (Structs, Enums, Arrays, Cells, Refs) {
+    build_registries_ww(structs, enums, arrays, cells, refs, WORD_WIDTH)
 }
 
 /// `build_registries` with an explicit target word width (R15). Production
@@ -439,8 +458,9 @@ pub fn build_registries_ww(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
     word_width: u32,
-) -> (Structs, Enums, Arrays, Cells) {
+) -> (Structs, Enums, Arrays, Cells, Refs) {
     let mut lb = LayoutBuilder {
         structs,
         enums,
@@ -499,6 +519,7 @@ pub fn build_registries_ww(
     }
 
     let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();
+    let ref_referents: Vec<IrType> = refs.iter().map(|d| ir_type_of(d.referent)).collect();
 
     (
         Structs {
@@ -514,6 +535,9 @@ pub fn build_registries_ww(
         },
         Cells {
             payload: cell_payloads,
+        },
+        Refs {
+            referent: ref_referents,
         },
     )
 }
@@ -818,11 +842,12 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
-    let (structs, enums, arrays, cells) = build_registries(
+    let (structs, enums, arrays, cells, refs) = build_registries(
         &module.structs,
         &module.enums,
         &module.arrays,
         &module.owned_cells,
+        &module.refs,
     );
     let env: HashMap<String, Arity> = module
         .words
@@ -841,6 +866,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         enums: &enums,
         arrays: &arrays,
         cells: &cells,
+        refs: &refs,
     };
 
     let mut funcs: Vec<IrFunc> = module
@@ -1200,6 +1226,7 @@ fn synthesize_cell_destructor(
         enums,
         arrays,
         cells,
+        ..
     } = regs;
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
     let param = b.fresh_value(IrType::OwnedCell(id));
@@ -1441,6 +1468,16 @@ pub(crate) fn lower_word(
         params_values
     };
 
+    // R12: a reference parameter arrives as an opaque `Ptr`, so the referent
+    // shape every projection and access needs comes from the declared type,
+    // not from the value. Seeded against `entry_values` so a loop reads it off
+    // the header phi output the body actually uses.
+    for (slot, value) in word.effect.inputs.iter().zip(&entry_values) {
+        if let Type::Ref(id, _, _) = slot.ty {
+            b.ref_inner.insert(*value, regs.refs.referent[id.index()]);
+        }
+    }
+
     match &word.body {
         WordBody::Terms { terms } => {
             // Every input starts on the stack (D6: the header phi outputs when
@@ -1526,6 +1563,13 @@ struct FuncBuilder<'a> {
     /// element/array-shape lookup. A shuffle reuses a value id, so a duped
     /// literal keeps its recorded value.
     const_vals: HashMap<Value, i64>,
+    /// The referent `IrType` of every reference-typed `Value` (R12). A
+    /// reference lowers to the opaque `IrType::Ptr`, which deliberately says
+    /// nothing about what it points at, so the shape a projection or an access
+    /// needs — a field offset, an element stride, an aggregate's blit size —
+    /// is carried here instead. Seeded from a word's declared reference
+    /// parameters and extended by each projection.
+    ref_inner: HashMap<Value, IrType>,
 }
 
 impl<'a> FuncBuilder<'a> {
@@ -1540,6 +1584,7 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cells,
+            ..
         } = regs;
         FuncBuilder {
             env,
@@ -1563,6 +1608,7 @@ impl<'a> FuncBuilder<'a> {
             locals: Vec::new(),
             value_types: Vec::new(),
             const_vals: HashMap::new(),
+            ref_inner: HashMap::new(),
         }
     }
 
@@ -1834,6 +1880,7 @@ impl<'a> FuncBuilder<'a> {
             }
             "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
             "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
+            "@" | "!" | "+!" => self.lower_access_word(name),
             // The spy constructor `( i64 -- __spy )` is identity at runtime
             // (R6): the tag *is* the value. It emits no call, only the same
             // `Conv` relabel a same-width conversion uses, so the result value
@@ -1845,6 +1892,12 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(spy);
             }
             _ => {
+                // Every `&`-led word: the two prefix borrow operators and the
+                // reference-mode accessor family (R2, R3).
+                if name.starts_with('&') {
+                    self.lower_reference_word(name, line);
+                    return;
+                }
                 // A conversion word `>iN`/`>uN`/`>f32`/`>f64`
                 // (checker-guaranteed numeric source): pop one, push the
                 // target-typed result. The backend reads the two `IrType`s to
@@ -1910,6 +1963,148 @@ impl<'a> FuncBuilder<'a> {
                     self.stack.push(v);
                 }
             }
+        }
+    }
+
+    /// Push a reference `Value` (always `IrType::Ptr`, R12) and record what it
+    /// points at, since the `IrType` deliberately no longer says.
+    fn push_reference(&mut self, ptr: Value, referent: IrType) {
+        self.ref_inner.insert(ptr, referent);
+        self.stack.push(ptr);
+    }
+
+    /// The referent shape of a reference `Value`.
+    fn referent_of(&self, ptr: Value) -> IrType {
+        *self
+            .ref_inner
+            .get(&ptr)
+            .expect("checked: every reference value records its referent")
+    }
+
+    /// Lower a `&`-led word (R2, R3, R12). No new `Instr` variant: a struct
+    /// field projection is a `PtrOffset`, an array element projection an
+    /// `ElemAddr` behind the same bounds guard `get` uses, and a cell payload
+    /// projection a `Load` of the pointer the place holds.
+    fn lower_reference_word(&mut self, name: &str, line: u32) {
+        let mutable = name.starts_with("&!");
+        let rest = &name[if mutable { 2 } else { 1 }..];
+        match rest {
+            ">" => {
+                let index = self.stack.pop().expect("&>: index");
+                let base = self.stack.pop().expect("&>: array reference");
+                let IrType::Array(id) = self.referent_of(base) else {
+                    unreachable!("checked: `&>`'s receiver references an array")
+                };
+                let (stride, elem, count) = self.array_parts(id);
+                self.bounds_check(index, count, line);
+                let addr = self.elem_addr(base, index, stride, IrType::Ptr);
+                self.push_reference(addr, elem);
+            }
+            "^" => {
+                let base = self.stack.pop().expect("&^: cell reference");
+                let IrType::OwnedCell(id) = self.referent_of(base) else {
+                    unreachable!("checked: `&^`'s receiver references an owning cell")
+                };
+                let payload = self.cells.payload[id.index()];
+                // The place holds the cell's heap pointer; the payload lives
+                // at that pointer, so the projection reads it out.
+                let cell_ptr = self.fresh_value(IrType::Ptr);
+                self.push_instr(Instr::Load(cell_ptr, base));
+                self.push_reference(cell_ptr, payload);
+            }
+            _ => {
+                if let Some(&StructWord::Get(id, fi)) = self.structs.words.get(rest) {
+                    let base = self.stack.pop().expect("field projection: receiver");
+                    let field = self.structs.layouts[id.index()].fields[fi];
+                    let addr = self.field_ptr(base, field.offset);
+                    self.push_reference(addr, field.ty);
+                    return;
+                }
+                let value = self
+                    .locals
+                    .iter()
+                    .find(|(n, _)| n == rest)
+                    .map(|(_, v)| *v)
+                    .expect("checked: a borrow's operand is a local");
+                self.lower_borrow(value);
+            }
+        }
+    }
+
+    /// R2: borrow a local. An aggregate local's own value *is* a pointer to
+    /// its storage, so the borrow is that pointer retyped as an opaque handle.
+    /// A cell local's value is the heap pointer itself, an SSA temporary with
+    /// no address of its own; `&^`/`&!^` reads a cell reference by loading the
+    /// pointer out of the place holding it, so borrowing a cell local first
+    /// gives it a place.
+    fn lower_borrow(&mut self, value: Value) {
+        let referent = self.value_type(value);
+        let ptr = match referent {
+            IrType::OwnedCell(_) => {
+                let slot = self.fresh_value(IrType::Ptr);
+                self.push_alloc(Instr::Alloc(slot, WORD_WIDTH, WORD_WIDTH));
+                self.push_instr(Instr::Store(slot, value));
+                slot
+            }
+            _ => {
+                let p = self.fresh_value(IrType::Ptr);
+                self.push_instr(Instr::PtrOffset(p, value, 0));
+                p
+            }
+        };
+        self.push_reference(ptr, referent);
+    }
+
+    /// R4: `@` fetches through a reference, `!` stores, `+!` adds in place.
+    /// The referent is checker-guaranteed `Copy`; a Copy *aggregate* is a real
+    /// case, taking the `Alloc`+`Blit` / `Blit` path `dup` already uses for
+    /// the same shape of copy.
+    fn lower_access_word(&mut self, name: &str) {
+        match name {
+            "@" => {
+                let ptr = self.stack.pop().expect("@: reference");
+                let referent = self.referent_of(ptr);
+                match referent {
+                    IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                        let dst = self.alloc_aggregate(referent);
+                        let size = self.value_size(referent);
+                        if size > 0 {
+                            self.push_instr(Instr::Blit(ptr, dst, size));
+                        }
+                        self.stack.push(dst);
+                    }
+                    _ => {
+                        let v = self.fresh_value(referent);
+                        self.push_instr(Instr::FieldLoad(v, ptr));
+                        self.stack.push(v);
+                    }
+                }
+            }
+            "!" => {
+                let val = self.stack.pop().expect("!: value");
+                let ptr = self.stack.pop().expect("!: reference");
+                let referent = self.referent_of(ptr);
+                match referent {
+                    IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                        let size = self.value_size(referent);
+                        if size > 0 {
+                            self.push_instr(Instr::Blit(val, ptr, size));
+                        }
+                    }
+                    _ => self.push_instr(Instr::FieldStore(ptr, val)),
+                }
+            }
+            "+!" => {
+                let val = self.stack.pop().expect("+!: addend");
+                let ptr = self.stack.pop().expect("+!: reference");
+                let referent = self.referent_of(ptr);
+                let cur = self.fresh_value(referent);
+                self.push_instr(Instr::FieldLoad(cur, ptr));
+                let sum = self.fresh_value(referent);
+                self.push_instr(Instr::Bin(sum, BinOp::Add, cur, val));
+                self.push_instr(Instr::FieldStore(ptr, sum));
+            }
+            _ => unreachable!("lower_access_word only handles @/!/+!"),
         }
     }
 
@@ -2653,6 +2848,12 @@ impl<'a> FuncBuilder<'a> {
                         let ty = self.value_type(t);
                         let v = self.fresh_value(ty);
                         self.push_instr(Instr::Phi(v, vec![(then_pred, t), (else_pred, e)]));
+                        // A merged reference is still `Ptr`, which says
+                        // nothing about its referent; carry the shape across
+                        // the join so a projection past it still resolves.
+                        if let Some(&referent) = self.ref_inner.get(&t) {
+                            self.ref_inner.insert(v, referent);
+                        }
                         join_stack.push(v);
                     }
                 }
@@ -2804,6 +3005,7 @@ mod tests {
             &module.enums,
             &module.arrays,
             &module.owned_cells,
+            &module.refs,
         )
         .1
     }
@@ -2815,6 +3017,7 @@ mod tests {
         enums: Enums,
         arrays: Arrays,
         cells: Cells,
+        refs: Refs,
     }
 
     impl Probe {
@@ -2822,17 +3025,19 @@ mod tests {
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
             check(&mut module).unwrap();
-            let (structs, enums, arrays, cells) = build_registries(
+            let (structs, enums, arrays, cells, refs) = build_registries(
                 &module.structs,
                 &module.enums,
                 &module.arrays,
                 &module.owned_cells,
+                &module.refs,
             );
             Probe {
                 structs,
                 enums,
                 arrays,
                 cells,
+                refs,
             }
         }
 
@@ -2876,6 +3081,7 @@ mod tests {
                     enums: &self.enums,
                     arrays: &self.arrays,
                     cells: &self.cells,
+                    refs: &self.refs,
                 },
             )
         }
@@ -2919,6 +3125,7 @@ mod tests {
         let enums = Enums::default();
         let arrays = Arrays::default();
         let cells = Cells::default();
+        let refs = Refs::default();
         let resolve: Resolver = &|_name: &str| unreachable!("not called");
         let b = FuncBuilder::new(
             &env,
@@ -2928,6 +3135,7 @@ mod tests {
                 enums: &enums,
                 arrays: &arrays,
                 cells: &cells,
+                refs: &refs,
             },
             "loop-word".to_string(),
         );
@@ -3036,6 +3244,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         assert_eq!(m, 1);
@@ -3060,6 +3269,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         assert_eq!(m, 1);
@@ -3133,6 +3343,7 @@ mod tests {
             &module.enums,
             &module.arrays,
             &module.owned_cells,
+            &module.refs,
         )
         .2
     }
@@ -3161,10 +3372,10 @@ mod tests {
         // A struct with two `usize` fields and an array of `usize`: both resize
         // with the parameter.
         let m = module_of(": w ( [usize 4] -- ) drop ;\ntype: Cursor a usize b usize ;");
-        let (s8, _, a8, _) =
-            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, 8);
-        let (s4, _, a4, _) =
-            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, 4);
+        let (s8, _, a8, ..) =
+            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, &m.refs, 8);
+        let (s4, _, a4, ..) =
+            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, &m.refs, 4);
         assert_eq!(s8.layouts[0].size, 16, "two usize fields at width 8");
         assert_eq!(s4.layouts[0].size, 8, "two usize fields at width 4");
         assert_eq!(a8.layouts[0].size, 32, "[usize 4] at width 8");
@@ -3330,6 +3541,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         assert_eq!(m, 1);
@@ -3360,6 +3572,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         assert_eq!(m, 1);
@@ -3400,6 +3613,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         let conv_dst = instrs(&func)
@@ -3435,6 +3649,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         let calls: Vec<&str> = instrs(&func)
@@ -3519,6 +3734,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         let loaded = func
@@ -3768,6 +3984,7 @@ mod tests {
         let enums = Enums::default();
         let arrays = Arrays::default();
         let cells = Cells::default();
+        let refs = Refs::default();
         let mut b = FuncBuilder::new(
             &env,
             &resolve,
@@ -3776,6 +3993,7 @@ mod tests {
                 enums: &enums,
                 arrays: &arrays,
                 cells: &cells,
+                refs: &refs,
             },
             "w".to_string(),
         );
@@ -3961,7 +4179,7 @@ mod tests {
     fn enum_layout_nested_struct_payload_sized_via_combined_registry() {
         // D9: a variant field of struct type is sized via its layout (16 for a
         // two-f64 Vec2), not `scalar_size_align`.
-        let (structs, enums, _arrays, _cells) = {
+        let (structs, enums, _arrays, _cells, _refs) = {
             let src = "type: Vec2 x f64 y f64 ; type: Shape | Dot p Vec2 | Unit ;";
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
@@ -3971,6 +4189,7 @@ mod tests {
                 &module.enums,
                 &module.arrays,
                 &module.owned_cells,
+                &module.refs,
             )
         };
         let _ = structs;
@@ -3985,7 +4204,7 @@ mod tests {
     fn struct_field_of_enum_type_sized_via_combined_registry() {
         // D9: a struct field of enum type is sized via the enum's layout, not
         // `scalar_size_align`; the struct places the next field past it.
-        let (structs, _enums, _arrays, _cells) = {
+        let (structs, _enums, _arrays, _cells, _refs) = {
             let src =
                 "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ;";
             let tokens = lex(src).unwrap();
@@ -3996,6 +4215,7 @@ mod tests {
                 &module.enums,
                 &module.arrays,
                 &module.owned_cells,
+                &module.refs,
             )
         };
         let t = layout(&structs, "Tagged");
@@ -4078,7 +4298,7 @@ mod tests {
         // the enum's aligned carried size. An empty line carries the one Shape
         // straight through: one prologue blit, one epilogue blit.
         let src = "type: Shape | Circle r f64 | Rect w f64 h f64 ;";
-        let (structs, enums, arrays, cells) = {
+        let (structs, enums, arrays, cells, refs) = {
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
             check(&mut module).unwrap();
@@ -4087,6 +4307,7 @@ mod tests {
                 &module.enums,
                 &module.arrays,
                 &module.owned_cells,
+                &module.refs,
             )
         };
         let env = HashMap::new();
@@ -4104,6 +4325,7 @@ mod tests {
                 enums: &enums,
                 arrays: &arrays,
                 cells: &cells,
+                refs: &refs,
             },
         );
         assert_eq!(m, 1);
@@ -4546,11 +4768,12 @@ mod tests {
             fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
             span: crate::ast::Span::default(),
         });
-        let (structs, enums, arrays, _cells) = build_registries(
+        let (structs, enums, arrays, ..) = build_registries(
             &module.structs,
             &module.enums,
             &module.arrays,
             &module.owned_cells,
+            &module.refs,
         );
         for (idx, layout) in structs.layouts.iter().enumerate() {
             let ty = Type::Struct(StructId::from_index(idx), layout.name);

@@ -11,9 +11,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    intern_array_type, intern_owned_cell_type, ArrayDecl, Clause, EnumDecl, EnumId, Module,
-    OwnedCellDecl, Span, StackEffect, StructDecl, StructId, Term, TermKind, Type, VariantDecl,
-    WordBody, WordDef, SPY_NAME,
+    intern_array_type, intern_owned_cell_type, intern_ref_type, ArrayDecl, Clause, EnumDecl,
+    EnumId, Module, OwnedCellDecl, RefDecl, Span, StackEffect, StructDecl, StructId, Term,
+    TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -168,7 +168,58 @@ pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[A
         Type::Array(id, _) => is_copy(arrays[id.index()].element, structs, enums, arrays),
         // Always linear regardless of payload, so no payload lookup here.
         Type::OwnedCell(_, _) => false,
+        // A shared reference is freely duplicated and discarded; a mutable one
+        // is not (R5's exclusivity, which `dup`'s Copy gate already enforces).
+        Type::Ref(_, mutable, _) => !mutable,
         _ => true,
+    }
+}
+
+/// Whether `ty` carries an exactly-once obligation: used exactly once,
+/// disposed by `drop`, tracked by `Moves`. This is *not* the negation of
+/// `is_copy`: `&!T` is neither `Copy` nor linear (R5/R8), so it is duplicated
+/// by nothing and owed to nothing — a reference local expires silently at the
+/// end of its block, and a reference is never dragged into move tracking.
+pub fn is_linear(
+    ty: Type,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> bool {
+    !ty.is_ref() && !is_copy(ty, structs, enums, arrays)
+}
+
+/// R8: whether `ty` **transitively contains** a reference — is one itself, or
+/// reaches one through a struct field, an enum variant payload, or an array
+/// element. The predicate every escape rejection is stated over, so a
+/// reference cannot slip into storage one level down from a declaration site.
+///
+/// A `^T` payload is deliberately *not* followed: a cell may close a type
+/// cycle (`^List` inside `List`), so following one would not terminate.
+/// `check_no_stored_references` sweeps the interned cell registry directly
+/// instead, which reaches every payload shape a program can name without
+/// recursing.
+pub fn contains_reference(
+    ty: Type,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> bool {
+    match ty {
+        Type::Ref(..) => true,
+        Type::Struct(id, _) => structs[id.index()]
+            .fields
+            .iter()
+            .any(|(_, f)| contains_reference(*f, structs, enums, arrays)),
+        Type::Enum(id, _) => enums[id.index()]
+            .variants
+            .iter()
+            .flat_map(|v| v.fields.iter())
+            .any(|(_, f)| contains_reference(*f, structs, enums, arrays)),
+        Type::Array(id, _) => {
+            contains_reference(arrays[id.index()].element, structs, enums, arrays)
+        }
+        _ => false,
     }
 }
 
@@ -358,7 +409,12 @@ impl Ctx<'_> {
 /// share one `ArrayId` numbering. `check` runs before `lower`, so the
 /// interned shapes are present when codegen consults them.
 pub fn check(module: &mut Module) -> Result<(), String> {
-    check_types(&module.structs, &module.enums, &module.arrays)?;
+    check_types(
+        &module.structs,
+        &module.enums,
+        &module.arrays,
+        &module.owned_cells,
+    )?;
 
     let mut env = builtin_table();
     for (name, sig) in struct_generated_sigs(&module.structs) {
@@ -390,9 +446,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         enums,
         arrays,
         owned_cells,
+        refs,
     } = module;
     for word in words.iter() {
-        check_word(word, enums, &env, arrays, owned_cells, structs)?;
+        check_word(word, enums, &env, arrays, owned_cells, refs, structs)?;
     }
     Ok(())
 }
@@ -406,11 +463,87 @@ pub fn check_types(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
 ) -> Result<(), String> {
     check_duplicate_type_names(structs, enums)?;
     check_recursion(structs, enums, arrays)?;
+    check_no_stored_references(structs, enums, arrays, cells)?;
     check_no_linear_array_elements(structs, enums, arrays)?;
     Ok(())
+}
+
+/// R8's declaration-site half: a struct field, an enum variant payload field,
+/// an interned array element, or an interned cell payload whose type
+/// transitively contains a reference is a located error. Runs after
+/// `check_recursion`, so the field-graph walk `contains_reference` performs is
+/// guaranteed acyclic. The two *construction* sites (`fill`'s element, `^`'s
+/// payload) are rejected separately in the body walk: both accept whatever
+/// type is on the stack with no declaration in sight.
+fn check_no_stored_references(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+) -> Result<(), String> {
+    for decl in structs {
+        for (field, ty) in &decl.fields {
+            if contains_reference(*ty, structs, enums, arrays) {
+                return Err(stored_reference_error(
+                    &format!("field `{field}` of type `{}`", decl.name),
+                    *ty,
+                    Some(decl.span),
+                ));
+            }
+        }
+    }
+    for decl in enums {
+        for variant in &decl.variants {
+            for (field, ty) in &variant.fields {
+                if contains_reference(*ty, structs, enums, arrays) {
+                    return Err(stored_reference_error(
+                        &format!(
+                            "payload field `{field}` of variant `{}` of type `{}`",
+                            variant.name, decl.name
+                        ),
+                        *ty,
+                        Some(variant.span),
+                    ));
+                }
+            }
+        }
+    }
+    for decl in arrays {
+        if contains_reference(decl.element, structs, enums, arrays) {
+            return Err(stored_reference_error(
+                &format!("element of array type `{}`", decl.name_static),
+                decl.element,
+                None,
+            ));
+        }
+    }
+    for decl in cells {
+        if contains_reference(decl.payload, structs, enums, arrays) {
+            return Err(stored_reference_error(
+                &format!("payload of cell type `{}`", decl.name_static),
+                decl.payload,
+                None,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// R8: the one wording every escape rejection shares. `position` names the
+/// storage slot the reference tried to reach; an array or cell shape has no
+/// declared name and so no span to cite.
+fn stored_reference_error(position: &str, ty: Type, span: Option<Span>) -> String {
+    let located = match span {
+        Some(span) => format!(" (line {}, col {})", span.line, span.col),
+        None => String::new(),
+    };
+    format!(
+        "error: a reference cannot be stored: {position} has type `{ty}`{located}\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow"
+    )
 }
 
 /// Arrays of linear elements are not supported yet: rejected here, over the
@@ -446,7 +579,7 @@ fn check_no_linear_array_elements(
 /// The struct-only projection of `check_types` (no enums/arrays), for callers
 /// that don't yet declare either.
 pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
-    check_types(structs, &[], &[])
+    check_types(structs, &[], &[], &[])
 }
 
 /// A duplicate `type:` name is a sharp located error naming the type.
@@ -565,6 +698,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         Type::Enum(id, _) => Some(TypeNode::Enum(id.index())),
         Type::Array(id, _) => Some(TypeNode::Array(id.index())),
         Type::OwnedCell(_, _) => None,
+        // A reference is a pointer, not an inline copy, so it closes no
+        // by-value cycle — and R8 keeps one out of every field position
+        // anyway.
+        Type::Ref(..) => None,
         Type::Int(_) | Type::Float(_) | Type::Bool | Type::Usize | Type::Isize | Type::Spy => None,
     }
 }
@@ -736,28 +873,32 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
 /// the word's own signature so self-recursion type-checks. `enums` is the
 /// registry the clause-style checks (coverage, scrutinee type, variant-name
 /// collision) consult.
+#[allow(clippy::too_many_arguments)]
 pub fn check_def(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env, arrays, cells, structs)
+    check_word(word, enums, &env, arrays, cells, refs, structs)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
 /// `entry_stack` (the carried slot types) and return the resulting typed stack.
 /// A type mismatch or underflow against the carried stack is a reported error.
+#[allow(clippy::too_many_arguments)]
 pub fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
 ) -> Result<Vec<Type>, String> {
@@ -767,9 +908,22 @@ pub fn infer_line(
     // position.
     let ctx = Ctx::Line { structs, enums };
     let mut scope = Scope::default();
-    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut scope, false)?;
+    let final_stack = check_terms(
+        terms, initial, &ctx, env, arrays, cells, refs, &mut scope, false,
+    )?;
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
+    // R8's sixth position: the session's inter-line stack outlives this line's
+    // locals, so a reference that survived to here would outlive its referent.
+    if let Some(slot) = final_stack
+        .iter()
+        .find(|s| contains_reference(s.ty, structs, enums, arrays))
+    {
+        return Err(format!(
+            "error: a reference cannot be stored: the line leaves `{}` on the stack, which the session carries into the next line\n  a `&T`/`&!T` borrows a local of this line, and this line's locals are gone by then",
+            slot.ty
+        ));
+    }
     Ok(final_stack.into_iter().map(|s| s.ty).collect())
 }
 
@@ -793,7 +947,7 @@ fn check_main_effect(
         .iter()
         .chain(&main.effect.outputs)
         .map(|slot| slot.ty)
-        .find(|ty| !is_copy(*ty, structs, enums, arrays));
+        .find(|ty| is_linear(*ty, structs, enums, arrays));
     let Some(ty) = offending else {
         return Ok(());
     };
@@ -903,7 +1057,7 @@ fn check_outputs(
             .get(declared.len()..)
             .unwrap_or_default()
             .iter()
-            .find(|s| !is_copy(s.ty, structs, enums, arrays))
+            .find(|s| is_linear(s.ty, structs, enums, arrays))
         {
             return Err(surplus_linear_value_error(word, slot.ty, line));
         }
@@ -1079,12 +1233,14 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
@@ -1095,16 +1251,49 @@ fn check_word(
             reject_variant_local(&ctx, name, "parameter")?;
         }
     }
+    check_reference_free_signature(word, structs, enums, arrays)?;
     match &word.body {
         WordBody::Terms { terms } => {
-            check_terms_word(word, enums, terms, env, arrays, cells, structs)
+            check_terms_word(word, enums, terms, env, arrays, cells, refs, structs)
         }
         WordBody::Clauses(clauses) => {
-            check_clause_word(word, enums, clauses, env, arrays, cells, structs)
+            check_clause_word(word, enums, clauses, env, arrays, cells, refs, structs)
         }
     }
 }
 
+/// R8's effect-signature half: no declared **output** may transitively
+/// contain a reference (returning one would outlive the frame that owns the
+/// referent), and an **input** may only be a reference at the top level — a
+/// type that merely *contains* one nested inside an array or a cell is
+/// rejected there too, so the carve-out stays closed if a future aggregate
+/// constructor arrives.
+fn check_reference_free_signature(
+    word: &WordDef,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    for slot in &word.effect.outputs {
+        if contains_reference(slot.ty, structs, enums, arrays) {
+            return Err(format!(
+                "error: a reference cannot be stored: `{}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
+                word.name, slot.ty
+            ));
+        }
+    }
+    for slot in &word.effect.inputs {
+        if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
+            return Err(format!(
+                "error: a reference cannot be stored: `{}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
+                word.name, slot.ty
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
 fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1112,6 +1301,7 @@ fn check_terms_word(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     // R3: a binding is an ordinary term, but the *entry* one keeps its own
@@ -1142,7 +1332,9 @@ fn check_terms_word(
 
     let ctx = word_ctx(word, structs, enums);
     let mut scope = Scope::default();
-    let final_stack = check_terms(terms, initial, &ctx, env, arrays, cells, &mut scope, true)?;
+    let final_stack = check_terms(
+        terms, initial, &ctx, env, arrays, cells, refs, &mut scope, true,
+    )?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
@@ -1154,6 +1346,7 @@ fn check_terms_word(
 /// enum (X7), the clauses must cover every variant exactly once (X4/X5/X6),
 /// and every clause body must leave the word's single declared output effect
 /// (X8).
+#[allow(clippy::too_many_arguments)]
 fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1161,6 +1354,7 @@ fn check_clause_word(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
@@ -1241,6 +1435,7 @@ fn check_clause_word(
             env,
             arrays,
             cells,
+            refs,
             structs,
         )?;
     }
@@ -1258,6 +1453,7 @@ fn check_clause_body(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
     let ctx = word_ctx(word, structs, enums);
@@ -1286,7 +1482,7 @@ fn check_clause_body(
     let split = initial.len() - n;
     let mut scope = Scope::default();
     for (name, ty) in clause.locals.iter().zip(&initial[split..]) {
-        scope.bind(name, *ty, !is_copy(*ty, structs, enums, arrays));
+        scope.bind(name, *ty, is_linear(*ty, structs, enums, arrays));
     }
     let stack_after_bind: Vec<Slot> = initial[..split]
         .iter()
@@ -1300,6 +1496,7 @@ fn check_clause_body(
         env,
         arrays,
         cells,
+        refs,
         &mut scope,
         true,
     )?;
@@ -1604,7 +1801,7 @@ fn check_linear_across_back_edge(
 ) -> Result<(), String> {
     if let Some(slot) = below_args
         .iter()
-        .find(|s| !is_copy(s.ty, ctx.structs(), ctx.enums(), arrays))
+        .find(|s| is_linear(s.ty, ctx.structs(), ctx.enums(), arrays))
     {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
@@ -1721,6 +1918,7 @@ fn check_terms(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     scope: &mut Scope,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
@@ -1733,6 +1931,7 @@ fn check_terms(
             env,
             arrays,
             cells,
+            refs,
             scope,
             tail && i == last,
         )?;
@@ -1748,6 +1947,7 @@ fn check_term(
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
     scope: &mut Scope,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
@@ -1791,7 +1991,7 @@ fn check_term(
             }
             let bound = stack.split_off(stack.len() - names.len());
             for (name, slot) in names.iter().zip(bound) {
-                let linear = !is_copy(slot.ty, ctx.structs(), ctx.enums(), arrays);
+                let linear = is_linear(slot.ty, ctx.structs(), ctx.enums(), arrays);
                 scope.bind(name, slot.ty, linear);
             }
             Ok(stack)
@@ -1804,6 +2004,14 @@ fn check_term(
                     return Err(use_after_move_error(ctx, span, name, ty, site));
                 }
                 stack.push(Slot::computed(ty));
+                return Ok(stack);
+            }
+            if let Some(stack) =
+                check_reference_word(name, span, &mut stack, ctx, scope, arrays, cells, refs)?
+            {
+                return Ok(stack);
+            }
+            if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays)? {
@@ -1875,6 +2083,7 @@ fn check_term(
                 env,
                 arrays,
                 cells,
+                refs,
                 &mut then_scope,
                 tail,
             )?;
@@ -1898,6 +2107,7 @@ fn check_term(
                 env,
                 arrays,
                 cells,
+                refs,
                 &mut else_scope,
                 tail,
             )?;
@@ -2267,6 +2477,341 @@ fn check_array_index(
     }
 }
 
+/// The referent of a reference type, and whether it is mutable.
+fn ref_parts(ty: Type, refs: &[RefDecl]) -> Option<(Type, bool)> {
+    match ty {
+        Type::Ref(id, mutable, _) => Some((refs[id.index()].referent, mutable)),
+        _ => None,
+    }
+}
+
+/// R2: `&x`/`&!x` applied to something that is not a local. A place is a
+/// local name and nothing more, so the diagnostic names what was found there
+/// and points at the binding that would make it one.
+fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) -> String {
+    format!(
+        "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name; bind the value with `| name |` first, then borrow that name",
+        in_word(ctx),
+        span.line,
+        span.col
+    )
+}
+
+/// ` in `word`` for a word body, empty for a bare REPL line: the suffix the
+/// slice's own diagnostics use to place themselves the way every other
+/// located error here does.
+fn in_word(ctx: &Ctx) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(" in `{name}`"),
+        Ctx::Line { .. } => String::new(),
+    }
+}
+
+/// R11: only an aggregate or cell local may be borrowed. A scalar local is an
+/// SSA temporary with no address, and giving it one is work no criterion
+/// needs.
+fn borrow_of_scalar_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
+    format!(
+        "error: cannot borrow the scalar local `{local}` of type `{ty}`{} (line {}, col {})\n  a scalar has no address; borrow a field or an aggregate instead",
+        in_word(ctx),
+        span.line,
+        span.col
+    )
+}
+
+/// A reference-mode word applied to something that is not the reference shape
+/// it projects through (`&[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
+fn reference_word_operand_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    expected: &str,
+    found: Type,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{name}` (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
+            span.line,
+            effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` expected {expected}, found `{found}`")
+        }
+    }
+}
+
+/// R4: `!`/`+!` through a shared reference. Storing through a `&T` is
+/// meaningless, and the mutable spelling is right there.
+fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    format!(
+        "error: `{op}` cannot store through the shared reference `{found}`{} (line {})\n  borrow it mutably with `&!` (and project with the `&!`-spelled accessors) to write through it",
+        in_word(ctx),
+        span.line
+    )
+}
+
+/// R4: `@`/`!`/`+!` are restricted to a `Copy` referent. Fetching a linear
+/// value through a reference would manufacture a second owner; storing over
+/// one would silently leak the value being overwritten (nothing auto-drops).
+fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Type) -> String {
+    let why = if op == "@" {
+        "fetching one would make a second owner of a value that is used exactly once"
+    } else {
+        "storing over one would silently leak the value being overwritten; nothing auto-drops"
+    };
+    format!(
+        "error: `{op}` cannot access the linear referent `{referent}`{} (line {})\n  {why}",
+        in_word(ctx),
+        span.line
+    )
+}
+
+/// R8's two construction sites: `fill`'s element and `^`'s payload accept
+/// whatever type is on the stack, with no declaration anywhere for
+/// `check_no_stored_references` to have caught.
+fn constructed_reference_error(ctx: &Ctx, span: Span, position: &str, ty: Type) -> String {
+    format!(
+        "error: a reference cannot be stored{} (line {})\n  {position} has type `{ty}`\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow",
+        in_word(ctx),
+        span.line
+    )
+}
+
+/// R2/R3: every `&`-led word — the two prefix borrow operators and the
+/// reference-mode accessor family. Returns `None` if `name` is not `&`-led
+/// (the caller falls through to the ordinary lookup chain).
+///
+/// One spelling per shape *and* per mutability (R3): the mutability is in the
+/// token, never inherited from the receiver, so a reader gets reference-ness,
+/// mutability and arity from the word alone. Every accessor consumes its
+/// reference argument the way any word consumes its arguments.
+#[allow(clippy::too_many_arguments)]
+fn check_reference_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    scope: &Scope,
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &mut Vec<RefDecl>,
+) -> Result<Option<Vec<Slot>>, String> {
+    if !name.starts_with('&') {
+        return Ok(None);
+    }
+    let mutable = name.starts_with("&!");
+    let rest = &name[if mutable { 2 } else { 1 }..];
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+
+    match rest {
+        ">" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let index = stack[n - 1];
+            let Some((referent, recv_mut)) = ref_parts(stack[n - 2].ty, refs) else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    name,
+                    "a reference to an array",
+                    stack[n - 2].ty,
+                ));
+            };
+            let Type::Array(id, _) = referent else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    name,
+                    "a reference to an array",
+                    stack[n - 2].ty,
+                ));
+            };
+            if recv_mut != mutable {
+                let want = intern_ref_type(refs, referent, mutable);
+                return Err(type_mismatch_error(ctx, span, name, want, stack[n - 2].ty));
+            }
+            let (count, elem) = (arrays[id.index()].count, arrays[id.index()].element);
+            check_array_index(index, count, ctx, span, name)?;
+            let out = intern_ref_type(refs, elem, mutable);
+            stack.truncate(n - 2);
+            stack.push(Slot::computed(out));
+        }
+        "^" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need(name, 1, n));
+            }
+            let Some((referent, recv_mut)) = ref_parts(stack[n - 1].ty, refs) else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    name,
+                    "a reference to an owning cell",
+                    stack[n - 1].ty,
+                ));
+            };
+            let Type::OwnedCell(cell_id, _) = referent else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    name,
+                    "a reference to an owning cell",
+                    stack[n - 1].ty,
+                ));
+            };
+            if recv_mut != mutable {
+                let want = intern_ref_type(refs, referent, mutable);
+                return Err(type_mismatch_error(ctx, span, name, want, stack[n - 1].ty));
+            }
+            let payload = cells[cell_id.index()].payload;
+            let out = intern_ref_type(refs, payload, mutable);
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(out));
+        }
+        _ => {
+            if let Some((struct_name, field_name)) = rest.split_once('>') {
+                if let Some(idx) = ctx.structs().iter().position(|d| d.name == struct_name) {
+                    let decl = &ctx.structs()[idx];
+                    if let Some(field_ty) = decl
+                        .fields
+                        .iter()
+                        .find(|(f, _)| f == field_name)
+                        .map(|(_, ty)| *ty)
+                    {
+                        let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
+                        let want = intern_ref_type(refs, struct_ty, mutable);
+                        let n = stack.len();
+                        if n < 1 {
+                            return Err(need(name, 1, n));
+                        }
+                        if stack[n - 1].ty != want {
+                            return Err(type_mismatch_error(
+                                ctx,
+                                span,
+                                name,
+                                want,
+                                stack[n - 1].ty,
+                            ));
+                        }
+                        let out = intern_ref_type(refs, field_ty, mutable);
+                        stack.truncate(n - 1);
+                        stack.push(Slot::computed(out));
+                        return Ok(Some(std::mem::take(stack)));
+                    }
+                }
+            }
+            // R2: everything else is a prefix borrow of a local, and only of a
+            // local.
+            if rest.is_empty() {
+                return Err(borrow_of_non_place_error(
+                    ctx,
+                    span,
+                    name,
+                    "it names nothing (a bare sigil cannot borrow whatever happens to be on the stack)",
+                ));
+            }
+            let Some(local_ty) = scope.local_type(rest) else {
+                let found = if rest.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    format!("`{rest}` is a literal, not a local")
+                } else {
+                    format!("`{rest}` is not a local in scope")
+                };
+                return Err(borrow_of_non_place_error(ctx, span, name, &found));
+            };
+            if !matches!(
+                local_ty,
+                Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
+            ) {
+                return Err(borrow_of_scalar_local_error(ctx, span, rest, local_ty));
+            }
+            let out = intern_ref_type(refs, local_ty, mutable);
+            stack.push(Slot::computed(out));
+        }
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// R4: `@` fetches, `!` stores, `+!` adds in place. All three are restricted
+/// to a `Copy` referent, which covers a Copy *aggregate* as well as a Copy
+/// scalar; `@` is typed for both `&T` and `&!T` directly, so there is no
+/// `&!T -> &T` demotion coercion to write.
+fn check_access_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    refs: &[RefDecl],
+) -> Result<Option<Vec<Slot>>, String> {
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+    match name {
+        "@" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(need("@", 1, n));
+            }
+            let Some((referent, _)) = ref_parts(stack[n - 1].ty, refs) else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    "@",
+                    "a reference",
+                    stack[n - 1].ty,
+                ));
+            };
+            if !is_copy(referent, ctx.structs(), ctx.enums(), arrays) {
+                return Err(access_of_linear_referent_error(ctx, span, "@", referent));
+            }
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(referent));
+        }
+        "!" | "+!" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let value = stack[n - 1];
+            let Some((referent, mutable)) = ref_parts(stack[n - 2].ty, refs) else {
+                return Err(reference_word_operand_error(
+                    ctx,
+                    span,
+                    name,
+                    "a mutable reference",
+                    stack[n - 2].ty,
+                ));
+            };
+            if !mutable {
+                return Err(store_through_shared_reference_error(
+                    ctx,
+                    span,
+                    name,
+                    stack[n - 2].ty,
+                ));
+            }
+            if !is_copy(referent, ctx.structs(), ctx.enums(), arrays) {
+                return Err(access_of_linear_referent_error(ctx, span, name, referent));
+            }
+            if name == "+!" && !referent.is_int() {
+                return Err(type_mismatch_error(ctx, span, "+!", Type::I64, referent));
+            }
+            match match_slot(value, referent) {
+                SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                SlotMatch::NeedsSizeConversion => {
+                    return Err(size_conversion_needed_error(ctx, span, name, referent));
+                }
+                SlotMatch::Mismatch => {
+                    return Err(type_mismatch_error(ctx, span, name, referent, value.ty));
+                }
+            }
+            stack.truncate(n - 2);
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
 /// Apply an array word (`fill`/`get`/`set`/`len`) if `name` is one, returning
 /// `Some(stack)`; `None` if the name is not an array word (the caller then
 /// looks it up in the env). These are generic over the array shape, so
@@ -2302,6 +2847,17 @@ fn check_array_word(
             };
             if !(1..=i64::from(u32::MAX)).contains(&count_val) {
                 return Err(fill_count_out_of_range_error(ctx, span, count_val));
+            }
+            // R8's third position, at the construction site: `fill` accepts
+            // any `Copy` element, and `&T` is `Copy`, so the declaration-site
+            // sweep never sees this shape.
+            if contains_reference(element.ty, ctx.structs(), ctx.enums(), arrays) {
+                return Err(constructed_reference_error(
+                    ctx,
+                    span,
+                    "the element `fill` would store",
+                    element.ty,
+                ));
             }
             if !is_copy(element.ty, ctx.structs(), ctx.enums(), arrays) {
                 return Err(fill_of_linear_element_error(ctx, span, element.ty));
@@ -2388,6 +2944,16 @@ fn check_owned_cell_word(
                 return Err(need("^", 1, n));
             }
             let payload = stack[n - 1].ty;
+            // R8's fourth position, at the construction site: `^` interns a
+            // cell over any payload type with no filter of its own.
+            if contains_reference(payload, ctx.structs(), ctx.enums(), arrays) {
+                return Err(constructed_reference_error(
+                    ctx,
+                    span,
+                    "the payload `^` would store",
+                    payload,
+                ));
+            }
             let cell_ty = intern_owned_cell_type(cells, payload);
             stack.truncate(n - 1);
             stack.push(Slot::computed(cell_ty));
@@ -3372,6 +3938,7 @@ mod tests {
             &terms,
             entry,
             &builtin_table(),
+            &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &[],
@@ -4378,5 +4945,63 @@ type: Boxed | Some h Holds | None ;\n")
         // (no scope-end rule applies to a bare line).
         let out = infer_src("drop", &[Type::Spy]).unwrap();
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn shared_reference_is_copy_and_mutable_reference_is_neither() {
+        // R12's soundness answers: getting either wrong silently misclassifies
+        // a reference as duplicable-and-droppable, or as owing a linear drop it
+        // must never receive.
+        let mut refs = Vec::new();
+        let shared = intern_ref_type(&mut refs, Type::I64, false);
+        let mutable = intern_ref_type(&mut refs, Type::I64, true);
+        assert_ne!(shared, mutable);
+        assert_eq!(shared.name(), "&i64");
+        assert_eq!(mutable.name(), "&!i64");
+
+        assert!(is_copy(shared, &[], &[], &[]));
+        assert!(!is_copy(mutable, &[], &[], &[]));
+        // Neither is linear: a reference owns nothing, so neither enters move
+        // tracking nor owes a disposal.
+        assert!(!is_linear(shared, &[], &[], &[]));
+        assert!(!is_linear(mutable, &[], &[], &[]));
+    }
+
+    #[test]
+    fn intern_ref_type_dedups_per_referent_and_mutability() {
+        let mut refs = Vec::new();
+        let a = intern_ref_type(&mut refs, Type::I64, true);
+        let b = intern_ref_type(&mut refs, Type::I64, true);
+        let c = intern_ref_type(&mut refs, Type::Bool, true);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn contains_reference_sees_through_a_struct_field() {
+        // R8's predicate is transitive: a struct that merely *reaches* a
+        // reference is rejected wherever a bare one would be.
+        let tokens = lex("type: Plain x i64 ;\n").unwrap();
+        let module = parse(&tokens).unwrap();
+        let mut refs = Vec::new();
+        let plain = Type::Struct(StructId::from_index(0), "Plain");
+        assert!(!contains_reference(
+            plain,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        let mut structs = module.structs;
+        structs[0].fields.push((
+            "r".to_string(),
+            intern_ref_type(&mut refs, Type::I64, false),
+        ));
+        assert!(contains_reference(
+            plain,
+            &structs,
+            &module.enums,
+            &module.arrays
+        ));
     }
 }

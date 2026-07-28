@@ -13,8 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ast::{
-    ArrayDecl, EnumDecl, Line, OwnedCellDecl, Span, StructDecl, Term, TermKind, Type, VariantDecl,
-    WordDef,
+    ArrayDecl, EnumDecl, Line, OwnedCellDecl, RefDecl, Span, StructDecl, Term, TermKind, Type,
+    VariantDecl, WordDef,
 };
 use crate::check::{self, Sig};
 use crate::driver;
@@ -243,6 +243,11 @@ pub struct Session {
     /// The interned owning-cell registry, mirroring `arrays`: grows as `^T`
     /// type expressions resolve, persisting across lines in the same session.
     owned_cells: Vec<OwnedCellDecl>,
+    /// The interned reference registry, mirroring `owned_cells`: grows as
+    /// `&T`/`&!T` type expressions resolve, persisting across lines. A
+    /// reference can never *survive* a line (R8), but a word defined at the
+    /// REPL may take one as an input.
+    refs: Vec<RefDecl>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct or enum), so the
     /// buffer is byte-addressable and slot offsets are computed from `types`,
@@ -265,6 +270,7 @@ impl Session {
             enums: Vec::new(),
             arrays: Vec::new(),
             owned_cells: Vec::new(),
+            refs: Vec::new(),
             buf: Vec::new(),
             top: 0,
             types: Vec::new(),
@@ -303,6 +309,7 @@ impl Session {
             &self.enums,
             &mut self.arrays,
             &mut self.owned_cells,
+            &mut self.refs,
         )?;
         match line {
             Line::Def(word) => self.eval_def(word, writer),
@@ -324,9 +331,7 @@ impl Session {
             Some((Token::Word(w), span)) => (w.clone(), *span),
             _ => return Err("parse error: `type:` must be followed by a type name".to_string()),
         };
-        if parser::is_reserved_caret_name(&name) {
-            return Err(parser::reserved_caret_name_error("type", &name, span));
-        }
+        parser::reject_reserved_name("type", &name, span)?;
         if parser::typedef_line_is_enum(tokens) {
             self.eval_enum_typedef(tokens, name.clone(), span)?;
         } else {
@@ -355,10 +360,11 @@ impl Session {
             &self.enums,
             &mut self.arrays,
             &mut self.owned_cells,
+            &mut self.refs,
         )
         .and_then(|fields| {
             self.structs[idx].fields = fields;
-            check::check_types(&self.structs, &self.enums, &self.arrays)
+            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)
         });
         if let Err(e) = result {
             self.structs.pop();
@@ -379,11 +385,8 @@ impl Session {
         span: Span,
     ) -> Result<(), String> {
         let variant_names = parser::enum_variant_names(tokens);
-        if let Some((vname, vspan)) = variant_names
-            .iter()
-            .find(|(n, _)| parser::is_reserved_caret_name(n))
-        {
-            return Err(parser::reserved_caret_name_error("variant", vname, *vspan));
+        for (vname, vspan) in &variant_names {
+            parser::reject_reserved_name("variant", vname, *vspan)?;
         }
         let variants = variant_names
             .into_iter()
@@ -407,12 +410,13 @@ impl Session {
             &self.enums,
             &mut self.arrays,
             &mut self.owned_cells,
+            &mut self.refs,
         )
         .and_then(|variant_fields| {
             for (vidx, fields) in variant_fields.into_iter().enumerate() {
                 self.enums[idx].variants[vidx].fields = fields;
             }
-            check::check_types(&self.structs, &self.enums, &self.arrays)
+            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)
         });
         if let Err(e) = result {
             self.enums.pop();
@@ -432,6 +436,7 @@ impl Session {
             &env,
             &mut self.arrays,
             &mut self.owned_cells,
+            &mut self.refs,
             &self.structs,
         )?;
 
@@ -444,13 +449,19 @@ impl Session {
         // derived from the typed env (RK2): ir needs only counts + output type.
         env.insert(name.clone(), sig.clone());
         let ir_lower_env = ir_arity_env(&env);
-        let (structs, enums, arrays, cells) =
-            ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
+        let (structs, enums, arrays, cells, refs) = ir::build_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        );
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
             arrays: &arrays,
             cells: &cells,
+            refs: &refs,
         };
         let funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
@@ -523,7 +534,7 @@ impl Session {
         let Some(deepest) = self
             .types
             .iter()
-            .position(|ty| !check::is_copy(*ty, &self.structs, &self.enums, &self.arrays))
+            .position(|ty| check::is_linear(*ty, &self.structs, &self.enums, &self.arrays))
         else {
             return Ok(());
         };
@@ -553,6 +564,7 @@ impl Session {
             &env,
             &mut self.arrays,
             &mut self.owned_cells,
+            &mut self.refs,
             &self.structs,
             &self.enums,
         )?;
@@ -562,13 +574,19 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let (structs, enums, arrays, cells) =
-            ir::build_registries(&self.structs, &self.enums, &self.arrays, &self.owned_cells);
+        let (structs, enums, arrays, cells, refs) = ir::build_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        );
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
             arrays: &arrays,
             cells: &cells,
+            refs: &refs,
         };
         let (func, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
