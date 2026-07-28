@@ -257,6 +257,16 @@ impl Moves {
         }
     }
 
+    /// The site that already consumed `name`, if any. Read-only companion to
+    /// `take`: a borrow is not a move, but a consumed local is no longer a
+    /// valid borrow root — its value, and any heap it owned, is gone.
+    fn moved_site(&self, name: &str) -> Option<Span> {
+        match self.states.get(name) {
+            Some(MoveState::Moved(site) | MoveState::MaybeMoved(site)) => Some(*site),
+            _ => None,
+        }
+    }
+
     /// The locals still holding an unconsumed value: `Live` (never mentioned)
     /// or `MaybeMoved` (consumed on one branch only), name-sorted so a scope
     /// with two of them always reports the same one.
@@ -2519,6 +2529,19 @@ fn borrow_of_scalar_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) ->
     )
 }
 
+/// R2: `&x`/`&!x` applied to a local that is *already* a reference. A borrow
+/// is only ever taken of a plain aggregate local, and the remedy is to drop
+/// the sigil: naming a reference local reborrows it.
+fn borrow_of_reference_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
+    format!(
+        "error: cannot borrow `{local}`{}: it is already the reference `{ty}` (line {}, col {})\n  write `{local}`, not `{spelled}{local}`; naming a reference local reborrows it",
+        in_word(ctx),
+        span.line,
+        span.col,
+        spelled = if matches!(ty, Type::Ref(_, true, _)) { "&!" } else { "&" },
+    )
+}
+
 /// A reference-mode word applied to something that is not the reference shape
 /// it projects through (`&[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
 fn reference_word_operand_error(
@@ -2720,11 +2743,21 @@ fn check_reference_word(
                 };
                 return Err(borrow_of_non_place_error(ctx, span, name, &found));
             };
+            if local_ty.is_ref() {
+                return Err(borrow_of_reference_local_error(ctx, span, rest, local_ty));
+            }
             if !matches!(
                 local_ty,
                 Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
             ) {
                 return Err(borrow_of_scalar_local_error(ctx, span, rest, local_ty));
+            }
+            // R2/R8: borrowing is not a move, but the referent still has to be
+            // there. A local consumed earlier holds nothing, and borrowing it
+            // would read (and project through) storage its owner has already
+            // freed.
+            if let Some(site) = scope.moves.moved_site(rest) {
+                return Err(use_after_move_error(ctx, span, rest, local_ty, site));
             }
             let out = intern_ref_type(refs, local_ty, mutable);
             stack.push(Slot::computed(out));

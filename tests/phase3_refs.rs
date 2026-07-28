@@ -197,6 +197,37 @@ fn borrow_of_scalar_local_is_error() {
 }
 
 #[test]
+fn borrow_of_moved_local_is_error() {
+    // A borrow is not a move, but the referent still has to exist: `b` was
+    // consumed (and its cell freed) before the borrow, so projecting through
+    // the reference would read freed storage.
+    let err = check_error(
+        "type: Box c ^i64 ;\n\
+         : main ( -- )\n  7 ^ Box | b |\n  b drop\n  &b &Box>c &^ @ . ;\n",
+    );
+    assert!(
+        err.contains("use after move") && err.contains("local `b` of type `Box`"),
+        "borrowing a consumed local must name the move that consumed it: {err}"
+    );
+    assert!(err.contains("line 4"), "the error should locate it: {err}");
+}
+
+#[test]
+fn borrow_of_reference_local_is_error() {
+    // R2: a reference parameter needs no sigil, so the sigil a reader might
+    // add by habit gets its own diagnostic rather than the scalar-root one.
+    let err = check_error("type: V x i64 y i64 ;\n: f ( &!V -- ) | b |\n  &!b &!V>x 1 +! ;\n");
+    assert!(
+        err.contains("it is already the reference `&!V`"),
+        "expected the already-a-reference rejection: {err}"
+    );
+    assert!(
+        err.contains("write `b`, not `&!b`"),
+        "the error should point at the remedy: {err}"
+    );
+}
+
+#[test]
 fn projection_to_scalar_field_is_accepted() {
     // R11 rejects a scalar *root*, not a scalar *result*: the referent here is
     // a field inside an aggregate that already has a slot.

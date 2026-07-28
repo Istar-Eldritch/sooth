@@ -3143,6 +3143,62 @@ mod tests {
     }
 
     #[test]
+    fn lower_borrow_of_cell_local_gives_the_pointer_a_place() {
+        // R12: `&^`/`&!^` project by *loading* the cell pointer out of the
+        // place holding it, but a cell local's value already *is* that pointer
+        // (an SSA temporary with no address), so borrowing one has to give it a
+        // slot first. The load then reads that slot back.
+        let ir = lower_src(": w ( -- i64 ) 7 ^ | c | &c &^ @ c ^> drop ;");
+        let w = &ir.funcs[0];
+        let alloc = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Alloc(v, size, _) if *size == WORD_WIDTH => Some(*v),
+                _ => None,
+            })
+            .expect("borrowing a cell local allocs a one-word place");
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Store(dst, _) if *dst == alloc)),
+            "the cell pointer is stored into its new place: {:?}",
+            instrs(w)
+        );
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Load(_, src) if *src == alloc)),
+            "the projection loads the pointer back out: {:?}",
+            instrs(w)
+        );
+    }
+
+    #[test]
+    fn lower_reference_through_a_branch_join_keeps_its_referent() {
+        // A merged reference is still the opaque `Ptr`, which says nothing
+        // about what it points at, so the join has to carry the referent shape
+        // across or the projection past it has no field offset to use.
+        let ir = lower_src(
+            "type: V x i64 y i64 ;\n             : w ( bool -- i64 ) | c | 1 2 V | v | c if &v else &v end &V>x @ ;",
+        );
+        let w = &ir.funcs[0];
+        let phi = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Phi(v, _) => Some(*v),
+                _ => None,
+            })
+            .expect("the two arms merge their references in a phi");
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::PtrOffset(_, base, _) if *base == phi)),
+            "the projection past the join offsets from the merged value: {:?}",
+            instrs(w)
+        );
+    }
+
+    #[test]
     fn lower_square_has_one_mul() {
         let ir = lower_src(": sq ( i64 -- i64 ) | n | n n * ;");
         let sq = &ir.funcs[0];
