@@ -2260,7 +2260,7 @@ type: Counter n i64 ;
 
     #[test]
     fn mutation_through_reference_emits_no_rebuild() {
-        // Criterion 6 (R13), structural because a runtime golden cannot
+        // Structural because a runtime golden cannot
         // distinguish "mutated in place" from "rebuilt correctly", and
         // eliminating the rebuild is the point of the slice. Pinned to the
         // mangled symbol: `qbe_name` rewrites `-` to `_`, so the literal
@@ -2293,7 +2293,7 @@ type: Counter n i64 ;
     #[test]
     fn rebuild_style_equivalent_still_emits_alloc_and_blit() {
         // The control: the functional setter in the same module keeps the
-        // whole-aggregate rebuild, so criterion 6's assertion is measuring
+        // whole-aggregate rebuild, so the no-rebuild test's assertion is measuring
         // `push-byte` rather than an emitter that stopped emitting `alloc`.
         let il = emit_src(MUTATION_PROBE);
         let body = func_body(&il, "export function :Counter $bump_rebuild(");

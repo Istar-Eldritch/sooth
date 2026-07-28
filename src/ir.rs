@@ -171,7 +171,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // The payload shape lives in the module's owning-cell registry; the
         // `IrType` carries only the `OwnedCellId` so it stays `Copy`.
         Type::OwnedCell(id, _) => IrType::OwnedCell(id),
-        // R12: a reference is always the opaque handle, never the referent's
+        // A reference is always the opaque handle, never the referent's
         // own aggregate type. QBE's C-ABI classification passes a `:Buf`-
         // spelled parameter *by value*, so a `&!Buf` mapped to
         // `IrType::Struct` would have a callee mutating a caller-side
@@ -411,7 +411,7 @@ pub struct Cells {
 }
 
 /// The IR's view of a program's reference types: the per-`RefId` referent
-/// `IrType`. Every reference lowers to `IrType::Ptr` (R12), so this is the
+/// `IrType`. Every reference lowers to `IrType::Ptr`, so this is the
 /// only place the referent shape survives into lowering — it seeds
 /// `FuncBuilder::ref_inner` for a word's reference-typed parameters.
 #[derive(Debug, Default)]
@@ -1468,7 +1468,7 @@ pub(crate) fn lower_word(
         params_values
     };
 
-    // R12: a reference parameter arrives as an opaque `Ptr`, so the referent
+    // A reference parameter arrives as an opaque `Ptr`, so the referent
     // shape every projection and access needs comes from the declared type,
     // not from the value. Seeded against `entry_values` so a loop reads it off
     // the header phi output the body actually uses.
@@ -1525,7 +1525,7 @@ struct FuncBuilder<'a> {
     enums: &'a Enums,
     arrays: &'a Arrays,
     cells: &'a Cells,
-    /// The per-`RefId` referent `IrType` (R16): needed to resolve a
+    /// The per-`RefId` referent `IrType`: needed to resolve a
     /// reference-mode clause scrutinee's `EnumId` when the referent itself is
     /// an enum.
     refs: &'a Refs,
@@ -1575,7 +1575,7 @@ struct FuncBuilder<'a> {
     /// element/array-shape lookup. A shuffle reuses a value id, so a duped
     /// literal keeps its recorded value.
     const_vals: HashMap<Value, i64>,
-    /// The referent `IrType` of every reference-typed `Value` (R12). A
+    /// The referent `IrType` of every reference-typed `Value`. A
     /// reference lowers to the opaque `IrType::Ptr`, which deliberately says
     /// nothing about what it points at, so the shape a projection or an access
     /// needs — a field offset, an element stride, an aggregate's blit size —
@@ -1906,7 +1906,7 @@ impl<'a> FuncBuilder<'a> {
             }
             _ => {
                 // Every `&`-led word: the two prefix borrow operators and the
-                // reference-mode accessor family (R2, R3).
+                // reference-mode accessor family.
                 if name.starts_with('&') {
                     self.lower_reference_word(name, line);
                     return;
@@ -1979,7 +1979,7 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Push a reference `Value` (always `IrType::Ptr`, R12) and record what it
+    /// Push a reference `Value` (always `IrType::Ptr`) and record what it
     /// points at, since the `IrType` deliberately no longer says.
     fn push_reference(&mut self, ptr: Value, referent: IrType) {
         self.ref_inner.insert(ptr, referent);
@@ -1994,7 +1994,7 @@ impl<'a> FuncBuilder<'a> {
             .expect("checked: every reference value records its referent")
     }
 
-    /// Lower a `&`-led word (R2, R3, R12). No new `Instr` variant: a struct
+    /// Lower a `&`-led word. No new `Instr` variant: a struct
     /// field projection is a `PtrOffset`, an array element projection an
     /// `ElemAddr` behind the same bounds guard `get` uses, and a cell payload
     /// projection a `Load` of the pointer the place holds.
@@ -2044,7 +2044,7 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// R2: borrow a local. An aggregate local's own value *is* a pointer to
+    /// Borrow a local. An aggregate local's own value *is* a pointer to
     /// its storage, so the borrow is that pointer retyped as an opaque handle.
     /// A cell local's value is the heap pointer itself, an SSA temporary with
     /// no address of its own; `&^`/`&!^` reads a cell reference by loading the
@@ -2068,7 +2068,7 @@ impl<'a> FuncBuilder<'a> {
         self.push_reference(ptr, referent);
     }
 
-    /// R4: `@` fetches through a reference, `!` stores, `+!` adds in place.
+    /// `@` fetches through a reference, `!` stores, `+!` adds in place.
     /// The referent is checker-guaranteed `Copy`; a Copy *aggregate* is a real
     /// case, taking the `Alloc`+`Blit` / `Blit` path `dup` already uses for
     /// the same shape of copy.
@@ -2903,8 +2903,8 @@ impl<'a> FuncBuilder<'a> {
         let tail = self.header.is_some();
         let scrutinee = *params.last().expect("clause word has a scrutinee input");
         let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
-        // R16: threaded from the already-checked frontend `Type` rather than
-        // re-derived from the lowered scrutinee's `IrType` — under R12 a
+        // Threaded from the already-checked frontend `Type` rather than
+        // re-derived from the lowered scrutinee's `IrType` — because a
         // `&!Enum` scrutinee lowers to the opaque `IrType::Ptr`, not
         // `IrType::Enum(id)`, so reading `self.value_type(scrutinee)` here
         // would make the enum arm below a reachable panic in reference mode.
@@ -2937,12 +2937,12 @@ impl<'a> FuncBuilder<'a> {
             self.locals.clear();
             self.stack = stack_below.clone();
             // Push the variant's payload first-deepest, loading each field from
-            // `payload_offset + field.offset`. R16: in reference mode every
+            // `payload_offset + field.offset`. In reference mode every
             // field is pushed as a reference to its own storage inside the
             // scrutinee (its address, never its value), registered in
             // `ref_inner` so a later access/projection through it resolves the
             // right shape — the same `IrType::Ptr` any other reference lowers
-            // to (R12).
+            // to.
             let fields = self.enums.layouts[scrut_id.index()].variants[vi]
                 .fields
                 .clone();
@@ -3177,7 +3177,7 @@ mod tests {
 
     #[test]
     fn lower_borrow_of_cell_local_gives_the_pointer_a_place() {
-        // R12: `&^`/`&!^` project by *loading* the cell pointer out of the
+        // `&^`/`&!^` project by *loading* the cell pointer out of the
         // place holding it, but a cell local's value already *is* that pointer
         // (an SSA temporary with no address), so borrowing one has to give it a
         // slot first. The load then reads that slot back.

@@ -245,7 +245,7 @@ pub struct Session {
     owned_cells: Vec<OwnedCellDecl>,
     /// The interned reference registry, mirroring `owned_cells`: grows as
     /// `&T`/`&!T` type expressions resolve, persisting across lines. A
-    /// reference can never *survive* a line (R8), but a word defined at the
+    /// reference can never *survive* a line, but a word defined at the
     /// REPL may take one as an input.
     refs: Vec<RefDecl>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte

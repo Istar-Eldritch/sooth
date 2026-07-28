@@ -508,7 +508,7 @@ impl Type {
 
     /// Whether a value of this type lives in memory rather than in an SSA
     /// temporary: the four shapes that have an address, and so the four that
-    /// can be borrowed (R11) or denoted by a second name (R21).
+    /// can be borrowed or denoted by a second name.
     pub fn is_aggregate(&self) -> bool {
         matches!(
             self,
