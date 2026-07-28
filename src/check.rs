@@ -53,6 +53,10 @@ struct Slot {
     /// Moved verbatim by a shuffle (a duped literal keeps its value), cleared
     /// by any operator/conversion/word call or branch merge (D8: no folding).
     int_val: Option<i64>,
+    /// R21: which region of memory an aggregate value denotes.
+    region: Option<RegionId>,
+    /// R6: the outstanding derivation a reference-typed value holds.
+    deriv: Option<DerivId>,
 }
 
 impl Slot {
@@ -63,6 +67,18 @@ impl Slot {
             ty,
             literal: false,
             int_val: None,
+            region: None,
+            deriv: None,
+        }
+    }
+
+    /// The same value, reached through a reference derived from `deriv`: a
+    /// projection's result (R3), which keeps its parent's provenance so the
+    /// place it traces back to stays findable however many steps away it is.
+    fn derived(ty: Type, deriv: Option<DerivId>) -> Slot {
+        Slot {
+            deriv,
+            ..Slot::computed(ty)
         }
     }
 }
@@ -223,6 +239,143 @@ pub fn contains_reference(
     }
 }
 
+/// R21: which region of memory an aggregate value denotes. Two slots carrying
+/// the same id are two names for one address, which is what makes a mutation
+/// through one silently observable through the other. `None` means "denotes a
+/// region nothing else names": every value is born that way, and an aggregate
+/// is given an id lazily, the first time something could alias it (a binding,
+/// or a non-consuming projection out of it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RegionId(u32);
+
+/// R6: one outstanding derivation from a place, interned in `Provenance` so a
+/// `Slot` can carry it by id and stay `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DerivId(u32);
+
+/// R6: what one live reference traces back to. Created by a fresh borrow
+/// (`&v`/`&!v`), by naming a reference local (a reborrow), and by every
+/// projection step, which copies its parent's chain rather than starting a new
+/// one — that is what lets a check ask "does anything still trace back to this
+/// place" without scanning for a particular value's identity.
+#[derive(Debug, Clone)]
+struct Deriv {
+    /// The place the reference was taken from: an owned aggregate local for a
+    /// fresh borrow, the reference local itself for a reborrow.
+    place: String,
+    /// The owned local at the bottom of the chain, if the chain starts at one.
+    /// A reborrow of a reference *parameter* has none: its referent lives in an
+    /// ancestor frame, so there is no place in this body to protect.
+    owned_root: Option<String>,
+    /// Whether `place` is a reference local this was reborrowed from, which is
+    /// what R3's suspend rule is keyed on. Cleared when the derivation is bound
+    /// into a local: the binding consumes the reborrow, which is why
+    /// `push-byte` may name `b` three times.
+    reborrow: bool,
+    mutable: bool,
+    /// Whether any projection step stands between the place and this
+    /// reference: R7's path-disjointness note is only apt when one does.
+    projected: bool,
+    /// Where the borrow was taken, so a conflict can name both ends.
+    span: Span,
+}
+
+/// The per-body provenance arenas: which place each live reference traces back
+/// to (R6) and which region each aggregate value denotes (R21). Threaded `&mut`
+/// through the walk rather than kept in `Scope`, which an `if` arm clones: ids
+/// stay unique across the arms, and a record outlives the arm that made it.
+#[derive(Debug, Default)]
+struct Provenance {
+    derivs: Vec<Deriv>,
+    regions: u32,
+    /// The interned region of one non-consuming projection out of a parent
+    /// region, so two peeks of the same field yield one id.
+    fields: HashMap<(u32, String), RegionId>,
+}
+
+impl Provenance {
+    fn fresh_region(&mut self) -> RegionId {
+        let id = RegionId(self.regions);
+        self.regions += 1;
+        id
+    }
+
+    /// R21: the region an interior value of `parent` denotes, interned per path
+    /// segment, so two non-consuming projections of the same field of the same
+    /// parent are recognised as two names for one address.
+    fn field_region(&mut self, parent: RegionId, segment: &str) -> RegionId {
+        let key = (parent.0, segment.to_string());
+        if let Some(id) = self.fields.get(&key) {
+            return *id;
+        }
+        let id = self.fresh_region();
+        self.fields.insert(key, id);
+        id
+    }
+
+    fn deriv(&self, id: DerivId) -> &Deriv {
+        &self.derivs[id.0 as usize]
+    }
+
+    fn add(&mut self, deriv: Deriv) -> DerivId {
+        let id = DerivId(self.derivs.len() as u32);
+        self.derivs.push(deriv);
+        id
+    }
+
+    /// R2: a fresh borrow of an owned aggregate place.
+    fn borrow(&mut self, place: &str, mutable: bool, span: Span) -> DerivId {
+        self.add(Deriv {
+            place: place.to_string(),
+            owned_root: Some(place.to_string()),
+            reborrow: false,
+            mutable,
+            projected: false,
+            span,
+        })
+    }
+
+    /// R5: naming a reference local reborrows it — a new chain rooted at that
+    /// local, keeping whatever owned place the old chain had already reached.
+    fn reborrow(
+        &mut self,
+        place: &str,
+        held: Option<DerivId>,
+        mutable: bool,
+        span: Span,
+    ) -> DerivId {
+        let owned_root = held.and_then(|id| self.deriv(id).owned_root.clone());
+        self.add(Deriv {
+            place: place.to_string(),
+            owned_root,
+            reborrow: true,
+            mutable,
+            projected: false,
+            span,
+        })
+    }
+
+    /// R3: one projection step — the same place, one step further from it.
+    fn project(&mut self, parent: Option<DerivId>) -> Option<DerivId> {
+        let deriv = Deriv {
+            projected: true,
+            ..self.deriv(parent?).clone()
+        };
+        Some(self.add(deriv))
+    }
+
+    /// R3: binding a reference into a local consumes the reborrow it came from,
+    /// so the place it was reborrowed from is suspended no longer. The owned
+    /// root survives: the local still keeps its referent borrowed (R6).
+    fn bind(&mut self, held: Option<DerivId>) -> Option<DerivId> {
+        let deriv = Deriv {
+            reborrow: false,
+            ..self.deriv(held?).clone()
+        };
+        Some(self.add(deriv))
+    }
+}
+
 /// R14: the move-state of one linear local, a three-value lattice. `Moved` and
 /// `MaybeMoved` carry the site that consumed the value, so a later use can name
 /// it; `MaybeMoved` is the join of disagreeing arms (consumed on one path only),
@@ -312,8 +465,19 @@ impl Moves {
 /// names in scope changes as terms are visited.
 #[derive(Debug, Clone, Default)]
 struct Scope {
-    bound: Vec<(String, Type)>,
+    bound: Vec<Binding>,
     moves: Moves,
+}
+
+/// One name in scope, with the provenance a borrow check reads off it: which
+/// region an aggregate binding denotes (R21) and which derivation a reference
+/// binding holds (R6).
+#[derive(Debug, Clone)]
+struct Binding {
+    name: String,
+    ty: Type,
+    region: Option<RegionId>,
+    deriv: Option<DerivId>,
 }
 
 impl Scope {
@@ -321,20 +485,33 @@ impl Scope {
         self.bound.len()
     }
 
+    fn local(&self, name: &str) -> Option<&Binding> {
+        self.bound.iter().find(|b| b.name == name)
+    }
+
     fn local_type(&self, name: &str) -> Option<Type> {
-        self.bound
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, ty)| *ty)
+        self.local(name).map(|b| b.ty)
     }
 
     /// Bring `name` into scope. A linear value also enters the move-state map,
-    /// so forgetting it is caught at the end of its block (R6).
-    fn bind(&mut self, name: &str, ty: Type, linear: bool) {
+    /// so forgetting it is caught at the end of its block (R6). An aggregate
+    /// with no region of its own gets one here: a binding is the first point at
+    /// which a second name could denote the same address (R21).
+    fn bind(&mut self, name: &str, slot: Slot, linear: bool, prov: &mut Provenance) {
         if linear {
             self.moves.states.insert(name.to_string(), MoveState::Live);
         }
-        self.bound.push((name.to_string(), ty));
+        let region = match (slot.region, slot.ty.is_aggregate()) {
+            (Some(id), _) => Some(id),
+            (None, true) => Some(prov.fresh_region()),
+            (None, false) => None,
+        };
+        self.bound.push(Binding {
+            name: name.to_string(),
+            ty: slot.ty,
+            region,
+            deriv: prov.bind(slot.deriv),
+        });
     }
 
     /// Take every name bound past `depth` out of scope, returning the first one
@@ -342,15 +519,86 @@ impl Scope {
     /// holding a linear value.
     fn leave(&mut self, depth: usize) -> Option<(String, Type, MoveState)> {
         let mut leaked: Vec<(String, Type, MoveState)> = Vec::new();
-        for (name, ty) in self.bound.split_off(depth) {
-            match self.moves.states.remove(&name) {
+        for binding in self.bound.split_off(depth) {
+            match self.moves.states.remove(&binding.name) {
                 Some(MoveState::Moved(_)) | None => {}
-                Some(state) => leaked.push((name, ty, state)),
+                Some(state) => leaked.push((binding.name, binding.ty, state)),
             }
         }
         leaked.sort_by(|a, b| a.0.cmp(&b.0));
         leaked.into_iter().next()
     }
+}
+
+/// R6: every derivation still live — held by a slot on the virtual stack, or by
+/// a reference-typed local still in scope. A reference is live from the term
+/// that creates it until the term that consumes its slot; a reference *local*
+/// is live for the whole block (R8).
+fn live_derivs<'a>(stack: &'a [Slot], scope: &'a Scope) -> impl Iterator<Item = DerivId> + 'a {
+    stack
+        .iter()
+        .filter_map(|slot| slot.deriv)
+        .chain(scope.bound.iter().filter_map(|b| b.deriv))
+}
+
+/// R6: the first live derivation satisfying `pred`. The scan is over
+/// provenance, never over value identity: a reference two projection steps
+/// removed from a place is still a derivation of that place.
+fn live_deriv(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    mut pred: impl FnMut(&Deriv) -> bool,
+) -> Option<DerivId> {
+    live_derivs(stack, scope).find(|id| pred(prov.deriv(*id)))
+}
+
+/// R6: a live borrow rooted at the owned place `place`, whatever its
+/// mutability and however many projection steps away.
+fn live_borrow_of(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    place: &str,
+) -> Option<DerivId> {
+    live_deriv(stack, scope, prov, |d| {
+        d.owned_root.as_deref() == Some(place)
+    })
+}
+
+/// R21: the region a non-consuming projection out of `parent` denotes, for an
+/// aggregate interior value (a scalar one is loaded into a temporary and denotes
+/// no region). The parent is given a region of its own if it has none: it is
+/// only here, where a second name for its interior can appear, that the
+/// identity starts to matter.
+fn peek_region(
+    parent: &mut Slot,
+    interior: Type,
+    segment: &str,
+    prov: &mut Provenance,
+) -> Option<RegionId> {
+    if !interior.is_aggregate() {
+        return None;
+    }
+    let base = *parent.region.get_or_insert_with(|| prov.fresh_region());
+    Some(prov.field_region(base, segment))
+}
+
+/// R21: another live name denoting the same region as the local `place`,
+/// name-sorted so a place aliased twice always reports the same one. A consumed
+/// local is not a name for anything, so it never aliases.
+fn aliasing_name<'a>(scope: &'a Scope, place: &str) -> Option<&'a str> {
+    let region = scope.local(place)?.region?;
+    let mut names: Vec<&str> = scope
+        .bound
+        .iter()
+        .filter(|b| {
+            b.name != place && b.region == Some(region) && scope.moves.moved_site(&b.name).is_none()
+        })
+        .map(|b| b.name.as_str())
+        .collect();
+    names.sort_unstable();
+    names.into_iter().next()
 }
 
 /// Where a block's extent ended, for the scope-end linearity diagnostic (R6):
@@ -918,8 +1166,9 @@ pub fn infer_line(
     // position.
     let ctx = Ctx::Line { structs, enums };
     let mut scope = Scope::default();
+    let mut prov = Provenance::default();
     let final_stack = check_terms(
-        terms, initial, &ctx, env, arrays, cells, refs, &mut scope, false,
+        terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, false,
     )?;
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
@@ -1342,8 +1591,9 @@ fn check_terms_word(
 
     let ctx = word_ctx(word, structs, enums);
     let mut scope = Scope::default();
+    let mut prov = Provenance::default();
     let final_stack = check_terms(
-        terms, initial, &ctx, env, arrays, cells, refs, &mut scope, true,
+        terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, true,
     )?;
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
@@ -1491,8 +1741,10 @@ fn check_clause_body(
     }
     let split = initial.len() - n;
     let mut scope = Scope::default();
+    let mut prov = Provenance::default();
     for (name, ty) in clause.locals.iter().zip(&initial[split..]) {
-        scope.bind(name, *ty, is_linear(*ty, structs, enums, arrays));
+        let linear = is_linear(*ty, structs, enums, arrays);
+        scope.bind(name, Slot::computed(*ty), linear, &mut prov);
     }
     let stack_after_bind: Vec<Slot> = initial[..split]
         .iter()
@@ -1507,6 +1759,7 @@ fn check_clause_body(
         arrays,
         cells,
         refs,
+        &mut prov,
         &mut scope,
         true,
     )?;
@@ -1929,6 +2182,7 @@ fn check_terms(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
@@ -1942,6 +2196,7 @@ fn check_terms(
             arrays,
             cells,
             refs,
+            prov,
             scope,
             tail && i == last,
         )?;
@@ -1958,6 +2213,7 @@ fn check_term(
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
     scope: &mut Scope,
     tail: bool,
 ) -> Result<Vec<Slot>, String> {
@@ -1971,6 +2227,8 @@ fn check_term(
                 ty: Type::I64,
                 literal: true,
                 int_val: Some(*n),
+                region: None,
+                deriv: None,
             });
             Ok(stack)
         }
@@ -2002,23 +2260,64 @@ fn check_term(
             let bound = stack.split_off(stack.len() - names.len());
             for (name, slot) in names.iter().zip(bound) {
                 let linear = is_linear(slot.ty, ctx.structs(), ctx.enums(), arrays);
-                scope.bind(name, slot.ty, linear);
+                scope.bind(name, slot, linear, prov);
             }
             Ok(stack)
         }
         TermKind::Call(name) => {
-            if let Some(ty) = scope.local_type(name) {
-                // R3 (D2): mentioning a linear local moves its value out; a
-                // second mention names the site that already consumed it.
-                if let Err(site) = scope.moves.take(name, span) {
-                    return Err(use_after_move_error(ctx, span, name, ty, site));
+            if let Some(binding) = scope.local(name) {
+                let (ty, region, held) = (binding.ty, binding.region, binding.deriv);
+                match ref_parts(ty, refs) {
+                    // R5: naming a reference local is a reborrow, not a move.
+                    // A mutable one suspends its place: a second reborrow while
+                    // anything derived from the first is still live would be two
+                    // live mutable references into one place.
+                    Some((_, mutable)) => {
+                        if mutable {
+                            if let Some(id) =
+                                live_deriv(&stack, scope, prov, |d| d.reborrow && d.place == *name)
+                            {
+                                return Err(suspended_place_error(ctx, span, name, prov.deriv(id)));
+                            }
+                        }
+                        let deriv = prov.reborrow(name, held, mutable, span);
+                        stack.push(Slot::derived(ty, Some(deriv)));
+                    }
+                    None => {
+                        // R6: consuming a place while a reference derived from
+                        // it is live would leave that reference aimed at storage
+                        // its owner has given away. Only a linear local is
+                        // consumed by being named; a Copy one is merely read.
+                        if is_linear(ty, ctx.structs(), ctx.enums(), arrays) {
+                            if let Some(id) = live_borrow_of(&stack, scope, prov, name) {
+                                return Err(consume_of_borrowed_place_error(
+                                    ctx,
+                                    span,
+                                    name,
+                                    ty,
+                                    prov.deriv(id),
+                                ));
+                            }
+                        }
+                        // R3 (D2): mentioning a linear local moves its value
+                        // out; a second mention names the site that already
+                        // consumed it.
+                        if let Err(site) = scope.moves.take(name, span) {
+                            return Err(use_after_move_error(ctx, span, name, ty, site));
+                        }
+                        // R21: naming an aggregate does not copy it, so the
+                        // pushed value denotes the local's own region.
+                        stack.push(Slot {
+                            region,
+                            ..Slot::computed(ty)
+                        });
+                    }
                 }
-                stack.push(Slot::computed(ty));
                 return Ok(stack);
             }
-            if let Some(stack) =
-                check_reference_word(name, span, &mut stack, ctx, scope, arrays, cells, refs)?
-            {
+            if let Some(stack) = check_reference_word(
+                name, span, &mut stack, ctx, scope, arrays, cells, refs, prov,
+            )? {
                 return Ok(stack);
             }
             if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
@@ -2030,14 +2329,15 @@ fn check_term(
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
+            if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_owned_cell_word(name, span, &mut stack, ctx, arrays, cells)?
             {
                 return Ok(stack);
             }
-            if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays)? {
+            if let Some(stack) = check_struct_peek_word(name, span, &mut stack, ctx, arrays, prov)?
+            {
                 return Ok(stack);
             }
             let sig = env
@@ -2094,6 +2394,7 @@ fn check_term(
                 arrays,
                 cells,
                 refs,
+                prov,
                 &mut then_scope,
                 tail,
             )?;
@@ -2118,6 +2419,7 @@ fn check_term(
                 arrays,
                 cells,
                 refs,
+                prov,
                 &mut else_scope,
                 tail,
             )?;
@@ -2155,6 +2457,13 @@ fn check_term(
                     // A value merged from two branches is never a single
                     // known literal, so it can't feed a compile-time count.
                     int_val: None,
+                    // Two arms can leave values denoting two different regions,
+                    // so the merge denotes neither of them in particular.
+                    region: None,
+                    // A reference crossing the join keeps a derivation, so its
+                    // place stays borrowed past the `end`; whether the two arms
+                    // agree on *which* place is R10's rule, not this one's.
+                    deriv: t_then.deriv.or(t_else.deriv),
                 });
             }
             Ok(merged)
@@ -2589,6 +2898,83 @@ fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Ty
     )
 }
 
+/// R5: exclusivity, in whichever of its two symmetric directions was
+/// violated — a new mutable borrow conflicts with any live borrow of the place,
+/// a new shared one with a live mutable borrow. R7: when the live borrow is a
+/// projection, the note says outright that path disjointness is not modeled,
+/// since the two references may well be aimed at different fields.
+fn conflicting_borrow_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    new_mutable: bool,
+    live: &Deriv,
+) -> String {
+    let sigil = if new_mutable { "&!" } else { "&" };
+    let held = if live.mutable { "mutable" } else { "shared" };
+    let note = if live.projected {
+        "\n  note: path disjointness is not modeled: a reference projected into one field borrows the whole place"
+    } else {
+        ""
+    };
+    format!(
+        "error: `{sigil}{place}` conflicts with a live borrow of `{place}`{} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first{note}",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
+    )
+}
+
+/// R3/R5: naming a `&!` local reborrows it, and a reborrow may not be taken
+/// while anything derived from the previous one is still live — the two would be
+/// two simultaneous mutable references into the same place.
+fn suspended_place_error(ctx: &Ctx, span: Span, place: &str, live: &Deriv) -> String {
+    format!(
+        "error: cannot reborrow `{place}`{} while a reference derived from it is live (line {}, col {})\n  the derivation taken at line {}, col {} is still live\n  a mutable borrow suspends its place until every reference derived from it is consumed",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
+    )
+}
+
+/// R6: consuming a place — moving it into a word, or disposing of it — while a
+/// reference derived from it is still live. The reference would be left aimed at
+/// storage its owner has given away.
+fn consume_of_borrowed_place_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    ty: Type,
+    live: &Deriv,
+) -> String {
+    let held = if live.mutable { "mutable" } else { "shared" };
+    format!(
+        "error: cannot consume the borrowed local `{place}` of type `{ty}`{} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
+    )
+}
+
+/// R21: a mutable borrow of a place a second live name denotes. Naming an
+/// aggregate does not copy it, so two locals can denote one region; mutating
+/// through one would then be silently observable through the other, which is
+/// exactly the class of silent failure the language exists to reject.
+fn aliased_place_borrow_error(ctx: &Ctx, span: Span, place: &str, alias: &str) -> String {
+    format!(
+        "error: cannot borrow `{place}` mutably{}: it is aliased by `{alias}` (line {}, col {})\n  both names denote one region of memory, so a mutation through `{place}` would be silently visible through `{alias}`\n  use `dup` for an independent copy",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 /// R8's two construction sites: `fill`'s element and `^`'s payload accept
 /// whatever type is on the stack, with no declaration anywhere for
 /// `check_no_stored_references` to have caught.
@@ -2618,6 +3004,7 @@ fn check_reference_word(
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
     refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
@@ -2658,8 +3045,9 @@ fn check_reference_word(
             let (count, elem) = (arrays[id.index()].count, arrays[id.index()].element);
             check_array_index(index, count, ctx, span, name)?;
             let out = intern_ref_type(refs, elem, mutable);
+            let deriv = prov.project(stack[n - 2].deriv);
             stack.truncate(n - 2);
-            stack.push(Slot::computed(out));
+            stack.push(Slot::derived(out, deriv));
         }
         "^" => {
             let n = stack.len();
@@ -2690,8 +3078,9 @@ fn check_reference_word(
             }
             let payload = cells[cell_id.index()].payload;
             let out = intern_ref_type(refs, payload, mutable);
+            let deriv = prov.project(stack[n - 1].deriv);
             stack.truncate(n - 1);
-            stack.push(Slot::computed(out));
+            stack.push(Slot::derived(out, deriv));
         }
         _ => {
             if let Some((struct_name, field_name)) = rest.split_once('>') {
@@ -2719,8 +3108,9 @@ fn check_reference_word(
                             ));
                         }
                         let out = intern_ref_type(refs, field_ty, mutable);
+                        let deriv = prov.project(stack[n - 1].deriv);
                         stack.truncate(n - 1);
-                        stack.push(Slot::computed(out));
+                        stack.push(Slot::derived(out, deriv));
                         return Ok(Some(std::mem::take(stack)));
                     }
                 }
@@ -2759,8 +3149,33 @@ fn check_reference_word(
             if let Some(site) = scope.moves.moved_site(rest) {
                 return Err(use_after_move_error(ctx, span, rest, local_ty, site));
             }
+            // R5: exclusivity, symmetric. A new mutable borrow conflicts with
+            // any live borrow of the place; a new shared one conflicts with a
+            // live mutable borrow. Per place, never a global counter: two live
+            // `&!` rooted at different locals do not conflict.
+            if let Some(id) = live_deriv(stack, scope, prov, |d| {
+                d.owned_root.as_deref() == Some(rest) && (mutable || d.mutable)
+            }) {
+                return Err(conflicting_borrow_error(
+                    ctx,
+                    span,
+                    rest,
+                    mutable,
+                    prov.deriv(id),
+                ));
+            }
+            // R21: a second live name for one region makes a mutation through
+            // this borrow silently observable through that name. Checked at the
+            // borrow, not at the naming: two names for a value nothing mutates
+            // read identically, so naming stays free.
+            if mutable {
+                if let Some(alias) = aliasing_name(scope, rest) {
+                    return Err(aliased_place_borrow_error(ctx, span, rest, alias));
+                }
+            }
             let out = intern_ref_type(refs, local_ty, mutable);
-            stack.push(Slot::computed(out));
+            let deriv = prov.borrow(rest, mutable, span);
+            stack.push(Slot::derived(out, Some(deriv)));
         }
     }
     Ok(Some(std::mem::take(stack)))
@@ -2865,6 +3280,7 @@ fn check_array_word(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    prov: &mut Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -2923,8 +3339,16 @@ fn check_array_word(
             let elem = arrays[id.index()].element;
             check_array_index(index, count, ctx, span, "get")?;
             // Non-consuming (R12): drop the index, leave the array, push T.
+            // R21: for an aggregate element the pushed value *is* the element,
+            // so two `get`s of one array denote one region. Which element is
+            // not modelled (R7 does not model path disjointness either), so
+            // every element of one array shares one region here.
+            let region = peek_region(&mut stack[n - 2], elem, "[]", prov);
             stack.truncate(n - 1);
-            stack.push(Slot::computed(elem));
+            stack.push(Slot {
+                region,
+                ..Slot::computed(elem)
+            });
         }
         "set" => {
             let n = stack.len();
@@ -3047,6 +3471,7 @@ fn check_struct_peek_word(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    prov: &mut Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     let Some((struct_name, field_name)) = name.split_once("|>") else {
         return Ok(None);
@@ -3072,7 +3497,13 @@ fn check_struct_peek_word(
     if top.ty != struct_ty {
         return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
     }
-    stack.push(Slot::computed(field_ty));
+    // R21: the peek is non-consuming and pushes the field's *interior address*,
+    // so two peeks of one field of one struct are two names for one region.
+    let region = peek_region(&mut stack[n - 1], field_ty, field_name, prov);
+    stack.push(Slot {
+        region,
+        ..Slot::computed(field_ty)
+    });
     Ok(Some(std::mem::take(stack)))
 }
 
@@ -3097,7 +3528,14 @@ fn check_shuffle(
             if !is_copy(top.ty, ctx.structs(), ctx.enums(), arrays) {
                 return Err(cannot_copy_linear_error(ctx, span, "dup", top.ty));
             }
-            stack.push(top);
+            // R21: `dup` of an aggregate deep-copies it (`Alloc`+`Blit`), so the
+            // copy denotes a region of its own — this is the whole remedy for an
+            // aliased place. `over` below reuses the value instead, and so
+            // deliberately keeps the region it copies.
+            stack.push(Slot {
+                region: None,
+                ..top
+            });
         }
         "drop" => {
             if stack.is_empty() {
@@ -3220,14 +3658,15 @@ mod tests {
         // `bound` truncation `leave` performs as a side effect, so the extent
         // rule is covered end to end by the goldens rather than here.
         let mut scope = Scope::default();
-        scope.bind("a", Type::I64, false);
+        let prov = &mut Provenance::default();
+        scope.bind("a", Slot::computed(Type::I64), false, prov);
         let depth = scope.depth();
-        scope.bind("b", Type::I64, false);
+        scope.bind("b", Slot::computed(Type::I64), false, prov);
         assert!(scope.leave(depth).is_none(), "a Copy local leaves cleanly");
 
         // R6: a linear name leaving scope with its value still held is what the
         // block-end firing site reports.
-        scope.bind("s", Type::Spy, true);
+        scope.bind("s", Slot::computed(Type::Spy), true, prov);
         let leaked = scope.leave(depth).expect("an unconsumed linear local");
         assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Spy));
         assert_eq!(leaked.2, MoveState::Live);
@@ -5009,6 +5448,44 @@ type: Boxed | Some h Holds | None ;\n")
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn provenance_interns_one_region_per_parent_and_segment() {
+        // R21's peek route rests on this: two non-consuming projections of one
+        // field of one parent must be recognised as one region, or the aliasing
+        // they create is invisible.
+        let mut prov = Provenance::default();
+        let s = prov.fresh_region();
+        let other = prov.fresh_region();
+        assert_ne!(s, other);
+        assert_eq!(prov.field_region(s, "a"), prov.field_region(s, "a"));
+        assert_ne!(prov.field_region(s, "a"), prov.field_region(s, "b"));
+        assert_ne!(prov.field_region(s, "a"), prov.field_region(other, "a"));
+    }
+
+    #[test]
+    fn provenance_bind_consumes_the_reborrow_and_keeps_the_owned_root() {
+        // The asymmetry that makes `push-byte` legal while criterion 8 still
+        // fires: binding a projected reference into a local releases the place
+        // it was reborrowed from, but not the owned local it ultimately borrows.
+        let mut prov = Provenance::default();
+        let span = Span { line: 1, col: 1 };
+        let fresh = prov.borrow("v", true, span);
+        let held = prov.bind(Some(fresh)).expect("a bound derivation");
+        let reborrow = prov.reborrow("r", Some(held), true, span);
+        let projected = prov.project(Some(reborrow)).expect("a projection");
+        assert!(prov.deriv(projected).reborrow, "still suspends `r`");
+        assert!(prov.deriv(projected).projected, "R7's note is apt here");
+        assert_eq!(prov.deriv(projected).owned_root.as_deref(), Some("v"));
+
+        let rebound = prov.bind(Some(projected)).expect("a bound derivation");
+        assert!(!prov.deriv(rebound).reborrow, "`r` is suspended no longer");
+        assert_eq!(
+            prov.deriv(rebound).owned_root.as_deref(),
+            Some("v"),
+            "`v` is still borrowed by the local"
+        );
     }
 
     #[test]

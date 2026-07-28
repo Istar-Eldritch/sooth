@@ -512,6 +512,16 @@ impl Type {
         matches!(self, Type::Ref(..))
     }
 
+    /// Whether a value of this type lives in memory rather than in an SSA
+    /// temporary: the four shapes that have an address, and so the four that
+    /// can be borrowed (R11) or denoted by a second name (R21).
+    pub fn is_aggregate(&self) -> bool {
+        matches!(
+            self,
+            Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
+        )
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Type::Bool => "bool",

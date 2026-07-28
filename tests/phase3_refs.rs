@@ -564,3 +564,285 @@ fn reference_local_expires_without_drop() {
     assert_eq!(stdout, "1\n");
     assert_eq!(code, 0);
 }
+
+// --- criterion 7: exclusivity, in both symmetric directions
+
+#[test]
+fn two_live_mutable_borrows_is_error() {
+    let err =
+        check_error("type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &!v &!v drop drop ;\n");
+    assert!(
+        err.contains("`&!v` conflicts with a live borrow of `v`"),
+        "expected the exclusivity rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 4, col 3 is still live"),
+        "the error should name the borrow it conflicts with: {err}"
+    );
+    assert!(
+        err.contains("line 4, col 7"),
+        "the error should locate it: {err}"
+    );
+    assert!(
+        !err.contains("path disjointness"),
+        "R7's note belongs only to a conflict with a *projected* borrow: {err}"
+    );
+}
+
+#[test]
+fn shared_borrow_while_mutable_live_is_error() {
+    let err =
+        check_error("type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &!v &v drop drop ;\n");
+    assert!(
+        err.contains("`&v` conflicts with a live borrow of `v`")
+            && err.contains("the mutable borrow taken at"),
+        "expected the shared-while-mutable rejection: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_while_shared_live_is_error() {
+    // The direction that is easy to omit: "no `&` while a `&!` is live" has no
+    // converse of its own, so this one needs stating outright.
+    let err =
+        check_error("type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &v &!v drop drop ;\n");
+    assert!(
+        err.contains("`&!v` conflicts with a live borrow of `v`")
+            && err.contains("the shared borrow taken at"),
+        "expected the mutable-while-shared rejection: {err}"
+    );
+}
+
+#[test]
+fn reborrow_while_projected_reference_still_live_is_error() {
+    // Both reborrows are individually consumed by their own projection, so a
+    // scan for the reborrow's own value would find nothing: the rule is stated
+    // over the place, and the derived `&!usize` two steps removed still holds
+    // `b` suspended.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : two-live ( &!Buf -- )\n  | b |\n  b &!Buf>len\n  b &!Buf>len\n  1 +! 1 +! ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+    assert!(
+        err.contains("the derivation taken at line 4"),
+        "the error should name the live derivation: {err}"
+    );
+    assert!(err.contains("line 5"), "the error should locate it: {err}");
+}
+
+#[test]
+fn two_live_mutable_borrows_to_different_places_is_accepted() {
+    // Per place, never a single global counter: `copy-byte` holds a `&!Buf` and
+    // a `&Buf` at once, rooted at two different locals.
+    let (stdout, code) = run_src(
+        "two-places-accepted",
+        &format!(
+            "{BUFFER_DOGFOOD}\n\
+             : main ( -- )\n\
+             \x20 new new | a b |\n\
+             \x20 &!a 72 >u8 push-byte\n\
+             \x20 &!b 90 >u8 push-byte\n\
+             \x20 &!a &b 0 copy-byte\n\
+             \x20 &a 0 byte-at .\n\
+             \x20 &a 1 byte-at .\n\
+             \x20 a drop b drop ;\n"
+        ),
+    );
+    assert_eq!(stdout, "72\n90\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn shared_reference_is_copy() {
+    // Two live `&V` to one place: shared references carry no exclusivity, so
+    // there is nothing for a suspend to protect.
+    let (stdout, code) = run_src(
+        "shared-reference-is-copy",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  7 8 V | v |\n  &v &v\n  &V>x @ .\n  &V>y @ . ;\n",
+    );
+    assert_eq!(stdout, "7\n8\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn naming_mutable_reference_local_reborrows() {
+    // Naming a `&!` local is a reborrow, not a move: without that a mutable
+    // helper would kill its own parameter on first use.
+    let (stdout, code) = run_src(
+        "reborrow-accepted",
+        "type: Counter n i64 ;\n\
+         : bump-twice ( &!Counter -- )\n  | c |\n  \
+         c &!Counter>n 1 +!\n  c &!Counter>n 1 +! ;\n\
+         : main ( -- )\n  0 Counter | k |\n  &!k bump-twice\n  &k &Counter>n @ . ;\n",
+    );
+    assert_eq!(stdout, "2\n");
+    assert_eq!(code, 0);
+}
+
+// --- criterion 8: a place stays borrowed until its borrows are consumed
+
+/// A linear place and a word that consumes one: a Copy local is never consumed
+/// by being named, so only a linear one can reach the consumption check.
+const BOX_PRELUDE: &str = "\
+type: Box c ^i64 ;
+
+: sink ( Box -- ) Box> ^> drop ;
+";
+
+#[test]
+fn move_of_place_borrowed_on_stack_is_error() {
+    let err = check_error(&format!(
+        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &b b sink\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("cannot consume the borrowed local `b` of type `Box`"),
+        "expected the consume-while-borrowed rejection: {err}"
+    );
+    assert!(
+        err.contains("the shared borrow taken at line 7, col 3 is still live"),
+        "the error should name both the place and the borrow: {err}"
+    );
+}
+
+#[test]
+fn move_of_place_borrowed_in_locals_is_error() {
+    // The conflicting borrow sits in the locals map rather than on the virtual
+    // stack: a reference local is live for the whole block.
+    let err = check_error(&format!(
+        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &b | r |\n  b sink ;\n"
+    ));
+    assert!(
+        err.contains("cannot consume the borrowed local `b` of type `Box`")
+            && err.contains("still live"),
+        "a borrow held in a local must count as live: {err}"
+    );
+    assert!(err.contains("line 8"), "the error should locate it: {err}");
+}
+
+#[test]
+fn dispose_of_borrowed_place_is_error() {
+    let err = check_error(&format!(
+        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &!b | r |\n  b drop ;\n"
+    ));
+    assert!(
+        err.contains("cannot consume the borrowed local `b` of type `Box`")
+            && err.contains("the mutable borrow taken at"),
+        "disposing a borrowed place is a consumption like any other: {err}"
+    );
+}
+
+#[test]
+fn move_after_borrow_ends_is_accepted() {
+    let (stdout, code) = run_src(
+        "move-after-borrow-ends",
+        &format!(
+            "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  \
+             &b &Box>c &^ @ .\n  b Box> ^> . ;\n"
+        ),
+    );
+    assert_eq!(stdout, "7\n7\n");
+    assert_eq!(code, 0);
+}
+
+// --- criterion 9: path disjointness is not modeled
+
+#[test]
+fn disjoint_field_borrows_are_conservatively_rejected() {
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x\n  &!v &!V>y\n  1 +! 1 +! ;\n",
+    );
+    assert!(
+        err.contains("`&!v` conflicts with a live borrow of `v`"),
+        "expected the disjointness rejection: {err}"
+    );
+    assert!(
+        err.contains("path disjointness is not modeled"),
+        "the stated limitation should say so outright: {err}"
+    );
+    assert!(err.contains("line 5"), "the error should locate it: {err}");
+}
+
+#[test]
+fn sequenced_borrows_of_two_fields_are_accepted() {
+    let (stdout, code) = run_src(
+        "sequenced-field-borrows",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x 10 +!\n  &!v &!V>y 20 +!\n  \
+         &v &V>x @ .\n  &v &V>y @ . ;\n",
+    );
+    assert_eq!(stdout, "11\n22\n");
+    assert_eq!(code, 0);
+}
+
+// --- criterion 17: two live names for one aggregate place
+
+#[test]
+fn mutable_borrow_of_name_aliased_place_is_error() {
+    // Naming an aggregate does not copy it: `p` and `q` are two names for one
+    // frame slot, so a mutation through `p` would be visible through `q`.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  &!p &!V>x 1 +!\n  q V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `q`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+    assert!(
+        err.contains("use `dup` for an independent copy"),
+        "the error should point at the remedy: {err}"
+    );
+    assert!(err.contains("line 5"), "the error should locate it: {err}");
+}
+
+#[test]
+fn mutable_borrow_of_peek_aliased_place_is_error() {
+    // The second route: a non-consuming peek pushes the field's interior
+    // address, so two peeks of one field alias with no naming involved.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         type: S a V b i64 ;\n\
+         : main ( -- )\n  1 2 V 3 S\n  S|>a swap S|>a swap drop\n  | p q |\n  \
+         &!p &!V>x 1 +!\n  q V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `q`"),
+        "a peek-aliased place must be rejected too: {err}"
+    );
+}
+
+#[test]
+fn dup_makes_aliased_names_independent() {
+    // `dup` is the whole remedy, and not a new concept: it is the language's
+    // existing explicit copy, applied to a case that currently slips past.
+    let (stdout, code) = run_src(
+        "dup-makes-independent",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V dup | p q |\n  &!p &!V>x 40 +!\n  p V> . .\n  q V> . . ;\n",
+    );
+    assert_eq!(
+        stdout, "2\n41\n2\n1\n",
+        "the duped copy must be independent of the mutated original"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn repeated_naming_without_mutable_borrow_is_accepted() {
+    // The rule fires at the borrow, not at the naming: two names for a value
+    // nothing mutates read identically, which is why `examples/vm.sth` (which
+    // names `vm` 38 times and never takes a `&!`) is untouched by this slice.
+    let (stdout, code) = run_src(
+        "repeated-naming-accepted",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  p V> . .\n  q V> . . ;\n",
+    );
+    assert_eq!(stdout, "2\n1\n2\n1\n");
+    assert_eq!(code, 0);
+}
