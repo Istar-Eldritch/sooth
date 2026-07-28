@@ -2980,8 +2980,8 @@ fn check_operator(
     Ok(Some(std::mem::take(stack)))
 }
 
-/// An array word (`fill`/`get`/`set`/`len`) applied to a non-array operand:
-/// names the array word and the offending operand type (X8).
+/// An array word (`fill`/`len`) applied to a non-array operand: names the
+/// array word and the offending operand type (X8).
 fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
@@ -3633,7 +3633,7 @@ fn check_access_word(
     Ok(Some(std::mem::take(stack)))
 }
 
-/// Apply an array word (`fill`/`get`/`set`/`len`) if `name` is one, returning
+/// Apply an array word (`fill`/`len`) if `name` is one, returning
 /// `Some(stack)`; `None` if the name is not an array word (the caller then
 /// looks it up in the env). These are generic over the array shape, so
 /// (like the shuffles and numeric operators) they dispatch on the concrete
@@ -3642,11 +3642,10 @@ fn check_access_word(
 /// - `fill ( T -- [T N] )`: the top slot is the compile-time count `N` (a
 ///   literal, M1), the slot below is the element `T`; interns the `(T, N)`
 ///   shape (R3) and pushes it.
-/// - `get ( [T N] usize -- T )`: **non-consuming** (R12/M4) — the array stays
-///   on the stack; a constant index is bounds-checked (X4).
-/// - `set ( [T N] usize T -- [T N] )`: a functional write; the value must
-///   match the element type.
 /// - `len ( [T N] -- usize )`: **non-consuming**, folds to the constant `N`.
+///
+/// Element access is a reference word (`&>`/`&!>` then `@`/`!`), not an
+/// array word: it goes through `check_access_word` instead.
 fn check_array_word(
     name: &str,
     span: Span,
@@ -3778,8 +3777,8 @@ fn check_owned_cell_word(
 }
 
 /// `S|>fi` (R10): a new non-consuming `( S -- S field )` peek, keyed by the
-/// per-struct-per-field name (unlike `fill`/`get`/`set`, it is not generic
-/// over a shape, so it is not a fixed entry in `struct_generated_sigs`
+/// per-struct-per-field name (unlike `fill`, it is not generic over a
+/// shape, so it is not a fixed entry in `struct_generated_sigs`
 /// either: it is looked up by parsing the `Struct|>field` name against the
 /// struct registry, same as the IR's `structs.words` map). `None` if `name`
 /// doesn't split on `|>` or doesn't resolve to a known struct+field (the
@@ -4371,13 +4370,38 @@ mod tests {
     }
 
     #[test]
+    fn check_len_on_non_array_is_error() {
+        // X8: `len` on a non-array operand names the word and the operand
+        // type via `array_word_operand_error`.
+        let err = check_src(": w ( i64 -- usize ) len ;").unwrap_err();
+        assert!(
+            err.contains("`len` requires an array operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("i64"), "should name the offending type: {err}");
+    }
+
+    #[test]
     fn check_constant_index_out_of_range_is_error() {
         // X4/R11: a literal index >= N is a sharp located compile error naming
-        // the length and the index.
+        // the length and the index. Index (9) and length (4) are deliberately
+        // distinct so a swapped-arg diagnostic bug can't hide behind a
+        // same-valued assertion.
         let err = check_src(": w ( [i64 4] -- ) | a | &a 9 &> drop ;").unwrap_err();
         assert!(err.contains("out of range"), "unexpected message: {err}");
-        assert!(err.contains("9"), "should name the index: {err}");
-        assert!(err.contains("4"), "should name the length: {err}");
+        assert!(err.contains('9'), "should name the index: {err}");
+        assert!(err.contains('4'), "should name the length: {err}");
+    }
+
+    #[test]
+    fn check_constant_index_at_length_boundary_is_error() {
+        // Index == length is the first invalid index (valid range is
+        // 0..length-1); this off-by-one boundary is distinct from the
+        // gross-violation case above and must be rejected too.
+        let err = check_src(": w ( [i64 4] -- ) | a | &a 4 &> drop ;").unwrap_err();
+        assert!(err.contains("out of range"), "unexpected message: {err}");
+        assert!(err.contains("index 4"), "should name the index: {err}");
+        assert!(err.contains("length 4"), "should name the length: {err}");
     }
 
     #[test]

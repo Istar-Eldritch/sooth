@@ -17,7 +17,7 @@ Second-class references `&T`/`&!T`, borrows of locals, projection through a refe
 | shape | shared | mutable |
 |---|---|---|
 | struct field | `&T>fi` `( &S -- &Ti )` | `&!T>fi` `( &!S -- &!Ti )` |
-| array element | `&>` `( &[T N] usize -- &T )` | `&!>` (same bounds trap as `get`) |
+| array element | `&>` `( &[T N] usize -- &T )` | `&!>` (runtime bounds trap) |
 | cell payload | `&^` `( &^T -- &T )` | `&!^` |
 
 Mutability is in the token, never inherited from the receiver. A projected type may itself be linear (`&!Buf>data : &!^[u8 64]`); R4's Copy gate governs access, not projection.
@@ -54,7 +54,7 @@ Two cheaper merges were tried and both are wrong. *Rejecting the join* whenever 
 
 **R13 — Mutation emits no rebuild.** Measurable form: `push-byte`'s emitted body contains no `alloc` and no `blit`. Its computed-index `&!>` still emits `bounds_check`'s `Cmp`/`Jnz`/trap block/`Call sooth_oob_trap`, so the count ceiling is set from the measured body including the guard.
 
-**R14 — No parameter-convention keywords.** `let`/`inout`/`sink`/`set` not added: the reference type *is* the convention, unannotated stays `sink`, no signature changes meaning. (`set` is also already a user-callable array word. Separately noted pre-existing bug, out of scope: a general word with two declared outputs panics at `print: value`; `get`'s two outputs work only as a checker/IR special case.)
+**R14 — No parameter-convention keywords.** `let`/`inout`/`sink`/`set` not added: the reference type *is* the convention, unannotated stays `sink`, no signature changes meaning. (Separately noted pre-existing bug, out of scope and unrelated to `get`/`set`'s later removal: an ordinary user-defined word with two or more declared stack outputs panics the compiler at `print: value` (`src/ir.rs`'s IR-stack tracking for `.` isn't general over multi-output words) — confirmed still reachable via a plain `: pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;`.)
 
 **R15 — ROADMAP's parked question, answered** (recorded at ROADMAP.md:498-504). `inout` projections **do** subsume a reified take/fill pair for every statically known path, and cover whole-value borrows too. No residual form added; reified residuals wait for the zipper slice's RC.
 
@@ -66,13 +66,13 @@ Two cheaper merges were tried and both are wrong. *Rejecting the join* whenever 
 
 **R20 — `get`/`set` superseded.** `&> @` replaces non-consuming two-output `get` (whose every read-only call site paid a `swap drop`); `&!> !` replaces `set`'s whole-array rebuild. `fill`/`len` are unaffected. The vocabulary only genuinely shrinks because R4 covers Copy aggregates (`vm.sth`'s `[Op N]`). *As shipped*, in the standalone follow-up commit this required (`examples/stack.sth`, `examples/vm.sth`, `tests/phase0.rs`, `tests/phase1.rs` rewritten, then `get`/`set` deleted): the aliasing difference the spec flagged ("`get` on an aggregate element aliases the array's storage; `&!> @` copies out") turned out to close a hazard rather than merely differ from it — `get`'s aggregate-element aliasing was R21's array-element route, and deleting `get` removed that route entirely (`@` on an aggregate always copies, never aliases), so the corresponding golden no longer has a reachable program to assert and was deleted rather than rewritten.
 
-**R21 — Two live names for one aggregate place: rejected where a `&!` makes it observable.** Naming an aggregate local reuses the same `Value` (one frame slot), and a non-consuming projection (`S|>fi`'s `Peek`) pushes an interior address — two routes by which distinct locals denote one region. Pre-existing and Copy-only (every route to a linear value is already closed by move tracking, `S|>fi`'s linear-field rejection, and `fill`'s `is_copy` gate), so no double-free: the failure mode is a wrong *value*, which is exactly what this language converts into a compile error. Fires at the borrow, not the naming, so repeated naming stays legal and `examples/vm.sth` (320-byte `Vm`, `vm` named 38 times) is untouched at zero cost. Diagnostic names both the borrow and the aliasing origin and points at `dup`. No implicit copy: `dup` is the language's explicit copy, and WCET reasoning requires instruction counts readable off the source.
+**R21 — Two live names for one aggregate place: rejected where a `&!` makes it observable.** Naming an aggregate local reuses the same `Value` (one frame slot), and a non-consuming projection (`S|>fi`'s `Peek`) pushes an interior address — routes by which distinct locals denote one region. Pre-existing and Copy-only (every route to a linear value is already closed by move tracking, `S|>fi`'s linear-field rejection, and `fill`'s `is_copy` gate), so no double-free: the failure mode is a wrong *value*, which is exactly what this language converts into a compile error. Fires at the borrow, not the naming, so repeated naming stays legal and `examples/vm.sth` (320-byte `Vm`, `vm` named 38 times) is untouched at zero cost. Diagnostic names both the borrow and the aliasing origin and points at `dup`. No implicit copy: `dup` is the language's explicit copy, and WCET reasoning requires instruction counts readable off the source.
 
 ## Load-bearing invariants (survived)
 
 QBE only; `Ptr` opaque, no arithmetic exposed, WASM lowering still possible. Linear spine intact: references never own, R4's Copy gate stops a borrow manufacturing a second owner or leaking an overwritten one, R8 stops a reference outliving its referent, and `&!T`'s third-category disposal is stated rather than left to fall through. `core` stays `no_std`; no JIT, no comptime interpreter.
 
-**Tripwire acknowledged:** `&T`/`&!T` are the third and fourth ad-hoc payload-interned constructors after `Array` and `OwnedCell` (docs/phase3-slice2-spec.md:9 called a third the signal to switch to Phase 4 generics). Sequencing: references are needed in Phase 3, generics are Phase 4. **Revisit trigger:** when Phase 4's ad-hoc dispatch lands, re-examine collapsing `&`/`&!` and the accessor family into overloads of `S>fi`/`get`/`^|>`.
+**Tripwire acknowledged:** `&T`/`&!T` are the third and fourth ad-hoc payload-interned constructors after `Array` and `OwnedCell` (docs/phase3-slice2-spec.md:9 called a third the signal to switch to Phase 4 generics). Sequencing: references are needed in Phase 3, generics are Phase 4. **Revisit trigger:** when Phase 4's ad-hoc dispatch lands, re-examine collapsing `&`/`&!` and the accessor family into overloads of `S>fi`/`&>`/`^|>`.
 
 ## Delivery, as shipped
 
@@ -143,4 +143,4 @@ type: Buf  data ^[u8 64]  len usize ;
 
 ## Out of scope
 
-The stack-value borrow `& ( T -- T &T )` (revisit if examples become build-then-configure pipelines). Path-disjoint borrows. Borrowing a scalar local and its spill. `!` over a linear value with drop-on-overwrite. Raw/foreign pointers (a third pointer kind's only client is hosted FFI, and it must stay an opaque handle). Collapsing the accessor family into Phase 4 overloads. RC, storable references, zippers. User-defined destructor bodies. Worklist-based branching disposal. The `get`/`set` migration itself. Making an aliased *read* an error, and eliminating the aliasing by implicit copying or by fixing the peek's lowering.
+The stack-value borrow `& ( T -- T &T )` (revisit if examples become build-then-configure pipelines). Path-disjoint borrows. Borrowing a scalar local and its spill. `!` over a linear value with drop-on-overwrite. Raw/foreign pointers (a third pointer kind's only client is hosted FFI, and it must stay an opaque handle). Collapsing the accessor family into Phase 4 overloads. RC, storable references, zippers. User-defined destructor bodies. Worklist-based branching disposal. The `get`/`set` migration itself (done in a follow-up commit). Making an aliased *read* an error, and eliminating the aliasing by implicit copying or by fixing the peek's lowering.

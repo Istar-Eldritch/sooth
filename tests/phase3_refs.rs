@@ -309,6 +309,30 @@ fn element_projection_out_of_bounds_still_traps() {
 }
 
 #[test]
+fn mutable_element_projection_through_shared_reference_is_error() {
+    // `&!>` requires a mutable-reference receiver; borrowing the array
+    // shared with `&` and then projecting with `&!>` is a receiver-mutability
+    // mismatch, not a bounds or type error.
+    let err = check_error(": main ( -- ) 0 4 fill | a | &a 0 &!> 99 ! &a 0 &> @ . ;");
+    assert!(
+        err.contains("`&!>` expected `&![i64 4]`, found `&[i64 4]`"),
+        "expected the receiver-mutability mismatch naming both types: {err}"
+    );
+}
+
+#[test]
+fn mutable_element_projection_through_mutable_reference_is_accepted() {
+    // The converse of the above: borrowing the array mutably with `&!` and
+    // projecting with the matching `&!>` is accepted.
+    let (stdout, code) = run_src(
+        "element-projection-mutable-receiver",
+        ": main ( -- ) 0 4 fill | a | &!a 0 &!> 99 ! &a 0 &> @ . ;",
+    );
+    assert_eq!(stdout, "99\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn store_through_shared_reference_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &v &V>x 5 !\n  v V> . . ;\n",
@@ -979,8 +1003,8 @@ fn mutable_borrow_of_an_array_over_duplicated_is_error() {
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V 4 fill 7 over | arr n arr2 |\n  \
-         &!arr 0 &!> &!V>x 99 !\n  arr 0 get V> drop .\n  \
-         arr2 0 get V> drop .\n  n . ;\n",
+         &!arr 0 &!> &!V>x 99 !\n  &arr 0 &> @ V> drop .\n  \
+         &arr2 0 &> @ V> drop .\n  n . ;\n",
     );
     assert!(
         err.contains("cannot borrow `arr` mutably") && err.contains("it is aliased by `arr2`"),

@@ -1241,7 +1241,7 @@ fn isize_round_trips_arithmetic_and_conversion() {
 }
 
 #[test]
-fn fill_constructs_and_get_reads_every_element_back_native() {
+fn fill_constructs_and_reads_every_element_back_native() {
     // Criterion 3: `fill` an `[i64 N]`, then read every element back through
     // a reference (`&>` then `@`) and print it; the values match the fill
     // value (unrolled stores + dynamic element addressing, R17/R18).
@@ -1261,7 +1261,7 @@ fn fill_constructs_and_get_reads_every_element_back_native() {
 }
 
 #[test]
-fn set_at_runtime_index_yields_new_array_original_untouched_native() {
+fn in_place_mutation_of_a_duped_array_leaves_the_original_untouched_native() {
     // Criterion 4: mutating one `dup`ed copy of an array in place through a
     // *runtime* index (computed, not a literal) leaves the other copy
     // untouched (D5 value semantics), since `dup` deep-copies rather than
@@ -1296,6 +1296,20 @@ fn constant_out_of_range_array_index_is_compile_error() {
     assert!(err.contains("out of range"), "unexpected message: {err}");
     assert!(err.contains('9'), "should name the index: {err}");
     assert!(err.contains('4'), "should name the length: {err}");
+}
+
+#[test]
+fn constant_index_at_length_boundary_is_compile_error() {
+    // Index == length is the first invalid index (valid range 0..length-1);
+    // distinct off-by-one boundary from the gross violation above.
+    let src = ": w ( -- )\n  0 4 fill | a |\n  &a 4 &> drop ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    let err = check::check(&mut module).expect_err("check should fail");
+
+    assert!(err.contains("out of range"), "unexpected message: {err}");
+    assert!(err.contains("index 4"), "should name the index: {err}");
+    assert!(err.contains("length 4"), "should name the length: {err}");
 }
 
 #[test]
@@ -1348,11 +1362,58 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
 }
 
 #[test]
+fn runtime_index_at_length_boundary_traps_and_aborts_native() {
+    // Index == length is the first invalid index (valid range 0..length-1),
+    // the off-by-one boundary distinct from the gross violation above.
+    let src = ": main ( -- )\n\
+  1 .\n\
+  0 4 fill | a |\n\
+  &a 2 2 + >usize &> @ drop\n\
+  99 . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-array-trap-boundary-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
+    let code = output
+        .status
+        .code()
+        .expect("process should exit normally, not die by signal");
+
+    assert_eq!(stdout, "1\n", "sentinel before the trap should print");
+    assert!(
+        !stdout.contains("99"),
+        "sentinel after the trap must not print: {stdout}"
+    );
+    assert_ne!(code, 0, "an out-of-bounds access must exit nonzero");
+    assert!(
+        stderr.contains("out of range"),
+        "trap message should say it's out of range: {stderr}"
+    );
+    assert!(
+        stderr.contains("index 4"),
+        "trap message should name the boundary index (4): {stderr}"
+    );
+    assert!(
+        stderr.contains("length 4"),
+        "trap message should name the length (4): {stderr}"
+    );
+}
+
+#[test]
 fn stack_dogfood_compiles_and_runs() {
     // Criterion 6: `examples/stack.sth`, a bounded `i64` stack embedding a
     // `[i64 16]` field with a runtime `usize` cursor. Exercises
-    // array-as-struct-field, `push`/`pop`/`peek`, non-consuming `get`,
-    // functional `set`, and the compile-time-constant `len`.
+    // array-as-struct-field, `push`/`pop`/`peek` reading and writing an
+    // element through a reference, and the compile-time-constant `len`.
     let (stdout, code) = run_and_capture_stdout("examples/stack.sth");
     assert_eq!(stdout, "3\n3\n2\n1\n16\n");
     assert_eq!(code, 0);
@@ -2548,7 +2609,7 @@ fn owned_zero_sized_payload_allocs_one_byte() {
 }
 
 #[test]
-fn owned_byte_buffer_peek_get_and_free_once() {
+fn owned_byte_buffer_peek_reads_and_frees_once() {
     // Criterion 13: `^[u8 N]` constructed from a filled array, peeked, a
     // byte read off the peeked copy through `&>`/`@`, then `drop`; exactly
     // one alloc/free.

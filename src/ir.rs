@@ -317,9 +317,8 @@ pub struct ArrayLayout {
 
 /// The IR's view of a program's arrays: the per-`ArrayId` layout registry.
 /// Unlike `Structs`/`Enums` there is no generated-word name map: the array
-/// words (`fill`/`get`/`set`/`len`) are generic and dispatched by name +
-/// operand type in `lower_call`, not by a per-array symbol. Empty for an
-/// array-free program.
+/// words (`fill`/`len`) are generic and dispatched by name + operand type in
+/// `lower_call`, not by a per-array symbol. Empty for an array-free program.
 #[derive(Debug, Default)]
 pub struct Arrays {
     pub layouts: Vec<ArrayLayout>,
@@ -1996,7 +1995,7 @@ impl<'a> FuncBuilder<'a> {
 
     /// Lower a `&`-led word. No new `Instr` variant: a struct
     /// field projection is a `PtrOffset`, an array element projection an
-    /// `ElemAddr` behind the same bounds guard `get` uses, and a cell payload
+    /// `ElemAddr` behind a runtime bounds guard, and a cell payload
     /// projection a `Load` of the pointer the place holds.
     fn lower_reference_word(&mut self, name: &str, line: u32) {
         let mutable = name.starts_with("&!");
@@ -2010,7 +2009,7 @@ impl<'a> FuncBuilder<'a> {
                 };
                 let (stride, elem, count) = self.array_parts(id);
                 self.bounds_check(index, count, line);
-                let addr = self.elem_addr(base, index, stride, IrType::Ptr);
+                let addr = self.elem_addr(base, index, stride);
                 self.push_reference(addr, elem);
             }
             "^" => {
@@ -2180,7 +2179,7 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// The exact byte size of a value of `ty` (an aggregate's whole size, a
-    /// scalar's width) — the blit length for a `fill`/`set` aggregate element.
+    /// scalar's width) — the blit length for a `fill` aggregate element.
     fn value_size(&self, ty: IrType) -> u32 {
         match ty {
             IrType::Struct(id) => self.structs.layouts[id.index()].size,
@@ -2190,19 +2189,18 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// `dst = base + index*stride`, typed `ty` (R17). Scalar element paths pass
-    /// `Ptr` (a `FieldLoad`/`FieldStore` follows); an aggregate element path
-    /// passes the element's own aggregate type so the address doubles as the
-    /// element value.
-    fn elem_addr(&mut self, base: Value, index: Value, stride: u32, ty: IrType) -> Value {
-        let dst = self.fresh_value(ty);
+    /// `dst = base + index*stride`, a `Ptr` (R17): every caller is a
+    /// reference projection, so a `FieldLoad`/`FieldStore` through `dst`
+    /// always follows.
+    fn elem_addr(&mut self, base: Value, index: Value, stride: u32) -> Value {
+        let dst = self.fresh_value(IrType::Ptr);
         self.push_instr(Instr::ElemAddr(dst, base, index, stride as i64));
         dst
     }
 
     /// Store `val` (of element type `elem`) at element place `fptr`: a
     /// width-exact scalar `FieldStore`, or an aggregate `Blit` of the whole
-    /// element. Shared by `fill`'s unrolled stores and `set`'s single store.
+    /// element. `fill`'s unrolled stores are the only caller.
     fn store_elem(&mut self, fptr: Value, val: Value, elem: IrType) {
         match elem {
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {

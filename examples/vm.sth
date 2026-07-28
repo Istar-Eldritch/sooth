@@ -1,7 +1,7 @@
-\ Dogfood: Phase 2 exit, now with Slice 6 references. A fixed-size bytecode
-\ stack machine that interprets a toy instruction set, composing fixed-size
-\ arrays, `usize`, enums with clause dispatch, structs, and the Slice 6
-\ self-tail-call dispatch loop.
+\ Dogfood: Phase 2 exit, now with Phase 3 Slice 6 references. A fixed-size
+\ bytecode stack machine that interprets a toy instruction set, composing
+\ fixed-size arrays, `usize`, enums with clause dispatch, structs, and the
+\ Phase 2 Slice 6 self-tail-call dispatch loop.
 \
 \ `Op` is mixed-arity: `Push`/`Load`/`Store`/`Jz`/`Jmp` carry a `i64`/`usize`
 \ payload; `Add`/`Sub`/`Mul`/`Halt` do not. `Vm` bundles the whole machine
@@ -18,9 +18,9 @@
 \ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the first
 \ `vm-pop` result with a mid-body `| ... |` binding instead of shuffling it
 \ into position with `swap`/`over`/`rot`. `vm-push`/`vm-pop`/`fetch` and
-\ `run`'s `Load`/`Store` clauses (Slice 6) read and write the operand stack
-\ and memory arrays through a reference instead of `get`/`set`'s
-\ read-two-outputs / rebuild-the-whole-array shapes.
+\ `run`'s `Load`/`Store` clauses (Phase 3 Slice 6) read and write the
+\ operand stack and memory arrays through a borrowed element reference
+\ (`&>`/`&!>` then `@`/`!`).
 
 type: Op
 | Push v i64

@@ -36,7 +36,7 @@ REPL boundaries; `examples/shapes.sth` dogfoods it natively and in the REPL.
 heap-free value arrays `[T N]` (structurally interned into an `ArrayId` registry so `Type`
 stays `Copy`, reusing the Slice 3/4 layout machinery), the target-width `usize` index/length
 type (width from a single threaded `WORD_WIDTH` parameter, never a hardcoded 8),
-`fill`/`get`/`set`/`len` words (non-consuming `get`, functional `set`), and dynamic indexing
+`fill`/`len` words (element access later moved to second-class references, Slice 6), and dynamic indexing
 with a runtime bounds trap (Sooth's first runtime failure path) via a backend-neutral
 `ElemAddr` op; `examples/stack.sth` dogfoods it. `isize` deferred to Phase 3 (its only
 motivation, pointer differences, arrives with pointers).
