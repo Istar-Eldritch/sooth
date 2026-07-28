@@ -610,6 +610,24 @@ library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
+**Modules and imports.** Sooth has been single-file through every phase so far, deliberately:
+no dogfood before this one has ever needed a second file, so introducing the machinery
+earlier would be pure speculative structure with nothing pushing on it. That stops being
+true right here — the stdlib layers need somewhere to live that isn't the user's own source
+file, so this lands first in the phase, before `Vec`/`Map`/`String`/`Box`/`Rc`/`Arc` do,
+otherwise "stdlib" is just a rebrand of "more compiler intrinsics." A file becomes a
+compilation unit; an import brings another file's declarations into scope, at minimum by
+qualified name. Type resolution, move-tracking, and the R21 aliasing rule are all
+value-flow-based, not file-based, so none of that checker machinery should need to know a
+boundary was crossed — the open design question is narrower: how struct/enum declarations
+from separate files join one shared type registry without a name collision or a duplicate
+registration. (Phase 4's open multimethods already lean on "module-level extensibility"
+without modules existing yet; this is where that debt gets paid.)
+**Exit:** two files, one importing a type and a word from the other, compiling and linking
+as one program.
+**Dogfood:** split an existing multi-word example (`vm.sth` or `stack.sth`) across a `main`
+file and a small library file it imports from.
+
 **Worklist-based disposal for branching structures (moved from Phase 3 Slice 4).** A
 multi-child recursive type's synthesized destructor loops only its *last* recursive field
 and recurses the rest, so a left-leaning tree still disposes in O(depth); a worklist would
