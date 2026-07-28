@@ -975,6 +975,68 @@ fn if_join_of_two_named_aggregates_without_a_borrow_is_accepted() {
 }
 
 #[test]
+fn mutable_borrow_of_a_place_over_duplicated_is_error() {
+    // `over` reuses its operand rather than deep-copying it, so both slots
+    // denote one address even when neither has been named yet.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V 7 over | a b c |\n  \
+         &!a &!V>x 99 !\n  a V> . .\n  c V> . .\n  b . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `a` mutably") && err.contains("it is aliased by `c`"),
+        "an `over` of an anonymous aggregate leaves two names for one address: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_of_an_array_over_duplicated_is_error() {
+    // Same hole reached through an array rather than a struct.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V 4 fill 7 over | arr n arr2 |\n  \
+         &!arr 0 &!> &!V>x 99 !\n  arr 0 get V> drop .\n  \
+         arr2 0 get V> drop .\n  n . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `arr` mutably") && err.contains("it is aliased by `arr2`"),
+        "an `over` of an anonymous array leaves two names for one address: {err}"
+    );
+}
+
+#[test]
+fn over_of_an_aggregate_without_a_mutable_borrow_is_accepted() {
+    // The rule still fires at the borrow, not at the duplication: two names for
+    // a value nothing mutates read identically.
+    let (stdout, code) = run_src(
+        "over-no-borrow",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V 7 over | a b c |\n  \
+         a V> . .\n  c V> . .\n  b . ;\n",
+    );
+    assert_eq!(stdout, "2\n1\n2\n1\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_of_a_place_a_merged_peek_may_denote_is_error() {
+    // A projection out of a merged value must project the field out of every
+    // region the merge could denote. Dropping the merged parent leaves only the
+    // peeked field, so nothing but that projection can catch the borrow.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         type: S a V b i64 ;\n\
+         : main ( -- )\n  1 2 V 7 S | s |\n  3 4 V 8 S | t |\n  \
+         0 0 > if s else t end S|>a swap drop | inner |\n  \
+         &!t &!S>a &!V>x 99 !\n  inner V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `t` mutably") && err.contains("it is aliased by `inner`"),
+        "a peek out of a merge must keep every arm's field region: {err}"
+    );
+}
+
+#[test]
 fn dup_makes_aliased_names_independent() {
     // `dup` is the whole remedy, and not a new concept: it is the language's
     // existing explicit copy, applied to a case that currently slips past.

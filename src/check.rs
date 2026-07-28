@@ -2622,7 +2622,7 @@ fn check_term(
             if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays)? {
+            if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
@@ -3890,6 +3890,7 @@ fn check_shuffle(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    prov: &mut Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -3925,11 +3926,20 @@ fn check_shuffle(
             if n < 2 {
                 return Err(need("over", 2, n));
             }
-            let below = stack[n - 2];
-            // R4: `over` copies the second slot, so it is gated exactly like
-            // `dup`.
+            let mut below = stack[n - 2];
+            // `over` is gated exactly like `dup`.
             if !is_copy(below.ty, ctx.structs(), ctx.enums(), arrays) {
                 return Err(cannot_copy_error(ctx, span, "over", below.ty));
+            }
+            // Unlike `dup`, `over` reuses the value rather than deep-copying it,
+            // so both slots denote one address. An anonymous aggregate has no
+            // region yet, and binding each slot would otherwise mint a separate
+            // one, hiding the aliasing.
+            if below.alias.is_none() && below.ty.is_aggregate() {
+                let region = prov.fresh_region();
+                let set = prov.alias_set_of(region);
+                below.alias = Some(Alias { set, span });
+                stack[n - 2].alias = below.alias;
             }
             stack.push(below);
         }
