@@ -21,20 +21,30 @@ is a compile error).
 
 ## Status
 
-**Phases 0 and 1 complete; Phase 2 (typed core) in progress** (see ROADMAP.md). The
-pipeline is implemented end to end: `gcd`/`factorial`/`lerp` and the newer examples
-compile to native binaries and run, and `cargo run -- repl` gives an interactive session
-where words are compiled to shared objects and `dlopen`'d in as you define them. Phase 2
-has landed its full **scalar core**: a `Type` per stack slot, unified at branch joins; the
-fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit target-only conversions
-(`>i8`..`>u64`); floating point (`f32`/`f64`) with IEEE arithmetic and comparison; bitwise
-operators (`and`/`or`/`xor`/`not`/`shl`/`shr`); and boolean logic with the full comparison
-set (`= < > <= >= <>`). Phase 2 has also landed **structs** (the `type:` declaration form,
-inline-aggregate layout, generated constructor/accessor words) and **enums/ADTs** (`type:`
-with `|`-separated variants, a tagged inline-aggregate representation, and
-exhaustiveness-checked clause-style word definition as the eliminator, no inline `match`).
-What remains in Phase 2 are fixed-size arrays, then the bytecode-VM exit dogfood. The
-compiler is a Rust bootstrap; the language will later self-host.
+**Phases 0-2 complete; Phase 3 (the memory model) in progress** (see ROADMAP.md). The
+pipeline is implemented end to end: the examples compile to native binaries and run, and
+`cargo run -- repl` gives an interactive session where words are compiled to shared objects
+and `dlopen`'d in as you define them.
+
+Phase 2 delivered the **typed core**, all of it heap-free: a `Type` per stack slot, unified
+at branch joins; the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit
+target-only conversions (`>i8`..`>u64`); floating point (`f32`/`f64`); bitwise operators;
+boolean logic with the full comparison set (`= < > <= >= <>`); **structs** (the `type:`
+form, inline-aggregate layout, generated constructor/accessor words); **enums/ADTs**
+(`|`-separated variants, tagged inline aggregates, exhaustiveness-checked clause-style
+elimination, no inline `match`); **fixed-size arrays** with `usize`; self-tail-call
+lowered to a jump; and a bytecode VM as the exit dogfood.
+
+Phase 3 is making the linear spine real rather than aspirational. Landed so far:
+move-by-default with `dup` gated on `Copy` and `drop` as an explicit destructor call;
+`^T`, a compiler-known single heap cell that is always linear and propagates linearity
+transitively through structs and enums, behind a `malloc`/`free` shim with an OOM trap;
+recursive heap data (lists, trees, mutually recursive shapes) whose synthesized
+destructors dispose in **constant stack**, verified past a million nodes under a 1 MB
+stack; and **general locals**, where `| names |` binds at any point in a body and REPL
+lines can bind too. Next is second-class references and escape checking.
+
+The compiler is a Rust bootstrap; the language will later self-host.
 
 Pipeline: `source → lex → parse → stack-effect check → backend-neutral IR → QBE IL
 → native binary`. Backend is [QBE](https://c9x.me/compile/), invoked from `PATH`
@@ -49,7 +59,7 @@ from [c9x.me/git/qbe.git](https://c9x.me/git/qbe.git) if so.
 
 ```sh
 cargo build
-cargo test                            # unit tests + the Phase 0/1 goldens
+cargo test                            # unit tests + the goldens
 cargo run -- run   examples/gcd.sth   # compile and run (prints 5)
 cargo run -- build examples/gcd.sth   # just compile, to examples/gcd
 cargo run -- repl                     # interactive session
@@ -64,7 +74,15 @@ lines below are input, other lines are the session's output):
 defined sq
 5 sq
 stack: 25
+1 2 3
+stack: 25 1 2 3
+| a b | a b + .
+5
+stack: 25 1
 ```
+
+The last line binds two values the *previous* line left on the session stack. A line's
+names are scoped to that line; the stack is what persists.
 
 ## Layout
 
@@ -75,7 +93,8 @@ src/ir.rs                         backend-neutral IR (Ptr[T] kept abstract)
 src/backend/qbe.rs                QBE IL emission
 src/driver.rs                     pipeline orchestration
 src/repl.rs                       REPL session: dlopen loop, generation mangling
-examples/                         target programs (gcd, factorial, lerp, rgb, mean, leap, ...)
-tests/phase0.rs                   golden tests: build+run + diagnostics across the scalar core
+examples/                         target programs (gcd, lerp, shapes, stack, list, vm, ...)
+tests/phase0.rs                   golden tests: build+run + diagnostics across the typed core
 tests/phase1.rs                   golden REPL sessions (define/redefine/recover)
+tests/phase3_locals.rs            goldens for general locals (mid-body and REPL-line)
 ```

@@ -1442,16 +1442,11 @@ pub(crate) fn lower_word(
     };
 
     match &word.body {
-        WordBody::Terms { locals, terms } => {
-            let mut stack = entry_values;
-            // Bind `| ... |` locals: pop the top N (D6: from the header phi
-            // outputs when looping), leftmost local = deepest.
-            let take = locals.len();
-            let bound = stack.split_off(stack.len() - take);
-            for (name, value) in locals.iter().zip(bound) {
-                b.locals.insert(name.clone(), value);
-            }
-            b.stack = stack;
+        WordBody::Terms { terms } => {
+            // Every input starts on the stack (D6: the header phi outputs when
+            // looping); an entry `| ... |` binding pops from it like any other
+            // binding term.
+            b.stack = entry_values;
             b.lower_terms(terms, self_tail);
         }
         WordBody::Clauses(clauses) => b.lower_clauses(clauses, &entry_values),
@@ -1521,7 +1516,10 @@ struct FuncBuilder<'a> {
     next_value: u32,
     next_block: u32,
     stack: Vec<Value>,
-    locals: HashMap<String, Value>,
+    /// The names in scope, innermost-last (R2, R10): leaving a block truncates
+    /// this to its length at block entry. A bound value is SSA and outlives the
+    /// name, so teardown frees nothing.
+    locals: Vec<(String, Value)>,
     value_types: Vec<IrType>,
     /// Compile-time integer value of each `Const`-defined `Value`, for the
     /// `fill` count (M1: the count is a checker-guaranteed literal) and the
@@ -1562,7 +1560,7 @@ impl<'a> FuncBuilder<'a> {
             next_value: 0,
             next_block: 1, // block 0 is the entry, already current
             stack: Vec::new(),
-            locals: HashMap::new(),
+            locals: Vec::new(),
             value_types: Vec::new(),
             const_vals: HashMap::new(),
         }
@@ -1698,15 +1696,24 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(v);
             }
             TermKind::Call(name) => self.lower_call(name, term.span.line, tail),
+            TermKind::Bind(names) => {
+                // R10: a binding is a compile-time rebinding of SSA values, so
+                // it emits nothing. Leftmost name takes the deepest value.
+                let bound = self.stack.split_off(self.stack.len() - names.len());
+                for (name, value) in names.iter().zip(bound) {
+                    self.locals.push((name.clone(), value));
+                }
+            }
             TermKind::If {
                 then_branch,
                 else_branch,
+                ..
             } => self.lower_if(then_branch, else_branch, tail),
         }
     }
 
     fn lower_call(&mut self, name: &str, line: u32, tail: bool) {
-        if let Some(&value) = self.locals.get(name) {
+        if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
         }
@@ -2603,6 +2610,9 @@ impl<'a> FuncBuilder<'a> {
         let join_id = self.fresh_block();
 
         let post_pop = self.stack.clone();
+        // R2: each arm is a block, so a name it binds is out of scope at its
+        // terminator; the checker has already rejected any use past there.
+        let locals_depth = self.locals.len();
         self.seal_block(Terminator::Jnz(test, then_id, else_id));
 
         self.start_block(then_id);
@@ -2610,12 +2620,14 @@ impl<'a> FuncBuilder<'a> {
         self.stack = post_pop.clone();
         self.lower_terms(then_branch, tail);
         let then_arm = self.seal_arm(join_id);
+        self.locals.truncate(locals_depth);
 
         self.start_block(else_id);
         self.terminated = false;
         self.stack = post_pop;
         self.lower_terms(else_branch, tail);
         let else_arm = self.seal_arm(join_id);
+        self.locals.truncate(locals_depth);
 
         match (then_arm, else_arm) {
             (None, None) => {
@@ -2699,7 +2711,7 @@ impl<'a> FuncBuilder<'a> {
         for vi in 0..n {
             let clause = clause_for_variant[vi].expect("checked: exhaustive coverage");
             self.start_block(clause_ids[vi]);
-            self.locals = HashMap::new();
+            self.locals.clear();
             self.stack = stack_below.clone();
             // Push the variant's payload first-deepest, loading each field from
             // `payload_offset + field.offset`.
@@ -2717,7 +2729,7 @@ impl<'a> FuncBuilder<'a> {
             let take = clause.locals.len();
             let bound = self.stack.split_off(self.stack.len() - take);
             for (name, value) in clause.locals.iter().zip(bound) {
-                self.locals.insert(name.clone(), value);
+                self.locals.push((name.clone(), value));
             }
             // R7/R9: a clause whose body ends in a tail self-call back-edges to
             // the shared loop header and contributes no join predecessor;
@@ -2950,6 +2962,19 @@ mod tests {
             })
             .unwrap();
         assert_eq!(bin.0, bin.1);
+    }
+
+    #[test]
+    fn lower_binding_emits_no_new_instr() {
+        // R10: a binding is a compile-time rebinding of SSA values, so binding
+        // the operands and mentioning them lowers to the same instructions as
+        // leaving them on the stack. No `Instr` variant was added.
+        let bound = lower_src(": w ( -- i64 ) 1 2 | a b | a b - ;");
+        let plain = lower_src(": w ( -- i64 ) 1 2 - ;");
+        assert_eq!(
+            format!("{:?}", instrs(&bound.funcs[0])),
+            format!("{:?}", instrs(&plain.funcs[0]))
+        );
     }
 
     #[test]
@@ -4178,6 +4203,44 @@ mod tests {
             0,
             "tail self-call is a back-edge, not a Call"
         );
+    }
+
+    /// The header phi structure that matters for R11: how many phis, how many
+    /// arms each has, and how many jumps target the header. Deliberately
+    /// ignores the carried `Value`s themselves, since those differ between
+    /// two independently-lowered programs even when the shape is identical.
+    fn header_phi_shape(func: &IrFunc, header: BlockId) -> (usize, Vec<usize>, usize) {
+        let phis = header_phis(header_block(func, header));
+        let phi_count = phis.len();
+        let arm_counts = phis.iter().map(|arms| arms.len()).collect();
+        (phi_count, arm_counts, jmps_to(func, header))
+    }
+
+    #[test]
+    fn lower_mid_body_binding_adds_no_header_phi() {
+        // Criterion 22 (R11): a mid-body binding inside a self-tail-recursive
+        // arm has its extent end at the arm's terminator, where the back-edge
+        // sits, so no name is live across it and the header still carries
+        // exactly one phi per loop-carried (input-arity) slot, unaffected by
+        // the binding. Proved by comparing against a binding-free equivalent:
+        // if a bound name ever leaked a phi onto the header, this source's
+        // shape would diverge from the one below instead of both trivially
+        // satisfying the same hard-coded numbers.
+        let with_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if | x | 1 - x go else drop end ;");
+        let without_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+        let f1 = &with_binding.funcs[0];
+        let f2 = &without_binding.funcs[0];
+        let header1 = loop_header(f1);
+        let header2 = loop_header(f2);
+        let shape1 = header_phi_shape(f1, header1);
+        let shape2 = header_phi_shape(f2, header2);
+        assert_eq!(
+            shape1, shape2,
+            "a mid-body binding must not change the header's phi structure"
+        );
+        assert_eq!(shape1.0, 2, "one header phi per loop-carried slot");
     }
 
     #[test]

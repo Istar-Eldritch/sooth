@@ -56,7 +56,11 @@ Concatenative, Forth-flavoured, with two non-negotiable ergonomics that Forth
 lacks: statically-checked stack effects and named locals.
 
 `gcd`, to fix the shape. `| a b |` binds the top items left-to-right in the same
-order as the effect comment, and a word calls itself directly (no `recurse`):
+order as the effect comment, and a word calls itself directly (no `recurse`). A
+binding is a term, not just an entry declaration: `| names |` is legal at any point
+in a body, popping that many values off the stack where it appears, with its extent
+running to the end of the enclosing block (a word body, a clause body, or an
+`if`/`else` arm) rather than the whole word:
 
 ```forth
 : gcd ( int int -- int )
@@ -79,8 +83,9 @@ values reused out of order, like a formula:
 ```
 
 `gcd` above sits on the line: two values, each reused and reordered in the recursive
-call, so names earn their keep. (Phase 0 ships no shuffling words yet, so there a
-local reference is the *only* way to reuse a value at all.)
+call. It is shown with names here, but `swap`/`over` write it just as legibly (that
+version is in the README), which is the point: two values is where the judgment call
+lives, and `lerp`'s three is where names clearly win.
 
 Checked stack effects are the cheap, high-value feature: Forth's signature failure
 mode (a silent underflow producing a wrong number at runtime) becomes a compile

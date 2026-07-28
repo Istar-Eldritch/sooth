@@ -106,8 +106,14 @@ stack at 1M+ nodes under a 1MB stack. A **struct** with more than one simultaneo
 recursive field still narrows to one chosen edge (D1, unchanged); an **enum**'s
 mutually-exclusive variants are not that restriction. Worklist-based disposal for
 branching structures stays out of scope, moved to Phase 6.
-**Next action: Phase 3 Slice 5** (general locals: mid-body `| names |` binding, and locals
-at the REPL line).
+**Phase 3 Slice 5 (general locals) is complete**: `| names |` binding at any point in a
+word body, clause body, or `if`/`else` arm (extent = the rest of the enclosing block, no
+new closing token), the checker's locals map evolving during the walk instead of a
+precomputed borrow, and locals at the REPL line with the session-stack depth as the
+binding's frame floor. No new IR instruction, and no header phi added for a mid-body name
+in a self-tail-recursive loop. `examples/vm.sth`'s `run` word dogfoods it, naming a
+`vm-pop` result mid-clause instead of shuffling it with `swap`/`over`/`rot`.
+**Next action: Phase 3 Slice 6** (second-class references + places + escape checking).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -441,16 +447,32 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    branching structures stays moved to Phase 6** (see there): it needs a growable
    pending-pointer structure and a new OOM-during-disposal interaction, neither of which
    this slice's gaps required.
-5. **General locals.** `| names |` binding is no longer confined to the top of a word or
-   clause body: it is permitted at any point in a body, popping values off the stack at the
-   point it appears (leftmost name binds the deepest value, exactly like the existing entry
-   binding). Also reaches the **REPL line**, which has no locals at all today (a bare line's
-   checker context carries none) — a REPL line gains the same `| names |` form a word body
-   already has. No new closing token: a mid-body binding's extent is simply the rest of its
-   enclosing block, so there is nothing to mark where it ends. This reverses the mid-body
-   half of Phase 2 Slice 4's "no mid-body binding, no closer: factor a word instead" (see the
-   note there); the no-closing-token half stands, unchanged, for the same reason it always
-   did. Dogfood: a REPL line that binds a local, which cannot be written today.
+5. **General locals.** ✅ done. `| names |` binding is no longer confined to the top of a
+   word or clause body: it is permitted at any point in a body or an `if`/`else` arm,
+   popping values off the stack at the point it appears (leftmost name binds the deepest
+   value, exactly like the existing entry binding). Extent is the rest of the enclosing
+   block, so a name bound in an arm is gone after `end`; no new closing token, since the
+   block's existing terminator already marks it. Re-binding a name still in scope and
+   binding more values than the frame holds are both located errors (the latter reuses the
+   existing needs-N-holds-M underflow shape, with the frame floor context-dependent: a
+   word's declared inputs, or a REPL line's current session-stack depth); a linear value
+   left unconsumed at its block's terminator is now caught there, naming the scope that
+   ended, rather than only at word end. The checker's `Ctx::Word` locals map is gone entirely:
+   names now live in an independently threaded `&mut Scope`, evolving as terms are walked
+   and saved/restored at block entry/exit — the slice's main structural change. No new IR instruction: a binding
+   lowers to a pop off the lowering stack plus an insert into the locals map, truncated at
+   block exit, since values are SSA and simply outlive the name; a mid-body binding inside
+   a self-tail-recursive arm needs no new header phi, its extent ending at the arm's
+   terminator where the back-edge sits. Also reaches the **REPL line**, which had no locals
+   at all before (a bare line's checker context carried none) — a line now gains the same
+   `| names |` form a word body has, scoped to the line, with the session stack persisting
+   across lines while names do not. This reverses the mid-body half of Phase 2 Slice 4's
+   "no mid-body binding, no closer: factor a word instead" (see the note there); the
+   no-closing-token half stands, unchanged, for the same reason it always did. Dogfood: a
+   REPL line that binds a local reaching a value an earlier line left, which could not be
+   written before; `examples/vm.sth`'s `run` word now names a `vm-pop` result mid-body in
+   its `Add`/`Sub`/`Mul`/`Store` clauses instead of shuffling it into position with
+   `swap`/`over`/`rot`.
 6. **Second-class references + places + escape checking.** Pass a borrow (`&`/`&!`), mutate
    in place, no move; the escape checker keeps refs from being stored or escaping scope. The
    reference *type* is the convention, not a Hylo-style `let`/`inout`/`sink`/`set` (the

@@ -255,17 +255,14 @@ pub struct WordDef {
     pub body: WordBody,
 }
 
-/// A word's body: either a term sequence with optional entry locals (the
-/// Slice 0-3 form), or a clause list (a clause-style eliminator over the
-/// word's enum top input, D4). A clause-style word has no word-entry locals
-/// (D8).
+/// A word's body: either a term sequence, or a clause list (a clause-style
+/// eliminator over the word's enum top input, D4). Entry locals are not a
+/// field here: a `| names |` binding is a `TermKind::Bind` term like any
+/// other, and the entry position is just the first one (R1). A clause-style
+/// word has no word-entry locals (D8).
 #[derive(Debug)]
 pub enum WordBody {
-    Terms {
-        /// Names bound by `| ... |`, in effect order; empty if absent.
-        locals: Vec<String>,
-        terms: Vec<Term>,
-    },
+    Terms { terms: Vec<Term> },
     Clauses(Vec<Clause>),
 }
 
@@ -498,9 +495,19 @@ pub enum TermKind {
     BoolLit(bool),
     /// A word invocation, or a reference to a named local.
     Call(String),
+    /// A `| names |` binding (R1): pops one value per name at the point it
+    /// appears, leftmost name taking the deepest value. Its extent is the rest
+    /// of the enclosing block (R2), so no closing term is needed.
+    Bind(Vec<String>),
     If {
         then_branch: Vec<Term>,
         else_branch: Vec<Term>,
+        /// The `else` token, when present: the `then` arm's terminator, and so
+        /// where a name bound in that arm goes out of scope (R2, R6).
+        else_span: Option<Span>,
+        /// The `end` token: the `else` arm's terminator, and the `then` arm's
+        /// too when there is no `else`.
+        end_span: Span,
     },
 }
 
