@@ -12,8 +12,9 @@ consequences, both applied below rather than left as stale prose:
 
 - The old "top-of-scope locals only" restriction this spec worked around is gone. The dogfood
   is rewritten to use it: `main` binds its two buffers directly instead of needing a `run`
-  helper only to have somewhere to bind them, and `push-byte` names its two projected
-  intermediates instead of re-deriving them by reborrowing three times.
+  helper only to have somewhere to bind them, and `push-byte` can now name its two projected
+  intermediates as it produces them (mid-body `| i |` / `| arr |` binding), instead of having
+  no way to hold onto them at all.
 - R20 below (superseding `get`/`set`) previously deferred the migration because a bare REPL
   line had no locals and so could never form a place. That is no longer true, but the migration
   still stays out of this slice's delivery phases, and it does not get a slice of its own
@@ -150,13 +151,15 @@ delimiter, handled by recursing into the ongoing token stream exactly as
 **R4 — Access through a reference: `@`, `!`, `+!`.**
 
 - `@` fetches, typed for **both** `&T -> T` and `&!T -> T`, consuming the reference either way.
+  Because `@` is typed for both directly, there is no implicit `&!T -> &T` demotion coercion
+  rule to write.
 - `!` stores, `( &!T T -- )` only — storing through a shared reference is meaningless.
 - `+!` adds in place, `( &!T T -- )`, `T` an integer type, sugar for fetch-add-store. `T` is
   inferred from the receiver, so the same bare-literal coercion carve-out that applies anywhere
   else a type is inferred rather than declared (`usize`/`isize` only, no bare `i64`-to-narrower
   coercion) applies here — `b Buf&!>len 1 +!` accepts the bare literal because `T = usize`.
 - **Restricted to `Copy` `T`, and a Copy *aggregate* is a real case, not a rejection.**
-  `lower_call`'s `"dup"` arm (src/ir.rs:1721-1740) already allocs a fresh slot and blits the
+  `lower_call`'s `"dup"` arm (src/ir.rs:1721-1753) already allocs a fresh slot and blits the
   bytes for a Copy `Struct`/`Enum`/`Array`, exercised on every `dup` of a Copy aggregate today
   (`1 2 V dup V> . . V> . .` prints `2 1 2 1`, i.e. independent copies). `@` on a Copy aggregate
   `T` lowers to `Alloc`+`Blit` the same way; `!` on a Copy aggregate lowers to `Blit` alone. Both
@@ -211,10 +214,15 @@ Rejected alternative: last-use (NLL-style) liveness. Materially more machinery, 
 criterion in this slice needs the precision.
 
 **R7 — Path disjointness is not modeled.** Two references derived from the same local conflict
-under R5 even when they project into disjoint fields, if both are simultaneously live. The
-measured cost is one `swap` in `byte-at`'s two-projection chain, sequencing so the first is
-fully consumed before the second is taken. A stated limitation with its own criterion, additive
-later. R16's reference-mode clause payload bindings are a narrow, named exemption from this
+under R5 even when they project into disjoint fields, if both are simultaneously live. The cost
+this slice actually pays is in `push-byte`: naming its two projected intermediates (`| i |`,
+`| arr |`) via mid-body binding is what avoids needing a `swap` to sequence them — the
+hand-trace below states this directly ("No `swap` is needed: naming `i` and `arr` as they are
+produced does the sequencing that a `swap` would otherwise have to do"). `byte-at`'s own
+two-projection chain (`b Buf&>data &^ i &> @`) is fully shared-mode, so the suspend rule this
+section is about never engaged there in the first place. A stated limitation with its own
+criterion, additive later. R16's reference-mode clause payload bindings are a narrow, named
+exemption from this
 rule, not a second case of it: a clause binds every field of one variant simultaneously, with no
 root local to reborrow from at all, and the fields are statically known to be disjoint (the
 checker knows the full field layout of the variant at the point it binds them) — sound by
@@ -259,6 +267,12 @@ this is correct).
 Combined with place-only creation (R2) and R11 (only an aggregate/cell local can be a borrow
 root), a reference cannot outlive its referent, so no lifetime apparatus is needed.
 
+One direct consequence of banning a reference on the output side: a projection can never be
+factored into its own helper word. `: len-of ( &!Buf -- &!usize ) Buf&!>len ;` is rejected —
+not because the projection itself is wrong, but because `&!usize` on the output side is exactly
+what this rule bans. This is why every projection in this slice's dogfood is written inline
+rather than factored out.
+
 **R9 — Loops: the referent must outlive the iteration, from both sides.** A reference
 **parameter** may cross a self-tail-call back-edge, since its referent lives in an ancestor
 frame and outlives every iteration — this is what keeps `walk ( &!List -- ) ... walk ;` legal,
@@ -299,9 +313,11 @@ pointer arithmetic is exposed to the surface language.
 `:Buf`-spelled parameter **by value**, so a callee storing into it would silently mutate a
 caller-side temporary — measured directly, this is not a hypothetical. `&T`/`&!T` map to
 `IrType::Ptr` instead, always, including in ABI positions; `IrType::Ptr` already exists
-(src/ir.rs:131) for exactly this shape, and both `width` and `qbe_abi_ty` already spell it `l`
-with no change needed to either function — only `ir_type_of` (src/ir.rs:154) gains the two new
-`Type` arms.
+(src/ir.rs:131), documented there as an opaque backend-neutral pointer/handle used elsewhere
+(e.g. the REPL line wrapper's carried stack), not something purpose-built for a reference — the
+load-bearing claim is only that the variant already exists, is opaque, and needs no change to
+accommodate a reference. Both `width` and `qbe_abi_ty` already spell it `l` with no change
+needed to either function — only `ir_type_of` (src/ir.rs:154) gains the two new `Type` arms.
 
 **This is a soundness answer, not only a mechanical one.** `Type` is matched exhaustively at
 many sites — `is_copy`, every `is_linear`-shaped predicate, the surplus-value check — and each
@@ -320,7 +336,7 @@ type has to render its own name in an error message or a generated accessor name
 
 **R13 — Mutation through a reference emits no rebuild.** The measurable form: `push-byte`'s
 emitted body contains no `alloc` and no `blit`. Its array-element projection (`&!>`) has a
-*computed* index, so `bounds_check` (src/ir.rs:2348-2358) emits a `Cmp`, a `Jnz`, a trap block,
+*computed* index, so `bounds_check` (src/ir.rs:2348-2376) emits a `Cmp`, a `Jnz`, a trap block,
 and a `Call sooth_oob_trap` on top of the address-arithmetic-plus-store shape; a criterion's
 instruction-count ceiling must be set from `push-byte`'s own measured shape including that
 guard, not from an idealized reference-only body.
@@ -458,9 +474,11 @@ coverage with no replacement. Slice 5 removed that: a REPL line has locals now, 
 word body. Doing the migration inside this slice would still be scope creep for the reasons
 above (a fourth delivery phase, two pre-existing example files and two pre-existing REPL
 goldens edited, in direct tension with R19's additive-only regression check), and it is not
-new language design either — rewrite four existing files to the new spelling, then delete
-`get`/`set` from the checker and IR. Once Slice 6 lands and `&>`/`&!>`/`@`/`!` exist, do it as an
-ordinary follow-up commit, no brief, no spec, no phased pipeline: small enough to do in one
+new language design either — rewrite three existing files (`examples/stack.sth`,
+`examples/vm.sth`, and `tests/phase1.rs`, which carries both REPL goldens) to the new spelling,
+then delete `get`/`set` from the checker and IR. Once Slice 6 lands and `&>`/`&!>`/`@`/`!`
+exist, do it as an ordinary follow-up commit, no brief, no spec, no phased pipeline: small
+enough to do in one
 pass, reviewed like any other change, not run through the slice machinery this document uses
 for actual design work.
 
@@ -642,7 +660,7 @@ in place.
 | `!` | `[]` |
 | `b` (reborrow 3 — the second's derived chain was fully consumed by `&!>` then `!`) | `[&!Buf]` |
 | `Buf&!>len` | `[&!usize]` |
-| `1` | `[&!usize, i64(1)]` |
+| `1` | `[&!usize, i64(1)]` (bare literal, R4's `usize` coercion carve-out) |
 | `+!` | `[]` |
 
 Ends `[]`, matching `( &!Buf u8 -- )`. `b` is reborrowed three times; at each subsequent naming,
@@ -671,7 +689,7 @@ caller.
 **Naming an aggregate local does not copy it.** `lower_call` pushes the *same* `Value` — a
 pointer to one frame slot — when a local is named ("i64 is Copy; reuse the value id",
 src/ir.rs:1717), including for a struct/array/enum local, while `dup` deep-copies via
-`Alloc`+`Blit` (src/ir.rs:1721-1740, R4's own justification above). Independently, a
+`Alloc`+`Blit` (src/ir.rs:1721-1753, R4's own justification above). Independently, a
 non-consuming aggregate projection (`S|>fi`'s `Peek`, src/ir.rs:2557ff.; `get` on an array
 element, src/ir.rs:2033ff.) pushes the interior address with no copy, on the stated
 justification that "the owning aggregate is consumed by the getter/destructure/clause" — false
