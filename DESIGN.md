@@ -83,8 +83,9 @@ values reused out of order, like a formula:
 ```
 
 `gcd` above sits on the line: two values, each reused and reordered in the recursive
-call, so names earn their keep. (Phase 0 ships no shuffling words yet, so there a
-local reference is the *only* way to reuse a value at all.)
+call. It is shown with names here, but `swap`/`over` write it just as legibly (that
+version is in the README), which is the point: two values is where the judgment call
+lives, and `lerp`'s three is where names clearly win.
 
 Checked stack effects are the cheap, high-value feature: Forth's signature failure
 mode (a silent underflow producing a wrong number at runtime) becomes a compile
