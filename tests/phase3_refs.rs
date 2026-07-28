@@ -884,6 +884,59 @@ fn mutable_borrow_aliased_by_if_join_result_is_error() {
 }
 
 #[test]
+fn mutable_borrow_aliased_by_one_if_arm_only_is_error() {
+    // The merge carries the alias forward from the single arm that has one, so
+    // the hazard is reported at the borrow even though the other arm leaves an
+    // independent value.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  \
+         1 0 > if v else v dup swap drop end | p |\n  \
+         &!p &!V>x 99 !\n  v V> . .\n  p V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `p` mutably")
+            && err.contains("it is aliased by `v`")
+            && err.contains("line 5, col 3"),
+        "expected the aliased-place rejection naming both ends and locating the borrow: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_aliased_by_the_second_if_arm_only_is_error() {
+    // The same shape with the arms swapped: arm order must not decide whether
+    // the alias survives the merge.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  \
+         0 0 > if v dup swap drop else v end | p |\n  \
+         &!p &!V>x 99 !\n  v V> . .\n  p V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
+        "expected the aliased-place rejection regardless of which arm aliases: {err}"
+    );
+}
+
+#[test]
+fn if_join_of_two_differently_aliased_arms_is_error() {
+    // One slot cannot carry two regions, so this shape is rejected at the join
+    // itself rather than silently keeping one arm's alias and losing the other.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
+         1 0 > if v else w end | p |\n  \
+         &!p &!V>x 99 !\n  v V> . .\n  w V> . .\n  p V> . . ;\n",
+    );
+    assert!(
+        err.contains("aliasing disagrees at the `if`/`else` join")
+            && err.contains("line 5")
+            && err.contains("`dup` the aliased arm"),
+        "expected the located join disagreement pointing at `dup`: {err}"
+    );
+}
+
+#[test]
 fn dup_makes_aliased_names_independent() {
     // `dup` is the whole remedy, and not a new concept: it is the language's
     // existing explicit copy, applied to a case that currently slips past.

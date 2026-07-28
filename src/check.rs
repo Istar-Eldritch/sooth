@@ -2373,6 +2373,32 @@ fn borrow_join_disagreement_error(
     }
 }
 
+/// The aliasing counterpart of `borrow_join_disagreement_error`.
+fn alias_join_disagreement_error(
+    ctx: &Ctx,
+    span: Span,
+    t_then: Option<Alias>,
+    t_else: Option<Alias>,
+) -> String {
+    let describe = |a: Option<Alias>| match a {
+        None => "an independent value".to_string(),
+        Some(a) => format!(
+            "a value sharing storage with the place named at line {}, col {}",
+            a.span.line, a.span.col
+        ),
+    };
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: aliasing disagrees at the `if`/`else` join in `{}` (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}: both arms must agree, since borrowing a name bound to the merge would otherwise mutate storage a live name still denotes on one path\n  `dup` the aliased arm for an independent copy\n  note: declared {}",
+            name, span.line, describe(t_then), describe(t_else), effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: aliasing disagrees at the `if`/`else` join (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}\n  `dup` the aliased arm for an independent copy",
+            span.line, describe(t_then), describe(t_else),
+        ),
+    }
+}
+
 /// Walk a term sequence. `scope` is the names in scope and the move-state of
 /// the linear ones, mutated in place as terms bind and mention names; `tail`
 /// marks the sequence as
@@ -2703,21 +2729,33 @@ fn check_term(
                 // path is computed after the merge, so it can't silently fill
                 // a `usize`/`isize` position without an explicit conversion
                 // (D8/X10).
+                // Never collapse a one-sided alias to "not aliased": the merged
+                // value really does share storage on that arm's path, so keeping
+                // the alias is what makes a later borrow of a name bound to the
+                // merge report the hazard instead of mutating invisibly. Two
+                // arms aliasing *different* regions cannot both be carried in
+                // one slot, so that shape is rejected here rather than losing
+                // one of them.
+                let alias = match (t_then.alias, t_else.alias) {
+                    (None, None) => None,
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    (Some(a), Some(b)) if a.region == b.region => Some(a),
+                    _ => {
+                        return Err(alias_join_disagreement_error(
+                            ctx,
+                            span,
+                            t_then.alias,
+                            t_else.alias,
+                        ));
+                    }
+                };
                 merged.push(Slot {
                     ty: t_then.ty,
                     literal: t_then.literal && t_else.literal,
                     // A value merged from two branches is never a single
                     // known literal, so it can't feed a compile-time count.
                     int_val: None,
-                    // R21: an arm can be a bare `Call` of a local that never
-                    // gets rebound (`if v else v end`), which leaves both arms
-                    // denoting the *same* region — collapsing that to `None`
-                    // regardless of agreement would let a name bound to the
-                    // merge alias its source silently.
-                    alias: match (t_then.alias, t_else.alias) {
-                        (Some(a), Some(b)) if a.region == b.region => Some(a),
-                        _ => None,
-                    },
+                    alias,
                     deriv,
                 });
             }
