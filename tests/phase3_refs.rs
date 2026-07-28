@@ -902,7 +902,7 @@ fn mutable_borrow_of_gotten_field_aliased_by_struct_is_error() {
     let err = check_error(
         "type: S arr [i64 4] ;\n\
          : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
-         &!items 0 &!> 9 !\n  &s S>arr 0 &> @ . ;\n",
+         &!items 0 &!> 9 !\n  &s &S>arr 0 &> @ . ;\n",
     );
     assert!(
         err.contains("cannot borrow `items` mutably") && err.contains("it is aliased by `s`"),
