@@ -504,8 +504,8 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    *borrow*, never at the naming or at a join, because naming twice is harmless if nothing
    mutates through it, and because forcing a `dup` on a non-hazard would insert exactly the
    copy this language refuses to insert implicitly (instruction counts stay readable off the
-   source for worst-case-timing work). The routes are naming, a non-consuming peek (`S|>fi`,
-   `get`), `over` (which reuses its operand rather than deep-copying like `dup`), and an
+   source for worst-case-timing work). The routes are naming, a non-consuming peek (`S|>fi`),
+   `over` (which reuses its operand rather than deep-copying like `dup`), and an
    `if`/`else` merge. A merge is why a value carries a *set* of regions interned behind an
    `AliasSetId` rather than a single region: the merge unions both arms, so a projection out
    of it projects the field out of every member and the borrow check tests pairwise overlap.

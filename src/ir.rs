@@ -1891,7 +1891,7 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
-            "fill" | "get" | "set" | "len" => self.lower_array_word(name, line),
+            "fill" | "len" => self.lower_array_word(name),
             "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
             "@" | "!" | "+!" => self.lower_access_word(name),
             // The spy constructor `( i64 -- __spy )` is identity at runtime
@@ -2215,11 +2215,9 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Lower an array word inline (R18): `fill` = alloc + N unrolled stores
-    /// (M6); `get` = element-addr + load, non-consuming (R12); `set` = alloc +
-    /// whole-array blit + element-addr + store, yielding a fresh array; `len`
-    /// = a constant `usize` from the layout, non-consuming.
-    fn lower_array_word(&mut self, name: &str, line: u32) {
+    /// Lower an array word inline: `fill` = alloc + N unrolled stores;
+    /// `len` = a constant `usize` from the layout, non-consuming.
+    fn lower_array_word(&mut self, name: &str) {
         match name {
             "fill" => {
                 let count_v = self.stack.pop().expect("fill: count");
@@ -2238,49 +2236,6 @@ impl<'a> FuncBuilder<'a> {
                 }
                 self.stack.push(dst);
             }
-            "get" => {
-                let index = self.stack.pop().expect("get: index");
-                // Non-consuming (R12/M4): the array stays on the stack.
-                let array = *self.stack.last().expect("get: array");
-                let id = match self.value_type(array) {
-                    IrType::Array(id) => id,
-                    _ => unreachable!("checked: get's second operand is an array"),
-                };
-                let (stride, elem, count) = self.array_parts(id);
-                self.bounds_check(index, count, line);
-                match elem {
-                    IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
-                        // The element address is itself the aggregate value.
-                        let v = self.elem_addr(array, index, stride, elem);
-                        self.stack.push(v);
-                    }
-                    _ => {
-                        let addr = self.elem_addr(array, index, stride, IrType::Ptr);
-                        let v = self.fresh_value(elem);
-                        self.push_instr(Instr::FieldLoad(v, addr));
-                        self.stack.push(v);
-                    }
-                }
-            }
-            "set" => {
-                let val = self.stack.pop().expect("set: value");
-                let index = self.stack.pop().expect("set: index");
-                let array = self.stack.pop().expect("set: array");
-                let id = match self.value_type(array) {
-                    IrType::Array(id) => id,
-                    _ => unreachable!("checked: set's first operand is an array"),
-                };
-                let (stride, elem, count) = self.array_parts(id);
-                self.bounds_check(index, count, line);
-                let size = self.arrays.layouts[id.index()].size;
-                let dst = self.alloc_array(id);
-                if size > 0 {
-                    self.push_instr(Instr::Blit(array, dst, size));
-                }
-                let addr = self.elem_addr(dst, index, stride, IrType::Ptr);
-                self.store_elem(addr, val, elem);
-                self.stack.push(dst);
-            }
             "len" => {
                 // Non-consuming (R10): the array stays; the constant folds in.
                 let array = *self.stack.last().expect("len: array");
@@ -2293,7 +2248,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, count as i64));
                 self.stack.push(v);
             }
-            _ => unreachable!("lower_array_word only handles fill/get/set/len"),
+            _ => unreachable!("lower_array_word only handles fill/len"),
         }
     }
 
@@ -3535,10 +3490,10 @@ mod tests {
     }
 
     #[test]
-    fn lower_get_is_non_consuming_elem_addr_and_load() {
-        // R18/R17: `get` addresses the element (`ElemAddr`) and loads it
-        // (`FieldLoad`); it allocs nothing (non-consuming, R12).
-        let ir = lower_src(": w ( [i64 4] -- i64 ) 0 get swap drop ;");
+    fn lower_reference_element_read_is_elem_addr_and_load() {
+        // `&>` addresses the element (`ElemAddr`); `@` loads it
+        // (`FieldLoad`); neither allocs, since the array is never rebuilt.
+        let ir = lower_src(": w ( [i64 4] -- i64 ) | a | &a 0 &> @ ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 1);
@@ -3546,23 +3501,22 @@ mod tests {
     }
 
     #[test]
-    fn lower_set_allocs_blits_addresses_and_stores() {
-        // R18: `set` allocs a fresh array, blits the whole original into it,
-        // addresses the element, and stores the new value — yielding a new
-        // array while the original is untouched (value semantics, D5).
-        let ir = lower_src(": w ( [i64 4] -- [i64 4] ) 0 9 set ;");
+    fn lower_reference_element_store_is_elem_addr_and_store_no_rebuild() {
+        // `&!>` addresses the element; `!` stores directly, with no alloc and
+        // no blit: replacing `set`'s whole-array rebuild is the point.
+        let ir = lower_src(": w ( [i64 4] usize i64 -- ) | a i x | &!a i &!> x ! ;");
         let w = &ir.funcs[0];
-        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
-        assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 0);
     }
 
     #[test]
-    fn lower_get_runtime_index_emits_bounds_guard_and_trap_call() {
-        // R19/D6: a runtime (non-literal) index guards the access with
-        // `index < N` and jumps to a trap block that calls the OOB helper.
-        let ir = lower_src(": w ( [i64 4] usize -- i64 ) get swap drop ;");
+    fn lower_reference_element_runtime_index_emits_bounds_guard_and_trap_call() {
+        // A runtime (non-literal) index guards the access with `index < N`
+        // and jumps to a trap block that calls the OOB helper.
+        let ir = lower_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
         let w = &ir.funcs[0];
         assert!(w
             .blocks
@@ -3578,10 +3532,10 @@ mod tests {
     }
 
     #[test]
-    fn lower_get_constant_index_has_no_runtime_guard() {
-        // R11/X4: a checked literal index is bounds-verified at compile time,
-        // so it skips the runtime guard entirely — no branch, no trap call.
-        let ir = lower_src(": w ( [i64 4] -- i64 ) 0 get swap drop ;");
+    fn lower_reference_element_constant_index_has_no_runtime_guard() {
+        // A checked literal index is bounds-verified at compile time, so it
+        // skips the runtime guard entirely — no branch, no trap call.
+        let ir = lower_src(": w ( [i64 4] -- i64 ) | a | &a 0 &> @ ;");
         let w = &ir.funcs[0];
         assert!(!w
             .blocks

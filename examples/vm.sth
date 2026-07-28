@@ -1,6 +1,7 @@
-\ Dogfood: Phase 2 exit. A fixed-size bytecode stack machine that interprets a
-\ toy instruction set, composing fixed-size arrays, `usize`, enums with
-\ clause dispatch, structs, and the Slice 6 self-tail-call dispatch loop.
+\ Dogfood: Phase 2 exit, now with Slice 6 references. A fixed-size bytecode
+\ stack machine that interprets a toy instruction set, composing fixed-size
+\ arrays, `usize`, enums with clause dispatch, structs, and the Slice 6
+\ self-tail-call dispatch loop.
 \
 \ `Op` is mixed-arity: `Push`/`Load`/`Store`/`Jz`/`Jmp` carry a `i64`/`usize`
 \ payload; `Add`/`Sub`/`Mul`/`Halt` do not. `Vm` bundles the whole machine
@@ -11,12 +12,15 @@
 \ A user word may only return one value through a call (see
 \ `examples/stack.sth`), so `vm-pop` bundles its `(Vm, i64)` result into a
 \ `VmPop` struct, destructured inline by the caller with the generated
-\ `VmPop>` word — same idiom as `Stack`/`Popped` in `examples/stack.sth`.
-\ `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same way.
+\ `VmPop>` word. `Fetched` bundles `run`'s `(Vm, Op)` fetch result the same
+\ way.
 \
 \ `run`'s `Add`/`Sub`/`Mul`/`Store` clauses (Phase 3 Slice 5) name the first
 \ `vm-pop` result with a mid-body `| ... |` binding instead of shuffling it
-\ into position with `swap`/`over`/`rot`.
+\ into position with `swap`/`over`/`rot`. `vm-push`/`vm-pop`/`fetch` and
+\ `run`'s `Load`/`Store` clauses (Slice 6) read and write the operand stack
+\ and memory arrays through a reference instead of `get`/`set`'s
+\ read-two-outputs / rebuild-the-whole-array shapes.
 
 type: Op
 | Push v i64
@@ -43,14 +47,16 @@ type: VmPop vm Vm val i64 ;
 
 : vm-push ( Vm i64 -- Vm )
   | vm x |
-  vm vm Vm>stack vm Vm>sp x set Vm<stack
-  vm Vm>sp 1 + Vm<sp ;
+  vm Vm>sp | i |
+  &!vm &!Vm>stack i &!> x !
+  vm vm Vm>sp 1 + Vm<sp ;
 
 : vm-pop ( Vm -- VmPop )
   | vm |
-  vm vm Vm>sp 1 - Vm<sp                \ new vm, sp decremented
-  vm Vm>stack vm Vm>sp 1 - get         \ original-vm array elem
-  swap drop                            \ elem
+  vm Vm>sp 1 - | i |
+  &vm &Vm>stack i &> @ | x |
+  vm i Vm<sp
+  x
   VmPop ;
 
 : bump-pc ( Vm -- Vm )
@@ -58,9 +64,9 @@ type: VmPop vm Vm val i64 ;
 
 : fetch ( Vm -- Fetched )
   | vm |
-  vm
-  vm Vm>prog vm Vm>pc get swap drop    \ read prog[pc], keep the Op
-  Fetched ;
+  vm Vm>pc | i |
+  &vm &Vm>prog i &> @ | op |
+  vm op Fetched ;
 
 \ Nine-clause self-tail-recursive dispatch loop. Every non-`Halt` clause
 \ produces an updated `Vm`, refetches the next `Op` out of the carried
@@ -72,7 +78,7 @@ type: VmPop vm Vm val i64 ;
     bump-pc
     fetch Fetched> run
 | Add   | vm |
-    vm vm-pop VmPop>          \ vm' b
+    vm vm-pop VmPop>          \ vm b
     | b |
     vm-pop VmPop>              \ vm'' a
     b +
@@ -96,15 +102,15 @@ type: VmPop vm Vm val i64 ;
     bump-pc
     fetch Fetched> run
 | Load  | vm addr |
-    vm vm Vm>mem addr get swap drop    \ vm mem[addr]
-    vm-push
+    &vm &Vm>mem addr &> @ | x |
+    vm x vm-push
     bump-pc
     fetch Fetched> run
 | Store | vm addr |
-    vm vm-pop VmPop>           \ vm' x
+    vm vm-pop VmPop>           \ v x
     | v x |
-    v v Vm>mem addr x set
-    Vm<mem
+    &!v &!Vm>mem addr &!> x !
+    v
     bump-pc
     fetch Fetched> run
 | Jz    | vm target |
@@ -124,7 +130,8 @@ type: VmPop vm Vm val i64 ;
     swap drop
 ;
 
-\ Assembles the sum-1..N-via-bytecode program (fill+set, no array literal):
+\ Assembles the sum-1..N-via-bytecode program (fill, then write each opcode
+\ through a reference into a named local, no array literal):
 \   0  Load  0    (L)   push i
 \   1  Jz    11         if i == 0 goto E
 \   2  Load  1          push acc
@@ -139,26 +146,28 @@ type: VmPop vm Vm val i64 ;
 \   11 Load  1    (E)   push acc
 \   12 Halt             result = acc on top of stack (seeded by fill)
 : build ( -- [Op 13] )
-  Halt 13 fill
-  0  >usize 0  >usize Load  set
-  1  >usize 11 >usize Jz    set
-  2  >usize 1  >usize Load  set
-  3  >usize 0  >usize Load  set
-  4  >usize Add set
-  5  >usize 1  >usize Store set
-  6  >usize 0  >usize Load  set
-  7  >usize 1 Push set
-  8  >usize Sub set
-  9  >usize 0  >usize Store set
-  10 >usize 0  >usize Jmp   set
-  11 >usize 1  >usize Load  set
-;
+  Halt 13 fill | prog |
+  &!prog 0  >usize &!> 0  >usize Load  !
+  &!prog 1  >usize &!> 11 >usize Jz    !
+  &!prog 2  >usize &!> 1  >usize Load  !
+  &!prog 3  >usize &!> 0  >usize Load  !
+  &!prog 4  >usize &!> Add !
+  &!prog 5  >usize &!> 1  >usize Store !
+  &!prog 6  >usize &!> 0  >usize Load  !
+  &!prog 7  >usize &!> 1 Push !
+  &!prog 8  >usize &!> Sub !
+  &!prog 9  >usize &!> 0  >usize Store !
+  &!prog 10 >usize &!> 0  >usize Jmp   !
+  &!prog 11 >usize &!> 1  >usize Load  !
+  prog ;
 
 : main ( -- )
   build
   0 >usize                       \ pc = 0
   0 8 fill
   0 >usize                       \ sp = 0
-  0 4 fill 0 >usize 100000 set  \ mem[0] = N = 100000, mem[1] = 0
+  0 4 fill | mem |
+  &!mem 0 >usize &!> 100000 !    \ mem[0] = N = 100000, mem[1] = 0
+  mem
   Vm
   fetch Fetched> run . ;

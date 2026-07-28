@@ -2628,7 +2628,7 @@ fn check_term(
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays, prov)? {
+            if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_owned_cell_word(name, span, &mut stack, ctx, arrays, cells)?
@@ -3653,7 +3653,6 @@ fn check_array_word(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
-    prov: &mut Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -3698,56 +3697,6 @@ fn check_array_word(
             }
             // Non-consuming: the array stays; `len` folds to the constant `N`.
             stack.push(Slot::computed(Type::Usize));
-        }
-        "get" => {
-            let n = stack.len();
-            if n < 2 {
-                return Err(need("get", 2, n));
-            }
-            let index = stack[n - 1];
-            let Type::Array(id, _) = stack[n - 2].ty else {
-                return Err(array_word_operand_error(ctx, span, "get", stack[n - 2].ty));
-            };
-            let count = arrays[id.index()].count;
-            let elem = arrays[id.index()].element;
-            check_array_index(index, count, ctx, span, "get")?;
-            // Non-consuming (R12): drop the index, leave the array, push T.
-            // For an aggregate element the pushed value *is* the element,
-            // so two `get`s of one array denote one region. Which element is
-            // not modelled (path disjointness is not modelled either), so
-            // every element of one array shares one region here.
-            let alias = peek_region(&mut stack[n - 2], elem, "[]", span, prov);
-            stack.truncate(n - 1);
-            stack.push(Slot {
-                alias,
-                ..Slot::computed(elem)
-            });
-        }
-        "set" => {
-            let n = stack.len();
-            if n < 3 {
-                return Err(need("set", 3, n));
-            }
-            let value = stack[n - 1];
-            let index = stack[n - 2];
-            let Type::Array(id, _) = stack[n - 3].ty else {
-                return Err(array_word_operand_error(ctx, span, "set", stack[n - 3].ty));
-            };
-            let array_ty = stack[n - 3].ty;
-            let count = arrays[id.index()].count;
-            let elem = arrays[id.index()].element;
-            check_array_index(index, count, ctx, span, "set")?;
-            match match_slot(value, elem) {
-                SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
-                SlotMatch::NeedsSizeConversion => {
-                    return Err(size_conversion_needed_error(ctx, span, "set", elem));
-                }
-                SlotMatch::Mismatch => {
-                    return Err(type_mismatch_error(ctx, span, "set", elem, value.ty));
-                }
-            }
-            stack.truncate(n - 3);
-            stack.push(Slot::computed(array_ty));
         }
         _ => return Ok(None),
     }
@@ -4401,13 +4350,12 @@ mod tests {
         check_src(": w ( -- ) 5 >usize . ;").unwrap();
     }
 
-    // Array words (R10-R14): fill / get / set / len type-checking.
+    // Array words: fill / len type-checking.
 
     #[test]
-    fn check_fill_get_set_len_happy_path_ok() {
-        // `fill` builds `[i64 4]`; `get`/`len` are non-consuming (the array
-        // stays), `set` yields a fresh array; one `drop` clears the residual.
-        check_src(": w ( -- ) 7 4 fill 0 get drop len drop 0 9 set drop ;").unwrap();
+    fn check_fill_len_happy_path_ok() {
+        // `fill` builds `[i64 4]`; `len` is non-consuming (the array stays).
+        check_src(": w ( -- ) 7 4 fill len drop drop ;").unwrap();
     }
 
     #[test]
@@ -4418,29 +4366,15 @@ mod tests {
     }
 
     #[test]
-    fn check_get_is_non_consuming_leaves_array_ok() {
-        // R12/M4: `get` leaves the array live, so a word returning both the
-        // array and the read element type-checks without a `dup`.
-        check_src(": w ( [i64 4] usize -- [i64 4] i64 ) | a i | a i get ;").unwrap();
-    }
-
-    #[test]
     fn check_len_is_non_consuming_leaves_array_ok() {
         check_src(": w ( [i64 4] -- [i64 4] usize ) | a | a len ;").unwrap();
-    }
-
-    #[test]
-    fn check_get_runtime_usize_index_ok() {
-        // A computed `usize` index is admissible (the runtime path; its bounds
-        // trap lands in Phase 4).
-        check_src(": w ( [i64 4] -- [i64 4] i64 ) | a | a 1 >usize get ;").unwrap();
     }
 
     #[test]
     fn check_constant_index_out_of_range_is_error() {
         // X4/R11: a literal index >= N is a sharp located compile error naming
         // the length and the index.
-        let err = check_src(": w ( -- ) 0 4 fill 9 get drop drop ;").unwrap_err();
+        let err = check_src(": w ( [i64 4] -- ) | a | &a 9 &> drop ;").unwrap_err();
         assert!(err.contains("out of range"), "unexpected message: {err}");
         assert!(err.contains("9"), "should name the index: {err}");
         assert!(err.contains("4"), "should name the length: {err}");
@@ -4449,7 +4383,7 @@ mod tests {
     #[test]
     fn check_computed_index_without_conversion_is_error() {
         // X10: a computed (non-literal) `i64` index needs an explicit `>usize`.
-        let err = check_src(": w ( i64 -- ) | n | 0 4 fill n get drop drop ;").unwrap_err();
+        let err = check_src(": w ( [i64 4] i64 -- ) | a n | &a n &> drop ;").unwrap_err();
         assert!(err.contains(">usize"), "unexpected message: {err}");
     }
 
@@ -4498,42 +4432,6 @@ mod tests {
     }
 
     #[test]
-    fn check_get_on_non_array_is_error() {
-        // X8: `get` on a non-array operand names the array word and the type.
-        let err = check_src(": w ( -- i64 ) 5 1 get ;").unwrap_err();
-        assert!(err.contains("`get`"), "unexpected message: {err}");
-        assert!(err.contains("array"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn check_set_wrong_element_type_is_error() {
-        // X8: `set` with a value not matching the element type errors, naming
-        // both the expected element type and the offending found type.
-        let err = check_src(": w ( -- ) 0 4 fill 0 true set drop ;").unwrap_err();
-        assert!(err.contains("type mismatch"), "unexpected message: {err}");
-        assert!(
-            err.contains("expected `i64`"),
-            "should name the element type: {err}"
-        );
-        assert!(
-            err.contains("found `bool`"),
-            "should name the offending type: {err}"
-        );
-    }
-
-    #[test]
-    fn check_get_wrong_arity_is_error() {
-        // X8: too few operands to `get` is a located underflow error naming
-        // the array word.
-        let err = check_src(": w ( -- i64 ) 5 get ;").unwrap_err();
-        assert!(err.contains("`get`"), "should name the word: {err}");
-        assert!(
-            err.contains("needs 2 values, but the stack holds 1"),
-            "should name the arity mismatch: {err}"
-        );
-    }
-
-    #[test]
     fn check_print_on_array_is_error() {
         // X6/R13: `.` on an array is a sharp located error naming `[T N]`.
         let err = check_src(": w ( -- ) 0 4 fill . ;").unwrap_err();
@@ -4560,7 +4458,7 @@ mod tests {
         // R8: structural dedup means `[i64 4]` in two positions is one type, so
         // an `[i64 4]` argument satisfies an `[i64 4]`-typed word.
         check_src(
-            ": mk ( -- [i64 4] ) 0 4 fill ;\n: use ( [i64 4] -- i64 ) 0 get swap drop ;\n: w ( -- i64 ) mk use ;",
+            ": mk ( -- [i64 4] ) 0 4 fill ;\n: use ( [i64 4] -- i64 ) | a | &a 0 &> @ ;\n: w ( -- i64 ) mk use ;",
         )
         .unwrap();
     }

@@ -1242,15 +1242,15 @@ fn isize_round_trips_arithmetic_and_conversion() {
 
 #[test]
 fn fill_constructs_and_get_reads_every_element_back_native() {
-    // Criterion 3: `fill` an `[i64 N]`, then read every element back via
-    // `get` and print it; the values match the fill value (unrolled stores +
-    // dynamic element addressing, R17/R18).
+    // Criterion 3: `fill` an `[i64 N]`, then read every element back through
+    // a reference (`&>` then `@`) and print it; the values match the fill
+    // value (unrolled stores + dynamic element addressing, R17/R18).
     let src = ": main ( -- )\n\
-  9 4 fill\n\
-  dup 0 get . drop\n\
-  dup 1 get . drop\n\
-  dup 2 get . drop\n\
-  3 get . drop ;\n";
+  9 4 fill | a |\n\
+  &a 0 &> @ .\n\
+  &a 1 &> @ .\n\
+  &a 2 &> @ .\n\
+  &a 3 &> @ . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-fill-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
@@ -1262,28 +1262,24 @@ fn fill_constructs_and_get_reads_every_element_back_native() {
 
 #[test]
 fn set_at_runtime_index_yields_new_array_original_untouched_native() {
-    // Criterion 4: `set` at a *runtime* index (computed, not a literal) on a
-    // duped array yields a new array with exactly one element changed; the
-    // original (kept alongside) is untouched (D5 value semantics). `get`
-    // leaves the array on the stack afterwards (non-consuming, R12/M4), so
-    // the same array is read from twice in a row without redoing `get`'s
-    // array operand.
+    // Criterion 4: mutating one `dup`ed copy of an array in place through a
+    // *runtime* index (computed, not a literal) leaves the other copy
+    // untouched (D5 value semantics), since `dup` deep-copies rather than
+    // aliasing.
     let src = ": main ( -- )\n\
-  0 4 fill dup\n\
-  1 1 + >usize 99 set\n\
-  2 >usize get .\n\
-  0 >usize get .\n\
-  swap\n\
-  2 >usize get .\n\
-  0 >usize get .\n\
-  drop drop ;\n";
+  0 4 fill dup | a b |\n\
+  &!a 1 1 + >usize &!> 99 !\n\
+  &a 2 &> @ .\n\
+  &a 0 &> @ .\n\
+  &b 2 &> @ .\n\
+  &b 0 &> @ . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-set-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
     std::fs::remove_file(&path).ok();
 
-    // New array: index 2 changed to 99, index 0 unchanged (0); original
-    // array: both indices still 0.
+    // Mutated copy: index 2 changed to 99, index 0 unchanged (0); original
+    // copy: both indices still 0.
     assert_eq!(stdout, "99\n0\n0\n0\n");
     assert_eq!(code, 0);
 }
@@ -1292,7 +1288,7 @@ fn set_at_runtime_index_yields_new_array_original_untouched_native() {
 fn constant_out_of_range_array_index_is_compile_error() {
     // Criterion 5(a), X4: a literal index >= N is a sharp, located compile
     // error naming the length and the index.
-    let src = ": w ( -- i64 )\n  0 4 fill 9 get drop ;\n";
+    let src = ": w ( -- )\n  0 4 fill | a |\n  &a 9 &> drop ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -1313,8 +1309,8 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
     // a swapped or duplicated arg would still pass a same-valued assertion.
     let src = ": main ( -- )\n\
   1 .\n\
-  0 4 fill\n\
-  3 4 + >usize get drop drop\n\
+  0 4 fill | a |\n\
+  &a 3 4 + >usize &> @ drop\n\
   99 . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-array-trap-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -1371,11 +1367,11 @@ fn nested_array_shapes_construct_and_read_back_native() {
     let src = "type: Vec2 x i64 y i64 ;\n\
 type: Box arr [i64 3] ;\n\
 : vx ( [Vec2 2] usize -- i64 )\n\
-| a i | a i get Vec2>x swap drop ;\n\
+| a i | &a i &> @ Vec2>x ;\n\
 : inner-at ( [[i64 2] 2] usize usize -- i64 )\n\
-| a i j | a i get swap drop j get swap drop ;\n\
+| a i j | &a i &> j &> @ ;\n\
 : box-at ( Box usize -- i64 )\n\
-| b i | b Box>arr i get swap drop ;\n\
+| b i | &b &Box>arr i &> @ ;\n\
 : main ( -- )\n\
   1 2 Vec2 2 fill\n\
   dup 0 vx .\n\
@@ -1520,7 +1516,7 @@ fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
 
 #[test]
 fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
-    // Slice 7 criterion 8 (the crux): `get` an `Op` out of the *carried*
+    // Slice 7 criterion 8 (the crux): read an `Op` out of the *carried*
     // program array, clause-match it, and tail-recurse. The array-across-the
     // -back-edge half was proven by a prior spike; the residual unproven
     // composition is enum-`get`-from-carried-array + clause dispatch in
@@ -1530,10 +1526,10 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
     // catches as a signal death (no exit code) and turns a no-op Slice 6
     // transform red. `idx` goes bool -> index via `if 1 else 0 end >usize`
     // (a conversion word on a `bool` is a checker error), and `fetch` reads
-    // the enum with non-consuming `get` (`swap drop` keeps the `Op`).
+    // the enum through a reference (`&>` then `@`) rather than `get`.
     let src = "type: Op | Step | Stop ;\n\
 : idx ( i64 -- usize ) | count | count 0 = if 1 else 0 end >usize ;\n\
-: fetch ( [Op 2] usize -- Op ) | a i | a i get swap drop ;\n\
+: fetch ( [Op 2] usize -- Op ) | a i | &a i &> @ ;\n\
 : run ( [Op 2] i64 i64 Op -- i64 )\n\
   | Step | prog count acc |\n\
       prog\n\
@@ -1543,7 +1539,7 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
       run\n\
   | Stop | prog count acc | acc\n\
 ;\n\
-: build ( -- [Op 2] ) Step 2 fill 1 Stop set ;\n\
+: build ( -- [Op 2] ) Step 2 fill | prog | &!prog 1 &!> Stop ! prog ;\n\
 : start ( [Op 2] -- i64 ) | prog | prog 1000000 0 prog 0 fetch run ;\n\
 : main ( -- ) build start . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-vm-smoke-{}.sth", std::process::id()));
@@ -1559,8 +1555,9 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
 fn vm_dogfood_compiles_and_runs() {
     // Phase 3 of Slice 7 (criteria 1, 2, 4, 5, 6): the VM's real dispatch
     // loop (`fetch` + the nine-clause self-tail-recursive `run`) interprets
-    // the sum-1..N bytecode program (built via `fill`+`set`, no array
-    // literal) at N = 10, exercising every opcode the sum program needs
+    // the sum-1..N bytecode program (built via `fill` and a reference into
+    // a named local, no array literal) at N = 10, exercising every opcode
+    // the sum program needs
     // (`Push`/`Add`/`Sub`/`Load`/`Store`/`Jz`/`Jmp`/`Halt`) and the `Jz`/`Jmp`
     // backward branch. `Mul` dispatches too (its clause is identical in shape
     // to `Add`/`Sub`) but sum-1..N never multiplies, so this golden doesn't
@@ -1590,21 +1587,23 @@ type: Fetched vm Vm op Op ;\n\
 type: VmPop vm Vm val i64 ;\n\
 : vm-push ( Vm i64 -- Vm )\n\
   | vm x |\n\
-  vm vm Vm>stack vm Vm>sp x set Vm<stack\n\
-  vm Vm>sp 1 + Vm<sp ;\n\
+  vm Vm>sp | i |\n\
+  &!vm &!Vm>stack i &!> x !\n\
+  vm vm Vm>sp 1 + Vm<sp ;\n\
 : vm-pop ( Vm -- VmPop )\n\
   | vm |\n\
-  vm vm Vm>sp 1 - Vm<sp\n\
-  vm Vm>stack vm Vm>sp 1 - get\n\
-  swap drop\n\
+  vm Vm>sp 1 - | i |\n\
+  &vm &Vm>stack i &> @ | x |\n\
+  vm i Vm<sp\n\
+  x\n\
   VmPop ;\n\
 : bump-pc ( Vm -- Vm )\n\
   dup Vm>pc 1 + Vm<pc ;\n\
 : fetch ( Vm -- Fetched )\n\
   | vm |\n\
-  vm\n\
-  vm Vm>prog vm Vm>pc get swap drop\n\
-  Fetched ;\n\
+  vm Vm>pc | i |\n\
+  &vm &Vm>prog i &> @ | op |\n\
+  vm op Fetched ;\n\
 : run ( Vm Op -- i64 )\n\
 | Push  | vm v |\n\
     vm v vm-push\n\
@@ -1635,17 +1634,15 @@ type: VmPop vm Vm val i64 ;\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Load  | vm addr |\n\
-    vm vm Vm>mem addr get swap drop\n\
-    vm-push\n\
+    &vm &Vm>mem addr &> @ | x |\n\
+    vm x vm-push\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Store | vm addr |\n\
     vm vm-pop VmPop>\n\
-    over Vm>mem\n\
-    addr\n\
-    rot\n\
-    set\n\
-    Vm<mem\n\
+    | v x |\n\
+    &!v &!Vm>mem addr &!> x !\n\
+    v\n\
     bump-pc\n\
     fetch Fetched> run\n\
 | Jz    | vm target |\n\
@@ -1665,26 +1662,28 @@ type: VmPop vm Vm val i64 ;\n\
     swap drop\n\
 ;\n\
 : build ( -- [Op 13] )\n\
-  Halt 13 fill\n\
-  0  >usize 0  >usize Load  set\n\
-  1  >usize 11 >usize Jz    set\n\
-  2  >usize 1  >usize Load  set\n\
-  3  >usize 0  >usize Load  set\n\
-  4  >usize Add set\n\
-  5  >usize 1  >usize Store set\n\
-  6  >usize 0  >usize Load  set\n\
-  7  >usize 1 Push set\n\
-  8  >usize Sub set\n\
-  9  >usize 0  >usize Store set\n\
-  10 >usize 0  >usize Jmp   set\n\
-  11 >usize 1  >usize Load  set\n\
-;\n\
+  Halt 13 fill | prog |\n\
+  &!prog 0  >usize &!> 0  >usize Load  !\n\
+  &!prog 1  >usize &!> 11 >usize Jz    !\n\
+  &!prog 2  >usize &!> 1  >usize Load  !\n\
+  &!prog 3  >usize &!> 0  >usize Load  !\n\
+  &!prog 4  >usize &!> Add !\n\
+  &!prog 5  >usize &!> 1  >usize Store !\n\
+  &!prog 6  >usize &!> 0  >usize Load  !\n\
+  &!prog 7  >usize &!> 1 Push !\n\
+  &!prog 8  >usize &!> Sub !\n\
+  &!prog 9  >usize &!> 0  >usize Store !\n\
+  &!prog 10 >usize &!> 0  >usize Jmp   !\n\
+  &!prog 11 >usize &!> 1  >usize Load  !\n\
+  prog ;\n\
 : main ( -- )\n\
   build\n\
   0 >usize\n\
   0 8 fill\n\
   0 >usize\n\
-  0 4 fill 0 >usize 10 set\n\
+  0 4 fill | mem |\n\
+  &!mem 0 >usize &!> 10 !\n\
+  mem\n\
   Vm\n\
   fetch Fetched> run . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-vm-small-n-{}.sth", std::process::id()));
@@ -2551,10 +2550,11 @@ fn owned_zero_sized_payload_allocs_one_byte() {
 #[test]
 fn owned_byte_buffer_peek_get_and_free_once() {
     // Criterion 13: `^[u8 N]` constructed from a filled array, peeked, a
-    // byte `get` off the peeked copy, then `drop`; exactly one alloc/free.
+    // byte read off the peeked copy through `&>`/`@`, then `drop`; exactly
+    // one alloc/free.
     let stdout = run_owned_traced_golden(
         "byte-buffer",
-        ": main ( -- )\n  7 >u8 4 fill ^ ^|> 0 get . drop drop ;\n",
+        ": main ( -- )\n  7 >u8 4 fill ^ ^|> | arr |\n  &arr 0 &> @ .\n  drop ;\n",
     );
     assert_eq!(stdout, "alloc 4\n7\nfree 4\n");
 }
@@ -2563,11 +2563,11 @@ fn owned_byte_buffer_peek_get_and_free_once() {
 fn peek_aggregate_does_not_alias_cell() {
     // Criterion 13 (continued): peek an aggregate, dispose the cell, *then*
     // read the peeked copy. If `^|>` had aliased the cell instead of copying
-    // out (R14), the read after `drop` would see freed memory; reading the
-    // right value after the free proves it didn't.
+    // out, the read after `drop` would see freed memory; reading the right
+    // value after the free proves it didn't.
     let stdout = run_owned_traced_golden(
         "peek-no-alias",
-        ": main ( -- )\n  9 >u8 4 fill ^ ^|> swap drop 0 get . drop ;\n",
+        ": main ( -- )\n  9 >u8 4 fill ^ ^|> | arr |\n  drop\n  &arr 0 &> @ . ;\n",
     );
     assert_eq!(stdout, "alloc 4\nfree 4\n9\n");
 }

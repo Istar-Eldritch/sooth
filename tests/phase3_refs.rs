@@ -856,22 +856,6 @@ fn mutable_borrow_of_peeked_field_aliased_by_struct_is_error() {
 }
 
 #[test]
-fn mutable_borrow_of_array_aliased_by_element_name_is_error() {
-    // The same overlap via `get`: every element of an array shares one region
-    // (index disjointness is not modelled either), so an element's peeked
-    // name aliases the whole array too.
-    let err = check_error(
-        "type: V x i64 y i64 ;\n\
-         : main ( -- )\n  1 2 V 4 fill | arr |\n  arr 0 get | elem |\n  drop\n  \
-         &!arr 0 &!> &!V>x 40 +!\n  elem V> . . ;\n",
-    );
-    assert!(
-        err.contains("cannot borrow `arr` mutably") && err.contains("it is aliased by `elem`"),
-        "expected the aliased-place rejection naming both ends: {err}"
-    );
-}
-
-#[test]
 fn mutable_borrow_aliased_by_if_join_result_is_error() {
     // When both `if` arms leave the *same* place's value (`v` named on
     // both sides, never rebound), the merge must still denote that place's

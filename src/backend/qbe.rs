@@ -1297,10 +1297,10 @@ mod tests {
 
     #[test]
     fn emit_bounds_trap_helper_prints_and_exits() {
-        // R19/D6: the module always emits the OOB trap helper, which writes the
+        // The module always emits the OOB trap helper, which writes the
         // located message to stderr (`dprintf` fd 2 + `$oobfmt`) and `exit`s
         // nonzero, ending in `hlt` so it aborts rather than falls through.
-        let il = emit_src(": w ( [i64 4] usize -- i64 ) get swap drop ;");
+        let il = emit_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
         assert!(il.contains("$sooth_oob_trap("), "missing trap helper: {il}");
         assert!(
             il.contains("data $oobfmt"),
@@ -1312,7 +1312,7 @@ mod tests {
         );
         assert!(il.contains("$exit(w 1)"), "trap must exit nonzero: {il}");
         assert!(il.contains("hlt"), "trap must abort (hlt): {il}");
-        // The runtime get guards the access with a branch to the trap symbol.
+        // The runtime element access guards it with a branch to the trap symbol.
         assert!(il.contains("jnz "), "runtime index must be guarded: {il}");
         assert!(
             il.contains("call $sooth_oob_trap("),

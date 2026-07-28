@@ -461,19 +461,20 @@ fn array_and_usize_cross_repl_line_boundary_and_render() {
 }
 
 /// Criterion 8: the `examples/stack.sth` dogfood — array-as-struct-field, a
-/// runtime `usize` cursor (the trap path), non-consuming `get`, functional
-/// `set`, and `len` — declared and run entirely across REPL lines (`type:`
-/// with an array field, then `fill`/`get`/`set`/`len` at REPL scope,
-/// mirroring the Slice 4 REPL-scope seeding).
+/// runtime `usize` cursor (the trap path), in-place mutation through `&!>`,
+/// a non-consuming read through `&>`/`@`, and `len` — declared and run
+/// entirely across REPL lines (`type:` with an array field, then
+/// `fill`/`&!>`/`&>`/`len` at REPL scope, mirroring the Slice 4 REPL-scope
+/// seeding).
 #[test]
 fn stack_dogfood_runs_in_repl() {
     let out = run_session(&[
         "type: Stack items [i64 16] top usize ;",
         "type: Popped rest Stack item i64 ;",
         ": empty ( -- Stack ) 0 16 fill 0 >usize Stack ;",
-        ": push ( Stack i64 -- Stack ) | s x | s s Stack>items s Stack>top x set Stack<items s Stack>top 1 + Stack<top ;",
-        ": pop ( Stack -- Popped ) | s | s s Stack>top 1 - Stack<top s Stack>items s Stack>top 1 - get swap drop Popped ;",
-        ": peek ( Stack -- Popped ) | s | s s Stack>items s Stack>top 1 - get swap drop Popped ;",
+        ": push ( Stack i64 -- Stack ) | s x | s Stack>top | i | &!s &!Stack>items i &!> x ! s s Stack>top 1 + Stack<top ;",
+        ": pop ( Stack -- Popped ) | s | s Stack>top 1 - | i | &s &Stack>items i &> @ | v | s i Stack<top v Popped ;",
+        ": peek ( Stack -- Popped ) | s | s Stack>top 1 - | i | &s &Stack>items i &> @ | v | s v Popped ;",
         "empty 1 push 2 push 3 push",
         "peek Popped> .",
         "pop Popped> .",
@@ -582,13 +583,13 @@ fn vm_dogfood_runs_in_repl() {
         "type: Vm prog [Op 13] pc usize stack [i64 8] sp usize mem [i64 4] ;",
         "type: Fetched vm Vm op Op ;",
         "type: VmPop vm Vm val i64 ;",
-        ": vm-push ( Vm i64 -- Vm ) | vm x | vm vm Vm>stack vm Vm>sp x set Vm<stack vm Vm>sp 1 + Vm<sp ;",
-        ": vm-pop ( Vm -- VmPop ) | vm | vm vm Vm>sp 1 - Vm<sp vm Vm>stack vm Vm>sp 1 - get swap drop VmPop ;",
+        ": vm-push ( Vm i64 -- Vm ) | vm x | vm Vm>sp | i | &!vm &!Vm>stack i &!> x ! vm vm Vm>sp 1 + Vm<sp ;",
+        ": vm-pop ( Vm -- VmPop ) | vm | vm Vm>sp 1 - | i | &vm &Vm>stack i &> @ | x | vm i Vm<sp x VmPop ;",
         ": bump-pc ( Vm -- Vm ) dup Vm>pc 1 + Vm<pc ;",
-        ": fetch ( Vm -- Fetched ) | vm | vm vm Vm>prog vm Vm>pc get swap drop Fetched ;",
-        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | vm vm Vm>mem addr get swap drop vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> over Vm>mem addr rot set Vm<mem bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = if target Vm<pc else bump-pc end fetch Fetched> run | Jmp | vm target | vm target Vm<pc fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
-        ": build ( -- [Op 13] ) Halt 13 fill 0 >usize 0 >usize Load set 1 >usize 11 >usize Jz set 2 >usize 1 >usize Load set 3 >usize 0 >usize Load set 4 >usize Add set 5 >usize 1 >usize Store set 6 >usize 0 >usize Load set 7 >usize 1 Push set 8 >usize Sub set 9 >usize 0 >usize Store set 10 >usize 0 >usize Jmp set 11 >usize 1 >usize Load set ;",
-        "build 0 >usize 0 8 fill 0 >usize 0 4 fill 0 >usize 100000 set Vm fetch Fetched> run .",
+        ": fetch ( Vm -- Fetched ) | vm | vm Vm>pc | i | &vm &Vm>prog i &> @ | op | vm op Fetched ;",
+        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | &vm &Vm>mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> | v x | &!v &!Vm>mem addr &!> x ! v bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = if target Vm<pc else bump-pc end fetch Fetched> run | Jmp | vm target | vm target Vm<pc fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
+        ": build ( -- [Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
+        "build 0 >usize 0 8 fill 0 >usize 0 4 fill | mem | &!mem 0 >usize &!> 100000 ! mem Vm fetch Fetched> run .",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
