@@ -216,7 +216,7 @@ cannot escape their scope. Because they can't escape, no *lifetime* system is
 needed: no lifetime variables, no region annotations, nothing that binds a
 reference's validity to a named scope. Lifetimes attach to named bindings; stack
 values are anonymous and shuffled by `swap`/`rot`, so a lifetime system is the worst
-possible fit here and stays deliberately avoided. Phase 3 Slice 6 adds a narrower
+possible fit here and stays deliberately avoided. Phase 3 Slice 6 shipped a narrower
 rule instead: per-place exclusivity (at most one live mutable reference to a place),
 checked at the point each place is consumed rather than by a liveness pass. That is
 not a lifetime system — it never asks how long a reference is allowed to live, only
@@ -224,6 +224,13 @@ whether two live ones alias — and it works with none of the lifetime apparatus
 because a reference already can't escape its creating scope. Affine values plus
 non-escaping, exclusivity-checked refs give most of the safety with none of the
 lifetime apparatus.
+
+A `&!T` is consequently a third disposal category, neither `Copy` (so it cannot be
+`dup`ed) nor linear (so it carries no `drop` obligation): it owns nothing, so a
+reference-typed local simply expires, while a reference left on the stack is still a
+surplus value. Exclusivity is also keyed per place rather than per path, so two
+references into disjoint fields of one local conflict while both are live; sequencing
+them is the workaround.
 
 Pointers (`^T`) are non-null by default: there is no compiler-known optional/nullable
 pointer type, now or planned before Phase 4's generics. Nullability, when a program

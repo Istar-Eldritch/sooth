@@ -41,8 +41,11 @@ move-by-default with `dup` gated on `Copy` and `drop` as an explicit destructor 
 transitively through structs and enums, behind a `malloc`/`free` shim with an OOM trap;
 recursive heap data (lists, trees, mutually recursive shapes) whose synthesized
 destructors dispose in **constant stack**, verified past a million nodes under a 1 MB
-stack; and **general locals**, where `| names |` binds at any point in a body and REPL
-lines can bind too. Next is second-class references and escape checking.
+stack; **general locals**, where `| names |` binds at any point in a body and REPL
+lines can bind too; and **second-class references**, where `&a`/`&!a` borrows a local,
+projection reaches a field, element or cell payload, and `@`/`!`/`+!` read and mutate
+through a reference, governed by per-place exclusivity and structural escape prevention
+rather than by any lifetime system. Next is opt-in reference counting (`Rc`/`Arc`).
 
 The compiler is a Rust bootstrap; the language will later self-host.
 

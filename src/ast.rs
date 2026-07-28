@@ -56,12 +56,6 @@ impl Module {
     pub fn intern_owned_cell_type(&mut self, payload: Type) -> Type {
         intern_owned_cell_type(&mut self.owned_cells, payload)
     }
-
-    /// Intern a `(referent, mutable)` reference shape against this module's
-    /// reference registry. Thin wrapper over the free `intern_ref_type`.
-    pub fn intern_ref_type(&mut self, referent: Type, mutable: bool) -> Type {
-        intern_ref_type(&mut self.refs, referent, mutable)
-    }
 }
 
 /// Resolve a source type-name word to a `Type`: the scalar table first, then
