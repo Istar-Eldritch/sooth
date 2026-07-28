@@ -15,9 +15,10 @@ consequences, both applied below rather than left as stale prose:
   helper only to have somewhere to bind them, and `push-byte` names its two projected
   intermediates instead of re-deriving them by reborrowing three times.
 - R20 below (superseding `get`/`set`) previously deferred the migration because a bare REPL
-  line had no locals and so could never form a place. That is no longer true. The migration is
-  still left out of this slice's delivery phases, but now for a scope reason, not a hard
-  blocker — flagged at R20 for confirmation rather than decided here.
+  line had no locals and so could never form a place. That is no longer true, but the migration
+  still stays out of this slice's delivery phases, and it does not get a slice of its own
+  either: it is small and mechanical enough to do as a standalone follow-up commit once this
+  slice lands, with no brief or spec of its own.
 
 ## Context: what is already true on the base commit
 
@@ -429,7 +430,8 @@ regression this exists to catch.
 ### Superseded vocabulary
 
 **R20 — `get` and `set` are superseded by `&!> @` (or `&> @` for a read-only borrow) and
-`&!> !`, migration and removal deferred to a later slice.** Not renamed, not changed here (R3).
+`&!> !`; migration and removal are a standalone follow-up, not part of this slice or any
+numbered slice.** Not renamed, not changed here (R3).
 `get ( [T N] usize -- [T N] T )` is non-consuming and two-output because Slice 1 gave it no
 other way to leave the array live; every read-only call site pays for it with an immediate
 `swap drop` (`examples/vm.sth:62,99`). `&> @` reads the same value with no re-pushed array to
@@ -447,18 +449,20 @@ reader to spot: `get` on an aggregate element aliases the array's storage (the p
 the element), while `&!> @` copies it out. Both are correct for a Copy value; they are not the
 same operation.
 
-**The migration's blocker is gone; whether to do it in this slice is now a scope call, not a
-forced deferral — flagged here rather than decided.** The previous reason to defer was that a
-bare REPL line had no locals (`Ctx::Line` carried none, so R2's place could never form there),
-which made the entire replacement vocabulary unreachable from a REPL line and would have deleted
+**The migration's old blocker is gone, but it stays out of this slice, and it does not get a
+slice of its own either.** The previous reason to defer was that a bare REPL line had no locals
+(`Ctx::Line` carried none, so R2's place could never form there), which made the entire
+replacement vocabulary unreachable from a REPL line and would have deleted
 `tests/phase1.rs`'s `stack_dogfood_runs_in_repl`/`vm_dogfood_runs_in_repl` goldens' REPL-scope
 coverage with no replacement. Slice 5 removed that: a REPL line has locals now, the same as a
-word body. **Recommendation: still leave the migration out of this slice.** Doing it here would
-add a fourth delivery phase, modify two pre-existing example files and two pre-existing REPL
-goldens, and directly conflict with R19's additive-only regression check for this slice unless
-that check's scope were narrowed — real scope creep for a slice whose exit is reference types,
-not vocabulary retirement. This is a recommendation, not a decision already made; confirm before
-implementation starts if a different call is wanted.
+word body. Doing the migration inside this slice would still be scope creep for the reasons
+above (a fourth delivery phase, two pre-existing example files and two pre-existing REPL
+goldens edited, in direct tension with R19's additive-only regression check), and it is not
+new language design either — rewrite four existing files to the new spelling, then delete
+`get`/`set` from the checker and IR. Once Slice 6 lands and `&>`/`&!>`/`@`/`!` exist, do it as an
+ordinary follow-up commit, no brief, no spec, no phased pipeline: small enough to do in one
+pass, reviewed like any other change, not run through the slice machinery this document uses
+for actual design work.
 
 ## Load-bearing invariants (must survive)
 
