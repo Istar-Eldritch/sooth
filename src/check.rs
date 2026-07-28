@@ -293,6 +293,21 @@ struct Deriv {
     span: Span,
 }
 
+impl Deriv {
+    /// R10: the places this derivation keeps suspended, which is what a branch
+    /// join has to agree on. Both halves are consulted by a hazard check
+    /// (`owned_root` by the consume/borrow-conflict scans, the reborrowed
+    /// reference local by R3's suspend rule), so both belong in the key: a join
+    /// keeps only one arm's derivation, and any place the discarded arm
+    /// suspended would silently stop being protected.
+    fn suspension(&self) -> (Option<&str>, Option<&str>) {
+        (
+            self.owned_root.as_deref(),
+            (self.reborrow && self.mutable).then_some(self.place.as_str()),
+        )
+    }
+}
+
 /// The per-body provenance arenas: which place each live reference traces back
 /// to (R6) and which region each aggregate value denotes (R21). Threaded `&mut`
 /// through the walk rather than kept in `Scope`, which an `if` arm clones: ids
@@ -2337,12 +2352,14 @@ fn borrow_join_disagreement_error(
     t_then: Option<&Deriv>,
     t_else: Option<&Deriv>,
 ) -> String {
-    let describe = |d: Option<&Deriv>| match d {
-        Some(deriv) => match &deriv.owned_root {
-            Some(place) => format!("a borrow of `{place}`"),
-            None => "a borrow with no local root".to_string(),
-        },
+    let describe = |d: Option<&Deriv>| match d.map(Deriv::suspension) {
         None => "no live borrow".to_string(),
+        Some((Some(root), Some(place))) => {
+            format!("a borrow of `{root}` reborrowed from `{place}`")
+        }
+        Some((Some(root), None)) => format!("a borrow of `{root}`"),
+        Some((None, Some(place))) => format!("a reborrow of `{place}`"),
+        Some((None, None)) => "a borrow with no local root".to_string(),
     };
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
@@ -2661,12 +2678,15 @@ fn check_term(
                 // derives from local `x`, the other from `y`), which the merge
                 // must reject rather than silently pick one arm's answer — a
                 // later hazard check would then reason about the wrong arm's
-                // runtime path. Both arms live with no owned root (a
-                // parameter-derived chain) agree trivially: neither denotes a
-                // place this frame must protect.
+                // runtime path. A place is either arm's owned root or the
+                // reference local a mutable reborrow suspends: two arms
+                // reborrowing *different* reference parameters have no owned
+                // root at all and still disagree.
                 let deriv = match (t_then.deriv, t_else.deriv) {
                     (None, None) => None,
-                    (Some(a), Some(b)) if prov.deriv(a).owned_root == prov.deriv(b).owned_root => {
+                    (Some(a), Some(b))
+                        if prov.deriv(a).suspension() == prov.deriv(b).suspension() =>
+                    {
                         Some(a)
                     }
                     _ => {
@@ -5782,6 +5802,25 @@ type: Boxed | Some h Holds | None ;\n")
             Some("v"),
             "`v` is still borrowed by the local"
         );
+    }
+
+    #[test]
+    fn provenance_suspension_key_covers_a_reborrow_with_no_owned_root() {
+        // R10's join key. A reborrow of a reference *parameter* has no owned
+        // root, so keying the join on `owned_root` alone would make two arms
+        // reborrowing two different parameters look identical.
+        let mut prov = Provenance::default();
+        let span = Span { line: 1, col: 1 };
+        let p = prov.reborrow("p", None, true, span);
+        let q = prov.reborrow("q", None, true, span);
+        assert_eq!(prov.deriv(p).owned_root, prov.deriv(q).owned_root);
+        assert_ne!(prov.deriv(p).suspension(), prov.deriv(q).suspension());
+
+        // A shared reborrow suspends nothing: `&T` is Copy, so two arms
+        // reborrowing different shared parameters still agree.
+        let p = prov.reborrow("p", None, false, span);
+        let q = prov.reborrow("q", None, false, span);
+        assert_eq!(prov.deriv(p).suspension(), prov.deriv(q).suspension());
     }
 
     #[test]

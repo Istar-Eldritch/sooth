@@ -1126,6 +1126,30 @@ fn borrow_live_on_both_arms_is_accepted() {
     assert_eq!(code, 0);
 }
 
+#[test]
+fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
+    // The two arms reborrow *different* reference parameters, so neither
+    // derivation has an owned root in this frame — yet each suspends its own
+    // reference local, and the merge keeps only one. Without R10 rejecting it,
+    // the `else` path reaches `q &!Buf>len` with a `&!usize` derived from `q`
+    // still live: the two-live-mutable-references hazard R3's suspend rule
+    // exists to stop.
+    let err = check_error(
+        "type: Buf  data ^[u8 64]  len usize ;\n\
+         : two-parents ( &!Buf &!Buf -- )\n  | p q |\n  \
+         true if p else q end\n  &!Buf>len\n  q &!Buf>len 1 +!\n  1 +! ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("borrow state disagrees"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("reborrow of `p`") && err.contains("reborrow of `q`"),
+        "the error should name both arms' reborrowed places: {err}"
+    );
+}
+
 // --- criterion 12: R16, reference-mode enum elimination
 
 #[test]
@@ -1146,6 +1170,26 @@ fn reference_mode_clause_binds_payload_as_reference() {
          : main ( -- )\n  5 Nil build\n  | l |\n  0 &l sum .\n  l drop ;\n",
     );
     assert_eq!(stdout, "15\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn reference_mode_clause_payload_bindings_are_simultaneously_live() {
+    // R16's named exemption from R7: a clause binds every field of one variant
+    // at once, with no root local to reborrow from, and the fields are
+    // statically disjoint — so both payload references may be live together,
+    // which R7's general rule would reject for two projections of one place.
+    let (stdout, code) = run_src(
+        "reference-mode-clause-disjoint-payloads",
+        "type: P | Zero | Both a i64 b i64 ;\n\
+         : bump ( &!P -- )\n  | Zero\n  | Both | a b |\n      a b\n      2 +!\n      1 +! ;\n\
+         : show ( P -- )\n  | Zero\n  | Both | a b | a . b .\n  ;\n\
+         : main ( -- )\n  1 2 Both | p |\n  &!p bump\n  p show ;\n",
+    );
+    assert_eq!(
+        stdout, "2\n4\n",
+        "each field is incremented through its own reference"
+    );
     assert_eq!(code, 0);
 }
 
