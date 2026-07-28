@@ -291,6 +291,10 @@ struct Provenance {
     /// The interned region of one non-consuming projection out of a parent
     /// region, so two peeks of the same field yield one id.
     fields: HashMap<(u32, String), RegionId>,
+    /// Each field region's immediate parent (R7/R21): a name for a struct's
+    /// field is still a name for part of the whole struct, so the alias check
+    /// has to test region *overlap* along this chain, not bare equality.
+    parents: HashMap<u32, RegionId>,
 }
 
 impl Provenance {
@@ -310,7 +314,27 @@ impl Provenance {
         }
         let id = self.fresh_region();
         self.fields.insert(key, id);
+        self.parents.insert(id.0, parent);
         id
+    }
+
+    /// R21: whether `a` and `b` denote overlapping storage — the same region,
+    /// or one an ancestor of the other along the field-projection chain.
+    /// Mirrors R7's conservative field-borrow rule on the naming side: a name
+    /// for an interior is still a name for (part of) its parent, so equality
+    /// alone misses the aliasing a peeked field's binding creates.
+    fn regions_overlap(&self, a: RegionId, b: RegionId) -> bool {
+        a == b || self.is_ancestor(a, b) || self.is_ancestor(b, a)
+    }
+
+    fn is_ancestor(&self, ancestor: RegionId, mut descendant: RegionId) -> bool {
+        while let Some(&parent) = self.parents.get(&descendant.0) {
+            if parent == ancestor {
+                return true;
+            }
+            descendant = parent;
+        }
+        false
     }
 
     fn deriv(&self, id: DerivId) -> &Deriv {
@@ -584,16 +608,20 @@ fn peek_region(
     Some(prov.field_region(base, segment))
 }
 
-/// R21: another live name denoting the same region as the local `place`,
-/// name-sorted so a place aliased twice always reports the same one. A consumed
-/// local is not a name for anything, so it never aliases.
-fn aliasing_name<'a>(scope: &'a Scope, place: &str) -> Option<&'a str> {
+/// R21: another live name denoting an overlapping region to the local
+/// `place` — the same region, or one nested inside the other's field chain
+/// (R7: a name for a field is still a name for part of the whole place) —
+/// name-sorted so a place aliased twice always reports the same one. A
+/// consumed local is not a name for anything, so it never aliases.
+fn aliasing_name<'a>(scope: &'a Scope, prov: &Provenance, place: &str) -> Option<&'a str> {
     let region = scope.local(place)?.region?;
     let mut names: Vec<&str> = scope
         .bound
         .iter()
         .filter(|b| {
-            b.name != place && b.region == Some(region) && scope.moves.moved_site(&b.name).is_none()
+            b.name != place
+                && b.region.is_some_and(|r| prov.regions_overlap(region, r))
+                && scope.moves.moved_site(&b.name).is_none()
         })
         .map(|b| b.name.as_str())
         .collect();
@@ -2457,9 +2485,19 @@ fn check_term(
                     // A value merged from two branches is never a single
                     // known literal, so it can't feed a compile-time count.
                     int_val: None,
-                    // Two arms can leave values denoting two different regions,
-                    // so the merge denotes neither of them in particular.
-                    region: None,
+                    // R21: an arm can be a bare `Call` of a local that never
+                    // gets rebound (`if v else v end`), which leaves both arms
+                    // denoting the *same* region — collapsing that to `None`
+                    // regardless of agreement would let a name bound to the
+                    // merge alias its source silently. Only equality is
+                    // preserved here (not overlap): a join that disagrees down
+                    // to different regions has no single id that names both,
+                    // which is R10's problem in a later phase, not this one's.
+                    region: if t_then.region == t_else.region {
+                        t_then.region
+                    } else {
+                        None
+                    },
                     // A reference crossing the join keeps a derivation, so its
                     // place stays borrowed past the `end`; whether the two arms
                     // agree on *which* place is R10's rule, not this one's.
@@ -3169,7 +3207,7 @@ fn check_reference_word(
             // borrow, not at the naming: two names for a value nothing mutates
             // read identically, so naming stays free.
             if mutable {
-                if let Some(alias) = aliasing_name(scope, rest) {
+                if let Some(alias) = aliasing_name(scope, prov, rest) {
                     return Err(aliased_place_borrow_error(ctx, span, rest, alias));
                 }
             }
@@ -5462,6 +5500,32 @@ type: Boxed | Some h Holds | None ;\n")
         assert_eq!(prov.field_region(s, "a"), prov.field_region(s, "a"));
         assert_ne!(prov.field_region(s, "a"), prov.field_region(s, "b"));
         assert_ne!(prov.field_region(s, "a"), prov.field_region(other, "a"));
+    }
+
+    #[test]
+    fn provenance_regions_overlap_along_the_field_chain() {
+        // R21's alias check reads this: a field region is still an alias of
+        // its parent (and transitively, its parent's parent), while two
+        // fields of unrelated parents share no ancestry at all.
+        let mut prov = Provenance::default();
+        let s = prov.fresh_region();
+        let other = prov.fresh_region();
+        let a = prov.field_region(s, "a");
+        let ab = prov.field_region(a, "b");
+        assert!(
+            prov.regions_overlap(s, s),
+            "a region always overlaps itself"
+        );
+        assert!(prov.regions_overlap(s, a), "a field overlaps its parent");
+        assert!(prov.regions_overlap(a, s), "overlap is symmetric");
+        assert!(
+            prov.regions_overlap(s, ab),
+            "overlap reaches through a grandparent"
+        );
+        assert!(
+            !prov.regions_overlap(other, a),
+            "unrelated parents share no ancestry"
+        );
     }
 
     #[test]

@@ -1,2 +1,0 @@
-type: V x i64 y i64 ;
-: main ( -- ) 1 2 V | v | 1 1 = if &v else &v end &V>x @ . v drop ;

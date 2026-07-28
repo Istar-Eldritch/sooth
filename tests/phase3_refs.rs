@@ -818,6 +818,72 @@ fn mutable_borrow_of_peek_aliased_place_is_error() {
 }
 
 #[test]
+fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
+    // R7/R21: a peeked field is still a name for part of the whole struct, so
+    // borrowing the struct while the peek's binding is live must be rejected
+    // the same as any other aliasing name — region *overlap*, not equality.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         type: S a V b i64 ;\n\
+         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a | peeked |\n  drop\n  \
+         &!s &!S>a &!V>x 40 +!\n  peeked V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `peeked`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_of_peeked_field_aliased_by_struct_is_error() {
+    // The same overlap from the other end: borrowing the field's own name
+    // while the struct it was peeked from is still live.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         type: S a V b i64 ;\n\
+         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a | peeked |\n  drop\n  \
+         &!peeked &!V>x 40 +!\n  s S>a V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `peeked` mutably") && err.contains("it is aliased by `s`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_of_array_aliased_by_element_name_is_error() {
+    // The same overlap via `get`: every element of an array shares one region
+    // (R7 does not model index disjointness either), so an element's peeked
+    // name aliases the whole array too.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V 4 fill | arr |\n  arr 0 get | elem |\n  drop\n  \
+         &!arr 0 &!> &!V>x 40 +!\n  elem V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `arr` mutably") && err.contains("it is aliased by `elem`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_aliased_by_if_join_result_is_error() {
+    // R21: when both `if` arms leave the *same* place's value (`v` named on
+    // both sides, never rebound), the merge must still denote that place's
+    // region — collapsing it to `None` regardless of agreement let a name
+    // bound to the join alias its source silently.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  1 0 = if v else v end | p |\n  \
+         &!v &!V>x 40 +!\n  p V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `v` mutably") && err.contains("it is aliased by `p`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
 fn dup_makes_aliased_names_independent() {
     // `dup` is the whole remedy, and not a new concept: it is the language's
     // existing explicit copy, applied to a case that currently slips past.
