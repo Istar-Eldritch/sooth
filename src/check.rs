@@ -53,8 +53,9 @@ struct Slot {
     /// Moved verbatim by a shuffle (a duped literal keeps its value), cleared
     /// by any operator/conversion/word call or branch merge (D8: no folding).
     int_val: Option<i64>,
-    /// R21: which region of memory an aggregate value denotes.
-    region: Option<RegionId>,
+    /// R21: which region this aggregate value denotes, and where this name for
+    /// it was pushed.
+    alias: Option<Alias>,
     /// R6: the outstanding derivation a reference-typed value holds.
     deriv: Option<DerivId>,
 }
@@ -67,7 +68,7 @@ impl Slot {
             ty,
             literal: false,
             int_val: None,
-            region: None,
+            alias: None,
             deriv: None,
         }
     }
@@ -247,6 +248,18 @@ pub fn contains_reference(
 /// or a non-consuming projection out of it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RegionId(u32);
+
+/// R21: one live name for a region, and where that name was pushed. The span is
+/// what lets the alias check report a *stack-resident* alias, which has no name
+/// of its own to cite: an aggregate spends most of its life on the virtual
+/// stack in this language, so the ability to locate one there is the difference
+/// between R21 catching the hazard and only catching the spelling of it where
+/// both ends happen to be bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Alias {
+    region: RegionId,
+    span: Span,
+}
 
 /// R6: one outstanding derivation from a place, interned in `Provenance` so a
 /// `Slot` can carry it by id and stay `Copy`.
@@ -525,8 +538,8 @@ impl Scope {
         if linear {
             self.moves.states.insert(name.to_string(), MoveState::Live);
         }
-        let region = match (slot.region, slot.ty.is_aggregate()) {
-            (Some(id), _) => Some(id),
+        let region = match (slot.alias, slot.ty.is_aggregate()) {
+            (Some(alias), _) => Some(alias.region),
             (None, true) => Some(prov.fresh_region()),
             (None, false) => None,
         };
@@ -590,43 +603,94 @@ fn live_borrow_of(
     })
 }
 
+/// R21's naming side: a live *mutable* borrow rooted at `place`, which any new
+/// name for that place would then silently observe mutations through.
+fn live_mutable_borrow_of(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    place: &str,
+) -> Option<DerivId> {
+    live_deriv(stack, scope, prov, |d| {
+        d.mutable && d.owned_root.as_deref() == Some(place)
+    })
+}
+
 /// R21: the region a non-consuming projection out of `parent` denotes, for an
 /// aggregate interior value (a scalar one is loaded into a temporary and denotes
 /// no region). The parent is given a region of its own if it has none: it is
 /// only here, where a second name for its interior can appear, that the
-/// identity starts to matter.
+/// identity starts to matter. Both names are located at the projection, which is
+/// where each of them enters play as an alias of the other.
 fn peek_region(
     parent: &mut Slot,
     interior: Type,
     segment: &str,
+    span: Span,
     prov: &mut Provenance,
-) -> Option<RegionId> {
+) -> Option<Alias> {
     if !interior.is_aggregate() {
         return None;
     }
-    let base = *parent.region.get_or_insert_with(|| prov.fresh_region());
-    Some(prov.field_region(base, segment))
+    let base = parent
+        .alias
+        .get_or_insert_with(|| Alias {
+            region: prov.fresh_region(),
+            span,
+        })
+        .region;
+    Some(Alias {
+        region: prov.field_region(base, segment),
+        span,
+    })
 }
 
-/// R21: another live name denoting an overlapping region to the local
-/// `place` — the same region, or one nested inside the other's field chain
-/// (R7: a name for a field is still a name for part of the whole place) —
-/// name-sorted so a place aliased twice always reports the same one. A
-/// consumed local is not a name for anything, so it never aliases.
-fn aliasing_name<'a>(scope: &'a Scope, prov: &Provenance, place: &str) -> Option<&'a str> {
+/// R21: where a second live name for a region is, when the diagnostic has to
+/// point at it. A bound local reports its name, which is what the user has to
+/// change; a value still on the virtual stack has no name, so it reports the
+/// site that pushed it instead.
+enum AliasOrigin<'a> {
+    Name(&'a str),
+    Stack(Span),
+}
+
+/// R21: another live name denoting a region overlapping the local `place`'s —
+/// the same region, or one nested inside the other's field chain (R7: a name for
+/// a field is still a name for part of the whole place). The scan covers the
+/// virtual stack as well as the locals map, exactly as R6's does: a
+/// concatenative body leaves aggregates on the stack constantly, so the
+/// stack-resident alias is the *common* shape of this hazard rather than an edge
+/// of it. A bound name is preferred over a stack slot when both alias, being the
+/// more actionable end to report, and names are sorted so a place aliased twice
+/// always reports the same one. A consumed local is not a name for anything, so
+/// it never aliases.
+fn aliasing_origin<'a>(
+    stack: &[Slot],
+    scope: &'a Scope,
+    prov: &Provenance,
+    place: &str,
+) -> Option<AliasOrigin<'a>> {
     let region = scope.local(place)?.region?;
+    let overlaps = |r: RegionId| prov.regions_overlap(region, r);
     let mut names: Vec<&str> = scope
         .bound
         .iter()
         .filter(|b| {
             b.name != place
-                && b.region.is_some_and(|r| prov.regions_overlap(region, r))
+                && b.region.is_some_and(&overlaps)
                 && scope.moves.moved_site(&b.name).is_none()
         })
         .map(|b| b.name.as_str())
         .collect();
     names.sort_unstable();
-    names.into_iter().next()
+    if let Some(name) = names.into_iter().next() {
+        return Some(AliasOrigin::Name(name));
+    }
+    stack
+        .iter()
+        .filter_map(|slot| slot.alias)
+        .find(|alias| overlaps(alias.region))
+        .map(|alias| AliasOrigin::Stack(alias.span))
 }
 
 /// Where a block's extent ended, for the scope-end linearity diagnostic (R6):
@@ -2255,7 +2319,7 @@ fn check_term(
                 ty: Type::I64,
                 literal: true,
                 int_val: Some(*n),
-                region: None,
+                alias: None,
                 deriv: None,
             });
             Ok(stack)
@@ -2333,10 +2397,27 @@ fn check_term(
                         if let Err(site) = scope.moves.take(name, span) {
                             return Err(use_after_move_error(ctx, span, name, ty, site));
                         }
+                        // R21, the direction symmetric with the check at the
+                        // borrow: this naming would be the *second* name for
+                        // storage a live `&!` already reaches, so the mutation
+                        // is just as silently observable as if the naming had
+                        // come first. Only an aggregate has a region, and so
+                        // only an aggregate can be a second name for one.
+                        if region.is_some() {
+                            if let Some(id) = live_mutable_borrow_of(&stack, scope, prov, name) {
+                                return Err(naming_aliases_borrowed_place_error(
+                                    ctx,
+                                    span,
+                                    name,
+                                    prov.deriv(id),
+                                ));
+                            }
+                        }
                         // R21: naming an aggregate does not copy it, so the
-                        // pushed value denotes the local's own region.
+                        // pushed value denotes the local's own region, located
+                        // here so a later borrow can point at this naming.
                         stack.push(Slot {
-                            region,
+                            alias: region.map(|region| Alias { region, span }),
                             ..Slot::computed(ty)
                         });
                     }
@@ -2489,14 +2570,14 @@ fn check_term(
                     // gets rebound (`if v else v end`), which leaves both arms
                     // denoting the *same* region — collapsing that to `None`
                     // regardless of agreement would let a name bound to the
-                    // merge alias its source silently. Only equality is
-                    // preserved here (not overlap): a join that disagrees down
-                    // to different regions has no single id that names both,
-                    // which is R10's problem in a later phase, not this one's.
-                    region: if t_then.region == t_else.region {
-                        t_then.region
-                    } else {
-                        None
+                    // merge alias its source silently. A join that *disagrees*
+                    // has no single id that names both, so the identity is lost
+                    // here and R21's third route stays open until R10 rejects
+                    // the disagreement outright (see R10, phase 3): the
+                    // agreement half is what this phase closes.
+                    alias: match (t_then.alias, t_else.alias) {
+                        (Some(a), Some(b)) if a.region == b.region => Some(a),
+                        _ => None,
                     },
                     // A reference crossing the join keeps a derivation, so its
                     // place stays borrowed past the `end`; whether the two arms
@@ -3001,15 +3082,52 @@ fn consume_of_borrowed_place_error(
 }
 
 /// R21: a mutable borrow of a place a second live name denotes. Naming an
-/// aggregate does not copy it, so two locals can denote one region; mutating
-/// through one would then be silently observable through the other, which is
-/// exactly the class of silent failure the language exists to reject.
-fn aliased_place_borrow_error(ctx: &Ctx, span: Span, place: &str, alias: &str) -> String {
+/// aggregate does not copy it, so two locals — or a local and a value still on
+/// the virtual stack — can denote one region; mutating through one would then be
+/// silently observable through the other, which is exactly the class of silent
+/// failure the language exists to reject.
+fn aliased_place_borrow_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    origin: &AliasOrigin<'_>,
+) -> String {
+    let (alias, other, remedy) = match origin {
+        AliasOrigin::Name(name) => (
+            format!("`{name}`"),
+            format!("`{name}`"),
+            "use `dup` for an independent copy",
+        ),
+        AliasOrigin::Stack(pushed) => (
+            format!(
+                "a value on the stack (pushed at line {}, col {})",
+                pushed.line, pushed.col
+            ),
+            "that value".to_string(),
+            "`dup` that value for an independent copy, or consume it before taking the borrow",
+        ),
+    };
     format!(
-        "error: cannot borrow `{place}` mutably{}: it is aliased by `{alias}` (line {}, col {})\n  both names denote one region of memory, so a mutation through `{place}` would be silently visible through `{alias}`\n  use `dup` for an independent copy",
+        "error: cannot borrow `{place}` mutably{} (line {}, col {}): it is aliased by {alias}\n  both denote one region of memory, so a mutation through `{place}` would be silently visible through {other}\n  {remedy}",
         in_word(ctx),
         span.line,
         span.col,
+    )
+}
+
+/// R21, the symmetric direction: naming an aggregate while a mutable borrow of
+/// its storage is live. R5 warns that the converse of an exclusivity rule is
+/// easy to omit, and this is that omission for R21: checking only at the borrow
+/// catches `v ... &!v` and misses `&!v ... v`, which is the same hazard with the
+/// two terms swapped.
+fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: &Deriv) -> String {
+    format!(
+        "error: cannot name `{name}`{} (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
     )
 }
 
@@ -3203,12 +3321,13 @@ fn check_reference_word(
                 ));
             }
             // R21: a second live name for one region makes a mutation through
-            // this borrow silently observable through that name. Checked at the
-            // borrow, not at the naming: two names for a value nothing mutates
-            // read identically, so naming stays free.
+            // this borrow silently observable through that name. Checked here
+            // *and* symmetrically at the naming: a naming that comes first is
+            // caught here, one that comes later is caught there. Naming an
+            // aggregate with no `&!` anywhere near it stays free either way.
             if mutable {
-                if let Some(alias) = aliasing_name(scope, prov, rest) {
-                    return Err(aliased_place_borrow_error(ctx, span, rest, alias));
+                if let Some(origin) = aliasing_origin(stack, scope, prov, rest) {
+                    return Err(aliased_place_borrow_error(ctx, span, rest, &origin));
                 }
             }
             let out = intern_ref_type(refs, local_ty, mutable);
@@ -3381,10 +3500,10 @@ fn check_array_word(
             // so two `get`s of one array denote one region. Which element is
             // not modelled (R7 does not model path disjointness either), so
             // every element of one array shares one region here.
-            let region = peek_region(&mut stack[n - 2], elem, "[]", prov);
+            let alias = peek_region(&mut stack[n - 2], elem, "[]", span, prov);
             stack.truncate(n - 1);
             stack.push(Slot {
-                region,
+                alias,
                 ..Slot::computed(elem)
             });
         }
@@ -3537,9 +3656,9 @@ fn check_struct_peek_word(
     }
     // R21: the peek is non-consuming and pushes the field's *interior address*,
     // so two peeks of one field of one struct are two names for one region.
-    let region = peek_region(&mut stack[n - 1], field_ty, field_name, prov);
+    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
     stack.push(Slot {
-        region,
+        alias,
         ..Slot::computed(field_ty)
     });
     Ok(Some(std::mem::take(stack)))
@@ -3570,10 +3689,7 @@ fn check_shuffle(
             // copy denotes a region of its own — this is the whole remedy for an
             // aliased place. `over` below reuses the value instead, and so
             // deliberately keeps the region it copies.
-            stack.push(Slot {
-                region: None,
-                ..top
-            });
+            stack.push(Slot { alias: None, ..top });
         }
         "drop" => {
             if stack.is_empty() {

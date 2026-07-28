@@ -912,3 +912,106 @@ fn repeated_naming_without_mutable_borrow_is_accepted() {
     assert_eq!(stdout, "2\n1\n2\n1\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn mutable_borrow_of_place_aliased_on_the_stack_is_error() {
+    // The alias need not be *bound*: a concatenative body leaves aggregates on
+    // the virtual stack constantly, so an unnamed naming still sitting there is
+    // the common shape of this hazard. It has no name to cite, so the error
+    // locates it by the site that pushed it.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  v\n  &!v &!V>x 40 +!\n  V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `v` mutably") && err.contains("a value on the stack"),
+        "a stack-resident alias must be rejected too: {err}"
+    );
+    assert!(
+        err.contains("pushed at line 4"),
+        "the error should locate the alias it cannot name: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_of_struct_aliased_by_peek_on_the_stack_is_error() {
+    // The peek route with neither end bound: `S|>a` is non-consuming, so both
+    // the struct and its interior are left on the stack, overlapping.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         type: S a V b i64 ;\n\
+         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a\n  \
+         &!s &!S>a &!V>x 40 +!\n  V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `s` mutably") && err.contains("a value on the stack"),
+        "a peeked interior left on the stack still aliases its parent: {err}"
+    );
+}
+
+#[test]
+fn naming_a_place_while_mutably_borrowed_is_error() {
+    // R21's symmetric direction, the one R5 warns is easy to omit: checking
+    // only at the borrow catches `v ... &!v` and misses `&!v ... v`, which is
+    // the same hazard with the two terms swapped.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  &!v\n  v | p |\n  \
+         &!V>x 40 +!\n  p V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot name `v`") && err.contains("a mutable borrow of it is still live"),
+        "expected the naming-side rejection naming both ends: {err}"
+    );
+    assert!(
+        err.contains("line 5") && err.contains("line 4"),
+        "the error should locate both the naming and the borrow: {err}"
+    );
+}
+
+#[test]
+fn naming_a_place_whose_mutable_borrow_is_bound_is_error() {
+    // The naming side reads bindings as well as the stack: a `&!` bound into a
+    // local is live for the whole body (R8), so no naming after it is safe.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  &!v | r |\n  v | p |\n  \
+         r &!V>x 40 +!\n  p V> . . ;\n",
+    );
+    assert!(
+        err.contains("cannot name `v`") && err.contains("a mutable borrow of it is still live"),
+        "a borrow bound into a local must block naming its place: {err}"
+    );
+}
+
+#[test]
+fn naming_a_place_after_its_borrow_ends_is_accepted() {
+    // The guard against an over-broad naming-side rule: the borrow is live
+    // until the term that consumes its slot (R6), and `+!` is that term, so
+    // naming `v` afterwards is ordinary reuse.
+    let (stdout, code) = run_src(
+        "naming-after-borrow-ends",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  &!v &!V>x 40 +!\n  v V> . . ;\n",
+    );
+    assert_eq!(stdout, "2\n41\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn dup_makes_a_stack_alias_independent() {
+    // `dup` is the remedy for the stack route too: the copy denotes a region of
+    // its own, so keeping it and dropping the original naming leaves the
+    // snapshot readable across the mutation.
+    let (stdout, code) = run_src(
+        "dup-makes-stack-alias-independent",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  v dup swap drop\n  \
+         &!v &!V>x 40 +!\n  V> . .\n  v V> . . ;\n",
+    );
+    assert_eq!(
+        stdout, "2\n1\n2\n41\n",
+        "the duped snapshot must not see the mutation"
+    );
+    assert_eq!(code, 0);
+}
