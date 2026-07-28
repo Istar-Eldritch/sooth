@@ -1709,8 +1709,22 @@ fn check_clause_word(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
-    let enum_id = match word.effect.inputs.last().map(|s| s.ty) {
-        Some(Type::Enum(id, _)) => id,
+    // R16: the top input may be a plain enum (value mode) or a reference to
+    // one (reference mode, `&Enum`/`&!Enum`) — the mode follows the declared
+    // type, never inferred. `ref_mutable` is `None` in value mode, `Some`
+    // (carrying the reference's mutability) in reference mode.
+    let (enum_id, ref_mutable) = match word.effect.inputs.last().map(|s| s.ty) {
+        Some(Type::Enum(id, _)) => (id, None),
+        Some(Type::Ref(rid, mutable, _)) => match refs[rid.index()].referent {
+            Type::Enum(id, _) => (id, Some(mutable)),
+            _ => {
+                return Err(format!(
+                    "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
+                    word.name,
+                    effect_str(&word.effect),
+                ));
+            }
+        },
         _ => {
             return Err(format!(
                 "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
@@ -1789,6 +1803,7 @@ fn check_clause_word(
             cells,
             refs,
             structs,
+            ref_mutable,
         )?;
     }
     Ok(())
@@ -1807,6 +1822,7 @@ fn check_clause_body(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    ref_mutable: Option<bool>,
 ) -> Result<(), String> {
     let ctx = word_ctx(word, structs, enums);
     let mut seen_locals = HashSet::new();
@@ -1816,10 +1832,17 @@ fn check_clause_body(
     }
 
     // The clause consumes the scrutinee and pushes the variant's fields
-    // (first field deepest) atop any inputs below it.
+    // (first field deepest) atop any inputs below it. R16: in reference mode
+    // every field arrives as a reference inheriting the scrutinee's
+    // mutability, projecting through it exactly as a struct-field projection
+    // would (R3) — the payload is never owned, so it is never moved or freed.
     let mut initial = below.to_vec();
     for (_, ty) in &variant.fields {
-        initial.push(*ty);
+        let field_ty = match ref_mutable {
+            Some(mutable) => intern_ref_type(refs, *ty, mutable),
+            None => *ty,
+        };
+        initial.push(field_ty);
     }
 
     // Clause-body `| names |` bind the top N (payload then below), leftmost
@@ -2142,6 +2165,50 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
     }
 }
 
+/// R9: a reference argument to a self-tail-call whose provenance traces to an
+/// owned local of *this* frame — a `place` naming an actual
+/// `Deriv::owned_root` — crosses a loop iteration boundary. Locals rebind at
+/// the loop header (`header_phis`, src/ir.rs:1491), so the storage that local
+/// named this iteration is not the storage the same name denotes next
+/// iteration, and a reference into it would alias a reused slot. A reference
+/// *parameter*, or one derived from it by projection, has no owned root
+/// (`owned_root` is `None`, R9's accept-case) and may cross freely — its
+/// referent lives in an ancestor frame that outlives every iteration, which is
+/// what keeps `walk ( &!List -- ) ... walk ;` legal.
+fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
+            name, span.line, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: a reference to a local cannot cross a loop: a reference derived from `{place}` crosses the back-edge to `{callee}`"
+        ),
+    }
+}
+
+/// R9: reject a reference argument to the recursive call whose derivation's
+/// owned root is a local of this frame. Scanned over the call's own arguments
+/// (`args`, i.e. `stack[base..]` before the call truncates it) — the values
+/// that actually cross the back-edge, as opposed to `check_linear_across_back_edge`'s
+/// `below_args`, the values stranded beneath them.
+fn check_reference_across_back_edge(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    args: &[Slot],
+    prov: &Provenance,
+) -> Result<(), String> {
+    for slot in args {
+        if let Some(id) = slot.deriv {
+            if let Some(place) = &prov.deriv(id).owned_root {
+                return Err(reference_across_back_edge_error(ctx, span, callee, place));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// R15: reject a linear value that would survive the back-edge of a
 /// self-tail-call, either stranded on the stack below the call's arguments or
 /// held by a local that was never consumed. A value *moved into* the call's
@@ -2254,6 +2321,37 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
         ),
         Ctx::Line { .. } => format!(
             "error: `if` branches leave different types (then: `{t_then}`, else: `{t_else}`)"
+        ),
+    }
+}
+
+/// R10: the borrow-suspension bookkeeping must agree at a branch join, real
+/// content the type-only shape unification above does not supply. One arm
+/// suspending a place the other leaves unsuspended (or suspending a
+/// *different* place) is rejected rather than silently picking one arm's
+/// answer, since a later hazard check would then reason about the wrong arm's
+/// runtime path.
+fn borrow_join_disagreement_error(
+    ctx: &Ctx,
+    span: Span,
+    t_then: Option<&Deriv>,
+    t_else: Option<&Deriv>,
+) -> String {
+    let describe = |d: Option<&Deriv>| match d {
+        Some(deriv) => match &deriv.owned_root {
+            Some(place) => format!("a borrow of `{place}`"),
+            None => "a borrow with no local root".to_string(),
+        },
+        None => "no live borrow".to_string(),
+    };
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: borrow state disagrees at the `if`/`else` join in `{}` (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
+            name, span.line, describe(t_then), describe(t_else), effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: borrow state disagrees at the `if`/`else` join (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}",
+            span.line, describe(t_then), describe(t_else),
         ),
     }
 }
@@ -2471,6 +2569,7 @@ fn check_term(
             }
             if tail && ctx.word_name() == Some(name.as_str()) {
                 check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
+                check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
             }
             stack.truncate(base);
             stack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
@@ -2555,6 +2654,30 @@ fn check_term(
                 if t_then.ty != t_else.ty {
                     return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
                 }
+                // R10: the type-only join above already rejects two arms whose
+                // stacks disagree in shape; it says nothing about *which place*
+                // a live reference's suspension is attributed to. Two arms of
+                // identical shape can each suspend a different place (one
+                // derives from local `x`, the other from `y`), which the merge
+                // must reject rather than silently pick one arm's answer — a
+                // later hazard check would then reason about the wrong arm's
+                // runtime path. Both arms live with no owned root (a
+                // parameter-derived chain) agree trivially: neither denotes a
+                // place this frame must protect.
+                let deriv = match (t_then.deriv, t_else.deriv) {
+                    (None, None) => None,
+                    (Some(a), Some(b)) if prov.deriv(a).owned_root == prov.deriv(b).owned_root => {
+                        Some(a)
+                    }
+                    _ => {
+                        return Err(borrow_join_disagreement_error(
+                            ctx,
+                            span,
+                            t_then.deriv.map(|id| prov.deriv(id)),
+                            t_else.deriv.map(|id| prov.deriv(id)),
+                        ));
+                    }
+                };
                 // A merged slot is a coercible literal only if *both* arms
                 // leave a literal there: a value computed on either runtime
                 // path is computed after the merge, so it can't silently fill
@@ -2570,19 +2693,12 @@ fn check_term(
                     // gets rebound (`if v else v end`), which leaves both arms
                     // denoting the *same* region — collapsing that to `None`
                     // regardless of agreement would let a name bound to the
-                    // merge alias its source silently. A join that *disagrees*
-                    // has no single id that names both, so the identity is lost
-                    // here and R21's third route stays open until R10 rejects
-                    // the disagreement outright (see R10, phase 3): the
-                    // agreement half is what this phase closes.
+                    // merge alias its source silently.
                     alias: match (t_then.alias, t_else.alias) {
                         (Some(a), Some(b)) if a.region == b.region => Some(a),
                         _ => None,
                     },
-                    // A reference crossing the join keeps a derivation, so its
-                    // place stays borrowed past the `end`; whether the two arms
-                    // agree on *which* place is R10's rule, not this one's.
-                    deriv: t_then.deriv.or(t_else.deriv),
+                    deriv,
                 });
             }
             Ok(merged)

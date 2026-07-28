@@ -1015,3 +1015,195 @@ fn dup_makes_a_stack_alias_independent() {
     );
     assert_eq!(code, 0);
 }
+
+// --- criterion 10: R9's back-edge rules, both sides
+
+const BIG_LIST: &str = "\
+type: List | Nil | Cons v i64 next ^List ;
+\
+: push-front ( List i64 -- List )\n  | rest v |\n  v rest ^ Cons ;
+\
+: build ( i64 List -- List )\n  | n acc |\n  n 0 = if\n    acc\n  else\n    \
+n 1 - acc n push-front build\n  end ;
+\
+: walk ( &!List -- )\n  | Nil\n  | Cons | v next |\n      v 1 +!\n      next &!^ walk\n  ;
+";
+
+#[test]
+fn reference_parameter_crosses_back_edge_in_constant_stack() {
+    // R9's accept-case: `walk`'s own reference parameter, reborrowed from a
+    // `Cons` payload projection each iteration, crosses the self-tail-call
+    // back-edge a million times in constant stack (no growth, no overflow),
+    // mutating every node in place; the front node's value, read back after
+    // the call returns, proves the mutation actually landed rather than the
+    // loop silently no-op-ing.
+    let src = format!(
+        "{BIG_LIST}\
+         type: Popped rest List val i64 ;\n\
+         : pop ( List -- Popped )\n  | Nil   Nil 0 Popped\n  | Cons  | v next | next ^> v Popped\n  ;\n\
+         : main ( -- )\n  1000000 Nil build\n  | l |\n  &!l walk\n  l pop Popped>\n  . drop ;\n",
+    );
+    let (stdout, code) = run_src("ref-param-crosses-back-edge", &src);
+    assert_eq!(
+        stdout, "2\n",
+        "a million-node walk must increment the front value exactly once, in constant stack"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn reference_to_local_across_back_edge_is_error() {
+    // R9's rejection: `x` is a local *created this iteration*, not the
+    // parameter `r` or anything projected from it, so a reference to it
+    // cannot legally cross the back-edge — its storage does not survive to
+    // the next iteration (locals rebind at the loop header).
+    let err = check_error(
+        "type: V x i64 ;\n\
+         : spin ( &!V i64 -- )\n  | r n |\n  n 0 = if\n  else\n    \
+         0 V | x |\n    &!x n 1 - spin\n  end ;\n\
+         : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
+    );
+    assert!(
+        err.contains("a reference to a local cannot cross a loop"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains('x'), "the error should name the local: {err}");
+}
+
+#[test]
+fn borrowed_local_carried_across_back_edge_is_error() {
+    // The other half of R9's justification: an owned local that is still
+    // borrowed cannot be loop-carried either. This is R21's existing
+    // naming-side rule (`naming_a_place_while_mutably_borrowed_is_error`),
+    // which fires here just as it would anywhere else — the hazard a
+    // self-tail-recursive loop would otherwise let through is exactly the
+    // one that rule already closes.
+    let err = check_error(
+        "type: V x i64 ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  n 0 = if\n    acc\n  else\n    \
+         &!acc\n    acc n 1 - spin\n  end ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot name `acc`") && err.contains("a mutable borrow of it is still live"),
+        "unexpected message: {err}"
+    );
+}
+
+// --- criterion 11: R10's branch-join borrow-state agreement
+
+#[test]
+fn borrow_on_one_arm_only_is_error() {
+    // Both arms leave a stack of identical shape (a `&!i64`), but each
+    // suspends a *different* place: type unification alone has nothing to say
+    // about that, so R10 must reject it as a disagreement at the join.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  1 3 V | w |\n  true if\n    &!v\n  else\n    &!w\n  end\n  \
+         &!V>x 1 +!\n  v drop\n  w drop ;\n",
+    );
+    assert!(
+        err.contains("borrow state disagrees"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains('v') && err.contains('w'),
+        "the error should name both arms' places: {err}"
+    );
+}
+
+#[test]
+fn borrow_live_on_both_arms_is_accepted() {
+    // Both arms suspend the *same* place: R10 has nothing to reject, and the
+    // merged reference stays usable past the join.
+    let (stdout, code) = run_src(
+        "borrow-live-on-both-arms",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  true if\n    &!v\n  else\n    &!v\n  end\n  \
+         &!V>x 1 +!\n  v V> . . ;\n",
+    );
+    assert_eq!(stdout, "2\n2\n");
+    assert_eq!(code, 0);
+}
+
+// --- criterion 12: R16, reference-mode enum elimination
+
+#[test]
+fn reference_mode_clause_binds_payload_as_reference() {
+    // A word whose declared top input is `&Enum` dispatches clause-style in
+    // reference mode: `v`'s payload binding is a `&i64`, fetched with `@`
+    // rather than moved, and the recursion projects a fresh `&List` through
+    // the cell each iteration — the same shape as `walk`, shared instead of
+    // mutable.
+    let (stdout, code) = run_src(
+        "reference-mode-clause-binds-payload",
+        "type: List | Nil | Cons v i64 next ^List ;\n\
+         : sum ( i64 &List -- i64 )\n  | Nil | acc | acc\n  | Cons | acc v next |\n      \
+         acc v @ +\n      next &^ sum\n  ;\n\
+         : push-front ( List i64 -- List )\n  | rest v |\n  v rest ^ Cons ;\n\
+         : build ( i64 List -- List )\n  | n acc |\n  n 0 = if\n    acc\n  else\n    \
+         n 1 - acc n push-front build\n  end ;\n\
+         : main ( -- )\n  5 Nil build\n  | l |\n  0 &l sum .\n  l drop ;\n",
+    );
+    assert_eq!(stdout, "15\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn reference_mode_clause_consuming_payload_is_error() {
+    // No clause may consume a payload binding: fetching `next`'s referent
+    // (`^List`, always linear) is the same R4 rejection a fetched/stored
+    // linear `T` gets anywhere else, not a special reference-mode rule.
+    let err = check_error(
+        "type: List | Nil | Cons v i64 next ^List ;\n\
+         : bad ( &!List -- )\n  | Nil\n  | Cons | v next |\n      next @\n      v drop\n  ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot access the linear referent"),
+        "unexpected message: {err}"
+    );
+}
+
+// --- criterion 14: the full dogfood
+
+#[test]
+fn reference_dogfood_prints_expected_bytes() {
+    let src = std::fs::read_to_string("examples/refs.sth").expect("the dogfood file should exist");
+    let (stdout, code) = run_src("reference-dogfood", &src);
+    assert_eq!(
+        stdout, "72\n90\n2\n2\n",
+        "push-byte's write, copy-byte's copy, the buffer's length, and walk's incremented head"
+    );
+    assert_eq!(code, 0);
+}
+
+// --- criterion 16: no regression
+
+#[test]
+fn regression_diff_shows_only_additions() {
+    // The base commit this slice built on top of (`docs/phase3-slice6-spec.md`
+    // records it directly): every change to `examples/`, `tests/phase0.rs`, or
+    // `tests/phase1.rs` since then must be an addition, never a modification
+    // or deletion, so this slice cannot have touched a pre-existing golden.
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--name-status",
+            "0e2763f",
+            "--",
+            "examples/",
+            "tests/phase0.rs",
+            "tests/phase1.rs",
+        ])
+        .output()
+        .expect("git diff should run");
+    assert!(output.status.success(), "git diff failed: {output:?}");
+    let diff = String::from_utf8(output.stdout).expect("git diff output should be utf8");
+    for line in diff.lines() {
+        assert!(
+            line.starts_with('A'),
+            "expected only additions under examples/ and the phase0/phase1 goldens, found: {line}"
+        );
+    }
+}

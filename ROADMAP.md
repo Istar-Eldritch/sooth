@@ -473,19 +473,35 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    written before; `examples/vm.sth`'s `run` word now names a `vm-pop` result mid-body in
    its `Add`/`Sub`/`Mul`/`Store` clauses instead of shuffling it into position with
    `swap`/`over`/`rot`.
-6. **Second-class references + places + escape checking.** Pass a borrow (`&`/`&!`), mutate
-   in place, no move; the escape checker keeps refs from being stored or escaping scope. The
-   reference *type* is the convention, not a Hylo-style `let`/`inout`/`sink`/`set` (the
-   interface here is a stack effect, not named parameters), so no existing signature changes
-   meaning. Comes after heap because "hand the value back" already works by threading it
-   through the stack. Dogfood: in-place mutation of an owned buffer through a `&!` reference.
-   **Design question this slice's brief must answer:** do `inout` projections into nested
-   fields subsume a reified take/fill pair (`S/fi` yielding a residual `∂S/∂fi`, refilled
-   exactly once)? A second-class projection is the same residual, made implicit and
-   lexically bounded, and it also covers whole-value borrows, so the expectation is yes
-   for every statically known path, leaving reified residuals worth having only where the
-   focus must escape (slice 3's zipper, as a stdlib type). Answer it here rather than
-   letting nested-path ergonomics get solved twice.
+6. **Second-class references + places + escape checking.** ✅ done. `&`/`&!` prefix borrow
+   operators on an aggregate/cell local, a per-place aliasing rule (not a lifetime-tracking
+   borrow checker: exclusivity plus escape prevention, no lifetime apparatus), and a
+   projection/accessor family (`&T>fi`/`&!T>fi`/`&>`/`&!>`/`&^`/`&!^`) that keeps a reference
+   opaque (`IrType::Ptr`, never the referent's own shape) all the way to the backend.
+   `@`/`!`/`+!` read/write/increment through a reference, restricted to a `Copy` referent
+   (covering a Copy aggregate via `Alloc`+`Blit` as well as a Copy scalar). Escape is closed
+   structurally: a reference cannot be stored in a struct field, enum payload, array
+   element, or cell payload, cannot appear on an effect's output side, and cannot survive a
+   REPL line. A self-tail-call back-edge may carry a reference parameter (or one derived
+   from it by projection) but not a reference to a current-scope local, and a branch join's
+   borrow-suspension state must agree across both arms. Reference-mode clause elimination
+   (a word whose declared top input is `&Enum`/`&!Enum`) binds each clause's payload as a
+   reference inheriting the scrutinee's mutability, exempt from the disjoint-borrow
+   limitation below since a variant's fields are statically known to be disjoint. Dogfood:
+   `examples/refs.sth` — in-place mutation of an owned buffer through a `&!` reference with
+   no rebuild (no `alloc`/`blit` in the emitted body), and `walk ( &!List -- )` mutating
+   every node of a list in constant stack via reference-mode dispatch.
+   **Known limitation, stated rather than modeled**: path disjointness. Two references
+   derived from the same local conflict even when they project into disjoint fields, if
+   both are simultaneously live; the workaround is sequencing (fully consume the first
+   before taking the second), which mid-body binding (slice 5) makes free of `swap`.
+   **Design question this slice's brief asked, answered (R15):** `inout` projections into
+   nested fields **do** subsume a reified take/fill pair (`S/fi` yielding a residual
+   `∂S/∂fi`, refilled exactly once) for every statically known path — a projection is the
+   same residual made implicit and lexically bounded, and it also covers whole-value
+   borrows. No residual form was added. Reified residuals remain worth having only where
+   the focus must escape, which is a later slice's zipper; escape prevention forbids storing
+   a reference, so the zipper waits for that slice's RC rather than for a residual type.
 7. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
 8. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The

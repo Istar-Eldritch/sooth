@@ -1486,7 +1486,15 @@ pub(crate) fn lower_word(
             b.stack = entry_values;
             b.lower_terms(terms, self_tail);
         }
-        WordBody::Clauses(clauses) => b.lower_clauses(clauses, &entry_values),
+        WordBody::Clauses(clauses) => {
+            let scrutinee_ty = word
+                .effect
+                .inputs
+                .last()
+                .expect("clause word has a scrutinee input")
+                .ty;
+            b.lower_clauses(clauses, &entry_values, scrutinee_ty)
+        }
     }
 
     // R8: back-patch the header phis with the collected back-edge operands.
@@ -1517,6 +1525,10 @@ struct FuncBuilder<'a> {
     enums: &'a Enums,
     arrays: &'a Arrays,
     cells: &'a Cells,
+    /// The per-`RefId` referent `IrType` (R16): needed to resolve a
+    /// reference-mode clause scrutinee's `EnumId` when the referent itself is
+    /// an enum.
+    refs: &'a Refs,
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
@@ -1584,7 +1596,7 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cells,
-            ..
+            refs,
         } = regs;
         FuncBuilder {
             env,
@@ -1593,6 +1605,7 @@ impl<'a> FuncBuilder<'a> {
             enums,
             arrays,
             cells,
+            refs,
             cur_word_name,
             header: None,
             header_phis: Vec::new(),
@@ -2884,14 +2897,23 @@ impl<'a> FuncBuilder<'a> {
     ///
     /// This is deliberately *not* the 2-predecessor `lower_if` shape: the join
     /// has N predecessors and M outputs.
-    fn lower_clauses(&mut self, clauses: &[Clause], params: &[Value]) {
+    fn lower_clauses(&mut self, clauses: &[Clause], params: &[Value], scrutinee_ty: Type) {
         // A clause word is self-tail-recursive iff a header was opened (R6);
         // its clause bodies then carry tail position (D7).
         let tail = self.header.is_some();
         let scrutinee = *params.last().expect("clause word has a scrutinee input");
         let stack_below: Vec<Value> = params[..params.len() - 1].to_vec();
-        let scrut_id = match self.value_type(scrutinee) {
-            IrType::Enum(id) => id,
+        // R16: threaded from the already-checked frontend `Type` rather than
+        // re-derived from the lowered scrutinee's `IrType` — under R12 a
+        // `&!Enum` scrutinee lowers to the opaque `IrType::Ptr`, not
+        // `IrType::Enum(id)`, so reading `self.value_type(scrutinee)` here
+        // would make the enum arm below a reachable panic in reference mode.
+        let (scrut_id, ref_mutable) = match scrutinee_ty {
+            Type::Enum(id, _) => (id, None),
+            Type::Ref(rid, mutable, _) => match self.refs.referent[rid.index()] {
+                IrType::Enum(id) => (id, Some(mutable)),
+                _ => unreachable!("checked: reference-mode clause scrutinee's referent is an enum"),
+            },
             _ => unreachable!("checked: a clause word's top input is an enum"),
         };
         let payload_offset = self.enums.layouts[scrut_id.index()].payload_offset;
@@ -2915,7 +2937,12 @@ impl<'a> FuncBuilder<'a> {
             self.locals.clear();
             self.stack = stack_below.clone();
             // Push the variant's payload first-deepest, loading each field from
-            // `payload_offset + field.offset`.
+            // `payload_offset + field.offset`. R16: in reference mode every
+            // field is pushed as a reference to its own storage inside the
+            // scrutinee (its address, never its value), registered in
+            // `ref_inner` so a later access/projection through it resolves the
+            // right shape — the same `IrType::Ptr` any other reference lowers
+            // to (R12).
             let fields = self.enums.layouts[scrut_id.index()].variants[vi]
                 .fields
                 .clone();
@@ -2924,7 +2951,13 @@ impl<'a> FuncBuilder<'a> {
                     offset: payload_offset + field.offset,
                     ..*field
                 };
-                self.load_field_onto_stack(scrutinee, adjusted);
+                match ref_mutable {
+                    Some(_) => {
+                        let fptr = self.field_ptr(scrutinee, adjusted.offset);
+                        self.push_reference(fptr, adjusted.ty);
+                    }
+                    None => self.load_field_onto_stack(scrutinee, adjusted),
+                }
             }
             // Bind clause-body `| names |` locals (top N, leftmost deepest).
             let take = clause.locals.len();
