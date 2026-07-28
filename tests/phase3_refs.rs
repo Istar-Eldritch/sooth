@@ -929,6 +929,22 @@ fn dup_makes_gotten_field_independent_of_struct() {
 }
 
 #[test]
+fn mutable_borrow_of_one_of_two_gotten_fields_from_same_struct_is_error() {
+    // Two getters off the *same* struct value, with no mutation of the
+    // struct itself in between, still alias each other: both denote the
+    // one region the struct's field occupies.
+    let err = check_error(
+        "type: S arr [i64 4] ;\n\
+         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | a |\n  s S>arr | b |\n  \
+         &!a 0 &!> 9 !\n  &b 0 &> @ . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `a` mutably") && err.contains("it is aliased by `b`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
 fn mutable_borrow_aliased_by_if_join_result_is_error() {
     // When both `if` arms leave the *same* place's value (`v` named on
     // both sides, never rebound), the merge must still denote that place's

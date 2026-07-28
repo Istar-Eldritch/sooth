@@ -507,7 +507,8 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    source for worst-case-timing work). The routes are naming, a non-consuming peek (`S|>fi`),
    the consuming getter of an aggregate field (`S>fi`, whose lowering pushes the field's
    interior address exactly as the peek's does), `over` (which reuses its operand rather
-   than deep-copying like `dup`), and an `if`/`else` merge. A merge is why a value carries a *set* of regions interned behind an
+   than deep-copying like `dup`), and an `if`/`else` merge. A merge is why a value carries
+   a *set* of regions interned behind an
    `AliasSetId` rather than a single region: the merge unions both arms, so a projection out
    of it projects the field out of every member and the borrow check tests pairwise overlap.
    The rule is Copy-only by construction: every route to a linear aggregate is already closed
