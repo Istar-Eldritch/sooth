@@ -43,8 +43,9 @@ Measured by building and running programs, not by reading code.
   (what this slice adds): DESIGN.md:139 reads "There is no lifetime-tracking borrow checker,"
   and DESIGN.md:213-224 states the distinction directly. No DESIGN.md work remains for this
   slice beyond recording the answer to ROADMAP.md's parked design question (R15).
-- **Naming an aggregate local does not copy it — a real, currently-open hole, unaffected by
-  Slice 5.** See "Open question: aggregate-local aliasing" below.
+- **Naming an aggregate local does not copy it.** A pre-existing hole this slice's `!`/`+!`
+  would make observable for the first time; resolved by R21 below (reject at the hazard, `dup`
+  is the remedy) rather than by inserting an implicit copy.
 
 ## Requirements
 
@@ -192,9 +193,8 @@ different locals, exercises exactly this). `over` shares `dup`'s pre-existing Co
 rejection and its message, which is worded for linearity/ownership and is misleading for a
 reference — a pre-existing wording gap, not new, and no criterion needs it fixed here.
 
-R5 governs borrows taken from places. It does **not** cover two aggregate *values* that alias
-one address with no borrow ever taken — see "Open question: aggregate-local aliasing" below,
-still unresolved and still gating implementation.
+R5 governs borrows taken from places. Two aggregate *values* that alias one address with no
+borrow ever taken are a separate, pre-existing case, handled by R21.
 
 **R6 — The borrow check fires at consumption points, keyed on the place and its outstanding
 derivations, not a liveness pass.** When a place is moved, dropped, or (re)borrowed in a way R5
@@ -204,7 +204,8 @@ provenance back to this place, through any number of projection steps — not wh
 naive scan for "the reborrow itself" misses a derived reference two steps removed that is
 nonetheless still live against the place (the `two-live` example above). Provenance is cheap to
 track — every projection already knows its own operand. The predicate is over reference-typed
-values only, and `@` terminates provenance (its result is a plain `T`, not traced further); the
+values plus the aggregate-value identity R21 needs, and `@` terminates provenance (its result is
+a plain `T`, not traced further); the
 exclusivity counter counts outstanding *derivations*, never the reference a local's own content
 happens to hold. Reject with a located error naming both the place and the conflicting borrow.
 A reference is live from the instruction that creates it until the term that consumes its slot;
@@ -482,6 +483,69 @@ enough to do in one
 pass, reviewed like any other change, not run through the slice machinery this document uses
 for actual design work.
 
+**R21 — Two live names for one aggregate place: rejected where a mutable borrow makes it
+observable, with `dup` as the remedy.** Naming an aggregate local does not copy it: `lower_call`
+pushes the *same* `Value` — a pointer to one frame slot — when a local is named ("i64 is Copy;
+reuse the value id", src/ir.rs:1717), including for a struct/array/enum local, while `dup`
+deep-copies via `Alloc`+`Blit` (src/ir.rs:1721-1753). Independently, a non-consuming aggregate
+projection (`S|>fi`'s `Peek`, src/ir.rs:2557ff.; `get` on an array element, src/ir.rs:2033ff.)
+pushes the interior address with no copy. Either way **two distinct locals can denote one region
+of memory**, by two independent routes — measured, both reproduce at HEAD:
+
+```forth
+type: V x i64 y i64 ;
+: f ( V V -- ) | p q | p V> . . q V> . . ;
+
+\ route 1, naming: no peek involved
+: main ( -- ) 1 2 V | v | v v f ;          \ prints 2 1 2 1
+
+\ route 2, non-consuming peek
+type: S a V b i64 ;
+: main2 ( -- ) 1 2 V 3 S  S|>a swap S|>a swap drop  f ;   \ prints 2 1 2 1
+```
+
+This is **pre-existing and Copy-only**. Every route to a linear value is already closed, and each
+was verified: naming a linear local moves it, so a second naming is `use after move`; `S|>fi`
+rejects a linear field outright ("use `S>` to destructure instead"); and `fill` gates on
+`is_copy`, so no array can hold linear elements. There is no double-free and no use-after-free
+here — the linear spine is intact. The failure mode is a wrong *value*: mutate through one name,
+silently observe it through the other. That is exactly the class of silent failure this language
+exists to convert into a compile error, which is why it is closed rather than documented.
+
+**The rule.** Taking a `&!` of a place is a located error when another live name denotes that
+same region. It fires at the borrow, not at the naming, because a naming that is never mutated
+through is harmless: two names for one Copy value read identically. The diagnostic names both the
+borrow and the aliasing origin, and points at `dup`:
+
+```forth
+1 2 V | v |  v v  | p q |   \ p and q alias one slot
+&!p ...                     \ error: `p` is aliased by `q`
+                            \ remedy: `v dup | p q |` — two independent slots
+```
+
+`dup` is the whole remedy, for both routes (`v dup`, `s S|>a dup`), and it is not a new concept:
+it is the language's existing explicit copy, applied to a case that currently slips past.
+
+**Why not insert the copy implicitly.** Two reasons, both load-bearing for this project rather
+than stylistic. First, `dup` **is** the explicit copy (DESIGN.md:21, CLAUDE.md's linear-spine
+invariant) — a compiler-inserted copy is the same category of implicit behaviour as an auto-drop,
+which the language flatly forbids. Second, hard real-time here is "achievable by discipline, not
+turnkey... you carry the WCET reasoning yourself" (DESIGN.md:212-222), and that reasoning is only
+possible if instruction counts are readable off the source. The cost is not hypothetical:
+`examples/vm.sth`'s `Vm` is **320 bytes** (`[Op 13]` at 16 each = 208, plus `pc` 8 + `[i64 8]` 64
+
+- `sp` 8 + `[i64 4]` 32), and `run` names `vm` 38 times across its clauses, with `vm-push` alone
+naming it three times per pushed value. Copying on every naming would add roughly 5-15 copies of
+320 bytes per interpreted instruction to the project's own exit dogfood, none of it visible in
+the source. Rejecting instead leaves `vm.sth` untouched at zero cost — it names `vm` repeatedly
+but never takes a `&!`, so it never trips the rule.
+
+**Phasing.** The rule needs the aggregate-value identity threading R6 introduces, so it lands in
+phase 2 alongside the other borrow rules, not phase 1. Phase 1 ships `!`/`+!` before it exists;
+phase 1's commit message already discloses that R5/R6/R7/R9/R10 are absent at that commit, and
+that disclosure extends to this rule — at phase 1, an aliased mutable borrow is *accepted*.
+Deliberate and temporary, exactly as for the other borrow rules.
+
 ## Load-bearing invariants (must survive)
 
 - Backend stays QBE; no LLVM. `Ptr[T]` stays opaque, never assumed to be a `u64`. R12 adds no
@@ -517,15 +581,17 @@ for actual design work.
    scalar-local rejection; R8's six transitive-containment rejections paired with the
    narrowed input-side accept-case; R8's reference-`drop`-is-a-no-op rule; R12's lowering.
    Checking here is types plus these specific soundness rules, not yet the borrow-conflict
-   machinery (R5-R7, R9-R10) — state explicitly in the phase-1 commit message that at this
+   machinery (R5-R7, R9-R10, R21) — state explicitly in the phase-1 commit message that at this
    commit a program using two conflicting borrows, or a borrow crossing a back-edge unsafely, is
    *accepted*. Deliberate and temporary.
    Exit: criteria 1 through 6, 13, and 15.
 2. **The borrow rules and their diagnostics.** R5 exclusivity in both symmetric directions, R6's
    consumption-point scan keyed on outstanding derivations rather than literal `Value` identity,
-   R7's disjointness rejection and its sequenced-workaround accept-case. Every rejection lands
-   with its located error and its own diagnostic golden.
-   Exit: criteria 7 through 9.
+   R7's disjointness rejection and its sequenced-workaround accept-case, and R21's aliased-place
+   rejection over both aliasing routes (naming and non-consuming peek), riding on the same
+   identity threading R6 adds. Every rejection lands with its located error and its own
+   diagnostic golden.
+   Exit: criteria 7 through 9, and 17.
 3. **Loops, joins, reference-mode enum elimination, the full dogfood, and the documentation
    correction.** R9's back-edge rules from both sides; R10's join rule with both the disagreement
    and agreement accept-case; R16's reference-mode clause elimination end to end, including
@@ -555,6 +621,7 @@ unit tests beside `backend/qbe.rs`, mirroring `emitted_alloc_shim_has_null_trap`
 | 7 | exclusivity, both directions: two live `&!` to *one* place, a `&` taken while a `&!` is live, a `&!` taken while a `&` is live, and a reborrow taken while a reference derived by projection from the previous reborrow is still live, are four located errors; two live `&!` to *different* places is accepted; `&` names twice cleanly (Copy); naming a `&!` local twice, once the prior derivation is fully consumed, is an accepted reborrow | `two_live_mutable_borrows_is_error`, `shared_borrow_while_mutable_live_is_error`, `mutable_borrow_while_shared_live_is_error`, `reborrow_while_projected_reference_still_live_is_error`, `two_live_mutable_borrows_to_different_places_is_accepted`, `shared_reference_is_copy`, `naming_mutable_reference_local_reborrows` | 2 |
 | 8 | consuming a place while a borrow of it is live is a located error naming both the place and the borrow, whether the conflicting borrow sits on the virtual stack or in the locals map; disposing a borrowed place is likewise an error; the same place consumed, or disposed, *after* its borrow is gone is accepted | `move_of_place_borrowed_on_stack_is_error`, `move_of_place_borrowed_in_locals_is_error`, `dispose_of_borrowed_place_is_error`, `move_after_borrow_ends_is_accepted` | 2 |
 | 9 | two references into disjoint fields of one place, held simultaneously, are rejected (stated limitation); sequencing them (fully consuming the first before taking the second) is accepted | `disjoint_field_borrows_are_conservatively_rejected`, `sequenced_borrows_of_two_fields_are_accepted` | 2 |
+| 17 | R21: taking a `&!` of an aggregate place another live name denotes is a located error naming both the borrow and the aliasing origin, over both routes (aliased by naming, aliased by a non-consuming peek); inserting `dup` makes the same program compile and the two names independent; naming an aggregate twice *without* taking a `&!` stays accepted, so `examples/vm.sth` is untouched; the rule never fires on a linear aggregate, which move tracking already rejects earlier | `mutable_borrow_of_name_aliased_place_is_error`, `mutable_borrow_of_peek_aliased_place_is_error`, `dup_makes_aliased_names_independent`, `repeated_naming_without_mutable_borrow_is_accepted` | 2 |
 | 10 | a reference parameter crosses a self-tail-call back-edge and mutates in constant stack over 1,000,000 nodes, an intermediate node's value read back afterward to confirm the mutation actually landed; a reference to a current-scope local crossing a back-edge, and a currently-borrowed local being loop-carried, are two located errors | `reference_parameter_crosses_back_edge_in_constant_stack`, `reference_to_local_across_back_edge_is_error`, `borrowed_local_carried_across_back_edge_is_error` | 3 |
 | 11 | a borrow live on one arm of an `if` and not the other is a located error at the join; a borrow live on both arms, or on neither, joins cleanly | `borrow_on_one_arm_only_is_error`, `borrow_live_on_both_arms_is_accepted` | 3 |
 | 12 | reference-mode clause elimination: a word whose declared top input is `&Enum`/`&!Enum` may dispatch clause-style; a clause's payload bindings are references inheriting the scrutinee's mutability and may be simultaneously live (the statically-disjoint exemption from R7); a clause body that consumes a payload binding is a located error | `reference_mode_clause_binds_payload_as_reference`, `reference_mode_clause_consuming_payload_is_error` | 3 (typing groundwork in 1) |
@@ -684,51 +751,6 @@ tail call is a legal R9 back-edge. Every node's value is incremented exactly onc
 recurses, in constant stack, and `walk` never frees or moves the list — ownership stays with the
 caller.
 
-## Open question: aggregate-local aliasing (not resolved this revision)
-
-**Naming an aggregate local does not copy it.** `lower_call` pushes the *same* `Value` — a
-pointer to one frame slot — when a local is named ("i64 is Copy; reuse the value id",
-src/ir.rs:1717), including for a struct/array/enum local, while `dup` deep-copies via
-`Alloc`+`Blit` (src/ir.rs:1721-1753, R4's own justification above). Independently, a
-non-consuming aggregate projection (`S|>fi`'s `Peek`, src/ir.rs:2557ff.; `get` on an array
-element, src/ir.rs:2033ff.) pushes the interior address with no copy, on the stated
-justification that "the owning aggregate is consumed by the getter/destructure/clause" — false
-for a non-consuming peek. Either way, **two distinct locals can denote one region of memory**
-today. This is pre-existing and currently invisible, because nothing mutates in place; this
-slice's `!`/`+!` make it observable for the first time:
-
-```forth
-type: V x i64 y i64 ;  type: S a V b i64 ;
-: f ( V V -- ) | p q | p V> . . q V> . . ;
-: main ( -- )
-  1 2 V 3 S
-  S|>a swap S|>a swap drop
-  f ;
-```
-
-verified to print `2 1 2 1`: `p` and `q` are two aliases of one `V`, and mutating through one
-after this slice's `!` lands would be observed through the other, with no rule in R5/R6
-noticing, since neither `p` nor `q` was ever borrowed from a *place* — they are two plain values
-that happen to share one address. R5's claim to be the entire aliasing rule holds only for
-values reached by borrowing a place; this hole is about two aggregate *values* sharing an
-address with no borrow ever taken.
-
-Three candidate resolutions, none chosen:
-
-1. **Naming an aggregate local materialises a copy.** Closes the hole at the point of naming, at
-   the cost of a real, performance-visible `Alloc`+`Blit` every time an aggregate local is
-   named — a cost this slice otherwise works to avoid (R13).
-2. **R5 extends to track outstanding aggregate copies of a place**, not just borrows of one, so
-   `p`/`q` above would be rejected as two live aliases the moment both are named. More machinery
-   than R5 as stated, and its interaction with `dup` (which *does* copy) needs working out.
-3. **Borrow roots are restricted** so an aliasable local (one that arrived by a non-consuming
-   peek of another place, rather than being bound at word entry from the stack) cannot be a
-   borrow root at all — narrower than either of the above, and it only closes the hole where a
-   reference is later taken, not the aliasing itself.
-
-**This question gates implementation.** Phase 1 cannot ship R4's `!`/`+!` without an answer,
-since they are exactly what makes the aliasing observable.
-
 ## Explicitly out of scope
 
 `& ( T -- T &T )`, the stack-value borrow form (R2; revisit if `examples/` after this slice and
@@ -741,7 +763,9 @@ future foreign pointer must be an opaque handle with no arithmetic. Collapsing `
 accessor family into overloads of the value-form words (the revisit trigger above; waits for
 Phase 4's ad-hoc dispatch). Reference counting and storable references, including a zipper.
 User-definable destructor bodies. Worklist-based branching disposal. The `get`/`set` migration
-itself (R20). The aggregate-local aliasing question above (gating, not deferred by choice).
+itself (R20). Making an aliased *read* an error (R21 fires only where a mutable borrow makes
+the aliasing observable). Eliminating the aliasing itself by copying on every naming, or by
+fixing the non-consuming peek's own lowering (R21 explains why neither is taken here).
 
 ## Phases
 
@@ -793,17 +817,18 @@ itself (R20). The aggregate-local aliasing question above (gating, not deferred 
         "unused_reference_is_surplus_value_error",
         "reference_local_expires_without_drop"
       ],
-      "exit": "Criteria 1 to 6, 13, and 15. The dogfood's push-byte and byte-at compile and run correctly, push-byte's emitted body contains no alloc and no blit while a rebuild-style control word in the same module still does, and a callee's mutation through a &! parameter is visible to the caller. Commit message records that R5/R6/R7/R9/R10 do not exist yet at this commit."
+      "exit": "Criteria 1 to 6, 13, and 15. The dogfood's push-byte and byte-at compile and run correctly, push-byte's emitted body contains no alloc and no blit while a rebuild-style control word in the same module still does, and a callee's mutation through a &! parameter is visible to the caller. Commit message records that R5/R6/R7/R9/R10/R21 do not exist yet at this commit, so conflicting borrows, unsafe back-edge crossings, and an aliased mutable borrow are all accepted here."
     },
     {
       "phase": 2,
       "focus": "borrow-rules-and-diagnostics",
       "difficulty": "hard",
-      "summary": "Exclusivity as the single, symmetric per-place aliasing rule, the consumption-point scan keyed on a place's outstanding derivations rather than literal Value identity, and the disjointness rejection with its sequenced-workaround accept-case.",
+      "summary": "Exclusivity as the single, symmetric per-place aliasing rule, the consumption-point scan keyed on a place's outstanding derivations rather than literal Value identity, the disjointness rejection with its sequenced-workaround accept-case, and R21's rejection of a mutable borrow of an aggregate place another live name denotes (dup is the remedy, no implicit copy is ever inserted).",
       "changes": [
         "src/check.rs: R5 exclusivity, both directions (at most one live &! per place; no & alongside a live &!; no &! alongside a live &; per-place not global), with &-is-Copy and &!-is-not derived from it rather than stated separately",
-        "src/check.rs: R6 consumption-point scan over the virtual stack and the locals map, keyed on a place's outstanding derivations (provenance traced through projection, not literal Value equality; reference-typed values only; @ terminates provenance), firing on move, dispose, and conflicting-borrow (including a reborrow taken while a projection derived from the previous reborrow is still live), no liveness pass",
-        "src/check.rs: R7 disjointness rejection as a stated limitation with its own diagnostic"
+        "src/check.rs: R6 consumption-point scan over the virtual stack and the locals map, keyed on a place's outstanding derivations (provenance traced through projection, not literal Value equality; reference-typed values plus the aggregate-value identity R21 needs; @ terminates provenance), firing on move, dispose, and conflicting-borrow (including a reborrow taken while a projection derived from the previous reborrow is still live), no liveness pass",
+        "src/check.rs: R7 disjointness rejection as a stated limitation with its own diagnostic",
+        "src/check.rs: R21 aliased-place rejection. Slot gains aggregate-value identity (it currently carries only ty/literal/int_val, so the checker cannot yet see that two slots denote one region); taking a &! of a place another live name denotes is a located error naming both the borrow and the aliasing origin and suggesting dup. Fires at the borrow, not at the naming, so repeated naming with no mutable borrow stays legal and examples/vm.sth is unaffected. Covers both aliasing routes: the naming path (lower_call reusing one Value id) and the non-consuming peek path (S|>fi/get pushing an interior address). No implicit copy is inserted anywhere: dup stays the only copy, so instruction counts remain readable off the source for WCET reasoning"
       ],
       "tests": [
         "two_live_mutable_borrows_is_error",
@@ -818,9 +843,13 @@ itself (R20). The aggregate-local aliasing question above (gating, not deferred 
         "dispose_of_borrowed_place_is_error",
         "move_after_borrow_ends_is_accepted",
         "disjoint_field_borrows_are_conservatively_rejected",
-        "sequenced_borrows_of_two_fields_are_accepted"
+        "sequenced_borrows_of_two_fields_are_accepted",
+        "mutable_borrow_of_name_aliased_place_is_error",
+        "mutable_borrow_of_peek_aliased_place_is_error",
+        "dup_makes_aliased_names_independent",
+        "repeated_naming_without_mutable_borrow_is_accepted"
       ],
-      "exit": "Criteria 7 to 9. Every borrow rule produces its specific located error in both R5 directions plus the reborrow-suspend case, and the accept-cases (different-places, reborrow after full consumption, Copy shared reference, move/dispose after borrow ends, sequenced disjoint fields) are all accepted."
+      "exit": "Criteria 7 to 9 and 17. Every borrow rule produces its specific located error in both R5 directions plus the reborrow-suspend case; the accept-cases (different-places, reborrow after full consumption, Copy shared reference, move/dispose after borrow ends, sequenced disjoint fields) are all accepted; and R21 rejects an aliased mutable borrow over both routes while leaving repeated naming and examples/vm.sth untouched."
     },
     {
       "phase": 3,
