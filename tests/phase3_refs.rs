@@ -1,8 +1,8 @@
-//! Phase 3 Slice 6 goldens: reference types, places, projection and access.
+//! Goldens for reference types, places, projection and access.
 //!
-//! Kept out of `tests/phase0.rs` deliberately: criterion 16 asserts that file
-//! is never modified from the slice's base commit, so a new golden belongs
-//! somewhere the addition-only check has nothing to reason about.
+//! Kept out of `tests/phase0.rs` deliberately: that file is asserted never to
+//! change from this work's base commit, so a new golden belongs somewhere the
+//! addition-only check has nothing to reason about.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -98,7 +98,7 @@ type: Buf  data ^[u8 64]  len usize ;
   dst src i byte-at push-byte ;
 ";
 
-// --- criterion 1: `&`/`&!` are prefix borrows of a place, and only of a place
+// --- `&`/`&!` are prefix borrows of a place, and only of a place
 
 #[test]
 fn borrow_of_place_is_accepted() {
@@ -180,7 +180,7 @@ fn shadowing_builtin_access_word_is_error() {
     }
 }
 
-// --- criterion 2: only an aggregate local is a borrow root; `&T` is Copy
+// --- only an aggregate local is a borrow root; `&T` is Copy
 
 #[test]
 fn borrow_of_scalar_local_is_error() {
@@ -214,7 +214,7 @@ fn borrow_of_moved_local_is_error() {
 
 #[test]
 fn borrow_of_reference_local_is_error() {
-    // R2: a reference parameter needs no sigil, so the sigil a reader might
+    // A reference parameter needs no sigil, so the sigil a reader might
     // add by habit gets its own diagnostic rather than the scalar-root one.
     let err = check_error("type: V x i64 y i64 ;\n: f ( &!V -- ) | b |\n  &!b &!V>x 1 +! ;\n");
     assert!(
@@ -229,7 +229,7 @@ fn borrow_of_reference_local_is_error() {
 
 #[test]
 fn projection_to_scalar_field_is_accepted() {
-    // R11 rejects a scalar *root*, not a scalar *result*: the referent here is
+    // What is rejected is a scalar *root*, not a scalar *result*: the referent here is
     // a field inside an aggregate that already has a slot.
     let (stdout, code) = run_src(
         "projection-to-scalar-field",
@@ -253,16 +253,21 @@ fn dup_of_shared_reference_is_accepted() {
 
 #[test]
 fn dup_of_mutable_reference_is_error() {
-    // Two live `&!` to one place, rejected by `dup`'s existing Copy gate:
-    // `&!T` is not `Copy`.
+    // Two live `&!` to one place, rejected by `dup`'s existing Copy gate. The
+    // explanation must cite exclusivity, not ownership: a reference owns
+    // nothing, so calling it linear would contradict the type rule.
     let err = check_error("type: V x i64 y i64 ;\n: main ( -- )\n  1 2 V | v |\n  &!v dup ;\n");
     assert!(
-        err.contains("`dup`") && err.contains("&!V"),
-        "expected `dup` to reject a mutable reference: {err}"
+        err.contains("`dup`") && err.contains("&!V") && err.contains("is exclusive"),
+        "expected `dup` to reject a mutable reference as exclusive: {err}"
+    );
+    assert!(
+        !err.contains("is linear"),
+        "a reference owns nothing, so the message must not call it linear: {err}"
     );
 }
 
-// --- criterion 3: projection through all three shapes, one spelling per
+// --- projection through all three shapes, one spelling per
 //     mutability
 
 #[test]
@@ -318,7 +323,7 @@ fn store_through_shared_reference_is_error() {
     );
 }
 
-// --- criterion 4: `@`, `!`, `+!`
+// --- `@`, `!`, `+!`
 
 #[test]
 fn access_through_reference_reads_and_writes() {
@@ -374,7 +379,7 @@ fn store_of_linear_referent_is_error() {
 
 #[test]
 fn fetch_or_store_of_copy_aggregate_reads_and_writes() {
-    // R4's Copy restriction is Copy-vs-linear, never scalar-vs-aggregate: a
+    // The Copy restriction is Copy-vs-linear, never scalar-vs-aggregate: a
     // Copy struct fetches via `Alloc`+`Blit` and stores via `Blit`.
     let (stdout, code) = run_src(
         "copy-aggregate-access",
@@ -414,7 +419,7 @@ fn fetch_of_copy_aggregate_survives_source_mutation() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 5: escape is prevented structurally
+// --- escape is prevented structurally
 
 #[test]
 fn reference_in_struct_field_is_error() {
@@ -518,7 +523,7 @@ fn drop_of_reference_frees_nothing() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 13: `&!T` lowers to an opaque pointer, not a by-value aggregate
+// --- `&!T` lowers to an opaque pointer, not a by-value aggregate
 
 #[test]
 fn mutation_through_reference_parameter_is_visible_to_caller() {
@@ -535,7 +540,7 @@ fn mutation_through_reference_parameter_is_visible_to_caller() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 15: a reference on the stack is surplus; in a local it expires
+// --- a reference on the stack is surplus; in a local it expires
 
 #[test]
 fn unused_reference_is_surplus_value_error() {
@@ -565,7 +570,7 @@ fn reference_local_expires_without_drop() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 7: exclusivity, in both symmetric directions
+// --- exclusivity, in both symmetric directions
 
 #[test]
 fn two_live_mutable_borrows_is_error() {
@@ -684,7 +689,7 @@ fn naming_mutable_reference_local_reborrows() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 8: a place stays borrowed until its borrows are consumed
+// --- a place stays borrowed until its borrows are consumed
 
 /// A linear place and a word that consumes one: a Copy local is never consumed
 /// by being named, so only a linear one can reach the consumption check.
@@ -749,7 +754,7 @@ fn move_after_borrow_ends_is_accepted() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 9: path disjointness is not modeled
+// --- path disjointness is not modeled
 
 #[test]
 fn disjoint_field_borrows_are_conservatively_rejected() {
@@ -780,7 +785,7 @@ fn sequenced_borrows_of_two_fields_are_accepted() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 17: two live names for one aggregate place
+// --- two live names for one aggregate place
 
 #[test]
 fn mutable_borrow_of_name_aliased_place_is_error() {
@@ -819,7 +824,7 @@ fn mutable_borrow_of_peek_aliased_place_is_error() {
 
 #[test]
 fn mutable_borrow_of_struct_aliased_by_peeked_field_is_error() {
-    // R7/R21: a peeked field is still a name for part of the whole struct, so
+    // A peeked field is still a name for part of the whole struct, so
     // borrowing the struct while the peek's binding is live must be rejected
     // the same as any other aliasing name — region *overlap*, not equality.
     let err = check_error(
@@ -853,7 +858,7 @@ fn mutable_borrow_of_peeked_field_aliased_by_struct_is_error() {
 #[test]
 fn mutable_borrow_of_array_aliased_by_element_name_is_error() {
     // The same overlap via `get`: every element of an array shares one region
-    // (R7 does not model index disjointness either), so an element's peeked
+    // (index disjointness is not modelled either), so an element's peeked
     // name aliases the whole array too.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
@@ -868,7 +873,7 @@ fn mutable_borrow_of_array_aliased_by_element_name_is_error() {
 
 #[test]
 fn mutable_borrow_aliased_by_if_join_result_is_error() {
-    // R21: when both `if` arms leave the *same* place's value (`v` named on
+    // When both `if` arms leave the *same* place's value (`v` named on
     // both sides, never rebound), the merge must still denote that place's
     // region — collapsing it to `None` regardless of agreement let a name
     // bound to the join alias its source silently.
@@ -1007,7 +1012,7 @@ fn mutable_borrow_of_struct_aliased_by_peek_on_the_stack_is_error() {
 
 #[test]
 fn naming_a_place_while_mutably_borrowed_is_error() {
-    // R21's symmetric direction, the one R5 warns is easy to omit: checking
+    // The symmetric direction, the one an exclusivity rule makes easy to omit: checking
     // only at the borrow catches `v ... &!v` and misses `&!v ... v`, which is
     // the same hazard with the two terms swapped.
     let err = check_error(
@@ -1028,7 +1033,7 @@ fn naming_a_place_while_mutably_borrowed_is_error() {
 #[test]
 fn naming_a_place_whose_mutable_borrow_is_bound_is_error() {
     // The naming side reads bindings as well as the stack: a `&!` bound into a
-    // local is live for the whole body (R8), so no naming after it is safe.
+    // local is live for the whole body, so no naming after it is safe.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  &!v | r |\n  v | p |\n  \
@@ -1043,7 +1048,7 @@ fn naming_a_place_whose_mutable_borrow_is_bound_is_error() {
 #[test]
 fn naming_a_place_after_its_borrow_ends_is_accepted() {
     // The guard against an over-broad naming-side rule: the borrow is live
-    // until the term that consumes its slot (R6), and `+!` is that term, so
+    // until the term that consumes its slot, and `+!` is that term, so
     // naming `v` afterwards is ordinary reuse.
     let (stdout, code) = run_src(
         "naming-after-borrow-ends",
@@ -1072,7 +1077,7 @@ fn dup_makes_a_stack_alias_independent() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 10: R9's back-edge rules, both sides
+// --- loop back-edge rules, both sides
 
 const BIG_LIST: &str = "\
 type: List | Nil | Cons v i64 next ^List ;
@@ -1087,7 +1092,7 @@ n 1 - acc n push-front build\n  end ;
 
 #[test]
 fn reference_parameter_crosses_back_edge_in_constant_stack() {
-    // R9's accept-case: `walk`'s own reference parameter, reborrowed from a
+    // The accept-case: `walk`'s own reference parameter, reborrowed from a
     // `Cons` payload projection each iteration, crosses the self-tail-call
     // back-edge a million times in constant stack (no growth, no overflow),
     // mutating every node in place; the front node's value, read back after
@@ -1109,7 +1114,7 @@ fn reference_parameter_crosses_back_edge_in_constant_stack() {
 
 #[test]
 fn reference_to_local_across_back_edge_is_error() {
-    // R9's rejection: `x` is a local *created this iteration*, not the
+    // The rejection: `x` is a local *created this iteration*, not the
     // parameter `r` or anything projected from it, so a reference to it
     // cannot legally cross the back-edge — its storage does not survive to
     // the next iteration (locals rebind at the loop header).
@@ -1128,8 +1133,8 @@ fn reference_to_local_across_back_edge_is_error() {
 
 #[test]
 fn borrowed_local_carried_across_back_edge_is_error() {
-    // The other half of R9's justification: an owned local that is still
-    // borrowed cannot be loop-carried either. This is R21's existing
+    // The other half of the loop justification: an owned local that is still
+    // borrowed cannot be loop-carried either. This is the existing
     // naming-side rule (`naming_a_place_while_mutably_borrowed_is_error`),
     // which fires here just as it would anywhere else — the hazard a
     // self-tail-recursive loop would otherwise let through is exactly the
@@ -1150,13 +1155,13 @@ fn borrowed_local_carried_across_back_edge_is_error() {
     );
 }
 
-// --- criterion 11: R10's branch-join borrow-state agreement
+// --- branch-join borrow-state agreement
 
 #[test]
 fn borrow_on_one_arm_only_is_error() {
     // Both arms leave a stack of identical shape (a `&!i64`), but each
     // suspends a *different* place: type unification alone has nothing to say
-    // about that, so R10 must reject it as a disagreement at the join.
+    // about that, so it must be rejected as a disagreement at the join.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  1 3 V | w |\n  true if\n    &!v\n  else\n    &!w\n  end\n  \
@@ -1174,7 +1179,7 @@ fn borrow_on_one_arm_only_is_error() {
 
 #[test]
 fn borrow_live_on_both_arms_is_accepted() {
-    // Both arms suspend the *same* place: R10 has nothing to reject, and the
+    // Both arms suspend the *same* place: there is nothing to reject, and the
     // merged reference stays usable past the join.
     let (stdout, code) = run_src(
         "borrow-live-on-both-arms",
@@ -1190,9 +1195,9 @@ fn borrow_live_on_both_arms_is_accepted() {
 fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
     // The two arms reborrow *different* reference parameters, so neither
     // derivation has an owned root in this frame — yet each suspends its own
-    // reference local, and the merge keeps only one. Without R10 rejecting it,
+    // reference local, and the merge keeps only one. Without rejecting it,
     // the `else` path reaches `q &!Buf>len` with a `&!usize` derived from `q`
-    // still live: the two-live-mutable-references hazard R3's suspend rule
+    // still live: the two-live-mutable-references hazard the suspend rule
     // exists to stop.
     let err = check_error(
         "type: Buf  data ^[u8 64]  len usize ;\n\
@@ -1210,7 +1215,7 @@ fn borrow_join_disagreeing_on_reborrowed_parameter_is_error() {
     );
 }
 
-// --- criterion 12: R16, reference-mode enum elimination
+// --- reference-mode enum elimination
 
 #[test]
 fn reference_mode_clause_binds_payload_as_reference() {
@@ -1235,10 +1240,10 @@ fn reference_mode_clause_binds_payload_as_reference() {
 
 #[test]
 fn reference_mode_clause_payload_bindings_are_simultaneously_live() {
-    // R16's named exemption from R7: a clause binds every field of one variant
+    // The clause form's named exemption: a clause binds every field of one variant
     // at once, with no root local to reborrow from, and the fields are
     // statically disjoint — so both payload references may be live together,
-    // which R7's general rule would reject for two projections of one place.
+    // which the general disjointness rule would reject for two projections of one place.
     let (stdout, code) = run_src(
         "reference-mode-clause-disjoint-payloads",
         "type: P | Zero | Both a i64 b i64 ;\n\
@@ -1256,7 +1261,7 @@ fn reference_mode_clause_payload_bindings_are_simultaneously_live() {
 #[test]
 fn reference_mode_clause_fetching_linear_payload_is_error() {
     // No clause may consume a payload binding: fetching `next`'s referent
-    // (`^List`, always linear) is the same R4 rejection a fetched/stored
+    // (`^List`, always linear) is the same rejection a fetched/stored
     // linear `T` gets anywhere else, not a special reference-mode rule.
     let err = check_error(
         "type: List | Nil | Cons v i64 next ^List ;\n\
@@ -1269,7 +1274,7 @@ fn reference_mode_clause_fetching_linear_payload_is_error() {
     );
 }
 
-// --- criterion 14: the full dogfood
+// --- the full dogfood
 
 #[test]
 fn reference_dogfood_prints_expected_bytes() {
@@ -1282,7 +1287,7 @@ fn reference_dogfood_prints_expected_bytes() {
     assert_eq!(code, 0);
 }
 
-// --- criterion 16: no regression
+// --- no regression
 
 #[test]
 fn regression_diff_shows_only_additions() {

@@ -108,7 +108,7 @@ Goldens in `tests/phase3_refs.rs` (new file, so criterion 16's addition-only che
 | 17 | R21 over every aliasing route (naming, peek, peeked field both ways, array element, `if`-join incl. one-sided arms in both orders, stack-side) plus naming-while-borrowed; two differently-aliased arms are rejected at the join itself; `dup` fixes it; plain repeated naming still accepted | 2 |
 | 10 | reference parameter crosses a back-edge over 1,000,000 nodes in constant stack with the mutation read back; local-derived crossing and loop-carried borrowed local are errors | 3 |
 | 11 | borrow live on one arm only is an error at the join (incl. the reborrowed-parameter variant); both arms or neither joins cleanly | 3 |
-| 12 | reference-mode clauses bind payloads as references, simultaneously live; consuming a payload binding is an error | 3 |
+| 12 | reference-mode clauses bind payloads as references, simultaneously live; fetching a linear payload's referent is an error (consuming a binding is unrepresentable, see R16) | 3 |
 | 14 | dogfood end to end: `72`, `90`, `2`, `2` | 3 |
 | 16 | full suite green; regression diff shows only additions | 3 |
 

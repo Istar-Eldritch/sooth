@@ -837,7 +837,8 @@ pub fn check_types(
     Ok(())
 }
 
-/// The declaration-site half of the no-stored-reference rule: a struct field, an enum variant payload field,
+/// The declaration-site half of the no-stored-reference rule: a struct field,
+/// an enum variant payload field,
 /// an interned array element, or an interned cell payload whose type
 /// transitively contains a reference is a located error. Runs after
 /// `check_recursion`, so the field-graph walk `contains_reference` performs is
@@ -1064,7 +1065,8 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         Type::Array(id, _) => Some(TypeNode::Array(id.index())),
         Type::OwnedCell(_, _) => None,
         // A reference is a pointer, not an inline copy, so it closes no
-        // by-value cycle — and the no-stored-reference rule keeps one out of every field position
+        // by-value cycle — and the no-stored-reference rule keeps one out of
+        // every field position
         // anyway.
         Type::Ref(..) => None,
         Type::Int(_) | Type::Float(_) | Type::Bool | Type::Usize | Type::Isize | Type::Spy => None,
@@ -1279,7 +1281,8 @@ pub fn infer_line(
     )?;
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
-    // The sixth position of the no-stored-reference rule: the session's inter-line stack outlives this line's
+    // The sixth position of the no-stored-reference rule: the session's
+    // inter-line stack outlives this line's
     // locals, so a reference that survived to here would outlive its referent.
     if let Some(slot) = final_stack
         .iter()
@@ -1628,7 +1631,8 @@ fn check_word(
     }
 }
 
-/// The effect-signature half of the no-stored-reference rule: no declared **output** may transitively
+/// The effect-signature half of the no-stored-reference rule: no declared
+/// **output** may transitively
 /// contain a reference (returning one would outlive the frame that owns the
 /// referent), and an **input** may only be a reference at the top level — a
 /// type that merely *contains* one nested inside an array or a cell is
@@ -2064,15 +2068,26 @@ fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String 
 /// R4 (D3): `dup`/`over` applied to a non-`Copy` value, in the DESIGN.md form.
 /// A linear value has no bits to copy: the only ways to get a second one are to
 /// thread this one through or to acquire another explicitly.
-fn cannot_copy_linear_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    // A reference is neither `Copy` nor linear, so the ownership wording below
+    // would tell the reader the opposite of the type rule.
+    let why = if found.is_ref() {
+        format!(
+            "`{found}` is exclusive: at most one may be live for a place, so copying it would make a second one; use it where it is, or borrow again once it is consumed"
+        )
+    } else {
+        format!(
+            "`{found}` is linear: it owns a resource and has no `Copy` instance, so there are no bits to copy; thread the value through instead"
+        )
+    };
     match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot `{}` a value of type `{}` in `{}` (line {})\n  `{}` is linear: it owns a resource and has no `Copy` instance, so there are no bits to copy; thread the value through instead\n  note: declared {}",
-            op, found, name, span.line, found, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: cannot `{op}` a value of type `{found}`: `{found}` is linear and has no `Copy` instance"
-        ),
+        Ctx::Word { name, effect, .. } => {
+            format!(
+            "error: cannot `{}` a value of type `{}` in `{}` (line {})\n  {}\n  note: declared {}",
+            op, found, name, span.line, why, effect_str(effect),
+        )
+        }
+        Ctx::Line { .. } => format!("error: cannot `{op}` a value of type `{found}`: {why}"),
     }
 }
 
@@ -3305,7 +3320,8 @@ fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: 
     )
 }
 
-/// Two construction sites the declaration-site rule cannot reach: `fill`'s element and `^`'s payload accept
+/// Two construction sites the declaration-site rule cannot reach: `fill`'s
+/// element and `^`'s payload accept
 /// whatever type is on the stack, with no declaration anywhere for
 /// `check_no_stored_references` to have caught.
 fn constructed_reference_error(ctx: &Ctx, span: Span, position: &str, ty: Type) -> String {
@@ -3857,7 +3873,7 @@ fn check_shuffle(
             // The pure reorderings below (`swap`/`rot`) move rather than copy
             // and stay legal on a linear value.
             if !is_copy(top.ty, ctx.structs(), ctx.enums(), arrays) {
-                return Err(cannot_copy_linear_error(ctx, span, "dup", top.ty));
+                return Err(cannot_copy_error(ctx, span, "dup", top.ty));
             }
             // `dup` of an aggregate deep-copies it (`Alloc`+`Blit`), so the
             // copy denotes a region of its own — this is the whole remedy for an
@@ -3887,7 +3903,7 @@ fn check_shuffle(
             // R4: `over` copies the second slot, so it is gated exactly like
             // `dup`.
             if !is_copy(below.ty, ctx.structs(), ctx.enums(), arrays) {
-                return Err(cannot_copy_linear_error(ctx, span, "over", below.ty));
+                return Err(cannot_copy_error(ctx, span, "over", below.ty));
             }
             stack.push(below);
         }
