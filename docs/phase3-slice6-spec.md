@@ -60,7 +60,7 @@ The *aliasing* side of the same join (R21's identity, not R10's borrow state) is
 
 **R17 / R18 — Test discipline.** Every criterion is a runnable golden except R13's no-rebuild shape, which asserts on emitted IL. R12's mapping is asserted behaviourally (caller-visible mutation). Structural tests live beside `backend/qbe.rs`, scoped to one named body via `func_body` and pinned to the mangled symbol (`$push_byte`, never `push-byte`). Diagnostics assert the specific error text and location; each rejection gets its own program, since checking fails fast.
 
-**R19 — Purely additive**, demonstrated by `git diff --name-status 0e2763f -- examples/ tests/phase0.rs tests/phase1.rs` showing only `A`.
+**R19 — Purely additive**, demonstrated by `git diff --name-status 0e2763f -- examples/ tests/phase0.rs tests/phase1.rs` showing only `A`. Checked by running that command, deliberately not by a test: an in-suite version hardcoded the base hash, so any squash, rebase or shallow clone that dropped the object would fail the suite for a reason unrelated to the compiler, and it would assert a one-time property forever.
 
 **R20 — `get`/`set` superseded, not migrated here.** `&> @` replaces non-consuming two-output `get` (whose every read-only call site pays a `swap drop`); `&!> !` replaces `set`'s whole-array rebuild. `fill`/`len` are unaffected. The vocabulary only genuinely shrinks because R4 covers Copy aggregates (`vm.sth`'s `[Op N]`). Difference worth stating: `get` on an aggregate element aliases the array's storage; `&!> @` copies out. Migration (rewrite `examples/stack.sth`, `examples/vm.sth`, `tests/phase1.rs`, then delete `get`/`set`) is a standalone follow-up commit — no brief, no spec, no slice.
 
@@ -110,7 +110,7 @@ Goldens in `tests/phase3_refs.rs` (new file, so criterion 16's addition-only che
 | 11 | borrow live on one arm only is an error at the join (incl. the reborrowed-parameter variant); both arms or neither joins cleanly | 3 |
 | 12 | reference-mode clauses bind payloads as references, simultaneously live; fetching a linear payload's referent is an error (consuming a binding is unrepresentable, see R16) | 3 |
 | 14 | dogfood end to end: `72`, `90`, `2`, `2` | 3 |
-| 16 | full suite green; regression diff shows only additions | 3 |
+| 16 | full suite green; the regression diff above shows only additions (checked by command, not by a test) | 3 |
 
 ## Dogfood (`examples/refs.sth`, as shipped)
 

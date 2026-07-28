@@ -1286,33 +1286,3 @@ fn reference_dogfood_prints_expected_bytes() {
     );
     assert_eq!(code, 0);
 }
-
-// --- no regression
-
-#[test]
-fn regression_diff_shows_only_additions() {
-    // The base commit this slice built on top of (`docs/phase3-slice6-spec.md`
-    // records it directly): every change to `examples/`, `tests/phase0.rs`, or
-    // `tests/phase1.rs` since then must be an addition, never a modification
-    // or deletion, so this slice cannot have touched a pre-existing golden.
-    let output = Command::new("git")
-        .args([
-            "diff",
-            "--name-status",
-            "0e2763f",
-            "--",
-            "examples/",
-            "tests/phase0.rs",
-            "tests/phase1.rs",
-        ])
-        .output()
-        .expect("git diff should run");
-    assert!(output.status.success(), "git diff failed: {output:?}");
-    let diff = String::from_utf8(output.stdout).expect("git diff output should be utf8");
-    for line in diff.lines() {
-        assert!(
-            line.starts_with('A'),
-            "expected only additions under examples/ and the phase0/phase1 goldens, found: {line}"
-        );
-    }
-}
