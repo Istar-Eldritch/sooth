@@ -2639,6 +2639,9 @@ fn check_term(
             {
                 return Ok(stack);
             }
+            if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
+                return Ok(stack);
+            }
             let sig = env
                 .get(name)
                 .ok_or_else(|| unknown_word_error(ctx, span, name))?;
@@ -3821,6 +3824,58 @@ fn check_struct_peek_word(
     // The peek is non-consuming and pushes the field's *interior address*,
     // so two peeks of one field of one struct are two names for one region.
     let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
+    stack.push(Slot {
+        alias,
+        ..Slot::computed(field_ty)
+    });
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// `S>fi` (R21's third route): the ordinary, consuming field getter, already
+/// registered in `struct_generated_sigs` and otherwise left to the generic
+/// env-based dispatch. That generic path pushes a plain `Slot::computed`
+/// with no alias, but for an aggregate field this getter's IR lowering
+/// pushes the field's *interior address* rather than copying it out (same
+/// device as `S|>fi`'s peek), so the struct operand and the extracted field
+/// alias one region exactly as two peeks would. `None` for a scalar field
+/// (no region to alias) or an unresolved name, so every other call site is
+/// untouched. Consuming, unlike the peek: the struct operand is popped, not
+/// left on the stack, but the aliasing hazard is unaffected by that, since
+/// the operand's own local binding (if it is named) keeps the same region
+/// regardless of what happens to the stack-level copy of its slot.
+fn check_struct_get_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    prov: &mut Provenance,
+) -> Result<Option<Vec<Slot>>, String> {
+    let Some((struct_name, field_name)) = name.split_once('>') else {
+        return Ok(None);
+    };
+    let structs = ctx.structs();
+    let Some(idx) = structs.iter().position(|d| d.name == struct_name) else {
+        return Ok(None);
+    };
+    let decl = &structs[idx];
+    let Some((_, field_ty)) = decl.fields.iter().find(|(f, _)| f == field_name) else {
+        return Ok(None);
+    };
+    let field_ty = *field_ty;
+    if !field_ty.is_aggregate() {
+        return Ok(None);
+    }
+    let struct_ty = Type::Struct(StructId::from_index(idx), decl.name_static);
+    let n = stack.len();
+    if n < 1 {
+        return Err(underflow_error(ctx, span, name, 1, n));
+    }
+    let top = stack[n - 1];
+    if top.ty != struct_ty {
+        return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
+    }
+    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
+    stack.truncate(n - 1);
     stack.push(Slot {
         alias,
         ..Slot::computed(field_ty)

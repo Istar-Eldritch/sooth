@@ -880,6 +880,55 @@ fn mutable_borrow_of_peeked_field_aliased_by_struct_is_error() {
 }
 
 #[test]
+fn mutable_borrow_of_struct_aliased_by_gotten_field_is_error() {
+    // The third route: the ordinary, *consuming* getter `S>fi` still pushes
+    // the aggregate field's interior address, so naming its result aliases
+    // the struct it was gotten from just as a peek would.
+    let err = check_error(
+        "type: S arr [i64 4] ;\n\
+         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
+         &!s &!S>arr 0 &!> 9 !\n  &items 0 &> @ . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `s` mutably") && err.contains("it is aliased by `items`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_of_gotten_field_aliased_by_struct_is_error() {
+    // The same overlap from the other end: borrowing the gotten field's own
+    // name while the struct it came from is still live.
+    let err = check_error(
+        "type: S arr [i64 4] ;\n\
+         : main ( -- )\n  0 4 fill S | s |\n  s S>arr | items |\n  \
+         &!items 0 &!> 9 !\n  &s S>arr 0 &> @ . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `items` mutably") && err.contains("it is aliased by `s`"),
+        "expected the aliased-place rejection naming both ends: {err}"
+    );
+}
+
+#[test]
+fn dup_makes_gotten_field_independent_of_struct() {
+    // `dup` is the remedy here too: feeding the getter an independent copy
+    // (dup, swap, drop the original) breaks the alias, and the resulting
+    // field is provably independent of a later mutation through `s`.
+    let (stdout, code) = run_src(
+        "dup-makes-gotten-field-independent",
+        "type: S arr [i64 4] ;\n\
+         : main ( -- )\n  0 4 fill S | s |\n  s dup swap drop S>arr | items |\n  \
+         &!s &!S>arr 0 &!> 9 !\n  &items 0 &> @ . ;\n",
+    );
+    assert_eq!(
+        stdout, "0\n",
+        "the gotten field must stay independent of the struct's later mutation"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn mutable_borrow_aliased_by_if_join_result_is_error() {
     // When both `if` arms leave the *same* place's value (`v` named on
     // both sides, never rebound), the merge must still denote that place's
