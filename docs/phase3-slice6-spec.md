@@ -71,7 +71,7 @@ needs no sigil — if `b : &!Buf` arrived as an input, the body writes `b`, not 
 A place is exactly a local name, never a projection path (`a Buf>len &!`, "borrow just this
 field," is not supported): nothing in the codebase inspects a preceding term the way that would
 require. The same result is reached through R3 instead — borrow the whole local first, then
-project through the reference with an ordinary word (`&!a Buf&!>len`).
+project through the reference with an ordinary word (`&!a &!Buf>len`).
 
 The rejected alternative, a stack-value borrow (`& ( T -- T &T )`, leaving the value below its
 own reference), is recorded because it is close and purely additive later: it cannot use locals
@@ -87,18 +87,18 @@ plain value.
 
 | shape | shared word | shared effect | mutable word | mutable effect |
 |---|---|---|---|---|
-| struct field | `T&>fi` (one per struct/field) | `( &S -- &Ti )` | `T&!>fi` | `( &!S -- &!Ti )` |
+| struct field | `&T>fi` (one per struct/field) | `( &S -- &Ti )` | `&!T>fi` | `( &!S -- &!Ti )` |
 | array element | `&>` (generic, like `get`) | `( &[T N] usize -- &T )` | `&!>` | `( &![T N] usize -- &!T )`, same runtime bounds trap as `get` |
 | cell payload | `&^` (generic, like `^|>`) | `( &^T -- &T )` | `&!^` | `( &!^T -- &!T )` |
 
 Mutability is explicit in the token itself (no "inherited from the receiver" rule): a reader
 gets reference-ness, mutability, and arity from the word alone. Every field's projected type may
-itself be linear (`Buf&!>data : &!^[u8 64]`, a mutable reference to a linear field) — this is
+itself be linear (`&!Buf>data : &!^[u8 64]`, a mutable reference to a linear field) — this is
 not a second Copy gate layered on top of R3; R4's Copy restriction is what governs fetch/store,
 not projection itself.
 
 **Projection through a `&!` consumes the parent reference, and separately suspends the place it
-was reborrowed from.** Each of `T&>fi`/`T&!>fi`, `&>`/`&!>`, `&^`/`&!^` takes its reference
+was reborrowed from.** Each of `&T>fi`/`&!T>fi`, `&>`/`&!>`, `&^`/`&!^` takes its reference
 argument off the stack the way every word takes its arguments off the stack. Consuming the
 parent *value* is not enough by itself to make a chain of mutable projections linear, because
 naming a `&!` local is a **reborrow** — it manufactures a fresh parent independent of whatever
@@ -107,8 +107,8 @@ was derived from the previous one:
 ```forth
 : two-live ( &!Buf -- )
   | b |
-  b Buf&!>len        \ reborrow #1 consumed by the projection, derived ref live
-  b Buf&!>len        \ reborrow #2, while #1's derived ref is still live
+  b &!Buf>len        \ reborrow #1 consumed by the projection, derived ref live
+  b &!Buf>len        \ reborrow #2, while #1's derived ref is still live
   1 +! 1 +! ;
 ```
 
@@ -123,7 +123,7 @@ its reborrows of `b` is fully consumed before the next is taken, so the place is
 suspended at the point of a subsequent reborrow.
 
 The suspend rule is **mutable-only**. `&T` is `Copy`, so a live `&T` parent alongside a
-reference derived from it composes freely (`&a dup Buf&>len` is fine) — shared references carry
+reference derived from it composes freely (`&a dup &Buf>len` is fine) — shared references carry
 no exclusivity, so there is nothing for a suspend to protect.
 
 R11's borrow-root list needs no reference-typed case: R2 is never applied to a value that is
@@ -157,7 +157,7 @@ delimiter, handled by recursing into the ongoing token stream exactly as
 - `+!` adds in place, `( &!T T -- )`, `T` an integer type, sugar for fetch-add-store. `T` is
   inferred from the receiver, so the same bare-literal coercion carve-out that applies anywhere
   else a type is inferred rather than declared (`usize`/`isize` only, no bare `i64`-to-narrower
-  coercion) applies here — `b Buf&!>len 1 +!` accepts the bare literal because `T = usize`.
+  coercion) applies here — `b &!Buf>len 1 +!` accepts the bare literal because `T = usize`.
 - **Restricted to `Copy` `T`, and a Copy *aggregate* is a real case, not a rejection.**
   `lower_call`'s `"dup"` arm (src/ir.rs:1721-1753) already allocs a fresh slot and blits the
   bytes for a Copy `Struct`/`Enum`/`Array`, exercised on every `dup` of a Copy aggregate today
@@ -219,7 +219,7 @@ this slice actually pays is in `push-byte`: naming its two projected intermediat
 `| arr |`) via mid-body binding is what avoids needing a `swap` to sequence them — the
 hand-trace below states this directly ("No `swap` is needed: naming `i` and `arr` as they are
 produced does the sequencing that a `swap` would otherwise have to do"). `byte-at`'s own
-two-projection chain (`b Buf&>data &^ i &> @`) is fully shared-mode, so the suspend rule this
+two-projection chain (`b &Buf>data &^ i &> @`) is fully shared-mode, so the suspend rule this
 section is about never engaged there in the first place. A stated limitation with its own
 criterion, additive later. R16's reference-mode clause payload bindings are a narrow, named
 exemption from this
@@ -268,7 +268,7 @@ Combined with place-only creation (R2) and R11 (only an aggregate/cell local can
 root), a reference cannot outlive its referent, so no lifetime apparatus is needed.
 
 One direct consequence of banning a reference on the output side: a projection can never be
-factored into its own helper word. `: len-of ( &!Buf -- &!usize ) Buf&!>len ;` is rejected —
+factored into its own helper word. `: len-of ( &!Buf -- &!usize ) &!Buf>len ;` is rejected —
 not because the projection itself is wrong, but because `&!usize` on the output side is exactly
 what this rule bans. This is why every projection in this slice's dogfood is written inline
 rather than factored out.
@@ -300,7 +300,7 @@ conservative rule is smaller and no criterion needs the imprecision.
 **R11 — Only aggregate or cell locals may be borrowed.** The root of a place must be a local of
 struct, enum, array, or cell type; a local of scalar type is a located error ("borrow a field or
 an aggregate"). Scalars are SSA temporaries with no address, and giving them one is real work no
-criterion needs. A projection whose *result* is scalar (`b Buf&!>len` yielding `&!usize`) is
+criterion needs. A projection whose *result* is scalar (`b &!Buf>len` yielding `&!usize`) is
 unaffected — the referent is a field inside an aggregate that already has a slot.
 
 **R12 — No new IR instruction; a reference is always `IrType::Ptr`.** Struct-field projection is
@@ -577,14 +577,14 @@ type: Buf  data ^[u8 64]  len usize ;
 
 : push-byte ( &!Buf u8 -- )
   | b x |
-  b Buf&!>len @ | i |
-  b Buf&!>data &!^ | arr |
+  b &!Buf>len @ | i |
+  b &!Buf>data &!^ | arr |
   arr i &!> x !
-  b Buf&!>len 1 +! ;
+  b &!Buf>len 1 +! ;
 
 : byte-at ( &Buf usize -- u8 )
   | b i |
-  b Buf&>data &^ i &> @ ;
+  b &Buf>data &^ i &> @ ;
 
 : copy-byte ( &!Buf &Buf usize -- )
   | dst src i |
@@ -598,7 +598,7 @@ type: Buf  data ^[u8 64]  len usize ;
   &!a &b 0 copy-byte
   &a 0 byte-at .
   &a 1 byte-at .
-  &a Buf&>len @ .
+  &a &Buf>len @ .
   a drop
   b drop
 
@@ -648,18 +648,18 @@ in place.
 | term | stack / locals after |
 |---|---|
 | `b` (reborrow 1) | `[&!Buf]` |
-| `Buf&!>len` (consumes the reborrow) | `[&!usize]` |
+| `&!Buf>len` (consumes the reborrow) | `[&!usize]` |
 | `@` | `[usize]` |
 | `\| i \|` | `[]`, `i : usize` |
 | `b` (reborrow 2 — the first's derived `&!usize` was fully consumed by `@`, so `b`'s place is not suspended) | `[&!Buf]` |
-| `Buf&!>data` | `[&!^[u8 64]]` |
+| `&!Buf>data` | `[&!^[u8 64]]` |
 | `&!^` | `[&![u8 64]]` |
 | `\| arr \|` | `[]`, `arr : &![u8 64]` |
 | `arr i &!>` | `[&!u8]` |
 | `x` (Copy local, no move) | `[&!u8, u8]` |
 | `!` | `[]` |
 | `b` (reborrow 3 — the second's derived chain was fully consumed by `&!>` then `!`) | `[&!Buf]` |
-| `Buf&!>len` | `[&!usize]` |
+| `&!Buf>len` | `[&!usize]` |
 | `1` | `[&!usize, i64(1)]` (bare literal, R4's `usize` coercion carve-out) |
 | `+!` | `[]` |
 
@@ -669,7 +669,7 @@ the point of a new reborrow, and R7's disjointness rule never has to reason abou
 derivations from `b` at once. No `swap` is needed: naming `i` and `arr` as they are produced
 does the sequencing that a `swap` would otherwise have to do.
 
-`byte-at ( &Buf usize -- u8 )`, `b : &Buf`, `i : usize`: `b` → `Buf&>data` (`&^[u8 64]`) → `&^`
+`byte-at ( &Buf usize -- u8 )`, `b : &Buf`, `i : usize`: `b` → `&Buf>data` (`&^[u8 64]`) → `&^`
 (`&[u8 64]`) → `i` → `&>` (`&u8`) → `@` (`u8`). Every projection here is shared, so the suspend
 rule never engages (mutable-only).
 
@@ -752,11 +752,11 @@ itself (R20). The aggregate-local aliasing question above (gating, not deferred 
       "phase": 1,
       "focus": "reference-types-places-projection-access",
       "difficulty": "hard",
-      "summary": "Add &T/&!T mapped to IrType::Ptr with a RefId registry and correct is_copy/is_linear answers, name reservation for &-led names and shadowing rejection for @/!/+!, the three-case &T/&!T type-position splitter, prefix &/&! on locals with the place-suspend rule for mutable projections, the T&>fi/T&!>fi/&>/&!>/&^/&!^ accessor family split by mutability, @/!/+! typed for both &T and &!T and covering a Copy aggregate via Alloc+Blit as well as a Copy scalar, R11's scalar-local rejection, R8's six escape rejections (five over compiled code plus the REPL carried-stack case, now genuinely reachable since Slice 5 gave REPL lines locals) plus drop-as-no-op, and the surplus-value rule for a leftover reference on the stack.",
+      "summary": "Add &T/&!T mapped to IrType::Ptr with a RefId registry and correct is_copy/is_linear answers, name reservation for &-led names and shadowing rejection for @/!/+!, the three-case &T/&!T type-position splitter, prefix &/&! on locals with the place-suspend rule for mutable projections, the &T>fi/&!T>fi/&>/&!>/&^/&!^ accessor family split by mutability, @/!/+! typed for both &T and &!T and covering a Copy aggregate via Alloc+Blit as well as a Copy scalar, R11's scalar-local rejection, R8's six escape rejections (five over compiled code plus the REPL carried-stack case, now genuinely reachable since Slice 5 gave REPL lines locals) plus drop-as-no-op, and the surplus-value rule for a leftover reference on the stack.",
       "changes": [
-        "src/lexer.rs, src/parser.rs: `&` and `&!` as prefix borrow operators on a local; `&T`/`&!T` in type position with its three splitting cases (bare, `^`-composed, `[`-delimited); `T&>fi`, `T&!>fi`, `&>`, `&!>`, `&^`, `&!^`, `@`, `!`, `+!` as words; `&`-led name reservation mirroring `is_reserved_caret_name`/`reserved_caret_name_error`; a shadowing rejection for the exact names `@`, `!`, `+!`; a unit test for the type-position splitter's `^`-led-remainder case",
+        "src/lexer.rs, src/parser.rs: `&` and `&!` as prefix borrow operators on a local; `&T`/`&!T` in type position with its three splitting cases (bare, `^`-composed, `[`-delimited); `&T>fi`, `&!T>fi`, `&>`, `&!>`, `&^`, `&!^`, `@`, `!`, `+!` as words; `&`-led name reservation mirroring `is_reserved_caret_name`/`reserved_caret_name_error`; a shadowing rejection for the exact names `@`, `!`, `+!`; a unit test for the type-position splitter's `^`-led-remainder case",
         "src/check.rs: reference types in the type lattice with an interned RefId (inner, mutable) registry; is_copy true for &T/false for &!T and every is_linear-shaped predicate false for both, including Moves::new's and the back-edge check's explicit reference-local exclusion; R2's local-only place; the accessor family split by mutability, each consuming its reference argument and suspending its root place for the mutable forms; R4's Copy restriction on @/!/+!, @ typed for both &T and &!T, now covering a Copy aggregate as well as a Copy scalar; R11's scalar-local rejection; R8's six transitive-containment rejections (struct field, enum payload, fill's array element, ^'s cell payload, effect output, REPL carried-stack survival) plus the effect-input accept-case narrowed to a top-level reference type; the surplus-value rule treating a leftover &!T on the stack like any non-Copy value while a reference local expires silently",
-        "src/ir.rs: ir_type_of gains &T/&!T -> IrType::Ptr; lower T&>fi/T&!>fi to PtrOffset, &>/&!> to ElemAddr, &^/&!^ to a Load of the stored pointer, @ to FieldLoad (Copy scalar) or Alloc+Blit (Copy aggregate), ! to FieldStore (Copy scalar) or Blit (Copy aggregate), +! to FieldLoad+Bin(Add)+FieldStore; drop of a reference emits no destructor call",
+        "src/ir.rs: ir_type_of gains &T/&!T -> IrType::Ptr; lower &T>fi/&!T>fi to PtrOffset, &>/&!> to ElemAddr, &^/&!^ to a Load of the stored pointer, @ to FieldLoad (Copy scalar) or Alloc+Blit (Copy aggregate), ! to FieldStore (Copy scalar) or Blit (Copy aggregate), +! to FieldLoad+Bin(Add)+FieldStore; drop of a reference emits no destructor call",
         "no new Instr variant; Alloc and Blit already exist and are already used this way by dup's own Copy-aggregate arm"
       ],
       "tests": [
