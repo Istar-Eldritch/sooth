@@ -13,7 +13,7 @@ are prerequisites for Slice 6: a bare REPL line forms no place, so it can take n
   no longer carries a `locals` field: entry locals are just a leading `Bind`. `Clause.locals`
   stays a field (clause payload binding is part of the pattern, not a body term). The
   entry-position diagnostic survives the unification, keyed off a leading `Bind`
-  (src/check.rs:1121, message at :1124).
+  (src/check.rs:1122, message at :1125).
 - **R2 — extent is the rest of the enclosing block** (word body, clause body, `if`/`else`
   arm). No closing token. Sibling arms may each bind the same name.
 - **R4/R5 — rejections.** Re-binding a name in scope is a located error, applied uniformly
@@ -28,9 +28,10 @@ are prerequisites for Slice 6: a bare REPL line forms no place, so it can take n
   do not; the existing transactional rollback is untouched.
 - **R9 — evolving locals.** `Ctx::Word`'s `&'a HashMap<String, Type>` is gone. Names live in
   a threaded `&mut Scope` (`bound: Vec<(String, Type)>` plus `Moves`), innermost-last so
-  leaving a block truncates to its entry depth (src/check.rs:248-292).
+  leaving a block truncates to its entry depth (src/check.rs:247-293).
 - **R10 — no new `Instr`.** Lowering pops from the lowering stack into a
-  `Vec<(String, Value)>` locals list and truncates at block exit (src/ir.rs:1704-1710).
+  `Vec<(String, Value)>` locals list (src/ir.rs:1704) and truncates it at each arm's exit
+  (src/ir.rs:2623 and :2630).
 - **R11 — nothing crosses a back edge.** Confirmed: a mid-body name's extent ends at the
   block terminator where the tail call sits, so no header phi is added.
 - **Dogfood.** `examples/vm.sth`'s `run` word names the first `vm-pop` result mid-body in
@@ -70,9 +71,15 @@ are prerequisites for Slice 6: a bare REPL line forms no place, so it can take n
 - **The original spec's headline REPL dogfood contradicted its own R7.** The three-line
   session `1 2 3` / `| a b |` / `a b + .` cannot work: R7 makes line locals die with the
   line, so line 2's binding is gone before line 3 reads it. The implementation correctly
-  chose R7 over the example. Corrected, working dogfood (one line, so the binding and its
-  use share a scope): `1 2 3 | a b | a b + .` prints `5` and leaves `1` on the session
-  stack, having reached the `2` and `3` an earlier line left.
+  chose R7 over the example. Corrected, working dogfood, with the binding and its use on
+  one line so they share a scope, while still reaching values an earlier line left:
+
+  ```
+  1 2 3
+  | a b | a b + .
+  ```
+
+  prints `5` and leaves `1` on the session stack.
 
 ## Load-bearing invariants held
 
@@ -91,7 +98,7 @@ asserted on its specific message.
 | re-binding in scope / over-binding / empty binding are located errors | `rebinding_a_name_in_scope_is_error`, `binding_more_values_than_frame_holds_is_error`, `empty_binding_with_no_names_is_error` |
 | a word cannot bind beneath its inputs; entry diagnostic survives | `binding_cannot_reach_beneath_declared_inputs`, `entry_binding_keeps_its_declared_input_diagnostic` |
 | unconsumed linear local errors at the block terminator; consumed is accepted | `unconsumed_linear_local_errors_at_block_end`, `linear_local_bound_and_consumed_in_arm_is_accepted` |
-| stage units: bind term, scope restore, no new instr, no header phi | `parse_mid_body_binding_produces_bind_term`, `check_block_exit_restores_locals_map`, `lower_binding_emits_no_new_instr`, `lower_mid_body_binding_adds_no_header_phi` |
+| stage units: bind term, leaked-local report, no new instr, no header phi | `parse_mid_body_binding_produces_bind_term`, `scope_leave_reports_the_unconsumed_linear_local`, `lower_binding_emits_no_new_instr`, `lower_mid_body_binding_adds_no_header_phi` |
 | clause bodies bind; the variant-name collision and misspelling diagnostics | `mid_body_binding_in_clause_body_binds`, `clause_body_binding_named_for_a_variant_is_error`, `clause_body_binding_named_for_a_variant_of_the_same_enum_is_error`, `misspelt_variant_in_clause_list_notes_the_binding_read`, `misspelt_variant_swallowed_as_a_binding_reports_the_missing_variant` |
 | REPL: binds, reaches earlier lines, session-depth floor, rollback, no name carryover | `repl_line_binds_a_local`, `repl_line_binding_reaches_earlier_line_values`, `repl_line_binding_more_than_the_session_stack_holds_is_error`, `failed_repl_line_after_binding_leaves_stack_intact`, `repl_line_locals_do_not_survive_to_next_line` |
 | back edge and dogfood | `mid_body_binding_in_self_tail_recursive_word_loops_correctly`, `vm_with_mid_body_binding_matches_previous_output` |
@@ -106,6 +113,18 @@ asserted on its specific message.
   would panic instead of mis-checking. Not changed: nothing in this slice or its tests
   exercises that condition, and CLAUDE.md's convention is not to add handling for a
   condition that cannot occur.
+- **A binding's stack consumption has no unit-level cover.** Making `TermKind::Bind` read
+  the operands without removing them leaves the whole lib suite green, because the stale
+  values sit *below* the top and every later operation still sees the right operands. It
+  surfaces only where stack depth itself is read: a self-tail-call's back edge takes its
+  operands from a stack that is now too deep, which `vm_dispatch_loop_runs_in_constant_stack`
+  catches. The behaviour is covered; the unit layer is not.
+- **The no-extra-header-phi property is structurally guaranteed, not empirically at risk.**
+  Header phi count is a function of declared input arity and back-edge count, and locals
+  live in a list phi construction never reads, so no binding bug can perturb it. Its test
+  compares against a binding-free lowering rather than hard-coding the numbers, so it
+  cannot pass vacuously, but it should not be read as evidence that the property was
+  precarious.
 
 ## Out of scope (unchanged)
 

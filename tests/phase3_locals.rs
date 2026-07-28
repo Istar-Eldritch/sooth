@@ -444,9 +444,19 @@ fn vm_with_mid_body_binding_matches_previous_output() {
     // `rot`. The rewrite must be output-preserving: same sum-1..100_000
     // bytecode program, same `5000050000` result as before the rewrite.
     let source = std::fs::read_to_string("examples/vm.sth").expect("read vm.sth");
+    let code: String = source
+        .lines()
+        .map(|l| l.split('\\').next().unwrap_or(""))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        code.matches("| b |").count(),
+        3,
+        "the Add/Sub/Mul clauses should each still bind the popped operand"
+    );
     assert!(
-        source.contains("| b |") && source.contains("| v x |"),
-        "examples/vm.sth should still carry the mid-body bindings the dogfood is named for"
+        code.contains("| v x |"),
+        "the Store clause should still bind both operands"
     );
     let binary = sooth::driver::build(Path::new("examples/vm.sth")).expect("build should succeed");
     let output = std::process::Command::new(&binary)

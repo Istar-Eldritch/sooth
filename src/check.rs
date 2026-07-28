@@ -2615,11 +2615,11 @@ mod tests {
     }
 
     #[test]
-    fn check_block_exit_restores_locals_map() {
-        // R14: `leave_block`'s diagnostic depends on `Scope::leave` returning
-        // the first (name-sorted) unconsumed linear local; that return value
-        // is what `leave_block` relies on, not the `bound` truncation `leave`
-        // performs as a side effect (see the clone-isolation check below).
+    fn scope_leave_reports_the_unconsumed_linear_local() {
+        // `leave_block`'s diagnostic depends on this return value. Extent is
+        // enforced by checking each arm on its own `scope.clone()`, not by the
+        // `bound` truncation `leave` performs as a side effect, so the extent
+        // rule is covered end to end by the goldens rather than here.
         let mut scope = Scope::default();
         scope.bind("a", Type::I64, false);
         let depth = scope.depth();
@@ -2632,21 +2632,6 @@ mod tests {
         let leaked = scope.leave(depth).expect("an unconsumed linear local");
         assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Spy));
         assert_eq!(leaked.2, MoveState::Live);
-
-        // The mechanism `if`-arm extent actually relies on: an arm is checked
-        // on its own `scope.clone()` (src/check.rs:1868-1870), so a name it
-        // binds never reaches the scope its sibling arm or the parent block
-        // sees, regardless of what `Scope::leave` does to the clone
-        // afterward. This is what makes R2's extent hold, not truncation.
-        let mut outer = Scope::default();
-        outer.bind("a", Type::I64, false);
-        let mut arm = outer.clone();
-        arm.bind("b", Type::I64, false);
-        assert!(arm.local_type("b").is_some());
-        assert!(
-            outer.local_type("b").is_none(),
-            "the outer scope must never see a name bound only in the arm's clone"
-        );
     }
 
     #[test]
