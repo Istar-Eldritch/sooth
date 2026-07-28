@@ -216,7 +216,7 @@ cannot escape their scope. Because they can't escape, no *lifetime* system is
 needed: no lifetime variables, no region annotations, nothing that binds a
 reference's validity to a named scope. Lifetimes attach to named bindings; stack
 values are anonymous and shuffled by `swap`/`rot`, so a lifetime system is the worst
-possible fit here and stays deliberately avoided. Phase 3 Slice 6 adds a narrower
+possible fit here and stays deliberately avoided. Phase 3 Slice 6 shipped a narrower
 rule instead: per-place exclusivity (at most one live mutable reference to a place),
 checked at the point each place is consumed rather than by a liveness pass. That is
 not a lifetime system — it never asks how long a reference is allowed to live, only
@@ -224,6 +224,38 @@ whether two live ones alias — and it works with none of the lifetime apparatus
 because a reference already can't escape its creating scope. Affine values plus
 non-escaping, exclusivity-checked refs give most of the safety with none of the
 lifetime apparatus.
+
+A `&!T` is consequently a third disposal category, neither `Copy` (so it cannot be
+`dup`ed) nor linear (so it carries no `drop` obligation): it owns nothing, so a
+reference-typed local simply expires, while a reference left on the stack is still a
+surplus value. Exclusivity is also keyed per place rather than per path, so two
+references into disjoint fields of one local conflict while both are live; sequencing
+them is the workaround.
+
+The rule that specifying references actually forced into the open is not about references
+at all: **naming an aggregate does not copy it**, so two names can denote one region of
+memory. That was invisible while nothing could mutate in place, and `!`/`+!` make it
+observable. So taking a mutable reference to a place another live name denotes is an error,
+and the remedy is `dup`. Two things follow, and both are deliberate. The error fires at the
+*borrow*, never at the naming: two names for a value nothing mutates read identically, so
+rejecting the naming would refuse correct programs. And no copy is ever inserted for the
+programmer, even though that would be the friendlier fix, because `dup` is *the* explicit
+copy in a language whose whole point is that copying and destruction are visible, and
+because hard real-time here is carried by the programmer's own worst-case reasoning, which
+requires instruction counts to be readable off the source. A compiler-inserted copy is the
+same category of invisible behaviour as an auto-drop.
+
+The rule is `Copy`-only by construction, which bounds how bad it ever was: every route to a
+linear aggregate is closed independently, by move tracking, by the non-consuming peek's
+refusal of a linear field, and by the standing ban on linear array elements. So the failure mode
+was a wrong *value*, never a double free or a use-after-free, and the linear spine was never
+at risk. It is still exactly the class of silent failure this language exists to turn into a
+compile error, which is why it is closed rather than documented.
+
+Because a branch merge can denote either arm's place, a value carries a *set* of regions
+rather than one. The merge unions both arms, so no aliasing rejection ever happens at a
+join: selecting one of two owned records takes no borrow and compiles, and the error waits
+for the borrow, where the diagnostic can name both ends.
 
 Pointers (`^T`) are non-null by default: there is no compiler-known optional/nullable
 pointer type, now or planned before Phase 4's generics. Nullability, when a program

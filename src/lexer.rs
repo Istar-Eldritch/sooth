@@ -370,4 +370,55 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn lex_borrow_sigil_glues_to_the_place_it_borrows() {
+        // Neither `&` nor `!` is a delimiter, so a prefix borrow and each
+        // reference-mode accessor lex as one token: the checker resolves a
+        // borrow in one step, like any other word.
+        let tokens = lex("&a &!a &!Buf>len &> &!> &^ &!^").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![
+                Token::Word("&a".into()),
+                Token::Word("&!a".into()),
+                Token::Word("&!Buf>len".into()),
+                Token::Word("&>".into()),
+                Token::Word("&!>".into()),
+                Token::Word("&^".into()),
+                Token::Word("&!^".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn lex_spaced_ampersand_is_not_a_borrow() {
+        // The sigil binds tightly: `& a` is two tokens, and `a&!` typed as one
+        // run is the single (unknown) word `a&!`, never `a` then `&!`.
+        assert_eq!(
+            words(&lex("& a").unwrap()),
+            vec![Token::Word("&".into()), Token::Word("a".into())]
+        );
+        assert_eq!(words(&lex("a&!").unwrap()), vec![Token::Word("a&!".into())]);
+    }
+
+    #[test]
+    fn lex_reference_to_array_type_splits_at_bracket() {
+        // `[` *is* a delimiter, so `&![u8 64]` splits across tokens while
+        // `&!^List` stays whole.
+        assert_eq!(
+            words(&lex("&![u8 64]").unwrap()),
+            vec![
+                Token::Word("&!".into()),
+                Token::LBracket,
+                Token::Word("u8".into()),
+                Token::Int(64),
+                Token::RBracket,
+            ]
+        );
+        assert_eq!(
+            words(&lex("&!^List").unwrap()),
+            vec![Token::Word("&!^List".into())]
+        );
+    }
 }

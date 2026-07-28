@@ -14,8 +14,8 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    ArrayDecl, Clause, EnumDecl, Line, Module, OwnedCellDecl, Span, StackEffect, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    ArrayDecl, Clause, EnumDecl, Line, Module, OwnedCellDecl, RefDecl, Span, StackEffect,
+    StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 
@@ -60,15 +60,11 @@ fn prepass_type_decls(
         if let (Token::Word(w), _) = &tokens[i] {
             if w == "type:" {
                 if let Some((Token::Word(name), span)) = tokens.get(i + 1) {
-                    if is_reserved_caret_name(name) {
-                        return Err(reserved_caret_name_error("type", name, *span));
-                    }
+                    reject_reserved_name("type", name, *span)?;
                     let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
                         let variants = scan_variant_names(tokens, i + 2);
-                        if let Some((vname, vspan)) =
-                            variants.iter().find(|(n, _)| is_reserved_caret_name(n))
-                        {
-                            return Err(reserved_caret_name_error("variant", vname, *vspan));
+                        for (vname, vspan) in &variants {
+                            reject_reserved_name("variant", vname, *vspan)?;
                         }
                         TypeDeclKind::Enum(variants)
                     } else {
@@ -86,7 +82,7 @@ fn prepass_type_decls(
 /// `^|>`, or any name beginning with `^`), used at every declaration site it
 /// can arise: a `type:` name, a `:` word name, a local binding, or the
 /// REPL's own `type:`-line path.
-pub fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
+fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
     format!(
         "error: `{name}` is reserved for the owning-cell syntax (`^`, `^>`, `^|>`) and cannot be used as a {kind} name at line {}, col {}",
         span.line, span.col
@@ -98,8 +94,49 @@ pub fn reserved_caret_name_error(kind: &str, name: &str, span: Span) -> String {
 /// reserved. Sooth has no notion of an identifier — a `type:`/`:` name or a
 /// local binding is otherwise just a bare word — so this is a plain prefix
 /// check, not a fixed set of three spellings.
-pub fn is_reserved_caret_name(name: &str) -> bool {
+fn is_reserved_caret_name(name: &str) -> bool {
     name.starts_with('^')
+}
+
+/// A located error for a name reserved by the reference syntax, the same
+/// shape `reserved_caret_name_error` applies to `^`-led names.
+fn reserved_ref_name_error(kind: &str, name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is reserved for the reference syntax (`&`, `&!`, `&>`, `&^`) and cannot be used as a {kind} name at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// Whether `name` collides with the reference syntax: any name beginning with
+/// `&` is reserved, exactly as any `^`-led name is reserved for owning cells.
+fn is_reserved_ref_name(name: &str) -> bool {
+    name.starts_with('&')
+}
+
+/// The three exact-name access builtins this slice introduces. A `:` word
+/// declaration naming one of them would silently change its meaning for every
+/// later caller, so it is rejected rather than shadowed.
+const ACCESS_WORDS: [&str; 3] = ["@", "!", "+!"];
+
+/// A located error for a `:` word declaration that would shadow one of the
+/// access builtins.
+fn shadowed_access_word_error(name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is a builtin access word (`@`, `!`, `+!`) and cannot be redefined at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// The one reserved-name gate every declaration site calls: a `^`-led name
+/// (owning cells) or a `&`-led name (references).
+pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), String> {
+    if is_reserved_caret_name(name) {
+        return Err(reserved_caret_name_error(kind, name, span));
+    }
+    if is_reserved_ref_name(name) {
+        return Err(reserved_ref_name_error(kind, name, span));
+    }
+    Ok(())
 }
 
 /// Collect variant `(name, span)` pairs from an enum `type:` body: the word
@@ -171,6 +208,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut enum_fields_by_decl = Vec::new();
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
+    let mut refs = Vec::new();
     {
         let mut parser = Parser {
             tokens,
@@ -179,6 +217,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
             enums: &enums,
             arrays: &mut arrays,
             owned_cells: &mut owned_cells,
+            refs: &mut refs,
         };
         while parser.pos < parser.tokens.len() {
             if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
@@ -206,6 +245,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         enums,
         arrays,
         owned_cells,
+        refs,
     })
 }
 
@@ -215,7 +255,8 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
 pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
-    parse_line_with_structs(tokens, &[], &[], &mut arrays, &mut owned_cells)
+    let mut refs = Vec::new();
+    parse_line_with_structs(tokens, &[], &[], &mut arrays, &mut owned_cells, &mut refs)
 }
 
 /// Parse a REPL line resolving struct and enum type names in a `:`
@@ -231,6 +272,7 @@ pub fn parse_line_with_structs(
     enums: &[EnumDecl],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
 ) -> Result<Line, String> {
     let mut parser = Parser {
         tokens,
@@ -239,6 +281,7 @@ pub fn parse_line_with_structs(
         enums,
         arrays,
         owned_cells,
+        refs,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -268,6 +311,7 @@ pub fn parse_typedef_line(
     enums: &[EnumDecl],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
 ) -> Result<Vec<(String, Type)>, String> {
     let mut parser = Parser {
         tokens,
@@ -276,6 +320,7 @@ pub fn parse_typedef_line(
         enums,
         arrays,
         owned_cells,
+        refs,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -313,6 +358,7 @@ pub fn parse_enum_typedef_line(
     enums: &[EnumDecl],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
     let mut parser = Parser {
         tokens,
@@ -321,6 +367,7 @@ pub fn parse_enum_typedef_line(
         enums,
         arrays,
         owned_cells,
+        refs,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -358,6 +405,10 @@ struct Parser<'t> {
     /// ahead of time, so it grows during type-expression resolution and
     /// persists across REPL lines exactly like `arrays`.
     owned_cells: &'t mut Vec<OwnedCellDecl>,
+    /// The interned reference registry, mirroring `owned_cells`: a `&T`/`&!T`
+    /// shape has no declared name either, so it grows as type expressions
+    /// resolve and persists across REPL lines.
+    refs: &'t mut Vec<RefDecl>,
 }
 
 impl<'t> Parser<'t> {
@@ -425,8 +476,9 @@ impl<'t> Parser<'t> {
     fn parse_worddef(&mut self) -> Result<WordDef, String> {
         self.expect_word(":")?;
         let (name, name_span) = self.expect_word_any_spanned()?;
-        if is_reserved_caret_name(&name) {
-            return Err(reserved_caret_name_error("word", &name, name_span));
+        reject_reserved_name("word", &name, name_span)?;
+        if ACCESS_WORDS.contains(&name.as_str()) {
+            return Err(shadowed_access_word_error(&name, name_span));
         }
         self.expect(Token::LParen)?;
         let effect = self.parse_effect()?;
@@ -539,10 +591,15 @@ impl<'t> Parser<'t> {
         // reserved-name error here rather than falling through to
         // `parse_type_expr`, which would try to resolve the `:` itself as an
         // unknown type name.
-        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^') || w.starts_with('&'))
+        {
             if matches!(self.tokens.get(self.pos + 1), Some((Token::Word(w), _)) if w == ":") {
                 let (name, span) = self.expect_word_any_spanned()?;
-                return Err(reserved_caret_name_error("slot", &name, span));
+                return Err(if is_reserved_caret_name(&name) {
+                    reserved_caret_name_error("slot", &name, span)
+                } else {
+                    reserved_ref_name_error("slot", &name, span)
+                });
             }
             let ty = self.parse_type_expr()?;
             return Ok(TypedSlot { name: None, ty });
@@ -568,6 +625,8 @@ impl<'t> Parser<'t> {
     fn parse_type_expr(&mut self) -> Result<Type, String> {
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             self.parse_array_type_expr()
+        } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('&')) {
+            self.parse_ref_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
             self.parse_owning_cell_type_expr()
         } else {
@@ -579,6 +638,16 @@ impl<'t> Parser<'t> {
     /// `^` is not a lexer delimiter, so `^^i64` arrives as one word.
     fn parse_owning_cell_type_expr(&mut self) -> Result<Type, String> {
         let (word, span) = self.expect_word_any_spanned()?;
+        self.split_owning_cell_word(&word, span)
+    }
+
+    /// Resolve a `^`-led type word already lifted off the stream: count the
+    /// leading `^`-run, resolve the remainder (recursing into the ongoing
+    /// token stream when the run is bare, e.g. `^[u8 4]`), then wrap once per
+    /// `^`. Split from `parse_owning_cell_type_expr` so the reference splitter
+    /// can hand it a `^`-led *remainder* of its own word (`&!^List`) rather
+    /// than a token.
+    fn split_owning_cell_word(&mut self, word: &str, span: Span) -> Result<Type, String> {
         let run_len = word.chars().take_while(|&c| c == '^').count();
         let remainder = &word[run_len..];
         let mut inner = if remainder.is_empty() {
@@ -607,6 +676,37 @@ impl<'t> Parser<'t> {
             inner = crate::ast::intern_owned_cell_type(self.owned_cells, inner);
         }
         Ok(inner)
+    }
+
+    /// A `&`-led type expression, in the three shapes the lexer can hand it
+    /// over. Neither `&` nor `!` nor `^` is a delimiter but `[` is, so:
+    /// `&!Buf` arrives as one word and splits within itself; `&!^List` also
+    /// arrives as one word and hands its `^`-led remainder to the owning-cell
+    /// splitter; `&![u8 64]` splits *across* tokens and recurses into the
+    /// ongoing stream, exactly as a bare `^`-run does.
+    fn parse_ref_type_expr(&mut self) -> Result<Type, String> {
+        let (word, span) = self.expect_word_any_spanned()?;
+        let sigil_len = if word.starts_with("&!") { 2 } else { 1 };
+        let mutable = sigil_len == 2;
+        let remainder = &word[sigil_len..];
+        let remainder_span = Span {
+            line: span.line,
+            col: span.col + sigil_len as u32,
+        };
+        let referent = if remainder.is_empty() {
+            if matches!(self.peek(), Some((Token::Word(w), _)) if w == "--") {
+                return Err(format!(
+                    "error: reference type `{word}` has no referent type at line {}, col {} (write `{word}T` for some type T)",
+                    span.line, span.col
+                ));
+            }
+            self.parse_type_expr()?
+        } else if remainder.starts_with('^') {
+            self.split_owning_cell_word(remainder, remainder_span)?
+        } else {
+            self.resolve_type(remainder, remainder_span)?
+        };
+        Ok(crate::ast::intern_ref_type(self.refs, referent, mutable))
     }
 
     /// The array-type-expression production `[ elem count ]` (D2, D3, M1):
@@ -696,6 +796,9 @@ impl<'t> Parser<'t> {
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
             return self.parse_owning_cell_type_expr();
+        }
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('&')) {
+            return self.parse_ref_type_expr();
         }
         let (ty_name, ty_span) = self.expect_field_type_token()?;
         self.resolve_type(&ty_name, ty_span)
@@ -853,9 +956,7 @@ impl<'t> Parser<'t> {
                     break;
                 }
                 Some((Token::Word(w), span)) => {
-                    if is_reserved_caret_name(w) {
-                        return Err(reserved_caret_name_error("local", w, *span));
-                    }
+                    reject_reserved_name("local", w, *span)?;
                     names.push(w.clone());
                     self.pos += 1;
                 }
@@ -1866,6 +1967,74 @@ mod tests {
         match w.effect.inputs[0].ty {
             Type::Array(_, name) => assert_eq!(name, "[i64 4]"),
             other => panic!("expected Type::Array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_reference_type_splits_within_one_word() {
+        // `&` and `!` are not delimiters, so `&!Buf` arrives as one `Word`
+        // token and splits within itself.
+        let module = parse_src("type: Buf n usize ;\n: w ( &!Buf &Buf -- ) drop drop ;").unwrap();
+        let w = &module.words[0];
+        assert_eq!(w.effect.inputs[0].ty.name(), "&!Buf");
+        assert_eq!(w.effect.inputs[1].ty.name(), "&Buf");
+        assert_ne!(w.effect.inputs[0].ty, w.effect.inputs[1].ty);
+    }
+
+    #[test]
+    fn parse_reference_to_owning_cell_type_hands_remainder_to_caret_splitter() {
+        // The three-case splitter's `^`-led-remainder case: `&!^List` is one
+        // token whose remainder `^List` is the *existing* caret splitter's
+        // input, not `resolve_type`'s. Reachable in the dogfood only via
+        // reference-mode clause inference, so it gets a unit test of its own.
+        let module =
+            parse_src("type: List | Nil | Cons v i64 next ^List ;\n: w ( &!^List -- ) drop ;")
+                .unwrap();
+        assert_eq!(module.words[0].effect.inputs[0].ty.name(), "&!^List");
+    }
+
+    #[test]
+    fn parse_reference_to_array_type_splits_across_tokens() {
+        // `[` *is* a delimiter, so this case recurses into the ongoing token
+        // stream instead of splitting within one word.
+        let module = parse_src(": w ( &![u8 64] -- ) drop ;").unwrap();
+        assert_eq!(module.words[0].effect.inputs[0].ty.name(), "&![u8 64]");
+    }
+
+    #[test]
+    fn parse_reference_type_with_no_referent_is_error() {
+        let err = parse_src(": w ( &! -- ) ;").unwrap_err();
+        assert!(
+            err.contains("has no referent type"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn reserved_reference_name_is_error_at_every_declaration_site() {
+        for src in [
+            ": &grab ( -- ) ;",
+            "type: &Thing x i64 ;",
+            "type: Shape | &Odd ;",
+            ": w ( i64 -- ) | &a | ;",
+            ": w ( &x : i64 -- ) drop ;",
+        ] {
+            let err = parse_src(src).unwrap_err();
+            assert!(
+                err.contains("reserved for the reference syntax"),
+                "unexpected message for `{src}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn redefining_an_access_word_is_error() {
+        for name in ["@", "!", "+!"] {
+            let err = parse_src(&format!(": {name} ( i64 -- ) . ;")).unwrap_err();
+            assert!(
+                err.contains("is a builtin access word"),
+                "unexpected message for `{name}`: {err}"
+            );
         }
     }
 }

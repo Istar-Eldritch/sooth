@@ -1,0 +1,64 @@
+type: Buf  data ^[u8 64]  len usize ;
+
+: new ( -- Buf )
+  0 >u8 64 fill ^ 0 >usize Buf ;
+
+: push-byte ( &!Buf u8 -- )
+  | b x |
+  b &!Buf>len @ | i |
+  b &!Buf>data &!^ | arr |
+  arr i &!> x !
+  b &!Buf>len 1 +! ;
+
+: byte-at ( &Buf usize -- u8 )
+  | b i |
+  b &Buf>data &^ i &> @ ;
+
+: copy-byte ( &!Buf &Buf usize -- )
+  | dst src i |
+  dst src i byte-at push-byte ;
+
+: main ( -- )
+  new new
+  | a b |
+  &!a 72 >u8 push-byte
+  &!b 90 >u8 push-byte
+  &!a &b 0 copy-byte
+  &a 0 byte-at .
+  &a 1 byte-at .
+  &a &Buf>len @ .
+  a drop
+  b drop
+
+  10 Nil build
+  | l |
+  &!l walk
+  l pop Popped>
+  . drop ;
+
+type: List | Nil | Cons v i64 next ^List ;
+type: Popped rest List val i64 ;
+
+: push-front ( List i64 -- List )
+  | rest v |
+  v rest ^ Cons ;
+
+: build ( i64 List -- List )
+  | n acc |
+  n 0 = if
+    acc
+  else
+    n 1 - acc n push-front build
+  end ;
+
+: pop ( List -- Popped )
+  | Nil   Nil 0 Popped
+  | Cons  | v next | next ^> v Popped
+  ;
+
+: walk ( &!List -- )
+  | Nil
+  | Cons | v next |
+      v 1 +!
+      next &!^ walk
+  ;

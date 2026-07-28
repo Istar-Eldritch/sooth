@@ -113,7 +113,20 @@ precomputed borrow, and locals at the REPL line with the session-stack depth as 
 binding's frame floor. No new IR instruction, and no header phi added for a mid-body name
 in a self-tail-recursive loop. `examples/vm.sth`'s `run` word dogfoods it, naming a
 `vm-pop` result mid-clause instead of shuffling it with `swap`/`over`/`rot`.
-**Next action: Phase 3 Slice 6** (second-class references + places + escape checking).
+**Phase 3 Slice 6 (second-class references) is complete**: `&T`/`&!T`, prefix `&a`/`&!a`
+borrows of a local, the projection family (`&T>fi`/`&!T>fi`/`&>`/`&!>`/`&^`/`&!^`), and
+`@`/`!`/`+!` through a reference, with a reference staying `IrType::Ptr` to the backend (the
+QBE backend needed no non-test change). Escape is closed structurally in six positions plus
+the REPL line; exclusivity is per place; a back-edge may carry a reference parameter but not
+one derived from a current-scope local. Two things fell out of specifying it. Because naming
+an aggregate does not copy it, **two names for one region plus a mutable borrow is an error**,
+with `dup` as the remedy: no copy is ever inserted implicitly, since worst-case-timing
+reasoning needs instruction counts readable off the source. And because an `if`/`else` merge
+can denote either arm's place, a value carries a *set* of regions rather than one, so the
+merge unions the arms and **no aliasing rejection happens at a join**: selecting one of two
+owned records compiles, and the error lands at the borrow where it can name both ends.
+`examples/refs.sth` dogfoods it.
+**Next action: Phase 3 Slice 7** (opt-in RC).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -473,19 +486,50 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    written before; `examples/vm.sth`'s `run` word now names a `vm-pop` result mid-body in
    its `Add`/`Sub`/`Mul`/`Store` clauses instead of shuffling it into position with
    `swap`/`over`/`rot`.
-6. **Second-class references + places + escape checking.** Pass a borrow (`&`/`&!`), mutate
-   in place, no move; the escape checker keeps refs from being stored or escaping scope. The
-   reference *type* is the convention, not a Hylo-style `let`/`inout`/`sink`/`set` (the
-   interface here is a stack effect, not named parameters), so no existing signature changes
-   meaning. Comes after heap because "hand the value back" already works by threading it
-   through the stack. Dogfood: in-place mutation of an owned buffer through a `&!` reference.
-   **Design question this slice's brief must answer:** do `inout` projections into nested
-   fields subsume a reified take/fill pair (`S/fi` yielding a residual `∂S/∂fi`, refilled
-   exactly once)? A second-class projection is the same residual, made implicit and
-   lexically bounded, and it also covers whole-value borrows, so the expectation is yes
-   for every statically known path, leaving reified residuals worth having only where the
-   focus must escape (slice 3's zipper, as a stdlib type). Answer it here rather than
-   letting nested-path ergonomics get solved twice.
+6. **Second-class references + places + escape checking.** ✅ done. `&`/`&!` prefix borrow
+   operators on an aggregate/cell local, a per-place aliasing rule (not a lifetime-tracking
+   borrow checker: exclusivity plus escape prevention, no lifetime apparatus), and a
+   projection/accessor family (`&T>fi`/`&!T>fi`/`&>`/`&!>`/`&^`/`&!^`) that keeps a reference
+   opaque (`IrType::Ptr`, never the referent's own shape) all the way to the backend.
+   `@`/`!`/`+!` read/write/increment through a reference, restricted to a `Copy` referent
+   (covering a Copy aggregate via `Alloc`+`Blit` as well as a Copy scalar). Escape is closed
+   structurally: a reference cannot be stored in a struct field, enum payload, array
+   element, or cell payload, cannot appear on an effect's output side, and cannot survive a
+   REPL line. A self-tail-call back-edge may carry a reference parameter (or one derived
+   from it by projection) but not a reference to a current-scope local, and a branch join's
+   borrow-suspension state must agree across both arms.
+   **The aliasing rule, which specifying this slice forced into the open**: naming an
+   aggregate does not copy it, so two names can denote one region, and taking a `&!` of a
+   place another live name denotes is an error whose remedy is `dup`. It fires at the
+   *borrow*, never at the naming or at a join, because naming twice is harmless if nothing
+   mutates through it, and because forcing a `dup` on a non-hazard would insert exactly the
+   copy this language refuses to insert implicitly (instruction counts stay readable off the
+   source for worst-case-timing work). The routes are naming, a non-consuming peek (`S|>fi`,
+   `get`), `over` (which reuses its operand rather than deep-copying like `dup`), and an
+   `if`/`else` merge. A merge is why a value carries a *set* of regions interned behind an
+   `AliasSetId` rather than a single region: the merge unions both arms, so a projection out
+   of it projects the field out of every member and the borrow check tests pairwise overlap.
+   The rule is Copy-only by construction: every route to a linear aggregate is already closed
+   by move tracking, the peek's linear-field rejection, and `fill`'s `Copy` gate, so the
+   failure mode was a wrong *value*, never a double free.
+   Reference-mode clause elimination
+   (a word whose declared top input is `&Enum`/`&!Enum`) binds each clause's payload as a
+   reference inheriting the scrutinee's mutability, exempt from the disjoint-borrow
+   limitation below since a variant's fields are statically known to be disjoint. Dogfood:
+   `examples/refs.sth` — in-place mutation of an owned buffer through a `&!` reference with
+   no rebuild (no `alloc`/`blit` in the emitted body), and `walk ( &!List -- )` mutating
+   every node of a list in constant stack via reference-mode dispatch.
+   **Known limitation, stated rather than modeled**: path disjointness. Two references
+   derived from the same local conflict even when they project into disjoint fields, if
+   both are simultaneously live; the workaround is sequencing (fully consume the first
+   before taking the second), which mid-body binding (slice 5) makes free of `swap`.
+   **Design question this slice's brief asked, answered (R15):** `inout` projections into
+   nested fields **do** subsume a reified take/fill pair (`S/fi` yielding a residual
+   `∂S/∂fi`, refilled exactly once) for every statically known path — a projection is the
+   same residual made implicit and lexically bounded, and it also covers whole-value
+   borrows. No residual form was added. Reified residuals remain worth having only where
+   the focus must escape, which is a later slice's zipper; escape prevention forbids storing
+   a reference, so the zipper waits for that slice's RC rather than for a residual type.
 7. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
    slice; could slip toward Phase 6 if it wants a stdlib home.
 8. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The

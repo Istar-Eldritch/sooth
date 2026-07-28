@@ -29,6 +29,11 @@ pub struct Module {
     /// payload-type shape, indexed by `OwnedCellId` and deduped structurally.
     /// Unlike `arrays` there is no count: a cell holds exactly one value.
     pub owned_cells: Vec<OwnedCellDecl>,
+    /// The per-program interned reference registry: one entry per distinct
+    /// `(referent, mutable)` shape, indexed by `RefId` and deduped
+    /// structurally. Mirrors `owned_cells`, with mutability as a second key
+    /// component so `&T` and `&!T` are separate entries.
+    pub refs: Vec<RefDecl>,
 }
 
 impl Module {
@@ -199,6 +204,54 @@ pub fn intern_owned_cell_type(cells: &mut Vec<OwnedCellDecl>, payload: Type) -> 
     Type::OwnedCell(id, name_static)
 }
 
+/// A registered reference type: its referent type, whether it is mutable
+/// (`&!T`) or shared (`&T`), and the leaked `&'static str` spelling every
+/// `Type::Ref` naming it carries directly. Deduped structurally by
+/// `(referent, mutable)`; a reference never owns, so unlike `OwnedCellDecl`
+/// there is nothing to free.
+#[derive(Debug)]
+pub struct RefDecl {
+    pub referent: Type,
+    pub mutable: bool,
+    pub name_static: &'static str,
+}
+
+/// A small `Copy` index into `Module::refs`, mirroring `OwnedCellId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RefId(pub(crate) usize);
+
+impl RefId {
+    /// Mint a `RefId` for a registry position; crate-internal so an id is
+    /// always tied to a real `refs` registry entry.
+    pub(crate) fn from_index(idx: usize) -> RefId {
+        RefId(idx)
+    }
+
+    pub fn index(&self) -> usize {
+        self.0
+    }
+}
+
+/// Intern a `(referent, mutable)` reference shape into `refs`, deduping
+/// structurally. Mirrors `intern_owned_cell_type`.
+pub fn intern_ref_type(refs: &mut Vec<RefDecl>, referent: Type, mutable: bool) -> Type {
+    if let Some(idx) = refs
+        .iter()
+        .position(|d| d.referent == referent && d.mutable == mutable)
+    {
+        return Type::Ref(RefId::from_index(idx), mutable, refs[idx].name_static);
+    }
+    let name = format!("&{}{}", if mutable { "!" } else { "" }, referent.name());
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let id = RefId::from_index(refs.len());
+    refs.push(RefDecl {
+        referent,
+        mutable,
+        name_static,
+    });
+    Type::Ref(id, mutable, name_static)
+}
+
 /// A small `Copy` index into `Module::arrays`, mirroring `StructId`/`EnumId`.
 /// Two `Type::Array` values are equal iff they name the same interned shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -313,6 +366,14 @@ pub enum Type {
     /// shape. Mirrors `Type::Array`. Always linear regardless of payload;
     /// see `is_copy`.
     OwnedCell(OwnedCellId, &'static str),
+    /// A borrowing reference, `&T` (shared) or `&!T` (mutable): a `RefId` into
+    /// the interned `(referent, mutable)` registry, the mutability, and the
+    /// leaked `&T`/`&!T` spelling. Mutability is carried in the variant as
+    /// well as in the registry entry because it is the *classification* bit
+    /// (`is_copy`, linearity, store-vs-fetch), asked at sites that hold no
+    /// registry; the referent, asked only where a projection or access is
+    /// being typed, stays behind the id so `Type` remains `Copy`.
+    Ref(RefId, bool, &'static str),
     /// The target-width unsigned integer (D7): distinct from every fixed-width
     /// `uN` in `INT_TYPES`, its size/align comes from the target word-width
     /// parameter (IR-side, Phase 3), never a hardcoded width here. The
@@ -440,6 +501,21 @@ impl Type {
         matches!(self, Type::Bool)
     }
 
+    /// Whether this type is a reference (`&T` or `&!T`).
+    pub fn is_ref(&self) -> bool {
+        matches!(self, Type::Ref(..))
+    }
+
+    /// Whether a value of this type lives in memory rather than in an SSA
+    /// temporary: the four shapes that have an address, and so the four that
+    /// can be borrowed or denoted by a second name.
+    pub fn is_aggregate(&self) -> bool {
+        matches!(
+            self,
+            Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
+        )
+    }
+
     pub fn name(&self) -> &'static str {
         match self {
             Type::Bool => "bool",
@@ -457,6 +533,7 @@ impl Type {
             Type::Enum(_, name) => name,
             Type::Array(_, name) => name,
             Type::OwnedCell(_, name) => name,
+            Type::Ref(_, _, name) => name,
             Type::Usize => "usize",
             Type::Isize => "isize",
             Type::Spy => SPY_NAME,
@@ -645,6 +722,7 @@ mod tests {
             enums: Vec::new(),
             arrays: Vec::new(),
             owned_cells: Vec::new(),
+            refs: Vec::new(),
         }
     }
 
@@ -700,6 +778,7 @@ mod tests {
             }],
             arrays: Vec::new(),
             owned_cells: Vec::new(),
+            refs: Vec::new(),
         }
     }
 
@@ -752,6 +831,7 @@ mod tests {
             }],
             arrays: Vec::new(),
             owned_cells: Vec::new(),
+            refs: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),

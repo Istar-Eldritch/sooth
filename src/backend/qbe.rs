@@ -1041,7 +1041,7 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, Arrays, Cells, Enums, IrModule, Registries, Structs};
+    use crate::ir::{lower, lower_line, Arrays, Cells, Enums, IrModule, Refs, Registries, Structs};
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
@@ -1075,6 +1075,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         emit(&IrModule {
@@ -1271,6 +1272,7 @@ mod tests {
                 enums: &Enums::default(),
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
+                refs: &Refs::default(),
             },
         );
         let il = emit(&IrModule {
@@ -2220,6 +2222,88 @@ mod tests {
         assert!(
             il.lines().any(|l| l.trim().ends_with("=l copy %v0")),
             "expected an l-width relabel of the tag: {il}"
+        );
+    }
+
+    /// The buffer dogfood plus a rebuild-style control word in the same
+    /// module, so the two structural criteria read the same emitted IL.
+    const MUTATION_PROBE: &str = "\
+type: Buf  data ^[u8 64]  len usize ;
+type: Counter n i64 ;
+
+: new ( -- Buf )
+  0 >u8 64 fill ^ 0 >usize Buf ;
+
+: push-byte ( &!Buf u8 -- )
+  | b x |
+  b &!Buf>len @ | i |
+  b &!Buf>data &!^ | arr |
+  arr i &!> x !
+  b &!Buf>len 1 +! ;
+
+: bump-rebuild ( Counter -- Counter )
+  | c |
+  c c Counter>n 1 + Counter<n ;
+
+: main ( -- )
+  new | a |
+  &!a 7 >u8 push-byte
+  a drop
+  0 Counter bump-rebuild Counter> . ;
+";
+
+    /// Instruction lines (tab-indented) in an emitted function body: the
+    /// labels, the header and the closing brace are not instructions.
+    fn instr_lines(body: &str) -> usize {
+        body.lines().filter(|l| l.starts_with('\t')).count()
+    }
+
+    #[test]
+    fn mutation_through_reference_emits_no_rebuild() {
+        // Structural because a runtime golden cannot
+        // distinguish "mutated in place" from "rebuilt correctly", and
+        // eliminating the rebuild is the point of the slice. Pinned to the
+        // mangled symbol: `qbe_name` rewrites `-` to `_`, so the literal
+        // `push-byte` could never match.
+        let il = emit_src(MUTATION_PROBE);
+        let body = func_body(&il, "export function $push_byte(");
+        assert!(
+            !body.contains("alloc"),
+            "mutation through a reference must not allocate a rebuilt aggregate: {body}"
+        );
+        assert!(
+            !body.contains("blit"),
+            "mutation through a reference must not copy a rebuilt aggregate: {body}"
+        );
+        assert!(
+            body.contains("storeb ") && body.contains("storel "),
+            "expected the address-arithmetic-plus-store shape: {body}"
+        );
+        // The ceiling is set from this body's own measured shape: the two
+        // projections and the element store, plus `bounds_check`'s guard
+        // (a `Cmp`, a `Jnz`, a trap block and its `sooth_oob_trap` call) that
+        // a *computed* index pays for, plus the fetch-add-store of `+!`.
+        assert!(
+            instr_lines(body) <= 24,
+            "in-place mutation should stay near the address-arithmetic shape, found {} instructions: {body}",
+            instr_lines(body)
+        );
+    }
+
+    #[test]
+    fn rebuild_style_equivalent_still_emits_alloc_and_blit() {
+        // The control: the functional setter in the same module keeps the
+        // whole-aggregate rebuild, so the no-rebuild test's assertion is measuring
+        // `push-byte` rather than an emitter that stopped emitting `alloc`.
+        let il = emit_src(MUTATION_PROBE);
+        let body = func_body(&il, "export function :Counter $bump_rebuild(");
+        assert!(
+            body.contains("alloc"),
+            "a functional setter still allocates its new shell: {body}"
+        );
+        assert!(
+            body.contains("blit"),
+            "a functional setter still copies the old shell: {body}"
         );
     }
 }
