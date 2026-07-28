@@ -257,9 +257,17 @@ struct RegionId(u32);
 /// both ends happen to be bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Alias {
-    region: RegionId,
+    set: AliasSetId,
     span: Span,
 }
+
+/// The regions one value may denote, interned in `Provenance` so a `Slot` can
+/// carry them by id and stay `Copy`. A value denotes more than one region only
+/// where control flow merged two arms that named different places: the merge
+/// cannot know which arm ran, so it keeps both and the borrow check tests every
+/// member. Same trick as `DerivId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AliasSetId(u32);
 
 /// One outstanding derivation from a place, interned in `Provenance` so a
 /// `Slot` can carry it by id and stay `Copy`.
@@ -319,6 +327,8 @@ struct Provenance {
     /// The interned region of one non-consuming projection out of a parent
     /// region, so two peeks of the same field yield one id.
     fields: HashMap<(u32, String), RegionId>,
+    /// The interned region sets, indexed by `AliasSetId`.
+    alias_sets: Vec<Vec<RegionId>>,
     /// Each field region's immediate parent: a name for a struct's
     /// field is still a name for part of the whole struct, so the alias check
     /// has to test region *overlap* along this chain, not bare equality.
@@ -330,6 +340,51 @@ impl Provenance {
         let id = RegionId(self.regions);
         self.regions += 1;
         id
+    }
+
+    fn intern_alias_set(&mut self, mut regions: Vec<RegionId>) -> AliasSetId {
+        regions.sort_unstable_by_key(|r| r.0);
+        regions.dedup();
+        if let Some(i) = self.alias_sets.iter().position(|s| *s == regions) {
+            return AliasSetId(i as u32);
+        }
+        self.alias_sets.push(regions);
+        AliasSetId((self.alias_sets.len() - 1) as u32)
+    }
+
+    fn alias_set_of(&mut self, region: RegionId) -> AliasSetId {
+        self.intern_alias_set(vec![region])
+    }
+
+    fn alias_regions(&self, id: AliasSetId) -> &[RegionId] {
+        &self.alias_sets[id.0 as usize]
+    }
+
+    /// Both arms' regions, since either runtime path may have produced the
+    /// merged value.
+    fn alias_union(&mut self, a: AliasSetId, b: AliasSetId) -> AliasSetId {
+        let mut regions = self.alias_regions(a).to_vec();
+        regions.extend_from_slice(self.alias_regions(b));
+        self.intern_alias_set(regions)
+    }
+
+    /// Whether any region of one value overlaps any region of the other.
+    fn alias_sets_overlap(&self, a: AliasSetId, b: AliasSetId) -> bool {
+        self.alias_regions(a).iter().any(|x| {
+            self.alias_regions(b)
+                .iter()
+                .any(|y| self.regions_overlap(*x, *y))
+        })
+    }
+
+    /// The same field projected out of every region the parent may denote.
+    fn field_alias_set(&mut self, parent: AliasSetId, segment: &str) -> AliasSetId {
+        let parents = self.alias_regions(parent).to_vec();
+        let mut fields = Vec::with_capacity(parents.len());
+        for region in parents {
+            fields.push(self.field_region(region, segment));
+        }
+        self.intern_alias_set(fields)
     }
 
     /// The region an interior value of `parent` denotes, interned per path
@@ -528,7 +583,7 @@ struct Scope {
 struct Binding {
     name: String,
     ty: Type,
-    region: Option<RegionId>,
+    aliases: Option<AliasSetId>,
     deriv: Option<DerivId>,
 }
 
@@ -553,15 +608,18 @@ impl Scope {
         if linear {
             self.moves.states.insert(name.to_string(), MoveState::Live);
         }
-        let region = match (slot.alias, slot.ty.is_aggregate()) {
-            (Some(alias), _) => Some(alias.region),
-            (None, true) => Some(prov.fresh_region()),
+        let aliases = match (slot.alias, slot.ty.is_aggregate()) {
+            (Some(alias), _) => Some(alias.set),
+            (None, true) => {
+                let region = prov.fresh_region();
+                Some(prov.alias_set_of(region))
+            }
             (None, false) => None,
         };
         self.bound.push(Binding {
             name: name.to_string(),
             ty: slot.ty,
-            region,
+            aliases,
             deriv: prov.bind(slot.deriv),
         });
     }
@@ -647,15 +705,17 @@ fn peek_region(
     if !interior.is_aggregate() {
         return None;
     }
-    let base = parent
-        .alias
-        .get_or_insert_with(|| Alias {
-            region: prov.fresh_region(),
-            span,
-        })
-        .region;
+    let base = match parent.alias {
+        Some(alias) => alias.set,
+        None => {
+            let region = prov.fresh_region();
+            let set = prov.alias_set_of(region);
+            parent.alias = Some(Alias { set, span });
+            set
+        }
+    };
     Some(Alias {
-        region: prov.field_region(base, segment),
+        set: prov.field_alias_set(base, segment),
         span,
     })
 }
@@ -685,14 +745,14 @@ fn aliasing_origin<'a>(
     prov: &Provenance,
     place: &str,
 ) -> Option<AliasOrigin<'a>> {
-    let region = scope.local(place)?.region?;
-    let overlaps = |r: RegionId| prov.regions_overlap(region, r);
+    let set = scope.local(place)?.aliases?;
+    let overlaps = |other: AliasSetId| prov.alias_sets_overlap(set, other);
     let mut names: Vec<&str> = scope
         .bound
         .iter()
         .filter(|b| {
             b.name != place
-                && b.region.is_some_and(&overlaps)
+                && b.aliases.is_some_and(&overlaps)
                 && scope.moves.moved_site(&b.name).is_none()
         })
         .map(|b| b.name.as_str())
@@ -704,7 +764,7 @@ fn aliasing_origin<'a>(
     stack
         .iter()
         .filter_map(|slot| slot.alias)
-        .find(|alias| overlaps(alias.region))
+        .find(|alias| overlaps(alias.set))
         .map(|alias| AliasOrigin::Stack(alias.span))
 }
 
@@ -2388,32 +2448,6 @@ fn borrow_join_disagreement_error(
     }
 }
 
-/// The aliasing counterpart of `borrow_join_disagreement_error`.
-fn alias_join_disagreement_error(
-    ctx: &Ctx,
-    span: Span,
-    t_then: Option<Alias>,
-    t_else: Option<Alias>,
-) -> String {
-    let describe = |a: Option<Alias>| match a {
-        None => "an independent value".to_string(),
-        Some(a) => format!(
-            "a value sharing storage with the place named at line {}, col {}",
-            a.span.line, a.span.col
-        ),
-    };
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: aliasing disagrees at the `if`/`else` join in `{}` (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}: both arms must agree, since borrowing a name bound to the merge would otherwise mutate storage a live name still denotes on one path\n  `dup` the aliased arm for an independent copy\n  note: declared {}",
-            name, span.line, describe(t_then), describe(t_else), effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: aliasing disagrees at the `if`/`else` join (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}\n  `dup` the aliased arm for an independent copy",
-            span.line, describe(t_then), describe(t_else),
-        ),
-    }
-}
-
 /// Walk a term sequence. `scope` is the names in scope and the move-state of
 /// the linear ones, mutated in place as terms bind and mention names; `tail`
 /// marks the sequence as
@@ -2514,7 +2548,7 @@ fn check_term(
         }
         TermKind::Call(name) => {
             if let Some(binding) = scope.local(name) {
-                let (ty, region, held) = (binding.ty, binding.region, binding.deriv);
+                let (ty, aliases, held) = (binding.ty, binding.aliases, binding.deriv);
                 match ref_parts(ty, refs) {
                     // Naming a reference local is a reborrow, not a move.
                     // A mutable one suspends its place: a second reborrow while
@@ -2559,7 +2593,7 @@ fn check_term(
                         // is just as silently observable as if the naming had
                         // come first. Only an aggregate has a region, and so
                         // only an aggregate can be a second name for one.
-                        if region.is_some() {
+                        if aliases.is_some() {
                             if let Some(id) = live_mutable_borrow_of(&stack, scope, prov, name) {
                                 return Err(naming_aliases_borrowed_place_error(
                                     ctx,
@@ -2573,7 +2607,7 @@ fn check_term(
                         // pushed value denotes the local's own region, located
                         // here so a later borrow can point at this naming.
                         stack.push(Slot {
-                            alias: region.map(|region| Alias { region, span }),
+                            alias: aliases.map(|set| Alias { set, span }),
                             ..Slot::computed(ty)
                         });
                     }
@@ -2744,25 +2778,17 @@ fn check_term(
                 // path is computed after the merge, so it can't silently fill
                 // a `usize`/`isize` position without an explicit conversion
                 // (D8/X10).
-                // Never collapse a one-sided alias to "not aliased": the merged
-                // value really does share storage on that arm's path, so keeping
-                // the alias is what makes a later borrow of a name bound to the
-                // merge report the hazard instead of mutating invisibly. Two
-                // arms aliasing *different* regions cannot both be carried in
-                // one slot, so that shape is rejected here rather than losing
-                // one of them.
+                // Keep every region either arm could have left, since the merge
+                // cannot know which one ran: dropping one would let a later
+                // borrow of a name bound to the merge mutate storage a live name
+                // still denotes on the path that was dropped.
                 let alias = match (t_then.alias, t_else.alias) {
                     (None, None) => None,
                     (Some(a), None) | (None, Some(a)) => Some(a),
-                    (Some(a), Some(b)) if a.region == b.region => Some(a),
-                    _ => {
-                        return Err(alias_join_disagreement_error(
-                            ctx,
-                            span,
-                            t_then.alias,
-                            t_else.alias,
-                        ));
-                    }
+                    (Some(a), Some(b)) => Some(Alias {
+                        set: prov.alias_union(a.set, b.set),
+                        span: a.span,
+                    }),
                 };
                 merged.push(Slot {
                     ty: t_then.ty,

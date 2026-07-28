@@ -924,9 +924,9 @@ fn mutable_borrow_aliased_by_the_second_if_arm_only_is_error() {
 }
 
 #[test]
-fn if_join_of_two_differently_aliased_arms_is_error() {
-    // One slot cannot carry two regions, so this shape is rejected at the join
-    // itself rather than silently keeping one arm's alias and losing the other.
+fn mutable_borrow_of_a_merge_of_two_aliased_arms_is_error() {
+    // The merge keeps both arms' regions, so the borrow is caught even though
+    // only one arm's place can be the one the merged value actually denotes.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
@@ -934,11 +934,44 @@ fn if_join_of_two_differently_aliased_arms_is_error() {
          &!p &!V>x 99 !\n  v V> . .\n  w V> . .\n  p V> . . ;\n",
     );
     assert!(
-        err.contains("aliasing disagrees at the `if`/`else` join")
-            && err.contains("line 5")
-            && err.contains("`dup` the aliased arm"),
-        "expected the located join disagreement pointing at `dup`: {err}"
+        err.contains("cannot borrow `p` mutably")
+            && err.contains("line 6, col 3")
+            && err.contains("use `dup`"),
+        "expected the borrow-site rejection naming both ends: {err}"
     );
+}
+
+#[test]
+fn mutable_borrow_of_a_place_a_merge_may_denote_is_error() {
+    // The symmetric direction: borrowing the place rather than the merge. The
+    // merge is only aliased with `w` on the path that was not taken, which is
+    // exactly why the region cannot be dropped at the join.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  3 4 V | w |\n  \
+         0 0 > if v else w end | p |\n  \
+         &!w &!V>x 99 !\n  p V> drop .\n  w V> drop . ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `w` mutably") && err.contains("it is aliased by `p`"),
+        "a merge keeps every region either arm could have left: {err}"
+    );
+}
+
+#[test]
+fn if_join_of_two_named_aggregates_without_a_borrow_is_accepted() {
+    // Selecting one of two owned records takes no borrow, so the aliasing rule
+    // has nothing to say about it. Rejecting this at the join was tried and is
+    // too blunt: it forces a copy on a program that never mutates.
+    let (stdout, code) = run_src(
+        "join-no-borrow",
+        "type: V x i64 y i64 ;\n\
+         : bigger ( V V -- V ) | a b |\n  \
+         a V> drop b V> drop > if a else b end ;\n\
+         : main ( -- ) 1 2 V 5 6 V bigger V> . . ;\n",
+    );
+    assert_eq!(stdout, "6\n5\n", "the larger record's fields, unchanged");
+    assert_eq!(code, 0);
 }
 
 #[test]
