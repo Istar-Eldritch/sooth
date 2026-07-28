@@ -988,16 +988,19 @@ fn mutable_borrow_of_place_aliased_on_the_stack_is_error() {
 
 #[test]
 fn mutable_borrow_of_struct_aliased_by_peek_on_the_stack_is_error() {
-    // The peek route with neither end bound: `S|>a` is non-consuming, so both
-    // the struct and its interior are left on the stack, overlapping.
+    // The peek route with neither end bound. The parent copy `s` leaves behind
+    // is dropped, so the only thing left overlapping is the peeked interior
+    // itself and the diagnostic has to locate the peek rather than the naming.
     let err = check_error(
         "type: V x i64 y i64 ;\n\
          type: S a V b i64 ;\n\
-         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a\n  \
+         : main ( -- )\n  1 2 V 3 S | s |\n  s S|>a swap drop\n  \
          &!s &!S>a &!V>x 40 +!\n  V> . . ;\n",
     );
     assert!(
-        err.contains("cannot borrow `s` mutably") && err.contains("a value on the stack"),
+        err.contains("cannot borrow `s` mutably")
+            && err.contains("a value on the stack")
+            && err.contains("col 5"),
         "a peeked interior left on the stack still aliases its parent: {err}"
     );
 }
@@ -1131,14 +1134,18 @@ fn borrowed_local_carried_across_back_edge_is_error() {
     // which fires here just as it would anywhere else — the hazard a
     // self-tail-recursive loop would otherwise let through is exactly the
     // one that rule already closes.
+    // The borrow is bound so both arms leave the same depth: the program is
+    // well-formed apart from the borrow, so the rejection cannot be coming
+    // from a stack-effect mismatch instead.
     let err = check_error(
         "type: V x i64 ;\n\
          : spin ( V i64 -- V )\n  | acc n |\n  n 0 = if\n    acc\n  else\n    \
-         &!acc\n    acc n 1 - spin\n  end ;\n\
+         &!acc | r |\n    acc n 1 - spin\n  end ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
-        err.contains("cannot name `acc`") && err.contains("a mutable borrow of it is still live"),
+        err.contains("cannot name `acc`")
+            && err.contains("a mutable borrow of it is still live (line 7, col 5)"),
         "unexpected message: {err}"
     );
 }
@@ -1247,7 +1254,7 @@ fn reference_mode_clause_payload_bindings_are_simultaneously_live() {
 }
 
 #[test]
-fn reference_mode_clause_consuming_payload_is_error() {
+fn reference_mode_clause_fetching_linear_payload_is_error() {
     // No clause may consume a payload binding: fetching `next`'s referent
     // (`^List`, always linear) is the same R4 rejection a fetched/stored
     // linear `T` gets anywhere else, not a special reference-mode rule.
