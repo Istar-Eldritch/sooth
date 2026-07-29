@@ -1035,7 +1035,8 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
 
 /// R2/R7: a `str` input has no C prototype (R4 makes it two machine words),
 /// and the conversion that gives it one is total — `cstr` is sound for every
-/// `str` under R4's sentinel — so the rejection names it.
+/// `str` under R11's static-rooting, a literal being the only constructor —
+/// so the rejection names it.
 fn extern_str_input_error(decl: &ExternDecl) -> String {
     format!(
         "error: `extern: {}` declares the input `str` (line {}, col {})\n  a `str` is a pointer and a length, which matches no C parameter; declare `cstr` and convert with `cstr` at the call site",

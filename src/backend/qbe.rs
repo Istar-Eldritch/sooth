@@ -65,9 +65,9 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oomfmt = { b \"sooth: out of memory (allocation of %ld bytes failed)\\n\", b 0 }\n",
     );
-    // `str` prints via `%.*s` (R9): the length is passed explicitly rather
-    // than relying on the sentinel, so the printed result depends on the
-    // value's own carried length, not on an invariant.
+    // `str` prints via `%.*s` (R9): the carried length is passed explicitly.
+    // R4 promises no terminator, so `%s` would read past the length for
+    // anything but a literal; the bound is a soundness requirement.
     out.push_str("data $strfmt = { b \"%.*s\", b 0 }\n");
     let str_lits = collect_str_literals(&ir.funcs);
     for (content, idx) in &str_lits {
@@ -599,8 +599,9 @@ fn collect_str_literals(funcs: &[IrFunc]) -> std::collections::HashMap<String, u
 }
 
 /// Emit one string literal's static data (R6): the byte content plus a
-/// trailing NUL the descriptor's `len` does **not** count (R4's sentinel,
-/// made free by construction), then the `{ptr, len}` descriptor itself. Every
+/// trailing NUL the descriptor's `len` does **not** count, which is what makes
+/// R7's `cstr` conversion sound for a literal-rooted `str` (R11) without R4
+/// promising anything, then the `{ptr, len}` descriptor itself. Every
 /// byte is spelled as its own `b <decimal>` component rather than a quoted
 /// string, so arbitrary content (embedded quotes, backslashes, control bytes)
 /// never needs its own escaping pass.
@@ -1013,10 +1014,9 @@ fn emit_instr(
             IrType::Spy => {
                 unreachable!("__spy is not a printable scalar; checker rejects it (R16)")
             }
-            // R9: `%.*s` with the carried length, not `%s`: the printed
-            // result must depend on the value's own length, never on the
-            // sentinel invariant alone (which is what `cstr` below does rely
-            // on, since it has no length to prefer).
+            // R9: `%.*s` with the carried length, not `%s`: R4 promises no
+            // terminator, so the carried length is the only safe bound.
+            // `cstr` below must rely on a terminator, having no length.
             IrType::Str => {
                 let ptr = format!("%sptr{ext_id}");
                 *ext_id += 1;
@@ -1345,8 +1345,8 @@ mod tests {
     #[test]
     fn emit_print_of_str_uses_precision_format() {
         // R9/criterion 8: `.` on a `str` prints via `%.*s`, passing the
-        // carried length explicitly rather than relying on `%s` and the
-        // sentinel.
+        // carried length explicitly rather than relying on `%s` and a
+        // terminator R4 does not promise.
         let il = emit_src(": w ( -- ) \"hi\" . ;");
         assert!(
             il.contains("data $strfmt = { b \"%.*s\", b 0 }"),

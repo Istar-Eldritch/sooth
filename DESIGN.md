@@ -578,12 +578,15 @@ rows, no borrow analysis needed to write the compiler in it.
 - Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in (deferred to
   the `alloc` layer, Phase 6); second-class refs (Hylo-style), no lifetime-tracking borrow
   checker; non-null pointers; hidden/checked return stack.
-- Strings: two types, following Zig. `str` is pointer + length *and* guarantees a NUL at
-  `byte[len]`, so Sooth code always reads the length and never scans, while C receives the
-  pointer for free. `cstr` is pointer-only with an unknown length, which is what C hands back;
-  `str` -> `cstr` drops the length for nothing, `cstr` -> `str` costs an explicit scan. A
-  literal satisfies `str`'s invariant natively. Arbitrary substring slicing cannot produce a
-  `str` (a substring's end is not a NUL) and is deferred besides, see Open / deferred.
+- Strings: two types, taking Zig's *split* (a length-carrying view plus a bare C pointer) but not
+  its sentinel-in-the-type. `str` is pointer + length and promises nothing about `byte[len]`, so
+  Sooth code always reads the length and never scans. `cstr` is pointer-only with an unknown
+  length, which is what C hands back. `str` -> `cstr` is free *for a literal*, whose lowering
+  emits an uncounted NUL, and is not free in general: `core` has no allocator to copy with, so a
+  caller that owns a buffer writes the terminator itself. `cstr` -> `str` costs an explicit scan.
+  A whole-type NUL guarantee was rejected because a view over part of a buffer could never uphold
+  it, and an invariant a later slice must revoke is worse than one never claimed. Slicing a buffer
+  into a view is deferred, see Open / deferred.
 - A user-supplied destructor is an overload of `drop` for a concrete type, not a new
   declaration form, and defining one *forces* that type linear regardless of what its fields
   would otherwise imply. `Copy` and a user destructor are mutually exclusive, for the reason
@@ -639,17 +642,24 @@ rows, no borrow analysis needed to write the compiler in it.
   drop set is empty and the concern is vacuous; the back-edge is the **defined disposal
   point**, so it has a home when a later Phase 3 slice lets a linear value ride a loop
   (Phase 3 Slice 1 defers loop-carried linear values).
-- **Slicing a buffer into a `str`.** A literal-rooted `str` points at static data and cannot
-  dangle, so it is unrestricted. A `str` slicing a heap `^[u8 N]` or a local buffer *is* a
-  borrow, and would bypass the escape rules entirely because it is not spelled `&`. Spelling
-  it as a reference does not work either: a word returning a borrow is exactly the shape the
-  no-declared-output-reference rule forbids, and that rule is what stands in for lifetimes.
-  Restricting a buffer-derived `str` the way `&T` is restricted would forbid returning it,
-  which unspells the slicing word again; making the restriction depend on provenance would
-  mean a `( str -- )` signature no longer says which kind it holds, and honest signatures are
-  what the no-lifetimes bet trades on. So: `str` points at static data only, until a real
-  client pushes on this. The likely client is Phase 9's self-hosted lexer, which is also where
-  the evidence would exist to justify whatever it costs.
+- **Slicing a buffer into a view.** A literal-rooted `str` points at static data and cannot
+  dangle, so it is unrestricted. A view over a heap `^[u8 N]` or a local buffer *is* a borrow,
+  and unrestricted it would bypass the escape rules entirely because it is not spelled `&`. The
+  objection that killed the earlier sketch was that restricting by *provenance* would leave a
+  `( str -- )` signature no longer saying which kind it holds, and honest signatures are what the
+  no-lifetimes bet trades on. That objection is answered by putting the rooting in the
+  **spelling**: `str` is the static view, `&str` / `&[u8]` / `&![u8]` are borrowed ones, a leading
+  `&` meaning exactly what `contains_reference` already reports, and a static view coercing
+  one-way into a borrowed position (`'static: 'a` collapsed to two points, which would be the only
+  subtyping in the language). No new checks fall out of that: "is borrowed" as the
+  `contains_reference` answer routes a borrowed view through all six existing no-stored-reference
+  positions, and "is shared" as the `is_copy` answer is the rule `Type::Ref` already uses. `cstr`
+  needs the same bit, or it becomes a side door that launders a borrow into an escapable pointer.
+  What stays true is that a borrowed view **cannot be returned**: the no-declared-output-reference
+  rule is precisely what keeps a two-point lattice from having to grow into lifetime variables, so
+  a word handing a region back returns indices instead. Still deferred until a real client pushes
+  on it. The likely client is Phase 9's self-hosted lexer, which wants byte offsets for
+  diagnostics anyway, and is also where the evidence would exist to justify whatever it costs.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

@@ -409,10 +409,12 @@ pub enum Type {
     /// `i64` tag, and its compiler-known destructor prints `drop <tag>`, so
     /// drop count, order, and timing are golden-observable.
     Spy,
-    /// Pointer + length with a sentinel invariant (`byte[len] == 0`, Zig's
-    /// `[:0]const u8`, R4): the length is authoritative for every Sooth-side
-    /// use, and the guaranteed terminator one past the end lets the pointer
-    /// alone go to C at zero cost (`cstr`). `Copy` (R10), never seen through
+    /// Pointer + length, and the length is the only thing it promises (R4):
+    /// authoritative for every Sooth-side use, never discovered by scanning.
+    /// Deliberately *not* `byte[len] == 0`; the terminator behind every `str`
+    /// in this slice comes from literal lowering (R6) and is a precondition of
+    /// the `cstr` conversion (R7), so a later `str` viewing part of a buffer
+    /// breaks one word rather than this type. `Copy` (R10), never seen through
     /// by `contains_reference` (its `Ptr` component is opaque, not a
     /// `Type::Ref`), and constructible only by a literal (R11), which is
     /// what makes both of those sound.

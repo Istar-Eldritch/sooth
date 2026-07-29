@@ -799,9 +799,10 @@ pub enum Instr {
     /// (same width); the frontend never spells the QBE op (R14).
     Conv(Value, Value),
     /// `dst: Str = &<static descriptor for this literal's content>` (R6): the
-    /// backend emits the byte data (trailing NUL not counted in length, so
-    /// R4's sentinel invariant is free) and the `{ptr, len}` descriptor once
-    /// per distinct content, and takes the descriptor's address here.
+    /// backend emits the byte data (trailing NUL not counted in length, which
+    /// is what gives a literal-rooted `str` a terminator for R7 to rely on)
+    /// and the `{ptr, len}` descriptor once per distinct content, and takes the
+    /// descriptor's address here.
     StrLit(Value, String),
 }
 
