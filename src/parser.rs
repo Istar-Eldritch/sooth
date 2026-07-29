@@ -141,6 +141,37 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     Ok(())
 }
 
+/// R12: the `extern:` symbol string is emitted verbatim as `call $<symbol>`
+/// once lowered, so it must already be a valid C identifier here at the
+/// declaration — the trust boundary — rather than surfacing as broken QBE
+/// output or an empty symbol name later.
+fn is_valid_c_symbol(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    match chars.next() {
+        Some(c) if c == '_' || c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// A located error for an `extern:` C-symbol string that is not a valid C
+/// identifier.
+fn invalid_c_symbol_error(symbol: &str, span: Span) -> String {
+    format!(
+        "error: `{symbol}` is not a valid C symbol name at line {}, col {}\n  a C symbol must be non-empty and match `[A-Za-z_][A-Za-z0-9_]*`",
+        span.line, span.col
+    )
+}
+
+/// The one gate every `extern:` symbol string passes through.
+fn reject_invalid_c_symbol(symbol: &str, span: Span) -> Result<(), String> {
+    if is_valid_c_symbol(symbol) {
+        Ok(())
+    } else {
+        Err(invalid_c_symbol_error(symbol, span))
+    }
+}
+
 /// Collect variant `(name, span)` pairs from an enum `type:` body: the word
 /// following each `|`, plus the very first body token when there is no
 /// leading `|`.
@@ -517,7 +548,8 @@ impl<'t> Parser<'t> {
         self.expect(Token::LParen)?;
         let effect = self.parse_effect()?;
         self.expect(Token::RParen)?;
-        let symbol = self.expect_str_literal()?;
+        let (symbol, symbol_span) = self.expect_str_literal()?;
+        reject_invalid_c_symbol(&symbol, symbol_span)?;
         self.expect(Token::Semicolon)?;
         Ok(ExternDecl {
             name,
@@ -530,12 +562,13 @@ impl<'t> Parser<'t> {
     /// The `extern:` declaration's C-symbol string literal (R1): an explicit
     /// `"..."`, not a bare word, so the checker never has to guess whether a
     /// word-shaped token is the symbol or a stray extra token.
-    fn expect_str_literal(&mut self) -> Result<String, String> {
+    fn expect_str_literal(&mut self) -> Result<(String, Span), String> {
         match self.peek() {
-            Some((Token::Str(s), _)) => {
+            Some((Token::Str(s), span)) => {
                 let s = s.clone();
+                let span = *span;
                 self.pos += 1;
-                Ok(s)
+                Ok((s, span))
             }
             Some((tok, span)) => Err(format!(
                 "parse error: expected a string literal naming the C symbol, found {tok:?} at line {}, col {}",
@@ -2122,6 +2155,28 @@ mod tests {
         let err = parse_src("extern: foo ( i64 -- i64 ) ;").unwrap_err();
         assert!(
             err.contains("string literal naming the C symbol"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_extern_empty_symbol_is_error() {
+        // R12: an empty C symbol would lower to `call $`, so it is rejected
+        // at the declaration rather than surfacing as broken QBE later.
+        let err = parse_src(r#"extern: f ( -- ) "" ;"#).unwrap_err();
+        assert!(
+            err.contains("not a valid C symbol name"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_extern_symbol_with_illegal_characters_is_error() {
+        // R12: a symbol containing a newline or quote would corrupt the
+        // generated `call $<symbol>` instruction if emitted verbatim.
+        let err = parse_src(r#"extern: g ( -- ) "a\nb\"c" ;"#).unwrap_err();
+        assert!(
+            err.contains("not a valid C symbol name"),
             "unexpected message: {err}"
         );
     }

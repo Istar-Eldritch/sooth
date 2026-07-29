@@ -913,6 +913,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 /// the declaration rather than at a call site; the output-reference
 /// rejection reuses `check_reference_free_signature`'s existing message
 /// rather than duplicating it (R3).
+///
+/// R14: the symbol's *shape* is checked in the parser, but nothing checks
+/// that it *exists* — that needs a symbol table the compiler has no access
+/// to, so a misspelled symbol is a `cc` linker error, not a diagnostic.
 fn check_extern_decls(
     externs: &[ExternDecl],
     words: &[WordDef],
@@ -942,8 +946,8 @@ fn check_extern_decls(
 /// already registered as a builtin, a user `:` word, or another `extern:`.
 fn extern_redeclaration_error(decl: &ExternDecl) -> String {
     format!(
-        "error: `extern: {}` redeclares an existing word `{}` (line {}, col {})",
-        decl.name, decl.name, decl.span.line, decl.span.col
+        "error: `extern: {}` redeclares an existing word (line {}, col {})",
+        decl.name, decl.span.line, decl.span.col
     )
 }
 
@@ -974,7 +978,7 @@ fn is_extern_boundary_scalar(ty: Type) -> bool {
 fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
     for slot in &decl.effect.inputs {
         if !is_extern_boundary_scalar(slot.ty) {
-            return Err(extern_owned_aggregate_error(decl, slot.ty, "input"));
+            return Err(extern_boundary_type_error(decl, slot.ty, "input"));
         }
     }
     for slot in &decl.effect.outputs {
@@ -984,9 +988,22 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
         if matches!(slot.ty, Type::OwnedCell(..)) {
             return Err(extern_owned_pointer_output_error(decl, slot.ty));
         }
-        return Err(extern_owned_aggregate_error(decl, slot.ty, "output"));
+        return Err(extern_boundary_type_error(decl, slot.ty, "output"));
     }
     Ok(())
+}
+
+/// R3: the rejection for a boundary-ineligible slot, worded by what the type
+/// actually is. `__spy` has no aggregate layout at all, so it is not called an
+/// "owned aggregate" it isn't; every other ineligible type genuinely is one.
+fn extern_boundary_type_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
+    if matches!(ty, Type::Spy) {
+        return format!(
+            "error: `extern: {}` declares the {position} `__spy` (line {}, col {})\n  `__spy` is a test-only diagnostic type and cannot cross the C boundary",
+            decl.name, decl.span.line, decl.span.col
+        );
+    }
+    extern_owned_aggregate_error(decl, ty, position)
 }
 
 fn extern_owned_aggregate_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
@@ -3307,10 +3324,11 @@ fn check_array_index(
         SlotMatch::NeedsSizeConversion => {
             Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
         }
-        SlotMatch::NeedsStrToCstrConversion => {
+        // A `str` index is a plain mismatch: the str-to-cstr case can only
+        // arise where a `cstr` is wanted, and an index always wants `usize`.
+        SlotMatch::NeedsStrToCstrConversion | SlotMatch::Mismatch => {
             Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty))
         }
-        SlotMatch::Mismatch => Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty)),
     }
 }
 
@@ -4243,6 +4261,26 @@ mod tests {
     }
 
     #[test]
+    fn check_extern_with_spy_boundary_type_is_error() {
+        // R3: `__spy` is boundary-ineligible in either position, but it is
+        // not an aggregate, so it must not be described as one.
+        for src in [
+            "extern: sp ( __spy -- i64 ) \"sp\" ;",
+            "extern: sp ( i64 -- __spy ) \"sp\" ;",
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains("test-only diagnostic type"),
+                "unexpected message: {err}"
+            );
+            assert!(
+                !err.contains("owned aggregate"),
+                "`__spy` described as an aggregate: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn check_extern_redeclaring_another_extern_is_error() {
         let src = "extern: foo ( i64 -- i64 ) \"foo\" ;\nextern: foo ( i64 -- i64 ) \"bar\" ;";
         let err = check_src(src).unwrap_err();
@@ -4294,7 +4332,10 @@ mod tests {
         let err =
             crate::parser::parse(&lex("extern: printf ( cstr ... -- i64 ) \"printf\" ;").unwrap())
                 .unwrap_err();
-        assert!(err.starts_with("error"), "unexpected message: {err}");
+        assert!(
+            err.contains("unknown type `...`"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

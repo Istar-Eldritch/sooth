@@ -182,6 +182,16 @@ concatenation, formatting, and anything allocator-touching (Phase 6's `alloc` la
 foreign calls (R3). Resource types and user destructor bodies (Slice 8b). A symbol-existence
 check (R14).
 
+## Carried into phase 3
+
+After phase 2, `module.externs` is read only by the parser, `ast`, and `check`; nothing lowers it.
+So a program the checker *accepts* still panics in lowering: `strlen` declared and called reaches
+`src/ir.rs`'s `self.env.get(name).expect("checked user word exists")`, because an `extern:` never
+enters the lowering env. This is phase 3's wiring, and phase 3's goldens (criteria 7, 14, 16)
+force it. It was deliberately not patched in phase 2 with a stopgap guard: the fix is to lower a
+foreign call, not to reject one later. Note for whoever picks it up that the QBE `call $<symbol>`
+site can trust the symbol's shape, since the parser validates it at the declaration (R12).
+
 ```json
 {
   "phases": [
