@@ -862,7 +862,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         &module.owned_cells,
         &module.refs,
     );
-    let env: HashMap<String, Arity> = module
+    let mut env: HashMap<String, Arity> = module
         .words
         .iter()
         .map(|w| {
@@ -873,7 +873,24 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             )
         })
         .collect();
-    let resolve = |name: &str| name.to_string();
+    // R1: an `extern:` declaration is registered into the same lowering env
+    // as a user word, keyed by its Sooth name, so an ordinary `Instr::Call`
+    // covers the call site; only the emitted symbol differs (R12).
+    let mut extern_symbols: HashMap<String, String> = HashMap::new();
+    for decl in &module.externs {
+        let ret_ty = decl.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
+        env.insert(
+            decl.name.clone(),
+            (decl.effect.inputs.len(), decl.effect.outputs.len(), ret_ty),
+        );
+        extern_symbols.insert(decl.name.clone(), decl.symbol.clone());
+    }
+    let resolve = |name: &str| {
+        extern_symbols
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    };
     let regs = Registries {
         structs: &structs,
         enums: &enums,

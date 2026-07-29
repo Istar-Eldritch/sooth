@@ -1,0 +1,8 @@
+extern: strlen ( cstr -- usize ) "strlen" ;
+extern: puts   ( cstr -- i64 )   "puts" ;
+
+: main ( -- )
+  "hello, sooth" | s |
+  s len .
+  s cstr strlen .
+  s cstr puts drop ;
