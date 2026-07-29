@@ -852,10 +852,11 @@ pub enum Terminator {
     Jmp(BlockId),
 }
 
-/// Declared signature of a user word: (input count, output count, output
-/// `IrType` if any). The build path derives this from declared slot types; the
-/// REPL derives it from the checker's typed env. A `None` output type (e.g. a
-/// word with no output) is treated as `IrType::Int` by callers.
+/// Declared signature of a user word or `extern:` declaration: (input count,
+/// output count, output `IrType` if any). The build path derives this from
+/// declared slot types; the REPL derives it from the checker's typed env. A
+/// `None` output type (e.g. a word with no output) is treated as
+/// `IrType::Int` by callers.
 pub type Arity = (usize, usize, Option<IrType>);
 
 /// Maps a called user-word name to the symbol it is emitted/linked as. The build
@@ -884,7 +885,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .collect();
     // R1: an `extern:` declaration is registered into the same lowering env
     // as a user word, keyed by its Sooth name, so an ordinary `Instr::Call`
-    // covers the call site; only the emitted symbol differs (R12).
+    // covers the call site; only the emitted symbol (R1's declared C symbol)
+    // differs.
     let mut extern_symbols: HashMap<String, String> = HashMap::new();
     for decl in &module.externs {
         let ret_ty = decl.effect.outputs.first().map(|slot| ir_type_of(slot.ty));

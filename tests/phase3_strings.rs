@@ -120,6 +120,7 @@ fn str_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
     // at the REPL line boundary, so `.` on a carried `str` printed a raw
     // decimal pointer instead of the content.
     let out = run_session(&["\"hi\"", "."]);
+    // "hi" and "stack:" run together deliberately: R9 appends no newline.
     assert_eq!(out, "stack: <str>\nhistack: (empty)\n");
 }
 
@@ -134,6 +135,7 @@ fn str_carried_across_a_repl_line_then_len_is_correct_not_a_panic() {
 #[test]
 fn cstr_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
     let out = run_session(&["\"hi\" cstr", "."]);
+    // "hi" and "stack:" run together deliberately: R9 appends no newline.
     assert_eq!(out, "stack: <cstr>\nhistack: (empty)\n");
 }
 
@@ -144,6 +146,7 @@ fn print_of_a_str_native() {
     let src = ": main ( -- )\n  \"hello\" . ;";
     let (stdout, code) = run_src("print-str", src);
     assert_eq!(code, 0, "golden should exit 0");
+    // No trailing newline is R9's decision, not a truncated golden.
     assert_eq!(stdout, "hello");
 }
 
@@ -154,7 +157,20 @@ fn print_of_a_cstr_native() {
     let src = ": main ( -- )\n  \"hello\" cstr . ;";
     let (stdout, code) = run_src("print-cstr", src);
     assert_eq!(code, 0, "golden should exit 0");
+    // No trailing newline is R9's decision, not a truncated golden.
     assert_eq!(stdout, "hello");
+}
+
+#[test]
+fn embedded_newline_escape_prints_as_a_literal_byte_native() {
+    // R9 (amended): `.` on a `str`/`cstr` writes exactly the literal's bytes
+    // and appends nothing, so a newline only appears where the source spelled
+    // `\n` itself — pinning that the "no trailing newline" decision is not
+    // also silently swallowing embedded ones.
+    let src = ": main ( -- )\n  \"one\\ntwo\\n\" . \"a\\tb\" . ;";
+    let (stdout, code) = run_src("embedded-newline", src);
+    assert_eq!(code, 0, "golden should exit 0");
+    assert_eq!(stdout, "one\ntwo\na\tb");
 }
 
 #[test]
@@ -191,6 +207,7 @@ fn interior_nul_diverges_sooth_len_from_c_strlen_native() {
     );
     let (stdout, code) = run_src("interior-nul", src);
     assert_eq!(code, 0, "golden should exit 0");
+    // No trailing newline after "ab" is R9's decision, not a truncated golden.
     assert_eq!(stdout, "5\n2\nab");
 }
 
@@ -208,6 +225,7 @@ fn str_stored_in_a_struct_field_round_trips_native() {
     );
     let (stdout, code) = run_src("str-struct-field", src);
     assert_eq!(code, 0, "golden should exit 0");
+    // No trailing newline after "hi" is R9's decision, not a truncated golden.
     assert_eq!(stdout, "2\nhi");
 }
 
