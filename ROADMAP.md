@@ -129,8 +129,9 @@ owned records compiles, and the error lands at the borrow where it can name both
 **Phase 3 Slice 8a (typed foreign calls + string slices) is complete**: one `extern:` declaration
 form (a C symbol string plus a stack effect), registered into the ordinary word environment so
 existing arity/type checks apply unchanged; the boundary type set is the numeric tower, `&T`/`&!T`,
-and `cstr` (amended during implementation to *exclude* `str`, which is two machine words matching
-no C prototype, not a scalar or a single opaque `Ptr`); owned aggregates, `str`, and an
+and `cstr` (amended during implementation to *exclude* `str`, which is a descriptor handle rather
+than a scalar or a single opaque `Ptr`, so C would receive a pointer to a descriptor rather than a
+`char*`); owned aggregates, `str`, and an
 owned/reference output are rejected at the declaration. Two new string types: `str` (one opaque
 pointer to a static two-word `{bytes_ptr, len}` descriptor, `IrType::Str`) and `cstr` (a bare
 NUL-terminated pointer, `IrType::Cstr`), both `Copy`, both static-rooted except that a `cstr` may

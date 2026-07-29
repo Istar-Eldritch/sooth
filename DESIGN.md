@@ -653,7 +653,7 @@ rows, no borrow analysis needed to write the compiler in it.
   one-way into a borrowed position (`'static: 'a` collapsed to two points, which would be the only
   subtyping in the language). For `contains_reference` itself, no new checks fall out: "is
   borrowed" as that answer routes a borrowed view through every existing no-stored-reference
-  position phrased over it (not "all six": the set of such positions can grow), and "is shared" as
+  position phrased over it, and "is shared" as
   the `is_copy` answer is the rule `Type::Ref` already uses. `cstr` needs the same bit, or it
   becomes a side door that launders a borrow into an escapable pointer. But `is_copy` is not the
   last knob: `is_linear` is `!ty.is_ref() && !is_copy(...)` (`check.rs`), and `Type::is_ref` is
@@ -666,6 +666,16 @@ rows, no borrow analysis needed to write the compiler in it.
   returns indices instead. Still deferred until a real client pushes on it. The likely client is
   Phase 9's self-hosted lexer, which wants byte offsets for diagnostics anyway, and is also where
   the evidence would exist to justify whatever it costs.
+- **`.` appending no separator, for every type (decided, not yet implemented).** Today `.` appends
+  a trailing newline for every type except `str`/`cstr` (slice 8a's R9). The decision is to make it
+  uniform the other way: `.` writes exactly the value and nothing else, a newline spelled
+  explicitly by the caller, e.g. `: print ( i64 -- ) . "\n" . ;`. Consequence: `1 . 2 .` then prints
+  `12`, callers supplying every separator, not just newlines. Amends Phase 0's definition of `.`
+  (`docs/phase0-spec.md` defines it as `printf("%ld\n", …)` in three places) and touches roughly
+  131 stdout assertions across four test files, so it lands as its own scoped change, not folded
+  into slice 8a. A single `print` covering every type needs Phase 4's static overloading; until
+  then it is one wrapper word per type, or an explicit `"\n" .` at each call site — and the wrapper
+  is only expressible from slice 8a onward, since it needs a string literal.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

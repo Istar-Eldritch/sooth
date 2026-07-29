@@ -1077,7 +1077,7 @@ fn emit_instr(
         // `src`'s carried length is the descriptor's second word: this file
         // owns the offset (`STR_LEN_OFFSET`) because `emit_str_literal` is
         // what wrote the descriptor's `{ptr, len}` shape in the first place
-        // (CODE FIX 3: the IR states intent, not a byte offset).
+        // (the IR states intent, not a byte offset).
         Instr::StrLen(dst, src) => {
             let addr = format!("%straddr{ext_id}");
             *ext_id += 1;
@@ -1386,6 +1386,23 @@ mod tests {
         );
         assert!(
             !il.contains("call $printf(l $strfmt"),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_str_literal_writes_uncounted_terminator_and_descriptor_shape() {
+        // R6: the static byte data ends with a NUL the descriptor's length
+        // word does not count (`STR_LEN_OFFSET` reads that word); "hi" is
+        // b 104, b 105 plus the uncounted b 0, and the descriptor's length is
+        // 2, not 3.
+        let il = emit_src(": w ( -- str ) \"hi\" ;");
+        assert!(
+            il.contains("data $strb0 = { b 104, b 105, b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("data $strd0 = { l $strb0, l 2 }"),
             "unexpected IL: {il}"
         );
     }

@@ -397,7 +397,16 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
         IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
         IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
-        _ => 8,
+        IrType::Int { .. }
+        | IrType::Float { .. }
+        | IrType::Bool
+        | IrType::Usize
+        | IrType::Isize
+        | IrType::Ptr
+        | IrType::Spy
+        | IrType::OwnedCell(_)
+        | IrType::Str
+        | IrType::Cstr => 8,
     }
 }
 
@@ -1391,42 +1400,30 @@ pub fn lower_line(
                 b.push_instr(Instr::Conv(relabeled, v));
                 stack.push(relabeled);
             }
-            // A carried spy slot loads its `i64` tag but keeps its `Spy`
-            // `IrType`, so a `drop` later in the line still finds the
-            // destructor (the REPL's residual disposal path, R6).
-            IrType::Spy => {
-                let v = b.fresh_value(IrType::Spy);
+            // Every remaining carried slot loads directly at its own
+            // `IrType` and needs no relabeling: `i64`, `Bool`, `Usize` and
+            // `Isize` all fill the full 8-byte cell as-is, and `Spy`,
+            // `OwnedCell`, `Str`, `Cstr` are all a bare pointer/tag. Keeping
+            // the type (rather than degrading to a bare `I64`) is what lets a
+            // later `drop` still find `Spy`/`OwnedCell`'s destructor, a later
+            // `len`/`.`/`cstr` dispatch on `Str`/`Cstr`, and `.`/comparisons
+            // treat a `Bool`/`Usize` slot correctly instead of as a signed
+            // `i64`.
+            IrType::Int { .. }
+            | IrType::Bool
+            | IrType::Usize
+            | IrType::Isize
+            | IrType::Spy
+            | IrType::OwnedCell(_)
+            | IrType::Str
+            | IrType::Cstr => {
+                let v = b.fresh_value(slot_ty);
                 b.push_instr(Instr::Load(v, ptr));
                 stack.push(v);
             }
-            // A carried cell slot loads its pointer but keeps its `OwnedCell`
-            // `IrType`, for the same reason a spy slot does: a later `drop`, or
-            // the REPL's residual disposal, must still find the destructor.
-            IrType::OwnedCell(id) => {
-                let v = b.fresh_value(IrType::OwnedCell(id));
-                b.push_instr(Instr::Load(v, ptr));
-                stack.push(v);
-            }
-            // A carried `str`/`cstr` slot loads its pointer but keeps its own
-            // `IrType`, for the same reason a spy or cell slot does: a later
-            // `len`/`.`/`cstr` in the line dispatches on the value's `IrType`
-            // (e.g. `len`'s `value_type(top) == IrType::Str` check), which the
-            // generic `I64` fallthrough below would silently defeat.
-            IrType::Str => {
-                let v = b.fresh_value(IrType::Str);
-                b.push_instr(Instr::Load(v, ptr));
-                stack.push(v);
-            }
-            IrType::Cstr => {
-                let v = b.fresh_value(IrType::Cstr);
-                b.push_instr(Instr::Load(v, ptr));
-                stack.push(v);
-            }
-            _ => {
-                let v = b.fresh_value(IrType::I64);
-                b.push_instr(Instr::Load(v, ptr));
-                stack.push(v);
-            }
+            // A `Type::Ref` is always rejected as a declared output (checker),
+            // so it can never reach the carried-slot buffer at all.
+            IrType::Ptr => unreachable!("a reference can never be a carried slot"),
         }
         in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums, b.arrays);
     }
@@ -3657,7 +3654,7 @@ mod tests {
 
     #[test]
     fn len_of_str_lowers_to_str_len_with_no_call() {
-        // R8/CODE FIX 3: `len` on a `str` lowers to the dedicated `StrLen`
+        // R8: `len` on a `str` lowers to the dedicated `StrLen`
         // instruction, not a call and not a hand-written byte offset.
         let ir = lower_src(": w ( -- usize ) \"hi\" len ;");
         let w = &ir.funcs[0];
@@ -3667,7 +3664,7 @@ mod tests {
 
     #[test]
     fn cstr_conversion_lowers_to_str_ptr() {
-        // R7/CODE FIX 3: `cstr` lowers to the dedicated `StrPtr` instruction.
+        // R7: `cstr` lowers to the dedicated `StrPtr` instruction.
         let ir = lower_src(": w ( -- cstr ) \"hi\" cstr ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::StrPtr(..))), 1);
@@ -3675,16 +3672,39 @@ mod tests {
 
     #[test]
     fn len_and_cstr_of_str_emit_no_byte_offset_instruction() {
-        // CODE FIX 3: neither `len` nor `cstr` reads the descriptor via a
-        // hand-written `field_ptr` offset (`PtrOffset` + `FieldLoad`) any
-        // more; both state their intent through a dedicated instruction
-        // instead, keeping the descriptor's layout a backend-only concern.
+        // Neither `len` nor `cstr` reads the descriptor via a hand-written
+        // `field_ptr` offset (`PtrOffset` + `FieldLoad`) any more; both state
+        // their intent through a dedicated instruction instead, keeping the
+        // descriptor's layout a backend-only concern.
         let ir = lower_src(": w ( -- ) \"hi\" len drop \"hi\" cstr drop ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::PtrOffset(..))), 0);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 0);
         assert_eq!(count(w, |i| matches!(i, Instr::StrLen(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::StrPtr(..))), 1);
+    }
+
+    #[test]
+    fn extern_call_lowers_to_a_call_with_the_declared_symbol() {
+        // R1: an `extern:` declaration's C symbol, not its Sooth word name,
+        // is what the emitted call names; binding a name that differs from
+        // its symbol (`clen` bound to `strlen`) would not catch a lowering
+        // bug that emitted `call $<word-name>` instead.
+        let ir = lower_src(
+            "extern: clen ( cstr -- usize ) \"strlen\" ;\n\
+             : w ( -- usize ) \"hi\" cstr clen ;",
+        );
+        let w = &ir.funcs[0];
+        let calls: Vec<&str> = w
+            .blocks
+            .iter()
+            .flat_map(|b| &b.instrs)
+            .filter_map(|i| match i {
+                Instr::Call(_, sym, _) => Some(sym.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["strlen"]);
     }
 
     #[test]
@@ -3718,6 +3738,42 @@ mod tests {
         // No scalar 8-byte-cell Load/Store touches a struct slot.
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 0);
         assert_eq!(count(&func, |i| matches!(i, Instr::Store(..))), 0);
+    }
+
+    #[test]
+    fn lower_line_carried_str_slot_keeps_its_own_ir_type() {
+        // The carried-slot prologue's match used to fall through a `_` arm
+        // for `str` (and other non-aggregate types), loading it as a bare
+        // `IrType::I64` and losing the type a later `len`/`.`/`cstr` in the
+        // line dispatches on. An empty line carries one `str` straight
+        // through: the loaded value must keep `IrType::Str`.
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let (func, m, out_bytes) = lower_line(
+            0,
+            &line_terms(""),
+            1,
+            &[Type::Str],
+            &env,
+            &resolve,
+            Registries {
+                structs: &Structs::default(),
+                enums: &Enums::default(),
+                arrays: &Arrays::default(),
+                cells: &Cells::default(),
+                refs: &Refs::default(),
+            },
+        );
+        assert_eq!(m, 1);
+        assert_eq!(out_bytes, 8);
+        let loaded = instrs(&func)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Load(dst, _) => Some(*dst),
+                _ => None,
+            })
+            .expect("a load of the carried str slot");
+        assert_eq!(func.value_types[loaded.0 as usize], IrType::Str);
     }
 
     #[test]

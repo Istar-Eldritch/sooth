@@ -116,9 +116,9 @@ fn foreign_call_writes_through_a_mutable_reference_native() {
 
 #[test]
 fn str_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
-    // CODE FIX 1 regression: a carried `str`'s `IrType` used to be discarded
-    // at the REPL line boundary, so `.` on a carried `str` printed a raw
-    // decimal pointer instead of the content.
+    // A carried `str`'s `IrType` used to be discarded at the REPL line
+    // boundary, so `.` on a carried `str` printed a raw decimal pointer
+    // instead of the content.
     let out = run_session(&["\"hi\"", "."]);
     // "hi" and "stack:" run together: `.` on a str appends no newline today; R9 records this as pending resolution.
     assert_eq!(out, "stack: <str>\nhistack: (empty)\n");
@@ -126,8 +126,8 @@ fn str_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
 
 #[test]
 fn str_carried_across_a_repl_line_then_len_is_correct_not_a_panic() {
-    // CODE FIX 1 regression: the same discarded `IrType` made `len` fall
-    // into the array-`len` path and hit `unreachable!` at src/ir.rs.
+    // The same discarded `IrType` made `len` fall into the array-`len` path
+    // and hit `unreachable!` at src/ir.rs.
     let out = run_session(&["\"hi\"", "len"]);
     assert_eq!(out, "stack: <str>\nstack: 2\n");
 }
@@ -135,8 +135,56 @@ fn str_carried_across_a_repl_line_then_len_is_correct_not_a_panic() {
 #[test]
 fn cstr_carried_across_a_repl_line_then_print_is_correct_not_a_pointer() {
     let out = run_session(&["\"hi\" cstr", "."]);
-    // "hi" and "stack:" run together: `.` on a cstr appends no newline today; R9 records this as pending resolution.
+    // "hi" and "stack:" run together: `.` on a cstr appends no newline, like `str` above.
     assert_eq!(out, "stack: <cstr>\nhistack: (empty)\n");
+}
+
+#[test]
+fn str_carried_across_a_repl_line_alongside_another_slot_is_correct() {
+    // T4: a `str` slot's buffer offset must stay correct when a scalar slot
+    // sits above it on the carried stack, covering the offset arithmetic end
+    // to end rather than only through the Rust-side `format_stack` units.
+    let out = run_session(&["\"hi\"", "7", ". ."]);
+    // The first `.` pops `7` (an `i64`, which appends a newline); the second
+    // pops the `str` and prints "hi" with none, running into "stack:".
+    assert_eq!(out, "stack: <str>\nstack: <str> 7\n7\nhistack: (empty)\n");
+}
+
+#[test]
+fn bool_carried_across_a_repl_line_then_print_is_true_not_one() {
+    // The carried-slot prologue's `_` wildcard used to load every
+    // unrecognised slot, including `Bool`, as a bare `IrType::I64`, so a
+    // carried `true` printed `1` (missing `Instr::Print`'s `Bool` arm and its
+    // `$boolstrs` path) instead of `true`. Same-line `true .` was always
+    // correct; only the carried path degraded.
+    let out = run_session(&["true", "."]);
+    assert_eq!(out, "stack: true\ntrue\nstack: (empty)\n");
+}
+
+#[test]
+fn usize_carried_across_a_repl_line_renders_unsigned_not_negative() {
+    // The same wildcard degraded a carried `usize` to `I64`, so an
+    // underflowed `usize` (whose `i64` bit pattern is negative) rendered
+    // signed in the stack display instead of unsigned.
+    let out = run_session(&["\"h\" len \"hh\" len -"]);
+    assert_eq!(out, "stack: 18446744073709551615\n");
+}
+
+#[test]
+fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
+    // The sharpest regression: a degraded carried `usize` compares signed
+    // (`<`'s dispatch reads the value's `IrType`), which is a semantic
+    // change, not just cosmetic. The wrapped-around difference is negative
+    // as an `i64` but enormous as a `usize`, so `< "hh" len` (3) flips
+    // between `true` (signed) and `false` (unsigned, correct); the same-line
+    // form is the reference.
+    let same_line = run_session(&["\"h\" len \"hh\" len - \"hh\" len < ."]);
+    let carried = run_session(&["\"h\" len \"hh\" len -", "\"hh\" len < ."]);
+    assert_eq!(same_line, "false\nstack: (empty)\n");
+    assert_eq!(
+        carried,
+        "stack: 18446744073709551615\nfalse\nstack: (empty)\n"
+    );
 }
 
 #[test]
@@ -146,7 +194,6 @@ fn print_of_a_str_native() {
     let src = ": main ( -- )\n  \"hello\" . ;";
     let (stdout, code) = run_src("print-str", src);
     assert_eq!(code, 0, "golden should exit 0");
-    // `.` on a str appends no newline today; R9 records this as pending resolution.
     assert_eq!(stdout, "hello");
 }
 
@@ -157,16 +204,15 @@ fn print_of_a_cstr_native() {
     let src = ": main ( -- )\n  \"hello\" cstr . ;";
     let (stdout, code) = run_src("print-cstr", src);
     assert_eq!(code, 0, "golden should exit 0");
-    // `.` on a cstr appends no newline today; R9 records this as pending resolution.
     assert_eq!(stdout, "hello");
 }
 
 #[test]
 fn embedded_newline_escape_prints_as_a_literal_byte_native() {
-    // R9 (amended): `.` on a `str`/`cstr` writes exactly the literal's bytes
-    // and appends nothing, so a newline only appears where the source spelled
-    // `\n` itself — pinning that the "no trailing newline" decision is not
-    // also silently swallowing embedded ones.
+    // R9: `.` on a `str`/`cstr` writes exactly the literal's bytes and
+    // appends nothing, so a newline only appears where the source spelled
+    // `\n` itself — pinning that the current no-trailing-newline behaviour is
+    // not also silently swallowing embedded ones.
     let src = ": main ( -- )\n  \"one\\ntwo\\n\" . \"a\\tb\" . ;";
     let (stdout, code) = run_src("embedded-newline", src);
     assert_eq!(code, 0, "golden should exit 0");
@@ -207,7 +253,6 @@ fn interior_nul_diverges_sooth_len_from_c_strlen_native() {
     );
     let (stdout, code) = run_src("interior-nul", src);
     assert_eq!(code, 0, "golden should exit 0");
-    // No trailing newline after "ab": `.` on a cstr appends none today; R9 records this as pending resolution.
     assert_eq!(stdout, "5\n2\nab");
 }
 
@@ -225,7 +270,6 @@ fn str_stored_in_a_struct_field_round_trips_native() {
     );
     let (stdout, code) = run_src("str-struct-field", src);
     assert_eq!(code, 0, "golden should exit 0");
-    // No trailing newline after "hi": `.` on a str appends none today; R9 records this as pending resolution.
     assert_eq!(stdout, "2\nhi");
 }
 

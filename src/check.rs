@@ -986,8 +986,8 @@ fn extern_redeclaration_error(decl: &ExternDecl) -> String {
 /// or an opaque `Ptr` the backend already passes across a call.
 ///
 /// `str` is excluded despite R2's list naming it, on R2's own criterion: R4
-/// makes it *two* machine words, so it is neither a scalar nor a single `Ptr`
-/// and matches no C prototype without an invented multi-argument ABI. See
+/// makes it a descriptor handle, not a scalar or a single opaque `Ptr`, so C
+/// would receive a pointer to a descriptor rather than a `char*`. See
 /// `extern_str_input_error`/`extern_str_output_error` for each direction.
 fn is_extern_boundary_scalar(ty: Type) -> bool {
     matches!(
@@ -1033,10 +1033,11 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
     Ok(())
 }
 
-/// R2/R7: a `str` input has no C prototype (R4 makes it two machine words),
-/// and the conversion that gives it one is total — `cstr` is sound for every
-/// `str` under R11's static-rooting, a literal being the only constructor —
-/// so the rejection names it.
+/// R2/R7: a `str` input has no C prototype (R4 makes it a descriptor handle,
+/// not a scalar or a single opaque `Ptr`, so C would receive a pointer to a
+/// descriptor rather than a `char*`), and the conversion that gives it one is
+/// total — `cstr` is sound for every `str` under R11's static-rooting, a
+/// literal being the only constructor — so the rejection names it.
 fn extern_str_input_error(decl: &ExternDecl) -> String {
     format!(
         "error: `extern: {}` declares the input `str` (line {}, col {})\n  a `str` is a pointer and a length, which matches no C parameter; declare `cstr` and convert with `cstr` at the call site",
@@ -4404,8 +4405,9 @@ mod tests {
 
     #[test]
     fn check_extern_with_str_parameter_is_error() {
-        // R2/R7: a `str` is two machine words (R4), so it matches no C
-        // parameter; the rejection names the total conversion to `cstr`.
+        // R2/R7: a `str` is a descriptor handle (R4), not a scalar or a
+        // single opaque `Ptr`, so it matches no C parameter; the rejection
+        // names the total conversion to `cstr`.
         let src = "extern: f ( str -- i64 ) \"f\" ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -4502,6 +4504,14 @@ mod tests {
             err.contains("convert it explicitly"),
             "unexpected message: {err}"
         );
+    }
+
+    #[test]
+    fn check_len_on_str_types_as_usize() {
+        // R8: `check_str_word` claims `len` on a `str` operand before the
+        // array path ever sees it, consuming the `str` and typing the result
+        // `usize` (not the array `len`'s non-consuming signature).
+        check_src(": w ( -- usize ) \"hi\" len ;").unwrap();
     }
 
     #[test]
@@ -5259,6 +5269,14 @@ mod tests {
         check_src(": w ( -- ) 3.14 . ;").unwrap();
         check_src(": w ( -- ) 3.14 >f32 . ;").unwrap();
         check_src(": w ( -- ) true . ;").unwrap();
+    }
+
+    #[test]
+    fn check_print_accepts_str_and_cstr() {
+        // `.`'s printable-scalar guard also accepts `str`/`cstr` (R9), matched
+        // by name rather than `is_numeric`/`is_bool`, since neither is numeric.
+        check_src(": w ( -- ) \"hi\" . ;").unwrap();
+        check_src(": w ( -- ) \"hi\" cstr . ;").unwrap();
     }
 
     #[test]
