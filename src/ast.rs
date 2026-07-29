@@ -391,6 +391,18 @@ pub enum Type {
     /// `i64` tag, and its compiler-known destructor prints `drop <tag>`, so
     /// drop count, order, and timing are golden-observable.
     Spy,
+    /// Pointer + length with a sentinel invariant (`byte[len] == 0`, Zig's
+    /// `[:0]const u8`, R4): the length is authoritative for every Sooth-side
+    /// use, and the guaranteed terminator one past the end lets the pointer
+    /// alone go to C at zero cost (`cstr`). `Copy` (R10), never seen through
+    /// by `contains_reference` (its `Ptr` component is opaque, not a
+    /// `Type::Ref`), and constructible only by a literal (R11), which is
+    /// what makes both of those sound.
+    Str,
+    /// Pointer-only, NUL-terminated, length unknown (Zig's `[*:0]const u8`,
+    /// R5): what a C `char*` parameter wants and what one hands back. `Copy`
+    /// like `Str`, for the same reason.
+    Cstr,
 }
 
 /// The source spelling of the drop-spy type and of its constructor word (R6):
@@ -465,6 +477,12 @@ impl Type {
         if name == SPY_NAME {
             return Some(Type::Spy);
         }
+        if name == "str" {
+            return Some(Type::Str);
+        }
+        if name == "cstr" {
+            return Some(Type::Cstr);
+        }
         if let Some((_, bits)) = FLOAT_TYPES.iter().find(|(n, _)| *n == name) {
             return Some(Type::Float(FloatType { bits: *bits }));
         }
@@ -537,6 +555,8 @@ impl Type {
             Type::Usize => "usize",
             Type::Isize => "isize",
             Type::Spy => SPY_NAME,
+            Type::Str => "str",
+            Type::Cstr => "cstr",
         }
     }
 }
@@ -570,6 +590,9 @@ pub enum TermKind {
     IntLit(i64),
     FloatLit(f64),
     BoolLit(bool),
+    /// A `"..."` string literal (R6): type `str`, decoded content already
+    /// escape-resolved by the lexer.
+    StrLit(String),
     /// A word invocation, or a reference to a named local.
     Call(String),
     /// A `| names |` binding (R1): pops one value per name at the point it

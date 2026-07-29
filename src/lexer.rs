@@ -16,6 +16,9 @@ pub enum Token {
     Int(i64),
     Float(f64),
     Word(String),
+    /// A `"..."` string literal (R6), already escape-decoded: the raw
+    /// content a `str` value carries, never the source spelling.
+    Str(String),
 }
 
 fn is_delimiter(c: char) -> bool {
@@ -88,6 +91,56 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 chars.next();
                 col += 1;
                 tokens.push((tok, span));
+            }
+            '"' => {
+                let start = Span { line, col };
+                chars.next();
+                col += 1;
+                let mut s = String::new();
+                let mut closed = false;
+                while let Some(c) = chars.next() {
+                    match c {
+                        '"' => {
+                            closed = true;
+                            col += 1;
+                            break;
+                        }
+                        '\\' => {
+                            col += 1;
+                            let Some(esc) = chars.next() else { break };
+                            col += 1;
+                            match esc {
+                                'n' => s.push('\n'),
+                                't' => s.push('\t'),
+                                '\\' => s.push('\\'),
+                                '"' => s.push('"'),
+                                '0' => s.push('\0'),
+                                other => {
+                                    return Err(format!(
+                                        "lex error: unknown escape '\\{other}' in string literal at line {}, col {}",
+                                        start.line, start.col
+                                    ));
+                                }
+                            }
+                        }
+                        '\n' => {
+                            s.push('\n');
+                            line += 1;
+                            col = 1;
+                        }
+                        _ => {
+                            s.push(c);
+                            col += 1;
+                        }
+                    }
+                }
+                if !closed {
+                    return Err(format!(
+                        "lex error: unterminated string literal starting at line {}, col {}",
+                        start.line, start.col
+                    ));
+                }
+                tokens.push((Token::Str(s), start));
             }
             _ => {
                 let start = Span { line, col };
@@ -400,6 +453,32 @@ mod tests {
             vec![Token::Word("&".into()), Token::Word("a".into())]
         );
         assert_eq!(words(&lex("a&!").unwrap()), vec![Token::Word("a&!".into())]);
+    }
+
+    #[test]
+    fn lex_string_literal_handles_every_escape() {
+        // Criterion 1: every declared escape (`\n \t \\ \" \0`) decodes.
+        let tokens = lex(r#""a\nb\tc\\d\"e\0f""#).unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![Token::Str("a\nb\tc\\d\"e\0f".to_string())]
+        );
+    }
+
+    #[test]
+    fn lex_unterminated_string_literal_is_error() {
+        // Criterion 2: no closing `"` before EOF is a located error.
+        let err = lex(r#""unterminated"#).unwrap_err();
+        assert!(err.contains("unterminated"), "unexpected message: {err}");
+        assert!(err.contains("line 1"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn lex_unknown_string_escape_is_error() {
+        // Criterion 3: an escape outside `\n \t \\ \" \0` is a located error.
+        let err = lex(r#""bad\zescape""#).unwrap_err();
+        assert!(err.contains("unknown escape"), "unexpected message: {err}");
+        assert!(err.contains("\\z"), "unexpected message: {err}");
     }
 
     #[test]

@@ -65,6 +65,14 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oomfmt = { b \"sooth: out of memory (allocation of %ld bytes failed)\\n\", b 0 }\n",
     );
+    // `str` prints via `%.*s` (R9): the length is passed explicitly rather
+    // than relying on the sentinel, so the printed result depends on the
+    // value's own carried length, not on an invariant.
+    out.push_str("data $strfmt = { b \"%.*s\", b 0 }\n");
+    let str_lits = collect_str_literals(&ir.funcs);
+    for (content, idx) in &str_lits {
+        emit_str_literal(&mut out, *idx, content);
+    }
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
     // array type then references an already-declared `:E`/`:arr_N`. Structs are
@@ -84,7 +92,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     }
     for func in &ir.funcs {
         out.push('\n');
-        emit_func(&mut out, func, layouts);
+        emit_func(&mut out, func, layouts, &str_lits);
     }
     emit_oob_trap(&mut out);
     emit_spy_drop(&mut out);
@@ -255,6 +263,9 @@ fn width(ty: IrType) -> &'static str {
         // A struct/enum/array value is a pointer in a register (`l`); its
         // aggregate `:S`/`:E`/`:A` type is only spelled in ABI positions.
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => "l",
+        // `str`'s descriptor address and `cstr`'s bytes pointer are each one
+        // opaque pointer, exactly like `Ptr`.
+        IrType::Str | IrType::Cstr => "l",
     }
 }
 
@@ -286,6 +297,7 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Ptr => "l".to_string(),
         IrType::Spy => "l".to_string(),
         IrType::OwnedCell(_) => "l".to_string(),
+        IrType::Str | IrType::Cstr => "l".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
@@ -314,6 +326,7 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Ptr => ("l", "loadl"),
         IrType::Spy => ("l", "loadl"),
         IrType::OwnedCell(_) => ("l", "loadl"),
+        IrType::Str | IrType::Cstr => ("l", "loadl"),
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
@@ -334,6 +347,7 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Ptr => "storel",
         IrType::Spy => "storel",
         IrType::OwnedCell(_) => "storel",
+        IrType::Str | IrType::Cstr => "storel",
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
@@ -562,7 +576,56 @@ fn norm_scalar_ww(ty: IrType, word_width: u32) -> IrType {
     }
 }
 
-fn emit_func(out: &mut String, func: &IrFunc, layouts: Layouts) {
+/// Walk every function's instructions in order and assign each distinct
+/// string literal content a stable index, deduping repeats of the same
+/// content. Called once, before any function body is emitted, so `emit_func`
+/// only ever looks an index up rather than assigning one (assigning per-func
+/// would let the same content get two indices in two functions).
+fn collect_str_literals(funcs: &[IrFunc]) -> std::collections::HashMap<String, usize> {
+    let mut lits = std::collections::HashMap::new();
+    for func in funcs {
+        for block in &func.blocks {
+            for instr in &block.instrs {
+                if let Instr::StrLit(_, content) = instr {
+                    if !lits.contains_key(content) {
+                        let idx = lits.len();
+                        lits.insert(content.clone(), idx);
+                    }
+                }
+            }
+        }
+    }
+    lits
+}
+
+/// Emit one string literal's static data (R6): the byte content plus a
+/// trailing NUL the descriptor's `len` does **not** count (R4's sentinel,
+/// made free by construction), then the `{ptr, len}` descriptor itself. Every
+/// byte is spelled as its own `b <decimal>` component rather than a quoted
+/// string, so arbitrary content (embedded quotes, backslashes, control bytes)
+/// never needs its own escaping pass.
+fn emit_str_literal(out: &mut String, idx: usize, content: &str) {
+    let mut bytes: Vec<String> = content
+        .as_bytes()
+        .iter()
+        .map(|b| format!("b {b}"))
+        .collect();
+    bytes.push("b 0".to_string());
+    writeln!(out, "data $strb{idx} = {{ {} }}", bytes.join(", ")).unwrap();
+    writeln!(
+        out,
+        "data $strd{idx} = {{ l $strb{idx}, l {} }}",
+        content.len()
+    )
+    .unwrap();
+}
+
+fn emit_func(
+    out: &mut String,
+    func: &IrFunc,
+    layouts: Layouts,
+    str_lits: &std::collections::HashMap<String, usize>,
+) {
     let ret_ty = match func.ret {
         Some(ty) => format!("{} ", qbe_abi_ty(ty, layouts)),
         None => String::new(),
@@ -584,7 +647,14 @@ fn emit_func(out: &mut String, func: &IrFunc, layouts: Layouts) {
     for block in &func.blocks {
         writeln!(out, "{}", label(block.id)).unwrap();
         for instr in &block.instrs {
-            emit_instr(out, instr, &func.value_types, layouts, &mut ext_id);
+            emit_instr(
+                out,
+                instr,
+                &func.value_types,
+                layouts,
+                &mut ext_id,
+                str_lits,
+            );
         }
         emit_term(out, &block.term);
     }
@@ -691,11 +761,16 @@ fn emit_instr(
     value_types: &[IrType],
     layouts: Layouts,
     ext_id: &mut u32,
+    str_lits: &std::collections::HashMap<String, usize>,
 ) {
     match instr {
         Instr::Const(v, n) => {
             let w = width(ty_of(value_types, *v));
             writeln!(out, "\t{} ={w} copy {n}", val(*v))
+        }
+        Instr::StrLit(v, content) => {
+            let idx = str_lits[content];
+            writeln!(out, "\t{} =l copy $strd{idx}", val(*v))
         }
         Instr::ConstF(v, x) => {
             // QBE float constants carry an `s_`/`d_` prefix; Rust's `f64`
@@ -938,6 +1013,25 @@ fn emit_instr(
             IrType::Spy => {
                 unreachable!("__spy is not a printable scalar; checker rejects it (R16)")
             }
+            // R9: `%.*s` with the carried length, not `%s`: the printed
+            // result must depend on the value's own length, never on the
+            // sentinel invariant alone (which is what `cstr` below does rely
+            // on, since it has no length to prefer).
+            IrType::Str => {
+                let ptr = format!("%sptr{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{ptr} =l loadl {}", val(*v)).unwrap();
+                let len_addr = format!("%slena{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{len_addr} =l add {}, 8", val(*v)).unwrap();
+                let len = format!("%slen{ext_id}");
+                *ext_id += 1;
+                writeln!(out, "\t{len} =l loadl {len_addr}").unwrap();
+                writeln!(out, "\tcall $printf(l $strfmt, l {len}, l {ptr}, ...)")
+            }
+            // `cstr` is already a bare NUL-terminated byte pointer, so it
+            // prints exactly like a bool's selected string does: `%s`.
+            IrType::Cstr => writeln!(out, "\tcall $printf(l $sfmt, l {}, ...)", val(*v)),
             IrType::OwnedCell(_) => {
                 unreachable!("a cell is not a printable scalar; checker rejects it")
             }
@@ -1244,6 +1338,37 @@ mod tests {
         assert!(il.contains("add $boolstrs,"), "unexpected IL: {il}");
         assert!(
             il.contains("call $printf(l $sfmt, l "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_of_str_uses_precision_format() {
+        // R9/criterion 8: `.` on a `str` prints via `%.*s`, passing the
+        // carried length explicitly rather than relying on `%s` and the
+        // sentinel.
+        let il = emit_src(": w ( -- ) \"hi\" . ;");
+        assert!(
+            il.contains("data $strfmt = { b \"%.*s\", b 0 }"),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            il.contains("call $printf(l $strfmt, l "),
+            "unexpected IL: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_print_of_cstr_uses_string_format() {
+        // R9/criterion 9: `.` on a `cstr` prints via plain `%s` (`$sfmt`),
+        // since it has no carried length to prefer.
+        let il = emit_src(": w ( -- ) \"hi\" cstr . ;");
+        assert!(
+            il.contains("call $printf(l $sfmt, l "),
+            "unexpected IL: {il}"
+        );
+        assert!(
+            !il.contains("call $printf(l $strfmt"),
             "unexpected IL: {il}"
         );
     }

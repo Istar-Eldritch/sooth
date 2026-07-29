@@ -140,6 +140,13 @@ pub enum IrType {
     /// from `Int`: `drop` dispatches on a value's `IrType`, and dispatch must
     /// not key off a bare pointer.
     OwnedCell(OwnedCellId),
+    /// `str` (R4): the opaque address of a static `{ptr, len}` descriptor
+    /// (never runtime-allocated, R11), so at runtime it is one pointer, like
+    /// `Ptr`, but distinct in the IR so `.`/`len`/`cstr` can dispatch on it.
+    Str,
+    /// `cstr` (R5): a bare NUL-terminated byte pointer. Identical at runtime
+    /// to `Ptr`, distinct in the IR for the same dispatch reason as `Str`.
+    Cstr,
 }
 
 impl IrType {
@@ -182,6 +189,8 @@ pub fn ir_type_of(ty: Type) -> IrType {
         Type::Usize => IrType::Usize,
         Type::Isize => IrType::Isize,
         Type::Spy => IrType::Spy,
+        Type::Str => IrType::Str,
+        Type::Cstr => IrType::Cstr,
     }
 }
 
@@ -368,7 +377,7 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Usize => word_width,
         IrType::Isize => word_width,
         // A cell is a pointer, so its width defers to `Ptr`'s convention.
-        IrType::Ptr | IrType::OwnedCell(_) => 8,
+        IrType::Ptr | IrType::OwnedCell(_) | IrType::Str | IrType::Cstr => 8,
         // A spy is its `i64` tag.
         IrType::Spy => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
@@ -789,6 +798,11 @@ pub enum Instr {
     /// sign/zero-extend (widen), truncate-and-canonicalize (narrow), or relabel
     /// (same width); the frontend never spells the QBE op (R14).
     Conv(Value, Value),
+    /// `dst: Str = &<static descriptor for this literal's content>` (R6): the
+    /// backend emits the byte data (trailing NUL not counted in length, so
+    /// R4's sentinel invariant is free) and the `{ptr, len}` descriptor once
+    /// per distinct content, and takes the descriptor's address here.
+    StrLit(Value, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1753,6 +1767,11 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
+            TermKind::StrLit(s) => {
+                let v = self.fresh_value(IrType::Str);
+                self.push_instr(Instr::StrLit(v, s.clone()));
+                self.stack.push(v);
+            }
             TermKind::Call(name) => self.lower_call(name, term.span.line, tail),
             TermKind::Bind(names) => {
                 // R10: a binding is a compile-time rebinding of SSA values, so
@@ -1890,7 +1909,31 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
-            "fill" | "len" => self.lower_array_word(name),
+            "fill" => self.lower_array_word(name),
+            "len" => {
+                let top = *self.stack.last().expect("len: operand");
+                if self.value_type(top) == IrType::Str {
+                    // R8: consuming, unlike the array `len` fold: the
+                    // length is carried at runtime (offset 8 of the
+                    // descriptor), not derivable from the type.
+                    self.stack.pop();
+                    let addr = self.field_ptr(top, 8);
+                    let v = self.fresh_value(IrType::Usize);
+                    self.push_instr(Instr::FieldLoad(v, addr));
+                    self.stack.push(v);
+                } else {
+                    self.lower_array_word(name);
+                }
+            }
+            "cstr" => {
+                // R7: discard the length, keep the bytes pointer (offset 0
+                // of the descriptor).
+                let s = self.stack.pop().expect("cstr: str operand");
+                let addr = self.field_ptr(s, 0);
+                let v = self.fresh_value(IrType::Cstr);
+                self.push_instr(Instr::FieldLoad(v, addr));
+                self.stack.push(v);
+            }
             "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
             "@" | "!" | "+!" => self.lower_access_word(name),
             // The spy constructor `( i64 -- __spy )` is identity at runtime

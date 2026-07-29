@@ -1046,6 +1046,10 @@ impl<'t> Parser<'t> {
                 kind: TermKind::FloatLit(v),
                 span,
             }),
+            Token::Str(s) => Ok(Term {
+                kind: TermKind::StrLit(s),
+                span,
+            }),
             Token::Word(w) if w == "true" => Ok(Term {
                 kind: TermKind::BoolLit(true),
                 span,

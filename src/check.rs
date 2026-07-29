@@ -1129,7 +1129,14 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // every field position
         // anyway.
         Type::Ref(..) => None,
-        Type::Int(_) | Type::Float(_) | Type::Bool | Type::Usize | Type::Isize | Type::Spy => None,
+        Type::Int(_)
+        | Type::Float(_)
+        | Type::Bool
+        | Type::Usize
+        | Type::Isize
+        | Type::Spy
+        | Type::Str
+        | Type::Cstr => None,
     }
 }
 
@@ -2125,6 +2132,21 @@ fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String 
     }
 }
 
+/// `cstr` applied to something other than `str` (R7): the only legal source
+/// for the discard-the-length conversion, so the error names it by name
+/// rather than as a generic type mismatch.
+fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `cstr` converts a `str`, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `cstr` converts a `str`, found `{found}`")
+        }
+    }
+}
+
 /// R4 (D3): `dup`/`over` applied to a non-`Copy` value, in the DESIGN.md form.
 /// A linear value has no bits to copy: the only ways to get a second one are to
 /// thread this one through or to acquire another explicitly.
@@ -2522,6 +2544,10 @@ fn check_term(
             stack.push(Slot::computed(Type::Bool));
             Ok(stack)
         }
+        TermKind::StrLit(_) => {
+            stack.push(Slot::computed(Type::Str));
+            Ok(stack)
+        }
         TermKind::Bind(names) => {
             // R1: pop one value per name at this point, leftmost name deepest,
             // the same shape whether this is the entry binding or a mid-body
@@ -2626,6 +2652,9 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
+                return Ok(stack);
+            }
+            if let Some(stack) = check_str_word(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
             if let Some(stack) = check_array_word(name, span, &mut stack, ctx, arrays)? {
@@ -2959,7 +2988,7 @@ fn check_operator(
                 return Err(need(".", 1, n));
             }
             let a = stack[n - 1];
-            if !a.ty.is_numeric() && !a.ty.is_bool() {
+            if !a.ty.is_numeric() && !a.ty.is_bool() && !matches!(a.ty, Type::Str | Type::Cstr) {
                 return Err(print_requires_printable_error(ctx, span, a.ty));
             }
             stack.truncate(n - 1);
@@ -3649,6 +3678,45 @@ fn check_access_word(
 ///
 /// Element access is a reference word (`&>`/`&!>` then `@`/`!`), not an
 /// array word: it goes through `check_access_word` instead.
+/// The two `str`-only words: `len ( str -- usize )` (R8) and `cstr
+/// ( str -- cstr )` (R7, the one explicit `str` -> `cstr` conversion — there
+/// is no reverse). Tried before `check_array_word`, whose own `len` claims
+/// the name unconditionally otherwise: returning `None` here when the
+/// operand isn't a `str` lets that array path still see it.
+fn check_str_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+) -> Result<Option<Vec<Slot>>, String> {
+    match name {
+        "len" => {
+            let Some(top) = stack.last() else {
+                return Ok(None);
+            };
+            if top.ty != Type::Str {
+                return Ok(None);
+            }
+            stack.pop();
+            stack.push(Slot::computed(Type::Usize));
+        }
+        "cstr" => {
+            let n = stack.len();
+            if n < 1 {
+                return Err(underflow_error(ctx, span, "cstr", 1, n));
+            }
+            let top = stack[n - 1];
+            if top.ty != Type::Str {
+                return Err(cstr_conversion_source_error(ctx, span, top.ty));
+            }
+            stack.truncate(n - 1);
+            stack.push(Slot::computed(Type::Cstr));
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
 fn check_array_word(
     name: &str,
     span: Span,
@@ -3990,6 +4058,16 @@ mod tests {
     fn check_lerp_is_ok() {
         let src = std::fs::read_to_string("examples/lerp.sth").unwrap();
         check_src(&src).unwrap();
+    }
+
+    #[test]
+    fn str_and_cstr_are_copy_and_storable() {
+        // Criterion 15/R10: `dup` is accepted on both, and a `str` is
+        // storable in a struct field (never seen as containing a
+        // reference, and Copy, so no linearity obligation on the field).
+        let src = "type: Box s str ;\n\
+: main ( -- )\n  \"hi\" dup drop drop\n  \"hi\" cstr dup drop drop\n  \"hi\" Box drop ;";
+        check_src(src).unwrap();
     }
 
     #[test]
