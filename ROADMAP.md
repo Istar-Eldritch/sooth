@@ -126,7 +126,8 @@ can denote either arm's place, a value carries a *set* of regions rather than on
 merge unions the arms and **no aliasing rejection happens at a join**: selecting one of two
 owned records compiles, and the error lands at the borrow where it can name both ends.
 `examples/refs.sth` dogfoods it.
-**Next action: Phase 3 Slice 7** (opt-in RC).
+**Next action: Phase 3 Slice 8a** (typed foreign calls + string slices). Slice 7's opt-in RC is
+deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -532,19 +533,48 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    borrows. No residual form was added. Reified residuals remain worth having only where
    the focus must escape, which is a later slice's zipper; escape prevention forbids storing
    a reference, so the zipper waits for that slice's RC rather than for a residual type.
-7. **Opt-in RC (`Rc`/`Arc`-equivalent).** Shared ownership, last ref frees. The softest
-   slice; could slip toward Phase 6 if it wants a stdlib home.
-8. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** The
-   Phase 3 exit dogfood: open/read/close files, with the compiler catching a deliberate
-   double-use and a forgotten `close`. **This slice is where a user can first attach their
-   own cleanup code to a type**, rather than only inheriting disposal by composition. It
-   lands here, not earlier and not in Phase 4, because a mechanism wants two dissimilar
-   real clients to be designed against: `free` (pointer + size) from slice 2 and `close`
-   (an integer handle, and it can fail) from this one. Designing it in slice 2 from the
-   buffer alone would be guessing. Open questions to settle here, not before: whether a
-   user destructor runs *before* or *instead of* the synthesized field glue, and how a
-   destructor body is stopped from dropping its own receiver and recursing forever. Note
-   this is destructor *bodies* only; `drop` becoming a polymorphic word is still Phase 4.
+7. **Opt-in RC (`Rc`/`Arc`-equivalent).** **Deferred to Phase 6**, taking the stdlib-home
+   escape hatch this entry always carried. It is not named in Phase 3's exit criteria, no
+   current dogfood needs shared ownership, second-class references already cover sharing
+   within a dynamic extent, and an arena-plus-index owning container covers graph-shaped data
+   without it. It is also the one deliberate crack in the linear spine (refcount traffic, and
+   cycle leaks without a `Weak`), which sits badly mid-phase in the slice whose point is
+   nailing down deterministic linear disposal. In Phase 6 it lands beside `Box`/`Vec`/`Map`/
+   `String`, which is the coherent home: it is a way to point at heap data, not a way to
+   dispose of it.
+8. **Resources as linear values (fds, hosted) + user-definable destructor bodies.** Split in
+   two, because the two mechanisms are orthogonal and `close` needs to *exist* before the
+   destructor mechanism can be designed against it (this entry always wanted "two dissimilar
+   real clients": `free`, pointer + size, from slice 2, and `close`, an integer handle that can
+   fail, from here).
+
+   **8a — typed foreign calls + string slices.** One `extern:` declaration form (a C symbol
+   plus a stack effect) instead of per-syscall compiler builtins, so every future hosted call
+   is library code. This is not new machinery so much as user-facing access to machinery the
+   backend already uses six times over (`malloc`, `free`, `printf`, `dprintf`, `exit`,
+   `getenv` are all already called by name). An untyped generic syscall word was considered
+   and rejected: it would force `Ptr[T]` to an integer, breaking the backend-neutral invariant
+   the WASM lowering depends on, and syscall numbers are neither OS- nor arch-portable. String
+   slices land here because there are none today (no `Token::Str` exists; `"hi"` lexes as a
+   word), which means **this phase's stated exit criterion was unreachable as written** until
+   they do. `str`/`cstr` per DESIGN.md's Memory model; buffer slicing stays out (see DESIGN.md
+   Open / deferred). Exit: a foreign call declared in Sooth, taking a literal `str` and a
+   reference, running.
+
+   **8b — resources and user destructor bodies.** The Phase 3 exit dogfood: open/read/close a
+   file, with the compiler catching a deliberate double-use and a forgotten `close`. **This is
+   where a user can first attach their own cleanup code to a type**, rather than only
+   inheriting disposal by composition. It needs *no new declaration form*: a user destructor
+   is an overload of `drop` for a concrete type, and defining one forces that type linear
+   (a struct holding one `i64` would otherwise be `Copy`), which is the same `Copy`/destructor
+   exclusion Rust enforces as E0184. That makes `drop` the first overloaded-by-input-type word,
+   a miniature early instance of Phase 4's planned ad-hoc dispatch rather than a parallel
+   mechanism. The two questions this entry parked are answered: the body runs **instead of**
+   the synthesized field glue ("nothing auto-drops" already makes it answerable for its own
+   fields through the ordinary must-consume rule, whereas running both would double-dispose),
+   and infinite self-recursion is closed by rejecting `drop` on a `T` inside `T`'s own `drop`
+   body, pointing at `T>` destructure instead. Note this is destructor *bodies* only; `drop`
+   becoming fully polymorphic is still Phase 4.
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
 

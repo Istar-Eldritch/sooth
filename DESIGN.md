@@ -181,7 +181,7 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
 - Checked stack effects (the compile-time virtual-stack pass, needed for codegen
   anyway).
 - Concrete monomorphic types: the numeric tower, `bool`, fixed arrays, slices,
-  string slices, records/structs, enums/ADTs.
+  string slices (`str`/`cstr`, see Memory model), records/structs, enums/ADTs.
 - Enough parametric polymorphism to give `dup`/`swap`/`max` honest signatures:
   type variables (`'T`) and a row variable (`..s`, the rest of the stack). This is
   Kitten-style row polymorphism, kept minimal.
@@ -575,9 +575,28 @@ rows, no borrow analysis needed to write the compiler in it.
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
-- Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in; second-class
-  refs (Hylo-style), no lifetime-tracking borrow checker; non-null pointers; hidden/checked return
-  stack.
+- Memory: ownership + linear types, deterministic explicit drop, no GC, RC opt-in (deferred to
+  the `alloc` layer, Phase 6); second-class refs (Hylo-style), no lifetime-tracking borrow
+  checker; non-null pointers; hidden/checked return stack.
+- Strings: two types, following Zig. `str` is pointer + length *and* guarantees a NUL at
+  `byte[len]`, so Sooth code always reads the length and never scans, while C receives the
+  pointer for free. `cstr` is pointer-only with an unknown length, which is what C hands back;
+  `str` -> `cstr` drops the length for nothing, `cstr` -> `str` costs an explicit scan. A
+  literal satisfies `str`'s invariant natively. Arbitrary substring slicing cannot produce a
+  `str` (a substring's end is not a NUL) and is deferred besides, see Open / deferred.
+- A user-supplied destructor is an overload of `drop` for a concrete type, not a new
+  declaration form, and defining one *forces* that type linear regardless of what its fields
+  would otherwise imply. `Copy` and a user destructor are mutually exclusive, for the reason
+  Rust makes them so (E0184): a `Copy` type could be duplicated and each copy discarded, so a
+  destructive body would run more than once for one logical resource. The body runs *instead
+  of* the synthesized field glue, never before or alongside it, because "nothing auto-drops"
+  already makes the body answerable for its own fields via the ordinary must-consume rule.
+- Foreign calls: one typed declaration form (`extern:`, a symbol plus a stack effect) rather
+  than per-call compiler builtins or an untyped generic syscall word. A raw syscall word is
+  ruled out: it would force `Ptr[T]` to become an integer, breaking the backend-neutral
+  invariant the WASM lowering depends on, and syscall numbers are neither OS- nor
+  arch-portable. Scalars and references may cross; owned aggregates and `^` returns may not.
+  The declaration site is itself the trust boundary, so there is no separate `unsafe` marker.
 - Codegen: compile-time virtual stack to native; words as functions.
 - Backend: QBE (small, legible, multi-arch native + C ABI for free); no LLVM. Owning a
   hand-written native backend is deferred, not ruled out (the joy is the language, not
@@ -620,6 +639,17 @@ rows, no borrow analysis needed to write the compiler in it.
   drop set is empty and the concern is vacuous; the back-edge is the **defined disposal
   point**, so it has a home when a later Phase 3 slice lets a linear value ride a loop
   (Phase 3 Slice 1 defers loop-carried linear values).
+- **Slicing a buffer into a `str`.** A literal-rooted `str` points at static data and cannot
+  dangle, so it is unrestricted. A `str` slicing a heap `^[u8 N]` or a local buffer *is* a
+  borrow, and would bypass the escape rules entirely because it is not spelled `&`. Spelling
+  it as a reference does not work either: a word returning a borrow is exactly the shape the
+  no-declared-output-reference rule forbids, and that rule is what stands in for lifetimes.
+  Restricting a buffer-derived `str` the way `&T` is restricted would forbid returning it,
+  which unspells the slicing word again; making the restriction depend on provenance would
+  mean a `( str -- )` signature no longer says which kind it holds, and honest signatures are
+  what the no-lifetimes bet trades on. So: `str` points at static data only, until a real
+  client pushes on this. The likely client is Phase 9's self-hosted lexer, which is also where
+  the evidence would exist to justify whatever it costs.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after
