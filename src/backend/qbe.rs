@@ -65,9 +65,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oomfmt = { b \"sooth: out of memory (allocation of %ld bytes failed)\\n\", b 0 }\n",
     );
-    // `str` prints via `%.*s` (R9): the carried length is passed explicitly.
-    // R4 promises no terminator, so `%s` would read past the length for
-    // anything but a literal; the bound is a soundness requirement.
+    // `str`'s print format; see `Instr::Print`'s `IrType::Str` arm for why `%.*s`.
     out.push_str("data $strfmt = { b \"%.*s\", b 0 }\n");
     let str_lits = collect_str_literals(&ir.funcs);
     for (content, idx) in &str_lits {
@@ -598,6 +596,11 @@ fn collect_str_literals(funcs: &[IrFunc]) -> std::collections::HashMap<String, u
     lits
 }
 
+/// The byte offset of a `str` descriptor's length word, matching the
+/// `{ l $strb{idx}, l <len> }` shape `emit_str_literal` writes below. Read by
+/// `Instr::StrLen`'s emission, the descriptor's only other consumer.
+const STR_LEN_OFFSET: u32 = 8;
+
 /// Emit one string literal's static data (R6): the byte content plus a
 /// trailing NUL the descriptor's `len` does **not** count, which is what makes
 /// R7's `cstr` conversion sound for a literal-rooted `str` (R11) without R4
@@ -1071,6 +1074,21 @@ fn emit_instr(
             let op = field_store_op(ty_of(value_types, *v));
             writeln!(out, "\t{op} {}, {}", val(*v), val(*ptr))
         }
+        // `src`'s carried length is the descriptor's second word: this file
+        // owns the offset (`STR_LEN_OFFSET`) because `emit_str_literal` is
+        // what wrote the descriptor's `{ptr, len}` shape in the first place
+        // (CODE FIX 3: the IR states intent, not a byte offset).
+        Instr::StrLen(dst, src) => {
+            let addr = format!("%straddr{ext_id}");
+            *ext_id += 1;
+            writeln!(out, "\t{addr} =l add {}, {STR_LEN_OFFSET}", val(*src)).unwrap();
+            writeln!(out, "\t{} =l loadl {addr}", val(*dst))
+        }
+        // `src`'s bytes pointer is the descriptor's first word, so no offset
+        // is needed: `src`'s own address already points at it.
+        Instr::StrPtr(dst, src) => {
+            writeln!(out, "\t{} =l loadl {}", val(*dst), val(*src))
+        }
         Instr::Load(dst, ptr) => {
             // The load width follows the destination's `IrType` (R20): a float
             // slot loads at its `s`/`d` width so its bits re-enter as a true
@@ -1344,9 +1362,8 @@ mod tests {
 
     #[test]
     fn emit_print_of_str_uses_precision_format() {
-        // R9/criterion 8: `.` on a `str` prints via `%.*s`, passing the
-        // carried length explicitly rather than relying on `%s` and a
-        // terminator R4 does not promise.
+        // R9/criterion 8: `.` on a `str` prints via `%.*s`; see `Instr::Print`'s
+        // `IrType::Str` arm for why.
         let il = emit_src(": w ( -- ) \"hi\" . ;");
         assert!(
             il.contains("data $strfmt = { b \"%.*s\", b 0 }"),

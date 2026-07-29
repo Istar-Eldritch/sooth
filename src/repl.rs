@@ -204,6 +204,17 @@ pub fn format_stack(
                 vals.push(format!("<{name}>"));
                 cell += 1;
             }
+            // A `str`/`cstr` slot is an opaque address like a cell slot, so it
+            // gets the same placeholder treatment rather than dereferencing
+            // its descriptor/bytes to print content.
+            Type::Str => {
+                vals.push("<str>".to_string());
+                cell += 1;
+            }
+            Type::Cstr => {
+                vals.push("<cstr>".to_string());
+                cell += 1;
+            }
             _ => {
                 let v = buf[cell];
                 vals.push(match ty {
@@ -810,6 +821,25 @@ mod tests {
         assert_eq!(
             format_stack(&[123, 99], &[cell_ty, Type::I64], &[], &[], &[]),
             "stack: <^i64> 99"
+        );
+    }
+
+    #[test]
+    fn format_stack_str_slot_shows_placeholder_and_offsets_past_it() {
+        // A `str` slot's descriptor address is not dereferenced for content;
+        // it renders as `<str>` and offsets past its one carried cell, like a
+        // cell slot.
+        assert_eq!(
+            format_stack(&[0, 99], &[Type::Str, Type::I64], &[], &[], &[]),
+            "stack: <str> 99"
+        );
+    }
+
+    #[test]
+    fn format_stack_cstr_slot_shows_placeholder_and_offsets_past_it() {
+        assert_eq!(
+            format_stack(&[0, 99], &[Type::Cstr, Type::I64], &[], &[], &[]),
+            "stack: <cstr> 99"
         );
     }
 

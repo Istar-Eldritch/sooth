@@ -804,6 +804,14 @@ pub enum Instr {
     /// and the `{ptr, len}` descriptor once per distinct content, and takes the
     /// descriptor's address here.
     StrLit(Value, String),
+    /// `dst: Usize = src`'s carried length (R8). States intent rather than an
+    /// offset: the descriptor's byte layout is decided once, in the backend,
+    /// by `emit_str_literal`, which is also the only place that then needs to
+    /// know where the length word sits (keeps `Ptr[T]` opaque here).
+    StrLen(Value, Value),
+    /// `dst: Cstr = src`'s bytes pointer, discarding the length (R7). Mirrors
+    /// `StrLen`: no offset spelled here, for the same reason.
+    StrPtr(Value, Value),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1397,6 +1405,21 @@ pub fn lower_line(
                 b.push_instr(Instr::Load(v, ptr));
                 stack.push(v);
             }
+            // A carried `str`/`cstr` slot loads its pointer but keeps its own
+            // `IrType`, for the same reason a spy or cell slot does: a later
+            // `len`/`.`/`cstr` in the line dispatches on the value's `IrType`
+            // (e.g. `len`'s `value_type(top) == IrType::Str` check), which the
+            // generic `I64` fallthrough below would silently defeat.
+            IrType::Str => {
+                let v = b.fresh_value(IrType::Str);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
+            IrType::Cstr => {
+                let v = b.fresh_value(IrType::Cstr);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
             _ => {
                 let v = b.fresh_value(IrType::I64);
                 b.push_instr(Instr::Load(v, ptr));
@@ -1932,24 +1955,21 @@ impl<'a> FuncBuilder<'a> {
                 let top = *self.stack.last().expect("len: operand");
                 if self.value_type(top) == IrType::Str {
                     // R8: consuming, unlike the array `len` fold: the
-                    // length is carried at runtime (offset 8 of the
-                    // descriptor), not derivable from the type.
+                    // length is carried at runtime, not derivable from the
+                    // type.
                     self.stack.pop();
-                    let addr = self.field_ptr(top, 8);
                     let v = self.fresh_value(IrType::Usize);
-                    self.push_instr(Instr::FieldLoad(v, addr));
+                    self.push_instr(Instr::StrLen(v, top));
                     self.stack.push(v);
                 } else {
                     self.lower_array_word(name);
                 }
             }
             "cstr" => {
-                // R7: discard the length, keep the bytes pointer (offset 0
-                // of the descriptor).
+                // R7: discard the length, keep the bytes pointer.
                 let s = self.stack.pop().expect("cstr: str operand");
-                let addr = self.field_ptr(s, 0);
                 let v = self.fresh_value(IrType::Cstr);
-                self.push_instr(Instr::FieldLoad(v, addr));
+                self.push_instr(Instr::StrPtr(v, s));
                 self.stack.push(v);
             }
             "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
@@ -3619,6 +3639,50 @@ mod tests {
         assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 0);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 0);
         assert_eq!(count(w, |i| matches!(i, Instr::Load(..))), 0);
+    }
+
+    #[test]
+    fn str_literal_lowers_to_a_static_data_reference() {
+        // R6: a `str` literal is exactly one `Instr::StrLit`, the backend's
+        // hook to emit the static descriptor and take its address.
+        let ir = lower_src(": w ( -- str ) \"hi\" ;");
+        let w = &ir.funcs[0];
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::StrLit(_, s) if s == "hi")),
+            1
+        );
+    }
+
+    #[test]
+    fn len_of_str_lowers_to_str_len_with_no_call() {
+        // R8/CODE FIX 3: `len` on a `str` lowers to the dedicated `StrLen`
+        // instruction, not a call and not a hand-written byte offset.
+        let ir = lower_src(": w ( -- usize ) \"hi\" len ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::StrLen(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    #[test]
+    fn cstr_conversion_lowers_to_str_ptr() {
+        // R7/CODE FIX 3: `cstr` lowers to the dedicated `StrPtr` instruction.
+        let ir = lower_src(": w ( -- cstr ) \"hi\" cstr ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::StrPtr(..))), 1);
+    }
+
+    #[test]
+    fn len_and_cstr_of_str_emit_no_byte_offset_instruction() {
+        // CODE FIX 3: neither `len` nor `cstr` reads the descriptor via a
+        // hand-written `field_ptr` offset (`PtrOffset` + `FieldLoad`) any
+        // more; both state their intent through a dedicated instruction
+        // instead, keeping the descriptor's layout a backend-only concern.
+        let ir = lower_src(": w ( -- ) \"hi\" len drop \"hi\" cstr drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::PtrOffset(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::StrLen(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::StrPtr(..))), 1);
     }
 
     #[test]

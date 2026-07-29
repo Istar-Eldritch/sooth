@@ -126,7 +126,21 @@ can denote either arm's place, a value carries a *set* of regions rather than on
 merge unions the arms and **no aliasing rejection happens at a join**: selecting one of two
 owned records compiles, and the error lands at the borrow where it can name both ends.
 `examples/refs.sth` dogfoods it.
-**Next action: Phase 3 Slice 8a** (typed foreign calls + string slices). Slice 7's opt-in RC is
+**Phase 3 Slice 8a (typed foreign calls + string slices) is complete**: one `extern:` declaration
+form (a C symbol string plus a stack effect), registered into the ordinary word environment so
+existing arity/type checks apply unchanged; the boundary type set is the numeric tower, `&T`/`&!T`,
+and `cstr` (amended during implementation to *exclude* `str`, which is two machine words matching
+no C prototype, not a scalar or a single opaque `Ptr`); owned aggregates, `str`, and an
+owned/reference output are rejected at the declaration. Two new string types: `str` (one opaque
+pointer to a static two-word `{bytes_ptr, len}` descriptor, `IrType::Str`) and `cstr` (a bare
+NUL-terminated pointer, `IrType::Cstr`), both `Copy`, both static-rooted except that a `cstr` may
+also come back from a declared foreign call, where the declaration site's trust governs instead
+(no `unsafe` marker). String literals (`Token::Str`, `\n \t \\ \" \0` escapes) lower to static
+data with an uncounted trailing NUL, which is what makes `len` (carried, no scan) and C's `strlen`
+agree on NUL-free content, and what the explicit, one-way `cstr` conversion relies on. `.` prints
+a `str` via `%.*s` bounded by the carried length and a `cstr` via `%s`. `examples/strings.sth`
+dogfoods it.
+**Next action: Phase 3 Slice 8b** (resources and user destructor bodies). Slice 7's opt-in RC is
 deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -548,18 +562,23 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    real clients": `free`, pointer + size, from slice 2, and `close`, an integer handle that can
    fail, from here).
 
-   **8a — typed foreign calls + string slices.** One `extern:` declaration form (a C symbol
-   plus a stack effect) instead of per-syscall compiler builtins, so every future hosted call
-   is library code. This is not new machinery so much as user-facing access to machinery the
-   backend already uses six times over (`malloc`, `free`, `printf`, `dprintf`, `exit`,
-   `getenv` are all already called by name). An untyped generic syscall word was considered
-   and rejected: it would force `Ptr[T]` to an integer, breaking the backend-neutral invariant
-   the WASM lowering depends on, and syscall numbers are neither OS- nor arch-portable. String
-   slices land here because there are none today (no `Token::Str` exists; `"hi"` lexes as a
-   word), which means **this phase's stated exit criterion was unreachable as written** until
-   they do. `str`/`cstr` per DESIGN.md's Memory model; buffer slicing stays out (see DESIGN.md
-   Open / deferred). Exit: a foreign call declared in Sooth, taking a literal `str` and a
-   reference, running.
+   **8a — typed foreign calls + string slices. ✅ done** (brief + spec:
+   `docs/phase3-slice8a-spec.md`). One `extern:` declaration form (a C symbol plus a stack
+   effect) instead of per-syscall compiler builtins, so every future hosted call is library
+   code. This is not new machinery so much as user-facing access to machinery the backend
+   already uses six times over (`malloc`, `free`, `printf`, `dprintf`, `exit`, `getenv` are
+   all already called by name). An untyped generic syscall word was considered and rejected:
+   it would force `Ptr[T]` to an integer, breaking the backend-neutral invariant the WASM
+   lowering depends on, and syscall numbers are neither OS- nor arch-portable. String slices
+   land here because there are none today (no `Token::Str` exists; `"hi"` lexes as a word),
+   which means **this phase's stated exit criterion was unreachable as written** until they
+   do. `str`/`cstr` per DESIGN.md's Memory model; buffer slicing stays out (see DESIGN.md Open
+   / deferred). **Exit criterion amended during implementation**: the original wording ("a
+   foreign call declared in Sooth, taking a literal `str` and a reference, running") is
+   unmeetable as written, since `str` is rejected at every `extern:` boundary (a descriptor
+   handle matches no C prototype, R2/R3) — so the exit is a foreign call declared in Sooth,
+   taking a literal `str` **converted with `cstr`**, and a reference, running;
+   `examples/strings.sth` dogfoods it.
 
    **8b — resources and user destructor bodies.** The Phase 3 exit dogfood: open/read/close a
    file, with the compiler catching a deliberate double-use and a forgotten `close`. **This is

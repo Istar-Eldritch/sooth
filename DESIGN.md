@@ -651,15 +651,21 @@ rows, no borrow analysis needed to write the compiler in it.
   **spelling**: `str` is the static view, `&str` / `&[u8]` / `&![u8]` are borrowed ones, a leading
   `&` meaning exactly what `contains_reference` already reports, and a static view coercing
   one-way into a borrowed position (`'static: 'a` collapsed to two points, which would be the only
-  subtyping in the language). No new checks fall out of that: "is borrowed" as the
-  `contains_reference` answer routes a borrowed view through all six existing no-stored-reference
-  positions, and "is shared" as the `is_copy` answer is the rule `Type::Ref` already uses. `cstr`
-  needs the same bit, or it becomes a side door that launders a borrow into an escapable pointer.
-  What stays true is that a borrowed view **cannot be returned**: the no-declared-output-reference
-  rule is precisely what keeps a two-point lattice from having to grow into lifetime variables, so
-  a word handing a region back returns indices instead. Still deferred until a real client pushes
-  on it. The likely client is Phase 9's self-hosted lexer, which wants byte offsets for
-  diagnostics anyway, and is also where the evidence would exist to justify whatever it costs.
+  subtyping in the language). For `contains_reference` itself, no new checks fall out: "is
+  borrowed" as that answer routes a borrowed view through every existing no-stored-reference
+  position phrased over it (not "all six": the set of such positions can grow), and "is shared" as
+  the `is_copy` answer is the rule `Type::Ref` already uses. `cstr` needs the same bit, or it
+  becomes a side door that launders a borrow into an escapable pointer. But `is_copy` is not the
+  last knob: `is_linear` is `!ty.is_ref() && !is_copy(...)` (`check.rs`), and `Type::is_ref` is
+  `matches!(self, Type::Ref(..))` (`ast.rs`), so a borrowed view spelled as a new variant answering
+  only `is_copy = false` would be classified linear and acquire a drop obligation, exactly the
+  third disposal category this entry says a borrow must not have. `is_ref` is a third required
+  answer, alongside `contains_reference` and `is_copy`. What stays true is that a borrowed view
+  **cannot be returned**: the no-declared-output-reference rule is precisely what keeps a
+  two-point lattice from having to grow into lifetime variables, so a word handing a region back
+  returns indices instead. Still deferred until a real client pushes on it. The likely client is
+  Phase 9's self-hosted lexer, which wants byte offsets for diagnostics anyway, and is also where
+  the evidence would exist to justify whatever it costs.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after
