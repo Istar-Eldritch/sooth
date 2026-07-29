@@ -2126,9 +2126,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_extern_declaration_registers_its_effect() {
-        // Criterion 4/R1: `extern:` parses at top level and its effect is
-        // recorded verbatim, alongside the explicit C symbol string.
+    fn parse_extern_declaration_records_its_effect() {
+        // Criterion 4/R1, parse half: `extern:` parses at top level and its
+        // effect is recorded verbatim, alongside the explicit C symbol string.
+        // That the effect is then *registered* is
+        // `check_extern_registers_its_effect_at_call_sites`.
         let module = parse_src(r#"extern: strlen ( cstr -- usize ) "strlen" ;"#).unwrap();
         assert_eq!(module.externs.len(), 1);
         let decl = &module.externs[0];

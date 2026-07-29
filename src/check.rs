@@ -907,12 +907,13 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 
 /// R1/R2/R3/R7/R12/R13/R14: every `extern:` declaration's own checks, run
 /// before its signature enters the word environment. R1's redeclaration
-/// check runs against `existing` (builtins plus struct/enum-generated
-/// words), the user's own `:` words, and every other `extern:` (in that
-/// order, first match wins); R2/R3 reject each forbidden boundary type at
-/// the declaration rather than at a call site; the output-reference
-/// rejection reuses `check_reference_free_signature`'s existing message
-/// rather than duplicating it (R3).
+/// check runs against the name-dispatched builtins (`BUILTIN_WORDS`),
+/// `existing` (`builtin_table`'s one fixed-effect builtin plus the
+/// struct/enum-generated words), the user's own `:` words, and every other
+/// `extern:` (in that order, first match wins); R2/R3 reject each forbidden
+/// boundary type at the declaration rather than at a call site; the
+/// output-reference rejection reuses `check_reference_free_signature`'s
+/// existing message rather than duplicating it (R3).
 ///
 /// R14: the symbol's *shape* is checked in the parser, but nothing checks
 /// that it *exists* — that needs a symbol table the compiler has no access
@@ -927,6 +928,9 @@ fn check_extern_decls(
 ) -> Result<(), String> {
     let mut seen: HashSet<&str> = HashSet::new();
     for decl in externs {
+        if is_builtin_word_name(decl.name.as_str()) {
+            return Err(extern_redeclaration_error(decl));
+        }
         if existing.contains_key(decl.name.as_str()) {
             return Err(extern_redeclaration_error(decl));
         }
@@ -942,6 +946,32 @@ fn check_extern_decls(
     Ok(())
 }
 
+/// R1: the builtin words `check_term` dispatches by name, in its probe chain,
+/// *before* the word environment is consulted at all. They are absent from
+/// `builtin_table` (which holds only the one builtin with a fixed effect), so
+/// an `extern:` naming one would be registered, never looked up, and silently
+/// do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
+/// words are dispatched in the same chain but are rejected earlier, against
+/// the declaration's name in the parser, so they are not repeated here.
+const BUILTIN_WORDS: &[&str] = &[
+    // check_shuffle
+    "dup", "drop", "swap", "over", "rot", // check_operator
+    "+", "-", "*", "/", "mod", "and", "or", "xor", "not", "shl", "shr", "=", "<", ">", "<=", ">=",
+    "<>", ".", // check_str_word
+    "len", "cstr", // check_array_word (`len` is shared with `check_str_word`)
+    "fill",
+];
+
+/// R1: whether `name` is dispatched as a builtin ahead of any environment
+/// lookup. Beyond the fixed names, `check_operator` claims every `>`-prefixed
+/// name with a non-empty remainder as a numeric conversion (`>u8`), erroring
+/// on an unrecognised target type rather than falling through, so no such
+/// name can reach a registered signature either. Bare `>` is the comparison
+/// operator, and is in the list.
+fn is_builtin_word_name(name: &str) -> bool {
+    BUILTIN_WORDS.contains(&name) || name.strip_prefix('>').is_some_and(|rest| !rest.is_empty())
+}
+
 /// R1: a located error for an `extern:` declaration redeclaring a name
 /// already registered as a builtin, a user `:` word, or another `extern:`.
 fn extern_redeclaration_error(decl: &ExternDecl) -> String {
@@ -952,8 +982,13 @@ fn extern_redeclaration_error(decl: &ExternDecl) -> String {
 }
 
 /// R2: the boundary type set an `extern:` slot may use in either position —
-/// the numeric tower, `bool`, `&T`/`&!T`, `str`, and `cstr`. Each is either a
-/// scalar or an opaque `Ptr` the backend already passes across a call.
+/// the numeric tower, `bool`, `&T`/`&!T`, and `cstr`. Each is either a scalar
+/// or an opaque `Ptr` the backend already passes across a call.
+///
+/// `str` is excluded despite R2's list naming it, on R2's own criterion: R4
+/// makes it *two* machine words, so it is neither a scalar nor a single `Ptr`
+/// and matches no C prototype without an invented multi-argument ABI. See
+/// `extern_str_input_error`/`extern_str_output_error` for each direction.
 fn is_extern_boundary_scalar(ty: Type) -> bool {
     matches!(
         ty,
@@ -963,7 +998,6 @@ fn is_extern_boundary_scalar(ty: Type) -> bool {
             | Type::Usize
             | Type::Isize
             | Type::Ref(..)
-            | Type::Str
             | Type::Cstr
     )
 }
@@ -977,6 +1011,9 @@ fn is_extern_boundary_scalar(ty: Type) -> bool {
 /// the allocator did not hand out is a sharper reason than the generic one.
 fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
     for slot in &decl.effect.inputs {
+        if matches!(slot.ty, Type::Str) {
+            return Err(extern_str_input_error(decl));
+        }
         if !is_extern_boundary_scalar(slot.ty) {
             return Err(extern_boundary_type_error(decl, slot.ty, "input"));
         }
@@ -985,12 +1022,35 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
         if is_extern_boundary_scalar(slot.ty) {
             continue;
         }
+        if matches!(slot.ty, Type::Str) {
+            return Err(extern_str_output_error(decl));
+        }
         if matches!(slot.ty, Type::OwnedCell(..)) {
             return Err(extern_owned_pointer_output_error(decl, slot.ty));
         }
         return Err(extern_boundary_type_error(decl, slot.ty, "output"));
     }
     Ok(())
+}
+
+/// R2/R7: a `str` input has no C prototype (R4 makes it two machine words),
+/// and the conversion that gives it one is total — `cstr` is sound for every
+/// `str` under R4's sentinel — so the rejection names it.
+fn extern_str_input_error(decl: &ExternDecl) -> String {
+    format!(
+        "error: `extern: {}` declares the input `str` (line {}, col {})\n  a `str` is a pointer and a length, which matches no C parameter; declare `cstr` and convert with `cstr` at the call site",
+        decl.name, decl.span.line, decl.span.col
+    )
+}
+
+/// R11: a returned `str` would be a `str` not built from a literal, which is
+/// the invariant R10's `Copy`/non-escaping status rests on. C supplies no
+/// length either, so there is nothing to build one from.
+fn extern_str_output_error(decl: &ExternDecl) -> String {
+    format!(
+        "error: `extern: {}` cannot return a `str` (line {}, col {})\n  a `str` may point at static data only, and C supplies no length; declare `cstr`",
+        decl.name, decl.span.line, decl.span.col
+    )
 }
 
 /// R3: the rejection for a boundary-ineligible slot, worded by what the type
@@ -1008,7 +1068,7 @@ fn extern_boundary_type_error(decl: &ExternDecl, ty: Type, position: &str) -> St
 
 fn extern_owned_aggregate_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
     format!(
-        "error: `extern: {}` declares the {position} `{}`, an owned aggregate (line {}, col {})\n  ownership across the C boundary has no answer and no client; only the numeric tower, `&T`/`&!T`, `str`, and `cstr` may cross",
+        "error: `extern: {}` declares the {position} `{}`, an owned aggregate (line {}, col {})\n  ownership across the C boundary has no answer and no client; only the numeric tower, `&T`/`&!T`, and `cstr` may cross",
         decl.name, ty, decl.span.line, decl.span.col
     )
 }
@@ -4255,9 +4315,55 @@ mod tests {
 
     #[test]
     fn check_extern_redeclaring_a_builtin_is_error() {
+        // Criterion 5/R1: every builtin `check_term` dispatches by name before
+        // the env lookup, plus the `>`-prefixed conversion family. None is in
+        // `builtin_table`, so without the `BUILTIN_WORDS` gate the declaration
+        // would be accepted, never consulted, and silently do nothing.
+        for name in BUILTIN_WORDS.iter().copied().chain([">u8", ">f64"]) {
+            let src = format!("extern: {name} ( i64 -- i64 ) \"s\" ;");
+            let Err(err) = check_src(&src) else {
+                panic!("`extern: {name}` was accepted");
+            };
+            assert!(
+                err.contains("redeclares"),
+                "unexpected message for `{name}`: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn check_extern_shadowing_a_builtin_does_not_change_its_meaning() {
+        // R1's reason for existing: before the gate, this compiled, and `dup`
+        // at the call site still meant the builtin with no diagnostic at all.
+        let src = "extern: dup ( i64 -- i64 ) \"mydup\" ;\n: main ( -- ) 1 dup . . ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_redeclaring_the_spy_builtin_is_error() {
+        // R1: `__spy` is the one builtin carried in `builtin_table`, so it is
+        // caught by the `existing` lookup rather than by `BUILTIN_WORDS`.
         let src = "extern: __spy ( i64 -- __spy ) \"spy\" ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_registers_its_effect_at_call_sites() {
+        // Criterion 4/R1: registration is what makes the existing arity and
+        // type checks apply to a foreign call unchanged. Parsing it is not
+        // enough, so assert the effect is actually consulted.
+        let ok =
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) \"hi\" cstr strlen . ;";
+        check_src(ok).unwrap();
+        let underflow = "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) strlen . ;";
+        let err = check_src(underflow).unwrap_err();
+        assert!(err.contains("strlen"), "unexpected message: {err}");
+        let wrong_type =
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) true strlen . ;";
+        let err = check_src(wrong_type).unwrap_err();
+        assert!(err.contains("strlen"), "unexpected message: {err}");
     }
 
     #[test]
@@ -4289,10 +4395,34 @@ mod tests {
 
     #[test]
     fn check_extern_accepts_the_full_r2_boundary_type_set() {
-        // R2: the numeric tower, `bool`, `&T`/`&!T`, `str`, and `cstr` may
-        // all cross an `extern:` boundary in either position.
-        let src = "extern: f1 ( i64 u8 usize isize f64 f32 bool -- i64 ) \"f1\" ;\nextern: f2 ( &i64 &!i64 -- i64 ) \"f2\" ;\nextern: f3 ( str -- cstr ) \"f3\" ;";
+        // R2: the numeric tower, `bool`, `&T`/`&!T`, and `cstr` may all cross
+        // an `extern:` boundary in either position.
+        let src = "extern: f1 ( i64 u8 usize isize f64 f32 bool -- i64 ) \"f1\" ;\nextern: f2 ( &i64 &!i64 -- i64 ) \"f2\" ;\nextern: f3 ( cstr -- cstr ) \"f3\" ;";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn check_extern_with_str_parameter_is_error() {
+        // R2/R7: a `str` is two machine words (R4), so it matches no C
+        // parameter; the rejection names the total conversion to `cstr`.
+        let src = "extern: f ( str -- i64 ) \"f\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("matches no C parameter") && err.contains("`cstr`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_extern_returning_str_is_error() {
+        // R11: a returned `str` would be one not built from a literal, which
+        // is the invariant R10's `Copy`/non-escaping status rests on.
+        let src = "extern: f ( -- str ) \"f\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("cannot return a `str`") && err.contains("static data only"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

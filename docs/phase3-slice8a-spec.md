@@ -25,13 +25,23 @@ binding `openat` as `open` must be possible. Redeclaring a name that already exi
 user word, or another `extern:`) is a located error.
 
 **R2 — What may cross the boundary.** Exactly: the numeric tower (`i64`/`u8`/`usize`/`isize`/
-`f64`/`f32`/`bool`), `&T` and `&!T`, `str`, and `cstr`. These are the types whose machine
-representation is either a scalar or an opaque `Ptr` the backend already passes.
+`f64`/`f32`/`bool`), `&T` and `&!T`, and `cstr`. These are the types whose machine representation
+is either a scalar or an opaque `Ptr` the backend already passes.
+
+*Amended during phase 2:* an earlier draft of this list also named `str`, which contradicts the
+list's own criterion — R4 makes a `str` **two** machine words, so it is neither a scalar nor a
+single `Ptr`, and it matches no C prototype without an invented multi-argument ABI. It is
+rejected in both positions (R3), and nothing is lost: R7's `cstr` conversion is total, so every
+`str` a caller holds can cross as a `cstr`.
 
 **R3 — What may not, each with its own rejection at the declaration, not at the call.** An owned
 aggregate (struct/enum/array/`^T`) in any position: ownership across the boundary has no answer
-and no client. A `^T` in output position specifically: it would forge ownership of memory the
-allocator did not hand out. A reference in output position: already forbidden generally
+and no client. A `str` in any position (R2's amendment): in input position because it matches no
+C parameter, with the rejection naming the `cstr` conversion that does; in output position
+because C supplies no length, and because a `str` not built from a literal is exactly what R11
+forbids and R10's `Copy` status depends on. A `^T` in output position specifically: it would
+forge ownership of memory the allocator did not hand out. A reference in output position:
+already forbidden generally
 (`src/check.rs:1694-1718`), and the existing message is reused rather than duplicated. Variadic
 C functions: unrepresentable in a fixed effect, so out of scope, and an `extern:` cannot express
 them by construction (no syntax for it) — no new check needed, but a test pins that `printf`
@@ -126,8 +136,8 @@ deleting one. See Dogfood below.
 | 1 | a `str` literal lexes, with each escape | `lex_string_literal_handles_every_escape` |
 | 2 | an unterminated literal is a located lex error | `lex_unterminated_string_literal_is_error` |
 | 3 | an unknown escape is a located lex error | `lex_unknown_string_escape_is_error` |
-| 4 | `extern:` parses and registers its effect | `parse_extern_declaration_registers_its_effect` |
-| 5 | an `extern:` redeclaring an existing word is an error | `check_extern_redeclaring_a_word_is_error` |
+| 4 | `extern:` parses and registers its effect | `parse_extern_declaration_records_its_effect` (parse) + `check_extern_registers_its_effect_at_call_sites` (register) |
+| 5 | an `extern:` redeclaring an existing word is an error | `check_extern_redeclaring_a_word_is_error`, `check_extern_redeclaring_a_builtin_is_error` |
 | 6 | `len` on a `str` is the carried length, no call emitted | `len_of_a_str_emits_no_call_native` |
 | 7 | the literal's terminator is uncounted, so Sooth's length and C's `strlen` agree | `str_length_and_foreign_strlen_agree_native` |
 | 8 | `.` on a `str` prints via `%.*s` | `emit_print_of_str_uses_precision_format` |
@@ -176,6 +186,11 @@ Sooth's carried length, the second is C scanning to the terminator the backend e
 counting it.
 
 ## Out of scope
+
+`str` at an `extern:` boundary (R2's amendment, R3). Admitting it later means pinning an ABI —
+presumably a `str` input expanding to two C arguments, `ptr` then `len` — and an output would
+additionally need R11 relaxed. No client asks for either: the dogfood crosses with `cstr` in
+both directions.
 
 Slicing a buffer into a `str` (DESIGN.md Open / deferred). `cstr -> str` (R7). Growable `String`,
 concatenation, formatting, and anything allocator-touching (Phase 6's `alloc` layer). Variadic
