@@ -12,8 +12,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     intern_array_type, intern_owned_cell_type, intern_ref_type, ArrayDecl, Clause, EnumDecl,
-    EnumId, Module, OwnedCellDecl, RefDecl, Span, StackEffect, StructDecl, StructId, Term,
-    TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
+    EnumId, ExternDecl, Module, OwnedCellDecl, RefDecl, Span, StackEffect, StructDecl, StructId,
+    Term, TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -104,6 +104,11 @@ enum SlotMatch {
     Exact,
     LiteralSizeType,
     NeedsSizeConversion,
+    /// R7: a `str` found where a `cstr` is wanted. Never coerces silently
+    /// (there is no implicit conversion, only the explicit `cstr` word), so
+    /// this is its own case rather than falling into `Mismatch`, exactly as
+    /// `NeedsSizeConversion` is split from a plain mismatch above.
+    NeedsStrToCstrConversion,
     Mismatch,
 }
 
@@ -117,6 +122,9 @@ fn match_slot(found: Slot, want: Type) -> SlotMatch {
         } else {
             SlotMatch::NeedsSizeConversion
         };
+    }
+    if want == Type::Cstr && found.ty == Type::Str {
+        return SlotMatch::NeedsStrToCstrConversion;
     }
     SlotMatch::Mismatch
 }
@@ -848,6 +856,23 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     for (name, sig) in enum_generated_sigs(&module.enums) {
         env.insert(name, sig);
     }
+
+    // R1: an `extern:` declaration is registered into the same word
+    // environment as any other word, so every existing arity/type check
+    // applies to its call sites unchanged; but first, R1's redeclaration
+    // rule and R2/R3's boundary-type rules are checked at the declaration.
+    check_extern_decls(
+        &module.externs,
+        &module.words,
+        &env,
+        &module.structs,
+        &module.enums,
+        &module.arrays,
+    )?;
+    for decl in &module.externs {
+        env.insert(decl.name.clone(), sig_of(&decl.effect));
+    }
+
     for word in &module.words {
         env.insert(word.name.clone(), sig_of(&word.effect));
     }
@@ -872,11 +897,110 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         arrays,
         owned_cells,
         refs,
+        externs: _,
     } = module;
     for word in words.iter() {
         check_word(word, enums, &env, arrays, owned_cells, refs, structs)?;
     }
     Ok(())
+}
+
+/// R1/R2/R3/R7/R12/R13/R14: every `extern:` declaration's own checks, run
+/// before its signature enters the word environment. R1's redeclaration
+/// check runs against `existing` (builtins plus struct/enum-generated
+/// words), the user's own `:` words, and every other `extern:` (in that
+/// order, first match wins); R2/R3 reject each forbidden boundary type at
+/// the declaration rather than at a call site; the output-reference
+/// rejection reuses `check_reference_free_signature`'s existing message
+/// rather than duplicating it (R3).
+fn check_extern_decls(
+    externs: &[ExternDecl],
+    words: &[WordDef],
+    existing: &HashMap<String, Sig>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    for decl in externs {
+        if existing.contains_key(decl.name.as_str()) {
+            return Err(extern_redeclaration_error(decl));
+        }
+        if words.iter().any(|w| w.name == decl.name) {
+            return Err(extern_redeclaration_error(decl));
+        }
+        if !seen.insert(decl.name.as_str()) {
+            return Err(extern_redeclaration_error(decl));
+        }
+        check_reference_free_signature(&decl.name, &decl.effect, structs, enums, arrays)?;
+        check_extern_boundary_types(decl)?;
+    }
+    Ok(())
+}
+
+/// R1: a located error for an `extern:` declaration redeclaring a name
+/// already registered as a builtin, a user `:` word, or another `extern:`.
+fn extern_redeclaration_error(decl: &ExternDecl) -> String {
+    format!(
+        "error: `extern: {}` redeclares an existing word `{}` (line {}, col {})",
+        decl.name, decl.name, decl.span.line, decl.span.col
+    )
+}
+
+/// R2: the boundary type set an `extern:` slot may use in either position —
+/// the numeric tower, `bool`, `&T`/`&!T`, `str`, and `cstr`. Each is either a
+/// scalar or an opaque `Ptr` the backend already passes across a call.
+fn is_extern_boundary_scalar(ty: Type) -> bool {
+    matches!(
+        ty,
+        Type::Int(_)
+            | Type::Float(_)
+            | Type::Bool
+            | Type::Usize
+            | Type::Isize
+            | Type::Ref(..)
+            | Type::Str
+            | Type::Cstr
+    )
+}
+
+/// R3: each `extern:` boundary-type rejection not already covered by
+/// `check_reference_free_signature` (which independently rejects any
+/// reference-containing output before this ever runs). An owned aggregate
+/// (struct/enum/array/`^T`) is rejected in either position: ownership across
+/// the FFI boundary has no answer and no client. A `^T` specifically in
+/// output position gets its own message, since forging ownership of memory
+/// the allocator did not hand out is a sharper reason than the generic one.
+fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
+    for slot in &decl.effect.inputs {
+        if !is_extern_boundary_scalar(slot.ty) {
+            return Err(extern_owned_aggregate_error(decl, slot.ty, "input"));
+        }
+    }
+    for slot in &decl.effect.outputs {
+        if is_extern_boundary_scalar(slot.ty) {
+            continue;
+        }
+        if matches!(slot.ty, Type::OwnedCell(..)) {
+            return Err(extern_owned_pointer_output_error(decl, slot.ty));
+        }
+        return Err(extern_owned_aggregate_error(decl, slot.ty, "output"));
+    }
+    Ok(())
+}
+
+fn extern_owned_aggregate_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
+    format!(
+        "error: `extern: {}` declares the {position} `{}`, an owned aggregate (line {}, col {})\n  ownership across the C boundary has no answer and no client; only the numeric tower, `&T`/`&!T`, `str`, and `cstr` may cross",
+        decl.name, ty, decl.span.line, decl.span.col
+    )
+}
+
+fn extern_owned_pointer_output_error(decl: &ExternDecl, ty: Type) -> String {
+    format!(
+        "error: `extern: {}` cannot return the owned pointer `{}` (line {}, col {})\n  it would forge ownership of memory the allocator did not hand out",
+        decl.name, ty, decl.span.line, decl.span.col
+    )
 }
 
 /// Type-level checks that must pass before any generated-word signature or
@@ -1511,6 +1635,12 @@ fn check_outputs(
                     word.name, line, want, want, effect_str(&word.effect),
                 ));
             }
+            SlotMatch::NeedsStrToCstrConversion => {
+                return Err(format!(
+                    "error: type mismatch in `{}` (line {})\n  body leaves `str` where the declaration requires `cstr`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
+                    word.name, line, effect_str(&word.effect),
+                ));
+            }
             SlotMatch::Mismatch => {
                 return Err(format!(
                     "error: type mismatch in `{}` (line {})\n  body leaves `{}` where the declaration requires `{}`\n  note: declared {}",
@@ -1687,7 +1817,7 @@ fn check_word(
             reject_variant_local(&ctx, name, "parameter")?;
         }
     }
-    check_reference_free_signature(word, structs, enums, arrays)?;
+    check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
     match &word.body {
         WordBody::Terms { terms } => {
             check_terms_word(word, enums, terms, env, arrays, cells, refs, structs)
@@ -1706,24 +1836,25 @@ fn check_word(
 /// rejected there too, so the carve-out stays closed if a future aggregate
 /// constructor arrives.
 fn check_reference_free_signature(
-    word: &WordDef,
+    name: &str,
+    effect: &StackEffect,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
 ) -> Result<(), String> {
-    for slot in &word.effect.outputs {
+    for slot in &effect.outputs {
         if contains_reference(slot.ty, structs, enums, arrays) {
             return Err(format!(
                 "error: a reference cannot be stored: `{}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
-                word.name, slot.ty
+                name, slot.ty
             ));
         }
     }
-    for slot in &word.effect.inputs {
+    for slot in &effect.inputs {
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
             return Err(format!(
                 "error: a reference cannot be stored: `{}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
-                word.name, slot.ty
+                name, slot.ty
             ));
         }
     }
@@ -1990,6 +2121,21 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
             name, span.line, op, needs, holds, effect_str(effect),
         ),
         Ctx::Line { .. } => format!("error: stack underflow: needs {needs} values, but the stack holds {holds}"),
+    }
+}
+
+/// R7: `str` -> `cstr` is an explicit word, never an implicit conversion; a
+/// `str` where a `cstr` is wanted names the fix rather than a plain
+/// mismatch, mirroring `size_conversion_needed_error`'s shape.
+fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` wants `cstr`, found `str`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
+            name, span.line, op, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: type mismatch: `{op}` wants `cstr`, found `str`: convert it explicitly with `cstr` first"
+        ),
     }
 }
 
@@ -2686,6 +2832,9 @@ fn check_term(
                     SlotMatch::NeedsSizeConversion => {
                         return Err(size_conversion_needed_error(ctx, span, name, *want));
                     }
+                    SlotMatch::NeedsStrToCstrConversion => {
+                        return Err(str_needs_cstr_conversion_error(ctx, span, name));
+                    }
                     SlotMatch::Mismatch => {
                         return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
                     }
@@ -3157,6 +3306,9 @@ fn check_array_index(
         }
         SlotMatch::NeedsSizeConversion => {
             Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
+        }
+        SlotMatch::NeedsStrToCstrConversion => {
+            Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty))
         }
         SlotMatch::Mismatch => Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty)),
     }
@@ -3654,6 +3806,9 @@ fn check_access_word(
                 SlotMatch::NeedsSizeConversion => {
                     return Err(size_conversion_needed_error(ctx, span, name, referent));
                 }
+                SlotMatch::NeedsStrToCstrConversion => {
+                    return Err(str_needs_cstr_conversion_error(ctx, span, name));
+                }
                 SlotMatch::Mismatch => {
                     return Err(type_mismatch_error(ctx, span, name, referent, value.ty));
                 }
@@ -4068,6 +4223,113 @@ mod tests {
         let src = "type: Box s str ;\n\
 : main ( -- )\n  \"hi\" dup drop drop\n  \"hi\" cstr dup drop drop\n  \"hi\" Box drop ;";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn check_extern_redeclaring_a_word_is_error() {
+        // Criterion 5/R1: an `extern:` naming an already-registered word (a
+        // user `:` word here) is a located error.
+        let src = ": foo ( i64 -- i64 ) ;\nextern: foo ( i64 -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("foo"), "unexpected message: {err}");
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_redeclaring_a_builtin_is_error() {
+        let src = "extern: __spy ( i64 -- __spy ) \"spy\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_redeclaring_another_extern_is_error() {
+        let src = "extern: foo ( i64 -- i64 ) \"foo\" ;\nextern: foo ( i64 -- i64 ) \"bar\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_accepts_the_full_r2_boundary_type_set() {
+        // R2: the numeric tower, `bool`, `&T`/`&!T`, `str`, and `cstr` may
+        // all cross an `extern:` boundary in either position.
+        let src = "extern: f1 ( i64 u8 usize isize f64 f32 bool -- i64 ) \"f1\" ;\nextern: f2 ( &i64 &!i64 -- i64 ) \"f2\" ;\nextern: f3 ( str -- cstr ) \"f3\" ;";
+        check_src(src).unwrap();
+    }
+
+    #[test]
+    fn check_extern_with_aggregate_parameter_is_error() {
+        // Criterion 11/R3: an owned aggregate (struct/enum/array) as an
+        // `extern:` input is rejected at the declaration.
+        let src = "type: Point x i64 y i64 ;\nextern: foo ( Point -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("owned aggregate"), "unexpected message: {err}");
+        assert!(err.contains("Point"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_with_array_parameter_is_error() {
+        let src = "extern: foo ( [i64 4] -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("owned aggregate"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_with_owned_pointer_parameter_is_error() {
+        // R3: `^T` is an owned aggregate too, rejected in input position
+        // with the generic aggregate message (the output-specific
+        // "forge ownership" message is only for the output position).
+        let src = "extern: foo ( ^i64 -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("owned aggregate"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_cannot_express_a_variadic_c_function() {
+        // R3: `extern:`'s grammar has no syntax for a variadic parameter
+        // list, so `printf` cannot be usefully declared: only a fixed
+        // effect can be spelled, e.g. one `cstr` and nothing else.
+        let src = "extern: printf ( cstr -- i64 ) \"printf\" ;";
+        check_src(src).unwrap();
+        let err =
+            crate::parser::parse(&lex("extern: printf ( cstr ... -- i64 ) \"printf\" ;").unwrap())
+                .unwrap_err();
+        assert!(err.starts_with("error"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_returning_owned_pointer_is_error() {
+        // Criterion 12/R3: an `extern:` returning `^T` is rejected: it would
+        // forge ownership of memory the allocator did not hand out.
+        let src = "extern: foo ( i64 -- ^i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("forge ownership"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_extern_returning_a_reference_is_error() {
+        // Criterion 13/R3: reusing the existing no-declared-output-reference
+        // message rather than duplicating it.
+        let src = "extern: foo ( i64 -- &i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("a reference cannot be stored"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_str_where_cstr_declared_is_error() {
+        // Criterion 10/R7: passing a `str` where a `cstr` is declared is a
+        // type error naming the conversion, not a silent pointer pun.
+        let src =
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- )\n  \"hi\" strlen drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("cstr"), "unexpected message: {err}");
+        assert!(
+            err.contains("convert it explicitly"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

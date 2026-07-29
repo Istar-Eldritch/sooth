@@ -34,6 +34,12 @@ pub struct Module {
     /// structurally. Mirrors `owned_cells`, with mutability as a second key
     /// component so `&T` and `&!T` are separate entries.
     pub refs: Vec<RefDecl>,
+    /// One entry per `extern:` declaration (R1), in source order. Registered
+    /// into the ordinary word environment (`check::check`) like any other
+    /// word signature, so every existing arity/type check applies to a call
+    /// site unchanged; the declaration itself carries the C symbol string a
+    /// call site never sees.
+    pub externs: Vec<ExternDecl>,
 }
 
 impl Module {
@@ -306,6 +312,18 @@ pub struct WordDef {
     pub name: String,
     pub effect: StackEffect,
     pub body: WordBody,
+}
+
+/// One `extern:` declaration (R1): a typed foreign-call binding. `symbol` is
+/// the explicit C symbol string, kept separate from `name` because a Sooth
+/// word name may use characters C cannot (`&!S>fi`), and because binding a
+/// C name like `open` to a differently-named Sooth word must be possible.
+#[derive(Debug)]
+pub struct ExternDecl {
+    pub name: String,
+    pub symbol: String,
+    pub effect: StackEffect,
+    pub span: Span,
 }
 
 /// A word's body: either a term sequence, or a clause list (a clause-style
@@ -746,6 +764,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            externs: Vec::new(),
         }
     }
 
@@ -802,6 +821,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            externs: Vec::new(),
         }
     }
 
@@ -855,6 +875,7 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            externs: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),
