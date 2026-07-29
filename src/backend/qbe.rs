@@ -1026,7 +1026,7 @@ fn emit_instr(
                 writeln!(out, "\t{ptr} =l loadl {}", val(*v)).unwrap();
                 let len_addr = format!("%slena{ext_id}");
                 *ext_id += 1;
-                writeln!(out, "\t{len_addr} =l add {}, 8", val(*v)).unwrap();
+                writeln!(out, "\t{len_addr} =l add {}, {STR_LEN_OFFSET}", val(*v)).unwrap();
                 let len = format!("%slen{ext_id}");
                 *ext_id += 1;
                 writeln!(out, "\t{len} =l loadl {len_addr}").unwrap();

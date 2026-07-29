@@ -175,7 +175,7 @@ fn usize_comparison_across_a_repl_line_matches_same_line_semantics() {
     // The sharpest regression: a degraded carried `usize` compares signed
     // (`<`'s dispatch reads the value's `IrType`), which is a semantic
     // change, not just cosmetic. The wrapped-around difference is negative
-    // as an `i64` but enormous as a `usize`, so `< "hh" len` (3) flips
+    // as an `i64` but enormous as a `usize`, so `< "hh" len` (2) flips
     // between `true` (signed) and `false` (unsigned, correct); the same-line
     // form is the reference.
     let same_line = run_session(&["\"h\" len \"hh\" len - \"hh\" len < ."]);

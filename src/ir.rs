@@ -1421,8 +1421,10 @@ pub fn lower_line(
                 b.push_instr(Instr::Load(v, ptr));
                 stack.push(v);
             }
-            // A `Type::Ref` is always rejected as a declared output (checker),
-            // so it can never reach the carried-slot buffer at all.
+            // The REPL's residual-stack check rejects a line that leaves a
+            // reference on the stack (check.rs's "a reference cannot be stored:
+            // the line leaves `&P` on the stack" diagnostic, tests/phase3_refs.rs),
+            // so a `Type::Ref` can never reach the carried-slot buffer at all.
             IrType::Ptr => unreachable!("a reference can never be a carried slot"),
         }
         in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums, b.arrays);
