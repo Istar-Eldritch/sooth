@@ -114,6 +114,10 @@ like any other linear field, via the same `recursive_disposal_path` field recurs
 built. A user destructor is just another kind of leaf, called the way
 `synthesize_cell_destructor`'s `free` already is one.
 
+## Rejection inherited from 8a: multi-output `extern:`
+
+**A multi-output `extern:` panics the compiler**, e.g. `extern: two ( i64 -- i64 i64 ) "two" ;` used at a call site dies at `panicked at src/ir.rs:1952: print: value`. Pre-existing, not a slice 8a regression: a multi-output *user* word (`: pair ( i64 -- i64 i64 ) dup ;`) panics at the identical line with the identical message. No C function returns two values, so rejecting a multi-output `extern:` at its declaration, alongside 8a's other R3 rejections, is cheap and belongs here. The general multi-output lowering hole (the user-word case) is the bigger, separate issue this does not fix.
+
 ## Open questions the spec should answer
 
 - **What exactly counts as the `drop` overload.** Presumably a word literally named `drop` whose

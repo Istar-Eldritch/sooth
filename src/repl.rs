@@ -162,8 +162,9 @@ fn resolver_with_override<'a>(
 /// `from_bits` (R21): displaying its `i64` bit pattern would be meaningless. An
 /// `f32` slot reads only the low 32 bits (it was stored 4-wide, Q2). A `bool`
 /// slot displays as `true`/`false` (matching `.`, not the raw 0/1). An
-/// unsigned slot displays as its unsigned value: the raw `i64` bit pattern of
-/// a high-bit-set `u64` is negative and would otherwise misprint as such.
+/// unsigned slot (a `uN` or `usize`) displays as its unsigned value: the raw
+/// `i64` bit pattern of a high-bit-set unsigned value is negative and would
+/// otherwise misprint as such.
 pub fn format_stack(
     buf: &[i64],
     types: &[Type],
@@ -204,6 +205,17 @@ pub fn format_stack(
                 vals.push(format!("<{name}>"));
                 cell += 1;
             }
+            // A `str`/`cstr` slot is an opaque address like a cell slot, so it
+            // gets the same placeholder treatment rather than dereferencing
+            // its descriptor/bytes to print content.
+            Type::Str => {
+                vals.push("<str>".to_string());
+                cell += 1;
+            }
+            Type::Cstr => {
+                vals.push("<cstr>".to_string());
+                cell += 1;
+            }
             _ => {
                 let v = buf[cell];
                 vals.push(match ty {
@@ -213,6 +225,8 @@ pub fn format_stack(
                     Type::Float(_) => f64::from_bits(v as u64).to_string(),
                     Type::Bool => if v != 0 { "true" } else { "false" }.to_string(),
                     Type::Int(it) if !it.signed() => (v as u64).to_string(),
+                    Type::Usize => (v as u64).to_string(),
+                    Type::Isize => v.to_string(),
                     _ => v.to_string(),
                 });
                 cell += 1;
@@ -814,12 +828,42 @@ mod tests {
     }
 
     #[test]
+    fn format_stack_str_slot_shows_placeholder_and_offsets_past_it() {
+        // A `str` slot's descriptor address is not dereferenced for content;
+        // it renders as `<str>` and offsets past its one carried cell, like a
+        // cell slot.
+        assert_eq!(
+            format_stack(&[0, 99], &[Type::Str, Type::I64], &[], &[], &[]),
+            "stack: <str> 99"
+        );
+    }
+
+    #[test]
+    fn format_stack_cstr_slot_shows_placeholder_and_offsets_past_it() {
+        assert_eq!(
+            format_stack(&[0, 99], &[Type::Cstr, Type::I64], &[], &[], &[]),
+            "stack: <cstr> 99"
+        );
+    }
+
+    #[test]
     fn format_stack_unsigned_slot_displays_unsigned_not_negative() {
         // A `u64` with the high bit set stores a negative `i64` bit pattern;
         // display must render its unsigned value, not that negative number.
         let u64_ty = Type::from_name("u64").unwrap();
         assert_eq!(
             format_stack(&[-1], &[u64_ty], &[], &[], &[]),
+            "stack: 18446744073709551615"
+        );
+    }
+
+    #[test]
+    fn format_stack_usize_slot_displays_unsigned_not_negative() {
+        // `Type::Usize` is a distinct variant from `Type::Int(u64)`; a
+        // carried `usize` slot with the high bit set used to fall to the
+        // catch-all `v.to_string()` arm and render negative.
+        assert_eq!(
+            format_stack(&[-1], &[Type::Usize], &[], &[], &[]),
             "stack: 18446744073709551615"
         );
     }
