@@ -96,13 +96,30 @@ which run the user body *and then* the field glue unconditionally — they can a
 they are affine (a value may be dropped implicitly, zero or one times), whereas Sooth is linear
 and the body is answerable for its own fields.
 
-**D4. Self-recursion is closed by rejecting `drop` on a `T` inside `T`'s own `drop` body.** Per
-recon 3 the only route in is an explicit call, so the guard is exactly that narrow: while
-checking the `drop` overload for `T`, a `drop` whose operand type is `T` is a located compile
-error pointing at `T>` (the existing full-destructure word) as the remedy. No liveness or
-call-graph analysis: it needs only "am I checking `T`'s overload" and "is this operand a `T`",
-both available at any word-body check. This must be an error rather than a tail-call-optimised
-loop, since it has no base case.
+**D4. Self-recursion is closed by whole-program call-graph reachability, not just a direct
+self-call.** A narrower cut (reject only a literal `drop T` written inside `T`'s own `drop`
+body) leaves a hole: a body that calls a helper word, which itself (perhaps transitively) calls
+`drop` on a `T`, hits the same unbounded recursion without tripping a purely syntactic check.
+Sooth has no generics, so every call site's target is resolved once, at compile time — this is
+reachability over a fixed graph, not interprocedural type inference. `src/check.rs:1803`
+(`check_tail_call_cycles`) already builds almost this: a whole-module adjacency graph, DFS cycle
+detection (`find_tail_cycle`), a located error naming the cycle chain
+(`mutual_tail_recursion_error`) — scoped to tail-position calls only, for an unrelated reason
+(mutual tail-recursion, Slice 6's D3/X1). This slice needs a sibling pass, not a rewrite of that
+one: an edge for *any* call (not just tail position), with a call to the overloaded `drop`
+resolved to the concrete `drop@T` node the same way `check_term`'s dispatch already resolves it
+per call site. For each user-defined `drop@T`, the question is just whether `drop@T` is
+reachable from itself — one DFS per resource type, not a full SCC decomposition of the whole
+program. This subsumes the direct-call case for free (a self-call is a cycle of length 1) and
+generalizes it to any depth, through any number of helper words, with `T>` (the existing
+full-destructure word) as the remedy either way.
+
+**Known, accepted limitation: this is reachability, not data-flow, so it is context-insensitive.**
+If a helper is called from `drop@T`'s body *and* is separately, legitimately reachable back to
+`drop@T` only down some other branch never taken from there, the graph still sees a cycle and
+rejects it — a false positive in principle, the standard cost of this class of check (the
+existing tail-cycle pass has the identical shape). The remedy is the same one already given:
+factor out a distinct helper. State this in the spec as expected behavior, not a bug to chase.
 
 **D5. The non-`Copy` diagnostic must carry the reason.** Per recon 4, extend it to name the
 cause when linearity came from a `drop` overload rather than from a `^`-holding field: "`File` is
@@ -113,6 +130,26 @@ to copy, with nothing pointing at the declaration responsible.
 like any other linear field, via the same `recursive_disposal_path` field recursion slices 3-4
 built. A user destructor is just another kind of leaf, called the way
 `synthesize_cell_destructor`'s `free` already is one.
+
+**D7. `Type::Spy`'s hardcoded drop dispatch folds into this same mechanism, as its first builtin
+entry, rather than remaining a second, parallel special case.** `Type::Spy`'s drop is currently a
+hardcoded `IrType::Spy` match arm (`src/ir.rs:2719`) emitting `Instr::Call(None,
+SPY_DROP_SYMBOL, [v])` — already shaped exactly like a resolved user overload's call, differing
+only in that its symbol is a hardcoded constant instead of a resolved user-word name. Whatever
+registration/lookup D1 introduces for user `drop` overloads gets one builtin entry, `Spy ->
+sooth_spy_drop`, and the hardcoded `IrType::Spy` arm is deleted in favor of the same lookup every
+other overload uses. Leaving Spy's dispatch as a separate hardcoded path beside a new general
+mechanism for the same concern (a linear type with a destructor) is exactly the "different
+sections pull different dependencies" signal CLAUDE.md's refactor list calls out. `is_copy`'s
+`Type::Spy => false` special case (`src/check.rs:183`) is unaffected either way — it becomes the
+same consequence D2 already derives for every other resource type, rather than a second,
+independent hardcoded fact about Spy specifically.
+
+**Not this slice: retiring `__spy` entirely.** D7 unifies the dispatch *mechanism*; it does not
+remove `Type::Spy`/`IrType::Spy` or migrate the ~250 existing call sites across `tests/phase0.rs`,
+`tests/phase1.rs`, `tests/phase3_locals.rs`, and in-crate unit tests in `check.rs`/`ir.rs` that
+construct one. That is Slice 8c (ROADMAP.md), a deliberately separate follow-up once this slice's
+mechanism is proven against a real resource (`File`) — do not fold it in here.
 
 ## Rejection inherited from 8a: multi-output `extern:`
 

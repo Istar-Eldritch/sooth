@@ -390,7 +390,8 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    symmetrically). Bootstrap (1a): a **test-only builtin linear primitive** (a drop-spy
    with a print-on-drop destructor tagged by an `i64`) gives the analysis teeth before
    heap exists; it is not user-facing surface and dissolves into an ordinary type once
-   `drop` is overridable (destructor bodies in slice 6, polymorphic dispatch in Phase 4). Aggregates are in scope via
+   `drop` is overridable (destructor bodies in slice 8b, the dissolution itself in slice 8c;
+   polymorphic dispatch in Phase 4). Aggregates are in scope via
    destructure-whole (no partial moves): `S>fi` stays consuming and drops the non-extracted
    fields, `S|>fi` is a non-consuming Copy-field peek (forbidden on linear fields), `S<fi`
    drops the overwritten field; the compiler synthesises recursive/tag-dispatched drop
@@ -592,9 +593,30 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    mechanism. The two questions this entry parked are answered: the body runs **instead of**
    the synthesized field glue ("nothing auto-drops" already makes it answerable for its own
    fields through the ordinary must-consume rule, whereas running both would double-dispose),
-   and infinite self-recursion is closed by rejecting `drop` on a `T` inside `T`'s own `drop`
-   body, pointing at `T>` destructure instead. Note this is destructor *bodies* only; `drop`
-   becoming fully polymorphic is still Phase 4.
+   and self-recursion is closed not by rejecting a bare direct self-call but by whole-program
+   call-graph reachability — any cycle back to `T`'s own `drop`, including through helper
+   words — generalizing the same tail-cycle-detection shape Slice 6's mutual-tail-recursion
+   check already established, with `T>` destructure as the remedy either way. `Type::Spy`, the
+   Slice 1 test-only bootstrap primitive, folds into the same dispatch table as its first
+   builtin entry (its hardcoded `IrType::Spy` drop arm is deleted), rather than remaining a
+   second, parallel special case for the same concern. Note this is destructor *bodies* only;
+   `drop` becoming fully polymorphic is still Phase 4.
+
+   **8c — retire `__spy`.** Once 8b's mechanism is proven, the Slice 1 bootstrap primitive is
+   fully redundant: every property it exists for (linear-by-declaration, `dup` rejection, drop
+   dispatch propagating through struct/enum/array/cell nesting, extern-boundary rejection) is now
+   expressible with an ordinary `type:` plus a user `drop` overload, and its synthesized native
+   trace stub (`sooth_spy_drop`, a compiler-emitted `printf` shim, `src/backend/qbe.rs:690`)
+   becomes unnecessary once a real destructor body can just call `.` directly — strictly better,
+   since it needs no compiler-synthesized machinery at all. A deletion-plus-migration slice, not
+   new design: remove `Type::Spy`/`IrType::Spy` and every hardcoded match arm across `ast.rs`/
+   `check.rs`/`ir.rs`/`src/backend/qbe.rs` (Rust's exhaustiveness check finds every site, the same
+   technique that closed the carried-slot bug in 8a), and rewrite the ~250 call sites across
+   `tests/phase0.rs`, `tests/phase1.rs`, `tests/phase3_locals.rs`, and in-crate unit tests in
+   `check.rs`/`ir.rs` to construct a small locally-defined resource type instead. Deliberately its
+   own slice, not folded into 8b: 8b already carries the mechanism's design risk, and this needs a
+   proven, working `File` example to migrate onto rather than landing at the same time as the
+   thing it depends on.
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
 
