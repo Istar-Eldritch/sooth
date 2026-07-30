@@ -324,14 +324,17 @@ including across redefinition (criteria 17, 22).
 ## Out of scope
 
 Enum- or array-typed `drop` overloads (R1; rejected with a located error, not silently accepted).
-`Type::Spy`/`IrType::Spy` untouched (`src/ir.rs:2717-2739`), deferred to Slice 8c along with the
-D7 unification cut above. The general multi-output-lowering panic for ordinary user words, as
-distinct from the `extern:` case R8 fixes. A symbol-existence check for `close` (unchanged from
-8a's R14). `extern:` at the REPL, in general: R11 makes a `drop` overload work at the REPL, but
-the REPL still cannot evaluate an `extern:` declaration or call an extern-declared word at all
-(unchanged from 8a's own Out-of-scope note); R11's own tests work around this with an extern-free
-override body. An overloadable `dup` / opt-in reference-counting, and `drop` becoming fully
-polymorphic open dispatch (Phase 4's ad-hoc overloading, and Phase 6's deferred RC problem): this
+`Type::Spy`/`IrType::Spy` untouched (`emit_drop`'s `IrType::Spy` arm, `src/ir.rs:2936`), deferred
+to Slice 8c along with the D7 unification cut above. The general multi-output-lowering panic for
+ordinary user words, as distinct from the `extern:` case R8 fixes. A symbol-existence check for
+`close` (unchanged from 8a's R14). `extern:` at the REPL, in general: R11 makes a `drop` overload
+work at the REPL, but the REPL still cannot evaluate an `extern:` declaration or call an
+extern-declared word at all (unchanged from 8a's own Out-of-scope note); R11's own tests work
+around this with an extern-free override body. `^T`/cell destructor dispatch joining any shared
+resolution step (moot, since D7's unification is cut, not R9 — R9 in this document is the
+non-`Copy`-fields decision). An overloadable `dup` / opt-in reference-counting, and `drop`
+becoming fully polymorphic open dispatch (Phase 4's ad-hoc overloading, and Phase 6's deferred RC
+problem): this
 slice does not lay groundwork toward either. Any change to `str`/`cstr` or the `.`-separator
 question (8a, DESIGN.md Open/deferred).
 
