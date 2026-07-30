@@ -1,0 +1,15 @@
+extern: open  ( cstr i64 -- i64 )              "open" ;
+extern: read  ( i64 &![u8 64] usize -- isize ) "read" ;
+extern: close ( i64 -- i64 )                   "close" ;
+
+type: File fd i64 ;
+
+: drop ( File -- )
+  | f | f File>fd close drop ;
+
+: main ( -- )
+  "examples/resource_fixture.txt" cstr 0 open | fd |
+  fd File | f |
+  0 >u8 64 fill | buf |
+  f File|>fd &!buf 64 >usize read . | file |
+  file drop ;

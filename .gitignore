@@ -3,3 +3,5 @@
 # Compiled example binaries land alongside their source (spec §9.2).
 /examples/*
 !/examples/*.sth
+# `resources.sth` reads this fixture at run time: source, not an artifact.
+!/examples/resource_fixture.txt

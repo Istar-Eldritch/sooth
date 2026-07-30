@@ -88,12 +88,20 @@ pub fn resolve_type_name(structs: &[StructDecl], enums: &[EnumDecl], name: &str)
 /// list, and the leaked `&'static str` copy of its name every `Type::Struct`
 /// naming it carries directly, so a struct name renders without threading
 /// the registry through every diagnostic-formatting call site.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
     pub name_static: &'static str,
     pub fields: Vec<(String, Type)>,
     pub span: Span,
+    /// R1/R2/R3 (slice 8b): whether a user `: drop ( T -- )` overload was
+    /// recognized for this struct. A separately *set* bit, never re-derived
+    /// from the fields (which is exactly what it overrides), mirroring how
+    /// the IR-side `StructLayout::is_linear` is a computed-once bit rather
+    /// than a predicate. Recording it on the declaration is what makes the
+    /// fact reach every `is_copy` call site, the layout fold, and the REPL's
+    /// persistent registries without threading a table through any of them.
+    pub has_drop_overload: bool,
 }
 
 /// A small `Copy` index into `Module::structs`. Two `Type::Struct` values are
@@ -761,6 +769,7 @@ mod tests {
                 name_static,
                 fields,
                 span: Span::default(),
+                has_drop_overload: false,
             }],
             enums: Vec::new(),
             arrays: Vec::new(),
@@ -867,6 +876,7 @@ mod tests {
                 name_static,
                 fields: Vec::new(),
                 span: Span::default(),
+                has_drop_overload: false,
             }],
             enums: vec![EnumDecl {
                 name: "Dup".to_string(),

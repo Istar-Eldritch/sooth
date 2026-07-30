@@ -203,8 +203,42 @@ pub struct StructLayout {
     pub size: u32,
     pub align: u32,
     pub fields: Vec<FieldLayout>,
-    /// Whether this struct is linear (any field is, transitively).
+    /// Whether this struct is linear (any field is, transitively, or it has a
+    /// user `drop` overload).
     pub is_linear: bool,
+    /// R2 (slice 8b): whether a user `: drop ( T -- )` overload was recognized
+    /// for this struct, copied from `StructDecl::has_drop_overload`. Read by
+    /// `expand_path` (R7), which sees only `Registries` and so cannot reach the
+    /// declaration.
+    pub has_drop_overload: bool,
+    /// R11 (slice 8b): the session-wide override epoch (`Session::override_epoch`),
+    /// `None` on the build path and for the whole REPL session until its first
+    /// `drop` override is ever defined. Set by the session after
+    /// `build_registries`, since it is a fact about the session's redefinition
+    /// history, not about the declaration. It lives on the layout because that
+    /// is the one thing both `struct_drop_symbol` call sites (destructor
+    /// synthesis and `emit_drop`) already reach, so both mint the same name
+    /// for a given epoch.
+    ///
+    /// R11.2 originally suffixed only the *overridden* struct's own symbol
+    /// with its own per-struct redefinition count. That left every enclosing
+    /// aggregate's glue (a struct/enum/cell composing the overridden struct)
+    /// unsuffixed even though its body's `Call` target changes across an
+    /// override event, which under `RTLD_GLOBAL`'s first-loaded-wins
+    /// resolution let a stale, pre-override callee stay wired in forever.
+    /// Stamping the *same* session-wide epoch onto every linear struct/enum/
+    /// cell once any override exists (rather than only the overridden one)
+    /// mints every destructor a fresh, never-before-used symbol on every
+    /// override event, sidestepping that staleness without computing which
+    /// aggregates actually reach the override transitively.
+    ///
+    /// One exception, and it is the whole of R11.3: an *overridden* struct's
+    /// own symbol carries the epoch its override was **defined** at, not the
+    /// session's current one, so the symbol never changes while that override
+    /// stands. The user body is then lowered exactly once, on its own
+    /// declaring line, and every later line resolves the pinned symbol
+    /// through `RTLD_GLOBAL` instead of re-lowering a body it never re-checks.
+    pub drop_generation: Option<u64>,
 }
 
 /// Whether a field's `IrType` is linear: the drop-spy directly, or a nested
@@ -223,21 +257,71 @@ fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays
     }
 }
 
-/// The synthesized per-type destructor symbol for a linear struct.
-fn struct_drop_symbol(id: StructId) -> String {
-    format!("sooth_struct_drop_{}", id.index())
+/// R2 (slice 8b): the user `drop` overload body to compile as each struct's
+/// destructor, keyed the way destructor synthesis itself is keyed — by
+/// `StructId`, never by the shared literal name `"drop"`, so overrides for
+/// distinct structs cannot collide. Borrowed rather than owned: the bodies live
+/// in the module being lowered (or, at the REPL, in the session).
+pub type DropOverrides<'a> = HashMap<StructId, DropOverride<'a>>;
+
+/// What an overridden struct's destructor is *for the module being lowered*.
+#[derive(Debug, Clone, Copy)]
+pub enum DropOverride<'a> {
+    /// Compile this body as the struct's destructor. The build path always
+    /// uses this; at the REPL, only the line declaring the override does.
+    Body(&'a WordDef),
+    /// R11.3: emit no destructor for this struct at all. Its symbol is pinned
+    /// to the epoch its override was defined at, so the body compiled on that
+    /// line is already loaded `RTLD_GLOBAL` and resolves for every later line.
+    /// Re-lowering the retained body here would resolve its callees against a
+    /// *later* line's env, which the body was never checked against — a
+    /// redefined callee of different arity panics lowering outright.
+    AlreadyLoaded,
+}
+
+/// The synthesized per-type destructor symbol for a linear struct. `epoch`
+/// is `Some` only at the REPL once its session holds at least one `drop`
+/// override (R11, R11.2): from that point on, *every* linear struct's/enum's/
+/// cell's destructor symbol carries the session's current override epoch, not
+/// only the overridden struct's own, because an unrelated struct's body may
+/// itself `Call` an overridden struct's destructor (or one composing it,
+/// transitively) and that callee's body changes across an override event.
+/// Leaving such a symbol unmangled would define one global symbol repeatedly
+/// with a differing body, ambiguous under the REPL's `RTLD_GLOBAL` loading,
+/// and (worse) `RTLD_GLOBAL` keeps whichever definition loaded *first*, so a
+/// later, correct recompilation would silently never take effect. Before any
+/// override exists in the session, epoch is `None` and every symbol stays
+/// unsuffixed, identical to the build path.
+///
+/// R11.3: for an *overridden* struct the epoch passed here is the one its
+/// override was defined at rather than the session's current one, pinning that
+/// one symbol across later override events (`StructLayout::drop_generation`).
+/// The two uses of the counter cannot collide: a struct emits glue only at
+/// epochs strictly before its override exists, and its override's own symbol
+/// at the defining epoch is the only thing minted for it from then on.
+fn struct_drop_symbol(id: StructId, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(g) => format!("sooth_struct_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_struct_drop_{}", id.index()),
+    }
 }
 
 /// The synthesized per-type destructor symbol for a linear enum: mirrors
 /// `struct_drop_symbol`, one uniform naming scheme for both aggregate kinds.
-fn enum_drop_symbol(id: EnumId) -> String {
-    format!("sooth_enum_drop_{}", id.index())
+fn enum_drop_symbol(id: EnumId, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(g) => format!("sooth_enum_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_enum_drop_{}", id.index()),
+    }
 }
 
 /// Mirrors `struct_drop_symbol`/`enum_drop_symbol`, one uniform naming
 /// scheme across all three kinds.
-fn cell_drop_symbol(id: OwnedCellId) -> String {
-    format!("sooth_cell_drop_{}", id.index())
+fn cell_drop_symbol(id: OwnedCellId, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(g) => format!("sooth_cell_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_cell_drop_{}", id.index()),
+    }
 }
 
 /// One field's placement within its owning struct: its byte offset and its own
@@ -296,6 +380,10 @@ pub struct EnumLayout {
     /// recurses into nested fields first), so this is a one-shot fold, not a
     /// further recursion, mirroring `StructLayout::is_linear`.
     pub is_linear: bool,
+    /// Mirrors `StructLayout::drop_generation`: the same session-wide override
+    /// epoch, so an enum composing an overridden struct also gets a fresh
+    /// destructor symbol per override event.
+    pub drop_generation: Option<u64>,
 }
 
 /// One variant's payload placement: its fields laid out (first field deepest)
@@ -425,6 +513,9 @@ impl Structs {
 #[derive(Debug, Default)]
 pub struct Cells {
     pub payload: Vec<IrType>,
+    /// Mirrors `StructLayout::drop_generation`, parallel to `payload` since a
+    /// cell has no per-item layout struct of its own to carry the field on.
+    pub drop_generations: Vec<Option<u64>>,
 }
 
 /// The IR's view of a program's reference types: the per-`RefId` referent
@@ -536,6 +627,7 @@ pub fn build_registries_ww(
     }
 
     let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();
+    let cell_drop_generations = vec![None; cell_payloads.len()];
     let ref_referents: Vec<IrType> = refs.iter().map(|d| ir_type_of(d.referent)).collect();
 
     (
@@ -552,6 +644,7 @@ pub fn build_registries_ww(
         },
         Cells {
             payload: cell_payloads,
+            drop_generations: cell_drop_generations,
         },
         Refs {
             referent: ref_referents,
@@ -631,12 +724,25 @@ impl LayoutBuilder<'_> {
         // field's own `is_linear` is already memoized (`place_fields` ->
         // `size_align` ensures it first), so this is a plain fold over the
         // just-placed fields, not a further recursion.
-        let is_linear = fields.iter().any(|f| self.layout_field_is_linear(f.ty));
+        //
+        // R2 (slice 8b): a user `drop` overload forces the bit regardless of
+        // what the fields fold to. This is the IR's own, separately computed
+        // linearity, not `check`'s: without the force, an all-`Copy`-fields
+        // resource would get no synthesized destructor at all (filtered out of
+        // `synthesize_aggregate_destructors`) and `emit_drop`'s guard would
+        // discard it silently, so its override would never run.
+        let has_drop_overload = structs[idx].has_drop_overload;
+        let is_linear =
+            has_drop_overload || fields.iter().any(|f| self.layout_field_is_linear(f.ty));
         self.struct_memo[idx] = Some(StructLayout {
             name: structs[idx].name_static,
             size,
             align,
             is_linear,
+            has_drop_overload,
+            // R11: the build path never suffixes a destructor symbol; the
+            // REPL sets this from its own override registry after the build.
+            drop_generation: None,
             fields,
         });
     }
@@ -681,6 +787,9 @@ impl LayoutBuilder<'_> {
             align,
             variants,
             is_linear,
+            // R11: the build path never suffixes a destructor symbol; the
+            // REPL sets this from its own override epoch after the build.
+            drop_generation: None,
         });
     }
 
@@ -874,17 +983,42 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
+    // R1/R2: recognized here, ahead of `build_registries`, rather than
+    // trusted from `StructDecl::has_drop_overload` -- `check::check` sets
+    // that bit as a side effect on `module.structs`, but `lower` takes
+    // `&Module` and has no way to require that it already ran. Recomputing
+    // the registry and forcing the bit on a local copy makes `lower` correct
+    // against a module that never went through `check` (layout would
+    // otherwise fold the struct non-linear, no destructor would be
+    // synthesized, and `overrides` below would silently go unused). The one
+    // registry is reused for the layout pass, the `env`/lowering filter, and
+    // the override map, so there is a single source of truth for which
+    // words are drop overloads.
+    let drop_overloads = crate::check::find_drop_overloads(&module.words, &module.structs)?;
+    let drop_overload_indices: std::collections::HashSet<usize> =
+        drop_overloads.values().copied().collect();
+    let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
+    for id in drop_overloads.keys() {
+        structs_forced[id.index()].has_drop_overload = true;
+    }
+
     let (structs, enums, arrays, cells, refs) = build_registries(
-        &module.structs,
+        &structs_forced,
         &module.enums,
         &module.arrays,
         &module.owned_cells,
         &module.refs,
     );
+    // R1: a recognized `drop` overload is excluded from the lowering env,
+    // same as `check`'s own env (`check.rs::check`): its body is compiled
+    // under the struct's destructor symbol, never called by the literal
+    // name `"drop"`.
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
-        .map(|w| {
+        .enumerate()
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
+        .map(|(_, w)| {
             let ret_ty = w.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
             (
                 w.name.clone(),
@@ -919,16 +1053,34 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         refs: &refs,
     };
 
+    // R1: a recognized `drop` overload is excluded from this generic
+    // per-word lowering pass -- unfiltered, it would compile to a QBE
+    // function literally named `drop`, and a second override in the same
+    // module would collide with it under the identical symbol. The override's
+    // body is instead compiled by `synthesize_aggregate_destructors` (R2)
+    // into the struct's own destructor symbol.
     let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve, regs))
+        .enumerate()
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
+        .map(|(_, w)| lower_word(w, &env, &resolve, regs))
+        .collect();
+
+    // R2: the override's body, by reference, keyed the way synthesis is keyed.
+    // The REPL builds the same map from its own session-level store instead of
+    // from a module's `words` (R11).
+    let overrides: DropOverrides = drop_overloads
+        .iter()
+        .map(|(id, idx)| (*id, DropOverride::Body(&module.words[*idx])))
         .collect();
 
     // R12: append a synthesized destructor for every linear struct/enum type
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
-    funcs.extend(synthesize_aggregate_destructors(&env, &resolve, regs));
+    funcs.extend(synthesize_aggregate_destructors(
+        &env, &resolve, regs, &overrides,
+    ));
 
     Ok(IrModule {
         funcs,
@@ -942,10 +1094,37 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// type. The REPL redefines these per line; safe because type redefinition is
 /// rejected, so every generation's glue is identical. If type redefinition is
 /// ever allowed, add a generation suffix, matching word symbols.
+///
+/// R11 (slice 8b): a *user* `drop` override is where that premise fails --
+/// redefining one at the REPL puts a different body under the same symbol.
+/// R11.2 additionally suffixes every *other* linear struct's/enum's/cell's
+/// destructor too, once the session holds any override at all: any of them
+/// may `Call` an overridden struct's destructor (directly, or transitively
+/// through a further composed aggregate), so their own body's callee changes
+/// across an override event exactly as the overridden struct's own body does.
+/// All three symbol kinds carry the *same* session-wide override epoch
+/// (`StructLayout`/`EnumLayout::drop_generation`, `Cells::drop_generations`,
+/// set by the session), so every destructor in a session that has ever seen
+/// an override mints a fresh, never-before-loaded symbol per override event
+/// -- the cheap alternative to computing exactly which aggregates reach the
+/// override. Before any override, epoch is `None` everywhere and every
+/// symbol stays unsuffixed, unchanged from the build path.
+///
+/// R2 (slice 8b): a struct in `overrides` gets the user's own `drop` body under
+/// that same symbol instead of the synthesized field glue. Every caller of the
+/// destructor already goes through `struct_drop_symbol` (`emit_drop`, and
+/// `drop_level_fields` through it), so substituting the body here is the whole
+/// of dispatch: no call site resolves a `drop` overload by name.
+///
+/// R11.3: an `AlreadyLoaded` entry gets no destructor emitted at all — the
+/// REPL marks every override but the one being declared that way, since each
+/// override's symbol is pinned to its defining epoch and its body must be
+/// lowered once, against the env it was checked against.
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    overrides: &DropOverrides,
 ) -> Vec<IrFunc> {
     let Registries {
         structs,
@@ -958,8 +1137,15 @@ pub fn synthesize_aggregate_destructors(
         .iter()
         .enumerate()
         .filter(|(_, layout)| layout.is_linear)
-        .map(|(idx, _)| {
-            synthesize_struct_destructor(StructId::from_index(idx), env, resolve, regs)
+        .filter_map(|(idx, _)| {
+            let id = StructId::from_index(idx);
+            match overrides.get(&id) {
+                Some(DropOverride::Body(word)) => Some(synthesize_struct_destructor_override(
+                    id, word, env, resolve, regs,
+                )),
+                Some(DropOverride::AlreadyLoaded) => None,
+                None => Some(synthesize_struct_destructor(id, env, resolve, regs)),
+            }
         });
     let enum_destructors = enums
         .layouts
@@ -1054,6 +1240,19 @@ fn expand_path(
     regs: Registries,
 ) -> Option<Vec<PathStep>> {
     match current {
+        // R7 (slice 8b): a struct with a user `drop` overload is a dead end for
+        // *another* type's search, exactly as a `Copy` scalar field is. The
+        // fused loop inlines every intermediate type's field projection instead
+        // of calling its destructor, so routing a cycle through an overridden
+        // struct would bypass the user's body and leak its resource silently.
+        // The `current != target` carve-out is for the search's own root: an
+        // overridden struct's own destructor is its override regardless (R2), so
+        // whether a path back to itself exists is moot there.
+        IrType::Struct(id)
+            if current != target && regs.structs.layouts[id.index()].has_drop_overload =>
+        {
+            None
+        }
         IrType::Struct(id) => {
             let fields = &regs.structs.layouts[id.index()].fields;
             expand_fields(fields, target, visited, regs)
@@ -1202,11 +1401,29 @@ fn synthesize_struct_destructor(
         b.seal_block(Terminator::Ret(None));
     }
     IrFunc {
-        name: struct_drop_symbol(id),
+        name: struct_drop_symbol(id, structs.layouts[id.index()].drop_generation),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
         value_types: b.value_types,
+    }
+}
+
+/// R2 (slice 8b): struct `id`'s destructor *is* the user's `drop` body. Lowered
+/// by exactly the machinery any other word body gets, then renamed to the
+/// destructor symbol every existing call site already calls — the override
+/// replaces `synthesize_struct_destructor`'s field glue rather than running
+/// before or alongside it (R5), so there is no glue left to compose with.
+fn synthesize_struct_destructor_override(
+    id: StructId,
+    word: &WordDef,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+) -> IrFunc {
+    IrFunc {
+        name: struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation),
+        ..lower_word(word, env, resolve, regs)
     }
 }
 
@@ -1253,7 +1470,7 @@ fn synthesize_enum_destructor(
     }
 
     IrFunc {
-        name: enum_drop_symbol(id),
+        name: enum_drop_symbol(id, enums.layouts[id.index()].drop_generation),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
@@ -1296,7 +1513,7 @@ fn synthesize_cell_destructor(
     }
     b.seal_block(Terminator::Ret(None));
     IrFunc {
-        name: cell_drop_symbol(id),
+        name: cell_drop_symbol(id, cells.drop_generations[id.index()]),
         params: vec![IrType::OwnedCell(id)],
         ret: None,
         blocks: b.blocks,
@@ -2723,13 +2940,17 @@ impl<'a> FuncBuilder<'a> {
             // linearity: the synthesized destructor drops a linear payload
             // first.
             IrType::OwnedCell(id) => {
-                self.push_instr(Instr::Call(None, cell_drop_symbol(id), vec![v]));
+                let symbol = cell_drop_symbol(id, self.cells.drop_generations[id.index()]);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
-                self.push_instr(Instr::Call(None, struct_drop_symbol(id), vec![v]));
+                let symbol =
+                    struct_drop_symbol(id, self.structs.layouts[id.index()].drop_generation);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
-                self.push_instr(Instr::Call(None, enum_drop_symbol(id), vec![v]));
+                let symbol = enum_drop_symbol(id, self.enums.layouts[id.index()].drop_generation);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => unreachable!(
                 "checked: a linear array element is rejected wherever an array type is named"
@@ -3057,6 +3278,178 @@ mod tests {
         lower(&module).unwrap()
     }
 
+    /// A scalar-only resource with a `drop` overload whose body has one
+    /// observable effect (a `Print` no synthesized glue ever emits), so "the
+    /// override is the destructor" is assertable on instructions.
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+
+    /// Every symbol an `IrFunc` calls, in emission order: what "the override
+    /// ran instead of the glue" is asserted on, rather than a substring of the
+    /// emitted text.
+    fn call_symbols(func: &IrFunc) -> Vec<&str> {
+        instrs(func)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(_, sym, _) => Some(sym.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn func<'a>(module: &'a IrModule, name: &str) -> &'a IrFunc {
+        module
+            .funcs
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no emitted func `{name}`: {:?}",
+                    module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+                )
+            })
+    }
+
+    #[test]
+    fn two_drop_overloads_for_different_structs_do_not_collide() {
+        // Criterion 16: neither override lands in the generic per-word
+        // lowering pass (which would emit two QBE functions literally named
+        // `drop`, the second colliding with the first), and each instead fills
+        // its own struct's destructor symbol with its own body.
+        let module = lower_src(
+            "type: A x i64 ; type: B y i64 ; \
+             : drop ( A -- ) | a | a A>x . ; : drop ( B -- ) | b | b B>y drop ; \
+             : main ( -- ) 1 A drop 2 B drop ;",
+        );
+        assert!(
+            module.funcs.iter().all(|f| f.name != "drop"),
+            "an emitted IrFunc was literally named `drop`: {:?}",
+            module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let a = func(&module, &struct_drop_symbol(StructId::from_index(0), None));
+        let b = func(&module, &struct_drop_symbol(StructId::from_index(1), None));
+        // `A`'s body prints its field, `B`'s discards it: two distinct bodies
+        // under two distinct symbols, not one shared or one clobbered.
+        assert_eq!(count(a, |i| matches!(i, Instr::Print(_))), 1);
+        assert_eq!(count(b, |i| matches!(i, Instr::Print(_))), 0);
+    }
+
+    #[test]
+    fn ir_registers_overridden_struct_as_linear_despite_all_copy_fields() {
+        // Criterion 20/R2: `StructLayout::is_linear` is the IR's own,
+        // separately computed bit, folded from declared field types alone --
+        // for a scalar-only resource that fold says `Copy`, so the override
+        // has to force it. Without the force, no destructor would be
+        // synthesized for `File` at all and `emit_drop`'s guard would discard
+        // an `f drop` silently.
+        let overridden = structs_of(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let file = layout(&overridden, "File");
+        assert!(file.is_linear);
+        assert!(file.has_drop_overload);
+
+        let plain = structs_of("type: File fd i64 ; : main ( -- ) 1 File drop ;");
+        assert!(!layout(&plain, "File").is_linear);
+    }
+
+    #[test]
+    fn lower_forces_drop_overload_linearity_even_when_check_never_ran() {
+        // R1/R2 code-review fix: `lower` used to trust
+        // `StructDecl::has_drop_overload`, a bit only `check::check` sets. A
+        // module that reaches `lower` without having gone through `check`
+        // (this test skips it, unlike `lower_src`) must still layout `File`
+        // as linear and substitute the override, not silently emit nothing.
+        let src = format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;");
+        let tokens = lex(&src).unwrap();
+        let module = parse(&tokens).unwrap();
+        let ir_module = lower(&module).unwrap();
+        let file = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(call_symbols(func(&ir_module, "main")), vec![file.as_str()]);
+        let dtor = func(&ir_module, &file);
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
+    }
+
+    #[test]
+    fn drop_of_an_overridden_struct_calls_its_destructor_symbol() {
+        // R2: the whole of dispatch. `lower_call`'s `"drop"` arm is unchanged
+        // and still symbol-based; forcing `is_linear` is what makes
+        // `emit_drop`'s guard pass, and the substituted body is what the
+        // symbol now resolves to.
+        let module = lower_src(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let file = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(call_symbols(func(&module, "main")), vec![file.as_str()]);
+        // The destructor is the user's body (one `.` of the field), not the
+        // generic glue (which for an all-`Copy` struct emits nothing at all).
+        let dtor = func(&module, &file);
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
+    }
+
+    #[test]
+    fn synthesize_destructor_of_resource_with_a_linear_field_uses_user_body_not_field_glue() {
+        // Criterion 15/R5: the override runs *instead of* the field glue, not
+        // before or alongside it. `Res`'s only field is linear, so the glue
+        // would call `Inner`'s destructor symbol directly; the body hands the
+        // field to `dispose` instead, so that call is the only one emitted.
+        let module = lower_src(
+            "type: Inner s __spy ; type: Res i Inner ; \
+             : dispose ( Inner -- ) drop ; \
+             : drop ( Res -- ) | r | r Res> dispose ; \
+             : main ( -- ) 1 __spy Inner Res drop ;",
+        );
+        let inner = struct_drop_symbol(StructId::from_index(0), None);
+        let res = struct_drop_symbol(StructId::from_index(1), None);
+        assert_eq!(call_symbols(func(&module, &res)), vec!["dispose"]);
+        // The glue that would have run is still emitted for `Inner` itself,
+        // which has no override: `dispose`'s own `drop` calls it.
+        assert_eq!(call_symbols(func(&module, "dispose")), vec![inner.as_str()]);
+    }
+
+    #[test]
+    fn resource_field_disposed_via_its_own_drop_symbol() {
+        // Criterion 13/R7 (ordinary composition): an enclosing struct's
+        // per-field disposal calls each linear field's destructor rather than
+        // inlining its fields, so a resource field is disposed through the
+        // user's body with no new mechanism -- `Holder`'s glue prints nothing
+        // itself, it calls `File`'s destructor, which prints.
+        let module = lower_src(&format!(
+            "{FILE_RESOURCE} type: Holder h File n i64 ; \
+             : main ( -- ) 1 File 2 Holder drop ;"
+        ));
+        let file = struct_drop_symbol(StructId::from_index(0), None);
+        let holder = func(&module, &struct_drop_symbol(StructId::from_index(1), None));
+        assert_eq!(call_symbols(holder), vec![file.as_str()]);
+        assert_eq!(count(holder, |i| matches!(i, Instr::Print(_))), 0);
+    }
+
+    #[test]
+    fn synthesize_destructor_excludes_override_structs_from_a_fused_disposal_path() {
+        // Criterion 14/R7 (the disposal-cycle case): `Chain`'s cycle runs back
+        // to itself *through* `Res`. The fused loop inlines every intermediate
+        // type's field projection instead of calling its destructor, so
+        // fusing this cycle would bypass `Res`'s override and leak its
+        // resource silently. With `Res` overridden the search stops there, so
+        // `Chain` falls back to per-field disposal and reaches the override
+        // through its own symbol.
+        let src = "type: Res fd i64 next ^Chain ; type: Chain r Res ; : main ( -- ) ;";
+        let plain = Probe::new(src);
+        assert!(
+            plain.path(plain.struct_ty("Chain")).is_some(),
+            "without an override, `Chain` fuses its cycle into one loop"
+        );
+
+        let p = Probe::with_overrides(src, &["Res"]);
+        assert_eq!(p.path(p.struct_ty("Chain")), None);
+        // The search's own root is unaffected: whether `Res` is on a cycle is
+        // moot, since its destructor is its override either way (R2).
+        assert!(p.path(p.struct_ty("Res")).is_some());
+
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let chain = synthesize_struct_destructor(p.struct_id("Chain"), &env, &resolve, p.regs());
+        assert_eq!(
+            call_symbols(&chain),
+            vec![struct_drop_symbol(p.struct_id("Res"), None).as_str()]
+        );
+    }
+
     fn structs_of(src: &str) -> Structs {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
@@ -3090,9 +3483,28 @@ mod tests {
 
     impl Probe {
         fn new(src: &str) -> Probe {
+            Probe::with_overrides(src, &[])
+        }
+
+        /// A `Probe` whose named structs each carry a `drop` overload, set the
+        /// way `check` sets it but without a `: drop` word in the source.
+        /// Deliberately not written as a program: an override body on a
+        /// disposal cycle must dispose something that leads back to its own
+        /// receiver, which R6's self-recursion rejection refuses, so R7's
+        /// cycle boundary is reachable from the registries but not from a
+        /// module that type-checks.
+        fn with_overrides(src: &str, overridden: &[&str]) -> Probe {
             let tokens = lex(src).unwrap();
             let mut module = parse(&tokens).unwrap();
             check(&mut module).unwrap();
+            for name in overridden {
+                let decl = module
+                    .structs
+                    .iter_mut()
+                    .find(|s| s.name == *name)
+                    .expect("declared struct");
+                decl.has_drop_overload = true;
+            }
             let (structs, enums, arrays, cells, refs) = build_registries(
                 &module.structs,
                 &module.enums,
@@ -3106,6 +3518,23 @@ mod tests {
                 arrays,
                 cells,
                 refs,
+            }
+        }
+
+        fn regs(&self) -> Registries<'_> {
+            Registries {
+                structs: &self.structs,
+                enums: &self.enums,
+                arrays: &self.arrays,
+                cells: &self.cells,
+                refs: &self.refs,
+            }
+        }
+
+        fn struct_id(&self, name: &str) -> StructId {
+            match self.struct_ty(name) {
+                IrType::Struct(id) => id,
+                other => unreachable!("{other:?}"),
             }
         }
 
@@ -3142,16 +3571,7 @@ mod tests {
         }
 
         fn path(&self, ty: IrType) -> Option<Vec<PathStep>> {
-            recursive_disposal_path(
-                ty,
-                Registries {
-                    structs: &self.structs,
-                    enums: &self.enums,
-                    arrays: &self.arrays,
-                    cells: &self.cells,
-                    refs: &self.refs,
-                },
-            )
+            recursive_disposal_path(ty, self.regs())
         }
     }
 
@@ -4993,6 +5413,7 @@ mod tests {
             name_static: "SpyArr",
             fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
             span: crate::ast::Span::default(),
+            has_drop_overload: false,
         });
         let (structs, enums, arrays, ..) = build_registries(
             &module.structs,
