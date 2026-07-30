@@ -47,6 +47,7 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
         .output()
         .expect("binary should run");
     std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&binary).ok();
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
         output

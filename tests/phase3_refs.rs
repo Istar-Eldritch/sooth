@@ -31,6 +31,7 @@ fn run_src_traced(name: &str, src: &str, trace: bool) -> (String, String, i32) {
     };
     let output = cmd.output().expect("binary should run");
     std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&binary).ok();
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
         String::from_utf8(output.stderr).expect("stderr should be utf8"),

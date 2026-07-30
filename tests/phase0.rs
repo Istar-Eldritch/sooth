@@ -28,6 +28,7 @@ fn run_binary(path: &str, trace: bool) -> (String, i32) {
         false => cmd.env_remove(sooth::ir::TRACE_ALLOC_ENV),
     };
     let output = cmd.output().expect("binary should run");
+    std::fs::remove_file(&binary).ok();
     (
         String::from_utf8(output.stdout).expect("stdout should be utf8"),
         output
@@ -1334,6 +1335,7 @@ fn runtime_out_of_range_array_index_traps_and_aborts_native() {
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
     let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
     let code = output
@@ -1381,6 +1383,7 @@ fn runtime_index_at_length_boundary_traps_and_aborts_native() {
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
     let stderr = String::from_utf8(output.stderr).expect("stderr should be utf8");
     let code = output
@@ -2492,6 +2495,7 @@ fn run_owned_memory_bounded_golden(tag: &str, src: &str, limit_kb: u64) -> i32 {
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .status()
         .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
     status
         .code()
         .expect("process should exit normally, not die by signal")
@@ -2675,6 +2679,7 @@ fn run_stack_bounded_golden(tag: &str, src: &str) -> Option<i32> {
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .status()
         .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
     status.code()
 }
 
