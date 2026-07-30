@@ -346,6 +346,15 @@ struct Provenance {
     /// field is still a name for part of the whole struct, so the alias check
     /// has to test region *overlap* along this chain, not bare equality.
     parents: HashMap<u32, RegionId>,
+    /// R6 (slice 8b): the resolved operand type of every `drop` call site in
+    /// this body, in the order the walk reaches them. Nothing in the walk
+    /// reads it back; the body walkers hand it to `check`, which needs the
+    /// *type* each `drop` resolves to in order to tell `drop@File` from a
+    /// `drop` of a plain `i64` — a distinction no purely syntactic pass over
+    /// callee names can make. It rides this arena for the same reason the
+    /// arena is threaded at all: an `if` arm clones `Scope`, so an
+    /// observation kept there would die with the arm.
+    dropped: Vec<Type>,
 }
 
 impl Provenance {
@@ -1024,10 +1033,36 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         refs,
         externs: _,
     } = module;
+    // R6: each body's own `drop` call sites, resolved to a concrete operand
+    // type by the walk that checks it. Collected per word so the graph below
+    // knows which body each site sits in.
+    let mut dropped: Vec<Vec<Type>> = Vec::with_capacity(words.len());
     for word in words.iter() {
-        check_word(word, enums, &env, arrays, owned_cells, refs, structs)?;
+        let mut sites = Vec::new();
+        check_word(
+            word,
+            enums,
+            &env,
+            arrays,
+            owned_cells,
+            refs,
+            structs,
+            &mut sites,
+        )?;
+        dropped.push(sites);
     }
-    Ok(())
+
+    // R6: only now, with every `drop` call site's operand type known, can the
+    // `drop`-reachability graph be built.
+    check_drop_overload_recursion(
+        words,
+        structs,
+        enums,
+        arrays,
+        owned_cells,
+        &drop_overloads,
+        &dropped,
+    )
 }
 
 /// R1/R2/R3/R7/R12/R13/R14: every `extern:` declaration's own checks, run
@@ -1647,7 +1682,19 @@ pub fn check_def(
 ) -> Result<(), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    check_word(word, enums, &env, arrays, cells, refs, structs)
+    // R6's whole-program `drop`-reachability pass has no whole program to walk
+    // here: `check_def` checks one word against an env, so its `drop` call
+    // sites are observed and discarded.
+    check_word(
+        word,
+        enums,
+        &env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &mut Vec::new(),
+    )
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -2022,6 +2069,282 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
     )
 }
 
+/// R6 (D4, slice 8b): reject a `drop` overload that can reach itself. Per
+/// override, the question is only whether `drop@T`'s own word is reachable
+/// from itself through any sequence of calls, direct or indirect -- a bare
+/// self-call is the cycle of length one, a chain through helpers the general
+/// case, and a `drop` of some *other* aggregate merely containing a `T` is
+/// the same question again, since disposing that aggregate runs `T`'s
+/// override through its own generic field glue.
+///
+/// This cannot be a sibling of `check_tail_call_cycles`, run before body
+/// checking: resolving *which* override a `drop` call site dispatches to
+/// needs the operand's static type, and nothing computes that before
+/// `check_word`'s per-term stack simulation. A purely syntactic pass over
+/// callee names (`check_tail_call_cycles`'s own shape) could not tell
+/// `drop@File` from the `drop` of the `i64` that `close` returns, and so
+/// would reject the dogfood outright.
+///
+/// **Known, accepted limitation:** reachability is not data-flow, so it is
+/// context-insensitive. A helper called from `drop@T` that is *separately*
+/// reachable back to `drop@T` only down a branch never taken from there
+/// still reads as a cycle -- the same false positive the tail-cycle pass
+/// already accepts, with the same remedy: factor out a distinct helper.
+fn check_drop_overload_recursion(
+    words: &[WordDef],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    overloads: &HashMap<StructId, usize>,
+    dropped: &[Vec<Type>],
+) -> Result<(), String> {
+    if overloads.is_empty() {
+        return Ok(());
+    }
+    let adj = drop_reachability_graph(words, structs, enums, arrays, cells, overloads, dropped);
+    // Sorted by struct id, so a program with two offending overloads always
+    // reports the same one.
+    let mut targets: Vec<(StructId, usize)> = overloads.iter().map(|(&id, &i)| (id, i)).collect();
+    targets.sort_by_key(|(id, _)| id.index());
+    for (id, idx) in targets {
+        let mut visited = vec![false; words.len()];
+        visited[idx] = true;
+        let mut chain = vec![idx];
+        if reaches_start(idx, &adj, &mut visited, &mut chain) {
+            return Err(recursive_drop_overload_error(
+                words, structs, overloads, id, &chain,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// R6: the whole-program graph the reachability question is asked over. Two
+/// kinds of edge out of a word `A`:
+///
+/// - an ordinary call anywhere in `A`'s body resolving to a user word `B`
+///   (**any** position, unlike `tail_position_calls`, which only ever reads
+///   `terms.last()`);
+/// - `A -> drop@T` for a `drop` call site in `A` whose recorded operand type
+///   either *is* the overridden struct `T`, or is an aggregate with no
+///   override of its own whose linear fields reach `T` through ordinary,
+///   non-overridden composition.
+///
+/// Every edge is resolved through the `StructId`-keyed override table, never
+/// through a name-keyed map: the literal name `"drop"` is shared by every
+/// override and says nothing about which one a site dispatches to.
+fn drop_reachability_graph(
+    words: &[WordDef],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    overloads: &HashMap<StructId, usize>,
+    dropped: &[Vec<Type>],
+) -> Vec<Vec<usize>> {
+    // An override is not callable by name (every `drop` call site is
+    // intercepted before name resolution reaches `env`), so it contributes no
+    // name edge in either direction: its only incoming edges are `drop` sites.
+    let overload_words: HashSet<usize> = overloads.values().copied().collect();
+    let name_to_idx: HashMap<&str, usize> = words
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !overload_words.contains(i))
+        .map(|(i, w)| (w.name.as_str(), i))
+        .collect();
+
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); words.len()];
+    for (i, word) in words.iter().enumerate() {
+        for callee in all_calls(&word.body) {
+            if let Some(&j) = name_to_idx.get(callee) {
+                if !adj[i].contains(&j) {
+                    adj[i].push(j);
+                }
+            }
+        }
+        for &ty in &dropped[i] {
+            let mut targets = Vec::new();
+            collect_drop_targets(
+                ty,
+                structs,
+                enums,
+                arrays,
+                cells,
+                overloads,
+                &mut Vec::new(),
+                &mut targets,
+            );
+            for j in targets {
+                if !adj[i].contains(&j) {
+                    adj[i].push(j);
+                }
+            }
+        }
+    }
+    adj
+}
+
+/// R6: the override bodies one `drop` call site can run, given its operand
+/// type. A check-side fold over `StructDecl` fields, shaped like `is_copy`'s,
+/// because there is no `StructLayout` to walk yet -- `build_registries` runs
+/// inside `ir::lower`, after `check` entirely.
+///
+/// An overridden struct is where the walk stops, the same boundary R7 applies
+/// to the fused-loop search in `ir::expand_path`, and that one stop covers
+/// both of R6's cases:
+///
+/// - at the root, it *is* case (a): dropping an overridden `B` runs `B`'s own
+///   body, so the edge goes there and reachability continues from `B`'s own
+///   recorded call sites during the DFS. Descending into `B`'s fields as well
+///   would inspect field glue that never runs, and fabricate an edge.
+/// - below the root, it is case (b)'s boundary: a non-overridden aggregate is
+///   disposed by generic field glue, which calls each linear field's own
+///   destructor, so every override reachable through that composition really
+///   does run -- but the composition stops at the first override, for the
+///   same reason.
+///
+/// A `Copy` type is a dead end because nothing disposes it at all. `seen` is
+/// monotone (never popped) since the answer is a *set* of reachable
+/// overrides, not a path, and a `^T` payload may close a type cycle the
+/// struct and enum registries cannot.
+#[allow(clippy::too_many_arguments)]
+fn collect_drop_targets(
+    ty: Type,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    overloads: &HashMap<StructId, usize>,
+    seen: &mut Vec<Type>,
+    found: &mut Vec<usize>,
+) {
+    if is_copy(ty, structs, enums, arrays) || seen.contains(&ty) {
+        return;
+    }
+    seen.push(ty);
+    let descend = |field: Type, seen: &mut Vec<Type>, found: &mut Vec<usize>| {
+        collect_drop_targets(field, structs, enums, arrays, cells, overloads, seen, found)
+    };
+    match ty {
+        Type::Struct(id, _) => {
+            if let Some(&idx) = overloads.get(&id) {
+                if !found.contains(&idx) {
+                    found.push(idx);
+                }
+                return;
+            }
+            for (_, field_ty) in &structs[id.index()].fields {
+                descend(*field_ty, seen, found);
+            }
+        }
+        Type::Enum(id, _) => {
+            for variant in &enums[id.index()].variants {
+                for (_, field_ty) in &variant.fields {
+                    descend(*field_ty, seen, found);
+                }
+            }
+        }
+        Type::Array(id, _) => descend(arrays[id.index()].element, seen, found),
+        Type::OwnedCell(id, _) => descend(cells[id.index()].payload, seen, found),
+        _ => {}
+    }
+}
+
+/// R6: every callee name a body mentions, in any position -- the whole-body
+/// sibling of `tail_position_calls`, which only ever reads `terms.last()`.
+/// Both `if` arms and every clause body are visited.
+///
+/// A local's own name reads as a `Call` term too, so a local sharing a word's
+/// name contributes an edge that no call justifies. That over-approximation
+/// can only add edges, never lose one, and is the same one
+/// `check_tail_call_cycles` already lives with.
+fn all_calls(body: &WordBody) -> Vec<&str> {
+    let mut out = Vec::new();
+    match body {
+        WordBody::Terms { terms } => collect_all_calls(terms, &mut out),
+        WordBody::Clauses(clauses) => {
+            for clause in clauses {
+                collect_all_calls(&clause.body, &mut out);
+            }
+        }
+    }
+    out
+}
+
+fn collect_all_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
+    for term in terms {
+        match &term.kind {
+            TermKind::Call(name) => out.push(name.as_str()),
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                collect_all_calls(then_branch, out);
+                collect_all_calls(else_branch, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Whether `start` is reachable from the last word on `chain`, growing
+/// `chain` into the route that gets there. A node is marked on the way down
+/// and never unmarked: if it could reach `start`, the search from it already
+/// said so, so skipping it on a later branch cannot lose a cycle.
+fn reaches_start(
+    start: usize,
+    adj: &[Vec<usize>],
+    visited: &mut [bool],
+    chain: &mut Vec<usize>,
+) -> bool {
+    let u = *chain.last().expect("reachability chain is never empty");
+    for &v in &adj[u] {
+        if v == start {
+            return true;
+        }
+        if !visited[v] {
+            visited[v] = true;
+            chain.push(v);
+            if reaches_start(start, adj, visited, chain) {
+                return true;
+            }
+            chain.pop();
+        }
+    }
+    false
+}
+
+/// R6: a located error naming the whole cycle in order, closing back to the
+/// override it started from, and naming `T>` as the remedy -- modeled on
+/// `mutual_tail_recursion_error`'s shape. An override has no callable name of
+/// its own, so it is rendered as the declaration the user wrote.
+fn recursive_drop_overload_error(
+    words: &[WordDef],
+    structs: &[StructDecl],
+    overloads: &HashMap<StructId, usize>,
+    id: StructId,
+    chain: &[usize],
+) -> String {
+    let render = |i: usize| match overloads.iter().find(|(_, &w)| w == i) {
+        Some((sid, _)) => format!("`drop ( {} -- )`", structs[sid.index()].name),
+        None => format!("`{}`", words[i].name),
+    };
+    let mut rendered: Vec<String> = chain.iter().map(|&i| render(i)).collect();
+    rendered.push(render(chain[0]));
+    let name = &structs[id.index()].name;
+    let span = word_span(&words[overloads[&id]]);
+    format!(
+        "error: recursive `drop` overload for `{}`: {} (line {}, col {})\n  a `drop` body cannot dispose its own receiver, directly or through any chain of calls; destructure it with `{}>` and dispose the fields instead",
+        name,
+        rendered.join(" -> "),
+        span.line,
+        span.col,
+        name
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_word(
     word: &WordDef,
@@ -2031,6 +2354,7 @@ fn check_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    dropped: &mut Vec<Type>,
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
@@ -2042,12 +2366,12 @@ fn check_word(
     }
     check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
     match &word.body {
-        WordBody::Terms { terms } => {
-            check_terms_word(word, enums, terms, env, arrays, cells, refs, structs)
-        }
-        WordBody::Clauses(clauses) => {
-            check_clause_word(word, enums, clauses, env, arrays, cells, refs, structs)
-        }
+        WordBody::Terms { terms } => check_terms_word(
+            word, enums, terms, env, arrays, cells, refs, structs, dropped,
+        ),
+        WordBody::Clauses(clauses) => check_clause_word(
+            word, enums, clauses, env, arrays, cells, refs, structs, dropped,
+        ),
     }
 }
 
@@ -2094,6 +2418,7 @@ fn check_terms_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    dropped: &mut Vec<Type>,
 ) -> Result<(), String> {
     // R3: a binding is an ordinary term, but the *entry* one keeps its own
     // diagnostic. Only there is the declared effect the frame, so only there
@@ -2127,6 +2452,7 @@ fn check_terms_word(
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, true,
     )?;
+    dropped.append(&mut prov.dropped);
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
@@ -2148,6 +2474,7 @@ fn check_clause_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    dropped: &mut Vec<Type>,
 ) -> Result<(), String> {
     // The top input may be a plain enum (value mode) or a reference to
     // one (reference mode, `&Enum`/`&!Enum`) — the mode follows the declared
@@ -2244,6 +2571,7 @@ fn check_clause_word(
             refs,
             structs,
             ref_mutable,
+            dropped,
         )?;
     }
     Ok(())
@@ -2263,6 +2591,7 @@ fn check_clause_body(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     ref_mutable: Option<bool>,
+    dropped: &mut Vec<Type>,
 ) -> Result<(), String> {
     let ctx = word_ctx(word, structs, enums);
     let mut seen_locals = HashSet::new();
@@ -2318,6 +2647,7 @@ fn check_clause_body(
         &mut scope,
         true,
     )?;
+    dropped.append(&mut prov.dropped);
     let line = clause
         .body
         .last()
@@ -4371,10 +4701,12 @@ fn check_shuffle(
             stack.push(Slot { alias: None, ..top });
         }
         "drop" => {
-            if stack.is_empty() {
-                return Err(need("drop", 1, 0));
-            }
-            stack.pop();
+            let top = stack.pop().ok_or_else(|| need("drop", 1, 0))?;
+            // R6 (slice 8b): a side observation only. `drop` still pops one
+            // value of any type with no type check, exactly as before; the
+            // recorded type is what lets `check`'s post-pass resolve which
+            // concrete override (if any) this call site dispatches to.
+            prov.dropped.push(top.ty);
         }
         "swap" => {
             let n = stack.len();
@@ -4596,7 +4928,9 @@ mod tests {
         // structs coexist with distinct `StructId` keys, with no collision
         // reported (the module checks fine), and the registry carries one
         // entry per struct.
-        let src = "type: A x i64 ; type: B y i64 ; : drop ( A -- ) drop ; : drop ( B -- ) drop ; : main ( -- ) 1 A drop 2 B drop ;";
+        let src = "type: A x i64 ; type: B y i64 ; \
+                   : drop ( A -- ) | a | a A>x . ; : drop ( B -- ) | b | b B>y . ; \
+                   : main ( -- ) 1 A drop 2 B drop ;";
         check_src(src).unwrap();
 
         let tokens = crate::lexer::lex(src).unwrap();
@@ -4796,6 +5130,122 @@ mod tests {
             err.contains("linear value `r` is never consumed"),
             "unexpected message: {err}"
         );
+    }
+
+    #[test]
+    fn check_drop_body_direct_self_recursion_is_error() {
+        // Criterion 8/R6: a `drop` body that drops its own receiver is a
+        // cycle of length one. The message names the chain and `File>` as the
+        // remedy, since destructuring is what the user has to do instead.
+        let src = "type: File fd i64 ; : drop ( File -- ) drop ; : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`File>`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_body_indirect_self_recursion_through_helper_is_error() {
+        // Criterion 9/R6: the same rejection through one helper word, which is
+        // why this is reachability over the whole call graph rather than a
+        // self-call test. The chain names the helper it goes through.
+        let src = "type: File fd i64 ; \
+                   : shut ( File -- ) drop ; \
+                   : drop ( File -- ) shut ; \
+                   : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`shut`"), "unexpected message: {err}");
+        assert!(err.contains("`File>`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_body_recursion_inside_an_if_arm_is_error() {
+        // R6: the call graph is over calls in *any* position, so the walker
+        // has to visit both `if` arms and every term after them --
+        // `tail_position_calls` only ever reads `terms.last()`, and would see
+        // neither of these.
+        let src = "type: File fd i64 ; \
+                   : shut ( File -- ) drop ; \
+                   : drop ( File -- ) | f | true if f shut else f shut end 1 . ; \
+                   : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`shut`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_of_copy_scalar_inside_drop_body_is_not_a_cycle() {
+        // Criterion 10/R6: the dogfood's own shape. Its body ends in a `drop`
+        // of the `Copy` `i64` its extern call returns, which a name-keyed
+        // graph would read as a call to the override itself and reject.
+        let src = "type: File fd i64 ; \
+                   : drop ( File -- ) | f | f File>fd drop ; \
+                   : main ( -- ) 1 File drop ;";
+        check_src(src).unwrap();
+    }
+
+    #[test]
+    fn check_drop_of_different_resource_inside_another_drop_body_is_ok() {
+        // Criterion 11/R6: dispatch is per struct id, so `drop@A` disposing a
+        // `B` is an edge to `drop@B` and nothing more -- no cycle, since
+        // `drop@B` reaches nothing back.
+        let src = "type: A x i64 ; type: B y i64 ; \
+                   : drop ( A -- ) | a | a A>x B drop ; \
+                   : drop ( B -- ) | b | b B>y drop ; \
+                   : main ( -- ) 1 A drop ;";
+        check_src(src).unwrap();
+    }
+
+    #[test]
+    fn check_drop_body_recursion_through_a_containing_aggregate_is_error() {
+        // Criterion 21/R6 case (b): `Box` has no override, so dropping one
+        // runs generic field glue that disposes its `File` field through
+        // `File`'s own override -- unbounded recursion at runtime, invisible
+        // to a graph that only looked at directly dropped types.
+        let src = "type: File fd i64 ; type: Box f File ; \
+                   : drop ( File -- ) | f | f Box drop ; \
+                   : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`File>`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_of_an_overridden_aggregate_does_not_walk_its_fields() {
+        // R6: case (b) must not fire when the dropped type is *itself*
+        // overridden. Dropping a `B` runs `B`'s own body, never `B`'s field
+        // glue, so walking into its `A` field here would fabricate an edge
+        // `drop@A -> drop@A` and reject a program that terminates: `drop@B`
+        // destructures its `A` field rather than dropping it.
+        let src = "type: A x i64 ; type: B a A ; \
+                   : drop ( A -- ) | a | a A>x drop 1 A B drop ; \
+                   : drop ( B -- ) | b | b B>a A>x drop ; \
+                   : main ( -- ) 1 A drop ;";
+        check_src(src).unwrap();
+    }
+
+    #[test]
+    fn check_drop_body_sharing_a_helper_with_another_word_is_not_a_cycle() {
+        // R6: reachability is over the whole call graph, so a helper called
+        // both from an override and from elsewhere must not read as a cycle
+        // just for being reachable from two places.
+        let src = "type: File fd i64 ; \
+                   : show ( i64 -- ) . ; \
+                   : drop ( File -- ) | f | f File>fd show ; \
+                   : main ( -- ) 1 File drop 2 show ;";
+        check_src(src).unwrap();
     }
 
     #[test]

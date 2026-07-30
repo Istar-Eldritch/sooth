@@ -250,6 +250,17 @@ and R5's own coverage needs a helper word whose body ends in `drop` (the shape t
 cycle above). Both halves are excluded now: a word named `drop` is neither a self-tail-call nor a
 name-keyed callee. R6 still owns every *typed* `drop` edge, and nothing about that pass changes.
 
+**Two notes from phase 3's implementation.** First, cases (a) and (b) collapse into *one* rule
+rather than a case split with a guard between them: the field walk stops at the first struct id in
+R1's registry whether that id is the walk's own root (which is case (a) — the edge goes to that
+override, and the DFS continues from its own recorded call sites) or reached below it (case (b)'s
+boundary). Case (b)'s "must not run when the directly dropped type is itself overridden" is then
+not a separate condition to remember, but the same stop that keeps the walk out of any override's
+fields. Second, nothing new is threaded through `check_term`: a `drop` call site's resolved operand
+type is recorded onto the per-body `Provenance` arena the walk already carries `&mut` (and for the
+same reason it is carried — an `if` arm clones `Scope`, so an observation kept there would die with
+the arm), and the body walkers hand each body's list to `check`, which owns the graph.
+
 **R7 — Composition is correct in both the ordinary case and the fused-recursive-disposal-cycle
 case; the override always runs.** Two distinct paths, not one:
 
@@ -358,6 +369,17 @@ is gone. Fixing this needs three coordinated pieces, not one:
    text describes, is necessary but *not sufficient*: without the bit, a REPL-declared resource
    stays `Copy` at all three sites while lowering correctly, and no existing test catches it
    (phase 2's all read a natively-checked `module.structs`).
+
+   *Found while implementing R6 (phase 4 decides what to do about it):* R6's reachability pass is
+   a whole-*program* pass, and `check::check_def` — the REPL's own per-word entry point — has no
+   program to walk, so it observes each `drop` call site's operand type and discards it. A REPL
+   line entering `: drop ( T -- ) drop ;` therefore passes R1's shape check and every body check,
+   and recurses unboundedly when the override is next invoked. The two candidate answers are (a)
+   accept the gap and record it in Out of scope, on the grounds that the REPL already has no
+   whole-program view (nothing there rejects mutual tail recursion across lines either), or (b)
+   run R6 over the session's retained `drop_overloads` bodies plus the line being entered, which
+   is a smaller graph than the native one but needs the same typed `drop` observations `check_def`
+   currently throws away. Not decided here.
 
 2. **Symbol collision under redefinition.** `struct_drop_symbol` (`src/ir.rs:227-229`) emits the
    unmangled global `sooth_struct_drop_N`, and REPL libraries load with `RTLD_NOW | RTLD_GLOBAL`
