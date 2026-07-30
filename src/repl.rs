@@ -264,10 +264,11 @@ pub struct Session {
     refs: Vec<RefDecl>,
     /// R11: every `drop` overload the session has seen, keyed the way
     /// destructor synthesis is keyed (by `StructId`, never by the shared
-    /// literal name), holding the generation it was last defined at and its
-    /// body. The body is retained because each later line re-synthesizes
-    /// destructors into its own freshly-`dlopen`ed module, by which time the
-    /// declaring line's `WordDef` is long gone. The generation lives here
+    /// literal name), holding the `override_epoch` it was last defined at and
+    /// its body. The body is retained because a later line's re-synthesis
+    /// still has to know the struct *has* an override (so it emits no glue
+    /// under the pinned symbol), and because the defining line itself lowers
+    /// it after the session has already been updated. The epoch lives here
     /// rather than in `self.env` because the override is deliberately absent
     /// from `env` (R1), so `next_generation`'s lookup could never see it.
     drop_overloads: HashMap<StructId, (u64, WordDef)>,
@@ -278,11 +279,10 @@ pub struct Session {
     /// cell's destructor symbol once `Some` (`apply_drop_generations`): a
     /// struct without its own override can still `Call`, inside its own
     /// destructor, one that composes an overridden struct, so its body
-    /// changes across an override event too. Distinct from the per-struct
-    /// generation stored in `drop_overloads` (which only counts *that
-    /// struct's own* redefinitions, and still names its `.so` file) -- an
-    /// unrelated struct's redefinition must still mint every symbol a fresh
-    /// name, which only a session-wide counter guarantees.
+    /// changes across an override event too. One counter serves both jobs:
+    /// an overridden struct's own symbol is stamped with the epoch its
+    /// override was defined at (pinning it, R11.3), everything else with the
+    /// session's current one.
     override_epoch: Option<u64>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct or enum), so the
@@ -468,23 +468,44 @@ impl Session {
         Ok(())
     }
 
-    /// R11: the retained override bodies as the map destructor synthesis
-    /// consumes, borrowed from the session instead of from a module's
-    /// `words` (the REPL has no persistent `module.words` to index into).
-    fn drop_override_bodies(&self) -> ir::DropOverrides<'_> {
+    /// R11: the retained overrides as the map destructor synthesis consumes,
+    /// borrowed from the session instead of from a module's `words` (the REPL
+    /// has no persistent `module.words` to index into).
+    ///
+    /// R11.3: only `declaring`, the struct whose `: drop` line is being
+    /// evaluated right now, contributes a body to lower; every other override
+    /// is `AlreadyLoaded`. A retained body was checked against the env of its
+    /// own line, so re-lowering it into a later line's module resolves its
+    /// callees against an env it was never checked against: a callee redefined
+    /// at a different arity panics lowering, and one redefined at the same
+    /// arity would silently never take effect anyway, since the pinned symbol
+    /// keeps the first-loaded body under `RTLD_GLOBAL`. Lowering an override
+    /// exactly once, on its own line, gives it the same snapshot semantics an
+    /// ordinary word already has (a word's body binds the callee generations
+    /// visible when it was defined).
+    fn drop_override_bodies(&self, declaring: Option<StructId>) -> ir::DropOverrides<'_> {
         self.drop_overloads
             .iter()
-            .map(|(id, (_, word))| (*id, word))
+            .map(|(id, (_, word))| {
+                let entry = if Some(*id) == declaring {
+                    ir::DropOverride::Body(word)
+                } else {
+                    ir::DropOverride::AlreadyLoaded
+                };
+                (*id, entry)
+            })
             .collect()
     }
 
     /// R11.2: stamp *every* linear struct's/enum's/cell's destructor symbol
     /// with the session's current override epoch, once the session has ever
     /// defined a `drop` override (`self.override_epoch` is `None` until
-    /// then). Not only the overridden struct's own: a struct/enum/cell with
-    /// no override of its own can still `Call`, inside its own destructor,
-    /// one that composes an overridden struct, so its body's callee changes
-    /// across an override event too. Redefining a `: drop` without this would
+    /// then). Not only the overridden struct's own: a struct/enum/cell with no
+    /// override of its own can still `Call`, inside its own destructor, one
+    /// that composes an overridden struct, so its body's callee changes across
+    /// an override event too. (An overridden struct's own symbol is the one
+    /// exception, stamped with the epoch its override was *defined* at so it
+    /// never moves again -- R11.3, at the loop below.) Redefining a `: drop` without this would
     /// define one unmangled global (the overridden struct's own symbol, or
     /// worse, an *enclosing* one that merely calls it) twice with two
     /// different bodies, ambiguous under the session's `RTLD_GLOBAL` loading,
@@ -500,8 +521,18 @@ impl Session {
         enums: &mut ir::Enums,
         cells: &mut ir::Cells,
     ) {
-        for layout in &mut structs.layouts {
-            layout.drop_generation = self.override_epoch;
+        for (idx, layout) in structs.layouts.iter_mut().enumerate() {
+            // R11.3: an override's symbol is pinned to its defining epoch, so
+            // the body compiled on that line stays the resolved destructor
+            // (here and at every `emit_drop` call site) without being
+            // re-lowered on every later line. Later override events still move
+            // every *other* symbol, so an enclosing aggregate's glue is
+            // re-emitted and re-resolves to whichever epoch each override is
+            // pinned at.
+            layout.drop_generation = match self.drop_overloads.get(&StructId::from_index(idx)) {
+                Some((epoch, _)) => Some(*epoch),
+                None => self.override_epoch,
+            };
         }
         for layout in &mut enums.layouts {
             layout.drop_generation = self.override_epoch;
@@ -518,29 +549,25 @@ impl Session {
     /// failure the session is left as it was.
     fn eval_drop_overload(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
         let id = check::drop_overload_struct_id(&word)?;
-        // Redefinition follows the session's ordinary generation-bump rule,
-        // not the per-module duplicate-override rejection: a second `: drop`
-        // line replaces the first, like any other redefinition.
-        let generation = self
-            .drop_overloads
-            .get(&id)
-            .map(|(g, _)| g + 1)
-            .unwrap_or(0);
+        // R11.2: bump the session-wide epoch before compiling, so this line's
+        // own destructor set (the override's and every other linear type's)
+        // mints fresh symbols reflecting it; rolled back below on failure,
+        // exactly like `drop_overloads` and `has_drop_overload`. Redefinition
+        // follows the session's ordinary generation-bump rule, not the
+        // per-module duplicate-override rejection: a second `: drop` line
+        // replaces the first, like any other redefinition.
+        let previous_epoch = self.override_epoch;
+        let epoch = previous_epoch.map_or(0, |e| e + 1);
         let had_overload = self.structs[id.index()].has_drop_overload;
-        let previous = self.drop_overloads.insert(id, (generation, word));
+        let previous = self.drop_overloads.insert(id, (epoch, word));
         // Set before the body is checked and before this line's own
         // destructor synthesis: the receiver must already be linear while its
         // own `drop` body is checked, and the defining line must emit the
         // override, not one last round of generic glue.
         self.structs[id.index()].has_drop_overload = true;
-        // R11.2: bump the session-wide epoch before compiling, so this line's
-        // own destructor set (the override's and every other linear type's)
-        // mints fresh symbols reflecting it; rolled back below on failure,
-        // exactly like `drop_overloads` and `has_drop_overload`.
-        let previous_epoch = self.override_epoch;
-        self.override_epoch = Some(previous_epoch.map_or(0, |e| e + 1));
+        self.override_epoch = Some(epoch);
 
-        match self.compile_drop_overload(id, generation) {
+        match self.compile_drop_overload(id, epoch) {
             Ok(lib) => {
                 self.libs.push(lib);
                 let name = self.structs[id.index()].name.clone();
@@ -560,8 +587,9 @@ impl Session {
     }
 
     /// R11: check the just-registered override's body and compile this
-    /// generation's destructor set into one loadable object.
-    fn compile_drop_overload(&mut self, id: StructId, generation: u64) -> Result<Library, String> {
+    /// epoch's destructor set into one loadable object. The only place the
+    /// override's body is ever lowered (R11.3).
+    fn compile_drop_overload(&mut self, id: StructId, epoch: u64) -> Result<Library, String> {
         let env = self.typed_env();
         check::check_def(
             &self.drop_overloads[&id].1,
@@ -595,7 +623,7 @@ impl Session {
                 &ir_lower_env,
                 &resolve,
                 regs,
-                &self.drop_override_bodies(),
+                &self.drop_override_bodies(Some(id)),
             )
         };
 
@@ -606,7 +634,7 @@ impl Session {
             arrays: arrays.layouts,
         })?;
         let dir = driver::tempfile_dir()?;
-        let so_path = dir.join(format!("drop_{}_gen{generation}.so", id.index()));
+        let so_path = dir.join(format!("drop_{}_epoch{epoch}.so", id.index()));
         driver::compile_so(&ssa, &so_path)?;
         Library::open(&so_path)
     }
@@ -660,15 +688,15 @@ impl Session {
             // path's single shared module), or `drop` on a linear struct/enum
             // dies at `dlopen` with an undefined `sooth_struct_drop_N`/
             // `sooth_enum_drop_N`.
-            // R11: an overridden struct's destructor is the retained user
-            // body, re-lowered into this line's module against the current
-            // generation's symbol; every other linear struct gets generic
-            // glue as before.
+            // R11.3: an overridden struct's destructor is *not* re-emitted
+            // here -- its symbol is pinned to the epoch it was defined at and
+            // resolves through `RTLD_GLOBAL` to that line's module; every
+            // other linear struct gets generic glue as before.
             funcs.extend(ir::synthesize_aggregate_destructors(
                 &ir_lower_env,
                 &resolve,
                 regs,
-                &self.drop_override_bodies(),
+                &self.drop_override_bodies(None),
             ));
             funcs
         };
@@ -799,7 +827,7 @@ impl Session {
                 &ir_lower_env,
                 &resolve,
                 regs,
-                &self.drop_override_bodies(),
+                &self.drop_override_bodies(None),
             );
             (func, m, out_bytes, aggregate_destructors)
         };
@@ -1081,9 +1109,11 @@ mod tests {
         assert_eq!(next_generation(env.get("sq")), 1);
     }
 
-    /// The destructor symbols one more REPL line would emit, built through
-    /// the same session state and the same synthesis call every line uses.
-    fn destructor_symbols(session: &Session) -> Vec<String> {
+    /// The destructor symbols one REPL line emits, built through the same
+    /// session state and the same synthesis call every line uses. `declaring`
+    /// is the struct whose `: drop` line is being evaluated, `None` for an
+    /// ordinary line (R11.3: an ordinary line emits no override body).
+    fn destructor_symbols(session: &Session, declaring: Option<StructId>) -> Vec<String> {
         let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
             &session.structs,
             &session.enums,
@@ -1101,10 +1131,15 @@ mod tests {
         };
         let env = ir_arity_env(&session.typed_env());
         let resolve = resolver_for(&session.env);
-        ir::synthesize_aggregate_destructors(&env, &resolve, regs, &session.drop_override_bodies())
-            .into_iter()
-            .map(|f| f.name)
-            .collect()
+        ir::synthesize_aggregate_destructors(
+            &env,
+            &resolve,
+            regs,
+            &session.drop_override_bodies(declaring),
+        )
+        .into_iter()
+        .map(|f| f.name)
+        .collect()
     }
 
     #[test]
@@ -1155,15 +1190,19 @@ mod tests {
         session
             .eval_line(": drop ( Res -- ) | r | r Res>n . ;", &mut out)
             .unwrap();
-        let first = destructor_symbols(&session);
+        let id = StructId::from_index(0);
+        let first = destructor_symbols(&session, Some(id));
         session
             .eval_line(": drop ( Res -- ) | r | r Res>n 100 + . ;", &mut out)
             .unwrap();
-        let second = destructor_symbols(&session);
+        let second = destructor_symbols(&session, Some(id));
 
         assert_eq!(first, vec!["sooth_struct_drop_0__gen0".to_string()]);
         assert_eq!(second, vec!["sooth_struct_drop_0__gen1".to_string()]);
-        assert_eq!(session.drop_overloads[&StructId::from_index(0)].0, 1);
+        assert_eq!(session.drop_overloads[&id].0, 1);
+        // R11.3: an ordinary line in between emits neither, leaving the
+        // pinned symbol to resolve through `RTLD_GLOBAL`.
+        assert!(destructor_symbols(&session, None).is_empty());
     }
 
     #[test]
@@ -1179,7 +1218,7 @@ mod tests {
             .eval_line("type: Pair a __spy b __spy ;", &mut out)
             .unwrap();
         assert_eq!(
-            destructor_symbols(&session),
+            destructor_symbols(&session, None),
             vec!["sooth_struct_drop_0".to_string()]
         );
     }
@@ -1195,11 +1234,13 @@ mod tests {
         let mut out = Vec::new();
         session.eval_line("type: Res n __spy ;", &mut out).unwrap();
         session.eval_line("type: Holder r Res ;", &mut out).unwrap();
-        let before = destructor_symbols(&session);
+        let before = destructor_symbols(&session, None);
         session
             .eval_line(": drop ( Res -- ) | r | 42 . r Res> drop ;", &mut out)
             .unwrap();
-        let after = destructor_symbols(&session);
+        let id = StructId::from_index(0);
+        let defining_line = destructor_symbols(&session, Some(id));
+        let later_line = destructor_symbols(&session, None);
 
         assert_eq!(
             before,
@@ -1209,12 +1250,17 @@ mod tests {
             ]
         );
         assert_eq!(
-            after,
+            defining_line,
             vec![
                 "sooth_struct_drop_0__gen0".to_string(),
                 "sooth_struct_drop_1__gen0".to_string(),
             ]
         );
+        // R11.3: `Holder`'s glue is re-emitted on every later line (harmless,
+        // its body is identical mechanical glue and it must exist in a module
+        // that drops a `Holder`), and it calls `Res`'s pinned symbol; `Res`'s
+        // own destructor is not re-emitted.
+        assert_eq!(later_line, vec!["sooth_struct_drop_1__gen0".to_string()]);
     }
 
     #[test]

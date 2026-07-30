@@ -231,6 +231,13 @@ pub struct StructLayout {
     /// mints every destructor a fresh, never-before-used symbol on every
     /// override event, sidestepping that staleness without computing which
     /// aggregates actually reach the override transitively.
+    ///
+    /// One exception, and it is the whole of R11.3: an *overridden* struct's
+    /// own symbol carries the epoch its override was **defined** at, not the
+    /// session's current one, so the symbol never changes while that override
+    /// stands. The user body is then lowered exactly once, on its own
+    /// declaring line, and every later line resolves the pinned symbol
+    /// through `RTLD_GLOBAL` instead of re-lowering a body it never re-checks.
     pub drop_generation: Option<u64>,
 }
 
@@ -255,7 +262,22 @@ fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays
 /// `StructId`, never by the shared literal name `"drop"`, so overrides for
 /// distinct structs cannot collide. Borrowed rather than owned: the bodies live
 /// in the module being lowered (or, at the REPL, in the session).
-pub type DropOverrides<'a> = HashMap<StructId, &'a WordDef>;
+pub type DropOverrides<'a> = HashMap<StructId, DropOverride<'a>>;
+
+/// What an overridden struct's destructor is *for the module being lowered*.
+#[derive(Debug, Clone, Copy)]
+pub enum DropOverride<'a> {
+    /// Compile this body as the struct's destructor. The build path always
+    /// uses this; at the REPL, only the line declaring the override does.
+    Body(&'a WordDef),
+    /// R11.3: emit no destructor for this struct at all. Its symbol is pinned
+    /// to the epoch its override was defined at, so the body compiled on that
+    /// line is already loaded `RTLD_GLOBAL` and resolves for every later line.
+    /// Re-lowering the retained body here would resolve its callees against a
+    /// *later* line's env, which the body was never checked against — a
+    /// redefined callee of different arity panics lowering outright.
+    AlreadyLoaded,
+}
 
 /// The synthesized per-type destructor symbol for a linear struct. `epoch`
 /// is `Some` only at the REPL once its session holds at least one `drop`
@@ -270,6 +292,13 @@ pub type DropOverrides<'a> = HashMap<StructId, &'a WordDef>;
 /// later, correct recompilation would silently never take effect. Before any
 /// override exists in the session, epoch is `None` and every symbol stays
 /// unsuffixed, identical to the build path.
+///
+/// R11.3: for an *overridden* struct the epoch passed here is the one its
+/// override was defined at rather than the session's current one, pinning that
+/// one symbol across later override events (`StructLayout::drop_generation`).
+/// The two uses of the counter cannot collide: a struct emits glue only at
+/// epochs strictly before its override exists, and its override's own symbol
+/// at the defining epoch is the only thing minted for it from then on.
 fn struct_drop_symbol(id: StructId, epoch: Option<u64>) -> String {
     match epoch {
         Some(g) => format!("sooth_struct_drop_{}__gen{g}", id.index()),
@@ -1043,7 +1072,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // from a module's `words` (R11).
     let overrides: DropOverrides = drop_overloads
         .iter()
-        .map(|(id, idx)| (*id, &module.words[*idx]))
+        .map(|(id, idx)| (*id, DropOverride::Body(&module.words[*idx])))
         .collect();
 
     // R12: append a synthesized destructor for every linear struct/enum type
@@ -1086,6 +1115,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// destructor already goes through `struct_drop_symbol` (`emit_drop`, and
 /// `drop_level_fields` through it), so substituting the body here is the whole
 /// of dispatch: no call site resolves a `drop` overload by name.
+///
+/// R11.3: an `AlreadyLoaded` entry gets no destructor emitted at all — the
+/// REPL marks every override but the one being declared that way, since each
+/// override's symbol is pinned to its defining epoch and its body must be
+/// lowered once, against the env it was checked against.
 pub fn synthesize_aggregate_destructors(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
@@ -1103,11 +1137,14 @@ pub fn synthesize_aggregate_destructors(
         .iter()
         .enumerate()
         .filter(|(_, layout)| layout.is_linear)
-        .map(|(idx, _)| {
+        .filter_map(|(idx, _)| {
             let id = StructId::from_index(idx);
             match overrides.get(&id) {
-                Some(word) => synthesize_struct_destructor_override(id, word, env, resolve, regs),
-                None => synthesize_struct_destructor(id, env, resolve, regs),
+                Some(DropOverride::Body(word)) => Some(synthesize_struct_destructor_override(
+                    id, word, env, resolve, regs,
+                )),
+                Some(DropOverride::AlreadyLoaded) => None,
+                None => Some(synthesize_struct_destructor(id, env, resolve, regs)),
             }
         });
     let enum_destructors = enums

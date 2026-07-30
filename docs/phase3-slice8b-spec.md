@@ -410,6 +410,44 @@ is gone. Fixing this needs three coordinated pieces, not one:
    itself follows the session's ordinary generation-bump rule (described at `repl.rs:90-95`,
    pinned by the `redefinition_bumps_generation` test at `repl.rs:892`), not R1's per-module
    "duplicate override" rejection, which only applies within a single compiled program.
+
+   *Amended in phase 4, twice over. First (R11.2, found in phase 4's own review): a per-struct
+   generation on the overridden struct alone is not enough.* An *enclosing* aggregate's glue
+   (a struct/enum/cell composing the overridden struct) `Call`s the overridden destructor's
+   symbol, so its own body changes across an override event too, while its own symbol would stay
+   unsuffixed — and `RTLD_GLOBAL` keeps the *first* definition loaded, so the enclosing glue
+   compiled before the override would keep calling the pre-override callee forever. So the
+   suffix is a single session-wide `Session::override_epoch`, bumped on every override
+   define/redefine event of *any* struct and stamped onto every linear struct's/enum's/cell's
+   symbol once the session holds any override at all. That is deliberately coarser than
+   computing which aggregates actually reach the override; the cost is re-emitting some glue
+   under a fresh name needlessly, which is free, and the whole per-struct-vs-session question
+   disappears. Pinned by `repl_redefining_drop_overload_refreshes_a_composing_structs_glue` and
+   `repl_composing_structs_glue_is_correct_when_override_postdates_it`.
+
+   *Second (R11.3, found in phase 4's review of that fix): with the epoch session-wide, an
+   override's symbol moved on every later override event, which forced its retained body to be
+   re-lowered — and re-lowering resolves callees against a **later** line's env than the body
+   was checked against.* A word the body calls, redefined at a different arity, panicked lowering
+   outright (`attempt to subtract with overflow`, popping a callee's new input arity off the old
+   body's stack); redefined at the same arity it silently had no effect anyway, since the
+   first-loaded body keeps winning under `RTLD_GLOBAL`. Both symptoms have one cause: the retained
+   body was being treated as re-compilable when the session offers no way to re-check it. Fix: an
+   *overridden* struct's symbol carries the epoch its override was **defined** at, not the
+   session's current one, so it never moves while that override stands; its body is therefore
+   lowered exactly once, on its own declaring line, and every later line emits no destructor for
+   it at all (`DropOverride::AlreadyLoaded`) and resolves the pinned symbol through
+   `RTLD_GLOBAL`. Every *other* symbol still moves on every override event, so enclosing glue is
+   still refreshed and re-resolves to whichever epoch each override is pinned at. This makes the
+   REPL's snapshot semantics explicit and uniform: an override's callees bind the generations
+   visible when it was defined, exactly as an ordinary word's body already does (an ordinary word
+   is also lowered once, pinned to its callees' mangled symbols). It also collapses the two
+   counters into one — the per-struct generation the text above proposed had no remaining
+   function once the epoch existed. The two uses of the one counter cannot collide: a struct
+   emits glue only at epochs strictly before its own override exists, and from that epoch on
+   nothing but its override's own symbol is minted for it. Pinned by
+   `repl_redefining_an_overrides_callee_leaves_the_override_alone` and
+   `repl_declaring_a_second_override_leaves_the_first_alone`.
 3. **No `extern:` at the REPL.** The REPL has no `extern:` evaluation path at all (confirmed:
    `grep -n extern src/repl.rs` finds only Rust `extern "C"` items; 8a's own Out-of-scope already
    records this gap). The dogfood's `drop` body calls `close`, an `extern:` word, so it cannot be
@@ -423,11 +461,12 @@ rejection does not reach a REPL-entered override. R6 is a whole-program call-gra
 REPL has no whole program: `check_def` checks one body against an env of *signatures*, so an
 indirect cycle routed through a non-override helper word (`drop@T` -> helper -> `drop@T`) is not
 computable, since the session retains no `WordDef` for an ordinary helper once its declaring
-line is gone. Consequence today: `: drop ( Res -- ) | r | r drop ;` is accepted at the REPL and
-overflows the stack when the value is dropped, where a compiled program rejects it at check
-time. Closing the general case needs the session to retain every word body (a change with its
-own weight, e.g. redefinition semantics for the retained graph), so it belongs to a later slice,
-not here.
+line is gone. Consequence today: `: drop ( Res -- ) | r | r drop ;` is accepted at the REPL, and
+dropping the value aborts the whole process (`fatal runtime error: stack overflow, aborting`),
+taking the session's carried stack and every definition in it with it — not a diagnostic, and not
+recoverable, where a compiled program rejects the same body at check time. Closing the general
+case needs the session to retain every word body (a change with its own weight, e.g. redefinition
+semantics for the retained graph), so it belongs to a later slice, not here.
 
 *Correction, found in phase 4's review:* the paragraph above overstates the gap. `drop_overloads`
 already retains every override's own body (R11.1) across lines, and `check_def` already builds
@@ -440,6 +479,14 @@ a cycle routed through a non-override helper remains genuinely out of reach (the
 paragraph above was written for). Phase 4 still adds no guard, on the same partial-vs-none
 judgment call as before, but a future slice closing this should reuse that existing state rather
 than retaining every word body, which the case actually reachable today does not require.
+
+*Recommendation for that future slice, from phase 4's second review:* take the partial guard
+rather than waiting for the general one. The reason is the failure mode, not the coverage: an
+unguarded cycle does not produce a wrong answer, it aborts the process, so the cheapest available
+subset (direct self-recursion, override-to-override, and case (b)) converts the most likely
+authoring mistake from a lost session into a located error, and the residual helper-routed case
+is strictly no worse than today. The partial guard is honest as long as its message does not
+claim exhaustiveness.
 
 ## Criterion → test map
 

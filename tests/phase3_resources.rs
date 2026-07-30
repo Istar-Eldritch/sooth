@@ -116,6 +116,79 @@ fn repl_redefined_drop_overload_runs_the_new_body() {
 }
 
 #[test]
+fn repl_redefining_an_overrides_callee_leaves_the_override_alone() {
+    // R11.3 (code review, phase 4): every later line used to re-lower the
+    // retained override body against *that* line's env, so redefining a word
+    // the body calls at a different arity read the new arity against the old
+    // body's stack and panicked in lowering. The override is lowered once, on
+    // its own line, and its destructor symbol is pinned to that line's epoch,
+    // so a later redefinition of a callee cannot reach it: `drop` still prints
+    // 7 through the original `helper`, the same snapshot an ordinary word's
+    // body already gets (its callees bind the generations visible when it was
+    // defined).
+    let out = run_session(&[
+        "type: Res n i64 ;",
+        ": helper ( i64 -- ) . ;",
+        ": drop ( Res -- ) | r | r Res>n helper ;",
+        ": helper ( i64 i64 -- ) + . ;",
+        "7 Res",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Res",
+            "defined helper",
+            "defined drop for Res",
+            "defined helper",
+            "stack: <Res>",
+            "7",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
+fn repl_declaring_a_second_override_leaves_the_first_alone() {
+    // R11.3: a `: drop` line bumps the session epoch, which moves every
+    // *other* destructor symbol -- but an override's own symbol is pinned to
+    // the epoch it was defined at, so declaring `B`'s override neither
+    // re-emits nor re-lowers `A`'s. Without the pinning this line, which does
+    // not even mention `A`, hits the same stale-env re-lowering panic.
+    let out = run_session(&[
+        "type: A n i64 ;",
+        "type: B n i64 ;",
+        ": helper ( i64 -- ) . ;",
+        ": drop ( A -- ) | a | a A>n helper ;",
+        ": helper ( i64 i64 -- ) + . ;",
+        ": drop ( B -- ) | b | b B>n . ;",
+        "1 A",
+        "drop",
+        "2 B",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type A",
+            "defined type B",
+            "defined helper",
+            "defined drop for A",
+            "defined helper",
+            "defined drop for B",
+            "stack: <A>",
+            "1",
+            "stack: (empty)",
+            "stack: <B>",
+            "2",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
 fn repl_quit_disposes_a_residual_resource_through_its_overload() {
     // The `:quit` LIFO-disposal path derives linearity from the session's
     // current structs, so an overridden struct left on the carried stack is
