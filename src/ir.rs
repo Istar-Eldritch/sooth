@@ -211,6 +211,14 @@ pub struct StructLayout {
     /// `expand_path` (R7), which sees only `Registries` and so cannot reach the
     /// declaration.
     pub has_drop_overload: bool,
+    /// R11 (slice 8b): the REPL generation whose override body this struct's
+    /// destructor symbol carries, `None` on the build path and for any struct
+    /// without an override. Set by the session after `build_registries`, since
+    /// it is a fact about the session's redefinition history, not about the
+    /// declaration. It lives on the layout because that is the one thing both
+    /// `struct_drop_symbol` call sites (destructor synthesis and `emit_drop`)
+    /// already reach, so both mint the same name for a given generation.
+    pub drop_generation: Option<u64>,
 }
 
 /// Whether a field's `IrType` is linear: the drop-spy directly, or a nested
@@ -236,9 +244,17 @@ fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays
 /// in the module being lowered (or, at the REPL, in the session).
 pub type DropOverrides<'a> = HashMap<StructId, &'a WordDef>;
 
-/// The synthesized per-type destructor symbol for a linear struct.
-fn struct_drop_symbol(id: StructId) -> String {
-    format!("sooth_struct_drop_{}", id.index())
+/// The synthesized per-type destructor symbol for a linear struct. `generation`
+/// is `Some` only for a REPL struct with a user `drop` override (R11): the
+/// override's body differs between generations, so redefining it would
+/// otherwise define one global symbol twice with two different bodies,
+/// ambiguous under the REPL's `RTLD_GLOBAL` loading. Generic field glue is
+/// identical across generations and stays unsuffixed.
+fn struct_drop_symbol(id: StructId, generation: Option<u64>) -> String {
+    match generation {
+        Some(g) => format!("sooth_struct_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_struct_drop_{}", id.index()),
+    }
 }
 
 /// The synthesized per-type destructor symbol for a linear enum: mirrors
@@ -660,6 +676,9 @@ impl LayoutBuilder<'_> {
             align,
             is_linear,
             has_drop_overload,
+            // R11: the build path never suffixes a destructor symbol; the
+            // REPL sets this from its own override registry after the build.
+            drop_generation: None,
             fields,
         });
     }
@@ -1009,6 +1028,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// rejected, so every generation's glue is identical. If type redefinition is
 /// ever allowed, add a generation suffix, matching word symbols.
 ///
+/// R11 (slice 8b): a *user* `drop` override is where that premise fails --
+/// redefining one at the REPL puts a different body under the same symbol --
+/// so an overridden struct's destructor does carry a generation suffix
+/// (`StructLayout::drop_generation`, set by the session). Generic glue is
+/// still identical per generation and stays unsuffixed.
+///
 /// R2 (slice 8b): a struct in `overrides` gets the user's own `drop` body under
 /// that same symbol instead of the synthesized field glue. Every caller of the
 /// destructor already goes through `struct_drop_symbol` (`emit_drop`, and
@@ -1292,7 +1317,7 @@ fn synthesize_struct_destructor(
         b.seal_block(Terminator::Ret(None));
     }
     IrFunc {
-        name: struct_drop_symbol(id),
+        name: struct_drop_symbol(id, structs.layouts[id.index()].drop_generation),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
@@ -1313,7 +1338,7 @@ fn synthesize_struct_destructor_override(
     regs: Registries,
 ) -> IrFunc {
     IrFunc {
-        name: struct_drop_symbol(id),
+        name: struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation),
         ..lower_word(word, env, resolve, regs)
     }
 }
@@ -2834,7 +2859,9 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Call(None, cell_drop_symbol(id), vec![v]));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
-                self.push_instr(Instr::Call(None, struct_drop_symbol(id), vec![v]));
+                let symbol =
+                    struct_drop_symbol(id, self.structs.layouts[id.index()].drop_generation);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
                 self.push_instr(Instr::Call(None, enum_drop_symbol(id), vec![v]));
@@ -3212,8 +3239,8 @@ mod tests {
             "an emitted IrFunc was literally named `drop`: {:?}",
             module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
-        let a = func(&module, &struct_drop_symbol(StructId::from_index(0)));
-        let b = func(&module, &struct_drop_symbol(StructId::from_index(1)));
+        let a = func(&module, &struct_drop_symbol(StructId::from_index(0), None));
+        let b = func(&module, &struct_drop_symbol(StructId::from_index(1), None));
         // `A`'s body prints its field, `B`'s discards it: two distinct bodies
         // under two distinct symbols, not one shared or one clobbered.
         assert_eq!(count(a, |i| matches!(i, Instr::Print(_))), 1);
@@ -3248,7 +3275,7 @@ mod tests {
         let tokens = lex(&src).unwrap();
         let module = parse(&tokens).unwrap();
         let ir_module = lower(&module).unwrap();
-        let file = struct_drop_symbol(StructId::from_index(0));
+        let file = struct_drop_symbol(StructId::from_index(0), None);
         assert_eq!(call_symbols(func(&ir_module, "main")), vec![file.as_str()]);
         let dtor = func(&ir_module, &file);
         assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
@@ -3261,7 +3288,7 @@ mod tests {
         // `emit_drop`'s guard pass, and the substituted body is what the
         // symbol now resolves to.
         let module = lower_src(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
-        let file = struct_drop_symbol(StructId::from_index(0));
+        let file = struct_drop_symbol(StructId::from_index(0), None);
         assert_eq!(call_symbols(func(&module, "main")), vec![file.as_str()]);
         // The destructor is the user's body (one `.` of the field), not the
         // generic glue (which for an all-`Copy` struct emits nothing at all).
@@ -3281,8 +3308,8 @@ mod tests {
              : drop ( Res -- ) | r | r Res> dispose ; \
              : main ( -- ) 1 __spy Inner Res drop ;",
         );
-        let inner = struct_drop_symbol(StructId::from_index(0));
-        let res = struct_drop_symbol(StructId::from_index(1));
+        let inner = struct_drop_symbol(StructId::from_index(0), None);
+        let res = struct_drop_symbol(StructId::from_index(1), None);
         assert_eq!(call_symbols(func(&module, &res)), vec!["dispose"]);
         // The glue that would have run is still emitted for `Inner` itself,
         // which has no override: `dispose`'s own `drop` calls it.
@@ -3300,8 +3327,8 @@ mod tests {
             "{FILE_RESOURCE} type: Holder h File n i64 ; \
              : main ( -- ) 1 File 2 Holder drop ;"
         ));
-        let file = struct_drop_symbol(StructId::from_index(0));
-        let holder = func(&module, &struct_drop_symbol(StructId::from_index(1)));
+        let file = struct_drop_symbol(StructId::from_index(0), None);
+        let holder = func(&module, &struct_drop_symbol(StructId::from_index(1), None));
         assert_eq!(call_symbols(holder), vec![file.as_str()]);
         assert_eq!(count(holder, |i| matches!(i, Instr::Print(_))), 0);
     }
@@ -3333,7 +3360,7 @@ mod tests {
         let chain = synthesize_struct_destructor(p.struct_id("Chain"), &env, &resolve, p.regs());
         assert_eq!(
             call_symbols(&chain),
-            vec![struct_drop_symbol(p.struct_id("Res")).as_str()]
+            vec![struct_drop_symbol(p.struct_id("Res"), None).as_str()]
         );
     }
 

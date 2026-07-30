@@ -13,8 +13,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ast::{
-    ArrayDecl, EnumDecl, Line, OwnedCellDecl, RefDecl, Span, StructDecl, Term, TermKind, Type,
-    VariantDecl, WordDef,
+    ArrayDecl, EnumDecl, Line, OwnedCellDecl, RefDecl, Span, StructDecl, StructId, Term, TermKind,
+    Type, VariantDecl, WordDef,
 };
 use crate::check::{self, Sig};
 use crate::driver;
@@ -262,6 +262,15 @@ pub struct Session {
     /// reference can never *survive* a line, but a word defined at the
     /// REPL may take one as an input.
     refs: Vec<RefDecl>,
+    /// R11: every `drop` overload the session has seen, keyed the way
+    /// destructor synthesis is keyed (by `StructId`, never by the shared
+    /// literal name), holding the generation it was last defined at and its
+    /// body. The body is retained because each later line re-synthesizes
+    /// destructors into its own freshly-`dlopen`ed module, by which time the
+    /// declaring line's `WordDef` is long gone. The generation lives here
+    /// rather than in `self.env` because the override is deliberately absent
+    /// from `env` (R1), so `next_generation`'s lookup could never see it.
+    drop_overloads: HashMap<StructId, (u64, WordDef)>,
     /// The carried stack, as 8-byte `i64` cells. `top` is the live byte
     /// length; a slot may span more than one cell (a struct or enum), so the
     /// buffer is byte-addressable and slot offsets are computed from `types`,
@@ -285,6 +294,7 @@ impl Session {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            drop_overloads: HashMap::new(),
             buf: Vec::new(),
             top: 0,
             types: Vec::new(),
@@ -326,6 +336,10 @@ impl Session {
             &mut self.refs,
         )?;
         match line {
+            // R11: a `: drop` line never enters `self.env` or gets lowered
+            // under its own name; it becomes the struct's destructor, the
+            // same substitution `ir::lower` performs for a compiled module.
+            Line::Def(word) if word.name == "drop" => self.eval_drop_overload(word, writer),
             Line::Def(word) => self.eval_def(word, writer),
             Line::Expr(terms) => self.eval_expr(&terms, writer),
         }
@@ -440,6 +454,122 @@ impl Session {
         Ok(())
     }
 
+    /// R11: the retained override bodies as the map destructor synthesis
+    /// consumes, borrowed from the session instead of from a module's
+    /// `words` (the REPL has no persistent `module.words` to index into).
+    fn drop_override_bodies(&self) -> ir::DropOverrides<'_> {
+        self.drop_overloads
+            .iter()
+            .map(|(id, (_, word))| (*id, word))
+            .collect()
+    }
+
+    /// R11.2: stamp each overridden struct's destructor symbol with the
+    /// generation whose body it carries. Without it, redefining a `: drop`
+    /// would define one unmangled global twice with two different bodies,
+    /// ambiguous under the session's `RTLD_GLOBAL` loading (identical generic
+    /// glue re-emitted per line is harmless, and stays unsuffixed). Applied
+    /// to the built layouts because that is where both symbol-minting sites,
+    /// destructor synthesis and `emit_drop`, read it from.
+    fn apply_drop_generations(&self, structs: &mut ir::Structs) {
+        for (id, (generation, _)) in &self.drop_overloads {
+            structs.layouts[id.index()].drop_generation = Some(*generation);
+        }
+    }
+
+    /// R11: define (or redefine) a struct's `drop` overload. The body is
+    /// checked exactly as any other word body, then compiled straight into
+    /// the struct's destructor symbol rather than under its own name: nothing
+    /// resolves a `drop` call site by name, at the REPL or natively. On any
+    /// failure the session is left as it was.
+    fn eval_drop_overload(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
+        let id = check::drop_overload_struct_id(&word)?;
+        // Redefinition follows the session's ordinary generation-bump rule,
+        // not the per-module duplicate-override rejection: a second `: drop`
+        // line replaces the first, like any other redefinition.
+        let generation = self
+            .drop_overloads
+            .get(&id)
+            .map(|(g, _)| g + 1)
+            .unwrap_or(0);
+        let had_overload = self.structs[id.index()].has_drop_overload;
+        let previous = self.drop_overloads.insert(id, (generation, word));
+        // Set before the body is checked and before this line's own
+        // destructor synthesis: the receiver must already be linear while its
+        // own `drop` body is checked, and the defining line must emit the
+        // override, not one last round of generic glue.
+        self.structs[id.index()].has_drop_overload = true;
+
+        match self.compile_drop_overload(id, generation) {
+            Ok(lib) => {
+                self.libs.push(lib);
+                let name = self.structs[id.index()].name.clone();
+                writeln!(writer, "defined drop for {name}")
+                    .map_err(|e| format!("writing stdout: {e}"))
+            }
+            Err(e) => {
+                match previous {
+                    Some(entry) => self.drop_overloads.insert(id, entry),
+                    None => self.drop_overloads.remove(&id),
+                };
+                self.structs[id.index()].has_drop_overload = had_overload;
+                Err(e)
+            }
+        }
+    }
+
+    /// R11: check the just-registered override's body and compile this
+    /// generation's destructor set into one loadable object.
+    fn compile_drop_overload(&mut self, id: StructId, generation: u64) -> Result<Library, String> {
+        let env = self.typed_env();
+        check::check_def(
+            &self.drop_overloads[&id].1,
+            &self.enums,
+            &env,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &mut self.refs,
+            &self.structs,
+        )?;
+
+        let ir_lower_env = ir_arity_env(&env);
+        let (mut structs, enums, arrays, cells, refs) = ir::build_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        );
+        self.apply_drop_generations(&mut structs);
+        let regs = ir::Registries {
+            structs: &structs,
+            enums: &enums,
+            arrays: &arrays,
+            cells: &cells,
+            refs: &refs,
+        };
+        let funcs = {
+            let resolve = resolver_for(&self.env);
+            ir::synthesize_aggregate_destructors(
+                &ir_lower_env,
+                &resolve,
+                regs,
+                &self.drop_override_bodies(),
+            )
+        };
+
+        let ssa = backend::qbe::emit(&IrModule {
+            funcs,
+            structs: structs.layouts,
+            enums: enums.layouts,
+            arrays: arrays.layouts,
+        })?;
+        let dir = driver::tempfile_dir()?;
+        let so_path = dir.join(format!("drop_{}_gen{generation}.so", id.index()));
+        driver::compile_so(&ssa, &so_path)?;
+        Library::open(&so_path)
+    }
+
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
         let name = word.name.clone();
         let sig = check::sig_of(&word.effect);
@@ -464,13 +594,14 @@ impl Session {
         // derived from the typed env (RK2): ir needs only counts + output type.
         env.insert(name.clone(), sig.clone());
         let ir_lower_env = ir_arity_env(&env);
-        let (structs, enums, arrays, cells, refs) = ir::build_registries(
+        let (mut structs, enums, arrays, cells, refs) = ir::build_registries(
             &self.structs,
             &self.enums,
             &self.arrays,
             &self.owned_cells,
             &self.refs,
         );
+        self.apply_drop_generations(&mut structs);
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
@@ -488,14 +619,15 @@ impl Session {
             // path's single shared module), or `drop` on a linear struct/enum
             // dies at `dlopen` with an undefined `sooth_struct_drop_N`/
             // `sooth_enum_drop_N`.
+            // R11: an overridden struct's destructor is the retained user
+            // body, re-lowered into this line's module against the current
+            // generation's symbol; every other linear struct gets generic
+            // glue as before.
             funcs.extend(ir::synthesize_aggregate_destructors(
                 &ir_lower_env,
                 &resolve,
                 regs,
-                // R11 (not yet): the session keeps no `drop` overload bodies,
-                // so a REPL line synthesizes generic glue for every linear
-                // struct.
-                &ir::DropOverrides::new(),
+                &self.drop_override_bodies(),
             ));
             funcs
         };
@@ -593,13 +725,14 @@ impl Session {
 
         self.seq += 1;
         let seq = self.seq;
-        let (structs, enums, arrays, cells, refs) = ir::build_registries(
+        let (mut structs, enums, arrays, cells, refs) = ir::build_registries(
             &self.structs,
             &self.enums,
             &self.arrays,
             &self.owned_cells,
             &self.refs,
         );
+        self.apply_drop_generations(&mut structs);
         let regs = ir::Registries {
             structs: &structs,
             enums: &enums,
@@ -625,7 +758,7 @@ impl Session {
                 &ir_lower_env,
                 &resolve,
                 regs,
-                &ir::DropOverrides::new(),
+                &self.drop_override_bodies(),
             );
             (func, m, out_bytes, aggregate_destructors)
         };
@@ -816,6 +949,7 @@ mod tests {
             fields: vec![],
             is_linear: false,
             has_drop_overload: false,
+            drop_generation: None,
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
         assert_eq!(
@@ -904,6 +1038,108 @@ mod tests {
         assert_eq!(next_generation(env.get("sq")), 0);
         env.insert("sq".to_string(), entry(0));
         assert_eq!(next_generation(env.get("sq")), 1);
+    }
+
+    /// The destructor symbols one more REPL line would emit, built through
+    /// the same session state and the same synthesis call every line uses.
+    fn destructor_symbols(session: &Session) -> Vec<String> {
+        let (mut structs, enums, arrays, cells, refs) = ir::build_registries(
+            &session.structs,
+            &session.enums,
+            &session.arrays,
+            &session.owned_cells,
+            &session.refs,
+        );
+        session.apply_drop_generations(&mut structs);
+        let regs = ir::Registries {
+            structs: &structs,
+            enums: &enums,
+            arrays: &arrays,
+            cells: &cells,
+            refs: &refs,
+        };
+        let env = ir_arity_env(&session.typed_env());
+        let resolve = resolver_for(&session.env);
+        ir::synthesize_aggregate_destructors(&env, &resolve, regs, &session.drop_override_bodies())
+            .into_iter()
+            .map(|f| f.name)
+            .collect()
+    }
+
+    #[test]
+    fn repl_drop_overload_is_kept_by_struct_id_and_out_of_env() {
+        // R11.1: the override is retained under the struct's id, so a later
+        // line can re-synthesize its destructor from a body whose own line is
+        // long gone; and it never enters `env`, mirroring R1's exclusion (a
+        // `drop` call site is intercepted before any name lookup, so an entry
+        // there would be dead).
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line("type: Res n i64 ;", &mut out).unwrap();
+        session
+            .eval_line(": drop ( Res -- ) | r | r Res>n . ;", &mut out)
+            .unwrap();
+
+        let id = StructId::from_index(0);
+        assert!(!session.env.contains_key("drop"));
+        assert_eq!(session.drop_overloads[&id].0, 0);
+        assert!(session.structs[0].has_drop_overload);
+    }
+
+    #[test]
+    fn repl_drop_overload_declaration_shape_is_validated() {
+        // R11.1: a REPL line gets R1's declaration-shape rule, not a laxer
+        // one, and a rejected line leaves the session untouched.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line(": drop ( i64 -- ) drop ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("must take a `type:`-declared struct"),
+            "unexpected message: {err}"
+        );
+        assert!(session.drop_overloads.is_empty());
+    }
+
+    #[test]
+    fn repl_redefining_drop_overload_does_not_collide_under_rtld_global() {
+        // Criterion 22/R11.2: two generations of one struct's override are two
+        // different bodies, so they must be two different global symbols --
+        // every REPL library loads `RTLD_GLOBAL`, and the unsuffixed name is
+        // only safe while every generation's body is identical glue.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line("type: Res n i64 ;", &mut out).unwrap();
+        session
+            .eval_line(": drop ( Res -- ) | r | r Res>n . ;", &mut out)
+            .unwrap();
+        let first = destructor_symbols(&session);
+        session
+            .eval_line(": drop ( Res -- ) | r | r Res>n 100 + . ;", &mut out)
+            .unwrap();
+        let second = destructor_symbols(&session);
+
+        assert_eq!(first, vec!["sooth_struct_drop_0__gen0".to_string()]);
+        assert_eq!(second, vec!["sooth_struct_drop_0__gen1".to_string()]);
+        assert_eq!(session.drop_overloads[&StructId::from_index(0)].0, 1);
+    }
+
+    #[test]
+    fn repl_generic_glue_symbol_stays_unsuffixed() {
+        // R11.2: only an overridden struct's symbol carries a generation.
+        // Generic field glue is identical across generations, so suffixing it
+        // would churn every symbol for no reason -- and would break the
+        // build path, which shares this naming.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Pair a __spy b __spy ;", &mut out)
+            .unwrap();
+        assert_eq!(
+            destructor_symbols(&session),
+            vec!["sooth_struct_drop_0".to_string()]
+        );
     }
 
     #[test]

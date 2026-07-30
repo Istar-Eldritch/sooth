@@ -418,6 +418,18 @@ is gone. Fixing this needs three coordinated pieces, not one:
    drops the scalar — proving retention and redefinition without depending on REPL `extern:`
    support this slice does not add.
 
+**Known gap, found while implementing phase 4 and deliberately left open:** R6's self-recursion
+rejection does not reach a REPL-entered override. R6 is a whole-program call-graph pass and the
+REPL has no whole program: `check_def` checks one body against an env of *signatures*, and the
+session retains no `WordDef` for any previously defined word, so an indirect cycle (`drop@T` ->
+helper -> `drop@T`) is not computable from what a session keeps. A *direct* self-call is
+detectable in isolation, but guarding only that would reject the shallow case while leaving the
+same unbounded recursion one helper away, so phase 4 adds neither. Consequence today:
+`: drop ( Res -- ) | r | r drop ;` is accepted at the REPL and overflows the stack when the value
+is dropped, where a compiled program rejects it at check time. Closing this needs the session to
+retain every word body (a change with its own weight, e.g. redefinition semantics for the
+retained graph), so it belongs to a later slice, not here.
+
 ## Criterion → test map
 
 | # | Criterion | Test |
@@ -498,8 +510,8 @@ type: File fd i64 ;
   "examples/resource_fixture.txt" cstr 0 open | fd |
   fd File | f |
   0 >u8 64 fill | buf |
-  f File|>fd &!buf 64 >usize read .
-  f drop ;
+  f File|>fd &!buf 64 >usize read . | file |
+  file drop ;
 ```
 
 (Verified against the syntax `tests/phase3_refs.rs` already exercises and passes: `0 >u8 N fill`
@@ -512,16 +524,17 @@ no explicit `drop`: it is `Copy`, and the surplus-value check `check_outputs`
 (`src/check.rs:1682-1691`) inspects only the final *stack* (`final_stack: &[Slot]`), not bound
 locals, so a `Copy` local left unused simply goes out of scope.)
 
-**Correction, found in phase 2's review (phase 4 must apply it):** `main` as written above does
-not compile. `check_struct_peek_word` (`src/check.rs`) is non-consuming of the *stack slot*, not
-of the *local*: the bare `f` term moves the local, and the peek leaves the struct back on the
+**Correction, found in phase 2's review, applied above in phase 4:** `main` as originally
+written (ending `f drop ;`) does not compile. `check_struct_peek_word` (`src/check.rs`) is
+non-consuming of the *stack slot*, not of the *local*: the bare `f` term moves the local, and the peek leaves the struct back on the
 stack as an anonymous slot. So after `f File|>fd &!buf 64 >usize read .` the `File` is on the
 stack while `f` is moved, and the trailing `f drop` is a use-after-move (verified: the same shape
 on a scalar-only resource is rejected with ``use after move in `main` ``). Re-binding under the
 same name is also refused (`is already bound`), so the fix is either to bind the leftover
-struct under a fresh name — `... read . | file | file drop ;` — or to drop the peek entirely and
-reuse the already-bound `Copy` `fd` for `read`: `fd &!buf 64 >usize read . f drop ;`. The latter
-is shorter but stops exercising `File|>fd` on a linear struct, which was the point of choosing it.
+struct under a fresh name — `... read . | file | file drop ;`, the form taken above — or to drop
+the peek entirely and reuse the already-bound `Copy` `fd` for `read`:
+`fd &!buf 64 >usize read . f drop ;`. The latter is shorter but stops exercising `File|>fd` on a
+linear struct, which was the point of choosing it.
 
 Expected output: exactly `"3\n"` (the fixture's fixed byte count, from `read`'s return value,
 printed with the trailing newline every other golden asserts) — deterministic regardless of repo

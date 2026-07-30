@@ -896,7 +896,12 @@ pub fn find_drop_overloads(
 /// overrides, or a located error citing the word's own declaration --
 /// modeled on `check_main_effect`'s shape (find the offending word by name,
 /// report its span).
-fn drop_overload_struct_id(word: &WordDef) -> Result<StructId, String> {
+///
+/// R11: the REPL calls this directly on its one entered `: drop` line, so a
+/// line-at-a-time override gets exactly the declaration-shape rule a compiled
+/// program's does; only the duplicate-override rejection differs, since a
+/// second REPL `: drop` for one struct is a redefinition, not a collision.
+pub fn drop_overload_struct_id(word: &WordDef) -> Result<StructId, String> {
     if !word.effect.outputs.is_empty() {
         return Err(drop_overload_output_error(word));
     }
@@ -1100,6 +1105,9 @@ fn check_extern_decls(
         if !seen.insert(decl.name.as_str()) {
             return Err(extern_redeclaration_error(decl));
         }
+        if decl.effect.outputs.len() > 1 {
+            return Err(extern_multi_output_error(decl));
+        }
         check_reference_free_signature(&decl.name, &decl.effect, structs, enums, arrays)?;
         check_extern_boundary_types(decl)?;
     }
@@ -1138,6 +1146,21 @@ fn extern_redeclaration_error(decl: &ExternDecl) -> String {
     format!(
         "error: `extern: {}` redeclares an existing word (line {}, col {})",
         decl.name, decl.span.line, decl.span.col
+    )
+}
+
+/// R8 (slice 8b): no C function returns two values, so a declared output
+/// arity above one describes no callable prototype. Left unrejected it lowers
+/// to a discarded result (`lower_call` binds a return only for `out_arity ==
+/// 1`) and panics in the *next* consumer of the value that was never pushed,
+/// which points at the wrong term entirely.
+fn extern_multi_output_error(decl: &ExternDecl) -> String {
+    format!(
+        "error: `extern: {}` declares {} outputs (line {}, col {})\n  no C function returns more than one value; declare at most one output",
+        decl.name,
+        decl.effect.outputs.len(),
+        decl.span.line,
+        decl.span.col
     )
 }
 
@@ -5334,6 +5357,21 @@ mod tests {
                 .unwrap_err();
         assert!(
             err.contains("unknown type `...`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_extern_multi_output_is_error() {
+        // Criterion 18/R8: a two-output `extern:` describes no C prototype.
+        // Unrejected it lowered to a discarded result and panicked in the
+        // *next* consumer of the value that was never pushed, naming the
+        // wrong term; the diagnostic sits at the declaration instead.
+        let src = "extern: two ( i64 -- i64 i64 ) \"two\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("`extern: two` declares 2 outputs")
+                && err.contains("no C function returns more than one value"),
             "unexpected message: {err}"
         );
     }
