@@ -231,6 +231,18 @@ reachable back to `drop@T` only down some other branch never taken from there, t
 sees a cycle and rejects it — a false positive in principle, the same cost the existing tail-
 cycle pass already accepts. The remedy is the one D4 already gives: factor out a distinct helper.
 
+**Found while implementing R1 (pre-existing, now reachable in real programs):**
+`check_tail_call_cycles`'s own graph is name-keyed, so a tail-position `drop` of *anything*
+(including a `Copy` scalar) contributes an edge to whichever word its `name_to_idx` kept for the
+literal name `"drop"`. With a `drop` override in the module, `type: A x i64 ; : f ( -- ) 1 drop ;
+: drop ( A -- ) | a | a A>x drop f ;` is already rejected as ``mutual tail recursion `f` -> `drop`
+-> `f` `` on `main` @ `1b10005`, though nothing recurses at runtime (`f` only ever drops an `i64`).
+R6's pass must not be layered on top of that: a `drop` term is dispatched by operand type, never
+by name, so it must contribute no name-keyed edge at all. Excluding every registered override word
+from `check_tail_call_cycles`'s `name_to_idx`, and letting R6's typed graph own every `drop` edge,
+is the fix; a `drop`-named edge surviving in the tail-cycle pass would keep this false positive
+alive alongside the new pass.
+
 **R7 — Composition is correct in both the ordinary case and the fused-recursive-disposal-cycle
 case; the override always runs.** Two distinct paths, not one:
 
