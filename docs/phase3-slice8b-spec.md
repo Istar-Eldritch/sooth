@@ -347,6 +347,18 @@ is gone. Fixing this needs three coordinated pieces, not one:
    next. The override is excluded from `self.env` (mirroring R1's env-exclusion) and validated
    with R1's declaration-shape rule at the point it is entered, exactly as a native `: drop` word
    would be — a REPL line does not get a laxer check than a compiled program.
+
+   *Amended by phase 2's implementation:* R3's "linear because it defines `drop`" fact is not
+   carried by a threaded table at all — phase 2 records it as `StructDecl::has_drop_overload`,
+   set by `check`'s pre-pass, and every consumer (`is_copy`, the IR layout fold, `expand_path`)
+   reads it off the declaration. So R3's three REPL sites (`repl.rs`'s `check_def`,
+   `dispose_residual`, `infer_line`) are correct only if this step **also sets that bit on
+   `Session::structs`** when an override is entered, and clears it if the override is ever
+   withdrawn. Threading a `DropOverrides` map into the re-synthesis calls, as this requirement's
+   text describes, is necessary but *not sufficient*: without the bit, a REPL-declared resource
+   stays `Copy` at all three sites while lowering correctly, and no existing test catches it
+   (phase 2's all read a natively-checked `module.structs`).
+
 2. **Symbol collision under redefinition.** `struct_drop_symbol` (`src/ir.rs:227-229`) emits the
    unmangled global `sooth_struct_drop_N`, and REPL libraries load with `RTLD_NOW | RTLD_GLOBAL`
    (`src/repl.rs:55`). The existing doc comment on `synthesize_aggregate_destructors`
@@ -477,6 +489,17 @@ legal regardless of the enclosing struct's own linearity since `check_struct_pee
 no explicit `drop`: it is `Copy`, and the surplus-value check `check_outputs`
 (`src/check.rs:1682-1691`) inspects only the final *stack* (`final_stack: &[Slot]`), not bound
 locals, so a `Copy` local left unused simply goes out of scope.)
+
+**Correction, found in phase 2's review (phase 4 must apply it):** `main` as written above does
+not compile. `check_struct_peek_word` (`src/check.rs`) is non-consuming of the *stack slot*, not
+of the *local*: the bare `f` term moves the local, and the peek leaves the struct back on the
+stack as an anonymous slot. So after `f File|>fd &!buf 64 >usize read .` the `File` is on the
+stack while `f` is moved, and the trailing `f drop` is a use-after-move (verified: the same shape
+on a scalar-only resource is rejected with ``use after move in `main` ``). Re-binding under the
+same name is also refused (`is already bound`), so the fix is either to bind the leftover
+struct under a fresh name — `... read . | file | file drop ;` — or to drop the peek entirely and
+reuse the already-bound `Copy` `fd` for `read`: `fd &!buf 64 >usize read . f drop ;`. The latter
+is shorter but stops exercising `File|>fd` on a linear struct, which was the point of choosing it.
 
 Expected output: exactly `"3\n"` (the fixture's fixed byte count, from `read`'s return value,
 printed with the trailing newline every other golden asserts) — deterministic regardless of repo

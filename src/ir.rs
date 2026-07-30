@@ -897,17 +897,42 @@ pub type Arity = (usize, usize, Option<IrType>);
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 
 pub fn lower(module: &Module) -> Result<IrModule, String> {
+    // R1/R2: recognized here, ahead of `build_registries`, rather than
+    // trusted from `StructDecl::has_drop_overload` -- `check::check` sets
+    // that bit as a side effect on `module.structs`, but `lower` takes
+    // `&Module` and has no way to require that it already ran. Recomputing
+    // the registry and forcing the bit on a local copy makes `lower` correct
+    // against a module that never went through `check` (layout would
+    // otherwise fold the struct non-linear, no destructor would be
+    // synthesized, and `overrides` below would silently go unused). The one
+    // registry is reused for the layout pass, the `env`/lowering filter, and
+    // the override map, so there is a single source of truth for which
+    // words are drop overloads.
+    let drop_overloads = crate::check::find_drop_overloads(&module.words, &module.structs)?;
+    let drop_overload_indices: std::collections::HashSet<usize> =
+        drop_overloads.values().copied().collect();
+    let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
+    for id in drop_overloads.keys() {
+        structs_forced[id.index()].has_drop_overload = true;
+    }
+
     let (structs, enums, arrays, cells, refs) = build_registries(
-        &module.structs,
+        &structs_forced,
         &module.enums,
         &module.arrays,
         &module.owned_cells,
         &module.refs,
     );
+    // R1: a recognized `drop` overload is excluded from the lowering env,
+    // same as `check`'s own env (`check.rs::check`): its body is compiled
+    // under the struct's destructor symbol, never called by the literal
+    // name `"drop"`.
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
-        .map(|w| {
+        .enumerate()
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
+        .map(|(_, w)| {
             let ret_ty = w.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
             (
                 w.name.clone(),
@@ -948,9 +973,6 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // module would collide with it under the identical symbol. The override's
     // body is instead compiled by `synthesize_aggregate_destructors` (R2)
     // into the struct's own destructor symbol.
-    let drop_overloads = crate::check::find_drop_overloads(&module.words, &module.structs)?;
-    let drop_overload_indices: std::collections::HashSet<usize> =
-        drop_overloads.values().copied().collect();
     let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
@@ -3213,6 +3235,23 @@ mod tests {
 
         let plain = structs_of("type: File fd i64 ; : main ( -- ) 1 File drop ;");
         assert!(!layout(&plain, "File").is_linear);
+    }
+
+    #[test]
+    fn lower_forces_drop_overload_linearity_even_when_check_never_ran() {
+        // R1/R2 code-review fix: `lower` used to trust
+        // `StructDecl::has_drop_overload`, a bit only `check::check` sets. A
+        // module that reaches `lower` without having gone through `check`
+        // (this test skips it, unlike `lower_src`) must still layout `File`
+        // as linear and substitute the override, not silently emit nothing.
+        let src = format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;");
+        let tokens = lex(&src).unwrap();
+        let module = parse(&tokens).unwrap();
+        let ir_module = lower(&module).unwrap();
+        let file = struct_drop_symbol(StructId::from_index(0));
+        assert_eq!(call_symbols(func(&ir_module, "main")), vec![file.as_str()]);
+        let dtor = func(&ir_module, &file);
+        assert_eq!(count(dtor, |i| matches!(i, Instr::Print(_))), 1);
     }
 
     #[test]

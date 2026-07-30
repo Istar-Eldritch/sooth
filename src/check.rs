@@ -1004,7 +1004,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 
     // Reject mutual tail-recursion cycles (D3, X1) on the whole-module
     // tail-call graph, after signature registration and before body checking.
-    check_tail_call_cycles(&module.words)?;
+    check_tail_call_cycles(&module.words, &drop_overload_indices)?;
 
     check_main_effect(
         &module.words,
@@ -1934,15 +1934,20 @@ fn word_span(word: &WordDef) -> Span {
 /// allowed; only mutual cycles are the error. Builtins, generated words, and
 /// non-tail calls contribute no edge, so a pair of words that mutually call
 /// each other in non-tail position never false-positives.
-fn check_tail_call_cycles(words: &[WordDef]) -> Result<(), String> {
-    // A word named `drop` is not callable by name (`check_shuffle`'s `"drop"`
-    // arm intercepts every call site first), so it contributes no edge in
-    // either direction: a body's trailing `drop` of a scalar would otherwise
-    // register a tail call *to* a `drop` overload and fabricate a cycle.
+fn check_tail_call_cycles(
+    words: &[WordDef],
+    drop_overload_indices: &HashSet<usize>,
+) -> Result<(), String> {
+    // A recognized `drop` overload is not callable by name (`check_shuffle`'s
+    // `"drop"` arm intercepts every call site first), so it contributes no
+    // edge in either direction: a body's trailing `drop` of a scalar would
+    // otherwise register a tail call *to* the overload and fabricate a cycle.
+    // Keyed by registry membership, not the literal name, matching every
+    // other exclusion in this pass.
     let name_to_idx: HashMap<&str, usize> = words
         .iter()
         .enumerate()
-        .filter(|(_, w)| w.name != "drop")
+        .filter(|(i, _)| !drop_overload_indices.contains(i))
         .map(|(i, w)| (w.name.as_str(), i))
         .collect();
 

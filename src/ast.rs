@@ -88,7 +88,7 @@ pub fn resolve_type_name(structs: &[StructDecl], enums: &[EnumDecl], name: &str)
 /// list, and the leaked `&'static str` copy of its name every `Type::Struct`
 /// naming it carries directly, so a struct name renders without threading
 /// the registry through every diagnostic-formatting call site.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StructDecl {
     pub name: String,
     pub name_static: &'static str,
