@@ -919,10 +919,21 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         refs: &refs,
     };
 
+    // R1: a recognized `drop` overload is excluded from this generic
+    // per-word lowering pass -- unfiltered, it would compile to a QBE
+    // function literally named `drop`, and a second override in the same
+    // module would collide with it under the identical symbol. The override's
+    // body is instead compiled by `synthesize_aggregate_destructors` (R2,
+    // phase 2) into the struct's own destructor symbol.
+    let drop_overloads = crate::check::find_drop_overloads(&module.words, &module.structs)?;
+    let drop_overload_indices: std::collections::HashSet<usize> =
+        drop_overloads.values().copied().collect();
     let mut funcs: Vec<IrFunc> = module
         .words
         .iter()
-        .map(|w| lower_word(w, &env, &resolve, regs))
+        .enumerate()
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
+        .map(|(_, w)| lower_word(w, &env, &resolve, regs))
         .collect();
 
     // R12: append a synthesized destructor for every linear struct/enum type
@@ -3055,6 +3066,26 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
         lower(&module).unwrap()
+    }
+
+    #[test]
+    fn two_drop_overloads_for_different_structs_do_not_collide() {
+        // Criterion 16's ir-side half, phase 1 slice: neither override lands
+        // in the generic per-word lowering pass, so no emitted `IrFunc` is
+        // literally named `drop` -- the distinct-destructor-symbol half of
+        // this criterion needs R2's `is_linear` fix (phase 2), since an
+        // overridden struct's layout still folds to non-linear until then and
+        // no destructor is synthesized for it at all yet.
+        let module = lower_src(
+            "type: A x i64 ; type: B y i64 ; \
+             : drop ( A -- ) drop ; : drop ( B -- ) drop ; \
+             : main ( -- ) 1 A drop 2 B drop ;",
+        );
+        assert!(
+            module.funcs.iter().all(|f| f.name != "drop"),
+            "an emitted IrFunc was literally named `drop`: {:?}",
+            module.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
     }
 
     fn structs_of(src: &str) -> Structs {

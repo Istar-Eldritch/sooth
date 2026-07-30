@@ -836,12 +836,117 @@ impl Ctx<'_> {
     }
 }
 
+/// R1: recognize every user-defined `drop` overload -- a word literally
+/// named `drop` whose declared effect is exactly one struct input and zero
+/// outputs -- in its own pre-pass, before `check_types` and before any name
+/// registration. Dispatch on a recognized override happens entirely through
+/// the returned `StructId -> word index` table, never through a name lookup
+/// on the string `"drop"`: `check_shuffle`'s `"drop"` arm (and `lower_call`'s
+/// mirror of it) intercepts every `drop` call site before any name
+/// resolution reaches `env`, so a word literally named `"drop"` registered
+/// into `env` the ordinary way would be dead on arrival (see the Grounding
+/// facts in the slice 8b spec).
+///
+/// This validates only the override's *declared shape*, never
+/// `is_copy`/`is_linear` on the input type itself: that fold's own
+/// termination argument depends on `check_recursion` having already run,
+/// which happens inside `check_types`, after this pre-pass -- calling it
+/// early would turn a cyclic struct declaration into a stack overflow
+/// instead of a diagnostic.
+///
+/// A `HashMap<&str, usize>` keyed on the shared literal name `"drop"` (the
+/// shape `check_tail_call_cycles`'s own `name_to_idx` uses) would silently
+/// keep only the last `drop` word seen and must not be used here: the
+/// registry is keyed by `StructId`, so overrides for distinct structs coexist
+/// with no collision, and a second override for the *same* struct is instead
+/// a located error.
+pub fn find_drop_overloads(
+    words: &[WordDef],
+    structs: &[StructDecl],
+) -> Result<HashMap<StructId, usize>, String> {
+    let mut registry: HashMap<StructId, usize> = HashMap::new();
+    for (idx, word) in words.iter().enumerate() {
+        if word.name != "drop" {
+            continue;
+        }
+        let id = drop_overload_struct_id(word)?;
+        if registry.contains_key(&id) {
+            return Err(duplicate_drop_overload_error(word, &structs[id.index()]));
+        }
+        registry.insert(id, idx);
+    }
+    Ok(registry)
+}
+
+/// R1: validate a `: drop` word's declared shape and return the struct id it
+/// overrides, or a located error citing the word's own declaration --
+/// modeled on `check_main_effect`'s shape (find the offending word by name,
+/// report its span).
+fn drop_overload_struct_id(word: &WordDef) -> Result<StructId, String> {
+    if !word.effect.outputs.is_empty() {
+        return Err(drop_overload_output_error(word));
+    }
+    if word.effect.inputs.len() != 1 {
+        return Err(drop_overload_arity_error(word));
+    }
+    match word.effect.inputs[0].ty {
+        Type::Struct(id, _) => Ok(id),
+        found => Err(drop_overload_non_struct_input_error(word, found)),
+    }
+}
+
+/// R1: a `drop` overload declaring one or more outputs.
+fn drop_overload_output_error(word: &WordDef) -> String {
+    let span = word_span(word);
+    format!(
+        "error: `drop` overload (line {}, col {}) must declare zero outputs, found {}",
+        span.line,
+        span.col,
+        effect_str(&word.effect)
+    )
+}
+
+/// R1: a `drop` overload not declaring exactly one input.
+fn drop_overload_arity_error(word: &WordDef) -> String {
+    let span = word_span(word);
+    format!(
+        "error: `drop` overload (line {}, col {}) must declare exactly one input, found {}",
+        span.line,
+        span.col,
+        effect_str(&word.effect)
+    )
+}
+
+/// R1: a `drop` overload whose one input is not a `type:`-declared struct --
+/// an enum, an array, a scalar, or a reference all land here.
+fn drop_overload_non_struct_input_error(word: &WordDef, found: Type) -> String {
+    let span = word_span(word);
+    format!(
+        "error: `drop` overload (line {}, col {}) must take a `type:`-declared struct, found `{}`",
+        span.line, span.col, found
+    )
+}
+
+/// R1: a second `drop` overload naming a struct that already has one.
+fn duplicate_drop_overload_error(word: &WordDef, target: &StructDecl) -> String {
+    let span = word_span(word);
+    format!(
+        "error: `{}` already defines its own `drop` (line {}, col {})",
+        target.name, span.line, span.col
+    )
+}
+
 /// Takes `&mut Module` because an array word (`fill`) interns its result
 /// shape `[T N]` into `module.arrays` during checking (R3, R10): the same
 /// registry `ir::lower` then reads, so the checker and the layout builder
 /// share one `ArrayId` numbering. `check` runs before `lower`, so the
 /// interned shapes are present when codegen consults them.
 pub fn check(module: &mut Module) -> Result<(), String> {
+    // R1: recognized ahead of `check_types` so the ordering hazard against
+    // `check_recursion` (run inside `check_types`) never arises.
+    let drop_overloads = find_drop_overloads(&module.words, &module.structs)?;
+    let drop_overload_indices: HashSet<usize> = drop_overloads.values().copied().collect();
+
     check_types(
         &module.structs,
         &module.enums,
@@ -873,7 +978,15 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         env.insert(decl.name.clone(), sig_of(&decl.effect));
     }
 
-    for word in &module.words {
+    // R1: a recognized `drop` overload is excluded from the ordinary word
+    // environment -- registering it under the literal name `"drop"` would be
+    // either dead (`check_shuffle`'s `"drop"` arm intercepts every call site
+    // first) or, for a second overload, a name collision the checker has no
+    // reason to reject, since dispatch never goes through this table.
+    for (idx, word) in module.words.iter().enumerate() {
+        if drop_overload_indices.contains(&idx) {
+            continue;
+        }
         env.insert(word.name.clone(), sig_of(&word.effect));
     }
 
@@ -4393,6 +4506,109 @@ mod tests {
         let src = "extern: foo ( i64 -- i64 ) \"foo\" ;\nextern: foo ( i64 -- i64 ) \"bar\" ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_overload_on_non_struct_input_is_error() {
+        // Criterion 5/R1: an enum, an array, or a scalar input is rejected
+        // exactly as a non-struct input would be, with a located error.
+        let enum_input = "type: E | V ; : drop ( E -- ) drop ;";
+        let err = check_src(enum_input).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(err.contains("type:"), "unexpected message: {err}");
+
+        let array_input = ": drop ( [i64 4] -- ) drop ;";
+        let err = check_src(array_input).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+
+        let scalar_input = ": drop ( i64 -- ) drop ;";
+        let err = check_src(scalar_input).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_overload_with_output_is_error() {
+        // Criterion 6/R1: a `drop` overload declaring an output is a located
+        // error, regardless of whether it also declares an input.
+        let src = "type: T x i64 ; : drop ( T -- i64 ) drop 0 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(err.contains("output"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_duplicate_drop_overload_for_one_struct_is_error() {
+        // Criterion 7/R1: two `drop` overloads for the same struct id is a
+        // located error naming that struct, even though the two words'
+        // bodies are otherwise unrelated.
+        let src = "type: T x i64 ; : drop ( T -- ) drop ; : drop ( T -- ) drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("T"), "unexpected message: {err}");
+        assert!(err.contains("drop"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_overloads_for_different_structs_both_land_in_the_registry() {
+        // Criterion 16's check-side half: two overrides for different
+        // structs coexist with distinct `StructId` keys, with no collision
+        // reported (the module checks fine), and the registry carries one
+        // entry per struct.
+        let src = "type: A x i64 ; type: B y i64 ; : drop ( A -- ) drop ; : drop ( B -- ) drop ; : main ( -- ) 1 A drop 2 B drop ;";
+        check_src(src).unwrap();
+
+        let tokens = crate::lexer::lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
+        assert_eq!(
+            registry.len(),
+            2,
+            "expected one entry per struct: {registry:?}"
+        );
+    }
+
+    #[test]
+    fn check_drop_overloads_are_excluded_from_env() {
+        // Stage-test obligation (criterion 16's check-side half): neither
+        // override lands in `env` under the shared literal name `"drop"` --
+        // if it did, the second override registered would silently clobber
+        // the first with no diagnostic, since `check`'s env-registration
+        // loop has no redeclaration check for ordinary `:` words the way
+        // `check_extern_decls` has for `extern:`. Mirrors `check`'s own
+        // filtered registration loop rather than calling it directly, since
+        // `env` is internal to `check`.
+        let src = "type: A x i64 ; type: B y i64 ; \
+                   : drop ( A -- ) drop ; : drop ( B -- ) drop ; \
+                   : main ( -- ) 1 A drop 2 B drop ;";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
+        let overload_indices: HashSet<usize> = registry.values().copied().collect();
+        let mut env: HashMap<String, Sig> = HashMap::new();
+        for (idx, word) in module.words.iter().enumerate() {
+            if overload_indices.contains(&idx) {
+                continue;
+            }
+            env.insert(word.name.clone(), sig_of(&word.effect));
+        }
+        assert!(
+            !env.contains_key("drop"),
+            "a `drop` overload leaked into env: {env:?}"
+        );
+    }
+
+    #[test]
+    fn check_drop_overload_with_self_recursive_struct_is_still_a_declaration_error_not_overflow() {
+        // R1's ordering-hazard caveat: a self-recursive struct with a
+        // malformed `drop` override naming that very struct (here, an
+        // extra output) must still produce this pre-pass's own located
+        // diagnostic, not overflow the stack inside `is_copy`/
+        // `check_recursion` -- the pre-pass runs before `check_types`
+        // (where `check_recursion` lives) and never calls `is_copy` on the
+        // declared input type itself.
+        let src = "type: Loop | Wrap next Loop | End ; : drop ( Loop -- i64 ) drop 0 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(err.contains("output"), "unexpected message: {err}");
     }
 
     #[test]
