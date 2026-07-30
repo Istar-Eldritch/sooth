@@ -139,6 +139,75 @@ fn repl_quit_disposes_a_residual_resource_through_its_overload() {
 }
 
 #[test]
+fn repl_redefining_drop_overload_refreshes_a_composing_structs_glue() {
+    // R11.2 (code review, phase 4): `Holder`'s own destructor never carries
+    // an override, but it `Call`s `Res`'s destructor symbol inside its own
+    // body -- so redefining `Res`'s override must refresh `Holder`'s glue
+    // too, or `Holder`'s frozen first-loaded destructor keeps calling the
+    // stale symbol forever under `RTLD_GLOBAL`.
+    let out = run_session(&[
+        "type: Res n i64 ;",
+        ": drop ( Res -- ) | r | r Res>n . ;",
+        "type: Holder r Res ;",
+        "7 Res Holder",
+        "drop",
+        ": drop ( Res -- ) | r | r Res>n 100 + . ;",
+        "7 Res Holder",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Res",
+            "defined drop for Res",
+            "defined type Holder",
+            "stack: <Holder>",
+            "7",
+            "stack: (empty)",
+            "defined drop for Res",
+            "stack: <Holder>",
+            "107",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
+fn repl_composing_structs_glue_is_correct_when_override_postdates_it() {
+    // R11.2 (code review, phase 4): `Holder`'s destructor is first compiled
+    // (and, under `RTLD_GLOBAL`, permanently pinned) *before* `Res` ever gets
+    // an override, calling generic field glue. Once the override is defined,
+    // `Holder`'s glue must be recompiled under a fresh symbol that calls the
+    // override, not left running the pre-override body forever.
+    let out = run_session(&[
+        "type: Res n __spy ;",
+        "type: Holder r Res ;",
+        "1 __spy Res Holder",
+        "drop",
+        ": drop ( Res -- ) | r | 42 . r Res> drop ;",
+        "1 __spy Res Holder",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Res",
+            "defined type Holder",
+            "stack: <Holder>",
+            "drop 1",
+            "stack: (empty)",
+            "defined drop for Res",
+            "stack: <Holder>",
+            "42",
+            "drop 1",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
 fn repl_resource_field_is_disposed_through_the_overload() {
     // R7's ordinary composition, at the REPL: an enclosing struct declared
     // *after* the override still disposes its resource field by calling that

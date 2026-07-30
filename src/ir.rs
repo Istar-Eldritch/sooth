@@ -211,13 +211,26 @@ pub struct StructLayout {
     /// `expand_path` (R7), which sees only `Registries` and so cannot reach the
     /// declaration.
     pub has_drop_overload: bool,
-    /// R11 (slice 8b): the REPL generation whose override body this struct's
-    /// destructor symbol carries, `None` on the build path and for any struct
-    /// without an override. Set by the session after `build_registries`, since
-    /// it is a fact about the session's redefinition history, not about the
-    /// declaration. It lives on the layout because that is the one thing both
-    /// `struct_drop_symbol` call sites (destructor synthesis and `emit_drop`)
-    /// already reach, so both mint the same name for a given generation.
+    /// R11 (slice 8b): the session-wide override epoch (`Session::override_epoch`),
+    /// `None` on the build path and for the whole REPL session until its first
+    /// `drop` override is ever defined. Set by the session after
+    /// `build_registries`, since it is a fact about the session's redefinition
+    /// history, not about the declaration. It lives on the layout because that
+    /// is the one thing both `struct_drop_symbol` call sites (destructor
+    /// synthesis and `emit_drop`) already reach, so both mint the same name
+    /// for a given epoch.
+    ///
+    /// R11.2 originally suffixed only the *overridden* struct's own symbol
+    /// with its own per-struct redefinition count. That left every enclosing
+    /// aggregate's glue (a struct/enum/cell composing the overridden struct)
+    /// unsuffixed even though its body's `Call` target changes across an
+    /// override event, which under `RTLD_GLOBAL`'s first-loaded-wins
+    /// resolution let a stale, pre-override callee stay wired in forever.
+    /// Stamping the *same* session-wide epoch onto every linear struct/enum/
+    /// cell once any override exists (rather than only the overridden one)
+    /// mints every destructor a fresh, never-before-used symbol on every
+    /// override event, sidestepping that staleness without computing which
+    /// aggregates actually reach the override transitively.
     pub drop_generation: Option<u64>,
 }
 
@@ -244,14 +257,21 @@ fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays
 /// in the module being lowered (or, at the REPL, in the session).
 pub type DropOverrides<'a> = HashMap<StructId, &'a WordDef>;
 
-/// The synthesized per-type destructor symbol for a linear struct. `generation`
-/// is `Some` only for a REPL struct with a user `drop` override (R11): the
-/// override's body differs between generations, so redefining it would
-/// otherwise define one global symbol twice with two different bodies,
-/// ambiguous under the REPL's `RTLD_GLOBAL` loading. Generic field glue is
-/// identical across generations and stays unsuffixed.
-fn struct_drop_symbol(id: StructId, generation: Option<u64>) -> String {
-    match generation {
+/// The synthesized per-type destructor symbol for a linear struct. `epoch`
+/// is `Some` only at the REPL once its session holds at least one `drop`
+/// override (R11, R11.2): from that point on, *every* linear struct's/enum's/
+/// cell's destructor symbol carries the session's current override epoch, not
+/// only the overridden struct's own, because an unrelated struct's body may
+/// itself `Call` an overridden struct's destructor (or one composing it,
+/// transitively) and that callee's body changes across an override event.
+/// Leaving such a symbol unmangled would define one global symbol repeatedly
+/// with a differing body, ambiguous under the REPL's `RTLD_GLOBAL` loading,
+/// and (worse) `RTLD_GLOBAL` keeps whichever definition loaded *first*, so a
+/// later, correct recompilation would silently never take effect. Before any
+/// override exists in the session, epoch is `None` and every symbol stays
+/// unsuffixed, identical to the build path.
+fn struct_drop_symbol(id: StructId, epoch: Option<u64>) -> String {
+    match epoch {
         Some(g) => format!("sooth_struct_drop_{}__gen{g}", id.index()),
         None => format!("sooth_struct_drop_{}", id.index()),
     }
@@ -259,14 +279,20 @@ fn struct_drop_symbol(id: StructId, generation: Option<u64>) -> String {
 
 /// The synthesized per-type destructor symbol for a linear enum: mirrors
 /// `struct_drop_symbol`, one uniform naming scheme for both aggregate kinds.
-fn enum_drop_symbol(id: EnumId) -> String {
-    format!("sooth_enum_drop_{}", id.index())
+fn enum_drop_symbol(id: EnumId, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(g) => format!("sooth_enum_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_enum_drop_{}", id.index()),
+    }
 }
 
 /// Mirrors `struct_drop_symbol`/`enum_drop_symbol`, one uniform naming
 /// scheme across all three kinds.
-fn cell_drop_symbol(id: OwnedCellId) -> String {
-    format!("sooth_cell_drop_{}", id.index())
+fn cell_drop_symbol(id: OwnedCellId, epoch: Option<u64>) -> String {
+    match epoch {
+        Some(g) => format!("sooth_cell_drop_{}__gen{g}", id.index()),
+        None => format!("sooth_cell_drop_{}", id.index()),
+    }
 }
 
 /// One field's placement within its owning struct: its byte offset and its own
@@ -325,6 +351,10 @@ pub struct EnumLayout {
     /// recurses into nested fields first), so this is a one-shot fold, not a
     /// further recursion, mirroring `StructLayout::is_linear`.
     pub is_linear: bool,
+    /// Mirrors `StructLayout::drop_generation`: the same session-wide override
+    /// epoch, so an enum composing an overridden struct also gets a fresh
+    /// destructor symbol per override event.
+    pub drop_generation: Option<u64>,
 }
 
 /// One variant's payload placement: its fields laid out (first field deepest)
@@ -454,6 +484,9 @@ impl Structs {
 #[derive(Debug, Default)]
 pub struct Cells {
     pub payload: Vec<IrType>,
+    /// Mirrors `StructLayout::drop_generation`, parallel to `payload` since a
+    /// cell has no per-item layout struct of its own to carry the field on.
+    pub drop_generations: Vec<Option<u64>>,
 }
 
 /// The IR's view of a program's reference types: the per-`RefId` referent
@@ -565,6 +598,7 @@ pub fn build_registries_ww(
     }
 
     let cell_payloads: Vec<IrType> = cells.iter().map(|d| ir_type_of(d.payload)).collect();
+    let cell_drop_generations = vec![None; cell_payloads.len()];
     let ref_referents: Vec<IrType> = refs.iter().map(|d| ir_type_of(d.referent)).collect();
 
     (
@@ -581,6 +615,7 @@ pub fn build_registries_ww(
         },
         Cells {
             payload: cell_payloads,
+            drop_generations: cell_drop_generations,
         },
         Refs {
             referent: ref_referents,
@@ -723,6 +758,9 @@ impl LayoutBuilder<'_> {
             align,
             variants,
             is_linear,
+            // R11: the build path never suffixes a destructor symbol; the
+            // REPL sets this from its own override epoch after the build.
+            drop_generation: None,
         });
     }
 
@@ -1029,10 +1067,19 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 /// ever allowed, add a generation suffix, matching word symbols.
 ///
 /// R11 (slice 8b): a *user* `drop` override is where that premise fails --
-/// redefining one at the REPL puts a different body under the same symbol --
-/// so an overridden struct's destructor does carry a generation suffix
-/// (`StructLayout::drop_generation`, set by the session). Generic glue is
-/// still identical per generation and stays unsuffixed.
+/// redefining one at the REPL puts a different body under the same symbol.
+/// R11.2 additionally suffixes every *other* linear struct's/enum's/cell's
+/// destructor too, once the session holds any override at all: any of them
+/// may `Call` an overridden struct's destructor (directly, or transitively
+/// through a further composed aggregate), so their own body's callee changes
+/// across an override event exactly as the overridden struct's own body does.
+/// All three symbol kinds carry the *same* session-wide override epoch
+/// (`StructLayout`/`EnumLayout::drop_generation`, `Cells::drop_generations`,
+/// set by the session), so every destructor in a session that has ever seen
+/// an override mints a fresh, never-before-loaded symbol per override event
+/// -- the cheap alternative to computing exactly which aggregates reach the
+/// override. Before any override, epoch is `None` everywhere and every
+/// symbol stays unsuffixed, unchanged from the build path.
 ///
 /// R2 (slice 8b): a struct in `overrides` gets the user's own `drop` body under
 /// that same symbol instead of the synthesized field glue. Every caller of the
@@ -1386,7 +1433,7 @@ fn synthesize_enum_destructor(
     }
 
     IrFunc {
-        name: enum_drop_symbol(id),
+        name: enum_drop_symbol(id, enums.layouts[id.index()].drop_generation),
         params: vec![self_ty],
         ret: None,
         blocks: b.blocks,
@@ -1429,7 +1476,7 @@ fn synthesize_cell_destructor(
     }
     b.seal_block(Terminator::Ret(None));
     IrFunc {
-        name: cell_drop_symbol(id),
+        name: cell_drop_symbol(id, cells.drop_generations[id.index()]),
         params: vec![IrType::OwnedCell(id)],
         ret: None,
         blocks: b.blocks,
@@ -2856,7 +2903,8 @@ impl<'a> FuncBuilder<'a> {
             // linearity: the synthesized destructor drops a linear payload
             // first.
             IrType::OwnedCell(id) => {
-                self.push_instr(Instr::Call(None, cell_drop_symbol(id), vec![v]));
+                let symbol = cell_drop_symbol(id, self.cells.drop_generations[id.index()]);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Struct(id) if self.structs.layouts[id.index()].is_linear => {
                 let symbol =
@@ -2864,7 +2912,8 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Enum(id) if self.enums.layouts[id.index()].is_linear => {
-                self.push_instr(Instr::Call(None, enum_drop_symbol(id), vec![v]));
+                let symbol = enum_drop_symbol(id, self.enums.layouts[id.index()].drop_generation);
+                self.push_instr(Instr::Call(None, symbol, vec![v]));
             }
             IrType::Array(id) if self.arrays.layouts[id.index()].is_linear => unreachable!(
                 "checked: a linear array element is rejected wherever an array type is named"
