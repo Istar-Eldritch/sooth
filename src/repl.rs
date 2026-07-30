@@ -272,6 +272,17 @@ pub struct Session {
     /// rather than in `self.env` because the override is deliberately absent
     /// from `env` (R1), so `next_generation`'s lookup could never see it.
     drop_overloads: HashMap<StructId, (u64, WordDef)>,
+    /// Blocker 1 (post-implementation review): the same-struct-id-keyed
+    /// `drop` call sites `check_def_collecting_drop_sites` recorded while
+    /// checking each override in `drop_overloads`, cached at the line that
+    /// defined it rather than re-derived later. A whole-session reachability
+    /// query (`check_drop_overload_reachability`, run on every `: drop` line)
+    /// needs every override's sites to catch a cycle closing through more
+    /// than one struct, but re-checking an *earlier* override's body against
+    /// a *later* line's env would reintroduce the stale-env hazard R11.2/
+    /// R11.3 already fixed for lowering -- a recorded site's operand type
+    /// never changes once observed, so caching it is exact, not stale.
+    drop_dropped_sites: HashMap<StructId, Vec<Type>>,
     /// R11.2: the session-wide override epoch, `None` until this session's
     /// first `drop` override is ever defined, then incremented by one on
     /// every subsequent override define/redefine event (of any struct, not
@@ -308,6 +319,7 @@ impl Session {
             owned_cells: Vec::new(),
             refs: Vec::new(),
             drop_overloads: HashMap::new(),
+            drop_dropped_sites: HashMap::new(),
             override_epoch: None,
             buf: Vec::new(),
             top: 0,
@@ -560,6 +572,7 @@ impl Session {
         let epoch = previous_epoch.map_or(0, |e| e + 1);
         let had_overload = self.structs[id.index()].has_drop_overload;
         let previous = self.drop_overloads.insert(id, (epoch, word));
+        let previous_sites = self.drop_dropped_sites.remove(&id);
         // Set before the body is checked and before this line's own
         // destructor synthesis: the receiver must already be linear while its
         // own `drop` body is checked, and the defining line must emit the
@@ -579,6 +592,10 @@ impl Session {
                     Some(entry) => self.drop_overloads.insert(id, entry),
                     None => self.drop_overloads.remove(&id),
                 };
+                match previous_sites {
+                    Some(sites) => self.drop_dropped_sites.insert(id, sites),
+                    None => self.drop_dropped_sites.remove(&id),
+                };
                 self.structs[id.index()].has_drop_overload = had_overload;
                 self.override_epoch = previous_epoch;
                 Err(e)
@@ -591,7 +608,7 @@ impl Session {
     /// override's body is ever lowered (R11.3).
     fn compile_drop_overload(&mut self, id: StructId, epoch: u64) -> Result<Library, String> {
         let env = self.typed_env();
-        check::check_def(
+        let sites = check::check_def_collecting_drop_sites(
             &self.drop_overloads[&id].1,
             &self.enums,
             &env,
@@ -599,6 +616,28 @@ impl Session {
             &mut self.owned_cells,
             &mut self.refs,
             &self.structs,
+        )?;
+        self.drop_dropped_sites.insert(id, sites);
+
+        // R6 at the REPL: checking this override's body in isolation cannot
+        // ask the whole-session reachability question (this override, or one
+        // reachable through it, disposing itself), so it is asked separately
+        // here, against every override currently live in the session (this
+        // line's own included) and each one's *cached* drop sites -- never a
+        // re-check of an earlier line's body against this line's env, which
+        // would reintroduce the stale-env hazard R11.2/R11.3 already fixed
+        // for lowering.
+        let overrides: Vec<(StructId, &WordDef, &[Type])> = self
+            .drop_overloads
+            .iter()
+            .map(|(&sid, (_, word))| (sid, word, self.drop_dropped_sites[&sid].as_slice()))
+            .collect();
+        check::check_drop_overload_reachability(
+            &overrides,
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
         )?;
 
         let ir_lower_env = ir_arity_env(&env);
@@ -1176,6 +1215,52 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(session.drop_overloads.is_empty());
+    }
+
+    #[test]
+    fn repl_self_recursive_drop_overload_is_a_located_error_not_a_crash() {
+        // Blocker 1: `check_def` alone only validates this override's body in
+        // isolation, so without `check_drop_overload_reachability` this line
+        // would register a `drop` override whose own body drops its own
+        // receiver -- a compile-time R6 rejection natively, but an unbounded
+        // runtime recursion (stack overflow) at the REPL, since nothing else
+        // ever asks the reachability question here.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line("type: Res n i64 ;", &mut out).unwrap();
+        let err = session
+            .eval_line(": drop ( Res -- ) | r | r drop ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `Res`"),
+            "unexpected message: {err}"
+        );
+        assert!(session.drop_overloads.is_empty());
+        assert!(!session.structs[0].has_drop_overload);
+    }
+
+    #[test]
+    fn repl_same_body_indirect_drop_recursion_through_a_composing_type_is_a_located_error() {
+        // Blocker 1's other crashing shape: the override never calls `drop`
+        // on its own receiver directly, only on a freshly built `Box` that
+        // *composes* it -- `Box` has no override of its own, so disposing one
+        // runs generic field glue back into `Res`'s override (R6 case (b),
+        // the same shape
+        // `check_drop_body_recursion_through_a_containing_aggregate_is_error`
+        // exercises natively).
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line("type: Res n i64 ;", &mut out).unwrap();
+        session.eval_line("type: Box f Res ;", &mut out).unwrap();
+        let err = session
+            .eval_line(": drop ( Res -- ) | r | r Box drop ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `Res`"),
+            "unexpected message: {err}"
+        );
+        assert!(session.drop_overloads.is_empty());
+        assert!(!session.structs[0].has_drop_overload);
     }
 
     #[test]

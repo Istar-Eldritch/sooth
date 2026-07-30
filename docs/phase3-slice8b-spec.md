@@ -138,9 +138,9 @@ search's own root (`current != target`), exactly as a `Copy` scalar field is alr
 One guard suffices, since the enum and cell routes funnel back through it.
 
 **Consequence:** a resource needing constant-stack disposal of its own recursive cycle must write
-that iteration inside its override body (via `T>` or Slice 6's self-tail-recursion); the compiler
-cannot auto-fuse an arbitrary user body the way it fuses mechanical glue. R6's rejection is what
-forces that instead of accepting unbounded recursive `drop`.
+that iteration inside its override body via `T>`; the compiler cannot auto-fuse an arbitrary user
+body the way it fuses mechanical glue. R6's rejection is what forces that instead of accepting
+unbounded recursive `drop`.
 
 **R8 — A multi-output `extern:` is rejected at the declaration.** Unrejected, `lower_call`'s
 `out_arity == 1` test discarded the result and the *next* consumer panicked, naming the wrong term.
@@ -270,3 +270,88 @@ Added beyond the map: `repl_drop_overload_is_kept_by_struct_id_and_out_of_env`,
 `repl_resource_field_is_disposed_through_the_overload`.
 
 ## Dogfood (`examples/resources.sth`, as shipped)
+
+Reading a real file whose length varies with repo state makes for a non-deterministic golden, so
+the dogfood reads a small dedicated fixture with a fixed, known size instead of a project
+document: `examples/resource_fixture.txt`, containing exactly `hi\n` (3 bytes, no other content).
+
+```
+extern: open  ( cstr i64 -- i64 )              "open" ;
+extern: read  ( i64 &![u8 64] usize -- isize ) "read" ;
+extern: close ( i64 -- i64 )                   "close" ;
+
+type: File fd i64 ;
+
+: drop ( File -- )
+  | f | f File>fd close drop ;
+
+: main ( -- )
+  "examples/resource_fixture.txt" cstr 0 open | fd |
+  fd File | f |
+  0 >u8 64 fill | buf |
+  f File|>fd &!buf 64 >usize read . | file |
+  file drop ;
+```
+
+(`main` is the corrected body — see "Delivery, as shipped", Phase 4's deltas, for why it differs
+from the original spec's `f drop`. `File|>fd` is verified against the syntax `tests/phase3_refs.rs`
+already exercises and passes: `0 >u8 N fill` for a `u8`-element array, `&!name` as the prefix
+mutable borrow of a bare array-typed local, and `File|>fd` as the non-consuming peek of a `Copy`
+field, legal regardless of the enclosing struct's own linearity since `check_struct_peek_word`
+gates only on the *field*'s `is_copy`, never the struct's. `buf` needs no explicit `drop`: it is
+`Copy`, and the surplus-value check inspects only the final stack, not bound locals, so a `Copy`
+local left unused simply goes out of scope.)
+
+Expected output: exactly `"3\n"` (the fixture's fixed byte count, from `read`'s return value,
+printed with the trailing newline every other golden asserts) — deterministic regardless of repo
+state, unlike reading a real project document would be. The golden test
+(`slice8b_dogfood_compiles_and_runs`) invokes the built binary with the working directory pinned
+at the repo root (`Command::current_dir`): this is the first example that opens a file at *run
+time* rather than only using a relative `.sth` path as compiler input, so no prior golden ever
+needed to set it.
+
+Exit criteria: a second `drop` of the same `File` is a compile error, not a runtime
+double-close (criterion 4); a `File` left unconsumed at end of `main` is a compile error naming
+the forgotten resource (criterion 3); `dup` on a `File` is rejected with R4's reason-carrying
+message (criterion 2); a `drop` body that calls `drop` on its own receiver (directly or through
+a helper) is rejected (criteria 8, 9), while a `drop` of the `Copy` scalar `close` returns, in
+the same body, is not (criterion 10); the emitted destructor for `File` contains the user body's
+`close` call and no synthesized field glue (criterion 15, tested against a separate fixture with
+a linear field, since scalar-only `File` cannot observe the *absence* of glue that was never
+going to be there); a `drop` overload declared at the REPL still runs correctly on a later line,
+including across redefinition (criteria 17, 22).
+
+## Out of scope
+
+Enum- or array-typed `drop` overloads (R1; rejected with a located error, not silently accepted).
+`Type::Spy`/`IrType::Spy` untouched (`src/ir.rs:2717-2739`), deferred to Slice 8c along with the
+D7 unification cut above. The general multi-output-lowering panic for ordinary user words, as
+distinct from the `extern:` case R8 fixes. A symbol-existence check for `close` (unchanged from
+8a's R14). `extern:` at the REPL, in general: R11 makes a `drop` overload work at the REPL, but
+the REPL still cannot evaluate an `extern:` declaration or call an extern-declared word at all
+(unchanged from 8a's own Out-of-scope note); R11's own tests work around this with an extern-free
+override body. An overloadable `dup` / opt-in reference-counting, and `drop` becoming fully
+polymorphic open dispatch (Phase 4's ad-hoc overloading, and Phase 6's deferred RC problem): this
+slice does not lay groundwork toward either. Any change to `str`/`cstr` or the `.`-separator
+question (8a, DESIGN.md Open/deferred).
+
+**Accepted limitations found and documented, not fixed, during post-implementation review:**
+
+- A REPL word body compiled *before* a struct gains a `drop` override (while the struct was
+  still all-`Copy`) is not retroactively re-lowered once the override makes it linear — calling
+  that stale-compiled word on a later, now-linear value of that type silently runs no destructor
+  at all. This is a linear-spine hole in principle, but matches the REPL's existing "word bodies
+  are snapshots at definition time" semantics used everywhere else, and re-lowering every
+  already-compiled word on every later type-linearity change is out of scope for this slice.
+- An override's body that calls a *different* struct's override binds that callee to the callee's
+  epoch at the point the caller override was defined — redefining the callee later does not
+  retroactively update an already-lowered caller. This is asymmetric with generated
+  (non-override) composition glue, which *does* refresh on redefinition; the asymmetry is a
+  decision (R11.2/R11.3 above), not an accident.
+- R6's whole-program reachability check now runs at the REPL too (`check_drop_overload_reachability`,
+  against the session's live override registry), so both a direct and a same-body indirect
+  self-recursive `drop` override are rejected there exactly as natively. It still cannot catch
+  recursion that only closes through an *ordinary* REPL helper word defined on an earlier,
+  separate line: the REPL retains no bodies for ordinary words across lines, so there is nothing
+  to walk for that case, the same residual gap R6's own "known, accepted limitation" paragraph
+  above already accepts for the native pass.

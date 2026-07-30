@@ -1059,8 +1059,9 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 
     // R6: only now, with every `drop` call site's operand type known, can the
     // `drop`-reachability graph be built.
+    let word_refs: Vec<&WordDef> = words.iter().collect();
     check_drop_overload_recursion(
-        words,
+        &word_refs,
         structs,
         enums,
         arrays,
@@ -1703,21 +1704,58 @@ pub fn check_def(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
 ) -> Result<(), String> {
+    check_def_collecting_drop_sites(word, enums, env, arrays, cells, refs, structs)?;
+    Ok(())
+}
+
+/// R6/R11: `check_def`'s own body-check, but returning this one word's
+/// recorded `drop` call sites instead of discarding them. The REPL keeps the
+/// result cached per override (`Session::drop_dropped_sites`) so a later
+/// line's reachability query (`check_drop_overload_reachability`) never has
+/// to re-check an *earlier* override's body against a *later* line's env --
+/// the same stale-env hazard R11.2/R11.3 already fixed for lowering. A
+/// `drop` call site's resolved operand type does not change once recorded;
+/// only whether that type is *currently* overridden can, and that question
+/// is answered fresh, from `structs`, every time the graph is built.
+pub fn check_def_collecting_drop_sites(
+    word: &WordDef,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    structs: &[StructDecl],
+) -> Result<Vec<Type>, String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
-    // R6's whole-program `drop`-reachability pass has no whole program to walk
-    // here: `check_def` checks one word against an env, so its `drop` call
-    // sites are observed and discarded.
-    check_word(
-        word,
-        enums,
-        &env,
-        arrays,
-        cells,
-        refs,
-        structs,
-        &mut Vec::new(),
-    )
+    let mut sites = Vec::new();
+    check_word(word, enums, &env, arrays, cells, refs, structs, &mut sites)?;
+    Ok(sites)
+}
+
+/// R6/R11: the REPL's own whole-session call to `check_drop_overload_recursion`,
+/// asked over every override currently live in the session (the new one
+/// already included) and each one's *cached* `drop` call sites
+/// (`check_def_collecting_drop_sites`, recorded once per override, at the
+/// line that defined it) rather than a re-check of every body.
+pub fn check_drop_overload_reachability(
+    overrides: &[(StructId, &WordDef, &[Type])],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+) -> Result<(), String> {
+    let words: Vec<&WordDef> = overrides.iter().map(|&(_, word, _)| word).collect();
+    let overloads: HashMap<StructId, usize> = overrides
+        .iter()
+        .enumerate()
+        .map(|(i, &(id, _, _))| (id, i))
+        .collect();
+    let dropped: Vec<Vec<Type>> = overrides
+        .iter()
+        .map(|&(_, _, sites)| sites.to_vec())
+        .collect();
+    check_drop_overload_recursion(&words, structs, enums, arrays, cells, &overloads, &dropped)
 }
 
 /// Infer the net effect of a bare line: simulate the typed stack from
@@ -2114,7 +2152,7 @@ fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
 /// still reads as a cycle -- the same false positive the tail-cycle pass
 /// already accepts, with the same remedy: factor out a distinct helper.
 fn check_drop_overload_recursion(
-    words: &[WordDef],
+    words: &[&WordDef],
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -2158,7 +2196,7 @@ fn check_drop_overload_recursion(
 /// through a name-keyed map: the literal name `"drop"` is shared by every
 /// override and says nothing about which one a site dispatches to.
 fn drop_reachability_graph(
-    words: &[WordDef],
+    words: &[&WordDef],
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -2344,7 +2382,7 @@ fn reaches_start(
 /// `mutual_tail_recursion_error`'s shape. An override has no callable name of
 /// its own, so it is rendered as the declaration the user wrote.
 fn recursive_drop_overload_error(
-    words: &[WordDef],
+    words: &[&WordDef],
     structs: &[StructDecl],
     overloads: &HashMap<StructId, usize>,
     id: StructId,
@@ -2357,7 +2395,7 @@ fn recursive_drop_overload_error(
     let mut rendered: Vec<String> = chain.iter().map(|&i| render(i)).collect();
     rendered.push(render(chain[0]));
     let name = &structs[id.index()].name;
-    let span = word_span(&words[overloads[&id]]);
+    let span = word_span(words[overloads[&id]]);
     format!(
         "error: recursive `drop` overload for `{}`: {} (line {}, col {})\n  a `drop` body cannot dispose its own receiver, directly or through any chain of calls; destructure it with `{}>` and dispose the fields instead",
         name,
@@ -4925,6 +4963,20 @@ mod tests {
     }
 
     #[test]
+    fn check_drop_overload_with_wrong_arity_is_error() {
+        // R1: a `drop` overload declaring anything other than exactly one
+        // input is a located error, distinct from the non-struct-input and
+        // output rejections tested above.
+        let src = "type: T x i64 ; : drop ( T T -- ) drop drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(
+            err.contains("must declare exactly one input"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
     fn check_drop_overload_with_output_is_error() {
         // Criterion 6/R1: a `drop` overload declaring an output is a located
         // error, regardless of whether it also declares an input.
@@ -4938,11 +4990,19 @@ mod tests {
     fn check_duplicate_drop_overload_for_one_struct_is_error() {
         // Criterion 7/R1: two `drop` overloads for the same struct id is a
         // located error naming that struct, even though the two words'
-        // bodies are otherwise unrelated.
-        let src = "type: T x i64 ; : drop ( T -- ) drop ; : drop ( T -- ) drop ;";
+        // bodies are otherwise unrelated. Both bodies destructure rather
+        // than self-recurse: a self-recursive body would let R6's own
+        // recursion check produce a message containing both "T" and "drop"
+        // even if the duplicate-override rejection this test targets were
+        // deleted entirely, since `find_drop_overloads` runs and returns
+        // before either body is ever checked.
+        let src = "type: T x i64 ; : drop ( T -- ) | a | a T>x drop ; \
+                   : drop ( T -- ) | a | a T>x drop ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("T"), "unexpected message: {err}");
-        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(
+            err.contains("`T` already defines its own `drop`"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
