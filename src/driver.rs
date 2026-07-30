@@ -84,14 +84,36 @@ pub fn compile_so(ssa: &str, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn tempfile_dir() -> Result<PathBuf, String> {
+/// A build's scratch directory, removed when dropped. Every current caller writes
+/// into it and is done (qbe/cc have already produced their output elsewhere, or
+/// `dlopen` has already read the `.so`) by the time its function returns, so
+/// scope-end `Drop` is always ordered after last use, not a race against it.
+pub(crate) struct TempDir(PathBuf);
+
+impl std::ops::Deref for TempDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        // Best-effort: a compile error earlier in the same function already
+        // reports the real failure, and a second one here on cleanup would
+        // only obscure it.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub(crate) fn tempfile_dir() -> Result<TempDir, String> {
     // Each build gets its own scratch dir so concurrent in-process builds (e.g.
     // parallel goldens) don't clobber each other's fixed-name intermediates.
     static N: AtomicU64 = AtomicU64::new(0);
     let seq = N.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!("sooth-{}-{seq}", std::process::id()));
     std::fs::create_dir_all(&dir).map_err(|e| format!("creating temp dir {dir:?}: {e}"))?;
-    Ok(dir)
+    Ok(TempDir(dir))
 }
 
 pub(crate) fn run_command(cmd: &mut Command) -> Result<(), String> {
