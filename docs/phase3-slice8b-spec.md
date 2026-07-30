@@ -243,6 +243,13 @@ from `check_tail_call_cycles`'s `name_to_idx`, and letting R6's typed graph own 
 is the fix; a `drop`-named edge surviving in the tail-cycle pass would keep this false positive
 alive alongside the new pass.
 
+*Landed in phase 2, ahead of R6*, because the same fact is load-bearing twice over there: a
+`drop`-named word is also its own `has_self_tail_call` false positive (`src/check.rs`), which would
+lower the dogfood's `| f | f File>fd close drop ;` to a back-edge loop instead of closing the fd,
+and R5's own coverage needs a helper word whose body ends in `drop` (the shape that fabricates the
+cycle above). Both halves are excluded now: a word named `drop` is neither a self-tail-call nor a
+name-keyed callee. R6 still owns every *typed* `drop` edge, and nothing about that pass changes.
+
 **R7 — Composition is correct in both the ordinary case and the fused-recursive-disposal-cycle
 case; the override always runs.** Two distinct paths, not one:
 

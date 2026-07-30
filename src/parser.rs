@@ -209,6 +209,7 @@ fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>,
                     name_static: Box::leak(name.clone().into_boxed_str()),
                     fields: Vec::new(),
                     span: *span,
+                    has_drop_overload: false,
                 });
             }
             TypeDeclKind::Enum(variant_names) => {

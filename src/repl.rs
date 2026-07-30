@@ -367,6 +367,7 @@ impl Session {
             name_static: Box::leak(name.into_boxed_str()),
             fields: Vec::new(),
             span,
+            has_drop_overload: false,
         });
         let result = parser::parse_typedef_line(
             tokens,
@@ -491,6 +492,10 @@ impl Session {
                 &ir_lower_env,
                 &resolve,
                 regs,
+                // R11 (not yet): the session keeps no `drop` overload bodies,
+                // so a REPL line synthesizes generic glue for every linear
+                // struct.
+                &ir::DropOverrides::new(),
             ));
             funcs
         };
@@ -616,8 +621,12 @@ impl Session {
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`
             // with an undefined `sooth_struct_drop_N`/`sooth_enum_drop_N`.
-            let aggregate_destructors =
-                ir::synthesize_aggregate_destructors(&ir_lower_env, &resolve, regs);
+            let aggregate_destructors = ir::synthesize_aggregate_destructors(
+                &ir_lower_env,
+                &resolve,
+                regs,
+                &ir::DropOverrides::new(),
+            );
             (func, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
@@ -806,6 +815,7 @@ mod tests {
             align: 8,
             fields: vec![],
             is_linear: false,
+            has_drop_overload: false,
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
         assert_eq!(

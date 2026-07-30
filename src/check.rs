@@ -178,9 +178,14 @@ pub fn builtin_table() -> HashMap<String, Sig> {
 /// linear too. `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s
 /// fields; neither can recurse into itself (`check_recursion` rejects that
 /// first), so this always terminates.
+///
+/// R3 (slice 8b): a struct with a user `drop` overload is linear whatever its
+/// fields say — a resource wrapping one `i64` would otherwise be `Copy` by
+/// the structural fold alone, and so silently duplicated and forgotten.
 pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[ArrayDecl]) -> bool {
     match ty {
         Type::Spy => false,
+        Type::Struct(id, _) if structs[id.index()].has_drop_overload => false,
         Type::Struct(id, _) => structs[id.index()]
             .fields
             .iter()
@@ -946,6 +951,13 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // `check_recursion` (run inside `check_types`) never arises.
     let drop_overloads = find_drop_overloads(&module.words, &module.structs)?;
     let drop_overload_indices: HashSet<usize> = drop_overloads.values().copied().collect();
+    // R3: defining `drop` for a struct forces it linear, so the fact is
+    // recorded on the declaration itself rather than re-derived: every
+    // `is_copy` call site, `ir`'s layout fold, and the REPL's persistent
+    // registries all read the same `StructDecl`.
+    for id in drop_overloads.keys() {
+        module.structs[id.index()].has_drop_overload = true;
+    }
 
     check_types(
         &module.structs,
@@ -1892,10 +1904,19 @@ fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
 
 /// R2 (M1): whether a word contains at least one tail-position call to itself.
 /// The lowerer uses this to decide whether to build the loop shape at all.
+///
+/// A `drop` overload never self-tail-calls, whatever its body's last term is:
+/// `drop` is intercepted as a builtin before any name resolution, at both
+/// check and lowering, so a trailing `drop` in a `: drop ( T -- )` body is a
+/// disposal of whatever is on top (typically some `Copy` scalar), not a call
+/// to the enclosing word. Without this, the dogfood's own
+/// `| f | f File>fd close drop ;` would lower to a back-edge loop instead of
+/// closing the fd.
 pub fn has_self_tail_call(word: &WordDef) -> bool {
-    tail_position_calls(&word.body)
-        .iter()
-        .any(|&callee| callee == word.name)
+    word.name != "drop"
+        && tail_position_calls(&word.body)
+            .iter()
+            .any(|&callee| callee == word.name)
 }
 
 /// A word's location, derived from the first term (or clause) of its body,
@@ -1914,9 +1935,14 @@ fn word_span(word: &WordDef) -> Span {
 /// non-tail calls contribute no edge, so a pair of words that mutually call
 /// each other in non-tail position never false-positives.
 fn check_tail_call_cycles(words: &[WordDef]) -> Result<(), String> {
+    // A word named `drop` is not callable by name (`check_shuffle`'s `"drop"`
+    // arm intercepts every call site first), so it contributes no edge in
+    // either direction: a body's trailing `drop` of a scalar would otherwise
+    // register a tail call *to* a `drop` overload and fabricate a cycle.
     let name_to_idx: HashMap<&str, usize> = words
         .iter()
         .enumerate()
+        .filter(|(_, w)| w.name != "drop")
         .map(|(i, w)| (w.name.as_str(), i))
         .collect();
 
@@ -2488,12 +2514,24 @@ fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
 /// R4 (D3): `dup`/`over` applied to a non-`Copy` value, in the DESIGN.md form.
 /// A linear value has no bits to copy: the only ways to get a second one are to
 /// thread this one through or to acquire another explicitly.
+///
+/// R4 (slice 8b): the linear cause names the `drop` overload when that is what
+/// made the type linear. An all-`Copy`-fields resource struct told only that it
+/// "has no bits to copy" points at nothing the reader can act on — its bits are
+/// plainly copyable, and its own `: drop` declaration is the reason they may not
+/// be.
 fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let defines_drop =
+        matches!(found, Type::Struct(id, _) if ctx.structs()[id.index()].has_drop_overload);
     // A reference is neither `Copy` nor linear, so the ownership wording below
     // would tell the reader the opposite of the type rule.
     let why = if found.is_ref() {
         format!(
             "`{found}` is exclusive: at most one may be live for a place, so copying it would make a second one; use it where it is, or borrow again once it is consumed"
+        )
+    } else if defines_drop {
+        format!(
+            "`{found}` is linear because it defines `drop`: its own destructor runs exactly once, so a copy would run it twice; thread the value through instead"
         )
     } else {
         format!(
@@ -4609,6 +4647,164 @@ mod tests {
         let err = check_src(src).unwrap_err();
         assert!(err.contains("drop"), "unexpected message: {err}");
         assert!(err.contains("output"), "unexpected message: {err}");
+    }
+
+    /// A checked module, for the tests that read a type fact back out of the
+    /// registries rather than only asserting a diagnostic.
+    fn checked_module(src: &str) -> Module {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+
+    /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
+    /// every R3/R4 test turns on, since the structural fold alone would call
+    /// it `Copy`.
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+
+    fn struct_ty(module: &Module, name: &str) -> Type {
+        let idx = module
+            .structs
+            .iter()
+            .position(|s| s.name == name)
+            .expect("declared struct");
+        Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
+    }
+
+    #[test]
+    fn check_struct_with_drop_overload_is_linear() {
+        // Criterion 1/R3: the override forces linearity, so a struct whose
+        // every field is `Copy` is not `Copy`. Without the override the same
+        // declaration folds to `Copy`, which is what makes this a real
+        // decision rather than a restatement of the field fold.
+        let module = checked_module(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let file = struct_ty(&module, "File");
+        assert!(!is_copy(
+            file,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(is_linear(
+            file,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+
+        let plain = checked_module("type: File fd i64 ; : main ( -- ) 1 File drop ;");
+        assert!(is_copy(
+            struct_ty(&plain, "File"),
+            &plain.structs,
+            &plain.enums,
+            &plain.arrays
+        ));
+    }
+
+    #[test]
+    fn check_dup_of_drop_overload_type_names_the_cause() {
+        // Criterion 2/R4: the reason-carrying cause, in both `Ctx` arms. The
+        // generic linear wording ("no bits to copy") would be actively
+        // misleading here: `File`'s bits are one plain `i64`, and its own
+        // `: drop` declaration is the whole reason they may not be copied.
+        let err = check_src(&format!(
+            "{FILE_RESOURCE} : main ( -- ) 1 File dup drop drop ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+        assert!(
+            err.contains("`File` is linear because it defines `drop`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("no bits to copy"),
+            "the generic linear cause was used: {err}"
+        );
+
+        // The `Ctx::Line` arm: the same fact reaches a bare REPL line, whose
+        // carried `File` slot is linear for the same reason.
+        let module = checked_module(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let tokens = lex("dup").unwrap();
+        let terms = match crate::parser::parse_line(&tokens).unwrap() {
+            crate::ast::Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let err = infer_line(
+            &terms,
+            &[struct_ty(&module, "File")],
+            &builtin_table(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &module.structs,
+            &module.enums,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`File` is linear because it defines `drop`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_unconsumed_all_copy_resource_at_word_end_is_error() {
+        // Criterion 3/R3: the forgotten-disposal check inherits the forced
+        // linearity, so an all-`Copy`-fields resource left bound at the end of
+        // a body is an error naming it.
+        let err = check_src(&format!("{FILE_RESOURCE} : main ( -- ) 1 File | f | ;")).unwrap_err();
+        assert!(
+            err.contains("linear value `f` is never consumed"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`File`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_double_drop_of_all_copy_resource_is_use_after_move_error() {
+        // Criterion 4/R3: a second `drop` of the same resource is a compile
+        // error rather than a runtime double-close, which is the whole point
+        // of forcing linearity on a struct the field fold calls `Copy`.
+        let err = check_src(&format!(
+            "{FILE_RESOURCE} : main ( -- ) 1 File | f | f drop f drop ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("local `f`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_drop_body_must_consume_linear_fields() {
+        // Criterion 12/R5/R9: an override body is checked like any other word
+        // body, so a resource holding a linear field is already forced to
+        // account for it -- no scalar-only restriction, and no new check.
+        let src = "type: Inner s __spy ; type: Res i Inner ; \
+                   : drop ( Res -- ) | r | r Res> drop ; \
+                   : main ( -- ) 1 __spy Inner Res drop ;";
+        check_src(src).unwrap();
+
+        let forgotten = "type: Inner s __spy ; type: Res i Inner ; \
+                         : drop ( Res -- ) | r | ; \
+                         : main ( -- ) 1 __spy Inner Res drop ;";
+        let err = check_src(forgotten).unwrap_err();
+        assert!(
+            err.contains("linear value `r` is never consumed"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_a_word_named_drop_contributes_no_tail_call_edge() {
+        // A `drop` term never resolves to a user word (`check_shuffle`
+        // intercepts it first), so the tail-call graph must not treat one as a
+        // call to a `drop` overload: `helper`'s trailing `drop` of an `i64`
+        // would otherwise close a fabricated mutual cycle with the override
+        // that tail-calls `helper`.
+        let src = "type: T x i64 ; \
+                   : helper ( i64 -- ) drop ; \
+                   : drop ( T -- ) | t | t T>x helper ; \
+                   : main ( -- ) 1 T drop ;";
+        check_src(src).unwrap();
     }
 
     #[test]
