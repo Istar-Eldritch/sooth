@@ -1818,7 +1818,9 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" .
 #[test]
 fn dup_of_linear_value_is_error() {
     // Criterion 1: `dup` is the explicit copy and a linear value has no copy.
-    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  7 Spy dup drop drop ;\n"));
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: main ( -- )\n  7 Spy dup drop drop ;\n"
+    ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(err.contains("linear"), "unexpected message: {err}");
@@ -2331,7 +2333,9 @@ fn linear_array_element_in_word_signature_is_error() {
 fn linear_array_element_in_struct_field_is_error() {
     // Same boundary, reached via a `type:` field declaration instead of a
     // word signature.
-    let err = linear_check_error(&format!("{SPY_DEF}type: Bag xs [Spy 2] ;\n: main ( -- ) 0 . ;\n"));
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Bag xs [Spy 2] ;\n: main ( -- ) 0 . ;\n"
+    ));
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"

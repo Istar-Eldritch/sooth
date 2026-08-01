@@ -5241,7 +5241,10 @@ mod tests {
         let is = instrs(w);
         let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
         assert_eq!(
-            count(w, |i| matches!(i, Instr::Call(_, sym, _) if sym != &spy_drop)),
+            count(
+                w,
+                |i| matches!(i, Instr::Call(_, sym, _) if sym != &spy_drop)
+            ),
             0,
             "the constructor emits no call: {is:?}"
         );
@@ -5894,7 +5897,9 @@ mod tests {
     #[test]
     fn recursive_disposal_path_rejects_non_cyclic_and_misleading_shapes() {
         // No cell at all: nothing to walk.
-        let p = Probe::new(&format!("{SPY_DEF}type: Plain x i64 y Spy ;\n: main ( -- ) ;"));
+        let p = Probe::new(&format!(
+            "{SPY_DEF}type: Plain x i64 y Spy ;\n: main ( -- ) ;"
+        ));
         assert_eq!(p.path(p.struct_ty("Plain")), None);
 
         // The bait is the *last* field, which is where the reverse-order scan

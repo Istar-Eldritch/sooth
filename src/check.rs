@@ -5526,8 +5526,7 @@ mod tests {
 
     #[test]
     fn check_main_linear_input_is_error() {
-        let err =
-            check_src(&format!("{SPY_DEF}: main ( Spy -- ) | s | s drop ;")).unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: main ( Spy -- ) | s | s drop ;")).unwrap_err();
         assert!(
             err.contains("cannot declare a linear type"),
             "unexpected message: {err}"
@@ -6427,8 +6426,10 @@ mod tests {
     fn check_no_linear_array_elements_direct_element_in_struct_field_is_error() {
         // The parser cannot reject `[Spy N]` (struct fields aren't resolved
         // until the whole module is parsed), so this is the checker's job.
-        let err =
-            check_src(&format!("{SPY_DEF}type: Bag xs [Spy 2] ; : main ( -- ) 0 . ;")).unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Bag xs [Spy 2] ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
             "unexpected message: {err}"
@@ -6495,8 +6496,10 @@ mod tests {
 
     #[test]
     fn owned_of_linear_array_is_error() {
-        let err = check_src(&format!("{SPY_DEF}: w ( ^[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"))
-            .unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( ^[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
             "unexpected message: {err}"
@@ -7156,8 +7159,10 @@ mod tests {
 
     #[test]
     fn check_over_of_linear_value_is_error() {
-        let err =
-            check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy 1 over drop drop drop ;")).unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( -- ) 7 Spy 1 over drop drop drop ;"
+        ))
+        .unwrap_err();
         assert!(err.contains("cannot `over`"), "unexpected message: {err}");
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
@@ -7186,8 +7191,10 @@ mod tests {
     fn check_use_after_move_of_linear_local_names_the_move_site() {
         // `SPY_DEF` is two lines, so `w`'s own line 3 (the first `s drop`)
         // lands on line 5 of the full source.
-        let err = check_src(&format!("{SPY_DEF}: w ( Spy -- )\n  | s |\n  s drop\n  s drop ;"))
-            .unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( Spy -- )\n  | s |\n  s drop\n  s drop ;"
+        ))
+        .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(
