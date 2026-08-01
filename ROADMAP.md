@@ -156,7 +156,24 @@ mechanism was considered mid-spec-review and **cut entirely**, not partially fol
 have been a pure no-op refactor of code Slice 8c deletes outright anyway. `examples/resources.sth`
 (open/read/close a file, `close` reached only through `File`'s own `drop` override, a deliberate
 double-use and a forgotten `close` both compile errors) is the Phase 3 exit dogfood.
-**Next action: Phase 3 Slice 8c** (retire `__spy`). Slice 7's opt-in RC is
+**Phase 3 Slice 8c (retire `__spy`) is complete**: `Type::Spy`/`IrType::Spy` and every
+hardcoded match arm across `ast.rs`/`check.rs`/`ir.rs`/`src/backend/qbe.rs` — the
+builtin-table entry, `is_copy`'s special case, and the backend's compiler-synthesized
+`sooth_spy_drop`/`$spyfmt` destructor shim — are gone, found via Rust's exhaustiveness
+checker rather than a manual audit. Every property the primitive existed to demonstrate is
+now expressed with an ordinary `type: Spy tag i64 ;` plus a user `drop` overload
+(`| s | "drop " . s Spy>tag . ;`), verified to reproduce the primitive's exact runtime trace
+byte-for-byte; ~280 call sites migrated across five test files and four in-crate unit-test
+modules, with all six integration-test binaries keeping identical counts to before
+(migration, not silent deletion). Five unit tests were deleted outright with no
+replacement, each confirmed to test only the deleted primitive's own bootstrap machinery
+(the backend's synthesized destructor IL, its hardcoded extern-boundary rejection wording,
+its own name/identity), leaving no coverage gap. A deletion-plus-migration slice with no
+design decisions (per its roadmap entry below), so it skipped the brief/spec/multi-round
+review pipeline used for 8a/8b: one async implementation pass plus one fresh-context review
+pass, proportional to migration blast radius rather than design risk.
+
+**Phase 3 is complete.** Slice 7's opt-in RC is
 deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -619,21 +636,25 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    (`src/ir.rs`'s `emit_drop`) is untouched here and stays fully in 8c's scope. Note this is
    destructor *bodies* only; `drop` becoming fully polymorphic is still Phase 4.
 
-   **8c — retire `__spy`.** Once 8b's mechanism is proven, the Slice 1 bootstrap primitive is
-   fully redundant: every property it exists for (linear-by-declaration, `dup` rejection, drop
-   dispatch propagating through struct/enum/array/cell nesting, extern-boundary rejection) is now
-   expressible with an ordinary `type:` plus a user `drop` overload, and its synthesized native
-   trace stub (`sooth_spy_drop`, a compiler-emitted `printf` shim, `src/backend/qbe.rs:690`)
-   becomes unnecessary once a real destructor body can just call `.` directly — strictly better,
-   since it needs no compiler-synthesized machinery at all. A deletion-plus-migration slice, not
-   new design: remove `Type::Spy`/`IrType::Spy` and every hardcoded match arm across `ast.rs`/
-   `check.rs`/`ir.rs`/`src/backend/qbe.rs` (Rust's exhaustiveness check finds every site, the same
-   technique that closed the carried-slot bug in 8a), and rewrite the ~250 call sites across
-   `tests/phase0.rs`, `tests/phase1.rs`, `tests/phase3_locals.rs`, and in-crate unit tests in
-   `check.rs`/`ir.rs` to construct a small locally-defined resource type instead. Deliberately its
-   own slice, not folded into 8b: 8b already carries the mechanism's design risk, and this needs a
-   proven, working `File` example to migrate onto rather than landing at the same time as the
-   thing it depends on.
+   **8c — retire `__spy`. ✅ done.** Once 8b's mechanism was proven, the Slice 1 bootstrap
+   primitive was fully redundant: every property it existed for (linear-by-declaration, `dup`
+   rejection, drop dispatch propagating through struct/enum/array/cell nesting, extern-boundary
+   rejection) is now expressible with an ordinary `type:` plus a user `drop` overload —
+   `type: Spy tag i64 ; : drop ( Spy -- ) | s | "drop " . s Spy>tag . ;` reproduces the old
+   primitive's exact runtime trace byte-for-byte. `Type::Spy`/`IrType::Spy` and every hardcoded
+   match arm across `ast.rs`/`check.rs`/`ir.rs`/`src/backend/qbe.rs` — the builtin-table entry,
+   `is_copy`'s special case, and the synthesized native trace stub (`sooth_spy_drop`, a
+   compiler-emitted `printf` shim) — are deleted, found via Rust's exhaustiveness check rather
+   than a manual audit, the same technique that closed the carried-slot bug in 8a. ~280 call
+   sites migrated across `tests/phase0.rs`, `tests/phase1.rs`, `tests/phase3_locals.rs`,
+   `tests/phase3_refs.rs`, `tests/phase3_resources.rs`, and in-crate unit tests in
+   `check.rs`/`ir.rs`/`parser.rs`/`src/backend/qbe.rs`, onto a small locally-defined resource
+   type; all six integration-test binaries kept identical counts to before, and the five unit
+   tests deleted outright (rather than migrated) each tested only the deleted primitive's own
+   bootstrap machinery, with no coverage gap left behind. No design decisions (built directly on
+   an async implementation pass plus one fresh-context review pass, skipping the brief/spec/
+   multi-round-review pipeline 8a/8b used, since this slice carried migration blast radius, not
+   design risk).
 
 ### Phase 4 — Minimal polymorphism + quotations  `[L]`
 
