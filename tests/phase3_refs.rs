@@ -48,6 +48,12 @@ fn check_error(src: &str) -> String {
     check::check(&mut module).expect_err("check should fail")
 }
 
+/// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+/// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+/// overload, so it is linear for the same reason any resource is, not by
+/// any compiler-known bit.
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     parser::parse(&tokens).expect_err("parsing should fail")
@@ -375,10 +381,11 @@ fn increment_through_mutable_reference_adds_in_place() {
 
 #[test]
 fn fetch_of_linear_referent_is_error() {
-    let err =
-        check_error("type: Holds a __spy ;\n: peek ( &Holds -- ) | h |\n  h &Holds>a @ drop ;\n");
+    let err = check_error(&format!(
+        "{SPY_DEF}type: Holds a Spy ;\n: peek ( &Holds -- ) | h |\n  h &Holds>a @ drop ;\n"
+    ));
     assert!(
-        err.contains("`@` cannot access the linear referent `__spy`"),
+        err.contains("`@` cannot access the linear referent `Spy`"),
         "expected the linear-fetch rejection: {err}"
     );
     assert!(
@@ -389,11 +396,11 @@ fn fetch_of_linear_referent_is_error() {
 
 #[test]
 fn store_of_linear_referent_is_error() {
-    let err = check_error(
-        "type: Holds a __spy ;\n: put ( &!Holds __spy -- ) | h s |\n  h &!Holds>a s ! ;\n",
-    );
+    let err = check_error(&format!(
+        "{SPY_DEF}type: Holds a Spy ;\n: put ( &!Holds Spy -- ) | h s |\n  h &!Holds>a s ! ;\n"
+    ));
     assert!(
-        err.contains("`!` cannot access the linear referent `__spy`"),
+        err.contains("`!` cannot access the linear referent `Spy`"),
         "expected the linear-store rejection: {err}"
     );
     assert!(
