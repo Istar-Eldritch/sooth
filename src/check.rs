@@ -1065,7 +1065,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 /// R1/R2/R3/R7/R12/R13/R14: every `extern:` declaration's own checks, run
 /// before its signature enters the word environment. R1's redeclaration
 /// check runs against the name-dispatched builtins (`BUILTIN_WORDS`),
-/// `existing` (`builtin_table`'s one fixed-effect builtin plus the
+/// `existing` (`builtin_table`'s seed, empty today, plus the
 /// struct/enum-generated words), the user's own `:` words, and every other
 /// `extern:` (in that order, first match wins); R2/R3 reject each forbidden
 /// boundary type at the declaration rather than at a call site; the
@@ -1108,9 +1108,9 @@ fn check_extern_decls(
 
 /// R1: the builtin words `check_term` dispatches by name, in its probe chain,
 /// *before* the word environment is consulted at all. They are absent from
-/// `builtin_table` (which holds only the one builtin with a fixed effect), so
-/// an `extern:` naming one would be registered, never looked up, and silently
-/// do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
+/// `builtin_table` (empty today, since every builtin dispatches on the
+/// concrete operand type rather than a fixed signature), so an `extern:`
+/// naming one would be registered, never looked up, and silently do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
 /// words are dispatched in the same chain but are rejected earlier, against
 /// the declaration's name in the parser, so they are not repeated here.
 const BUILTIN_WORDS: &[&str] = &[

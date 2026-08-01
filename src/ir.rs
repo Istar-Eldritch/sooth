@@ -5248,6 +5248,12 @@ mod tests {
             0,
             "the constructor emits no call: {is:?}"
         );
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1, "{is:?}");
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::FieldStore(..))),
+            1,
+            "{is:?}"
+        );
     }
 
     #[test]
