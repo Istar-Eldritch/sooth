@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{
     intern_array_type, intern_owned_cell_type, intern_ref_type, ArrayDecl, Clause, EnumDecl,
     EnumId, ExternDecl, Module, OwnedCellDecl, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Term, TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
+    Term, TermKind, Type, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -154,37 +154,28 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
 }
 
 /// The builtin word -> typed-effect table, as the seed of a checking env.
-/// Every *structural* builtin is handled directly in `check_term`
+/// Every builtin is handled directly in `check_term`
 /// (`check_shuffle`/`check_operator`): the stack shuffles, the numeric-tower
 /// operators, and `.` (type-directed over any printable scalar, not a fixed
 /// `( i64 -- )`) all dispatch on the concrete operand type rather than a fixed
-/// signature, so they are absent here. The drop-spy constructor `__spy ( i64
-/// -- __spy )` (R6) is the one builtin with a fixed effect, so it is the one
-/// entry.
+/// signature, so this table is empty.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    HashMap::from([(
-        SPY_NAME.to_string(),
-        Sig {
-            inputs: vec![Type::I64],
-            outputs: vec![Type::Spy],
-        },
-    )])
+    HashMap::new()
 }
 
 /// R2/R7: whether `ty` is `Copy` (freely duplicated and discarded) rather than
-/// linear (used exactly once, disposed by `drop`). The drop-spy is linear;
-/// a struct or enum is linear iff any field/variant-payload field is
-/// (transitively), so a struct-of-struct-of-spy or an enum carrying one is
-/// linear too. `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s
-/// fields; neither can recurse into itself (`check_recursion` rejects that
-/// first), so this always terminates.
+/// linear (used exactly once, disposed by `drop`). A struct or enum is linear
+/// iff any field/variant-payload field is (transitively), so a
+/// struct-of-struct-of-resource or an enum carrying one is linear too.
+/// `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s fields; neither
+/// can recurse into itself (`check_recursion` rejects that first), so this
+/// always terminates.
 ///
 /// R3 (slice 8b): a struct with a user `drop` overload is linear whatever its
 /// fields say — a resource wrapping one `i64` would otherwise be `Copy` by
 /// the structural fold alone, and so silently duplicated and forgotten.
 pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[ArrayDecl]) -> bool {
     match ty {
-        Type::Spy => false,
         Type::Struct(id, _) if structs[id.index()].has_drop_overload => false,
         Type::Struct(id, _) => structs[id.index()]
             .fields
@@ -1199,7 +1190,7 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
             return Err(extern_str_input_error(decl));
         }
         if !is_extern_boundary_scalar(slot.ty) {
-            return Err(extern_boundary_type_error(decl, slot.ty, "input"));
+            return Err(extern_owned_aggregate_error(decl, slot.ty, "input"));
         }
     }
     for slot in &decl.effect.outputs {
@@ -1212,7 +1203,7 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
         if matches!(slot.ty, Type::OwnedCell(..)) {
             return Err(extern_owned_pointer_output_error(decl, slot.ty));
         }
-        return Err(extern_boundary_type_error(decl, slot.ty, "output"));
+        return Err(extern_owned_aggregate_error(decl, slot.ty, "output"));
     }
     Ok(())
 }
@@ -1237,19 +1228,6 @@ fn extern_str_output_error(decl: &ExternDecl) -> String {
         "error: `extern: {}` cannot return a `str` (line {}, col {})\n  a `str` may point at static data only, and C supplies no length; declare `cstr`",
         decl.name, decl.span.line, decl.span.col
     )
-}
-
-/// R3: the rejection for a boundary-ineligible slot, worded by what the type
-/// actually is. `__spy` has no aggregate layout at all, so it is not called an
-/// "owned aggregate" it isn't; every other ineligible type genuinely is one.
-fn extern_boundary_type_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
-    if matches!(ty, Type::Spy) {
-        return format!(
-            "error: `extern: {}` declares the {position} `__spy` (line {}, col {})\n  `__spy` is a test-only diagnostic type and cannot cross the C boundary",
-            decl.name, decl.span.line, decl.span.col
-        );
-    }
-    extern_owned_aggregate_error(decl, ty, position)
 }
 
 fn extern_owned_aggregate_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
@@ -1521,7 +1499,6 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         | Type::Bool
         | Type::Usize
         | Type::Isize
-        | Type::Spy
         | Type::Str
         | Type::Cstr => None,
     }

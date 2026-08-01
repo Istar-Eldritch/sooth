@@ -12,7 +12,7 @@ use std::mem;
 
 use crate::ast::{
     ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, RefDecl,
-    StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef, SPY_NAME,
+    StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -29,12 +29,6 @@ pub const WORD_WIDTH: u32 = 8;
 /// nonzero. The backend emits the definition; the IR references it by name so
 /// both sides agree on one symbol.
 pub const OOB_TRAP_SYMBOL: &str = "sooth_oob_trap";
-
-/// The drop-spy's compiler-known destructor (R5/R6): `drop` on a `__spy` lowers
-/// to a plain `Call` of this symbol, which prints `drop <tag>`. The backend
-/// emits the definition; the IR references it by name so both sides agree on
-/// one symbol, exactly like `OOB_TRAP_SYMBOL`.
-pub const SPY_DROP_SYMBOL: &str = "sooth_spy_drop";
 
 /// The heap allocator's acquire half: `allocate(n) -> ptr`, a compiler-emitted
 /// shim over `malloc` that traps on a NULL return and requests `max(n, 1)`
@@ -129,16 +123,10 @@ pub enum IrType {
     /// a linear-memory offset under a future WASM lowering. Used by the line
     /// wrapper's `%stack` parameter.
     Ptr,
-    /// The drop-spy primitive (R6). Represented as a 64-bit signed integer (its
-    /// tag) everywhere the backend touches it, but distinct from `Int` in the
-    /// IR: `drop` reads a value's `IrType` to decide whether to emit the
-    /// destructor call, and an `i64` tag must not become one by accident.
-    Spy,
     /// An owning heap cell `^T`, keyed by the `OwnedCellId` of its interned
     /// payload shape. A pointer everywhere the backend touches it, but
-    /// distinct from `Ptr` in the IR for the same reason `Spy` is distinct
-    /// from `Int`: `drop` dispatches on a value's `IrType`, and dispatch must
-    /// not key off a bare pointer.
+    /// distinct from `Ptr` in the IR: `drop` dispatches on a value's
+    /// `IrType`, and dispatch must not key off a bare pointer.
     OwnedCell(OwnedCellId),
     /// `str` (R4): the opaque address of a static `{ptr, len}` descriptor
     /// (never runtime-allocated, R11), so at runtime it is one pointer, like
@@ -188,7 +176,6 @@ pub fn ir_type_of(ty: Type) -> IrType {
         Type::Ref(..) => IrType::Ptr,
         Type::Usize => IrType::Usize,
         Type::Isize => IrType::Isize,
-        Type::Spy => IrType::Spy,
         Type::Str => IrType::Str,
         Type::Cstr => IrType::Cstr,
     }
@@ -241,13 +228,12 @@ pub struct StructLayout {
     pub drop_generation: Option<u64>,
 }
 
-/// Whether a field's `IrType` is linear: the drop-spy directly, or a nested
+/// Whether a field's `IrType` is linear: an owning cell directly, or a nested
 /// aggregate whose own layout is linear. `ensure_struct`/`ensure_enum` cannot
 /// call this: each computes its own `is_linear` inline while `layouts` is
 /// still being built, before a nested field's entry exists here.
 fn field_is_linear(ty: IrType, structs: &Structs, enums: &Enums, arrays: &Arrays) -> bool {
     match ty {
-        IrType::Spy => true,
         // Always linear whatever its payload, so no payload lookup.
         IrType::OwnedCell(_) => true,
         IrType::Struct(id) => structs.layouts[id.index()].is_linear,
@@ -466,8 +452,6 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Isize => word_width,
         // A cell is a pointer, so its width defers to `Ptr`'s convention.
         IrType::Ptr | IrType::OwnedCell(_) | IrType::Str | IrType::Cstr => 8,
-        // A spy is its `i64` tag.
-        IrType::Spy => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
         IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
         IrType::Array(_) => unreachable!("an array field resolves via the layout registry"),
@@ -491,7 +475,6 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         | IrType::Usize
         | IrType::Isize
         | IrType::Ptr
-        | IrType::Spy
         | IrType::OwnedCell(_)
         | IrType::Str
         | IrType::Cstr => 8,
@@ -793,13 +776,13 @@ impl LayoutBuilder<'_> {
         });
     }
 
-    /// Whether a just-laid-out field's `IrType` is linear (R7): the drop-spy
-    /// directly, or a nested struct/enum whose own memoized layout is linear.
-    /// Shared by the struct and enum `is_linear` folds; both call sites have
-    /// already ensured the nested aggregate's memo entry via `size_align`.
+    /// Whether a just-laid-out field's `IrType` is linear (R7): an owning
+    /// cell directly, or a nested struct/enum whose own memoized layout is
+    /// linear. Shared by the struct and enum `is_linear` folds; both call
+    /// sites have already ensured the nested aggregate's memo entry via
+    /// `size_align`.
     fn layout_field_is_linear(&self, ty: IrType) -> bool {
         match ty {
-            IrType::Spy => true,
             // Always linear whatever its payload, so no payload lookup.
             IrType::OwnedCell(_) => true,
             IrType::Struct(id) => {
@@ -1619,18 +1602,16 @@ pub fn lower_line(
             }
             // Every remaining carried slot loads directly at its own
             // `IrType` and needs no relabeling: `i64`, `Bool`, `Usize` and
-            // `Isize` all fill the full 8-byte cell as-is, and `Spy`,
-            // `OwnedCell`, `Str`, `Cstr` are all a bare pointer/tag. Keeping
-            // the type (rather than degrading to a bare `I64`) is what lets a
-            // later `drop` still find `Spy`/`OwnedCell`'s destructor, a later
-            // `len`/`.`/`cstr` dispatch on `Str`/`Cstr`, and `.`/comparisons
-            // treat a `Bool`/`Usize` slot correctly instead of as a signed
-            // `i64`.
+            // `Isize` all fill the full 8-byte cell as-is, and `OwnedCell`,
+            // `Str`, `Cstr` are all a bare pointer. Keeping the type (rather
+            // than degrading to a bare `I64`) is what lets a later `drop`
+            // still find `OwnedCell`'s destructor, a later `len`/`.`/`cstr`
+            // dispatch on `Str`/`Cstr`, and `.`/comparisons treat a
+            // `Bool`/`Usize` slot correctly instead of as a signed `i64`.
             IrType::Int { .. }
             | IrType::Bool
             | IrType::Usize
             | IrType::Isize
-            | IrType::Spy
             | IrType::OwnedCell(_)
             | IrType::Str
             | IrType::Cstr => {
@@ -2192,16 +2173,6 @@ impl<'a> FuncBuilder<'a> {
             }
             "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
             "@" | "!" | "+!" => self.lower_access_word(name),
-            // The spy constructor `( i64 -- __spy )` is identity at runtime
-            // (R6): the tag *is* the value. It emits no call, only the same
-            // `Conv` relabel a same-width conversion uses, so the result value
-            // carries `IrType::Spy` and a later `drop` can recognise it.
-            SPY_NAME => {
-                let tag = self.stack.pop().expect("__spy: tag");
-                let spy = self.fresh_value(IrType::Spy);
-                self.push_instr(Instr::Conv(spy, tag));
-                self.stack.push(spy);
-            }
             _ => {
                 // Every `&`-led word: the two prefix borrow operators and the
                 // reference-mode accessor family.
@@ -2926,16 +2897,14 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// R5/R12/R16: the universal disposal primitive. On a linear value (a
-    /// `__spy`, or a struct/enum whose `is_linear` is set) this is a plain `Call`
-    /// to the (builtin or synthesized) destructor; a `Copy` value is discarded
-    /// with no runtime effect. Shared by `drop`, `S>fi`'s drop-the-rest,
-    /// `S<fi`'s drop-on-overwrite, and the synthesized struct/enum destructors
-    /// themselves, so "how a value is disposed" lives in one place.
+    /// struct/enum whose `is_linear` is set, or an owning cell) this is a
+    /// plain `Call` to the (builtin or synthesized) destructor; a `Copy`
+    /// value is discarded with no runtime effect. Shared by `drop`, `S>fi`'s
+    /// drop-the-rest, `S<fi`'s drop-on-overwrite, and the synthesized
+    /// struct/enum destructors themselves, so "how a value is disposed" lives
+    /// in one place.
     fn emit_drop(&mut self, v: Value) {
         match self.value_type(v) {
-            IrType::Spy => {
-                self.push_instr(Instr::Call(None, SPY_DROP_SYMBOL.to_string(), vec![v]));
-            }
             // A cell always frees on drop, regardless of its payload's own
             // linearity: the synthesized destructor drops a linear payload
             // first.
