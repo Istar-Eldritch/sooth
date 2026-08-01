@@ -1788,7 +1788,7 @@ fn non_tail_factorial_still_a_real_call_native() {
     assert_eq!(code, 0);
 }
 
-// Phase 3 Slice 1: the linear core on bare `__spy` values. Every
+// Phase 3 Slice 1: the linear core on bare `Spy` values. Every
 // drop-observing golden compares the *whole* stdout, so "exactly once" and drop
 // order are actually proven; every negative golden asserts the diagnostic and
 // the backticked type name.
@@ -1808,34 +1808,45 @@ fn linear_check_error(src: &str) -> String {
     check::check(&mut module).expect_err("check should fail")
 }
 
+/// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+/// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+/// overload, so it is linear for the same reason any resource is, not by
+/// any compiler-known bit. Two lines, so every line number in a source
+/// string it is prepended to shifts up by 2.
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
 #[test]
 fn dup_of_linear_value_is_error() {
     // Criterion 1: `dup` is the explicit copy and a linear value has no copy.
-    let err = linear_check_error(": main ( -- )\n  7 __spy dup drop drop ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  7 Spy dup drop drop ;\n"));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(err.contains("linear"), "unexpected message: {err}");
 }
 
 #[test]
 fn over_of_linear_value_is_error() {
     // Criterion 1b: `over` copies its second slot, so it is gated too.
-    let err = linear_check_error(": main ( -- )\n  7 __spy 1 over drop drop drop ;\n");
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: main ( -- )\n  7 Spy 1 over drop drop drop ;\n"
+    ));
     assert!(err.contains("cannot `over`"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
 fn use_after_move_of_linear_local_is_error() {
     // Criterion 2: the second mention errors and names the site of the first.
-    let err = linear_check_error(
-        ": main ( -- )\n  7 __spy hold ;\n\
-: hold ( __spy -- )\n  | s |\n  s drop\n  s drop ;\n",
-    );
+    // `SPY_DEF` is two lines, so `hold`'s own line 3 (the first `s drop`)
+    // lands on line 7.
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: main ( -- )\n  7 Spy hold ;\n\
+: hold ( Spy -- )\n  | s |\n  s drop\n  s drop ;\n"
+    ));
     assert!(err.contains("use after move"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(
-        err.contains("moved at line 5, col 3"),
+        err.contains("moved at line 7, col 3"),
         "the diagnostic should name the move site: {err}"
     );
 }
@@ -1846,7 +1857,7 @@ fn explicit_drop_runs_destructor_once() {
     // is written (between the two ordinary prints).
     let stdout = run_linear_golden(
         "drop-once",
-        ": main ( -- )\n  1 .\n  7 __spy drop\n  2 . ;\n",
+        &format!("{SPY_DEF}: main ( -- )\n  1 .\n  7 Spy drop\n  2 . ;\n"),
     );
     assert_eq!(stdout, "1\ndrop 7\n2\n");
 }
@@ -1854,21 +1865,21 @@ fn explicit_drop_runs_destructor_once() {
 #[test]
 fn surplus_linear_on_stack_is_error() {
     // Criterion 4a: forgetting is an error, not a silent drop.
-    let err = linear_check_error(": main ( -- )\n  7 __spy ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  7 Spy ;\n"));
     assert!(
         err.contains("linear value left on the stack"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
 fn unconsumed_linear_local_is_error() {
     // Criterion 4b: a linear local never consumed by scope end. Locals are not
     // on the final stack, so this is its own pass, not `check_outputs`.
-    let err = linear_check_error(": hold ( __spy -- )\n  | s |\n  1 . ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}: hold ( Spy -- )\n  | s |\n  1 . ;\n"));
     assert!(err.contains("never consumed"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(
         err.contains("`s`"),
         "the error should name the local: {err}"
@@ -1895,8 +1906,10 @@ fn swap_of_linear_values_is_allowed() {
     // makes 1 the top.
     let stdout = run_linear_golden(
         "reorder",
-        ": main ( -- )\n  7 __spy 8 __spy swap drop drop\n\
-  1 __spy 2 __spy 3 __spy rot drop drop drop ;\n",
+        &format!(
+            "{SPY_DEF}: main ( -- )\n  7 Spy 8 Spy swap drop drop\n\
+  1 Spy 2 Spy 3 Spy rot drop drop drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 7\ndrop 8\ndrop 1\ndrop 3\ndrop 2\n");
 }
@@ -1907,8 +1920,10 @@ fn both_arms_consume_linear_ok() {
     // own spy exactly once.
     let stdout = run_linear_golden(
         "both-arms",
-        ": dispose ( __spy bool -- )\n  | s c |\n  c if s drop else 99 . s drop end ;\n\
-: main ( -- )\n  7 __spy true dispose\n  8 __spy false dispose ;\n",
+        &format!(
+            "{SPY_DEF}: dispose ( Spy bool -- )\n  | s c |\n  c if s drop else 99 . s drop end ;\n\
+: main ( -- )\n  7 Spy true dispose\n  8 Spy false dispose ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 7\n99\ndrop 8\n");
 }
@@ -1917,11 +1932,11 @@ fn both_arms_consume_linear_ok() {
 fn divergent_arm_use_is_error() {
     // Criterion 10b: consumed in one arm only, then referenced past the join.
     // The join yields `MaybeMoved`, so the later use is a use-after-move.
-    let err = linear_check_error(
-        ": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;\n"
+    ));
     assert!(err.contains("use after move"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -1930,29 +1945,31 @@ fn divergent_arm_unconsumed_is_error() {
     // compiler errors at scope end rather than inserting a compensating drop.
     // `s` WAS consumed on the `then` arm, so the diagnostic must not claim it
     // was never touched: the bug is the `else` arm forgetting it.
-    let err =
-        linear_check_error(": oops ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;\n");
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;\n"
+    ));
     assert!(
         err.contains("not consumed on every path"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
 fn linear_across_loop_back_edge_is_located_error() {
     // Criterion 12: a linear value live across the self-tail-call back-edge is
-    // deferred (R15/D8), as a located error rather than a miscompile.
-    let err = linear_check_error(
-        ": spin ( __spy i64 -- i64 )\n  | s n |\n\
-  n 0 = if s drop 0 else 9 __spy n 1 - spin end ;\n",
-    );
+    // deferred (R15/D8), as a located error rather than a miscompile. `SPY_DEF`
+    // is two lines, so `spin`'s own line 3 lands on line 5.
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n\
+  n 0 = if s drop 0 else 9 Spy n 1 - spin end ;\n"
+    ));
     assert!(
         err.contains("not supported yet"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
-    assert!(err.contains("line 3"), "the error should be located: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    assert!(err.contains("line 5"), "the error should be located: {err}");
 }
 
 #[test]
@@ -1980,8 +1997,10 @@ fn destructure_whole_drops_each_field() {
     // destructure moved both fields out rather than just the top one.
     let stdout = run_linear_golden(
         "destructure-whole",
-        "type: Pair a __spy b __spy ;\n\
-: main ( -- )\n  1 __spy 2 __spy Pair\n  Pair> drop drop ;\n",
+        &format!(
+            "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+: main ( -- )\n  1 Spy 2 Spy Pair\n  Pair> drop drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 2\ndrop 1\n");
 }
@@ -1992,10 +2011,10 @@ fn nested_struct_is_linear_transitively() {
     // rejected exactly like a bare spy, naming the outer struct type, proving
     // linearity propagates through a nested aggregate rather than stopping at
     // the immediate field.
-    let err = linear_check_error(
-        "type: Inner v __spy ;\ntype: Outer i Inner ;\n\
-: main ( -- )\n  5 __spy Inner Outer dup\n  Outer> Inner> drop\n  Outer> Inner> drop ;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Inner v Spy ;\ntype: Outer i Inner ;\n\
+: main ( -- )\n  5 Spy Inner Outer dup\n  Outer> Inner> drop\n  Outer> Inner> drop ;\n"
+    ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
     assert!(err.contains("`Outer`"), "unexpected message: {err}");
 
@@ -2003,8 +2022,10 @@ fn nested_struct_is_linear_transitively() {
     // chain runs correctly end to end.
     let stdout = run_linear_golden(
         "nested-struct",
-        "type: Inner v __spy ;\ntype: Outer i Inner ;\n\
-: main ( -- )\n  5 __spy Inner Outer\n  Outer> Inner> drop ;\n",
+        &format!(
+            "{SPY_DEF}type: Inner v Spy ;\ntype: Outer i Inner ;\n\
+: main ( -- )\n  5 Spy Inner Outer\n  Outer> Inner> drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 5\n");
 }
@@ -2017,8 +2038,10 @@ fn get_field_drops_the_rest_on_linear_struct() {
     // (tag 1) that follows.
     let stdout = run_linear_golden(
         "get-drops-rest",
-        "type: Pair a __spy b __spy ;\n\
-: main ( -- )\n  1 __spy 2 __spy Pair\n  Pair>a drop ;\n",
+        &format!(
+            "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+: main ( -- )\n  1 Spy 2 Spy Pair\n  Pair>a drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 2\ndrop 1\n");
 }
@@ -2031,8 +2054,10 @@ fn set_field_drops_overwritten_linear_field() {
     // destructure+drop.
     let stdout = run_linear_golden(
         "set-drops-overwritten",
-        "type: Pair a __spy b __spy ;\n\
-: main ( -- )\n  1 __spy 2 __spy Pair\n  9 __spy Pair<a\n  Pair> drop drop ;\n",
+        &format!(
+            "{SPY_DEF}type: Pair a Spy b Spy ;\n\
+: main ( -- )\n  1 Spy 2 Spy Pair\n  9 Spy Pair<a\n  Pair> drop drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 1\ndrop 2\ndrop 9\n");
 }
@@ -2045,8 +2070,7 @@ fn drop_of_linear_struct_runs_field_glue_in_declaration_order() {
     // is field-order-driven, not a generic "drop whatever's on the stack".
     let stdout = run_linear_golden(
         "drop-whole-struct",
-        "type: Pair a __spy b __spy ;\n\
-: main ( -- )\n  1 __spy 2 __spy Pair drop ;\n",
+        &format!("{SPY_DEF}type: Pair a Spy b Spy ;\n: main ( -- )\n  1 Spy 2 Spy Pair drop ;\n"),
     );
     assert_eq!(stdout, "drop 1\ndrop 2\n");
 }
@@ -2061,8 +2085,10 @@ fn drop_of_nested_linear_struct_recurses_into_the_synthesized_destructor() {
     // recursion isn't just "the nested struct happens to be first".
     let stdout = run_linear_golden(
         "drop-whole-nested-struct",
-        "type: Inner z __spy ;\ntype: Outer i __spy n __spy w Inner ;\n\
-: main ( -- )\n  1 __spy 2 __spy 3 __spy Inner Outer drop ;\n",
+        &format!(
+            "{SPY_DEF}type: Inner z Spy ;\ntype: Outer i Spy n Spy w Inner ;\n\
+: main ( -- )\n  1 Spy 2 Spy 3 Spy Inner Outer drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 1\ndrop 2\ndrop 3\n");
 }
@@ -2079,8 +2105,10 @@ fn peek_copy_field_keeps_struct() {
     // `b` at the first peek, or left nothing for the trailing `drop` to see).
     let stdout = run_linear_golden(
         "peek-copy-field",
-        "type: Pair a i64 b __spy ;\n\
-: main ( -- )\n  5 3 __spy Pair\n  Pair|>a drop\n  Pair|>a drop\n  drop ;\n",
+        &format!(
+            "{SPY_DEF}type: Pair a i64 b Spy ;\n\
+: main ( -- )\n  5 3 Spy Pair\n  Pair|>a drop\n  Pair|>a drop\n  drop ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 3\n");
 }
@@ -2089,14 +2117,14 @@ fn peek_copy_field_keeps_struct() {
 fn peek_linear_field_is_error() {
     // Criterion 7b: peeking the linear field `b` is a compile error naming
     // both the peek workaround and the offending field's type.
-    let err = linear_check_error(
-        "type: Pair a i64 b __spy ;\n: main ( -- )\n  5 3 __spy Pair\n  Pair|>b drop drop ;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Pair a i64 b Spy ;\n: main ( -- )\n  5 3 Spy Pair\n  Pair|>b drop drop ;\n"
+    ));
     assert!(
         err.contains("cannot `Pair|>b`"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(err.contains("`S>`"), "unexpected message: {err}");
 }
 
@@ -2112,10 +2140,10 @@ fn dup_of_linear_enum_is_error() {
     // exact source compiled, ran, and printed nothing (an exactly-once
     // violation with no diagnostic). It is now rejected like any other linear
     // value, naming the enum type.
-    let err = linear_check_error(
-        "type: Box | Full v __spy | Empty ;\n\
-: main ( -- )\n  1 __spy Full dup drop drop ;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Box | Full v Spy | Empty ;\n\
+: main ( -- )\n  1 Spy Full dup drop drop ;\n"
+    ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
     assert!(err.contains("`Box`"), "unexpected message: {err}");
     assert!(err.contains("linear"), "unexpected message: {err}");
@@ -2127,17 +2155,19 @@ fn nested_enum_is_linear_transitively() {
     // struct-of-enum-of-struct-of-spy, so `dup` on the outer struct is
     // rejected naming `Wrap`, and dropping it whole runs the chain of
     // synthesized destructors (struct -> tag dispatch -> struct -> spy).
-    let src = "type: Inner v __spy ;\ntype: Held | Empty | Some i Inner ;\n\
-type: Wrap h Held ;\n";
+    let src = format!(
+        "{SPY_DEF}type: Inner v Spy ;\ntype: Held | Empty | Some i Inner ;\n\
+type: Wrap h Held ;\n"
+    );
     let err = linear_check_error(&format!(
-        "{src}: main ( -- )\n  5 __spy Inner Some Wrap dup drop drop ;\n"
+        "{src}: main ( -- )\n  5 Spy Inner Some Wrap dup drop drop ;\n"
     ));
     assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
     assert!(err.contains("`Wrap`"), "unexpected message: {err}");
 
     let stdout = run_linear_golden(
         "nested-enum",
-        &format!("{src}: main ( -- )\n  5 __spy Inner Some Wrap drop ;\n"),
+        &format!("{src}: main ( -- )\n  5 Spy Inner Some Wrap drop ;\n"),
     );
     assert_eq!(stdout, "drop 5\n");
 }
@@ -2152,9 +2182,11 @@ fn drop_of_linear_enum_dispatches_on_tag() {
     // prints prove the dispatch didn't run the wrong arm's glue (or both).
     let stdout = run_linear_golden(
         "enum-tag-dispatch",
-        "type: Item | Empty | Full v __spy ;\n\
-: main ( -- )\n  1 .\n  true if 5 __spy Full else Empty end drop\n  2 .\n\
-  false if 9 __spy Full else Empty end drop\n  3 . ;\n",
+        &format!(
+            "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
+: main ( -- )\n  1 .\n  true if 5 Spy Full else Empty end drop\n  2 .\n\
+  false if 9 Spy Full else Empty end drop\n  3 . ;\n"
+        ),
     );
     assert_eq!(stdout, "1\ndrop 5\n2\n3\n");
 }
@@ -2169,9 +2201,11 @@ fn clause_body_disposes_linear_payload() {
     // body's own doing, not compiler-inserted compensation.
     let stdout = run_linear_golden(
         "clause-disposes-payload",
-        "type: Item | Empty | Full v __spy ;\n\
+        &format!(
+            "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
 : handle ( Item -- )\n| Empty   99 .\n| Full    drop\n;\n\
-: main ( -- )\n  Empty handle\n  7 __spy Full handle ;\n",
+: main ( -- )\n  Empty handle\n  7 Spy Full handle ;\n"
+        ),
     );
     assert_eq!(stdout, "99\ndrop 7\n");
 }
@@ -2183,12 +2217,12 @@ fn unconsumed_linear_clause_payload_is_error() {
     // forgetting it is a compile error naming the local and the word. This is
     // the branch Phase 1 left unreachable (a linear clause payload needed the
     // enum linearity this phase adds).
-    let err = linear_check_error(
-        "type: Item | Empty | Full v __spy ;\n\
-: handle ( Item -- )\n| Empty   99 .\n| Full | s |   1 .\n;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
+: handle ( Item -- )\n| Empty   99 .\n| Full | s |   1 .\n;\n"
+    ));
     assert!(err.contains("never consumed"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(
         err.contains("`s`"),
         "the error should name the local: {err}"
@@ -2204,10 +2238,10 @@ fn duplicate_word_entry_local_is_error() {
     // A repeated binding name (`| s s |`) must not collapse to last-wins in
     // the name -> type map: that would silently drop the earlier binding
     // (and any linear value in it) from all tracking, with no diagnostic.
-    let err = linear_check_error(
-        ": hold ( __spy __spy -- )\n  | s s |\n  s drop ;\n\
-: main ( -- ) 1 __spy 2 __spy hold 99 . ;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: hold ( Spy Spy -- )\n  | s s |\n  s drop ;\n\
+: main ( -- ) 1 Spy 2 Spy hold 99 . ;\n"
+    ));
     assert!(err.contains("duplicate local"), "unexpected message: {err}");
     assert!(
         err.contains("`s`"),
@@ -2223,11 +2257,11 @@ fn duplicate_word_entry_local_is_error() {
 fn duplicate_clause_body_local_is_error() {
     // The clause-body twin of `duplicate_word_entry_local_is_error`: the
     // same last-wins hazard exists in the `| Variant | s s |` binding path.
-    let err = linear_check_error(
-        "type: R | Two a __spy b __spy ;\n\
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: R | Two a Spy b Spy ;\n\
 : use ( R -- ) | Two | s s | s drop ;\n\
-: main ( -- ) 1 __spy 2 __spy Two use ;\n",
-    );
+: main ( -- ) 1 Spy 2 Spy Two use ;\n"
+    ));
     assert!(err.contains("duplicate local"), "unexpected message: {err}");
     assert!(
         err.contains("`s`"),
@@ -2243,12 +2277,12 @@ fn duplicate_clause_body_local_is_error() {
 fn main_declaring_linear_output_is_error() {
     // Nothing calls `main`, so a linear output would leak past the program
     // boundary unnoticed instead of being disposed.
-    let err = linear_check_error(": main ( -- __spy ) 7 __spy ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- Spy ) 7 Spy ;\n"));
     assert!(
         err.contains("cannot declare a linear type"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(err.contains("`main`"), "unexpected message: {err}");
 }
 
@@ -2256,12 +2290,12 @@ fn main_declaring_linear_output_is_error() {
 fn main_declaring_linear_input_is_error() {
     // Nothing calls `main`, so a linear input arrives in an uninitialised
     // ABI register; running its destructor would be undefined behaviour.
-    let err = linear_check_error(": main ( __spy -- ) | s | s drop ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}: main ( Spy -- ) | s | s drop ;\n"));
     assert!(
         err.contains("cannot declare a linear type"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
     assert!(err.contains("`main`"), "unexpected message: {err}");
 }
 
@@ -2269,46 +2303,49 @@ fn main_declaring_linear_input_is_error() {
 fn fill_of_linear_element_is_error() {
     // Array-element linearity isn't tracked transitively by the drop-glue
     // path yet, so `fill` rejects a linear element outright.
-    let err = linear_check_error(": main ( -- )\n  0 __spy 3 fill drop ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  0 Spy 3 fill drop ;\n"));
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
 fn linear_array_element_in_word_signature_is_error() {
     // The array-type boundary (not just `fill`) rejects a linear element: a
-    // `[__spy 2]` slot in a word's stack effect names the type directly. The
-    // parser cannot know `__spy` is linear until struct/enum fields are
+    // `[Spy 2]` slot in a word's stack effect names the type directly. The
+    // parser cannot know `Spy` is linear until struct/enum fields are
     // resolved, so this is a checker error, not a parse error.
-    let err = linear_check_error(": w ( [__spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n");
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}: w ( [Spy 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
+    ));
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
 fn linear_array_element_in_struct_field_is_error() {
     // Same boundary, reached via a `type:` field declaration instead of a
     // word signature.
-    let err = linear_check_error("type: Bag xs [__spy 2] ;\n: main ( -- ) 0 . ;\n");
+    let err = linear_check_error(&format!("{SPY_DEF}type: Bag xs [Spy 2] ;\n: main ( -- ) 0 . ;\n"));
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
     );
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
 fn linear_array_element_via_linear_struct_in_struct_field_is_error() {
-    // Indirect linearity: `Arr`'s field isn't itself `__spy`, but `Holds`
+    // Indirect linearity: `Arr`'s field isn't itself `Spy`, but `Holds`
     // (its element) contains one transitively, so the array is linear too.
-    let err =
-        linear_check_error("type: Holds s __spy ;\ntype: Arr a [Holds 2] ;\n: main ( -- ) 0 . ;\n");
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Holds s Spy ;\ntype: Arr a [Holds 2] ;\n: main ( -- ) 0 . ;\n"
+    ));
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
@@ -2320,9 +2357,9 @@ fn linear_array_element_via_linear_struct_in_struct_field_is_error() {
 fn linear_array_element_via_linear_struct_in_word_signature_is_error() {
     // Same indirection, reached via a word signature slot instead of a
     // struct field.
-    let err = linear_check_error(
-        "type: Holds s __spy ;\n: w ( [Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n",
-    );
+    let err = linear_check_error(&format!(
+        "{SPY_DEF}type: Holds s Spy ;\n: w ( [Holds 2] -- )\n  | a | a drop ;\n: main ( -- ) 0 . ;\n"
+    ));
     assert!(
         err.contains("linear array elements are not supported yet"),
         "unexpected message: {err}"
@@ -2358,7 +2395,7 @@ fn run_owned_traced_golden(tag: &str, src: &str) -> String {
 #[test]
 fn unconsumed_owned_is_error() {
     // Criterion 2: forgetting to dispose a cell is a compile error, exactly
-    // like a bare `__spy` (R4: `^T` is always linear).
+    // like a bare linear value (R4: `^T` is always linear).
     let err = linear_check_error(": main ( -- )\n  5 ^ ;\n");
     assert!(
         err.contains("linear value left on the stack"),
@@ -2388,7 +2425,7 @@ fn over_of_owned_is_error() {
 #[test]
 fn use_after_move_of_owned_is_error() {
     // Criterion 4: the second mention errors and names the site of the
-    // first, mirroring the `__spy` case.
+    // first, mirroring the bare linear-value case.
     let err = linear_check_error(
         ": main ( -- )\n  5 ^ hold ;\n\
 : hold ( ^i64 -- )\n  | s |\n  s ^> drop\n  s ^> drop ;\n",
@@ -2444,10 +2481,10 @@ fn owned_unwrap_aggregate_copies_out_before_free() {
 #[test]
 fn peek_owned_linear_payload_is_error() {
     // Criterion 7: `^|>` on a linear payload is a compile error naming the
-    // payload's type (R11/R14); `^__spy` proves it via the drop-spy.
-    let err = linear_check_error(": main ( -- )\n  7 __spy ^ ^|> ;\n");
+    // payload's type (R11/R14); `^Spy` proves it via a linear payload.
+    let err = linear_check_error(&format!("{SPY_DEF}: main ( -- )\n  7 Spy ^ ^|> ;\n"));
     assert!(err.contains("cannot `^|>`"), "unexpected message: {err}");
-    assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
 }
 
 #[test]
@@ -2540,10 +2577,13 @@ fn peek_owned_copy_payload_keeps_cell_live() {
 
 #[test]
 fn owned_linear_payload_frees_before_dropping_payload() {
-    // Criterion 8: `^__spy` disposal. The transcript is `free 8` *then*
+    // Criterion 8: `^Spy` disposal. The transcript is `free 8` *then*
     // `drop 7`, one stdout stream so the order is real (R8: the cell frees
     // before the payload's own destructor runs).
-    let stdout = run_owned_traced_golden("spy-payload", ": main ( -- )\n  7 __spy ^ drop ;\n");
+    let stdout = run_owned_traced_golden(
+        "spy-payload",
+        &format!("{SPY_DEF}: main ( -- )\n  7 Spy ^ drop ;\n"),
+    );
     assert_eq!(stdout, "alloc 8\nfree 8\ndrop 7\n");
 }
 
@@ -2556,7 +2596,7 @@ fn owned_aggregate_payload_frees_before_dropping_fields() {
     // drops its linear field (`drop 1`).
     let stdout = run_owned_traced_golden(
         "aggregate-payload",
-        "type: Holds a __spy b i64 ;\n: main ( -- )\n  1 __spy 2 Holds ^ drop ;\n",
+        &format!("{SPY_DEF}type: Holds a Spy b i64 ;\n: main ( -- )\n  1 Spy 2 Holds ^ drop ;\n"),
     );
     assert_eq!(stdout, "alloc 16\nfree 16\ndrop 1\n");
 }
@@ -2710,24 +2750,26 @@ fn deep_list_disposes_in_constant_stack() {
 
 #[test]
 fn recursive_list_disposes_in_expected_order() {
-    // Criterion 5: a list with a `__spy` per node builds, walks one node off
+    // Criterion 5: a list with a `Spy` per node builds, walks one node off
     // the front (printing its value, dropping its spy, unwrapping its tail),
     // and disposes the remainder through the loop. The trace is rooted at the
     // bare `List` value, not a `^List`, so no line of it depends on the cell
     // destructor's own free ordering.
     let stdout = run_owned_traced_golden(
         "recursive-list",
-        "type: List | Nil | Cons v i64 tag __spy next ^List ;\n\
+        &format!(
+            "{SPY_DEF}type: List | Nil | Cons v i64 tag Spy next ^List ;\n\
 : push-front ( List i64 -- List )\n  \
   | rest v |\n  \
-  v v __spy rest ^ Cons ;\n\
+  v v Spy rest ^ Cons ;\n\
 : step ( List -- List )\n\
 | Nil    Nil\n\
 | Cons   | v t n |  v . t drop n ^>\n\
 ;\n\
 : main ( -- )\n  \
   Nil 3 push-front 2 push-front 1 push-front\n  \
-  step drop ;\n",
+  step drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2744,12 +2786,14 @@ fn recursive_disposal_is_pre_order() {
     // not tell the two apart.
     let stdout = run_owned_traced_golden(
         "pre-order",
-        "type: L | Nil | Cons tag __spy next ^L ;\n\
+        &format!(
+            "{SPY_DEF}type: L | Nil | Cons tag Spy next ^L ;\n\
 : push-front ( L i64 -- L )\n  \
   | rest v |\n  \
-  v __spy rest ^ Cons ;\n\
+  v Spy rest ^ Cons ;\n\
 : main ( -- )\n  \
-  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2762,17 +2806,20 @@ fn recursive_destructor_reads_node_before_overwriting_slot() {
     // Criterion 10 (R12): the recursive field is declared *first*, with two
     // distinct spies after it. The loop reuses one frame slot, so the copy-out
     // of the next node overwrites the current one; emitting the fields in
-    // declaration order instead would drop the spies of whatever node the slot
-    // happened to hold, printing garbage tags (or repeating a node's) while
-    // leaving the alloc/free trace perfectly balanced. Only the tags catch it.
+    // declaration order instead would drop the Spy values of whatever node the
+    // slot happened to hold, printing garbage tags (or repeating a node's)
+    // while leaving the alloc/free trace perfectly balanced. Only the tags
+    // catch it.
     let stdout = run_owned_traced_golden(
         "copyout-order",
-        "type: L | Nil | Cons next ^L a __spy b __spy ;\n\
+        &format!(
+            "{SPY_DEF}type: L | Nil | Cons next ^L a Spy b Spy ;\n\
 : push-front ( L i64 -- L )\n  \
   | rest v |\n  \
-  rest ^ v __spy v 1 + __spy Cons ;\n\
+  rest ^ v Spy v 1 + Spy Cons ;\n\
 : main ( -- )\n  \
-  Nil 5 push-front 3 push-front 1 push-front drop ;\n",
+  Nil 5 push-front 3 push-front 1 push-front drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2787,20 +2834,22 @@ fn non_recursive_cell_shapes_are_not_treated_as_recursive() {
     // of which must keep straight-line synthesis. A false positive would blit
     // the enclosing type's bytes out of a cell that does not hold one, so the
     // spy tags and the sizes are both load-bearing: `Outer` holds a cell of a
-    // *different* struct, `Twice` is a `^^__spy` whose inner payload is a cell
+    // *different* struct, `Twice` is a `^^Spy` whose inner payload is a cell
     // rather than the enclosing type (the `^^Self` near miss), and `Holder`
     // holds a cell of an unrelated enum.
     let stdout = run_owned_traced_golden(
         "near-miss",
-        "type: Inner t __spy ;\n\
+        &format!(
+            "{SPY_DEF}type: Inner t Spy ;\n\
 type: Outer c ^Inner ;\n\
-type: Twice c ^^__spy ;\n\
-type: Payload | A t __spy | B ;\n\
+type: Twice c ^^Spy ;\n\
+type: Payload | A t Spy | B ;\n\
 type: Holder c ^Payload ;\n\
 : main ( -- )\n  \
-  1 __spy Inner ^ Outer drop\n  \
-  2 __spy ^ ^ Twice drop\n  \
-  3 __spy A ^ Holder drop ;\n",
+  1 Spy Inner ^ Outer drop\n  \
+  2 Spy ^ ^ Twice drop\n  \
+  3 Spy A ^ Holder drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2826,11 +2875,13 @@ fn recursive_disposal_path_backtracks_past_a_misleading_last_field() {
     // would scramble.
     let stdout = run_owned_traced_golden(
         "misleading-last-field",
-        "type: Leafy v i64 ;\n\
+        &format!(
+            "{SPY_DEF}type: Leafy v i64 ;\n\
 type: Bait c ^Leafy ;\n\
-type: Node | End | More good ^Node bait ^Bait tag __spy ;\n\
+type: Node | End | More good ^Node bait ^Bait tag Spy ;\n\
 : main ( -- )\n  \
-  End ^\n  9 Leafy ^ Bait ^ 1 __spy More ^\n  9 Leafy ^ Bait ^ 2 __spy More\n  drop ;\n",
+  End ^\n  9 Leafy ^ Bait ^ 1 Spy More ^\n  9 Leafy ^ Bait ^ 2 Spy More\n  drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2847,11 +2898,13 @@ fn two_unrelated_self_recursive_types_dispose_independently() {
     // neither's disposal wanders into the other's fields.
     let stdout = run_owned_traced_golden(
         "two-unrelated-recursive",
-        "type: R1 | End1 | More1 tag __spy next ^R1 ;\n\
-type: R2 | End2 | More2 tag __spy next ^R2 ;\n\
+        &format!(
+            "{SPY_DEF}type: R1 | End1 | More1 tag Spy next ^R1 ;\n\
+type: R2 | End2 | More2 tag Spy next ^R2 ;\n\
 : main ( -- )\n  \
-  3 __spy End1 ^ More1 1 __spy swap ^ More1 drop\n  \
-  4 __spy End2 ^ More2 2 __spy swap ^ More2 drop ;\n",
+  3 Spy End1 ^ More1 1 Spy swap ^ More1 drop\n  \
+  4 Spy End2 ^ More2 2 Spy swap ^ More2 drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2870,7 +2923,7 @@ fn self_recursive_struct_destructor_compiles() {
     // emits a duplicate block label and QBE rejects the whole module.
     let stdout = run_owned_golden(
         "self-recursive-struct",
-        "type: Cyclic v __spy next ^Cyclic ;\n: main ( -- )\n  0 . ;\n",
+        &format!("{SPY_DEF}type: Cyclic v Spy next ^Cyclic ;\n: main ( -- )\n  0 . ;\n"),
     );
     assert_eq!(stdout, "0\n");
 }
@@ -2894,18 +2947,20 @@ fn recursive_tree_builds_and_disposes() {
     // the loop steps to `right`.
     let stdout = run_owned_traced_golden(
         "tree-7",
-        "type: Tree | Leaf | Node tag __spy left ^Tree right ^Tree ;\n\
+        &format!(
+            "{SPY_DEF}type: Tree | Leaf | Node tag Spy left ^Tree right ^Tree ;\n\
 : main ( -- )\n  \
-  1 __spy\n  \
-  2 __spy\n    \
-    4 __spy Leaf ^ Leaf ^ Node ^\n    \
-    5 __spy Leaf ^ Leaf ^ Node ^\n    \
+  1 Spy\n  \
+  2 Spy\n    \
+    4 Spy Leaf ^ Leaf ^ Node ^\n    \
+    5 Spy Leaf ^ Leaf ^ Node ^\n    \
     Node ^\n  \
-  3 __spy\n    \
-    6 __spy Leaf ^ Leaf ^ Node ^\n    \
-    7 __spy Leaf ^ Leaf ^ Node ^\n    \
+  3 Spy\n    \
+    6 Spy Leaf ^ Leaf ^ Node ^\n    \
+    7 Spy Leaf ^ Leaf ^ Node ^\n    \
     Node ^\n  \
-  Node drop ;\n",
+  Node drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2928,12 +2983,14 @@ fn multi_child_destructor_loops_on_last_recursive_field() {
     // `left`, printing `1, 3, 2` (R17 names this exact contrast).
     let stdout = run_owned_traced_golden(
         "tree-order",
-        "type: Tree | Leaf | Node tag __spy left ^Tree right ^Tree ;\n\
+        &format!(
+            "{SPY_DEF}type: Tree | Leaf | Node tag Spy left ^Tree right ^Tree ;\n\
 : main ( -- )\n  \
-  1 __spy\n  \
-  2 __spy Leaf ^ Leaf ^ Node ^\n  \
-  3 __spy Leaf ^ Leaf ^ Node ^\n  \
-  Node drop ;\n",
+  1 Spy\n  \
+  2 Spy Leaf ^ Leaf ^ Node ^\n  \
+  3 Spy Leaf ^ Leaf ^ Node ^\n  \
+  Node drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -2979,19 +3036,21 @@ fn mutually_recursive_types_dispose_in_constant_stack() {
     // whole two-type cycle, which is Slice 4's point.
     let stdout = run_owned_traced_golden(
         "mutual-small",
-        "type: A | ANil | ACons tag __spy next ^B ;\n\
-type: B | BNil | BCons tag __spy next ^A ;\n\
+        &format!(
+            "{SPY_DEF}type: A | ANil | ACons tag Spy next ^B ;\n\
+type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
   n 0 = if\n    \
     acc\n  \
   else\n    \
     n 1 -\n    \
-    n __spy acc ^ BCons ^\n    \
-    n __spy swap ACons\n    \
+    n Spy acc ^ BCons ^\n    \
+    n Spy swap ACons\n    \
     build\n  \
   end ;\n\
-: main ( -- )\n  3 ANil build drop ;\n",
+: main ( -- )\n  3 ANil build drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -3000,21 +3059,23 @@ drop 1\nfree 24\ndrop 1\nfree 24\ndrop 2\nfree 24\ndrop 2\nfree 24\n\
 drop 3\nfree 24\ndrop 3\nfree 24\n"
     );
 
-    let deep_src = "type: A | ANil | ACons tag __spy next ^B ;\n\
-type: B | BNil | BCons tag __spy next ^A ;\n\
+    let deep_src = format!(
+        "{SPY_DEF}type: A | ANil | ACons tag Spy next ^B ;\n\
+type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
   n 0 = if\n    \
     acc\n  \
   else\n    \
     n 1 -\n    \
-    n __spy acc ^ BCons ^\n    \
-    n __spy swap ACons\n    \
+    n Spy acc ^ BCons ^\n    \
+    n Spy swap ACons\n    \
     build\n  \
   end ;\n\
-: main ( -- )\n  300000 ANil build drop ;\n";
+: main ( -- )\n  300000 ANil build drop ;\n"
+    );
     assert_eq!(
-        run_stack_bounded_golden("mutual-deep", deep_src),
+        run_stack_bounded_golden("mutual-deep", &deep_src),
         Some(0),
         "a mutually recursive chain should dispose in constant stack"
     );
@@ -3081,13 +3142,15 @@ fn wrapper_struct_recursive_list_disposes_in_expected_order() {
     // alloc/free trace still balanced.
     let stdout = run_owned_traced_golden(
         "wrapper-list-order",
-        "type: Wrap next ^List tag __spy ;\n\
+        &format!(
+            "{SPY_DEF}type: Wrap next ^List tag Spy ;\n\
 type: List | Nil | Cons w Wrap ;\n\
 : push-front ( List i64 -- List )\n  \
   | rest v |\n  \
-  rest ^ v __spy Wrap Cons ;\n\
+  rest ^ v Spy Wrap Cons ;\n\
 : main ( -- )\n  \
-  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -3107,12 +3170,14 @@ fn double_cell_recursive_list_disposes_in_expected_order() {
     // itself), which pins that both unwraps free their own cell exactly once.
     let stdout = run_owned_traced_golden(
         "double-cell-list",
-        "type: L | Nil | Cons next ^^L tag __spy ;\n\
+        &format!(
+            "{SPY_DEF}type: L | Nil | Cons next ^^L tag Spy ;\n\
 : push-front ( L i64 -- L )\n  \
   | rest v |\n  \
-  rest ^ ^ v __spy Cons ;\n\
+  rest ^ ^ v Spy Cons ;\n\
 : main ( -- )\n  \
-  Nil 3 push-front 2 push-front 1 push-front drop ;\n",
+  Nil 3 push-front 2 push-front 1 push-front drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -3125,16 +3190,18 @@ drop 1\nfree 8\nfree 24\ndrop 2\nfree 8\nfree 24\ndrop 3\nfree 8\nfree 24\n"
 /// and whose `B` level declares it after, so one ordering trap is live at each
 /// level whichever end the disposal starts from. A-node tags are `n * 10`,
 /// B-node tags `n`, so every node in the chain is distinguishable.
-const MUTUAL_CHAIN_TYPES: &str = "type: A | ANil | ACons next ^B tag __spy ;\n\
-type: B | BNil | BCons tag __spy next ^A ;\n\
+const MUTUAL_CHAIN_TYPES: &str = "type: Spy tag i64 ;\n\
+: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n\
+type: A | ANil | ACons next ^B tag Spy ;\n\
+type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
   n 0 = if\n    \
     acc\n  \
   else\n    \
     n 1 -\n    \
-    n __spy acc ^ BCons ^\n    \
-    n 10 * __spy ACons\n    \
+    n Spy acc ^ BCons ^\n    \
+    n 10 * Spy ACons\n    \
     build\n  \
   end ;\n";
 
@@ -3166,7 +3233,7 @@ drop 30\nfree 24\ndrop 3\nfree 24\n"
         "mutual-from-b",
         &format!(
             "{MUTUAL_CHAIN_TYPES}: main ( -- )\n  \
-  3 ANil build ^ 0 __spy swap BCons drop ;\n"
+  3 ANil build ^ 0 Spy swap BCons drop ;\n"
         ),
     );
     assert_eq!(
@@ -3191,11 +3258,13 @@ fn multi_variant_recursive_enum_disposes_in_expected_order() {
     // proves both arms loop.
     let stdout = run_owned_traced_golden(
         "multi-variant",
-        "type: T | Nil | X next ^T tag __spy | Y tag __spy next ^T ;\n\
-: push-x ( T i64 -- T )\n  | rest v |  rest ^ v __spy X ;\n\
-: push-y ( T i64 -- T )\n  | rest v |  v __spy rest ^ Y ;\n\
+        &format!(
+            "{SPY_DEF}type: T | Nil | X next ^T tag Spy | Y tag Spy next ^T ;\n\
+: push-x ( T i64 -- T )\n  | rest v |  rest ^ v Spy X ;\n\
+: push-y ( T i64 -- T )\n  | rest v |  v Spy rest ^ Y ;\n\
 : main ( -- )\n  \
-  Nil 4 push-y 3 push-x 2 push-y 1 push-x drop ;\n",
+  Nil 4 push-y 3 push-x 2 push-y 1 push-x drop ;\n"
+        ),
     );
     assert_eq!(
         stdout,
@@ -3270,14 +3339,16 @@ fn intermediate_dispatch_with_base_case_declared_first_terminates_correctly() {
     // actually drifts: with `ANil` declared first (the shape the spec names)
     // no arm has yet back-edged when the terminating arm is emitted, so
     // deleting the per-arm `terminated` reset leaves this half green.
-    let base_first = "type: A | ANil | ACons x __spy next ^B ;\n\
-type: B y __spy z ^A ;\n\
+    let base_first = format!(
+        "{SPY_DEF}type: A | ANil | ACons x Spy next ^B ;\n\
+type: B y Spy z ^A ;\n\
 : main ( -- )\n  \
-  1 __spy 2 __spy 3 __spy ANil ^ B ^ ACons ^ B drop ;\n";
+  1 Spy 2 Spy 3 Spy ANil ^ B ^ ACons ^ B drop ;\n"
+    );
     let expected = "alloc 24\nalloc 16\nalloc 24\n\
 drop 1\nfree 24\ndrop 2\nfree 16\ndrop 3\nfree 24\n";
     assert_eq!(
-        run_owned_traced_golden("mid-dispatch-base-first", base_first),
+        run_owned_traced_golden("mid-dispatch-base-first", &base_first),
         expected
     );
 
@@ -3285,12 +3356,14 @@ drop 1\nfree 24\ndrop 2\nfree 16\ndrop 3\nfree 24\n";
     // the builder marked terminated, so without the reset the terminating
     // arm's block is never sealed at all and `qbe` rejects the module with
     // `block @blk3 is used undefined` — a build failure, not a wrong trace.
-    let continuing_first = "type: A | ACons x __spy next ^B | ANil ;\n\
-type: B y __spy z ^A ;\n\
+    let continuing_first = format!(
+        "{SPY_DEF}type: A | ACons x Spy next ^B | ANil ;\n\
+type: B y Spy z ^A ;\n\
 : main ( -- )\n  \
-  1 __spy 2 __spy 3 __spy ANil ^ B ^ ACons ^ B drop ;\n";
+  1 Spy 2 Spy 3 Spy ANil ^ B ^ ACons ^ B drop ;\n"
+    );
     assert_eq!(
-        run_owned_traced_golden("mid-dispatch-continuing-first", continuing_first),
+        run_owned_traced_golden("mid-dispatch-continuing-first", &continuing_first),
         expected
     );
 }
