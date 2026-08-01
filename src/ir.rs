@@ -3252,6 +3252,15 @@ mod tests {
     /// override is the destructor" is assertable on instructions.
     const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
 
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is (R3 of
+    /// slice 8b), not by any compiler-known bit. Always the first struct in a
+    /// source string that uses it, so every other struct's `StructId` shifts
+    /// up by one relative to a spy-free program.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
     /// Every symbol an `IrFunc` calls, in emission order: what "the override
     /// ran instead of the glue" is asserted on, rather than a substring of the
     /// emitted text.
@@ -3357,14 +3366,14 @@ mod tests {
         // before or alongside it. `Res`'s only field is linear, so the glue
         // would call `Inner`'s destructor symbol directly; the body hands the
         // field to `dispose` instead, so that call is the only one emitted.
-        let module = lower_src(
-            "type: Inner s __spy ; type: Res i Inner ; \
+        let module = lower_src(&format!(
+            "{SPY_DEF}type: Inner s Spy ; type: Res i Inner ; \
              : dispose ( Inner -- ) drop ; \
              : drop ( Res -- ) | r | r Res> dispose ; \
-             : main ( -- ) 1 __spy Inner Res drop ;",
-        );
-        let inner = struct_drop_symbol(StructId::from_index(0), None);
-        let res = struct_drop_symbol(StructId::from_index(1), None);
+             : main ( -- ) 1 Spy Inner Res drop ;"
+        ));
+        let inner = struct_drop_symbol(StructId::from_index(1), None);
+        let res = struct_drop_symbol(StructId::from_index(2), None);
         assert_eq!(call_symbols(func(&module, &res)), vec!["dispose"]);
         // The glue that would have run is still emitted for `Inner` itself,
         // which has no override: `dispose`'s own `drop` calls it.
@@ -5223,23 +5232,16 @@ mod tests {
     // Phase 3 Slice 1: the drop-spy's lowering (R5/R6/R16).
 
     #[test]
-    fn lower_spy_constructor_relabels_the_tag_without_a_call() {
-        // The constructor is identity at runtime: no `Call`, just the relabel
-        // that gives the value its `Spy` `IrType`.
-        let ir = lower_src(": w ( -- ) 7 __spy drop ;");
-        let w = &ir.funcs[0];
+    fn lower_struct_constructor_emits_no_call_only_alloc_and_store() {
+        // Constructing a linear struct value is inlined alloc + field
+        // stores, not a runtime call: only `drop`'s own destructor call is
+        // emitted.
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;"));
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
         let is = instrs(w);
-        assert!(
-            is.iter().any(
-                |i| matches!(i, Instr::Conv(dst, _) if w.value_types[dst.0 as usize] == IrType::Spy)
-            ),
-            "expected a relabel to a Spy-typed value: {is:?}"
-        );
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
         assert_eq!(
-            count(
-                w,
-                |i| matches!(i, Instr::Call(_, sym, _) if sym != SPY_DROP_SYMBOL)
-            ),
+            count(w, |i| matches!(i, Instr::Call(_, sym, _) if sym != &spy_drop)),
             0,
             "the constructor emits no call: {is:?}"
         );
@@ -5247,8 +5249,8 @@ mod tests {
 
     #[test]
     fn lower_drop_of_linear_value_calls_the_destructor() {
-        let ir = lower_src(": w ( -- ) 7 __spy drop ;");
-        let w = &ir.funcs[0];
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;"));
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
         let calls: Vec<&String> = instrs(w)
             .iter()
             .filter_map(|i| match i {
@@ -5256,7 +5258,12 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec![SPY_DROP_SYMBOL], "expected one destructor call");
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(
+            calls,
+            vec![spy_drop.as_str()],
+            "expected one destructor call"
+        );
     }
 
     #[test]
@@ -5272,15 +5279,16 @@ mod tests {
 
     #[test]
     fn struct_layout_is_linear_iff_a_field_is_transitively() {
-        let ir = lower_src(
-            "type: Plain x i64 y i64 ; \
-             type: Holds a __spy b i64 ; \
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Plain x i64 y i64 ; \
+             type: Holds a Spy b i64 ; \
              type: Wraps h Holds ; \
-             : w ( -- ) ;",
-        );
-        assert!(!ir.structs[0].is_linear, "Plain has no linear field");
-        assert!(ir.structs[1].is_linear, "Holds carries a spy directly");
-        assert!(ir.structs[2].is_linear, "Wraps carries one transitively");
+             : w ( -- ) ;"
+        ));
+        assert!(ir.structs[0].is_linear, "Spy has a drop overload");
+        assert!(!ir.structs[1].is_linear, "Plain has no linear field");
+        assert!(ir.structs[2].is_linear, "Holds carries a Spy directly");
+        assert!(ir.structs[3].is_linear, "Wraps carries one transitively");
     }
 
     #[test]
@@ -5350,11 +5358,12 @@ mod tests {
         // every drop-glue site consults. If they ever disagree the checker
         // gates a `dup` the lowering then emits no glue for (or the reverse),
         // so pin all three rather than trusting three hand-kept matches.
-        let src = "type: Plain x i64 y i64 ; \
-                   type: Holds a __spy b i64 ; \
+        let src = format!(
+            "{SPY_DEF}type: Plain x i64 y i64 ; \
+                   type: Holds a Spy b i64 ; \
                    type: Wraps h Holds ; \
                    type: Deep w Wraps p Plain ; \
-                   type: Item | Empty | Full v __spy ; \
+                   type: Item | Empty | Full v Spy ; \
                    type: EnumInStruct e Item ; \
                    type: StructInEnum | Some h Holds | None ; \
                    type: EnumInEnum | Inner i EnumInStruct | Outer ; \
@@ -5362,18 +5371,25 @@ mod tests {
                    type: Boxed b ^i64 ; \
                    type: BoxedPlain p ^Plain ; \
                    type: MaybeBoxed | Full b ^i64 | Empty ; \
-                   : w ( -- ) ;";
-        let tokens = lex(src).unwrap();
+                   : w ( -- ) ;"
+        );
+        let tokens = lex(&src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module).unwrap();
-        // `SpyArr` (an `[__spy 4]` field) is spliced in directly rather than
+        // `SpyArr` (a `[Spy 4]` field) is spliced in directly rather than
         // through source: Item 1's array-type-use rejection means no source
         // program can spell this declaration any more, but the predicate
-        // must still be correct on the type alone.
+        // must still be correct on the type alone. Reuses the real `Spy`
+        // struct from `SPY_DEF` (already `has_drop_overload`, set by `check`
+        // above) rather than hand-building a fixture, since `SPY_DEF` is
+        // always prepended first and so is always struct index 0.
+        let spy_id = StructId::from_index(0);
+        let spy_name_static = module.structs[spy_id.index()].name_static;
+        let spy_ty = Type::Struct(spy_id, spy_name_static);
         let spy_array_id = ArrayId::from_index(module.arrays.len());
-        let spy_array_name: &'static str = "[__spy 4]";
+        let spy_array_name: &'static str = "[Spy 4]";
         module.arrays.push(ArrayDecl {
-            element: Type::Spy,
+            element: spy_ty,
             count: 4,
             name_static: spy_array_name,
         });
@@ -5438,7 +5454,7 @@ mod tests {
         }
         // Criterion (item 3): an array field is linear iff its element is,
         // transitively; `PlainArr` (an `[i64 4]` field) stays Copy, `SpyArr`
-        // (an `[__spy 4]` field, spliced in above) is linear even though no
+        // (a `[Spy 4]` field, spliced in above) is linear even though no
         // source program can declare that field any more, so the predicate
         // must be correct on the type alone.
         let plain_arr_idx = structs
@@ -5479,18 +5495,22 @@ mod tests {
     fn lower_appends_one_destructor_func_per_linear_struct_only() {
         // R12: a synthesized destructor exists for every linear struct type,
         // and only those (a Copy struct needs no glue, so gets no function).
-        let ir = lower_src(
-            "type: Plain x i64 y i64 ; \
-             type: Holds a __spy b i64 ; \
-             : w ( -- ) ;",
-        );
-        assert!(ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_1"));
-        assert!(!ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_0"));
+        // `Plain` (index 1, Copy) gets no destructor; `Holds` (index 2,
+        // linear) does.
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Plain x i64 y i64 ; \
+             type: Holds a Spy b i64 ; \
+             : w ( -- ) ;"
+        ));
+        assert!(ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_2"));
+        assert!(!ir.funcs.iter().any(|f| f.name == "sooth_struct_drop_1"));
     }
 
     #[test]
     fn lower_drop_of_whole_linear_struct_calls_its_synthesized_destructor() {
-        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds drop ;");
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Holds a Spy b i64 ; : w ( -- ) 1 Spy 2 Holds drop ;"
+        ));
         let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
         let calls: Vec<&String> = instrs(w)
             .iter()
@@ -5499,19 +5519,21 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec!["sooth_struct_drop_0"]);
+        let holds_drop = struct_drop_symbol(StructId::from_index(1), None);
+        assert_eq!(calls, vec![holds_drop.as_str()]);
     }
 
     #[test]
     fn synthesized_struct_destructor_drops_linear_fields_in_declaration_order() {
         // R12: struct -> drop its linear fields in declaration order. `Holds`
         // has a linear field (`a`) then a Copy one (`b`), so the destructor
-        // calls the spy destructor exactly once, for `a`.
-        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) ;");
+        // calls `Spy`'s destructor exactly once, for `a`.
+        let ir = lower_src(&format!("{SPY_DEF}type: Holds a Spy b i64 ; : w ( -- ) ;"));
+        let holds_drop = struct_drop_symbol(StructId::from_index(1), None);
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_struct_drop_0")
+            .find(|f| f.name == holds_drop)
             .expect("a destructor was synthesized for the linear struct");
         let calls: Vec<&String> = instrs(dtor)
             .iter()
@@ -5520,7 +5542,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(calls, vec![spy_drop.as_str()]);
     }
 
     #[test]
@@ -5552,10 +5575,12 @@ mod tests {
     fn synthesized_cell_destructor_frees_before_dropping_a_linear_aggregate_payload() {
         // An aggregate payload is copied out of the cell (a Blit), then
         // the block is freed, and only then does the copy's own drop
-        // glue run. The `^__spy` golden covers the scalar payload at
+        // glue run. The `^Spy` golden covers the scalar payload at
         // runtime; this pins the aggregate path, where the copy-out must
         // still complete before anything else touches the block or the copy.
-        let ir = lower_src("type: Holds a __spy b i64 ; : w ( -- ) 1 __spy 2 Holds ^ drop ;");
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Holds a Spy b i64 ; : w ( -- ) 1 Spy 2 Holds ^ drop ;"
+        ));
         let dtor = ir
             .funcs
             .iter()
@@ -5574,12 +5599,13 @@ mod tests {
                 _ => None,
             })
             .collect();
+        let holds_drop = struct_drop_symbol(StructId::from_index(1), None);
         assert_eq!(
             calls
                 .iter()
                 .map(|(_, sym)| sym.as_str())
                 .collect::<Vec<_>>(),
-            vec![FREE_SYMBOL, "sooth_struct_drop_0"],
+            vec![FREE_SYMBOL, holds_drop.as_str()],
             "the cell frees, then the payload's own destructor runs"
         );
         assert!(
@@ -5599,7 +5625,7 @@ mod tests {
         // so the destructor jumps straight to the one variant block instead
         // of loading a tag and comparing it (the `n == 1` branch of
         // `dispatch_on_tag`, otherwise unreached by the 2-variant goldens).
-        let ir = lower_src("type: Box | Full v __spy ; : w ( -- ) ;");
+        let ir = lower_src(&format!("{SPY_DEF}type: Box | Full v Spy ; : w ( -- ) ;"));
         let dtor = ir
             .funcs
             .iter()
@@ -5618,7 +5644,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(calls, vec![spy_drop.as_str()]);
     }
 
     #[test]
@@ -5627,7 +5654,9 @@ mod tests {
         // between the first and last compare (`vi < n - 2` in
         // `dispatch_on_tag`), never built by the 2-variant goldens. Each of
         // the 3 variants gets its own block; only `Full`'s carries a drop.
-        let ir = lower_src("type: Item | Empty | Full v __spy | Named n i64 ; : w ( -- ) ;");
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Item | Empty | Full v Spy | Named n i64 ; : w ( -- ) ;"
+        ));
         let dtor = ir
             .funcs
             .iter()
@@ -5642,7 +5671,8 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(calls, vec![SPY_DROP_SYMBOL]);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(calls, vec![spy_drop.as_str()]);
     }
 
     // Unit-level coverage of `recursive_disposal_path`'s path-finding: which
@@ -5857,7 +5887,7 @@ mod tests {
     #[test]
     fn recursive_disposal_path_rejects_non_cyclic_and_misleading_shapes() {
         // No cell at all: nothing to walk.
-        let p = Probe::new("type: Plain x i64 y __spy ;\n: main ( -- ) ;");
+        let p = Probe::new(&format!("{SPY_DEF}type: Plain x i64 y Spy ;\n: main ( -- ) ;"));
         assert_eq!(p.path(p.struct_ty("Plain")), None);
 
         // The bait is the *last* field, which is where the reverse-order scan
