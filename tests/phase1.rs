@@ -10,6 +10,17 @@ fn run_session(lines: &[&str]) -> String {
     run_session_traced(lines, false)
 }
 
+/// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+/// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+/// overload, so it is linear for the same reason any resource is, not by
+/// any compiler-known bit. Defining it as two REPL lines emits "defined type
+/// Spy" and "defined drop for Spy", two lines every golden below that uses
+/// it must account for; unlike the retired scalar primitive, a bare `Spy`
+/// residual now shows on the REPL stack as the aggregate placeholder
+/// `<Spy>`, not its tag value.
+const SPY_TYPE_LINE: &str = "type: Spy tag i64 ;";
+const SPY_DROP_LINE: &str = ": drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;";
+
 /// Run a scripted session with the allocation trace enabled or disabled (R10).
 /// The trace shares the session's stdout, so an allocation-observing session
 /// reads as one transcript: `alloc <size>`/`free <size>` lines interleaved with
@@ -619,34 +630,52 @@ fn vm_dogfood_runs_in_repl() {
 
 #[test]
 fn repl_quit_disposes_residual_linear() {
-    let out = run_session(&["7 __spy", "8 __spy", ":quit"]);
+    let out = run_session(&[SPY_TYPE_LINE, SPY_DROP_LINE, "7 Spy", "8 Spy", ":quit"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["stack: 7", "stack: 7 8", "drop 8", "drop 7"],
-        "residual spies should be disposed at `:quit`, top of stack first"
+        vec![
+            "defined type Spy",
+            "defined drop for Spy",
+            "stack: <Spy>",
+            "stack: <Spy> <Spy>",
+            "drop 8",
+            "drop 7",
+        ],
+        "residual Spy values should be disposed at `:quit`, top of stack first"
     );
 }
 
 #[test]
 fn repl_within_one_line_create_and_drop_prints_once() {
-    let out = run_session(&["7 __spy drop", ":quit"]);
+    let out = run_session(&[SPY_TYPE_LINE, SPY_DROP_LINE, "7 Spy drop", ":quit"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["drop 7", "stack: (empty)"],
-        "a spy created and dropped within one line should print exactly once"
+        vec![
+            "defined type Spy",
+            "defined drop for Spy",
+            "drop 7",
+            "stack: (empty)",
+        ],
+        "a Spy created and dropped within one line should print exactly once"
     );
 }
 
 #[test]
 fn repl_explicit_drop_not_redisposed_at_quit() {
-    let out = run_session(&["7 __spy", "drop", ":quit"]);
+    let out = run_session(&[SPY_TYPE_LINE, SPY_DROP_LINE, "7 Spy", "drop", ":quit"]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["stack: 7", "drop 7", "stack: (empty)"],
-        "a spy dropped on an earlier line prints once, not again at `:quit`"
+        vec![
+            "defined type Spy",
+            "defined drop for Spy",
+            "stack: <Spy>",
+            "drop 7",
+            "stack: (empty)",
+        ],
+        "a Spy dropped on an earlier line prints once, not again at `:quit`"
     );
 }
 
@@ -657,17 +686,26 @@ fn repl_word_definition_keeps_strict_linear_rule() {
     // rule (forgetting a linear value is a compile error, not an auto-drop),
     // and the bad definition reports and rolls back rather than killing the
     // session.
-    let out = run_session(&[": bad ( -- ) 7 __spy ;", "bad", "1 .", ":quit"]);
+    let out = run_session(&[
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        ": bad ( -- ) 7 Spy ;",
+        "bad",
+        "1 .",
+        ":quit",
+    ]);
     let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines[0], "defined type Spy");
+    assert_eq!(lines[1], "defined drop for Spy");
     assert!(
-        lines[0].contains("linear value left on the stack") && lines[0].contains("`bad`"),
+        lines[2].contains("linear value left on the stack") && lines[2].contains("`bad`"),
         "expected the surplus-linear diagnostic naming `bad`: {}",
-        lines[0]
+        lines[2]
     );
     assert_eq!(
-        &lines[1..3],
+        &lines[3..5],
         [
-            "  body leaves a `__spy` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it",
+            "  body leaves a `Spy` beyond the 0 declared output(s): a linear value must be consumed exactly once, so `drop` it or return it",
             "  note: declared ( -- )",
         ],
         "the session should survive the bad definition and keep processing later lines: {out}"
@@ -675,11 +713,11 @@ fn repl_word_definition_keeps_strict_linear_rule() {
     // The rejected definition must not have half-landed: calling `bad` next
     // is an unknown word, not a call into a partially-registered one.
     assert!(
-        lines[3].contains("unknown word") && lines[3].contains("bad"),
+        lines[5].contains("unknown word") && lines[5].contains("bad"),
         "expected `bad` to be unregistered after its rejected definition: {}",
-        lines[3]
+        lines[5]
     );
-    assert_eq!(&lines[4..], ["1", "stack: (empty)"]);
+    assert_eq!(&lines[6..], ["1", "stack: (empty)"]);
 }
 
 // Phase 2: the synthesized struct destructor (`sooth_struct_drop_N`) must be
@@ -690,14 +728,18 @@ fn repl_word_definition_keeps_strict_linear_rule() {
 #[test]
 fn repl_bare_line_drops_linear_struct() {
     let out = run_session(&[
-        "type: Pair a __spy b __spy ;",
-        "1 __spy 2 __spy Pair",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "type: Pair a Spy b Spy ;",
+        "1 Spy 2 Spy Pair",
         "drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         vec![
+            "defined type Spy",
+            "defined drop for Spy",
             "defined type Pair",
             "stack: <Pair>",
             "drop 1",
@@ -710,14 +752,18 @@ fn repl_bare_line_drops_linear_struct() {
 #[test]
 fn repl_word_definition_drops_linear_struct() {
     let out = run_session(&[
-        "type: Pair a __spy b __spy ;",
-        ": mk ( -- ) 1 __spy 2 __spy Pair drop ;",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "type: Pair a Spy b Spy ;",
+        ": mk ( -- ) 1 Spy 2 Spy Pair drop ;",
         "mk",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         vec![
+            "defined type Spy",
+            "defined drop for Spy",
             "defined type Pair",
             "defined mk",
             "drop 1",
@@ -730,14 +776,23 @@ fn repl_word_definition_drops_linear_struct() {
 #[test]
 fn repl_quit_disposes_residual_linear_struct() {
     let out = run_session(&[
-        "type: Pair a __spy b __spy ;",
-        "1 __spy 2 __spy Pair",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "type: Pair a Spy b Spy ;",
+        "1 Spy 2 Spy Pair",
         ":quit",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["defined type Pair", "stack: <Pair>", "drop 1", "drop 2"],
+        vec![
+            "defined type Spy",
+            "defined drop for Spy",
+            "defined type Pair",
+            "stack: <Pair>",
+            "drop 1",
+            "drop 2",
+        ],
         "a residual linear struct should be disposed at `:quit`, field-order drop"
     );
 }
@@ -750,14 +805,18 @@ fn repl_quit_disposes_residual_linear_struct() {
 #[test]
 fn repl_word_definition_drops_linear_enum() {
     let out = run_session(&[
-        "type: Item | Empty | Full v __spy ;",
-        ": mk ( -- ) 1 __spy Full drop ;",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "type: Item | Empty | Full v Spy ;",
+        ": mk ( -- ) 1 Spy Full drop ;",
         "mk",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         vec![
+            "defined type Spy",
+            "defined drop for Spy",
             "defined type Item",
             "defined mk",
             "drop 1",
@@ -769,20 +828,28 @@ fn repl_word_definition_drops_linear_enum() {
 #[test]
 fn repl_quit_disposes_residual_linear_enum() {
     let out = run_session(&[
-        "type: Item | Empty | Full v __spy ;",
-        "1 __spy Full",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "type: Item | Empty | Full v Spy ;",
+        "1 Spy Full",
         ":quit",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["defined type Item", "stack: <Item>", "drop 1"],
+        vec![
+            "defined type Spy",
+            "defined drop for Spy",
+            "defined type Item",
+            "stack: <Item>",
+            "drop 1",
+        ],
         "a residual linear enum should be disposed at `:quit`, tag-dispatched"
     );
 }
 
 // Phase 3 Slice 2 (criterion 15): a `^T` cell left on the residual REPL stack
-// is freed at `:quit` through the same `dispose_residual` path as `__spy` and
+// is freed at `:quit` through the same `dispose_residual` path as a Spy and
 // the struct/enum cases above, needing no production change beyond Phase 1's
 // session-persistent cell registry. The trace is gated on, so the transcript
 // is asserted exactly, `alloc` at construction then `free` at `:quit`.
@@ -808,9 +875,11 @@ fn repl_quit_frees_residual_owned() {
 fn repl_quit_frees_residual_recursive_value() {
     let out = run_session_traced(
         &[
-            "type: List | Nil | Cons tag __spy next ^List ;",
-            "1 __spy Nil ^ Cons",
-            "2 __spy swap ^ Cons",
+            SPY_TYPE_LINE,
+            SPY_DROP_LINE,
+            "type: List | Nil | Cons tag Spy next ^List ;",
+            "1 Spy Nil ^ Cons",
+            "2 Spy swap ^ Cons",
             ":quit",
         ],
         true,
@@ -819,6 +888,8 @@ fn repl_quit_frees_residual_recursive_value() {
     assert_eq!(
         lines,
         vec![
+            "defined type Spy",
+            "defined drop for Spy",
             "defined type List",
             "alloc 24",
             "stack: <List>",
