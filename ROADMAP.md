@@ -141,7 +141,22 @@ data with an uncounted trailing NUL, which is what makes `len` (carried, no scan
 agree on NUL-free content, and what the explicit, one-way `cstr` conversion relies on. `.` prints
 a `str` via `%.*s` bounded by the carried length and a `cstr` via `%s`. `examples/strings.sth`
 dogfoods it.
-**Next action: Phase 3 Slice 8b** (resources and user destructor bodies). Slice 7's opt-in RC is
+**Phase 3 Slice 8b (resources and user destructor bodies) is complete**: `drop` is the first
+overloaded-by-input-type word, a miniature early instance of Phase 4's dispatch — a user body
+substitutes directly into the existing `struct_drop_symbol` slot rather than an env-name lookup,
+since `drop` is intercepted by hardcoded match arms before any lookup, at both check and
+IR-lowering time, and runs *instead of* the synthesized field glue. Self-recursion (direct,
+through a helper word, or through a containing aggregate) is caught by whole-program call-graph
+reachability, both natively and at the REPL. Full REPL support: session-level retention of
+overrides, an epoch/generation-suffixed destructor symbol avoiding `RTLD_GLOBAL` collisions on
+redefinition (stamps every linear struct/enum/cell, not just the overridden one), and
+composing-glue refresh on redefinition. A fused-disposal-cycle boundary fix (`expand_path`) stops
+an override from being silently bypassed. Unifying `Type::Spy`'s hardcoded drop dispatch into this
+mechanism was considered mid-spec-review and **cut entirely**, not partially folded in: it would
+have been a pure no-op refactor of code Slice 8c deletes outright anyway. `examples/resources.sth`
+(open/read/close a file, `close` reached only through `File`'s own `drop` override, a deliberate
+double-use and a forgotten `close` both compile errors) is the Phase 3 exit dogfood.
+**Next action: Phase 3 Slice 8c** (retire `__spy`). Slice 7's opt-in RC is
 deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -582,7 +597,8 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    taking a literal `str` **converted with `cstr`**, and a reference, running;
    `examples/strings.sth` dogfoods it.
 
-   **8b — resources and user destructor bodies.** The Phase 3 exit dogfood: open/read/close a
+   **8b — resources and user destructor bodies. ✅ done** (brief + spec:
+   `docs/phase3-slice8b-spec.md`). The Phase 3 exit dogfood: open/read/close a
    file, with the compiler catching a deliberate double-use and a forgotten `close`. **This is
    where a user can first attach their own cleanup code to a type**, rather than only
    inheriting disposal by composition. It needs *no new declaration form*: a user destructor
@@ -596,11 +612,12 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    and self-recursion is closed not by rejecting a bare direct self-call but by whole-program
    call-graph reachability — any cycle back to `T`'s own `drop`, including through helper
    words — generalizing the same tail-cycle-detection shape Slice 6's mutual-tail-recursion
-   check already established, with `T>` destructure as the remedy either way. `Type::Spy`, the
-   Slice 1 test-only bootstrap primitive, folds into the same dispatch table as its first
-   builtin entry (its hardcoded `IrType::Spy` drop arm is deleted), rather than remaining a
-   second, parallel special case for the same concern. Note this is destructor *bodies* only;
-   `drop` becoming fully polymorphic is still Phase 4.
+   check already established, with `T>` destructure as the remedy either way. **Unifying
+   `Type::Spy`'s hardcoded drop dispatch into this same table was considered during spec review
+   and cut entirely**, not implemented: it would only have delivered a behavior-preserving
+   refactor of code 8c deletes outright anyway, so `IrType::Spy`'s hardcoded arm
+   (`src/ir.rs`'s `emit_drop`) is untouched here and stays fully in 8c's scope. Note this is
+   destructor *bodies* only; `drop` becoming fully polymorphic is still Phase 4.
 
    **8c — retire `__spy`.** Once 8b's mechanism is proven, the Slice 1 bootstrap primitive is
    fully redundant: every property it exists for (linear-by-declaration, `dup` rejection, drop
