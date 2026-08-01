@@ -5417,15 +5417,22 @@ mod tests {
                 crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
                 layout.is_linear
             );
-            assert_eq!(
-                layout
-                    .fields
-                    .iter()
-                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
-                layout.is_linear,
-                "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
-                layout.name
-            );
+            // `Spy` itself is excluded here: it is linear purely because of
+            // its `has_drop_overload` bit (an override on all-Copy fields),
+            // not because any field is `field_is_linear`, a distinct case
+            // already pinned by
+            // `ir_registers_overridden_struct_as_linear_despite_all_copy_fields`.
+            if idx != spy_id.index() {
+                assert_eq!(
+                    layout
+                        .fields
+                        .iter()
+                        .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
+                    layout.is_linear,
+                    "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
+                    layout.name
+                );
+            }
         }
         // R7/R12 (Phase 4): the same three-way pin, over the enum registry's
         // `Type::Enum` arm of `is_copy` and the variant-payload fold
