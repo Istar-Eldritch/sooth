@@ -1300,7 +1300,7 @@ mod tests {
         let mut session = Session::new();
         let mut out = Vec::new();
         session
-            .eval_line("type: Pair a __spy b __spy ;", &mut out)
+            .eval_line("type: Pair a ^i64 b ^i64 ;", &mut out)
             .unwrap();
         assert_eq!(
             destructor_symbols(&session, None),
@@ -1317,7 +1317,7 @@ mod tests {
         // would keep winning under `RTLD_GLOBAL` forever.
         let mut session = Session::new();
         let mut out = Vec::new();
-        session.eval_line("type: Res n __spy ;", &mut out).unwrap();
+        session.eval_line("type: Res n ^i64 ;", &mut out).unwrap();
         session.eval_line("type: Holder r Res ;", &mut out).unwrap();
         let before = destructor_symbols(&session, None);
         session

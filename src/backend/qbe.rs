@@ -2324,17 +2324,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emit_spy_value_uses_l_width() {
-        // A spy is its `i64` tag in a register: the constructor's relabel is a
-        // plain `l`-width copy, never an aggregate or a `w`.
-        let il = emit_src(": w ( -- ) 7 __spy drop ;");
-        assert!(
-            il.lines().any(|l| l.trim().ends_with("=l copy %v0")),
-            "expected an l-width relabel of the tag: {il}"
-        );
-    }
-
     /// The buffer dogfood plus a rebuild-style control word in the same
     /// module, so the two structural criteria read the same emitted IL.
     const MUTATION_PROBE: &str = "\

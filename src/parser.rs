@@ -1211,6 +1211,13 @@ mod tests {
         parse(&tokens)
     }
 
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is, not by
+    /// any compiler-known bit.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
     /// The terms of a `WordBody::Terms`; panics on a clause body.
     fn terms_body(word: &WordDef) -> &[Term] {
         match &word.body {
@@ -1821,16 +1828,17 @@ mod tests {
 
     #[test]
     fn parse_array_type_linear_element_in_signature_parses_ok() {
-        // The parser cannot know `__spy` is linear until the checker resolves
-        // it (struct/enum field lists aren't filled in until the whole
-        // module is parsed); rejection happens later, in the checker.
-        let result = parse_src(": w ( [__spy 2] -- ) drop ;");
+        // The parser cannot know `Spy` is linear until the checker resolves
+        // it (a struct's `has_drop_overload` bit isn't set until `check` sees
+        // its `drop` overload, and array-of-linear rejection runs there, not
+        // here); the name itself resolves from the parser's name pre-pass.
+        let result = parse_src(&format!("{SPY_DEF}: w ( [Spy 2] -- ) drop ;"));
         assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
     #[test]
     fn parse_typedef_linear_array_field_parses_ok() {
-        let result = parse_src("type: Bag xs [__spy 2] ;");
+        let result = parse_src(&format!("{SPY_DEF}type: Bag xs [Spy 2] ;"));
         assert!(result.is_ok(), "unexpected error: {:?}", result.err());
     }
 
