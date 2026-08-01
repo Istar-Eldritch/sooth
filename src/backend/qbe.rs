@@ -8,8 +8,7 @@ use std::fmt::Write;
 
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
-    Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, SPY_DROP_SYMBOL,
-    TRACE_ALLOC_ENV, WORD_WIDTH,
+    Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -51,12 +50,8 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     out.push_str(
         "data $oobfmt = { b \"sooth: array index out of range (line %ld)\\n  index %ld is out of bounds for length %ld\\n\", b 0 }\n",
     );
-    // The drop-spy destructor's message: `drop <tag>` on stdout, through the
-    // same `printf` path `.` uses, so a golden can assert drop count and
-    // order interleaved with ordinary output.
-    out.push_str("data $spyfmt = { b \"drop %ld\\n\", b 0 }\n");
-    // Both trace lines go through the same `printf` path as the spy and `.`,
-    // so program order equals transcript order in a golden.
+    // Both trace lines go through the same `printf` path as `.`, so program
+    // order equals transcript order in a golden.
     out.push_str("data $allocfmt = { b \"alloc %ld\\n\", b 0 }\n");
     out.push_str("data $freefmt = { b \"free %ld\\n\", b 0 }\n");
     writeln!(out, "data $tracenv = {{ b \"{TRACE_ALLOC_ENV}\", b 0 }}").unwrap();
@@ -93,7 +88,6 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
         emit_func(&mut out, func, layouts, &str_lits);
     }
     emit_oob_trap(&mut out);
-    emit_spy_drop(&mut out);
     emit_alloc_shim(&mut out);
     emit_free_shim(&mut out);
     emit_oom_trap(&mut out);
@@ -252,9 +246,6 @@ fn width(ty: IrType) -> &'static str {
         IrType::Usize => "l",
         IrType::Isize => "l",
         IrType::Ptr => "l",
-        // A spy is its `i64` tag in a register; only the frontend distinguishes
-        // it (to emit the destructor call on `drop`).
-        IrType::Spy => "l",
         // An owning cell is its heap pointer in a register; only the frontend
         // distinguishes it (to emit the free on `drop`).
         IrType::OwnedCell(_) => "l",
@@ -293,7 +284,6 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Usize => "l".to_string(),
         IrType::Isize => "l".to_string(),
         IrType::Ptr => "l".to_string(),
-        IrType::Spy => "l".to_string(),
         IrType::OwnedCell(_) => "l".to_string(),
         IrType::Str | IrType::Cstr => "l".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
@@ -322,7 +312,6 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Usize => ("l", "loadl"),
         IrType::Isize => ("l", "loadl"),
         IrType::Ptr => ("l", "loadl"),
-        IrType::Spy => ("l", "loadl"),
         IrType::OwnedCell(_) => ("l", "loadl"),
         IrType::Str | IrType::Cstr => ("l", "loadl"),
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
@@ -343,7 +332,6 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Usize => "storel",
         IrType::Isize => "storel",
         IrType::Ptr => "storel",
-        IrType::Spy => "storel",
         IrType::OwnedCell(_) => "storel",
         IrType::Str | IrType::Cstr => "storel",
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
@@ -567,9 +555,6 @@ fn norm_scalar_ww(ty: IrType, word_width: u32) -> IrType {
             bits: (word_width * 8) as u8,
             signed: true,
         },
-        // A spy is its `i64` tag, so the spy constructor's relabel `Conv`
-        // (R6) lands in the same-width integer arm and emits a plain `copy`.
-        IrType::Spy => IrType::I64,
         other => other,
     }
 }
@@ -681,17 +666,6 @@ fn emit_oob_trap(out: &mut String) {
     out.push_str("\tcall $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)\n");
     out.push_str("\tcall $exit(w 1)\n");
     out.push_str("\thlt\n");
-    out.push_str("}\n");
-}
-
-/// Emit the drop-spy's destructor (R5/R6): print `drop <tag>` and return. Every
-/// `drop` of a `__spy` is a `Call` to this, so the count, order and timing of
-/// destructor runs are exactly what the program's `drop`s say they are.
-fn emit_spy_drop(out: &mut String) {
-    writeln!(out, "\nfunction ${SPY_DROP_SYMBOL}(l %tag) {{").unwrap();
-    out.push_str("@start\n");
-    out.push_str("\tcall $printf(l $spyfmt, l %tag, ...)\n");
-    out.push_str("\tret\n");
     out.push_str("}\n");
 }
 
@@ -1014,9 +988,6 @@ fn emit_instr(
             // no-widening reasoning as `usize`, but routed to `$fmt`.
             IrType::Isize => writeln!(out, "\tcall $printf(l $fmt, l {}, ...)", val(*v)),
             IrType::Ptr => unreachable!("Ptr is not a printable scalar; checker rejects it"),
-            IrType::Spy => {
-                unreachable!("__spy is not a printable scalar; checker rejects it (R16)")
-            }
             // R9: `%.*s` with the carried length, not `%s`: R4 promises no
             // terminator, so the carried length is the only safe bound.
             // `cstr` below must rely on a terminator, having no length.
@@ -2228,26 +2199,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn emit_spy_destructor_prints_the_tag_and_returns() {
-        // R5/R6: the destructor is a plain function printing `drop <tag>`; a
-        // `drop` of a `__spy` is a call to it, so drop order is exactly the
-        // order the calls are emitted in.
-        let il = emit_src(": w ( -- ) 7 __spy drop ;");
-        assert!(
-            il.contains("data $spyfmt = { b \"drop %ld"),
-            "expected the destructor's format string: {il}"
-        );
-        assert!(
-            il.contains("function $sooth_spy_drop(l %tag)"),
-            "expected the destructor definition: {il}"
-        );
-        assert!(
-            il.contains("call $sooth_spy_drop(l "),
-            "expected `drop` to call the destructor: {il}"
-        );
-    }
-
     /// The text of the emitted `function` whose header line starts with `header`,
     /// up to its closing brace. Every module carries several runtime helpers, and
     /// more than one of them `exit(1)`s, so an assertion about one helper has to
@@ -2370,17 +2321,6 @@ mod tests {
         assert!(
             free.contains("call $sooth_trace_event(l $freefmt, l %adj)"),
             "expected the free event: {free}"
-        );
-    }
-
-    #[test]
-    fn emit_spy_value_uses_l_width() {
-        // A spy is its `i64` tag in a register: the constructor's relabel is a
-        // plain `l`-width copy, never an aggregate or a `w`.
-        let il = emit_src(": w ( -- ) 7 __spy drop ;");
-        assert!(
-            il.lines().any(|l| l.trim().ends_with("=l copy %v0")),
-            "expected an l-width relabel of the tag: {il}"
         );
     }
 

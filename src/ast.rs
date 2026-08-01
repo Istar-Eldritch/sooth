@@ -413,10 +413,6 @@ pub enum Type {
     /// word-width-derived size/align, same D8 literal-coercion carve-out, but
     /// prints and computes as signed.
     Isize,
-    /// The test-only linear drop-spy primitive, spelled `__spy`: carries an
-    /// `i64` tag, and its compiler-known destructor prints `drop <tag>`, so
-    /// drop count, order, and timing are golden-observable.
-    Spy,
     /// Pointer + length, and the length is the only thing it promises (R4):
     /// authoritative for every Sooth-side use, never discovered by scanning.
     /// Deliberately *not* `byte[len] == 0`; the terminator behind every `str`
@@ -432,11 +428,6 @@ pub enum Type {
     /// like `Str`, for the same reason.
     Cstr,
 }
-
-/// The source spelling of the drop-spy type and of its constructor word (R6):
-/// one name for both, resolved as a type by `Type::from_name` and as a word by
-/// `check::builtin_table`.
-pub const SPY_NAME: &str = "__spy";
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
 /// `Type::Int` can only be built via `Type::from_name`/`Type::I64`, both of
@@ -501,9 +492,6 @@ impl Type {
         }
         if name == "isize" {
             return Some(Type::Isize);
-        }
-        if name == SPY_NAME {
-            return Some(Type::Spy);
         }
         if name == "str" {
             return Some(Type::Str);
@@ -582,7 +570,6 @@ impl Type {
             Type::Ref(_, _, name) => name,
             Type::Usize => "usize",
             Type::Isize => "isize",
-            Type::Spy => SPY_NAME,
             Type::Str => "str",
             Type::Cstr => "cstr",
         }
@@ -666,15 +653,6 @@ mod tests {
             );
         }
         assert_eq!(Type::from_name("bool"), Some(Type::Bool));
-    }
-
-    #[test]
-    fn type_spy_resolves_by_its_internal_name_and_is_not_numeric() {
-        assert_eq!(Type::from_name(SPY_NAME), Some(Type::Spy));
-        assert_eq!(Type::Spy.name(), "__spy");
-        assert!(!Type::Spy.is_numeric());
-        assert!(!Type::Spy.is_int());
-        assert!(!Type::Spy.is_bool());
     }
 
     #[test]

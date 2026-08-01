@@ -1300,8 +1300,13 @@ mod tests {
         let mut session = Session::new();
         let mut out = Vec::new();
         session
-            .eval_line("type: Pair a __spy b __spy ;", &mut out)
+            .eval_line("type: Pair a i64 b i64 ;", &mut out)
             .unwrap();
+        // Force linearity by hand rather than through a real `: drop` line
+        // (mirrors slice 8b's `has_drop_overload` bit): this test's whole
+        // point is the state *before* the session has ever evaluated a
+        // `drop` override, so `session.drop_overloads` must stay empty.
+        session.structs[0].has_drop_overload = true;
         assert_eq!(
             destructor_symbols(&session, None),
             vec!["sooth_struct_drop_0".to_string()]
@@ -1317,7 +1322,12 @@ mod tests {
         // would keep winning under `RTLD_GLOBAL` forever.
         let mut session = Session::new();
         let mut out = Vec::new();
-        session.eval_line("type: Res n __spy ;", &mut out).unwrap();
+        session.eval_line("type: Res n i64 ;", &mut out).unwrap();
+        // Force `Res` linear by hand rather than through a real `: drop`
+        // line yet (mirrors slice 8b's `has_drop_overload` bit): the
+        // override below must still be the session's *first*, so
+        // `session.drop_overloads` has to stay empty until then.
+        session.structs[0].has_drop_overload = true;
         session.eval_line("type: Holder r Res ;", &mut out).unwrap();
         let before = destructor_symbols(&session, None);
         session

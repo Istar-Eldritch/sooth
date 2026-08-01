@@ -67,6 +67,13 @@ fn parse_error(src: &str) -> String {
     parser::parse(&tokens).expect_err("parsing should fail")
 }
 
+/// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+/// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+/// overload, so it is linear for the same reason any resource is, not by
+/// any compiler-known bit. Two lines, so every line number in a source
+/// string it is prepended to shifts up by 2.
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
 #[test]
 fn mid_body_binding_consumes_from_the_stack() {
     // Criterion 1: `| a b |` pops two values where it appears, leaving the `1`
@@ -163,25 +170,26 @@ fn entry_binding_keeps_its_declared_input_diagnostic() {
 fn unconsumed_linear_local_errors_at_block_end() {
     // Criterion 9: the firing site is the arm's terminator, and the message
     // names it, so the fix ("consume it before then") has a location.
-    let at_else = check_error(
-        ": w ( bool -- )\n  if 7 __spy | s | 0 .\n  else 0 . end ;\n\
-: main ( -- ) true w ;\n",
-    );
+    // `SPY_DEF` is two lines, so `w`'s own line 3 (the `else`) lands on line 5.
+    let at_else = check_error(&format!(
+        "{SPY_DEF}: w ( bool -- )\n  if 7 Spy | s | 0 .\n  else 0 . end ;\n\
+: main ( -- ) true w ;\n"
+    ));
     assert!(
         at_else.contains("linear value `s` is never consumed"),
         "unexpected message: {at_else}"
     );
     assert!(
-        at_else.contains("scope ends at the `else` on line 3, col 3"),
+        at_else.contains("scope ends at the `else` on line 5, col 3"),
         "unexpected message: {at_else}"
     );
 
-    let at_end = check_error(
-        ": w ( bool -- )\n  if 0 .\n  else 7 __spy | s | 0 .\n  end ;\n\
-: main ( -- ) true w ;\n",
-    );
+    let at_end = check_error(&format!(
+        "{SPY_DEF}: w ( bool -- )\n  if 0 .\n  else 7 Spy | s | 0 .\n  end ;\n\
+: main ( -- ) true w ;\n"
+    ));
     assert!(
-        at_end.contains("scope ends at the `end` on line 4, col 3"),
+        at_end.contains("scope ends at the `end` on line 6, col 3"),
         "unexpected message: {at_end}"
     );
 }
@@ -193,15 +201,17 @@ fn linear_local_bound_in_arm_and_moved_on_one_nested_path_is_error() {
     // `if` consumes it on one path only, joining to `MaybeMoved`; the outer
     // arm's own end must still catch it, with the `every_path` wording and
     // the outer arm's terminator, not the word-end message.
-    let err = check_error(
-        ": w ( bool bool -- )\n  if\n    7 __spy | s |\n    if s drop else 1 . end\n  else\n    0 . end ;\n: main ( -- ) true true w ;\n",
-    );
+    // `SPY_DEF` is two lines, so `w`'s own line 5 (the outer `else`) lands
+    // on line 7.
+    let err = check_error(&format!(
+        "{SPY_DEF}: w ( bool bool -- )\n  if\n    7 Spy | s |\n    if s drop else 1 . end\n  else\n    0 . end ;\n: main ( -- ) true true w ;\n"
+    ));
     assert!(
         err.contains("is not consumed on every path"),
         "unexpected message: {err}"
     );
     assert!(
-        err.contains("scope ends at the `else` on line 5, col 3"),
+        err.contains("scope ends at the `else` on line 7, col 3"),
         "unexpected message: {err}"
     );
 }
@@ -213,8 +223,10 @@ fn linear_local_bound_and_consumed_in_arm_is_accepted() {
     // the spy's destructor proves it ran exactly once.
     let (stdout, code) = run_src(
         "linear-local-consumed-in-arm",
-        ": w ( bool -- )\n  if 7 __spy | s | s drop\n  else 0 . end ;\n\n\
-: main ( -- )\n  true w\n  false w ;\n",
+        &format!(
+            "{SPY_DEF}: w ( bool -- )\n  if 7 Spy | s | s drop\n  else 0 . end ;\n\n\
+: main ( -- )\n  true w\n  false w ;\n"
+        ),
     );
     assert_eq!(stdout, "drop 7\n0\n");
     assert_eq!(code, 0);

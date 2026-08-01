@@ -254,18 +254,22 @@ fn repl_composing_structs_glue_is_correct_when_override_postdates_it() {
     // `Holder`'s glue must be recompiled under a fresh symbol that calls the
     // override, not left running the pre-override body forever.
     let out = run_session(&[
-        "type: Res n __spy ;",
+        "type: Spy tag i64 ;",
+        ": drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;",
+        "type: Res n Spy ;",
         "type: Holder r Res ;",
-        "1 __spy Res Holder",
+        "1 Spy Res Holder",
         "drop",
         ": drop ( Res -- ) | r | 42 . r Res> drop ;",
-        "1 __spy Res Holder",
+        "1 Spy Res Holder",
         "drop",
     ]);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
         vec![
+            "defined type Spy",
+            "defined drop for Spy",
             "defined type Res",
             "defined type Holder",
             "stack: <Holder>",

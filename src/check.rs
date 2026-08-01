@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{
     intern_array_type, intern_owned_cell_type, intern_ref_type, ArrayDecl, Clause, EnumDecl,
     EnumId, ExternDecl, Module, OwnedCellDecl, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Term, TermKind, Type, VariantDecl, WordBody, WordDef, SPY_NAME,
+    Term, TermKind, Type, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -154,37 +154,28 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
 }
 
 /// The builtin word -> typed-effect table, as the seed of a checking env.
-/// Every *structural* builtin is handled directly in `check_term`
+/// Every builtin is handled directly in `check_term`
 /// (`check_shuffle`/`check_operator`): the stack shuffles, the numeric-tower
 /// operators, and `.` (type-directed over any printable scalar, not a fixed
 /// `( i64 -- )`) all dispatch on the concrete operand type rather than a fixed
-/// signature, so they are absent here. The drop-spy constructor `__spy ( i64
-/// -- __spy )` (R6) is the one builtin with a fixed effect, so it is the one
-/// entry.
+/// signature, so this table is empty.
 pub fn builtin_table() -> HashMap<String, Sig> {
-    HashMap::from([(
-        SPY_NAME.to_string(),
-        Sig {
-            inputs: vec![Type::I64],
-            outputs: vec![Type::Spy],
-        },
-    )])
+    HashMap::new()
 }
 
 /// R2/R7: whether `ty` is `Copy` (freely duplicated and discarded) rather than
-/// linear (used exactly once, disposed by `drop`). The drop-spy is linear;
-/// a struct or enum is linear iff any field/variant-payload field is
-/// (transitively), so a struct-of-struct-of-spy or an enum carrying one is
-/// linear too. `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s
-/// fields; neither can recurse into itself (`check_recursion` rejects that
-/// first), so this always terminates.
+/// linear (used exactly once, disposed by `drop`). A struct or enum is linear
+/// iff any field/variant-payload field is (transitively), so a
+/// struct-of-struct-of-resource or an enum carrying one is linear too.
+/// `structs`/`enums` resolve a `Type::Struct`/`Type::Enum`'s fields; neither
+/// can recurse into itself (`check_recursion` rejects that first), so this
+/// always terminates.
 ///
 /// R3 (slice 8b): a struct with a user `drop` overload is linear whatever its
 /// fields say — a resource wrapping one `i64` would otherwise be `Copy` by
 /// the structural fold alone, and so silently duplicated and forgotten.
 pub fn is_copy(ty: Type, structs: &[StructDecl], enums: &[EnumDecl], arrays: &[ArrayDecl]) -> bool {
     match ty {
-        Type::Spy => false,
         Type::Struct(id, _) if structs[id.index()].has_drop_overload => false,
         Type::Struct(id, _) => structs[id.index()]
             .fields
@@ -1074,7 +1065,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
 /// R1/R2/R3/R7/R12/R13/R14: every `extern:` declaration's own checks, run
 /// before its signature enters the word environment. R1's redeclaration
 /// check runs against the name-dispatched builtins (`BUILTIN_WORDS`),
-/// `existing` (`builtin_table`'s one fixed-effect builtin plus the
+/// `existing` (`builtin_table`'s seed, empty today, plus the
 /// struct/enum-generated words), the user's own `:` words, and every other
 /// `extern:` (in that order, first match wins); R2/R3 reject each forbidden
 /// boundary type at the declaration rather than at a call site; the
@@ -1117,9 +1108,9 @@ fn check_extern_decls(
 
 /// R1: the builtin words `check_term` dispatches by name, in its probe chain,
 /// *before* the word environment is consulted at all. They are absent from
-/// `builtin_table` (which holds only the one builtin with a fixed effect), so
-/// an `extern:` naming one would be registered, never looked up, and silently
-/// do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
+/// `builtin_table` (empty today, since every builtin dispatches on the
+/// concrete operand type rather than a fixed signature), so an `extern:`
+/// naming one would be registered, never looked up, and silently do nothing. The `^`-led owning-cell words and the `@`/`!`/`+!` access
 /// words are dispatched in the same chain but are rejected earlier, against
 /// the declaration's name in the parser, so they are not repeated here.
 const BUILTIN_WORDS: &[&str] = &[
@@ -1199,7 +1190,7 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
             return Err(extern_str_input_error(decl));
         }
         if !is_extern_boundary_scalar(slot.ty) {
-            return Err(extern_boundary_type_error(decl, slot.ty, "input"));
+            return Err(extern_owned_aggregate_error(decl, slot.ty, "input"));
         }
     }
     for slot in &decl.effect.outputs {
@@ -1212,7 +1203,7 @@ fn check_extern_boundary_types(decl: &ExternDecl) -> Result<(), String> {
         if matches!(slot.ty, Type::OwnedCell(..)) {
             return Err(extern_owned_pointer_output_error(decl, slot.ty));
         }
-        return Err(extern_boundary_type_error(decl, slot.ty, "output"));
+        return Err(extern_owned_aggregate_error(decl, slot.ty, "output"));
     }
     Ok(())
 }
@@ -1237,19 +1228,6 @@ fn extern_str_output_error(decl: &ExternDecl) -> String {
         "error: `extern: {}` cannot return a `str` (line {}, col {})\n  a `str` may point at static data only, and C supplies no length; declare `cstr`",
         decl.name, decl.span.line, decl.span.col
     )
-}
-
-/// R3: the rejection for a boundary-ineligible slot, worded by what the type
-/// actually is. `__spy` has no aggregate layout at all, so it is not called an
-/// "owned aggregate" it isn't; every other ineligible type genuinely is one.
-fn extern_boundary_type_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
-    if matches!(ty, Type::Spy) {
-        return format!(
-            "error: `extern: {}` declares the {position} `__spy` (line {}, col {})\n  `__spy` is a test-only diagnostic type and cannot cross the C boundary",
-            decl.name, decl.span.line, decl.span.col
-        );
-    }
-    extern_owned_aggregate_error(decl, ty, position)
 }
 
 fn extern_owned_aggregate_error(decl: &ExternDecl, ty: Type, position: &str) -> String {
@@ -1366,7 +1344,7 @@ fn stored_reference_error(position: &str, ty: Type, span: Option<Span>) -> Strin
 /// type named anywhere (a word signature slot, a struct field, an enum
 /// variant field) is interned into this one registry, and `is_copy` already
 /// walks an array's element transitively, so this single sweep catches a
-/// direct `[__spy N]` and an indirect `[LinearStruct N]` alike. Runs after
+/// direct `[LinearStruct N]` and an indirect one alike. Runs after
 /// `check_recursion`, which rules out a self-referential struct/enum/array
 /// first, so `is_copy`'s recursion over the field graph is guaranteed to
 /// terminate. `ArrayDecl` carries no span (an array shape has no declared
@@ -1521,7 +1499,6 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         | Type::Bool
         | Type::Usize
         | Type::Isize
-        | Type::Spy
         | Type::Str
         | Type::Cstr => None,
     }
@@ -4892,15 +4869,6 @@ mod tests {
     }
 
     #[test]
-    fn check_extern_redeclaring_the_spy_builtin_is_error() {
-        // R1: `__spy` is the one builtin carried in `builtin_table`, so it is
-        // caught by the `existing` lookup rather than by `BUILTIN_WORDS`.
-        let src = "extern: __spy ( i64 -- __spy ) \"spy\" ;";
-        let err = check_src(src).unwrap_err();
-        assert!(err.contains("redeclares"), "unexpected message: {err}");
-    }
-
-    #[test]
     fn check_extern_registers_its_effect_at_call_sites() {
         // Criterion 4/R1: registration is what makes the existing arity and
         // type checks apply to a foreign call unchanged. Parsing it is not
@@ -4915,26 +4883,6 @@ mod tests {
             "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) true strlen . ;";
         let err = check_src(wrong_type).unwrap_err();
         assert!(err.contains("strlen"), "unexpected message: {err}");
-    }
-
-    #[test]
-    fn check_extern_with_spy_boundary_type_is_error() {
-        // R3: `__spy` is boundary-ineligible in either position, but it is
-        // not an aggregate, so it must not be described as one.
-        for src in [
-            "extern: sp ( __spy -- i64 ) \"sp\" ;",
-            "extern: sp ( i64 -- __spy ) \"sp\" ;",
-        ] {
-            let err = check_src(src).unwrap_err();
-            assert!(
-                err.contains("test-only diagnostic type"),
-                "unexpected message: {err}"
-            );
-            assert!(
-                !err.contains("owned aggregate"),
-                "`__spy` described as an aggregate: {err}"
-            );
-        }
     }
 
     #[test]
@@ -5085,6 +5033,15 @@ mod tests {
     /// it `Copy`.
     const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
 
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is (R3),
+    /// not by any compiler-known bit. Always the first struct in a source
+    /// string that uses it, so every other struct's `StructId` shifts up by
+    /// one relative to a spy-free program.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
     fn struct_ty(module: &Module, name: &str) -> Type {
         let idx = module
             .structs
@@ -5200,15 +5157,19 @@ mod tests {
         // Criterion 12/R5/R9: an override body is checked like any other word
         // body, so a resource holding a linear field is already forced to
         // account for it -- no scalar-only restriction, and no new check.
-        let src = "type: Inner s __spy ; type: Res i Inner ; \
-                   : drop ( Res -- ) | r | r Res> drop ; \
-                   : main ( -- ) 1 __spy Inner Res drop ;";
-        check_src(src).unwrap();
+        let src = format!(
+            "{SPY_DEF}type: Inner s Spy ; type: Res i Inner ; \
+             : drop ( Res -- ) | r | r Res> drop ; \
+             : main ( -- ) 1 Spy Inner Res drop ;"
+        );
+        check_src(&src).unwrap();
 
-        let forgotten = "type: Inner s __spy ; type: Res i Inner ; \
-                         : drop ( Res -- ) | r | ; \
-                         : main ( -- ) 1 __spy Inner Res drop ;";
-        let err = check_src(forgotten).unwrap_err();
+        let forgotten = format!(
+            "{SPY_DEF}type: Inner s Spy ; type: Res i Inner ; \
+             : drop ( Res -- ) | r | ; \
+             : main ( -- ) 1 Spy Inner Res drop ;"
+        );
+        let err = check_src(&forgotten).unwrap_err();
         assert!(
             err.contains("linear value `r` is never consumed"),
             "unexpected message: {err}"
@@ -5535,10 +5496,12 @@ mod tests {
         assert!(scope.leave(depth).is_none(), "a Copy local leaves cleanly");
 
         // R6: a linear name leaving scope with its value still held is what the
-        // block-end firing site reports.
-        scope.bind("s", Slot::computed(Type::Spy), true, prov);
+        // block-end firing site reports. `bind`'s `linear` flag is passed
+        // explicitly by the caller (not derived from the `Type` via
+        // `is_copy`), so any type distinct from `a`'s suffices here.
+        scope.bind("s", Slot::computed(Type::Bool), true, prov);
         let leaked = scope.leave(depth).expect("an unconsumed linear local");
-        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Spy));
+        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Bool));
         assert_eq!(leaked.2, MoveState::Live);
     }
 
@@ -5553,22 +5516,22 @@ mod tests {
 
     #[test]
     fn check_main_linear_output_is_error() {
-        let err = check_src(": main ( -- __spy ) 7 __spy ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: main ( -- Spy ) 7 Spy ;")).unwrap_err();
         assert!(
             err.contains("cannot declare a linear type"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_main_linear_input_is_error() {
-        let err = check_src(": main ( __spy -- ) | s | s drop ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: main ( Spy -- ) | s | s drop ;")).unwrap_err();
         assert!(
             err.contains("cannot declare a linear type"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -5975,21 +5938,23 @@ mod tests {
         // `fill` has no per-slot `Copy` gate today (unlike `dup`/`over`), and
         // array-element linearity isn't tracked transitively, so a linear
         // element is rejected rather than silently replicated/leaked.
-        let err = check_src(": w ( -- ) 0 __spy 3 fill drop ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 0 Spy 3 fill drop ;")).unwrap_err();
         assert!(
             err.contains("not supported yet"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_fill_of_linear_struct_element_is_error() {
         // The same rejection applies transitively: a struct that is linear
         // because one of its fields is (R7) is just as unsupported as a bare
-        // `__spy` element.
-        let err = check_src("type: Holder xs __spy ;\n: w ( -- ) 0 __spy Holder 3 fill drop ;")
-            .unwrap_err();
+        // `Spy` element.
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holder xs Spy ;\n: w ( -- ) 0 Spy Holder 3 fill drop ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("not supported yet"),
             "unexpected message: {err}"
@@ -6343,15 +6308,15 @@ mod tests {
     #[test]
     fn check_struct_peek_on_linear_field_is_error() {
         // R10: a linear field can't be peeked (workaround: `S>`).
-        let err = check_src(
-            "type: Holds a __spy b i64 ; : main ( -- ) 7 __spy 1 Holds Holds|>a drop drop ;",
-        )
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holds a Spy b i64 ; : main ( -- ) 7 Spy 1 Holds Holds|>a drop drop ;"
+        ))
         .unwrap_err();
         assert!(
             err.contains("cannot `Holds|>a`"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(err.contains("`S>`"), "unexpected message: {err}");
     }
 
@@ -6459,33 +6424,41 @@ mod tests {
 
     #[test]
     fn check_no_linear_array_elements_direct_element_in_struct_field_is_error() {
-        // The parser cannot reject `[__spy N]` (struct fields aren't resolved
+        // The parser cannot reject `[Spy N]` (struct fields aren't resolved
         // until the whole module is parsed), so this is the checker's job.
-        let err = check_src("type: Bag xs [__spy 2] ; : main ( -- ) 0 . ;").unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Bag xs [Spy 2] ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_no_linear_array_elements_direct_element_in_word_signature_is_error() {
-        let err = check_src(": w ( [__spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;").unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( [Spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_no_linear_array_elements_indirect_via_linear_struct_field_is_error() {
-        // `Arr`'s element (`Holds`) is not itself `__spy`, but contains one
+        // `Arr`'s element (`Holds`) is not itself `Spy`, but contains one
         // transitively; `is_copy` already sees through that, so the sweep
         // over `module.arrays` must too.
-        let err = check_src("type: Holds s __spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
-            .unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holds s Spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
             "unexpected message: {err}"
@@ -6495,9 +6468,9 @@ mod tests {
 
     #[test]
     fn check_no_linear_array_elements_indirect_via_linear_struct_in_signature_is_error() {
-        let err = check_src(
-            "type: Holds s __spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;",
-        )
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holds s Spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+        ))
         .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
@@ -6523,12 +6496,15 @@ mod tests {
 
     #[test]
     fn owned_of_linear_array_is_error() {
-        let err = check_src(": w ( ^[__spy 2] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( ^[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("linear array elements are not supported yet"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -6978,17 +6954,28 @@ mod tests {
         check_src(&std::fs::read_to_string("examples/gcd.sth").unwrap()).unwrap();
     }
 
-    // Phase 3 Slice 1: the linear core on bare `__spy` values.
+    // Phase 3 Slice 1: the linear core on bare linear values.
 
     #[test]
-    fn is_copy_every_type_but_the_spy() {
+    fn is_copy_every_scalar_is_copy_and_a_drop_overloaded_struct_is_not() {
         for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
             assert!(
                 is_copy(Type::from_name(name).unwrap(), &[], &[], &[]),
                 "{name} is Copy"
             );
         }
-        assert!(!is_copy(Type::Spy, &[], &[], &[]));
+        // R3 (slice 8b): a struct with a user `drop` overload is linear
+        // whatever its fields say -- built directly here since this test
+        // exercises `is_copy`'s own signature, not a checked module.
+        let structs = vec![StructDecl {
+            name: "Res".to_string(),
+            name_static: "Res",
+            fields: vec![("tag".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: true,
+        }];
+        let res = Type::Struct(StructId::from_index(0), "Res");
+        assert!(!is_copy(res, &structs, &[], &[]));
     }
 
     #[test]
@@ -7047,33 +7034,44 @@ mod tests {
     #[test]
     fn is_copy_struct_is_linear_iff_a_field_is_transitively() {
         // R7/R8 (Phase 2): a struct with no linear field is Copy; one with a
-        // linear field (direct or nested) is linear, transitively.
-        let tokens = lex("type: Plain x i64 y i64 ;\n\
-type: Holds a __spy b i64 ;\n\
-type: Wraps h Holds ;\n")
-        .unwrap();
-        let module = parse(&tokens).unwrap();
+        // linear field (direct or nested) is linear, transitively. `^i64`
+        // (an owning cell, always linear regardless of payload) stands in
+        // for a direct linear leaf field, since this test exercises
+        // `is_copy`'s own fold directly rather than through a checked module.
+        let mut owned_cells = Vec::new();
+        let cell_ty = intern_owned_cell_type(&mut owned_cells, Type::I64);
+        let structs = vec![
+            StructDecl {
+                name: "Plain".to_string(),
+                name_static: "Plain",
+                fields: vec![("x".to_string(), Type::I64), ("y".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+            },
+            StructDecl {
+                name: "Holds".to_string(),
+                name_static: "Holds",
+                fields: vec![("a".to_string(), cell_ty), ("b".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+            },
+            StructDecl {
+                name: "Wraps".to_string(),
+                name_static: "Wraps",
+                fields: vec![(
+                    "h".to_string(),
+                    Type::Struct(StructId::from_index(1), "Holds"),
+                )],
+                span: Span::default(),
+                has_drop_overload: false,
+            },
+        ];
         let plain = Type::Struct(StructId::from_index(0), "Plain");
         let holds = Type::Struct(StructId::from_index(1), "Holds");
         let wraps = Type::Struct(StructId::from_index(2), "Wraps");
-        assert!(is_copy(
-            plain,
-            &module.structs,
-            &module.enums,
-            &module.arrays
-        ));
-        assert!(!is_copy(
-            holds,
-            &module.structs,
-            &module.enums,
-            &module.arrays
-        ));
-        assert!(!is_copy(
-            wraps,
-            &module.structs,
-            &module.enums,
-            &module.arrays
-        ));
+        assert!(is_copy(plain, &structs, &[], &[]));
+        assert!(!is_copy(holds, &structs, &[], &[]));
+        assert!(!is_copy(wraps, &structs, &[], &[]));
     }
 
     #[test]
@@ -7081,88 +7079,126 @@ type: Wraps h Holds ;\n")
         // R7/R12 (Phase 4): an enum with no linear variant field is Copy; one
         // with a linear field (direct in one variant, or nested through a
         // struct in another) is linear, transitively. `Plain` has no linear
-        // variant, `Item` carries a spy directly in `Full`, `Boxed` carries
-        // one nested inside `Holds`.
-        let tokens = lex("type: Plain | A | B ;\n\
-type: Item | Empty | Full v __spy ;\n\
-type: Holds a __spy b i64 ;\n\
-type: Boxed | Some h Holds | None ;\n")
-        .unwrap();
-        let module = parse(&tokens).unwrap();
+        // variant, `Item` carries a linear field (an owning cell) directly in
+        // `Full`, `Boxed` carries one nested inside `Holds`. Built by hand
+        // rather than parsed, for the same reason as the struct fold above.
+        let mut owned_cells = Vec::new();
+        let cell_ty = intern_owned_cell_type(&mut owned_cells, Type::I64);
+        let structs = vec![StructDecl {
+            name: "Holds".to_string(),
+            name_static: "Holds",
+            fields: vec![("a".to_string(), cell_ty), ("b".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+        }];
+        let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
+            name: name.to_string(),
+            name_static: name,
+            fields,
+            span: Span::default(),
+        };
+        let enums = vec![
+            EnumDecl {
+                name: "Plain".to_string(),
+                name_static: "Plain",
+                variants: vec![variant("A", vec![]), variant("B", vec![])],
+                span: Span::default(),
+            },
+            EnumDecl {
+                name: "Item".to_string(),
+                name_static: "Item",
+                variants: vec![
+                    variant("Empty", vec![]),
+                    variant("Full", vec![("v".to_string(), cell_ty)]),
+                ],
+                span: Span::default(),
+            },
+            EnumDecl {
+                name: "Boxed".to_string(),
+                name_static: "Boxed",
+                variants: vec![
+                    variant(
+                        "Some",
+                        vec![(
+                            "h".to_string(),
+                            Type::Struct(StructId::from_index(0), "Holds"),
+                        )],
+                    ),
+                    variant("None", vec![]),
+                ],
+                span: Span::default(),
+            },
+        ];
         let plain = Type::Enum(EnumId::from_index(0), "Plain");
         let item = Type::Enum(EnumId::from_index(1), "Item");
         let boxed = Type::Enum(EnumId::from_index(2), "Boxed");
-        assert!(is_copy(
-            plain,
-            &module.structs,
-            &module.enums,
-            &module.arrays
-        ));
-        assert!(!is_copy(
-            item,
-            &module.structs,
-            &module.enums,
-            &module.arrays
-        ));
-        assert!(!is_copy(
-            boxed,
-            &module.structs,
-            &module.enums,
-            &module.arrays
-        ));
+        assert!(is_copy(plain, &structs, &enums, &[]));
+        assert!(!is_copy(item, &structs, &enums, &[]));
+        assert!(!is_copy(boxed, &structs, &enums, &[]));
     }
 
     #[test]
-    fn check_spy_constructor_takes_an_i64_tag_ok() {
-        check_src(": w ( -- ) 7 __spy drop ;").unwrap();
+    fn check_struct_constructor_takes_a_matching_i64_field_ok() {
+        check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;")).unwrap();
     }
 
     #[test]
-    fn check_spy_constructor_on_a_float_tag_is_error() {
-        let err = check_src(": w ( -- ) 7.5 __spy drop ;").unwrap_err();
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+    fn check_struct_constructor_on_a_float_field_is_error() {
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7.5 Spy drop ;")).unwrap_err();
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_dup_of_linear_value_is_error() {
-        let err = check_src(": w ( -- ) 7 __spy dup drop drop ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy dup drop drop ;")).unwrap_err();
         assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(err.contains("linear"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_over_of_linear_value_is_error() {
-        let err = check_src(": w ( -- ) 7 __spy 1 over drop drop drop ;").unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( -- ) 7 Spy 1 over drop drop drop ;"
+        ))
+        .unwrap_err();
         assert!(err.contains("cannot `over`"), "unexpected message: {err}");
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_shuffles_that_only_reorder_linear_values_are_ok() {
         // `swap`/`rot` move rather than copy, so the `dup`/`over` gate must not
         // over-reach to them.
-        check_src(": w ( -- ) 7 __spy 8 __spy swap drop drop ;").unwrap();
-        check_src(": w ( -- ) 1 __spy 2 __spy 3 __spy rot drop drop drop ;").unwrap();
+        check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy 8 Spy swap drop drop ;")).unwrap();
+        check_src(&format!(
+            "{SPY_DEF}: w ( -- ) 1 Spy 2 Spy 3 Spy rot drop drop drop ;"
+        ))
+        .unwrap();
     }
 
     #[test]
     fn check_print_on_linear_value_is_error() {
         // R16: `.` is a printable-scalar path, and a linear value is not one
         // (the backend's `unreachable!` guard depends on this).
-        let err = check_src(": w ( -- ) 7 __spy . ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy . ;")).unwrap_err();
         assert!(err.contains("printable"), "unexpected message: {err}");
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_use_after_move_of_linear_local_names_the_move_site() {
-        let err = check_src(": w ( __spy -- )\n  | s |\n  s drop\n  s drop ;").unwrap_err();
+        // `SPY_DEF` is two lines, so `w`'s own line 3 (the first `s drop`)
+        // lands on line 5 of the full source.
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( Spy -- )\n  | s |\n  s drop\n  s drop ;"
+        ))
+        .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(
-            err.contains("moved at line 3, col 3"),
+            err.contains("moved at line 5, col 3"),
             "the diagnostic should name the move site: {err}"
         );
     }
@@ -7175,9 +7211,9 @@ type: Boxed | Some h Holds | None ;\n")
 
     #[test]
     fn check_unconsumed_linear_local_is_error() {
-        let err = check_src(": w ( __spy -- )\n  | s |\n  1 . ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: w ( Spy -- )\n  | s |\n  1 . ;")).unwrap_err();
         assert!(err.contains("never consumed"), "unexpected message: {err}");
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
         assert!(
             err.contains("`s`"),
             "the error should name the local: {err}"
@@ -7186,12 +7222,12 @@ type: Boxed | Some h Holds | None ;\n")
 
     #[test]
     fn check_surplus_linear_value_is_a_linear_flavoured_error() {
-        let err = check_src(": w ( -- ) 7 __spy ;").unwrap_err();
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy ;")).unwrap_err();
         assert!(
             err.contains("linear value left on the stack"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
@@ -7209,52 +7245,59 @@ type: Boxed | Some h Holds | None ;\n")
     fn check_linear_local_consumed_in_both_arms_is_ok() {
         // R14: `Moved` in both arms joins to `Moved`, not `MaybeMoved`, even
         // though the two move sites differ.
-        check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else s drop end ;").unwrap();
+        check_src(&format!(
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c if s drop else s drop end ;"
+        ))
+        .unwrap();
     }
 
     #[test]
     fn check_linear_local_moved_in_one_arm_then_used_is_error() {
-        let err =
-            check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;")
-                .unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;"
+        ))
+        .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
-        let err = check_src(": w ( __spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;")
-            .unwrap_err();
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;"
+        ))
+        .unwrap_err();
         assert!(
             err.contains("not consumed on every path"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
     }
 
     #[test]
     fn check_linear_value_across_self_tail_call_is_error() {
-        // R15: the fresh spy pushed in the recursive arm leaves `s` live across
-        // the back-edge, which the loop lowering cannot dispose yet.
-        let err = check_src(
-            ": spin ( __spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else 9 __spy n 1 - spin end ;",
-        )
+        // R15: the fresh Spy pushed in the recursive arm leaves `s` live
+        // across the back-edge, which the loop lowering cannot dispose yet.
+        // `SPY_DEF` is two lines, so `spin`'s own line 3 lands on line 5.
+        let err = check_src(&format!(
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else 9 Spy n 1 - spin end ;"
+        ))
         .unwrap_err();
         assert!(
             err.contains("not supported yet"),
             "unexpected message: {err}"
         );
-        assert!(err.contains("`__spy`"), "unexpected message: {err}");
-        assert!(err.contains("line 3"), "the error should be located: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        assert!(err.contains("line 5"), "the error should be located: {err}");
     }
 
     #[test]
     fn check_linear_value_forwarded_into_the_self_tail_call_is_ok() {
-        // Moved *into* the recursive call's arguments, the spy is forwarded, not
-        // stranded, so the R15 guard must not fire.
-        check_src(
-            ": spin ( __spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else s n 1 - spin end ;",
-        )
+        // Moved *into* the recursive call's arguments, the Spy is forwarded,
+        // not stranded, so the R15 guard must not fire.
+        check_src(&format!(
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else s n 1 - spin end ;"
+        ))
         .unwrap();
     }
 
@@ -7265,9 +7308,13 @@ type: Boxed | Some h Holds | None ;\n")
 
     #[test]
     fn infer_line_consumes_a_carried_linear_slot_ok() {
-        // The REPL path: a residual linear slot can be dropped by a later line
-        // (no scope-end rule applies to a bare line).
-        let out = infer_src("drop", &[Type::Spy]).unwrap();
+        // The REPL path: a residual linear slot can be dropped by a later
+        // line (no scope-end rule applies to a bare line). `^i64` (an owning
+        // cell, always linear) stands in for a linear entry slot, since this
+        // test exercises `infer_line` directly with no struct/enum registry.
+        let mut owned_cells = Vec::new();
+        let cell_ty = intern_owned_cell_type(&mut owned_cells, Type::I64);
+        let out = infer_src("drop", &[cell_ty]).unwrap();
         assert!(out.is_empty());
     }
 
