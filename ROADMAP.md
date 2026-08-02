@@ -175,10 +175,29 @@ pass, proportional to migration blast radius rather than design risk.
 
 **Phase 3 is complete.** Slice 7's opt-in RC is
 deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
-**Next action: Phase 4 Slice 1** (type variables + row variables + length variables +
-monomorphization, native only), the first of eight dependency-ordered slices now planned
-out under Phase 4. It also owns the long-standing multi-output lowering panic, which a row
-variable in output position makes unavoidable.
+**Phase 4 Slice 1 (type variables + row variable + length variables + monomorphization,
+native) is complete**: a user `:` word may declare `'T` (type variable), `..s` (row
+variable), and a length variable in an array count position `['T 'N]`, optionally bounded
+(`'T: Copy`); the checker represents these in a checker-only `PolyType`/`PolySig` living
+beside a word's declared effect (`Type` gains no variant, the `Slot` virtual stack stays
+concrete), unifies them against the concrete stack at each call site, checks bounds
+Kitten-style against the concrete instantiation, and the backend emits one monomorphized
+`IrFunc` per distinct instantiation, keyed through a check→lower table so the call-site
+symbol and the emitted symbol can never disagree. The same slice closes the long-standing
+multi-output lowering panic (`lower_call` silently dropped every result past the first):
+a synthesized aggregate-return ABI (a bundle struct interned at check time, flagged so no
+destructor is ever synthesized for it) is both the fix and the mechanism a row variable in
+output position lowers through once monomorphization has resolved it to a concrete count —
+one mechanism for both. `max`/`max-total` ship as new builtins, `max` over the integer
+tower and `max-total` over floats by the `total_cmp` bit-pattern rule, kept as two disjoint
+surfaces rather than pretending IEEE `>` is total. `examples/stack.sth` is the dogfood:
+`pop`/`peek` now return `( Stack -- Stack i64 )` directly instead of hand-bundling into a
+`Popped` struct; the honest finding is that polymorphic `dup`/`swap`/`max` touch no
+existing example, since the core shuffles were already type-transparent before this slice
+and no checked-in program computed a maximum. REPL monomorphization, the combinator
+library, and the inliner stay out of scope, deferred to later slices.
+**Next action: Phase 4 Slice 2** (REPL monomorphization), the next of eight
+dependency-ordered slices planned out under Phase 4.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

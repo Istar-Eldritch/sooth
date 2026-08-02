@@ -31,6 +31,26 @@ fn run_src(name: &str, src: &str, trace: bool) -> (String, i32) {
 }
 
 #[test]
+fn core_shuffles_are_polymorphic_over_i64_bool_and_a_struct() {
+    // Criterion 1 (S3, R2): `dup`/`swap` were already type-transparent before
+    // this slice (`check_shuffle` moves `Slot`s verbatim; the `lower_call`
+    // shuffle arms dispatch on runtime `value_type`), so this pins that they
+    // run correctly over `i64`, `bool`, and a struct in one program, without
+    // acquiring any `PolySig`/monomorphization machinery.
+    let (stdout, code) = run_src(
+        "shuffles",
+        "type: Vec2 x i64 y i64 ;\n\
+         : main ( -- )\n\
+         5 dup . .\n\
+         true false swap . .\n\
+         1 2 Vec2 dup Vec2>x . Vec2>y . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "5\n5\ntrue\nfalse\n1\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn two_output_word_call_pushes_both_results() {
     // Criterion 2 (R10, R11): the recon-3 reproduction. `: pair` checked and
     // lowered before this slice, but calling it dropped the second result and
