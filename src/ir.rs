@@ -4895,15 +4895,14 @@ mod tests {
     #[test]
     fn lower_dup_of_struct_allocs_and_blits() {
         // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
-        // blit), unlike a scalar `dup` which reuses the value id.
-        //
-        // R10 (phase 4 slice 1): the second alloc and the two further blits
-        // are the two-output return bundle this word now packs its outputs
-        // into; `dup`'s own copy is the first of the three blits.
-        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 Vec2 ) dup ;");
+        // blit), unlike a scalar `dup` which reuses the value id. Single
+        // output plus a `drop` of the extra copy, so this measures only
+        // `dup`'s own copy, not the phase 4 slice 1 bundle-pack path (see
+        // `lower_two_output_word_returns_one_bundle_holding_both` for that).
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 ) dup drop ;");
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
-        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 2);
-        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 3);
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
     }
 
     #[test]
@@ -5079,16 +5078,15 @@ mod tests {
     #[test]
     fn lower_dup_of_enum_allocs_and_blits() {
         // R15: `dup` of an enum copies the aggregate bytes (fresh alloc +
-        // blit), like a struct and unlike a scalar.
-        //
-        // R10 (phase 4 slice 1): as in the struct case, the second alloc and
-        // the two further blits are the two-output return bundle.
+        // blit), like a struct and unlike a scalar. Single output plus a
+        // `drop` of the extra copy, so this measures only `dup`'s own copy,
+        // not the phase 4 slice 1 bundle-pack path.
         let ir = lower_src(
-            "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt MaybeInt ) dup ;",
+            "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt ) dup drop ;",
         );
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
-        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 2);
-        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 3);
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
     }
 
     #[test]

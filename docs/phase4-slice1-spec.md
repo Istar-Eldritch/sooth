@@ -483,6 +483,21 @@ symbol.
   temptation is to over-build its unification. Mitigation: `..s` is passed through opaquely (R7),
   its only exercised consumer is criterion 5's synthetic word, and its lowering is *entirely*
   subsumed by R9+R10+R11 (monomorphization resolves it to a concrete count before lowering sees it).
+- **Pre-existing aggregate-return aliasing (known issue, not fixed by this slice).** QBE gives an
+  aggregate return one slot per call site; `field_value` (`src/ir.rs:2933`) hands back an interior
+  pointer into that slot rather than a copy. A struct-typed value produced by a call and carried
+  live across a back-edge (a self-tail-recursive loop that calls the struct-returning word again
+  before the next iteration reads the old value) is silently aliased: iteration k+1's call
+  overwrites the slot iteration k's value still points into. Reproduced with a single-output
+  struct-returning word, so this predates the slice and is **not** introduced or widened in kind by
+  R10/R11; it is widened in *exposure*, since every multi-output word now returns through the same
+  aggregate-return mechanism a single-output struct return already used. Scalar bundle outputs are
+  unaffected (the unpack loads copies, R11). Left unfixed here: no phase in this spec touches
+  call-site value lifetime or introduces a copy-on-carry rule. Flagged for Slices 4-5, whose
+  combinators (`each`/`fold`) are exactly the shape (a struct accumulator threaded through a loop
+  back-edge) that hits this; a fix likely means either copying a call result before it's stored to
+  a carried slot, or giving each call site's aggregate return its own slot instead of reusing one
+  per call site.
 
 ## Current-state anchors (confirmed against `9f8644c`)
 
