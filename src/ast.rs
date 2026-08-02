@@ -1,7 +1,7 @@
 //! Sooth AST. Skeleton for Phase 0; grows as the language does.
 
 /// A source location, 1-based (line, col).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
     pub line: u32,
     pub col: u32,
@@ -40,6 +40,10 @@ pub struct Module {
     /// site unchanged; the declaration itself carries the C symbol string a
     /// call site never sees.
     pub externs: Vec<ExternDecl>,
+    /// R14 (phase 4 slice 1): one entry per call site of a polymorphic word,
+    /// keyed by the call site's `Span`, emitted by the checker and consumed by
+    /// lowering. Empty for a program with no polymorphic calls.
+    pub instantiations: std::collections::HashMap<Span, CallInst>,
 }
 
 impl Module {
@@ -102,6 +106,16 @@ pub struct StructDecl {
     /// fact reach every `is_copy` call site, the layout fold, and the REPL's
     /// persistent registries without threading a table through any of them.
     pub has_drop_overload: bool,
+    /// R10 (phase 4 slice 1): whether this is a synthesized *return bundle*
+    /// rather than a user `type:` declaration — the aggregate a word with two
+    /// or more outputs returns through. A separately set bit, never re-derived
+    /// from the fields (nothing about them says "bundle"), mirroring
+    /// `has_drop_overload`. It rides the ordinary struct registry so the layout
+    /// pass sizes it like any other struct, and `StructLayout::bundle` carries
+    /// it on to destructor synthesis, which skips a bundle: its fields are the
+    /// caller's outputs, moved out by the unpack in the same breath, so drop
+    /// glue here would double-free a linear one.
+    pub is_bundle: bool,
 }
 
 /// A small `Copy` index into `Module::structs`. Two `Type::Struct` values are
@@ -307,6 +321,40 @@ pub fn intern_array_type(arrays: &mut Vec<ArrayDecl>, element: Type, count: u32)
     Type::Array(id, name_static)
 }
 
+/// R10 (phase 4 slice 1): intern the synthesized return-bundle struct for a
+/// word's `outputs` tuple (two or more outputs), deduping structurally by that
+/// tuple exactly as `intern_array_type` dedups an array shape. The checker
+/// calls this so the bundle is in `Module::structs` before the layout pass;
+/// lowering only reads it back (`Structs::bundle_for`).
+pub fn intern_bundle_struct(structs: &mut Vec<StructDecl>, outputs: &[Type]) -> StructId {
+    if let Some(idx) = structs.iter().position(|d| {
+        d.is_bundle
+            && d.fields.len() == outputs.len()
+            && d.fields.iter().zip(outputs).all(|((_, f), o)| f == o)
+    }) {
+        return StructId::from_index(idx);
+    }
+    let id = StructId::from_index(structs.len());
+    // Positional, like the backend's array type symbols: an output tuple's own
+    // spelling (`[i64 4]`, `&!Buf`) is not a legal QBE aggregate name, and the
+    // name is never the dedup key.
+    let name = format!("__ret_{}", structs.len());
+    let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
+    structs.push(StructDecl {
+        name,
+        name_static,
+        fields: outputs
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| (format!("f{i}"), *ty))
+            .collect(),
+        span: Span::default(),
+        has_drop_overload: false,
+        is_bundle: true,
+    });
+    id
+}
+
 /// One REPL input unit: either a word definition or a bare term sequence
 /// evaluated against the carried stack.
 #[derive(Debug)]
@@ -318,8 +366,134 @@ pub enum Line {
 #[derive(Debug)]
 pub struct WordDef {
     pub name: String,
+    /// The concrete stack effect. For a **polymorphic** word (`poly` is
+    /// `Some`) this is left empty: the signature lives entirely in `poly`,
+    /// and every concrete path (env registration, monomorphic body checking,
+    /// bundle interning) skips such a word, so no variable is ever forced into
+    /// a concrete `Type` slot (R4/S1).
     pub effect: StackEffect,
     pub body: WordBody,
+    /// R4 (phase 4 slice 1): the polymorphic signature, present only when the
+    /// declared effect mentions a type variable `'T`, a length variable `'N`,
+    /// or the row variable `..s`. `None` for a monomorphic word, whose whole
+    /// signature is `effect`.
+    pub poly: Option<Box<PolySig>>,
+}
+
+/// R3/R6 (phase 4 slice 1): a capability a type variable can be bounded by.
+/// `Copy` gates `dup`/`over`; `Ord` gates `>`/`max`. Both are resolved at the
+/// concrete instantiation by the existing predicates (`is_copy`, the numeric
+/// tower), Kitten-style, with no trait objects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    Copy,
+    Ord,
+}
+
+/// R4: an array count in a polymorphic type: a concrete length or a length
+/// variable `'N` (index into `PolySig::len_var_names`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Len {
+    Concrete(u32),
+    Var(u32),
+}
+
+/// R4: a type in a polymorphic signature. A monomorphic sub-type folds to
+/// `Concrete`; a variable-bearing array (`['T 'N]`, `[i64 'N]`, `['T 4]`)
+/// stays `Array`. `Type` itself gains **no** variant (S1): the variable forms
+/// live only here, in a word's declared effect and in call-site unification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolyType {
+    Concrete(Type),
+    /// A type variable (index into `PolySig::ty_var_names`).
+    Var(u32),
+    Array(Box<PolyType>, Len),
+}
+
+/// R4: a polymorphic stack effect. The variable id spaces are per-signature
+/// (a `Var(0)` in one word is unrelated to a `Var(0)` in another); the
+/// `*_var_names` tables carry each id's surface spelling for diagnostics.
+#[derive(Debug, Clone)]
+pub struct PolySig {
+    /// The input row variable (`..s` at the deepest input slot), if any.
+    pub row_in: Option<u32>,
+    pub inputs: Vec<PolyType>,
+    pub outputs: Vec<PolyType>,
+    /// The output row variable, if any; the same id as `row_in` when the
+    /// same `..s` name passes through.
+    pub row_out: Option<u32>,
+    pub bounds: Vec<(u32, Bound)>,
+    pub ty_var_names: Vec<String>,
+    pub len_var_names: Vec<String>,
+    pub row_var_names: Vec<String>,
+}
+
+impl PolySig {
+    /// Whether type variable `id` carries `bound`.
+    pub fn has_bound(&self, id: u32, bound: Bound) -> bool {
+        self.bounds.iter().any(|(v, b)| *v == id && *b == bound)
+    }
+}
+
+/// R5/R14: a ground substitution `θ` resolved by unifying a `PolySig` against
+/// a concrete call-site stack. Kept as sorted `(id, value)` vectors so it is
+/// deterministic (the mangled symbol depends on it) and cheaply `Eq`
+/// (specializations dedup structurally).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Subst {
+    pub ty: Vec<(u32, Type)>,
+    pub len: Vec<(u32, u32)>,
+}
+
+impl Subst {
+    /// The concrete type variable `id` resolved to.
+    pub fn ty_of(&self, id: u32) -> Option<Type> {
+        self.ty.iter().find(|(v, _)| *v == id).map(|(_, t)| *t)
+    }
+
+    /// The concrete length variable `id` resolved to.
+    pub fn len_of(&self, id: u32) -> Option<u32> {
+        self.len.iter().find(|(v, _)| *v == id).map(|(_, n)| *n)
+    }
+}
+
+/// R14: the per-call-site instantiation record the checker emits for a call to
+/// a polymorphic word, keyed by the call site's `Span` in
+/// `Module::instantiations`. Lowering reads exactly what the
+/// name-keyed `Resolver`/`Arity` structurally cannot supply per call site: the
+/// ground `θ`, the mangled callee symbol, the concrete output arity, the
+/// ordered concrete output types, and the bundle `StructId` when the output
+/// count is `>= 2`.
+#[derive(Debug, Clone)]
+pub struct CallInst {
+    pub callee: String,
+    pub subst: Subst,
+    pub symbol: String,
+    pub out_arity: usize,
+    pub output_types: Vec<Type>,
+    pub bundle: Option<StructId>,
+}
+
+/// R9/R14: the mangled symbol for one instantiation `(word, θ)`. A pure,
+/// deterministic function of its inputs with no lowering-order dependence, so
+/// the checker's call-site table and the lowered `IrFunc.name` are minted from
+/// one source of truth and can never disagree. Mirrors `struct_drop_symbol`'s
+/// positional, id-based shape (a word name or a type spelling may hold
+/// characters no QBE symbol admits, so both are sanitized here).
+pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
+    fn sanitize(s: &str) -> String {
+        s.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect()
+    }
+    let mut parts = Vec::new();
+    for (id, ty) in &subst.ty {
+        parts.push(format!("t{id}_{}", sanitize(ty.name())));
+    }
+    for (id, n) in &subst.len {
+        parts.push(format!("n{id}_{n}"));
+    }
+    format!("sooth_mono_{}__{}", sanitize(word), parts.join("_"))
 }
 
 /// One `extern:` declaration (R1): a typed foreign-call binding. `symbol` is
@@ -748,12 +922,14 @@ mod tests {
                 fields,
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             }],
             enums: Vec::new(),
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
             externs: Vec::new(),
+            instantiations: std::collections::HashMap::new(),
         }
     }
 
@@ -811,6 +987,7 @@ mod tests {
             owned_cells: Vec::new(),
             refs: Vec::new(),
             externs: Vec::new(),
+            instantiations: std::collections::HashMap::new(),
         }
     }
 
@@ -855,6 +1032,7 @@ mod tests {
                 fields: Vec::new(),
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             }],
             enums: vec![EnumDecl {
                 name: "Dup".to_string(),
@@ -866,6 +1044,7 @@ mod tests {
             owned_cells: Vec::new(),
             refs: Vec::new(),
             externs: Vec::new(),
+            instantiations: std::collections::HashMap::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),
@@ -897,6 +1076,36 @@ mod tests {
             other => panic!("expected Type::Array, got {other:?}"),
         }
         assert_eq!(a.to_string(), "[i64 4]");
+    }
+
+    #[test]
+    fn intern_bundle_struct_same_tuple_dedups_expected() {
+        let mut structs = Vec::new();
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        let b = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        assert_eq!(a, b);
+        assert_eq!(structs.len(), 1);
+        assert!(structs[0].is_bundle);
+        assert_eq!(
+            structs[0].fields,
+            vec![
+                ("f0".to_string(), Type::I64),
+                ("f1".to_string(), Type::Bool)
+            ]
+        );
+    }
+
+    #[test]
+    fn intern_bundle_struct_distinct_tuples_and_orders_are_distinct_expected() {
+        // Two outputs of the same types in the other order are a different
+        // bundle: the tuple is ordered, deepest output first.
+        let mut structs = Vec::new();
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        let b = intern_bundle_struct(&mut structs, &[Type::Bool, Type::I64]);
+        let c = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool, Type::I64]);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(structs.len(), 3);
     }
 
     #[test]

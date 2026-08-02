@@ -1,21 +1,17 @@
-\ Dogfood: Slice 5 fixed-size arrays + usize, and Slice 6 references. A
-\ bounded `i64` stack over an embedded array and a runtime `usize` cursor,
-\ exercising array-as-field, the runtime cursor (the bounds-trap path),
-\ in-place mutation through `&!>`, a non-consuming read through `&>`/`@`, and
-\ `len`.
+\ Dogfood: Slice 5 fixed-size arrays + usize, Slice 6 references, and Phase 4
+\ Slice 1's multi-output ABI. A bounded `i64` stack over an embedded array
+\ and a runtime `usize` cursor, exercising array-as-field, the runtime
+\ cursor (the bounds-trap path), in-place mutation through `&!>`, a
+\ non-consuming read through `&>`/`@`, and `len`.
 \
-\ `pop`/`peek` bundle their two results (the updated `Stack` and the read
-\ value) into a `Popped` struct: a user-defined word may only return one
-\ value through a call, so the pair rides home as a single aggregate and the
-\ caller destructures it with the generated `Popped>` word.
+\ `pop`/`peek` return their two results (the updated `Stack` and the read
+\ value) directly as `( Stack -- Stack i64 )`: a user-defined word may now
+\ return more than one value through a call (the multi-output aggregate-
+\ return ABI), so no hand-written bundle struct is needed.
 
 type: Stack 
   items [i64 16] 
   top usize ;
-
-type: Popped 
-  rest Stack 
-  item i64 ;
 
 : empty ( -- Stack )
   0 16 fill 0 >usize Stack ;
@@ -26,24 +22,24 @@ type: Popped
   &!s &!Stack>items i &!> x !   \ write in place, no whole-array rebuild
   s s Stack>top 1 + Stack<top ;
 
-: pop ( Stack -- Popped )
+: pop ( Stack -- Stack i64 )
   | s |
   s Stack>top 1 - | i |
   &s &Stack>items i &> @ | v |  \ read without aliasing the array
-  s i Stack<top v Popped ;
+  s i Stack<top v ;
 
-: peek ( Stack -- Popped )
+: peek ( Stack -- Stack i64 )
   | s |
   s Stack>top 1 - | i |
   &s &Stack>items i &> @ | v |
-  s v Popped ;
+  s v ;
 
 : main ( -- )
   empty
   1 push 2 push 3 push
-  peek Popped> .                \ 3, non-consuming: stack unchanged underneath
-  pop Popped> .                 \ 3
-  pop Popped> .                 \ 2
-  peek Popped> .                \ 1, one item left
+  peek .                        \ 3, non-consuming: stack unchanged underneath
+  pop .                         \ 3
+  pop .                         \ 2
+  peek .                        \ 1, one item left
   Stack>items len .             \ 16, len is a compile-time constant of the array shape
   drop ;                        \ discard the residual items array

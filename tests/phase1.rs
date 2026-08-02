@@ -471,12 +471,13 @@ fn array_and_usize_cross_repl_line_boundary_and_render() {
     assert_eq!(lines, vec!["stack: <[i64 4]>", "stack: <[i64 4]> 5"]);
 }
 
-/// Criterion 8: the `examples/stack.sth` dogfood — array-as-struct-field, a
+/// Criterion 8: a REPL-scope stack exercise — array-as-struct-field, a
 /// runtime `usize` cursor (the trap path), in-place mutation through `&!>`,
-/// a non-consuming read through `&>`/`@`, and `len` — declared and run
-/// entirely across REPL lines (`type:` with an array field, then
-/// `fill`/`&!>`/`&>`/`len` at REPL scope, mirroring the Slice 4 REPL-scope
-/// seeding).
+/// a non-consuming read through `&>`/`@`, and `len` — with its words declared
+/// and run entirely across REPL lines (`type:` with an array field, then
+/// `fill`/`&!>`/`&>`/`len` at REPL scope). It stresses the same features as
+/// `examples/stack.sth` but defines its own words inline rather than loading
+/// that file.
 #[test]
 fn stack_dogfood_runs_in_repl() {
     let out = run_session(&[

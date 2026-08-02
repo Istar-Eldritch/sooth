@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::ast::{
-    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, RefDecl,
-    StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef,
+    ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module, OwnedCellDecl,
+    OwnedCellId, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term,
+    TermKind, Type, TypedSlot, WordBody, WordDef,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -198,6 +199,14 @@ pub struct StructLayout {
     /// `expand_path` (R7), which sees only `Registries` and so cannot reach the
     /// declaration.
     pub has_drop_overload: bool,
+    /// R10 (phase 4 slice 1): whether this is a synthesized multi-output return
+    /// bundle, copied from `StructDecl::is_bundle`. Two readers:
+    /// `synthesize_aggregate_destructors` skips a bundle however linear its
+    /// fields fold (they are the caller's outputs, moved out by the unpack, so
+    /// glue here would double-free one), and `lower_call` uses it as the
+    /// discriminator for the unpack branch — bundle presence, not a raw output
+    /// count, since the REPL's registries intern no bundle at all.
+    pub bundle: bool,
     /// R11 (slice 8b): the session-wide override epoch (`Session::override_epoch`),
     /// `None` on the build path and for the whole REPL session until its first
     /// `drop` override is ever defined. Set by the session after
@@ -342,6 +351,12 @@ pub enum StructWord {
 pub struct Structs {
     pub layouts: Vec<StructLayout>,
     pub words: HashMap<String, StructWord>,
+    /// R10: the interned return bundles as `(output tuple, its id)`, the
+    /// lookup a word's declared outputs go through to find the aggregate it
+    /// returns. Keyed on the frontend `Type` tuple the checker interned by,
+    /// not on the lowered `IrType`s (every reference collapses to `Ptr`, so
+    /// those are not a faithful key). Empty when nothing interned one.
+    pub bundles: Vec<(Vec<Type>, StructId)>,
 }
 
 /// The computed tagged layout of one enum (D3, M1), word-width-neutral: a
@@ -489,6 +504,17 @@ impl Structs {
     pub fn from_structs(structs: &[StructDecl]) -> Structs {
         build_registries(structs, &[], &[], &[], &[]).0
     }
+
+    /// R10: the synthesized bundle struct a word with these declared outputs
+    /// returns, or `None` when none was interned for the tuple — a word with
+    /// fewer than two outputs, or any registry the checker never interned into
+    /// (the REPL's), which then keeps its pre-slice single-value lowering.
+    pub fn bundle_for(&self, outputs: &[Type]) -> Option<StructId> {
+        self.bundles
+            .iter()
+            .find(|(tys, _)| tys == outputs)
+            .map(|(_, id)| *id)
+    }
 }
 
 /// The IR's view of a program's owning cells: the per-`OwnedCellId` payload
@@ -587,7 +613,10 @@ pub fn build_registries_ww(
         .collect();
 
     let mut swords = HashMap::new();
-    for (idx, decl) in structs.iter().enumerate() {
+    // R10: a synthesized bundle is an ABI detail with no source spelling, so it
+    // contributes no generated words; lowering reaches its pack and unpack
+    // through `StructWord` directly, never by name.
+    for (idx, decl) in structs.iter().enumerate().filter(|(_, d)| !d.is_bundle) {
         let id = StructId::from_index(idx);
         swords.insert(decl.name.clone(), StructWord::Construct(id));
         swords.insert(format!("{}>", decl.name), StructWord::Destructure(id));
@@ -613,10 +642,23 @@ pub fn build_registries_ww(
     let cell_drop_generations = vec![None; cell_payloads.len()];
     let ref_referents: Vec<IrType> = refs.iter().map(|d| ir_type_of(d.referent)).collect();
 
+    let bundles: Vec<(Vec<Type>, StructId)> = structs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_bundle)
+        .map(|(idx, d)| {
+            (
+                d.fields.iter().map(|(_, ty)| *ty).collect(),
+                StructId::from_index(idx),
+            )
+        })
+        .collect();
+
     (
         Structs {
             layouts: struct_layouts,
             words: swords,
+            bundles,
         },
         Enums {
             layouts: enum_layouts,
@@ -723,6 +765,10 @@ impl LayoutBuilder<'_> {
             align,
             is_linear,
             has_drop_overload,
+            // R10: carried through unchanged; a bundle is sized and laid out
+            // exactly like a user struct, and differs only in getting no
+            // destructor.
+            bundle: structs[idx].is_bundle,
             // R11: the build path never suffixes a destructor symbol; the
             // REPL sets this from its own override registry after the build.
             drop_generation: None,
@@ -980,6 +1026,31 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let drop_overloads = crate::check::find_drop_overloads(&module.words, &module.structs)?;
     let drop_overload_indices: std::collections::HashSet<usize> =
         drop_overloads.values().copied().collect();
+    // R9: a polymorphic word carries no concrete `Sig`, is never called by its
+    // plain name (every call site resolves through the R14 instantiation
+    // table), and lowers not once but once per recorded instantiation below.
+    // So it is excluded from the plain-name env and per-word pass, exactly as
+    // a `drop` overload is.
+    let poly_indices: std::collections::HashSet<usize> = module
+        .words
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.poly.is_some())
+        .map(|(idx, _)| idx)
+        .collect();
+    // R11/R14: the fixed input arity of each polymorphic word, name-keyed. A
+    // call site pops this many args (the row prefix, if any, stays on the
+    // caller's stack, S2); it is constant across a word's instantiations, so
+    // it lives here rather than per-`CallInst`.
+    let poly_arities: HashMap<String, usize> = module
+        .words
+        .iter()
+        .filter_map(|w| {
+            w.poly
+                .as_ref()
+                .map(|sig| (w.name.clone(), sig.inputs.len()))
+        })
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -1000,9 +1071,9 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx) && !poly_indices.contains(idx))
         .map(|(_, w)| {
-            let ret_ty = w.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
+            let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
                 w.name.clone(),
                 (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
@@ -1046,9 +1117,79 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
-        .map(|(_, w)| lower_word(w, &env, &resolve, regs))
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx) && !poly_indices.contains(idx))
+        .map(|(_, w)| {
+            let self_tail = crate::check::has_self_tail_call(w);
+            lower_word_parts(
+                &w.name,
+                &w.effect,
+                &w.body,
+                self_tail,
+                &env,
+                &resolve,
+                regs,
+                &module.instantiations,
+                &poly_arities,
+            )
+        })
         .collect();
+
+    // R9: one monomorphized `IrFunc` per distinct recorded instantiation.
+    // Every call site of a polymorphic word wrote a `CallInst` keyed by its
+    // span, carrying the symbol the checker minted for its own R14 table entry.
+    // `IrFunc.name` here is *not* read from that field: `instantiation_symbol`
+    // is called again on `(word, θ)`, the same pure function the checker called,
+    // so the emitted symbol and the call site's `Instr::Call` target are two
+    // independent computations that can only agree because the function is
+    // deterministic, not because one was copied from the other. θ is ground,
+    // so the substituted effect carries concrete array types with concrete
+    // `N` and the body lowers with no length-variable handling (length
+    // polymorphism is discharged here).
+    let poly_words: HashMap<&str, &WordDef> = module
+        .words
+        .iter()
+        .filter(|w| w.poly.is_some())
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    // Dedup by symbol and sort, so the monomorphized funcs emit in a fixed
+    // order regardless of `instantiations`' randomized HashMap iteration --
+    // the rest of the module emits deterministically from `Vec`-ordered words,
+    // and the IL should too.
+    let mut distinct: Vec<(String, &CallInst)> = Vec::new();
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for inst in module.instantiations.values() {
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        if emitted.insert(symbol.clone()) {
+            distinct.push((symbol, inst));
+        }
+    }
+    distinct.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (symbol, inst) in distinct {
+        let word = poly_words[inst.callee.as_str()];
+        let sig = word
+            .poly
+            .as_ref()
+            .expect("a recorded callee is polymorphic");
+        let effect = concrete_effect(sig, &inst.subst, &module.arrays);
+        // R7/R14: a self-recursive polymorphic word is a nested polymorphic
+        // call (the body calling the very word being instantiated), out of
+        // scope this slice; `self_tail` stays `false` here rather than
+        // reusing `has_self_tail_call` (which only recognizes a plain-name
+        // `Call`, never a `CallInst` lookup), so such a body still lowers
+        // correctly as an ordinary recursive call, just without the
+        // loop/back-edge transform a monomorphic self-tail word gets.
+        funcs.push(lower_word_parts(
+            &symbol,
+            &effect,
+            &word.body,
+            false,
+            &env,
+            &resolve,
+            regs,
+            &module.instantiations,
+            &poly_arities,
+        ));
+    }
 
     // R2: the override's body, by reference, keyed the way synthesis is keyed.
     // The REPL builds the same map from its own session-level store instead of
@@ -1119,7 +1260,10 @@ pub fn synthesize_aggregate_destructors(
         .layouts
         .iter()
         .enumerate()
-        .filter(|(_, layout)| layout.is_linear)
+        // R10/R11: a linear *bundle* gets no glue. Its fields are the caller's
+        // outputs, moved out by the unpack the instant the call returns, so a
+        // destructor for the shell would free a linear one a second time.
+        .filter(|(_, layout)| layout.is_linear && !layout.bundle)
         .filter_map(|(idx, _)| {
             let id = StructId::from_index(idx);
             match overrides.get(&id) {
@@ -1687,24 +1831,120 @@ pub fn lower_line(
     (func, m, out_bytes as usize)
 }
 
+/// R10: the `IrType` a word returns — its one output, or the synthesized
+/// bundle struct for two or more. The single derivation both the lowering env's
+/// `ret_ty` and `lower_word`'s own `ret` go through, so a caller reading the
+/// env and the callee it calls can never disagree about the return shape.
+/// Falls back to the first output where no bundle was interned (the REPL's
+/// registries, D2): that path keeps its pre-slice lowering rather than
+/// half-entering the bundle ABI.
+fn word_ret_ty(outputs: &[TypedSlot], structs: &Structs) -> Option<IrType> {
+    match bundle_of(outputs, structs) {
+        Some(id) => Some(IrType::Struct(id)),
+        None => outputs.first().map(|slot| ir_type_of(slot.ty)),
+    }
+}
+
+/// R10: the bundle a word with these declared outputs returns through.
+fn bundle_of(outputs: &[TypedSlot], structs: &Structs) -> Option<StructId> {
+    if outputs.len() < 2 {
+        return None;
+    }
+    let tys: Vec<Type> = outputs.iter().map(|slot| slot.ty).collect();
+    structs.bundle_for(&tys)
+}
+
+/// R9: build the concrete `StackEffect` of one instantiation `(word, θ)`,
+/// substituting the ground `θ` into the polymorphic signature's fixed inputs
+/// and outputs. The row variable (`..s`) is not materialized: it is a
+/// pass-through that stays on the caller's stack (S2), so it never enters the
+/// monomorphized function's frame.
+fn concrete_effect(sig: &PolySig, subst: &Subst, arrays: &[ArrayDecl]) -> StackEffect {
+    let slot = |pt: &PolyType| TypedSlot {
+        name: None,
+        ty: subst_polytype(pt, subst, arrays),
+    };
+    StackEffect {
+        inputs: sig.inputs.iter().map(&slot).collect(),
+        outputs: sig.outputs.iter().map(&slot).collect(),
+    }
+}
+
+/// R9: apply a ground `θ` to a `PolyType`, yielding a concrete `Type`. A
+/// variable resolves through `θ`; a variable-bearing array folds to its already
+/// interned concrete shape (the caller pushed that shape, so it exists in the
+/// module's array registry — lowering only reads it, it never interns).
+fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl]) -> Type {
+    match pt {
+        PolyType::Concrete(t) => *t,
+        PolyType::Var(v) => subst
+            .ty_of(*v)
+            .expect("checked: unification bound every input type variable"),
+        PolyType::Array(elem, len) => {
+            let element = subst_polytype(elem, subst, arrays);
+            let count = match len {
+                Len::Concrete(k) => *k,
+                Len::Var(ln) => subst
+                    .len_of(*ln)
+                    .expect("checked: unification bound every length variable"),
+            };
+            let idx = arrays
+                .iter()
+                .position(|d| d.element == element && d.count == count)
+                .expect("checked: the concrete array shape was interned at the call site");
+            Type::Array(ArrayId::from_index(idx), arrays[idx].name_static)
+        }
+    }
+}
+
 /// Lower a single word body against an external env/resolver. The REPL uses
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
-/// so a definition compiles against previously-loaded words.
+/// so a definition compiles against previously-loaded words. A REPL line has
+/// no polymorphic words (D2), so its calls carry no instantiation table.
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
 ) -> IrFunc {
-    let params: Vec<IrType> = word
-        .effect
-        .inputs
-        .iter()
-        .map(|s| ir_type_of(s.ty))
-        .collect();
-    let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
+    let self_tail = crate::check::has_self_tail_call(word);
+    lower_word_parts(
+        &word.name,
+        &word.effect,
+        &word.body,
+        self_tail,
+        env,
+        resolve,
+        regs,
+        empty_instantiations(),
+        empty_poly_arities(),
+    )
+}
 
-    let mut b = FuncBuilder::new(env, resolve, regs, word.name.clone());
+/// The shared word-body lowering, parameterized by name/effect/body so a
+/// monomorphized instantiation (R9) can lower a polymorphic word's body under
+/// its mangled symbol against a `θ`-substituted concrete effect. The
+/// instantiation table and poly-arity map thread through so a call to a
+/// polymorphic word inside this body resolves to its per-site symbol (R14).
+#[allow(clippy::too_many_arguments)]
+fn lower_word_parts(
+    name: &str,
+    effect: &StackEffect,
+    body: &WordBody,
+    self_tail: bool,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    poly_arities: &HashMap<String, usize>,
+) -> IrFunc {
+    let params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
+    let bundle = bundle_of(&effect.outputs, regs.structs);
+    let ret = word_ret_ty(&effect.outputs, regs.structs);
+
+    let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
+    b.instantiations = instantiations;
+    b.poly_arities = poly_arities;
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -1714,7 +1954,6 @@ pub(crate) fn lower_word(
     // the params and jumps to a header carrying one phi per loop-carried slot;
     // the body reads the phi outputs so each iteration rebinds them. A word
     // with no tail self-call lowers exactly as before (no header, no phi).
-    let self_tail = crate::check::has_self_tail_call(word);
     let entry_values = if self_tail {
         b.begin_loop(&params_values)
     } else {
@@ -1725,13 +1964,13 @@ pub(crate) fn lower_word(
     // shape every projection and access needs comes from the declared type,
     // not from the value. Seeded against `entry_values` so a loop reads it off
     // the header phi output the body actually uses.
-    for (slot, value) in word.effect.inputs.iter().zip(&entry_values) {
+    for (slot, value) in effect.inputs.iter().zip(&entry_values) {
         if let Type::Ref(id, _, _) = slot.ty {
             b.ref_inner.insert(*value, regs.refs.referent[id.index()]);
         }
     }
 
-    match &word.body {
+    match body {
         WordBody::Terms { terms } => {
             // Every input starts on the stack (D6: the header phi outputs when
             // looping); an entry `| ... |` binding pops from it like any other
@@ -1740,8 +1979,7 @@ pub(crate) fn lower_word(
             b.lower_terms(terms, self_tail);
         }
         WordBody::Clauses(clauses) => {
-            let scrutinee_ty = word
-                .effect
+            let scrutinee_ty = effect
                 .inputs
                 .last()
                 .expect("clause word has a scrutinee input")
@@ -1758,17 +1996,39 @@ pub(crate) fn lower_word(
     // The fall-through (base-case) block returns; a body that ended entirely in
     // back-edges is already terminated and needs no Ret.
     if !b.terminated {
-        let result = if ret.is_some() { b.stack.pop() } else { None };
+        // R10: two or more outputs leave the frame packed into the bundle,
+        // deepest output in the first field; one or none is the single value
+        // (or nothing) it always was.
+        let result = match bundle {
+            Some(id) => Some(b.pack_bundle(id)),
+            None if ret.is_some() => b.stack.pop(),
+            None => None,
+        };
         b.seal_block(Terminator::Ret(result));
     }
 
     IrFunc {
-        name: word.name.clone(),
+        name: name.to_string(),
         params,
         ret,
         blocks: b.blocks,
         value_types: b.value_types,
     }
+}
+
+/// A shared empty instantiation table for lowering paths with no polymorphic
+/// call sites (the REPL, D2; destructor synthesis; unit tests), so
+/// `FuncBuilder::new` can hand out a valid reference without every caller
+/// threading one.
+fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+/// The poly-arity companion of `empty_instantiations`.
+fn empty_poly_arities() -> &'static HashMap<String, usize> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, usize>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
 }
 
 struct FuncBuilder<'a> {
@@ -1782,6 +2042,15 @@ struct FuncBuilder<'a> {
     /// reference-mode clause scrutinee's `EnumId` when the referent itself is
     /// an enum.
     refs: &'a Refs,
+    /// R14: the per-call-site instantiation table. A `Call` term whose span
+    /// keys an entry here is a call to a polymorphic word and resolves to that
+    /// entry's mangled symbol and per-θ output shape, not the name-keyed
+    /// `env`/`resolve`. Empty on the REPL/destructor/test paths.
+    instantiations: &'a HashMap<Span, CallInst>,
+    /// R14: the fixed input arity of each polymorphic word, name-keyed. How
+    /// many args a polymorphic call pops (the `CallInst` carries the output
+    /// shape, but the input count is name-constant across θ, so it lives here).
+    poly_arities: &'a HashMap<String, usize>,
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
@@ -1859,6 +2128,8 @@ impl<'a> FuncBuilder<'a> {
             arrays,
             cells,
             refs,
+            instantiations: empty_instantiations(),
+            poly_arities: empty_poly_arities(),
             cur_word_name,
             header: None,
             header_phis: Vec::new(),
@@ -2012,7 +2283,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::StrLit(v, s.clone()));
                 self.stack.push(v);
             }
-            TermKind::Call(name) => self.lower_call(name, term.span.line, tail),
+            TermKind::Call(name) => self.lower_call(name, term.span, tail),
             TermKind::Bind(names) => {
                 // R10: a binding is a compile-time rebinding of SSA values, so
                 // it emits nothing. Leftmost name takes the deepest value.
@@ -2029,9 +2300,20 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    fn lower_call(&mut self, name: &str, line: u32, tail: bool) {
+    fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
+        let line = span.line;
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
+            return;
+        }
+        // R14/R11: a call to a polymorphic word resolves entirely through the
+        // instantiation table keyed by this call site's span, never the
+        // name-keyed `env`/`resolve` (which cannot distinguish one θ from
+        // another). This is checked before the builtin/user dispatch below
+        // because a polymorphic callee is always a user word whose name is
+        // none of the builtins.
+        if let Some(inst) = self.instantiations.get(&span).cloned() {
+            self.lower_poly_call(&inst);
             return;
         }
         match name {
@@ -2145,6 +2427,36 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Cmp(v, op, lhs, rhs));
                 self.stack.push(v);
             }
+            // R12 (S6): `max` over the integer tower, inline compare-and-select
+            // (`Cmp(Gt)` plus a two-block phi-join), no `Instr::Call`, no
+            // monomorphization.
+            "max" => {
+                let rhs = self.stack.pop().expect("max: rhs");
+                let lhs = self.stack.pop().expect("max: lhs");
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Gt, lhs, rhs));
+                let v = self.emit_select(cmp, |_| lhs, |_| rhs);
+                self.stack.push(v);
+            }
+            // R13 (S6): `max-total` over `f32`/`f64`, ordered by the
+            // `total_cmp` bit-pattern rule (map each operand's IEEE bits to a
+            // monotone unsigned key — flip every bit if the sign bit is set,
+            // else flip only the sign bit — then integer-compare the keys),
+            // so no float `>` is ever emitted.
+            "max-total" => {
+                let rhs = self.stack.pop().expect("max-total: rhs");
+                let lhs = self.stack.pop().expect("max-total: lhs");
+                let bits: u8 = match self.value_type(lhs) {
+                    IrType::Float { bits } => bits,
+                    other => unreachable!("checked: max-total operand is a float, got {other:?}"),
+                };
+                let lhs_key = self.total_order_key(lhs, bits);
+                let rhs_key = self.total_order_key(rhs, bits);
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Gt, lhs_key, rhs_key));
+                let v = self.emit_select(cmp, |_| lhs, |_| rhs);
+                self.stack.push(v);
+            }
             "." => {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
@@ -2234,7 +2546,17 @@ impl<'a> FuncBuilder<'a> {
                     *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
                 let args = self.stack.split_off(split);
-                let ret = if out_arity == 1 {
+                // R11: a multi-output callee returns one bundle, unpacked back
+                // onto the stack below, so the lowering stack matches the
+                // stack the checker verified. The discriminator is the
+                // bundle's own flag, not `out_arity >= 2`: the REPL's env
+                // derives a multi-output `ret_ty` from the first output alone
+                // and interns no bundle, and must not enter this branch.
+                let bundle = match ret_ty {
+                    Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+                    _ => None,
+                };
+                let ret = if out_arity == 1 || bundle.is_some() {
                     Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
                 } else {
                     None
@@ -2243,6 +2565,9 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Call(ret, sym, args));
                 if let Some(v) = ret {
                     self.stack.push(v);
+                }
+                if let Some(id) = bundle {
+                    self.unpack_bundle(id);
                 }
             }
         }
@@ -2928,6 +3253,61 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
+    /// R10, callee side: pop the top `n` stack values into a fresh bundle of
+    /// `id` (deepest output first, matching the field order the checker
+    /// interned) and yield it as the word's single returned value. Literally
+    /// the struct constructor, which is the point: the bundle is the struct
+    /// users hand-wrote before this ABI existed.
+    fn pack_bundle(&mut self, id: StructId) -> Value {
+        self.lower_struct_word(StructWord::Construct(id));
+        self.stack.pop().expect("pack: the bundle just constructed")
+    }
+
+    /// R11, caller side: replace the returned bundle on the stack with its
+    /// fields, deepest first — the exact reverse of `pack_bundle`, through the
+    /// same destructure a generated `S>` uses, so a linear field is moved out
+    /// of the shell exactly as `S>` moves one.
+    fn unpack_bundle(&mut self, id: StructId) {
+        self.lower_struct_word(StructWord::Destructure(id));
+    }
+
+    /// R14/R11: lower a call to a polymorphic word through its per-call-site
+    /// `CallInst`. The mangled symbol (not `(self.resolve)(name)`), the
+    /// per-θ output arity, and the bundle come straight from the table, so
+    /// two instantiations of one word reach two distinct symbols and two
+    /// distinct return shapes even though `env`/`resolve` are name-keyed. The
+    /// input arity is name-constant across θ and read from `poly_arities`; the
+    /// row prefix, if any, stays on the stack below the popped args (S2). The
+    /// bundle unpack is the same pack/unpack path a monomorphic multi-output
+    /// call takes (R10/R11), so a row-variable-expanded count lowers
+    /// identically to a fixed multi-output word — D4's one mechanism.
+    fn lower_poly_call(&mut self, inst: &CallInst) {
+        let in_arity = self.poly_arities[&inst.callee];
+        let split = self.stack.len() - in_arity;
+        let args = self.stack.split_off(split);
+        let ret = if inst.out_arity == 1 || inst.bundle.is_some() {
+            let ret_ty = match inst.bundle {
+                Some(id) => IrType::Struct(id),
+                None => ir_type_of(
+                    *inst
+                        .output_types
+                        .first()
+                        .expect("out_arity == 1 guarantees a single output type"),
+                ),
+            };
+            Some(self.fresh_value(ret_ty))
+        } else {
+            None
+        };
+        self.push_instr(Instr::Call(ret, inst.symbol.clone(), args));
+        if let Some(v) = ret {
+            self.stack.push(v);
+        }
+        if let Some(id) = inst.bundle {
+            self.unpack_bundle(id);
+        }
+    }
+
     /// Lower a generated struct word inline, first field deepest.
     fn lower_struct_word(&mut self, sw: StructWord) {
         match sw {
@@ -3029,6 +3409,92 @@ impl<'a> FuncBuilder<'a> {
                 self.stack.push(dst);
             }
         }
+    }
+
+    /// A two-block compare-and-select (`max`/`max-total`'s shared shape,
+    /// R12/R13): branch on `cond`, run each closure in its own block to
+    /// produce that arm's value, and join with one `Phi`. Simpler than
+    /// `lower_if`/`seal_arm` because a select's arms never back-edge (they
+    /// lower no user terms, just a handful of value-producing instructions),
+    /// so both predecessors always reach the join.
+    fn emit_select(
+        &mut self,
+        cond: Value,
+        then_fn: impl FnOnce(&mut Self) -> Value,
+        else_fn: impl FnOnce(&mut Self) -> Value,
+    ) -> Value {
+        let then_id = self.fresh_block();
+        let else_id = self.fresh_block();
+        let join_id = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cond, then_id, else_id));
+
+        self.start_block(then_id);
+        self.terminated = false;
+        let then_val = then_fn(self);
+        let then_pred = self.cur_id;
+        self.seal_block(Terminator::Jmp(join_id));
+
+        self.start_block(else_id);
+        self.terminated = false;
+        let else_val = else_fn(self);
+        let else_pred = self.cur_id;
+        self.seal_block(Terminator::Jmp(join_id));
+
+        self.start_block(join_id);
+        self.terminated = false;
+        let ty = self.value_type(then_val);
+        let v = self.fresh_value(ty);
+        self.push_instr(Instr::Phi(
+            v,
+            vec![(then_pred, then_val), (else_pred, else_val)],
+        ));
+        v
+    }
+
+    /// R13: the `total_cmp` bit-pattern key for one `max-total` operand.
+    /// Reinterprets `operand`'s IEEE bits as an unsigned integer (an 8-byte
+    /// scratch slot, stored/reloaded at the operand's own width — `Store`/
+    /// `Load` already dispatch on the value's declared `IrType`, R20), then
+    /// maps the bits to a monotone key: flip every bit if the sign bit is
+    /// set, else flip only the sign bit. Comparing two keys as unsigned
+    /// integers then reproduces the total order without ever comparing the
+    /// floats themselves.
+    fn total_order_key(&mut self, operand: Value, bits: u8) -> Value {
+        let uty = IrType::Int {
+            bits,
+            signed: false,
+        };
+        let slot = self.fresh_value(IrType::Ptr);
+        self.push_alloc(Instr::Alloc(slot, 8, 8));
+        self.push_instr(Instr::Store(slot, operand));
+        let raw = self.fresh_value(uty);
+        self.push_instr(Instr::Load(raw, slot));
+
+        let sign_mask: i64 = 1i64 << (bits - 1);
+        let mask_v = self.fresh_value(uty);
+        self.push_instr(Instr::Const(mask_v, sign_mask));
+        let masked = self.fresh_value(uty);
+        self.push_instr(Instr::Bin(masked, BinOp::And, raw, mask_v));
+        let zero_u = self.fresh_value(uty);
+        self.push_instr(Instr::Const(zero_u, 0));
+        let is_neg = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(is_neg, CmpOp::Ne, masked, zero_u));
+
+        self.emit_select(
+            is_neg,
+            |b| {
+                let all_ones = b.fresh_value(uty);
+                b.push_instr(Instr::Const(all_ones, -1));
+                let key = b.fresh_value(uty);
+                b.push_instr(Instr::Bin(key, BinOp::Xor, raw, all_ones));
+                key
+            },
+            |b| {
+                let key = b.fresh_value(uty);
+                b.push_instr(Instr::Bin(key, BinOp::Xor, raw, mask_v));
+                key
+            },
+        )
     }
 
     /// `tail` (R1) is true when this `if` is itself in tail position; it then
@@ -3579,6 +4045,153 @@ mod tests {
             .flat_map(|b| b.instrs.iter())
             .filter(|i| pred(i))
             .count()
+    }
+
+    #[test]
+    fn lower_max_emits_a_compare_and_select_no_call() {
+        // R12: `max` lowers inline to `Cmp(Gt)` plus a `Phi`-joined select, no
+        // `Instr::Call` and no monomorphization.
+        let ir = lower_src(": main ( -- ) 3 5 max . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Cmp(_, CmpOp::Gt, ..))),
+            1
+        );
+        assert_eq!(count(main, |i| matches!(i, Instr::Phi(..))), 1);
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    #[test]
+    fn lower_max_total_emits_no_float_compare() {
+        // R13: `max-total` orders by the bit-pattern rule, so the emitted
+        // `Cmp`s are all over the unsigned integer key, never `Instr::Cmp`
+        // with a float operand.
+        let ir = lower_src(": main ( -- ) 1.5 2.5 max-total . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        let float_cmps = instrs(main)
+            .iter()
+            .filter(|i| match i {
+                Instr::Cmp(_, _, a, _) => {
+                    matches!(main.value_types[a.0 as usize], IrType::Float { .. })
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(float_cmps, 0);
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    #[test]
+    fn lower_two_output_word_returns_one_bundle_holding_both() {
+        // Criterion 9 (R10): a two-output word's body ends in one `Ret` of the
+        // synthesized bundle, with both outputs stored into it -- not a single
+        // value returned and the other silently dropped.
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let pair = ir.funcs.iter().find(|f| f.name == "pair").unwrap();
+        let IrType::Struct(bundle) = pair.ret.expect("a two-output word returns its bundle") else {
+            panic!("expected a struct return, got {:?}", pair.ret);
+        };
+        assert!(ir.structs[bundle.index()].bundle);
+        assert_eq!(ir.structs[bundle.index()].fields.len(), 2);
+
+        let last = pair.blocks.last().unwrap();
+        let Terminator::Ret(Some(returned)) = last.term else {
+            panic!("expected a value return, got {:?}", last.term);
+        };
+        assert_eq!(
+            pair.value_types[returned.0 as usize],
+            IrType::Struct(bundle)
+        );
+        assert_eq!(count(pair, |i| matches!(i, Instr::FieldStore(..))), 2);
+    }
+
+    #[test]
+    fn lower_call_of_two_output_word_unpacks_the_bundle_onto_the_stack() {
+        // R11: the caller reads both outputs back out of the returned bundle
+        // (two field loads), so its lowering stack matches the stack the
+        // checker verified -- the recon-3 desync that used to panic.
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(Some(_), ..))), 1);
+        assert_eq!(count(main, |i| matches!(i, Instr::FieldLoad(..))), 2);
+        assert_eq!(count(main, |i| matches!(i, Instr::Print(_))), 2);
+    }
+
+    #[test]
+    fn monomorphization_emits_one_mangled_func_per_instantiation() {
+        // R9/R14: a polymorphic word is never emitted under its plain name;
+        // instead one mangled `IrFunc` is emitted per distinct ground θ, and
+        // each call site targets its own instantiation's symbol through the
+        // R14 table, not `dupit`.
+        let ir = lower_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) 5 dupit . . true dupit . . ;",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "dupit"),
+            "the polymorphic word must not lower under its plain name"
+        );
+        let mono: Vec<&str> = ir
+            .funcs
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|n| n.starts_with("sooth_mono_dupit"))
+            .collect();
+        assert_eq!(mono.len(), 2, "one IrFunc per θ (i64 and bool)");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        let calls = call_symbols(main);
+        for sym in &mono {
+            assert!(calls.contains(sym), "main should call `{sym}` directly");
+        }
+    }
+
+    #[test]
+    fn lower_single_output_word_keeps_its_scalar_return() {
+        // R2/R15: nothing about the bundle path reaches a word with one
+        // output; it returns its scalar directly, as before the slice.
+        let ir = lower_src(": inc ( i64 -- i64 ) 1 + ;");
+        let inc = ir.funcs.iter().find(|f| f.name == "inc").unwrap();
+        assert_eq!(inc.ret, Some(IrType::I64));
+        assert!(ir.structs.is_empty());
+    }
+
+    #[test]
+    fn lower_bundle_with_a_linear_field_gets_no_destructor() {
+        // Criterion 10 (R10/R11, key risk 1): the bundle for `( -- ^i64 i64 )`
+        // folds linear (its first field is an owning cell), yet no drop glue is
+        // synthesized for it -- the glue would free the cell the caller's
+        // unpack has already moved out.
+        let ir =
+            lower_src(": cell-and-tag ( -- ^i64 i64 ) 7 ^ 3 ; : main ( -- ) cell-and-tag . ^> . ;");
+        let (idx, layout) = ir
+            .structs
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.bundle)
+            .expect("the two-output word interned a bundle");
+        assert!(
+            layout.is_linear,
+            "an owning-cell field folds the bundle linear"
+        );
+        let glue = format!("sooth_struct_drop_{idx}");
+        assert!(
+            !ir.funcs.iter().any(|f| f.name == glue),
+            "a bundle must carry no destructor, found `{glue}`"
+        );
+    }
+
+    #[test]
+    fn lower_two_words_with_one_output_shape_share_one_bundle() {
+        // R8: bundles are interned by output tuple, deduped structurally like
+        // an array shape, so two words of the same shape share one struct and
+        // a third shape gets its own.
+        let ir = lower_src(
+            ": pair ( i64 -- i64 i64 ) dup ;\n\
+             : twice ( i64 -- i64 i64 ) dup ;\n\
+             : flags ( -- bool bool ) true false ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(ir.structs.iter().filter(|l| l.bundle).count(), 2);
     }
 
     #[test]
@@ -4624,7 +5237,7 @@ mod tests {
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("+", 0, false);
+        b.lower_call("+", Span::default(), false);
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }
@@ -4700,8 +5313,10 @@ mod tests {
     #[test]
     fn lower_dup_of_struct_allocs_and_blits() {
         // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
-        // blit), unlike a scalar `dup` which reuses the value id.
-        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 Vec2 ) dup ;");
+        // blit), unlike a scalar `dup` which reuses the value id. Single
+        // output plus a `drop` of the extra copy, so this measures only
+        // `dup`'s own copy, not the multi-output bundle-pack path.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 ) dup drop ;");
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
         assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
         assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
@@ -4880,9 +5495,11 @@ mod tests {
     #[test]
     fn lower_dup_of_enum_allocs_and_blits() {
         // R15: `dup` of an enum copies the aggregate bytes (fresh alloc +
-        // blit), like a struct and unlike a scalar.
+        // blit), like a struct and unlike a scalar. Single output plus a
+        // `drop` of the extra copy, so this measures only `dup`'s own copy,
+        // not the multi-output bundle-pack path.
         let ir = lower_src(
-            "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt MaybeInt ) dup ;",
+            "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt ) dup drop ;",
         );
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
         assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
@@ -5408,6 +6025,7 @@ mod tests {
             fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
             span: crate::ast::Span::default(),
             has_drop_overload: false,
+            is_bundle: false,
         });
         let (structs, enums, arrays, ..) = build_registries(
             &module.structs,
