@@ -2966,6 +2966,7 @@ fn poly_term(
             // silent leak).
             let mut seen = HashSet::new();
             for name in names {
+                reject_variant_local(ctx, name, "local")?;
                 reject_duplicate_local(ctx, name, span, &mut seen)?;
                 if scope.locals.contains_key(name) {
                     return Err(rebound_local_error(ctx, span, name));
@@ -2981,44 +2982,18 @@ fn poly_term(
                 scope.locals.insert(name.clone(), pt);
             }
         }
-        TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            // R7: a branch join lifts `infer_line`'s rule to `PolyType` — both
-            // arms must leave the same residual stack. The slice's exercised
-            // bodies are straight-line, so this is stated, not stressed.
-            let then_stack = poly_walk(
-                then_branch,
-                stack.clone(),
-                &mut scope.clone(),
-                sig,
-                ctx,
-                env,
-                structs,
-                enums,
-                arrays,
-            )?;
-            let else_stack = poly_walk(
-                else_branch,
-                stack,
-                &mut scope.clone(),
-                sig,
-                ctx,
-                env,
-                structs,
-                enums,
-                arrays,
-            )?;
-            if then_stack != else_stack {
-                return Err(format!(
-                    "error: branch arms of `{}` (line {}) leave different stacks",
-                    ctx.word_name().unwrap_or("<line>"),
-                    span.line
-                ));
-            }
-            stack = then_stack;
+        TermKind::If { .. } => {
+            // A polymorphic `if` needs the monomorphic arm's machinery
+            // (condition-pop, per-arm unconsumed-linear check, move-join); none
+            // of that is lifted to `PolyType` yet, and a partial version both
+            // over-rejects valid bodies and can leave the stack in a state that
+            // panics a later stage. Reject it outright here until a future
+            // slice implements it properly, mirroring the monomorphic arm.
+            return Err(format!(
+                "error: `if` in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
         }
         TermKind::Call(name) => {
             return poly_call_term(
@@ -6009,6 +5984,42 @@ mod tests {
         let err = check_src(": bad ( 'T 'T -- 'T ) | x x | x ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("duplicate local"), "unexpected message: {err}");
         assert!(err.contains('x'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_local_named_after_variant_is_error() {
+        // A local named after a registered variant would make the clause-vs-
+        // locals `|` disambiguation ambiguous: the poly binder rejects it as
+        // the monomorphic sibling `( i64 i64 -- i64 )` of the same body does,
+        // naming the collision.
+        let err = check_src(
+            "type: Maybe | None | Some v i64 ;\n: f ( 'T i64 -- 'T ) drop | Some | Some ;\n: main ( -- ) 1 2 f drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("collides with the variant name `Some`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_poly_body_with_if_is_rejected() {
+        // `if` in a polymorphic body is rejected outright until a future slice
+        // lifts the monomorphic arm's condition-pop / per-arm leak check /
+        // move-join to `PolyType`; a partial version both over-rejects valid
+        // bodies and can panic a later stage.
+        let err = check_src(
+            ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n: main ( -- ) 1 2 true choose drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`if` in the polymorphic body of `choose`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("not yet supported"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
