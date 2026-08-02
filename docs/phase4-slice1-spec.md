@@ -100,12 +100,13 @@ polymorphic signatures" are a documentation/`hover` concern, not an enforcement 
 **S4: `Copy` is an ordinary required-operation constraint, not privileged.** A type variable
 carries a bound set; `Copy` is one entry, resolved at the concrete instantiation by the existing
 `is_copy` predicate, exactly as `>` for `max` resolves against the numeric tower, Kitten-style,
-no trait objects, no formal trait system. Inside a polymorphic body, `is_copy`/`is_linear` gain a
-type-variable arm that answers from the variable's bound set (a `'T: Copy` may be `dup`ed; an
-unbounded `'T` may not). Privileging `Copy` in the variable-binding machinery is rejected because
+no trait objects, no formal trait system. Inside a polymorphic body, copy-ness and `Ord`-ness of a bare variable are answered from its
+bound set by the separate `PolyType` body-check (R7), which does **not** modify `is_copy`/`is_linear`
+(they keep their concrete-only matches): a `'T: Copy` may be `dup`ed; an unbounded `'T` may not.
+Privileging `Copy` in the variable-binding machinery is rejected because
 it would foreclose the identical treatment a polymorphic `drop ( 'T -- )` needs in Slice 6 (the
 per-type `drop` overload resolution parked by 8b): `drop`, `Copy`, and `Ord` are then one
-mechanism pointed at three operations. See R4, R5.
+mechanism pointed at three operations. See R6, R7.
 
 **S5: The dogfood is `examples/stack.sth`, rewritten to return multiple values directly,** and
 the plain D7 finding that polymorphic `dup`/`swap` touch no existing example (they already
@@ -118,14 +119,14 @@ operand type. Over a float it is a located error naming `max-total`. `max-total 
 defined for `f32`/`f64` and orders by the Rust-`total_cmp` rule (a bit-pattern total order that
 sorts `-0.0 < +0.0` and places NaN at the ends), surfaced explicitly at the call site rather than
 pretending IEEE `>` is total (D6). Both are builtins (inline arms, like `>`); neither is a
-library word and neither is monomorphized. See R11, R12.
+library word and neither is monomorphized. See R12, R13.
 
 ## Requirements by stage
 
 Requirement IDs `Rn`; diagnostics `Xn` (each a behavioural negative test asserting the specific
 message *and* the named identifiers, per the test convention). "Golden" means source-in →
 expected-output or source-in → expected-diagnostic, runnable, never an IL-string assertion,
-except the two structural requirements (R6, R10) explicitly marked as emitted-IR assertions.
+except the one structural requirement (R10) explicitly marked as an emitted-IR assertion.
 
 ### Surface syntax and parsing (`src/lexer.rs`, `src/parser.rs`, `src/ast.rs`)
 
@@ -150,7 +151,7 @@ at most once on each side and only deepest; anywhere else is a located error (X2
 **R2: A word with no variables is unchanged.** `parse_effect` still produces a concrete
 `StackEffect` for a monomorphic word; the polymorphic representation is attached only when at
 least one variable is present, so every existing example and test parses and resolves byte-for-byte
-as before (regression-checked, R17).
+as before (regression-checked, R15).
 
 **R3: Bound syntax: `'T: Copy` at the binding occurrence.** A bound is written immediately after
 a type variable's binding occurrence as `'T: Copy` (colon then a capability name), the capability
@@ -194,14 +195,40 @@ variable, the concrete type θ bound it to, and the unsatisfied capability (X5 f
 `Ord`). The message for `Copy` carries the linear-spine reason (a linear value cannot be
 duplicated), mirroring 8b's reason-carrying diagnostic.
 
-**R7: Body checking of a polymorphic word.** A polymorphic word's body is checked once, with
-each variable represented on the simulated stack by a distinct opaque placeholder type that
-unifies only with itself. `is_copy`/`is_linear` gain a type-variable arm reading the bound set:
-`dup`/`over` on a `'T: Copy` placeholder is accepted, on an unbounded `'T` is X7 (`dup` of a
-possibly-linear `'T`, naming the variable and the missing `Copy` bound); a `'T` value forgotten at
-body end is the existing must-consume error; `>` on a `'T` requires an `Ord` bound (X8). A length
-variable is opaque to the body except through `len`/`&>`/`fill`, which are already length-agnostic.
-The row variable is opaque: the body may not inspect a `..s` slot, only pass it through.
+**R7: Body checking of a polymorphic word, over a `PolyType` stack (not the concrete `Slot`
+stack).** A polymorphic word's body is checked once by a dedicated pass, `check_poly_body`, whose
+virtual stack holds `PolyType` (R4), **not** `Slot`/`Type`. This is deliberately a *separate*
+mechanism from `infer_line`, and that separation is what makes the representation possible: no
+placeholder is ever pushed onto `Slot.ty` (a concrete `Type` with no variable variant, S1/R4); the
+concrete `Slot` stack and every concrete path stay untouched; `is_copy` (`src/check.rs:177`) and
+`is_linear` (`src/check.rs:204`, derived from `is_copy`) gain **no** new arm, so their exhaustive
+matches and `is_copy`'s `_ => true` tail are unchanged and an unbounded `'T` can never fall through
+a catch-all and read as `Copy`; and `is_aggregate` (`src/ast.rs:546`) plus the ~116 concrete
+`Type::` match sites are never reached with a variable at all. `check_poly_body` is seeded from
+`PolySig.inputs`, with `row_in` an opaque row marker, and dispatches per slot kind with **no
+catch-all**:
+
+- **`PolyType::Concrete(t)`**: copy-ness, `Ord`-ness, and every type-directed check delegate to the
+  existing predicates on the unwrapped `t` (`is_copy(t)`, the numeric-tower predicate, …), giving
+  byte-for-byte the monomorphic answer. Concrete literals and concrete sub-computations in the body
+  push `Concrete(_)` slots and are checked exactly as today.
+- **`PolyType::Var(v)`**: a *bare* variable supports **only**: the five core shuffles, an operation
+  its bound set permits, binding to and reading from a local `| x |`, being passed to a call slot
+  that is itself the same variable, and being returned. `dup`/`over` require `Copy ∈ bounds(v)` (else
+  X7, naming `v` and the missing `Copy` bound); `>`/`max` require `Ord ∈ bounds(v)` (else X8, naming
+  `v`). Every other type-directed operation on a bare `Var` (arithmetic, `.`, a field/array/`@`
+  access, a conversion, a concrete-typed call argument) is a located error naming `v`: because a
+  `Var` slot satisfies **no** concrete-type predicate, a body a real instantiation would reject can
+  never slip through (Key-risk 2). A length variable is opaque except through the already
+  length-agnostic `len`/`&>`/`fill`/`@`; the row variable is pass-through only.
+
+Forgetting a bare linear `Var` (unbounded, non-`Copy`) at body end is the existing must-consume
+error, checked against the residual `PolyType` stack vs `PolySig.outputs` (`row_out` matched against
+the carried row marker). Branch joins inside a polymorphic body reuse `infer_line`'s join rule lifted
+to `PolyType` (both arms' residual `PolyType` stacks must be equal); the slice's exercised
+polymorphic bodies (criteria 3–5) are straight-line, so this rule is stated, not stressed. A
+polymorphic body calling *another polymorphic* word with a variable propagated is out of scope this
+slice (see R14); the bodies under test call only the inlined shuffles/`max` and monomorphic words.
 
 **R8: Instantiation recording.** Each distinct ground θ for each polymorphic word is recorded in
 a per-module specialization set (deduped structurally, mirroring `intern_array_type`), consumed by
@@ -210,12 +237,34 @@ shapes, K.
 
 ### Lowering: monomorphization and the multi-output ABI (`src/ir.rs`, `src/backend/qbe.rs`)
 
+**R14: The check→lower instantiation table (the per-call-site carrier).** The name-only `Resolver`
+(`src/ir.rs:966`, `&dyn Fn(&str) -> String`) and name-keyed `env` (`Arity`, `src/ir.rs:961`) cannot,
+by construction, map one polymorphic word called at two concrete shapes to two symbols or two output
+arities: both are keyed by name alone. So the checker emits a side table
+`instantiations: HashMap<Span, CallInst>`, keyed by the call site's `Span` (already on every `Term`,
+`src/ast.rs:598`/`:5`), and passes it into `ir::lower` alongside `&Module`, the same way
+`find_drop_overloads`' result already flows check→lower. `Span` gains a `Hash` derive and the full
+`term.span` (not just `term.span.line`, as `lower_term` passes today at `src/ir.rs:2015`) is threaded
+into `lower_call`, so a call site's identity survives to lowering. Each `CallInst` records exactly
+what `env`/`Resolver` structurally cannot supply for that one call site: the ground `θ`
+(`{TyVar→Type, LenVar→u32, RowVar→Vec<Type>}`), the **mangled callee symbol** for that instantiation
+(R9's scheme), the instantiation's **concrete `out_arity`**, and its **ordered output `IrType`s**
+(the bundle tuple when `out_arity ≥ 2`). `lower_call`, for a call whose callee carries a `PolySig`,
+reads `instantiations[term.span]` and emits `Instr::Call` to `CallInst.symbol` (not
+`(self.resolve)(name)`), using `CallInst.out_arity`/`CallInst.output_types` for R10/R11's pack/unpack
+(not the name-keyed `env`). A monomorphic call has no table entry and takes the existing
+`env`/`Resolver` path unchanged. Because a polymorphic body calls nothing polymorphic in this slice
+(R7), each call-site `Span` resolves to exactly one ground `CallInst`, so the `Span` key is
+unambiguous in-slice; nested polymorphic calls (which would need one entry per enclosing
+instantiation) are out of scope, deferred to the Slice 5 inliner.
+
 **R9: Monomorphization: one `IrFunc` per instantiation.** For each recorded specialization
 `(word, θ)`, `ir::lower` substitutes θ into the word's effect and body types and emits one
 `IrFunc` under a **mangled** name keyed on θ's ground types, reusing the existing symbol-mangling
 scheme (`struct_drop_symbol`'s epoch-suffix shape, `src/ir.rs:288`; the same `mangled_symbol`
 device 8b used). A monomorphic word lowers once under its plain name, unchanged. A call site
-resolves through the `Resolver` to the mangled symbol for its own instantiation. Because θ is
+resolves to the mangled symbol for its own instantiation through the R14 instantiation table (not the
+name-only `Resolver`, which cannot key on θ). Because θ is
 ground, the monomorphized body carries concrete array types with concrete `N`, so
 `lower_array_word`, `&>`, `@`, and `len` need no length-variable handling: length polymorphism
 is fully discharged by monomorphization (confirming recon 2's "the compiler is already
@@ -223,25 +272,39 @@ length-polymorphic by hand"). Builtins are exempt (S3).
 
 **R10: The multi-output aggregate ABI (S2), callee side.** A word (or monomorphized
 instantiation) whose **concrete** output count is ≥ 2 gets a synthesized *bundle struct*
-`__ret$<tuple>` interned in the struct registry, deduped by its output-type tuple. `lower_word`'s
-finalization (`src/ir.rs:1762`, today `let result = if ret.is_some() { b.stack.pop() }`) is
-extended: for arity ≥ 2 it allocates the bundle (`alloc_struct`), stores the top `out_arity`
-stack values into its fields deepest-first, and returns it via `Terminator::Ret(Some(bundle))`;
-`IrFunc.ret` becomes `Some(IrType::Struct(bundle_id))` and `env`'s `ret_ty` follows. `Instr::Call`
-keeps its single `Option<Value>`. No new IR variant. Structural check: a two-output word's emitted
-body ends in one `Ret` of a struct value, with the two outputs stored into it.
+`__ret$<tuple>` interned in the struct registry, deduped by its output-type tuple and marked with a
+new `bundle: bool` flag on its `StructLayout` (`src/ir.rs:188`, beside `is_linear` at `:195`;
+`false` for every user `type:` struct, `true` only for a synthesized bundle). That flag is how the
+registry tells a bundle from a user struct, and it suppresses destructor synthesis (R11):
+`synthesize_aggregate_destructors` (`src/ir.rs:1106`) filters `layout.is_linear && !layout.bundle`,
+so a bundle acquires no drop glue even when a field is linear. Both `lower_word` touch-points move:
+the single-output ret projection `let ret = word.effect.outputs.first().map(...)` (`src/ir.rs:1705`)
+must, for arity ≥ 2, yield the bundle's `IrType::Struct(bundle_id)` rather than only the first
+output's type; and the finalization `let result = if ret.is_some() { b.stack.pop() }`
+(`src/ir.rs:1761`) allocates the bundle (`alloc_struct`), stores the top `out_arity` stack values
+into its fields deepest-first, and returns it via `Terminator::Ret(Some(bundle))`. `IrFunc.ret`
+becomes `Some(IrType::Struct(bundle_id))` and `env`'s `ret_ty` follows. `Instr::Call` keeps its
+single `Option<Value>`. No new IR variant. Structural check: a two-output word's emitted body ends
+in one `Ret` of a struct value, with the two outputs stored into it.
 
 **R11: The multi-output aggregate ABI, caller side (closes recon 3).** `lower_call`'s fallthrough
-(`src/ir.rs:2233-2246`) stops discarding results when `out_arity >= 2`: it receives the single
-bundle value and immediately **unpacks** it into `out_arity` field loads pushed back onto the
-stack deepest-first (the reverse of R10's pack, reusing the destructure path the generated `S>`
-word already uses), so the caller's lowering stack matches the checker-verified stack exactly and
-the `print: value` / subtract-overflow panic is gone. A field that is itself linear is moved out
-by the unpack exactly as `S>` moves a linear field; the bundle shell is left dead with no owned
-bytes, so no disposal runs on it (it is never surplus-checked; it exists only across the two
-adjacent pack/unpack steps). This is the same code path a row variable reaches: monomorphization
-(R9) has already resolved `row_out` to a concrete count, so a row-variable word and a fixed
-`( i64 -- i64 i64 )` word lower through R10/R11 identically. **One mechanism, D4 satisfied.**
+(`src/ir.rs:2233`) stops discarding results when `out_arity >= 2`. The instantiation-specific
+`out_arity` and bundle output types come from the R14 table (`CallInst`), **not** the name-keyed
+`env`, which holds a single `Arity` per name and so cannot represent a per-θ output count: for a
+row-variable instantiation the count is per-θ, so R14 is the only carrier that has it (the same
+root cause as the caller-side symbol-resolution gap, fixed once by R14). It receives the single bundle value and immediately **unpacks**
+it into `out_arity` field loads pushed back onto the stack deepest-first (the reverse of R10's pack,
+reusing the destructure path the generated `S>` word already uses), so the caller's lowering stack
+matches the checker-verified stack exactly and the `print: value` / subtract-overflow panic is gone.
+A field that is itself linear is moved out by the unpack exactly as `S>` moves a linear field; the
+bundle shell is then dead with no owned bytes. It never runs a destructor, and this is *enforced*,
+not asserted: R10 flags the interned bundle struct (`bundle: bool`) and
+`synthesize_aggregate_destructors` skips flagged structs, so no drop glue is ever synthesized for it:
+the one mechanism that could have double-freed the moved-out linear field. The shell is also never
+bound to a local and never surplus-checked (it exists only across the two adjacent pack/unpack
+steps). This is the same code path a row variable reaches: monomorphization (R9) has already
+resolved `row_out` to a concrete count, so a row-variable word and a fixed `( i64 -- i64 i64 )` word
+lower through R10/R11 identically. **One mechanism, D4 satisfied.**
 
 ### `max` / `max-total` (`src/check.rs`, `src/ir.rs`, `src/backend/qbe.rs`)
 
@@ -261,6 +324,15 @@ directing integer operands to `max`). The lowering emits no float `>`; the golde
 total-order result on operands where IEEE and total order agree, and R13's negative test asserts
 that `max` refuses floats (X9) so the two surfaces stay disjoint.
 
+### Regression (`tests/`, existing suite)
+
+**R15: Addition-only regression (referenced by R2).** No existing golden or unit test changes its
+expected output as a result of this slice: every monomorphic word parses, checks, and lowers
+byte-for-byte as on `main`, the `Slot` stack stays concrete `Type`, and `is_copy`/`is_linear` are
+untouched. The check is the existing suite passing unmodified, plus the two `stack.sth`-diff goldens
+(criteria 1, 8) confirming the rewrite's output is unchanged; a diff to any pre-slice
+`.expected`/assertion is a regression, not an update.
+
 ## Success criteria
 
 Every criterion maps to a runnable golden; each Xn maps to a behavioural negative test asserting
@@ -271,14 +343,15 @@ unit tests sit beside their stage (`src/lexer.rs`, `src/parser.rs`, `src/check.r
 | # | criterion | kind | maps |
 |---|---|---|---|
 | 1 | polymorphic `dup`/`swap` on `i64`, `bool`, and a struct in one program run correctly (already type-transparent; pins it) | golden, run | S3, R2 |
-| 2 | a user word `: pair ( i64 -- i64 i64 ) dup ;` called as `5 pair . .` prints `5` then `5` (recon-3 repro, no longer panics) | golden, run | R10, R11 |
-| 3 | a user word with a `'T: Copy` type variable, called at two concrete types, runs and prints both | golden, run | R1, R4–R7, R9 |
+| 2 | a user word `: pair ( i64 -- i64 i64 ) dup ;` called as `5 pair . .` prints `5` then `5` (recon-3 repro, no longer panics) | golden, run | R10, R11, R14 |
+| 3 | a user word with a `'T: Copy` type variable, called at two concrete types, runs and prints both | golden, run | R1, R4–R7, R9, R14 |
 | 4 | a length-polymorphic user word over `[i64 4]` and `[i64 8]` runs (the recon-2 "unwritable" case, now written) | golden, run | R1, R5, R9 |
-| 5 | a row-variable user word (e.g. `( ..s 'a 'b -- ..s 'a 'b 'a 'b )`, `'a`/`'b: Copy`) runs, exercising a ≥2-output row expansion through R10/R11 | golden, run | R1, R5, R9, R10, R11 |
+| 5 | a row-variable user word (e.g. `( ..s 'a 'b -- ..s 'a 'b 'a 'b )`, `'a`/`'b: Copy`) runs, exercising a ≥2-output row expansion through R10/R11 | golden, run | R1, R5, R9, R10, R11, R14 |
 | 6 | `max` over `i64`, over `u8`, and over `usize` prints the larger operand each | golden, run | R12 |
 | 7 | `max-total` over two `f64` and two `f32` prints the total-ordered larger | golden, run | R13 |
-| 8 | the dogfood (`stack.sth`, rewritten) runs with output unchanged: `3` `3` `2` `1` `16` | golden, run | R10, R11, S5 |
+| 8 | the dogfood (`stack.sth`, rewritten) runs with output unchanged: `3` `3` `2` `1` `16` | golden, run | R10, R11, R14, S5 |
 | 9 | a two-output word's emitted body ends in one struct `Ret` with both outputs stored (not a dropped second value) | structural (emitted IR) | R10 |
+| 10 | a two-output word with a linear output field (`( -- ^i64 i64 )` via a Phase 3 owned cell) runs, freeing the owned cell exactly once (no double-free, no leak), and its interned bundle struct carries no synthesized destructor | golden, run + structural | R10, R11, R14 |
 | X1 | one `'`-name used in both a type slot and a count slot is a located declaration error | negative, message + `'T` | R1 |
 | X2 | `..s` in a non-deepest position, or twice on one side, is a located error | negative, message | R1 |
 | X3 | a bound on a use occurrence, or an unknown capability name, are two located errors | negative, message + name | R3 |
@@ -304,8 +377,8 @@ R11) they return directly:
 
 `type: Popped`, and every `Popped>` destructure at the call sites, are deleted; `main` calls
 `pop .` / `peek .` directly. Output is unchanged (`3` `3` `2` `1` `16`), so the golden pins the
-rewrite behaviourally. `Stack` is all-`Copy`, so the residual `Stack` after the last read is
-discarded by the trailing `drop` exactly as before.
+rewrite behaviourally. `Stack` is all-`Copy`; the trailing `drop` discards the items array that `Stack>items` yields
+(having consumed the `Stack`), exactly as in the original.
 
 **The plain D7 finding (reported, not papered over):** polymorphic `dup`/`swap` simplify **no**
 existing example, because they already accepted every type: the shuffles were type-transparent
@@ -348,8 +421,14 @@ one-directional (declared signature against a concrete stack), never full type i
   linear and the interning or the disposal fold treats the bundle as an owning aggregate, a double
   free or a leak results. Mitigation: the bundle exists only across the adjacent pack/unpack, is
   never bound to a local, never surplus-checked, and its fields are moved out through the existing
-  `S>` destructure path, the same shape `Popped` already exercises. Pinned by criterion 2/5's runs
-  and by a golden with a linear output field if one is reachable in this slice.
+`S>` destructure path, the same shape `Popped` already exercises. A multi-output word with a linear
+output field **is** reachable this slice (`( -- ^i64 i64 )` via Phase 3 owned cells), so this is
+live, not hypothetical, and is *enforced*, not asserted: R10 marks the interned bundle with a
+`bundle` flag on its `StructLayout` and `synthesize_aggregate_destructors` skips flagged structs
+(`is_linear && !bundle`), so no destructor is ever synthesized for a bundle even when a field is
+linear. Pinned by criterion 10: a `( -- ^i64 i64 )` word run that frees the owned cell exactly once
+(no double-free, no leak), with a structural check that the bundle struct carries no destructor
+symbol.
 - **Body checking with opaque variable placeholders (R7).** A placeholder must unify only with
   itself and must not accidentally satisfy a concrete-type predicate (e.g. `is_aggregate`,
   numeric-op dispatch) and thereby accept a body that a real instantiation would reject. Mitigation:
@@ -372,7 +451,8 @@ one-directional (declared signature against a concrete stack), never full type i
   runtime `value_type`, emit no `Instr::Call`. → S3.
 - The multi-output desync, `src/ir.rs:2233-2246`: `ret = if out_arity == 1 { Some(...) } else
   { None }`, second output silently dropped. → R11.
-- `lower_word` finalization pops one output: `src/ir.rs:1762`; `IrFunc.ret: Option<IrType>`,
+- `lower_word` finalization pops one output: `src/ir.rs:1761` (and the single-output ret projection
+  `let ret = word.effect.outputs.first().map(...)` at `src/ir.rs:1705`); `IrFunc.ret: Option<IrType>`,
   `Terminator::Ret(Option<Value>)` single-valued. → R10.
 - `Arity = (usize, usize, Option<IrType>)`: `src/ir.rs:961`; `Instr::Call(Option<Value>, ...)`:
   `src/ir.rs:861`. → R10, R11.
@@ -382,6 +462,12 @@ one-directional (declared signature against a concrete stack), never full type i
 - `parse_effect`/`parse_slot`/`parse_type_expr`/`parse_array_type_expr`:
   `src/parser.rs:644`/`:663`/`:709`/`:804`. `'`/`..` are not delimiters. → R1, R3.
 - `type: Popped` bundling in `examples/stack.sth` (and `list.sth`, `vm.sth`): the D7 dogfood. → S5.
+- `Term { kind, span }` / `Span { line, col }` (`#[derive(... Eq)]`, no `Hash` yet):
+  `src/ast.rs:598`/`:5`; `lower_term` passes only `term.span.line` into `lower_call`: `src/ir.rs:2015`.
+  → R14 (call-site key).
+- `StructLayout` (bundle-flag home, beside `is_linear`): `src/ir.rs:188`/`:195`;
+  `synthesize_aggregate_destructors` filters on `is_linear`: `src/ir.rs:1106` (filter at `:1122`).
+  → R10/R11 (bundle-destructor suppression).
 
 ## Phases JSON
 
@@ -390,31 +476,33 @@ one-directional (declared signature against a concrete stack), never full type i
   "phases": [
     {
       "phase": 1,
-      "focus": "Multi-output aggregate-return ABI (S2): synthesize and intern a bundle struct for any word with a concrete output count >= 2; extend lower_word's finalization to pack the top out_arity stack values into it and Ret it (R10); stop lower_call's fallthrough discarding results when out_arity >= 2 and unpack the bundle back onto the stack via the S> destructure path (R11); update env's ret_ty and IrFunc.ret. Closes the recon-3 panic (src/ir.rs:2233-2246). No new Instr. Exit: criteria 2, 9.",
+      "focus": "Multi-output aggregate-return ABI (S2): synthesize and intern a bundle struct for any word with a concrete output count >= 2, marked with a StructLayout bundle flag so synthesize_aggregate_destructors skips it and never double-frees a linear output field (B4); extend lower_word's two touch-points (the ret projection at src/ir.rs:1705 and the finalization at src/ir.rs:1761) to pack the top out_arity stack values into the bundle and Ret it (R10); stop lower_call's fallthrough discarding results when out_arity >= 2 and unpack the bundle back onto the stack via the S> destructure path, sourcing the per-call-site out_arity/bundle type from the check-to-lower instantiation table rather than the name-keyed env (R11, R14); update env's ret_ty and IrFunc.ret. Closes the recon-3 panic (src/ir.rs:2233). No new Instr. Exit: criteria 2, 9, 10.",
       "effort": "high",
       "difficulty": "hard"
     },
     {
       "phase": 2,
-      "focus": "Checker-side variable machinery (S1/S4): PolyType/PolySig representation (R4) with no new Type variant and a concrete Slot stack; lex/parse 'T, 'N in count position, and ..s (R1) plus the 'T: Copy bound (R3); call-site unification and substitution (R5); bound checking at the instantiation (R6); polymorphic-body checking with opaque placeholders and the is_copy/is_linear variable arm (R7); instantiation recording (R8). Checker-only; polymorphic words do not lower yet. Exit: X1, X2, X3, X4, X5, X6, X7, X8 as diagnostic goldens.",
+      "focus": "Checker-side variable machinery (S1/S4): PolyType/PolySig representation (R4) with no new Type variant and a concrete Slot stack; lex/parse 'T, 'N in count position, and ..s (R1) plus the 'T: Copy bound (R3); call-site unification and substitution (R5); bound checking at the instantiation (R6); polymorphic-body checking over a separate PolyType stack (R7) with is_copy/is_linear left unmodified (bare-variable copy/Ord answered from the bound set, no catch-all); instantiation recording (R8); build the check-to-lower instantiation table keyed by call-site span, carrying theta + mangled symbol + concrete out_arity + bundle output types (R14). Checker-only; polymorphic words do not lower yet. Exit: X1, X2, X3, X4, X5, X6, X7, X8 as diagnostic goldens.",
       "effort": "high",
       "difficulty": "hard"
     },
     {
       "phase": 3,
-      "focus": "Monomorphization lowering (R9): emit one mangled IrFunc per recorded instantiation, substituting the ground theta into effect and body types, reusing the struct_drop_symbol-style mangling; resolve each call site to its instantiation's symbol; length variables discharged by concrete N in the monomorphized body. Depends on phase 1 (a polymorphic instantiation may be multi-output / row-expanded) and phase 2 (the recorded instantiations). Makes phase-2 polymorphic words run. Exit: criteria 3, 4, 5.",
+      "focus": "Monomorphization lowering (R9): emit one mangled IrFunc per recorded instantiation, substituting the ground theta into effect and body types, reusing the struct_drop_symbol-style mangling; resolve each call site to its instantiation's symbol through the R14 instantiation table (not the name-only Resolver); length variables discharged by concrete N in the monomorphized body. Depends on phase 1 (a polymorphic instantiation may be multi-output / row-expanded) and phase 2 (the recorded instantiations and the R14 table). Makes phase-2 polymorphic words run. Exit: criteria 3, 4, 5.",
       "effort": "high",
       "difficulty": "hard"
     },
     {
       "phase": 4,
       "focus": "max and max-total builtins (S6/D6): inline max over the integer tower (R12) with a compare-and-select lowering and a located rejection of floats naming max-total (X9); inline max-total over f32/f64 by the total_cmp bit-pattern rule (R13) with a located rejection of integers naming max (X10). Builtins only, no monomorphization. Exit: criteria 6, 7.",
-      "effort": "medium"
+      "effort": "medium",
+      "difficulty": "medium"
     },
     {
       "phase": 5,
-      "focus": "Dogfood and docs (S5/D7): rewrite examples/stack.sth so pop/peek return ( Stack -- Stack i64 ) directly, delete type: Popped and every Popped> destructure, output unchanged 3/3/2/1/16 (criterion 8); record the plain D7 finding that polymorphic dup/swap/max touch no existing example; note the slice's decisions in DESIGN.md/ROADMAP.md; run the addition-only regression check (R2, R17). Exit: criterion 1, criterion 8.",
-      "effort": "low"
+      "focus": "Dogfood and docs (S5/D7): rewrite examples/stack.sth so pop/peek return ( Stack -- Stack i64 ) directly, delete type: Popped and every Popped> destructure, output unchanged 3/3/2/1/16 (criterion 8); record the plain D7 finding that polymorphic dup/swap/max touch no existing example; note the slice's decisions in DESIGN.md/ROADMAP.md; run the addition-only regression check (R2, R15). Exit: criterion 1, criterion 8.",
+      "effort": "low",
+      "difficulty": "easy"
     }
   ]
 }
