@@ -1151,12 +1151,20 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .filter(|w| w.poly.is_some())
         .map(|w| (w.name.as_str(), w))
         .collect();
+    // Dedup by symbol and sort, so the monomorphized funcs emit in a fixed
+    // order regardless of `instantiations`' randomized HashMap iteration --
+    // the rest of the module emits deterministically from `Vec`-ordered words,
+    // and the IL should too.
+    let mut distinct: Vec<(String, &CallInst)> = Vec::new();
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for inst in module.instantiations.values() {
         let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
-        if !emitted.insert(symbol.clone()) {
-            continue;
+        if emitted.insert(symbol.clone()) {
+            distinct.push((symbol, inst));
         }
+    }
+    distinct.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (symbol, inst) in distinct {
         let word = poly_words[inst.callee.as_str()];
         let sig = word
             .poly
@@ -3248,12 +3256,17 @@ impl<'a> FuncBuilder<'a> {
         let in_arity = self.poly_arities[&inst.callee];
         let split = self.stack.len() - in_arity;
         let args = self.stack.split_off(split);
-        let ret_ty: Option<IrType> = match inst.bundle {
-            Some(id) => Some(IrType::Struct(id)),
-            None => inst.output_types.first().map(|t| ir_type_of(*t)),
-        };
         let ret = if inst.out_arity == 1 || inst.bundle.is_some() {
-            Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+            let ret_ty = match inst.bundle {
+                Some(id) => IrType::Struct(id),
+                None => ir_type_of(
+                    *inst
+                        .output_types
+                        .first()
+                        .expect("out_arity == 1 guarantees a single output type"),
+                ),
+            };
+            Some(self.fresh_value(ret_ty))
         } else {
             None
         };
