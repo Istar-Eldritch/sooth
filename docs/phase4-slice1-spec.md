@@ -316,7 +316,15 @@ single `Option<Value>`. No new IR variant. Structural check: a two-output word's
 in one `Ret` of a struct value, with the two outputs stored into it.
 
 **R11: The multi-output aggregate ABI, caller side (closes recon 3).** `lower_call`'s fallthrough
-(`src/ir.rs:2233`) stops discarding results when `out_arity >= 2`. Where the `out_arity` and bundle
+(`src/ir.rs:2233`) stops discarding results when `out_arity >= 2` **and `env`'s `ret_ty` for this
+call is a bundle `Struct` (R10) or an R14 table entry exists**: the discriminator is bundle
+presence, not the raw `out_arity` count. This matters because `lower_call` is shared with the REPL
+(`src/repl.rs:853`'s `ir::lower_line`), whose own `ir_arity_env` (`src/repl.rs:104-109`) derives
+`ret_ty` from `sig.outputs.first()` (a scalar) and never interns a bundle, since the REPL calls
+`check::infer_line`, never `check::check` (R10's check-time interning). A monomorphic multi-output
+word defined at the REPL is therefore **out of scope this slice** (consistent with D2): it must hit
+neither the new unpack branch (guarded out by the bundle-presence check above) nor silently keep
+today's panic path repurposed for a different failure. Where the `out_arity` and bundle
 output types come from splits by mono-vs-poly: For a **monomorphic** multi-output call (`pair`, the
 dogfood's `pop`/`peek`, the `( -- ^i64 i64 )` cell word: criteria 2, 8, 10) they come straight from
 the name-keyed `env`: its `Arity` already carries the output count (`src/ir.rs:961`) and its `ret_ty`
