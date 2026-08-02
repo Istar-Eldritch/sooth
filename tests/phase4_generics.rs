@@ -159,6 +159,23 @@ fn row_variable_word_expands_to_a_multi_output_bundle_and_runs() {
 }
 
 #[test]
+fn row_variable_passes_a_non_empty_below_stack_through_in_order() {
+    // R5/R9: the row variable is a below-stack marker, so values pushed before
+    // the fixed inputs must survive untouched and in order beneath the word's
+    // outputs. Here `..s` binds `9 8` (not the empty stack the sibling golden
+    // exercises): `9 8 1 2 dup2` leaves `9 8 1 2 1 2`, so printing top-first
+    // yields the two duplicated outputs, then the two originals, then `8 9`.
+    let (stdout, code) = run_src(
+        "dup2_row",
+        ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+         : main ( -- ) 9 8 1 2 dup2 . . . . . . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "2\n1\n2\n1\n8\n9\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn two_output_word_result_feeds_another_call() {
     // R11: the unpacked values are ordinary stack values, so they flow into
     // the next word exactly as any other operands do.

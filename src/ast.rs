@@ -42,7 +42,7 @@ pub struct Module {
     pub externs: Vec<ExternDecl>,
     /// R14 (phase 4 slice 1): one entry per call site of a polymorphic word,
     /// keyed by the call site's `Span`, emitted by the checker and consumed by
-    /// lowering (Phase 3). Empty for a program with no polymorphic calls.
+    /// lowering. Empty for a program with no polymorphic calls.
     pub instantiations: std::collections::HashMap<Span, CallInst>,
 }
 
@@ -390,16 +390,6 @@ pub enum Bound {
     Ord,
 }
 
-impl Bound {
-    /// The capability's surface spelling, for diagnostics.
-    pub fn name(&self) -> &'static str {
-        match self {
-            Bound::Copy => "Copy",
-            Bound::Ord => "Ord",
-        }
-    }
-}
-
 /// R4: an array count in a polymorphic type: a concrete length or a length
 /// variable `'N` (index into `PolySig::len_var_names`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,17 +429,9 @@ pub struct PolySig {
 }
 
 impl PolySig {
-    /// The bounds declared on type variable `id`.
-    pub fn bounds_of(&self, id: u32) -> impl Iterator<Item = Bound> + '_ {
-        self.bounds
-            .iter()
-            .filter(move |(v, _)| *v == id)
-            .map(|(_, b)| *b)
-    }
-
     /// Whether type variable `id` carries `bound`.
     pub fn has_bound(&self, id: u32, bound: Bound) -> bool {
-        self.bounds_of(id).any(|b| b == bound)
+        self.bounds.iter().any(|(v, b)| *v == id && *b == bound)
     }
 }
 
@@ -461,8 +443,6 @@ impl PolySig {
 pub struct Subst {
     pub ty: Vec<(u32, Type)>,
     pub len: Vec<(u32, u32)>,
-    /// The concrete types the input row variable absorbed, deepest-first.
-    pub row: Vec<Type>,
 }
 
 impl Subst {
@@ -479,7 +459,7 @@ impl Subst {
 
 /// R14: the per-call-site instantiation record the checker emits for a call to
 /// a polymorphic word, keyed by the call site's `Span` in
-/// `Module::instantiations`. Lowering (Phase 3) reads exactly what the
+/// `Module::instantiations`. Lowering reads exactly what the
 /// name-keyed `Resolver`/`Arity` structurally cannot supply per call site: the
 /// ground `θ`, the mangled callee symbol, the concrete output arity, the
 /// ordered concrete output types, and the bundle `StructId` when the output
@@ -496,7 +476,7 @@ pub struct CallInst {
 
 /// R9/R14: the mangled symbol for one instantiation `(word, θ)`. A pure,
 /// deterministic function of its inputs with no lowering-order dependence, so
-/// the Phase 2 call-site table and the Phase 3 `IrFunc.name` are minted from
+/// the checker's call-site table and the lowered `IrFunc.name` are minted from
 /// one source of truth and can never disagree. Mirrors `struct_drop_symbol`'s
 /// positional, id-based shape (a word name or a type spelling may hold
 /// characters no QBE symbol admits, so both are sanitized here).
@@ -512,9 +492,6 @@ pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
     }
     for (id, n) in &subst.len {
         parts.push(format!("n{id}_{n}"));
-    }
-    for (i, ty) in subst.row.iter().enumerate() {
-        parts.push(format!("r{i}_{}", sanitize(ty.name())));
     }
     format!("sooth_mono_{}__{}", sanitize(word), parts.join("_"))
 }

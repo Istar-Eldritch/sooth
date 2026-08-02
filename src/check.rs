@@ -1058,7 +1058,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     let mut dropped: Vec<Vec<Type>> = Vec::with_capacity(words.len());
     // R14: the per-call-site instantiation table, filled as each monomorphic
     // body's calls to polymorphic words are unified, then stored on the module
-    // for lowering (Phase 3).
+    // for lowering.
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
@@ -1108,9 +1108,9 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     intern_output_bundles(module);
     // R8/R14: each polymorphic instantiation whose resolved output count is
     // >= 2 needs the same kind of bundle a monomorphic multi-output word gets,
-    // interned into the same `module.structs` (reusing phase 1's interning) so
-    // lowering reads it back like any other struct. The table itself is then
-    // handed to lowering on the module.
+    // interned into the same `module.structs` (reusing the checker's earlier
+    // struct interning) so lowering reads it back like any other struct. The
+    // table itself is then handed to lowering on the module.
     for inst in insts.values_mut() {
         if inst.out_arity >= 2 {
             inst.bundle = Some(intern_bundle_struct(
@@ -2844,6 +2844,33 @@ fn poly_is_copy(
     }
 }
 
+/// R7 companion to the monomorphic `Scope`/`Moves`: the locals a polymorphic
+/// body binds, paired with the move state of the ones that are not `Copy`. A
+/// `Copy` local is read freely and never enters `moves`; a non-`Copy` local
+/// (a bare variable with no `Copy` bound, or a concrete linear slot) is
+/// consumed on its first read, so a second read is use-after-move and never
+/// reading it leaks at the word's end (nothing is dropped for you).
+#[derive(Debug, Clone, Default)]
+struct PolyScope {
+    locals: HashMap<String, PolyType>,
+    moves: HashMap<String, Option<Span>>,
+}
+
+impl PolyScope {
+    /// The non-`Copy` locals still holding an unconsumed value, name-sorted so
+    /// a body with two of them always reports the same one.
+    fn unconsumed(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .moves
+            .iter()
+            .filter(|(_, site)| site.is_none())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+}
+
 /// R7: check a polymorphic word's body once, over a virtual stack of
 /// `PolyType` (never the concrete `Slot` stack, S1/R4). Seeded from the
 /// declared fixed inputs; the input row variable is an opaque below-stack
@@ -2873,12 +2900,20 @@ fn check_poly_body(
         }
     };
     let stack = sig.inputs.clone();
-    let mut scope: HashMap<String, PolyType> = HashMap::new();
+    let mut scope = PolyScope::default();
     let residual = poly_walk(
         terms, stack, &mut scope, sig, &ctx, env, structs, enums, arrays,
     )?;
     if residual != sig.outputs {
         return Err(poly_output_mismatch_error(word, sig, &residual));
+    }
+    // A non-`Copy` local never read still holds its value here; nothing is
+    // auto-dropped, so it leaks. The monomorphic sibling rejects the same
+    // shape at `leave_block`; the residual check above cannot see a value
+    // parked in a local.
+    if let Some(local) = scope.unconsumed().first().map(|s| s.to_string()) {
+        let pt = scope.locals[&local].clone();
+        return Err(poly_local_unconsumed_error(word, sig, &local, &pt));
     }
     Ok(())
 }
@@ -2887,7 +2922,7 @@ fn check_poly_body(
 fn poly_walk(
     terms: &[Term],
     mut stack: Vec<PolyType>,
-    scope: &mut HashMap<String, PolyType>,
+    scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
@@ -2905,7 +2940,7 @@ fn poly_walk(
 fn poly_term(
     term: &Term,
     mut stack: Vec<PolyType>,
-    scope: &mut HashMap<String, PolyType>,
+    scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
@@ -2926,7 +2961,12 @@ fn poly_term(
             }
             let bound = stack.split_off(stack.len() - names.len());
             for (name, pt) in names.iter().zip(bound) {
-                scope.insert(name.clone(), pt);
+                // A non-`Copy` binding carries a consume-exactly-once
+                // obligation tracked in `moves`; a `Copy` one does not.
+                if !poly_is_copy(&pt, sig, structs, enums, arrays) {
+                    scope.moves.insert(name.clone(), None);
+                }
+                scope.locals.insert(name.clone(), pt);
             }
         }
         TermKind::If {
@@ -2982,7 +3022,7 @@ fn poly_call_term(
     name: &str,
     span: Span,
     mut stack: Vec<PolyType>,
-    scope: &HashMap<String, PolyType>,
+    scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
@@ -2990,9 +3030,18 @@ fn poly_call_term(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
 ) -> Result<Vec<PolyType>, String> {
-    // A named local reads back its bound `PolyType`.
-    if let Some(pt) = scope.get(name) {
-        stack.push(pt.clone());
+    // A named local reads back its bound `PolyType`. A non-`Copy` local is
+    // consumed on read (R3/D2): a second read is use-after-move, exactly as
+    // the monomorphic checker treats a linear local; a `Copy` local carries no
+    // such obligation and is absent from `moves`.
+    if let Some(pt) = scope.locals.get(name).cloned() {
+        if let Some(state) = scope.moves.get(name) {
+            if let Some(site) = *state {
+                return Err(poly_use_after_move_error(ctx, span, name, site));
+            }
+            scope.moves.insert(name.to_string(), Some(span));
+        }
+        stack.push(pt);
         return Ok(stack);
     }
     let need = |n: usize, holds: usize| underflow_error(ctx, span, name, n, holds);
@@ -3156,15 +3205,14 @@ fn poly_copy_gate(
             &sig.ty_var_names[*v as usize],
         )),
         PolyType::Concrete(t) => Err(cannot_copy_error(ctx, span, op, *t)),
-        PolyType::Array(elem, _) => match elem.as_ref() {
-            PolyType::Var(v) => Err(poly_copy_body_error(
-                ctx,
-                span,
-                op,
-                &sig.ty_var_names[*v as usize],
-            )),
-            _ => Err(cannot_copy_error(ctx, span, op, Type::I64)),
-        },
+        // A variable-bearing array is non-`Copy` exactly when its element is
+        // (a length-variable array is never interned, so the declaration-time
+        // `check_no_linear_array_elements` never sees it). Recurse so the
+        // error names the real offending element, an unbounded variable or a
+        // linear concrete type, never a fabricated one.
+        PolyType::Array(elem, _) => {
+            poly_copy_gate(elem, op, sig, ctx, span, structs, enums, arrays)
+        }
     }
 }
 
@@ -3393,6 +3441,36 @@ fn apply_subst(
             Ok(intern_array_type(arrays, elem_ty, count))
         }
     }
+}
+
+/// R7 twin of `linear_local_unconsumed_error` for the polymorphic body
+/// checker: a local bound to a non-`Copy` slot still holds its value at the
+/// word's end. Names the local and its slot so the diagnostic matches the one
+/// a concrete instantiation would already get from the monomorphic checker.
+fn poly_local_unconsumed_error(
+    word: &WordDef,
+    sig: &PolySig,
+    local: &str,
+    pt: &PolyType,
+) -> String {
+    format!(
+        "error: linear value `{}` is never consumed in `{}`\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)",
+        local,
+        word.name,
+        local,
+        poly_type_str(pt, sig),
+    )
+}
+
+/// R7 twin of `use_after_move_error` for the polymorphic body checker: a
+/// non-`Copy` local read again after its first read (which consumed it),
+/// citing the earlier read site.
+fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: use after move in `{where_}` (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
+        span.line, site.line, site.col,
+    )
 }
 
 fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
@@ -5874,6 +5952,28 @@ mod tests {
         let err = check_src(": bad ( 'T 'T -- bool ) > ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Ord"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_local_bound_and_never_read_is_unconsumed_error() {
+        // A `'T` bound to a local and never read leaks: the polymorphic body
+        // checker rejects it exactly as the monomorphic sibling rejects
+        // `( ^i64 -- ) | x | ;`, naming the variable.
+        let err = check_src(": leaky ( 'T -- ) | x | ;\n: main ( -- ) ;").unwrap_err();
+        assert!(
+            err.contains("linear value `x` is never consumed"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn check_poly_local_read_twice_is_use_after_move() {
+        // Reading a non-`Copy` local a second time is use-after-move: the
+        // polymorphic checker rejects it as the monomorphic sibling rejects
+        // `( ^i64 -- ^i64 ^i64 ) | x | x x ;`, naming the variable.
+        let err = check_src(": twice ( 'T -- 'T 'T ) | x | x x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains('x'), "unexpected message: {err}");
     }
 
     #[test]

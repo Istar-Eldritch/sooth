@@ -1136,9 +1136,9 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 
     // R9: one monomorphized `IrFunc` per distinct recorded instantiation.
     // Every call site of a polymorphic word wrote a `CallInst` keyed by its
-    // span, carrying the symbol Phase 2 minted for its own R14 table entry.
+    // span, carrying the symbol the checker minted for its own R14 table entry.
     // `IrFunc.name` here is *not* read from that field: `instantiation_symbol`
-    // is called again on `(word, θ)`, the same pure function Phase 2 called,
+    // is called again on `(word, θ)`, the same pure function the checker called,
     // so the emitted symbol and the call site's `Instr::Call` target are two
     // independent computations that can only agree because the function is
     // deterministic, not because one was copied from the other. θ is ground,
@@ -3253,7 +3253,6 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Lower a generated struct word inline, first field deepest.
     /// R10, callee side: pop the top `n` stack values into a fresh bundle of
     /// `id` (deepest output first, matching the field order the checker
     /// interned) and yield it as the word's single returned value. Literally
@@ -3309,6 +3308,7 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
+    /// Lower a generated struct word inline, first field deepest.
     fn lower_struct_word(&mut self, sw: StructWord) {
         match sw {
             StructWord::Construct(id) => {
@@ -3411,11 +3411,6 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// `tail` (R1) is true when this `if` is itself in tail position; it then
-    /// hands tail position to the last term of both arms, so a self-call at the
-    /// end of either arm back-edges (R7). An arm that back-edges leaves the
-    /// builder `terminated` and contributes no predecessor to the join; the
-    /// join is elided entirely when both arms back-edge (R8, both-arms-tail).
     /// A two-block compare-and-select (`max`/`max-total`'s shared shape,
     /// R12/R13): branch on `cond`, run each closure in its own block to
     /// produce that arm's value, and join with one `Phi`. Simpler than
@@ -3502,6 +3497,11 @@ impl<'a> FuncBuilder<'a> {
         )
     }
 
+    /// `tail` (R1) is true when this `if` is itself in tail position; it then
+    /// hands tail position to the last term of both arms, so a self-call at the
+    /// end of either arm back-edges (R7). An arm that back-edges leaves the
+    /// builder `terminated` and contributes no predecessor to the join; the
+    /// join is elided entirely when both arms back-edge (R8, both-arms-tail).
     fn lower_if(&mut self, then_branch: &[Term], else_branch: &[Term], tail: bool) {
         let test = self.stack.pop().expect("if: test value");
         let then_id = self.fresh_block();
@@ -5315,8 +5315,7 @@ mod tests {
         // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
         // blit), unlike a scalar `dup` which reuses the value id. Single
         // output plus a `drop` of the extra copy, so this measures only
-        // `dup`'s own copy, not the phase 4 slice 1 bundle-pack path (see
-        // `lower_two_output_word_returns_one_bundle_holding_both` for that).
+        // `dup`'s own copy, not the multi-output bundle-pack path.
         let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 ) dup drop ;");
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
         assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
@@ -5498,7 +5497,7 @@ mod tests {
         // R15: `dup` of an enum copies the aggregate bytes (fresh alloc +
         // blit), like a struct and unlike a scalar. Single output plus a
         // `drop` of the extra copy, so this measures only `dup`'s own copy,
-        // not the phase 4 slice 1 bundle-pack path.
+        // not the multi-output bundle-pack path.
         let ir = lower_src(
             "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt ) dup drop ;",
         );
