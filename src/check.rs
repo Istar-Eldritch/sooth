@@ -2959,6 +2959,14 @@ fn poly_term(
                 let op = format!("| {} |", names.join(" "));
                 return Err(underflow_error(ctx, span, &op, names.len(), stack.len()));
             }
+            // R4 twin of the monomorphic binder: re-binding a name still in
+            // scope would orphan the earlier binding, and a non-`Copy` value
+            // parked in it could then never be consumed (a silent leak).
+            for name in names {
+                if scope.locals.contains_key(name) {
+                    return Err(rebound_local_error(ctx, span, name));
+                }
+            }
             let bound = stack.split_off(stack.len() - names.len());
             for (name, pt) in names.iter().zip(bound) {
                 // A non-`Copy` binding carries a consume-exactly-once
@@ -5973,7 +5981,42 @@ mod tests {
         // `( ^i64 -- ^i64 ^i64 ) | x | x x ;`, naming the variable.
         let err = check_src(": twice ( 'T -- 'T 'T ) | x | x x ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("local `x`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_local_rebound_while_in_scope_is_error() {
+        // R4 twin of the monomorphic rebinding rejection: a second `| x |`
+        // while `x` is still in scope would orphan the first binding, leaking
+        // the non-`Copy` value parked in it. Reject at compile time, naming the
+        // variable, exactly as `( ^i64 ^i64 -- ^i64 ) | x | | x | x ;` is.
+        let err =
+            check_src(": shadow ( 'T 'T -- 'T ) | x | | x | x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("already bound"), "unexpected message: {err}");
         assert!(err.contains('x'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_dup_of_variable_element_array_names_type_variable() {
+        // R7/`poly_copy_gate` array arm: `dup` of an array whose element is an
+        // unbounded `'T` recurses to the element and names the variable, not a
+        // fabricated `i64`.
+        let err =
+            check_src(": bad ( ['T 'N] -- ['T 'N] ['T 'N] ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Copy"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_dup_of_linear_element_array_names_element_type() {
+        // `poly_copy_gate` array arm: `dup` of a length-variable array whose
+        // element is a concrete linear struct names that struct, never `i64`.
+        let err = check_src(&format!(
+            "{SPY}: bad ( [Spy 'N] -- [Spy 'N] [Spy 'N] ) dup ;\n: main ( -- ) ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("Spy"), "unexpected message: {err}");
+        assert!(err.contains("linear"), "unexpected message: {err}");
     }
 
     #[test]
