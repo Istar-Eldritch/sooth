@@ -751,11 +751,24 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    **Closes the multi-output lowering hole**, which stops being deferrable here: a `..s` in
    output position *is* a word with a statically-unknown number of outputs, so row variables
    cannot ship on a lowering path that panics on two. The defect is long-standing and
-   independent of this phase (`: pair ( i64 -- i64 i64 ) dup ;` panics in `src/ir.rs`, at
-   `print: value` or a subtract overflow depending on how the results are consumed); it was
-   noted and passed over three times (the Slice 6 spec, and 8b's brief and spec, the latter
-   rejecting multi-output `extern:` at the declaration precisely to avoid it) and has never
-   had a home. This is its home.
+   independent of this phase; it was noted and passed over three times (the Slice 6 spec, and
+   8b's brief and spec, the latter rejecting multi-output `extern:` at the declaration
+   precisely to avoid it) and has never had a home. It lands here rather than as a standalone
+   warm-up fix because **it is not a separate decision**: "how do two values cross a call
+   boundary" and "how does `..s` cross a call boundary" are one question, and answering it
+   early, without the constraint that actually stresses it, risks answering it twice and
+   inconsistently. A stopgap diagnostic rejecting multi-output calls is also not worth taking,
+   since this slice removes it again immediately.
+   Two things the brief should start from. **The defect is narrower than "multi-output words
+   are broken"**: defining one checks and lowers fine (ten existing tests assert exactly that,
+   including `: w ( -- bool bool bool )` lowering successfully), and only the *call* desyncs
+   the stack — `lower_call` builds a result only when `out_arity == 1`, `Instr::Call` carries
+   an `Option<Value>`, and `env` stores a single `ret_ty`, so there is nowhere to put a second
+   output. And **the likely answer already exists in the tree**: aggregate returns work today
+   (`vm-pop ( Vm -- VmPop )` in `examples/vm.sth` is a shipped word returning a struct), so
+   multi-output can plausibly synthesize the bundling users currently do by hand, against
+   machinery that is already load-bearing. Out-parameters and a carried stack are the
+   alternatives to weigh against it.
    **The float total-ordering decision, deferred from the floats slice, lands here**: float
    `<`/`=` are IEEE-partial, so a `max`/sort over floats needs an explicit total order
    (Rust-`total_cmp` style) surfaced at the call site rather than pretending IEEE ordering
