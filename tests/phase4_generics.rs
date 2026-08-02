@@ -170,15 +170,19 @@ fn max_over_the_integer_tower_prints_the_larger_operand() {
 
 #[test]
 fn max_total_over_floats_prints_the_total_ordered_larger() {
-    // Criterion 7 (R13): `max-total` over two `f64` and two `f32`, both cases
-    // where IEEE order and total order agree.
+    // Criterion 7 (R13): `max-total` over two `f64` and two `f32`. The first
+    // two lines are positive pairs; the negative and mixed-sign pairs exercise
+    // the sign-set branch of the `total_cmp` key, where a raw unsigned compare
+    // of the bit patterns would pick the wrong operand without the transform.
     let (stdout, code) = run_src(
         "maxtotal",
         ": main ( -- )\n\
          1.5 2.5 max-total .\n\
-         3.5 >f32 1.5 >f32 max-total . ;\n",
+         3.5 >f32 1.5 >f32 max-total .\n\
+         -3.0 -5.0 max-total .\n\
+         -1.0 2.0 max-total . ;\n",
         false,
     );
-    assert_eq!(stdout, "2.5\n3.5\n");
+    assert_eq!(stdout, "2.5\n3.5\n-3\n2\n");
     assert_eq!(code, 0);
 }
