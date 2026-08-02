@@ -2959,10 +2959,14 @@ fn poly_term(
                 let op = format!("| {} |", names.join(" "));
                 return Err(underflow_error(ctx, span, &op, names.len(), stack.len()));
             }
-            // R4 twin of the monomorphic binder: re-binding a name still in
-            // scope would orphan the earlier binding, and a non-`Copy` value
-            // parked in it could then never be consumed (a silent leak).
+            // R4 twin of the monomorphic binder: a duplicate name inside this
+            // one bind group would orphan the earlier binding, and re-binding a
+            // name still in scope from an earlier group would do the same; a
+            // non-`Copy` value parked in either could then never be consumed (a
+            // silent leak).
+            let mut seen = HashSet::new();
             for name in names {
+                reject_duplicate_local(ctx, name, span, &mut seen)?;
                 if scope.locals.contains_key(name) {
                     return Err(rebound_local_error(ctx, span, name));
                 }
@@ -5993,6 +5997,17 @@ mod tests {
         let err =
             check_src(": shadow ( 'T 'T -- 'T ) | x | | x | x ;\n: main ( -- ) ;").unwrap_err();
         assert!(err.contains("already bound"), "unexpected message: {err}");
+        assert!(err.contains('x'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_duplicate_local_in_bind_group_is_error() {
+        // A name repeated inside one bind group (`| x x |`) orphans the first
+        // binding before the cross-group rebind guard can see it: the poly
+        // checker rejects it as the monomorphic sibling rejects
+        // `( ^i64 ^i64 -- ^i64 ) | x x | x ;`, naming the variable.
+        let err = check_src(": bad ( 'T 'T -- 'T ) | x x | x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
         assert!(err.contains('x'), "unexpected message: {err}");
     }
 
