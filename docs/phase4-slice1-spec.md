@@ -233,7 +233,14 @@ slice (see R14); the bodies under test call only the inlined shuffles/`max` and 
 **R8: Instantiation recording.** Each distinct ground θ for each polymorphic word is recorded in
 a per-module specialization set (deduped structurally, mirroring `intern_array_type`), consumed by
 lowering (R9). A word instantiated at only one concrete shape yields one specialization; at K
-shapes, K.
+shapes, K. Bundle-struct interning (R10) happens in the same check-time step and into the same
+`module` registries: whenever a word's *concrete* output count is >= 2, whether a monomorphic word
+like `pair` or a resolved instantiation of a polymorphic one, the checker interns its bundle struct
+into `module.structs` (deduped by output tuple, exactly as `intern_array_type` interns a shape into
+`module.arrays`), and the specialization carries the bundle's `StructId`. Bundle interning is
+therefore gated on output count, not on polymorphism, so a monomorphic multi-output word gets a
+bundle even though it has no θ entry. R8 and R10 name the same home, `module.structs`, filled at
+check time; lowering only reads it, it never interns.
 
 ### Lowering: monomorphization and the multi-output ABI (`src/ir.rs`, `src/backend/qbe.rs`)
 
@@ -262,7 +269,12 @@ instantiation) are out of scope, deferred to the Slice 5 inliner.
 `(word, θ)`, `ir::lower` substitutes θ into the word's effect and body types and emits one
 `IrFunc` under a **mangled** name keyed on θ's ground types, reusing the existing symbol-mangling
 scheme (`struct_drop_symbol`'s epoch-suffix shape, `src/ir.rs:288`; the same `mangled_symbol`
-device 8b used). A monomorphic word lowers once under its plain name, unchanged. A call site
+device 8b used). The mangling is a **pure, deterministic function of `(word, θ)`** with no
+lowering-order dependence, and that function is the single shared source of truth for the
+instantiation's symbol: Phase 2 computes `CallInst.symbol` in the R14 table by calling it, and
+Phase 3 emits this `IrFunc.name` by calling the same function on the same `(word, θ)`, so the
+call-site key and the emitted symbol can never disagree even though they are produced in different
+phases. A monomorphic word lowers once under its plain name, unchanged. A call site
 resolves to the mangled symbol for its own instantiation through the R14 instantiation table (not the
 name-only `Resolver`, which cannot key on θ). Because θ is
 ground, the monomorphized body carries concrete array types with concrete `N`, so
@@ -272,27 +284,49 @@ length-polymorphic by hand"). Builtins are exempt (S3).
 
 **R10: The multi-output aggregate ABI (S2), callee side.** A word (or monomorphized
 instantiation) whose **concrete** output count is ≥ 2 gets a synthesized *bundle struct*
-`__ret$<tuple>` interned in the struct registry, deduped by its output-type tuple and marked with a
-new `bundle: bool` flag on its `StructLayout` (`src/ir.rs:188`, beside `is_linear` at `:195`;
-`false` for every user `type:` struct, `true` only for a synthesized bundle). That flag is how the
-registry tells a bundle from a user struct, and it suppresses destructor synthesis (R11):
-`synthesize_aggregate_destructors` (`src/ir.rs:1106`) filters `layout.is_linear && !layout.bundle`,
-so a bundle acquires no drop glue even when a field is linear. Both `lower_word` touch-points move:
+`__ret$<tuple>` **interned at check time into `module.structs`**, deduped by its output-type tuple,
+exactly the way `intern_array_type` interns an array shape into `module.arrays` (R8). The bundle is a
+`StructDecl` carrying a new `is_bundle: bool` flag (`false` for every user `type:` struct, `true`
+only for a synthesized bundle), a separately-set bit mirroring how `StructDecl::has_drop_overload`
+is set rather than re-derived from the fields. Interning is done by the checker, not by lowering:
+`Registries` holds only shared `&structs` refs with no interior mutability (`src/ir.rs:518`), so
+`lower_word`/`lower_call` can never mint a new `StructLayout`. Because the bundle lands in
+`module.structs` before the layout pass, `build_registries` lays it out into `structs.layouts` like
+any user struct, computing its `size`/`align`/`is_linear` from its fields automatically and copying
+`is_bundle` onto a new `bundle: bool` flag of its `StructLayout` (`src/ir.rs:188`, beside
+`is_linear` at `:195`), exactly as it already copies `has_drop_overload` (`src/ir.rs:717`). That
+flag is how the registry tells a bundle from a user struct, and it suppresses destructor synthesis
+(R11): `synthesize_aggregate_destructors` (`src/ir.rs:1106`) iterates `structs.layouts` (bundles
+included, because they were interned before the layout pass) and filters
+`layout.is_linear && !layout.bundle`, so a bundle acquires no drop glue even when a field is linear.
+The backend emits it through `IrModule.structs = structs.layouts` like any other struct. This is why
+the filter is *enforced by construction*, not asserted (B4): were the bundle instead interned into a
+side `Vec` during lowering, `synthesize_aggregate_destructors` would never iterate it and the
+backend would never emit it. Both `lower_word` touch-points move:
 the single-output ret projection `let ret = word.effect.outputs.first().map(...)` (`src/ir.rs:1705`)
-must, for arity ≥ 2, yield the bundle's `IrType::Struct(bundle_id)` rather than only the first
-output's type; and the finalization `let result = if ret.is_some() { b.stack.pop() }`
+must, for arity ≥ 2, yield the bundle's `IrType::Struct(bundle_id)` (the `StructId` the checker
+interned for this word's output tuple, R8) rather than only the first output's type; and the
+finalization `let result = if ret.is_some() { b.stack.pop() }`
 (`src/ir.rs:1761`) allocates the bundle (`alloc_struct`), stores the top `out_arity` stack values
 into its fields deepest-first, and returns it via `Terminator::Ret(Some(bundle))`. `IrFunc.ret`
-becomes `Some(IrType::Struct(bundle_id))` and `env`'s `ret_ty` follows. `Instr::Call` keeps its
+becomes `Some(IrType::Struct(bundle_id))` and `env`'s `ret_ty` follows (derived at `src/ir.rs:1005`
+from the word's outputs; for arity ≥ 2 it is the bundle `StructId`, which is what lets a monomorphic
+multi-output caller read the bundle type straight from `env`, R11). `Instr::Call` keeps its
 single `Option<Value>`. No new IR variant. Structural check: a two-output word's emitted body ends
 in one `Ret` of a struct value, with the two outputs stored into it.
 
 **R11: The multi-output aggregate ABI, caller side (closes recon 3).** `lower_call`'s fallthrough
-(`src/ir.rs:2233`) stops discarding results when `out_arity >= 2`. The instantiation-specific
-`out_arity` and bundle output types come from the R14 table (`CallInst`), **not** the name-keyed
-`env`, which holds a single `Arity` per name and so cannot represent a per-θ output count: for a
-row-variable instantiation the count is per-θ, so R14 is the only carrier that has it (the same
-root cause as the caller-side symbol-resolution gap, fixed once by R14). It receives the single bundle value and immediately **unpacks**
+(`src/ir.rs:2233`) stops discarding results when `out_arity >= 2`. Where the `out_arity` and bundle
+output types come from splits by mono-vs-poly: For a **monomorphic** multi-output call (`pair`, the
+dogfood's `pop`/`peek`, the `( -- ^i64 i64 )` cell word: criteria 2, 8, 10) they come straight from
+the name-keyed `env`: its `Arity` already carries the output count (`src/ir.rs:961`) and its `ret_ty`
+is the bundle `IrType::Struct(bundle_id)` R10 set (derived at `src/ir.rs:1005`), so the caller takes
+the existing `env`/`Resolver` path with no table lookup (R14). Only for a **polymorphic per-θ
+instantiation** (a type- or row-variable word whose output count and/or bundle tuple vary per θ:
+criteria 3, 5) does a single `Arity` per name fail to represent the per-θ shape; there the
+per-instantiation `out_arity` and bundle output types come from the R14 table (`CallInst`), keyed by
+call-site `Span` (the same root cause as the caller-side symbol-resolution gap, fixed once by R14).
+Either way `lower_call` receives the single bundle value and immediately **unpacks**
 it into `out_arity` field loads pushed back onto the stack deepest-first (the reverse of R10's pack,
 reusing the destructure path the generated `S>` word already uses), so the caller's lowering stack
 matches the checker-verified stack exactly and the `print: value` / subtract-overflow panic is gone.
@@ -343,15 +377,15 @@ unit tests sit beside their stage (`src/lexer.rs`, `src/parser.rs`, `src/check.r
 | # | criterion | kind | maps |
 |---|---|---|---|
 | 1 | polymorphic `dup`/`swap` on `i64`, `bool`, and a struct in one program run correctly (already type-transparent; pins it) | golden, run | S3, R2 |
-| 2 | a user word `: pair ( i64 -- i64 i64 ) dup ;` called as `5 pair . .` prints `5` then `5` (recon-3 repro, no longer panics) | golden, run | R10, R11, R14 |
+| 2 | a user word `: pair ( i64 -- i64 i64 ) dup ;` called as `5 pair . .` prints `5` then `5` (recon-3 repro, no longer panics) | golden, run | R10, R11 |
 | 3 | a user word with a `'T: Copy` type variable, called at two concrete types, runs and prints both | golden, run | R1, R4–R7, R9, R14 |
 | 4 | a length-polymorphic user word over `[i64 4]` and `[i64 8]` runs (the recon-2 "unwritable" case, now written) | golden, run | R1, R5, R9 |
 | 5 | a row-variable user word (e.g. `( ..s 'a 'b -- ..s 'a 'b 'a 'b )`, `'a`/`'b: Copy`) runs, exercising a ≥2-output row expansion through R10/R11 | golden, run | R1, R5, R9, R10, R11, R14 |
 | 6 | `max` over `i64`, over `u8`, and over `usize` prints the larger operand each | golden, run | R12 |
 | 7 | `max-total` over two `f64` and two `f32` prints the total-ordered larger | golden, run | R13 |
-| 8 | the dogfood (`stack.sth`, rewritten) runs with output unchanged: `3` `3` `2` `1` `16` | golden, run | R10, R11, R14, S5 |
+| 8 | the dogfood (`stack.sth`, rewritten) runs with output unchanged: `3` `3` `2` `1` `16` | golden, run | R10, R11, S5 |
 | 9 | a two-output word's emitted body ends in one struct `Ret` with both outputs stored (not a dropped second value) | structural (emitted IR) | R10 |
-| 10 | a two-output word with a linear output field (`( -- ^i64 i64 )` via a Phase 3 owned cell) runs, freeing the owned cell exactly once (no double-free, no leak), and its interned bundle struct carries no synthesized destructor | golden, run + structural | R10, R11, R14 |
+| 10 | a two-output word with a linear output field (`( -- ^i64 i64 )` via a Phase 3 owned cell) runs, freeing the owned cell exactly once (no double-free, no leak), and its interned bundle struct carries no synthesized destructor | golden, run + structural | R10, R11 |
 | X1 | one `'`-name used in both a type slot and a count slot is a located declaration error | negative, message + `'T` | R1 |
 | X2 | `..s` in a non-deepest position, or twice on one side, is a located error | negative, message | R1 |
 | X3 | a bound on a use occurrence, or an unknown capability name, are two located errors | negative, message + name | R3 |
@@ -476,13 +510,13 @@ symbol.
   "phases": [
     {
       "phase": 1,
-      "focus": "Multi-output aggregate-return ABI (S2): synthesize and intern a bundle struct for any word with a concrete output count >= 2, marked with a StructLayout bundle flag so synthesize_aggregate_destructors skips it and never double-frees a linear output field (B4); extend lower_word's two touch-points (the ret projection at src/ir.rs:1705 and the finalization at src/ir.rs:1761) to pack the top out_arity stack values into the bundle and Ret it (R10); stop lower_call's fallthrough discarding results when out_arity >= 2 and unpack the bundle back onto the stack via the S> destructure path, sourcing the per-call-site out_arity/bundle type from the check-to-lower instantiation table rather than the name-keyed env (R11, R14); update env's ret_ty and IrFunc.ret. Closes the recon-3 panic (src/ir.rs:2233). No new Instr. Exit: criteria 2, 9, 10.",
+      "focus": "Multi-output aggregate-return ABI (S2), monomorphic path only (criteria 2, 9, 10 are all monomorphic multi-output words, so this phase needs no variable machinery and no R14 table): at check time, intern a bundle struct into module.structs for any word with a concrete output count >= 2 (a new StructDecl is_bundle flag that build_registries copies onto a new StructLayout bundle flag at src/ir.rs:717, mirroring has_drop_overload), so synthesize_aggregate_destructors filters is_linear && !bundle and never double-frees a linear output field (B4, B5); extend lower_word's two touch-points (the ret projection at src/ir.rs:1705 and the finalization at src/ir.rs:1761) to pack the top out_arity stack values into the bundle and Ret it, setting IrFunc.ret and env's ret_ty (src/ir.rs:1005) to the bundle Struct type (R10); stop lower_call's fallthrough discarding results when out_arity >= 2 and unpack the bundle back onto the stack via the S> destructure path, sourcing the monomorphic caller's out_arity/bundle type straight from the name-keyed env/ret_ty, no instantiation table (R11). Closes the recon-3 panic (src/ir.rs:2233). No new Instr, no dependency on the R14 table (built in phase 2). Exit: criteria 2, 9, 10.",
       "effort": "high",
       "difficulty": "hard"
     },
     {
       "phase": 2,
-      "focus": "Checker-side variable machinery (S1/S4): PolyType/PolySig representation (R4) with no new Type variant and a concrete Slot stack; lex/parse 'T, 'N in count position, and ..s (R1) plus the 'T: Copy bound (R3); call-site unification and substitution (R5); bound checking at the instantiation (R6); polymorphic-body checking over a separate PolyType stack (R7) with is_copy/is_linear left unmodified (bare-variable copy/Ord answered from the bound set, no catch-all); instantiation recording (R8); build the check-to-lower instantiation table keyed by call-site span, carrying theta + mangled symbol + concrete out_arity + bundle output types (R14). Checker-only; polymorphic words do not lower yet. Exit: X1, X2, X3, X4, X5, X6, X7, X8 as diagnostic goldens.",
+      "focus": "Checker-side variable machinery (S1/S4): PolyType/PolySig representation (R4) with no new Type variant and a concrete Slot stack; lex/parse 'T, 'N in count position, and ..s (R1) plus the 'T: Copy bound (R3); call-site unification and substitution (R5); bound checking at the instantiation (R6); polymorphic-body checking over a separate PolyType stack (R7) with is_copy/is_linear left unmodified (bare-variable copy/Ord answered from the bound set, no catch-all); instantiation recording (R8); build the check-to-lower instantiation table keyed by call-site span, carrying theta + mangled symbol + concrete out_arity + bundle output types (R14), the mangled symbol minted by the existing struct_drop_symbol-style mangling primitive (src/ir.rs:288) applied deterministically to (word, theta), the single source of truth both this table key and phase 3's IrFunc.name (R9) are minted from, so they provably agree without phase 2 consuming any phase-3 artifact; reuse phase 1's check-time bundle interning for any instantiation whose resolved output count is >= 2. Checker-only; polymorphic words do not lower yet. Exit: X1, X2, X3, X4, X5, X6, X7, X8 as diagnostic goldens.",
       "effort": "high",
       "difficulty": "hard"
     },
