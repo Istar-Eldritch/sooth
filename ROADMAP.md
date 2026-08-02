@@ -176,9 +176,9 @@ pass, proportional to migration blast radius rather than design risk.
 **Phase 3 is complete.** Slice 7's opt-in RC is
 deferred to Phase 6, where it joins `Box`/`Vec`/`Map`/`String` in the `alloc` layer.
 **Next action: Phase 4 Slice 1** (type variables + row variables + length variables +
-monomorphization), the first of seven dependency-ordered slices now planned out under
-Phase 4. It also owns the long-standing multi-output lowering panic, which a row variable
-in output position makes unavoidable.
+monomorphization, native only), the first of eight dependency-ordered slices now planned
+out under Phase 4. It also owns the long-standing multi-output lowering panic, which a row
+variable in output position makes unavoidable.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -709,26 +709,37 @@ whole, land it in order. Phase 3's evidence for slicing rather than one big push
 its Slice 8 had to split into 8a/8b/8c mid-flight (`close` had to exist before the
 destructor mechanism could be designed against it) and its Slice 3 shipped covering only
 direct self-recursion, needing Slice 4 as a follow-on — both boundaries discovered late,
-under load. Process is calibrated per slice, not uniformly: slices 1–4 carry real design
-risk and want full specs, while 7 is a mechanical migration that can run 8c-style (no
+under load. Process is calibrated per slice, not uniformly: slices 1–5 carry real design
+risk and want full specs, while 8 is a mechanical migration that can run 8c-style (no
 spec, one implementation pass plus one review).
 
 **The paper pre-check that shaped this plan.** Before committing to the order, the four
 headline combinators (`each`/`fold`/`filter`/`while`) were hand-written against the
 planned feature set to see what they actually need. The exercise inverted the expected
 answer: quotation *capture*, the question that looked hardest, turned out to be a
-quality-of-life issue (see slice 3), while two things absent from the plan turned out to
-be load-bearing — length polymorphism and generic struct declarations, now slices 1 and 2.
+quality-of-life issue (see slice 4), while two things absent from the plan turned out to
+be load-bearing — length polymorphism and generic struct declarations, now slices 1 and 3.
 Same technique as `vm.sth`, which shipped with zero compiler changes and made that fact
 the Phase 2 exit verdict: write the program first, then find out what the compiler owes it.
 
-1. **Type variables + row variables + length variables + monomorphization.** The deepest
-   change, and first for that reason: `'T` and `..s` mean a `Sig` stops being purely
+1. **Type variables + row variables + length variables + monomorphization (native).** The
+   deepest change, and first for that reason: `'T` and `..s` mean a `Sig` stops being purely
    concrete, so unification and substitution touch every signature-checking path (blast
    radius comparable to Phase 2 Slice 1's typed-core spine, which is the closest precedent
-   for how invasive it is). Monomorphise per concrete stack shape, force-inline the small
-   core words. Required operations (`>` for `max`) resolve at the concrete instantiation,
-   Kitten-style, no formal trait system.
+   for how invasive it is). Monomorphise per concrete stack shape. Required operations (`>`
+   for `max`) resolve at the concrete instantiation, Kitten-style, no formal trait system.
+   **Native only — the REPL is slice 2**, split off because this slice already carries more
+   than 8b did and 8b was Phase 3's largest, needing three review rounds precisely because it
+   did the native and REPL halves together.
+   **No inlining here** (see slice 5). The phrase "force-inline the small core words" that
+   this entry used to carry is probably already satisfied and costs nothing: `dup`/`swap`/`+`
+   and friends are match arms in `lower_call` that never emit an `Instr::Call`, and
+   `check_shuffle` already dispatches on the concrete operand type, so "honest polymorphic
+   signatures" may be a checker-side change with no lowering work at all. The brief should
+   confirm that; if it holds, this slice adds no inlining machinery of any kind.
+   Dogfood: rewrite existing examples to use polymorphic words, rather than adding a new
+   example. The exit criterion ("polymorphic `dup`/`swap`/`max`") is a test, not a program,
+   and the existing corpus is the honest measure of whether the generics are usable.
    **A length variable (`'N`) is required, not optional** — the pre-check's main finding.
    An array's length is part of its type, so `[i64 8]` and `[i64 4]` are distinct and a word
    taking one rejects the other, while the builtin `len` accepts both: the compiler already
@@ -746,7 +757,7 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    6 restricts to a `Copy` referent, so `each`'s element variable needs the bound — while
    `fold`'s accumulator needs none and may legitimately be linear. **Per-variable, not a
    blanket "generics are Copy-only" rule.** The signature of a polymorphic `drop ( 'T -- )`
-   is the same question pointed at 8b's per-type overloads; parked for slice 5, but its
+   is the same question pointed at 8b's per-type overloads; parked for slice 6, but its
    answer must not be foreclosed here.
    **Closes the multi-output lowering hole**, which stops being deferrable here: a `..s` in
    output position *is* a word with a statically-unknown number of outputs, so row variables
@@ -773,7 +784,20 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    `<`/`=` are IEEE-partial, so a `max`/sort over floats needs an explicit total order
    (Rust-`total_cmp` style) surfaced at the call site rather than pretending IEEE ordering
    is total.
-2. **Generic struct declarations.** A `type:` parameterized by the slice 1 variables, with
+2. **REPL monomorphization.** Split from slice 1 to keep the phase's risk out of one commit,
+   and placed immediately after so no later slice builds on a REPL that cannot see a
+   polymorphic word. **The problem is retention.** `Session` keeps signatures in `env` but
+   discards ordinary word *bodies* once their line compiles to a `.so`; the only bodies it
+   retains are `drop_overloads`, which 8b added. A polymorphic word has no concrete
+   instantiation to compile at its defining line, and a later line's `5 id` needs `id@i64`
+   lowered into *that* line's `.so`, from a body the session threw away. So this generalizes
+   8b's retention scheme from "drop overrides" to "every polymorphic word" — and inherits its
+   hazards, which are documented in place and worth reading before designing: the stale-env
+   problem that `drop_dropped_sites` caches around (re-checking an earlier body against a
+   later line's env), and `RTLD_GLOBAL` symbol collision when two lines instantiate the same
+   word at the same type, which is what the epoch-suffixing machinery already solves for
+   destructors.
+3. **Generic struct declarations.** A `type:` parameterized by the slice 1 variables, with
    layout and the `StructId`/`ArrayId` registries keyed per instantiation. Its own slice
    rather than part of slice 1, which is already the phase's largest, and placed immediately
    after while that machinery is unbuilt-upon: monomorphising a *type declaration* extends
@@ -784,7 +808,7 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    length, so the pair must be bundled into a generic struct exactly as `vm.sth` bundles
    `VmPop`/`Fetched` today. That also makes this the workaround that keeps the multi-output
    hole from being on `filter`'s critical path, independently of slice 1 closing it.
-3. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
+4. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
    primitive they compile down to for constant-stack iteration, plus call-site inlining.
    After slice 1 because a combinator's signature has to *say* `[ 'a -- 'b ]`, which needs
    row variables to be expressible at all. **Capture is a quality-of-life question, not a
@@ -801,18 +825,32 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    scope after inlining — no environment, no allocation, and no `FnOnce`/`FnMut`/`Fn` split
    if capture is restricted to `Copy` locals. Escaping quotations stay out of scope
    regardless — they need the uniform-runtime-stack fallback and Phase 6's alloc layer.
-4. **The combinator library in Sooth + inlining (the phase's headline exit).**
+5. **The combinator library in Sooth + inlining (the phase's headline exit).**
    `each`/`map`/`filter`/`fold`/`while`/`times` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
-   tight loops rather than a `call` per element. Depends on 1–3 only, and comes *before* the
+   tight loops rather than a `call` per element. Depends on 1–4 only, and comes *before* the
    dispatch slices deliberately: it is the first real integration test of the type machinery
    against quotations, so if the two are awkward together, that feedback should arrive before
    three more mechanisms are built on top. The paper pre-check is not a substitute for this,
-   only a filter on the plan. Accepts one known churn cost — the library is written against
-   keyword `if` and gets rewritten when slice 7 turns `if` into a word — which is a handful
-   of library words, cheaper than reordering the phase around it. Dogfood: rewrite an earlier
-   program to use it.
-5. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
+   only a filter on the plan.
+   **This slice owns the inliner, and it is the only one** — there is no inlining anywhere in
+   the compiler today. Everything the source calls "inline" means "lowered straight to
+   instructions rather than a call" (builtins and generated struct/enum words are match arms
+   in `lower_call` that never emit `Instr::Call`); a user `:` word is always a real call.
+   **Nothing downstream will do it either**: QBE is a per-function backend and emits
+   `callq` even for a one-instruction function called with a constant (verified directly),
+   and the driver runs `cc` on a `.s` with no `-O` flags, so that is only the assembler. The
+   pass lands here rather than with monomorphization because combinators are *ordinary Sooth
+   library words*, so inlining them is inlining monomorphized user words — there is one
+   mechanism either way, and it should be designed against its first real consumer instead of
+   two slices ahead of one. That library-words commitment is what forces the pass at all: the
+   alternative is making combinators compiler-known and lowering them as match arms, cheaper
+   but forfeiting the thing the phase is trying to prove, in the same way `vm.sth` shipping
+   with zero compiler changes *was* the Phase 2 exit verdict.
+   Accepts one known churn cost — the library is written against keyword `if` and gets
+   rewritten when slice 8 turns `if` into a word — which is a handful of library words,
+   cheaper than reordering the phase around it. Dogfood: rewrite an earlier program to use it.
+6. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
    concrete types is a rule that gets rewritten once type variables exist. **The compiler
    already does this by hand and this slice is where it stops**: the numeric-tower operators
@@ -822,19 +860,19 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    overloads are the other such sites; the latter are explicitly parked for here ("`drop`
    becoming fully polymorphic is still Phase 4"), and absorbing them means retiring the
    hardcoded interception arms in `check.rs`/`ir.rs` that currently run before any env lookup.
-6. **Open multimethods.** `generic:`/`method:` on a sum: the open/dynamic dual of Phase 2
+7. **Open multimethods.** `generic:`/`method:` on a sum: the open/dynamic dual of Phase 2
    Slice 4's closed clause-style match, trading closed exhaustiveness for module-level
-   extensibility (the expression problem). Separate from slice 5 rather than bundled because
+   extensibility (the expression problem). Separate from slice 6 rather than bundled because
    it needs a runtime dispatch table — the language's first — where static overloading needs
    none. **Deferral candidate to Phase 6, on the same reasoning that moved opt-in RC out of
    Phase 3**: its stated payoff is extension across module boundaries, and Sooth is
    single-file until Phase 6 introduces modules, so the benefit is unobservable here and the
    design would be specified against a consumer that does not exist. Decide at its brief.
-7. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
+8. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
-   the other six enable: it needs quotations (slice 3) for `if` to be a word at all, and
-   dispatch (slice 5) so `Bool`'s type-directed printing becomes an ordinary overload instead
+   the other seven enable: it needs quotations (slice 4) for `if` to be a word at all, and
+   dispatch (slice 6) so `Bool`'s type-directed printing becomes an ordinary overload instead
    of a re-added special case — which is the whole point of waiting, per the bundle note
    above. Mechanically it is a large migration rather than a design problem: `bool` has been
    in the test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special
