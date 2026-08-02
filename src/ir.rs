@@ -3458,13 +3458,12 @@ impl<'a> FuncBuilder<'a> {
 
     /// R13: the `total_cmp` bit-pattern key for one `max-total` operand.
     /// Reinterprets `operand`'s IEEE bits as an unsigned integer (an 8-byte
-    /// scratch slot, zeroed so an `f32`'s untouched high bytes read as zero,
-    /// then stored/reloaded at the operand's own width — `Store`/`Load`
-    /// already dispatch on the value's declared `IrType`, R20), then maps the
-    /// bits to a monotone key: flip every bit if the sign bit is set, else
-    /// flip only the sign bit. Comparing two keys as unsigned integers then
-    /// reproduces the total order without ever comparing the floats
-    /// themselves.
+    /// scratch slot, stored/reloaded at the operand's own width — `Store`/
+    /// `Load` already dispatch on the value's declared `IrType`, R20), then
+    /// maps the bits to a monotone key: flip every bit if the sign bit is
+    /// set, else flip only the sign bit. Comparing two keys as unsigned
+    /// integers then reproduces the total order without ever comparing the
+    /// floats themselves.
     fn total_order_key(&mut self, operand: Value, bits: u8) -> Value {
         let uty = IrType::Int {
             bits,
@@ -3472,9 +3471,6 @@ impl<'a> FuncBuilder<'a> {
         };
         let slot = self.fresh_value(IrType::Ptr);
         self.push_alloc(Instr::Alloc(slot, 8, 8));
-        let zero8 = self.fresh_value(IrType::I64);
-        self.push_instr(Instr::Const(zero8, 0));
-        self.push_instr(Instr::Store(slot, zero8));
         self.push_instr(Instr::Store(slot, operand));
         let raw = self.fresh_value(uty);
         self.push_instr(Instr::Load(raw, slot));
