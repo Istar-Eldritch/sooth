@@ -2427,6 +2427,36 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Cmp(v, op, lhs, rhs));
                 self.stack.push(v);
             }
+            // R12 (S6): `max` over the integer tower, inline compare-and-select
+            // (`Cmp(Gt)` plus a two-block phi-join), no `Instr::Call`, no
+            // monomorphization.
+            "max" => {
+                let rhs = self.stack.pop().expect("max: rhs");
+                let lhs = self.stack.pop().expect("max: lhs");
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Gt, lhs, rhs));
+                let v = self.emit_select(cmp, |_| lhs, |_| rhs);
+                self.stack.push(v);
+            }
+            // R13 (S6): `max-total` over `f32`/`f64`, ordered by the
+            // `total_cmp` bit-pattern rule (map each operand's IEEE bits to a
+            // monotone unsigned key — flip every bit if the sign bit is set,
+            // else flip only the sign bit — then integer-compare the keys),
+            // so no float `>` is ever emitted.
+            "max-total" => {
+                let rhs = self.stack.pop().expect("max-total: rhs");
+                let lhs = self.stack.pop().expect("max-total: lhs");
+                let bits: u8 = match self.value_type(lhs) {
+                    IrType::Float { bits } => bits,
+                    other => unreachable!("checked: max-total operand is a float, got {other:?}"),
+                };
+                let lhs_key = self.total_order_key(lhs, bits);
+                let rhs_key = self.total_order_key(rhs, bits);
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Gt, lhs_key, rhs_key));
+                let v = self.emit_select(cmp, |_| lhs, |_| rhs);
+                self.stack.push(v);
+            }
             "." => {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
@@ -3386,6 +3416,96 @@ impl<'a> FuncBuilder<'a> {
     /// end of either arm back-edges (R7). An arm that back-edges leaves the
     /// builder `terminated` and contributes no predecessor to the join; the
     /// join is elided entirely when both arms back-edge (R8, both-arms-tail).
+    /// A two-block compare-and-select (`max`/`max-total`'s shared shape,
+    /// R12/R13): branch on `cond`, run each closure in its own block to
+    /// produce that arm's value, and join with one `Phi`. Simpler than
+    /// `lower_if`/`seal_arm` because a select's arms never back-edge (they
+    /// lower no user terms, just a handful of value-producing instructions),
+    /// so both predecessors always reach the join.
+    fn emit_select(
+        &mut self,
+        cond: Value,
+        then_fn: impl FnOnce(&mut Self) -> Value,
+        else_fn: impl FnOnce(&mut Self) -> Value,
+    ) -> Value {
+        let then_id = self.fresh_block();
+        let else_id = self.fresh_block();
+        let join_id = self.fresh_block();
+        self.seal_block(Terminator::Jnz(cond, then_id, else_id));
+
+        self.start_block(then_id);
+        self.terminated = false;
+        let then_val = then_fn(self);
+        let then_pred = self.cur_id;
+        self.seal_block(Terminator::Jmp(join_id));
+
+        self.start_block(else_id);
+        self.terminated = false;
+        let else_val = else_fn(self);
+        let else_pred = self.cur_id;
+        self.seal_block(Terminator::Jmp(join_id));
+
+        self.start_block(join_id);
+        self.terminated = false;
+        let ty = self.value_type(then_val);
+        let v = self.fresh_value(ty);
+        self.push_instr(Instr::Phi(
+            v,
+            vec![(then_pred, then_val), (else_pred, else_val)],
+        ));
+        v
+    }
+
+    /// R13: the `total_cmp` bit-pattern key for one `max-total` operand.
+    /// Reinterprets `operand`'s IEEE bits as an unsigned integer (an 8-byte
+    /// scratch slot, zeroed so an `f32`'s untouched high bytes read as zero,
+    /// then stored/reloaded at the operand's own width — `Store`/`Load`
+    /// already dispatch on the value's declared `IrType`, R20), then maps the
+    /// bits to a monotone key: flip every bit if the sign bit is set, else
+    /// flip only the sign bit. Comparing two keys as unsigned integers then
+    /// reproduces the total order without ever comparing the floats
+    /// themselves.
+    fn total_order_key(&mut self, operand: Value, bits: u8) -> Value {
+        let uty = IrType::Int {
+            bits,
+            signed: false,
+        };
+        let slot = self.fresh_value(IrType::Ptr);
+        self.push_alloc(Instr::Alloc(slot, 8, 8));
+        let zero8 = self.fresh_value(IrType::I64);
+        self.push_instr(Instr::Const(zero8, 0));
+        self.push_instr(Instr::Store(slot, zero8));
+        self.push_instr(Instr::Store(slot, operand));
+        let raw = self.fresh_value(uty);
+        self.push_instr(Instr::Load(raw, slot));
+
+        let sign_mask: i64 = 1i64 << (bits - 1);
+        let mask_v = self.fresh_value(uty);
+        self.push_instr(Instr::Const(mask_v, sign_mask));
+        let masked = self.fresh_value(uty);
+        self.push_instr(Instr::Bin(masked, BinOp::And, raw, mask_v));
+        let zero_u = self.fresh_value(uty);
+        self.push_instr(Instr::Const(zero_u, 0));
+        let is_neg = self.fresh_value(IrType::Bool);
+        self.push_instr(Instr::Cmp(is_neg, CmpOp::Ne, masked, zero_u));
+
+        self.emit_select(
+            is_neg,
+            |b| {
+                let all_ones = b.fresh_value(uty);
+                b.push_instr(Instr::Const(all_ones, -1));
+                let key = b.fresh_value(uty);
+                b.push_instr(Instr::Bin(key, BinOp::Xor, raw, all_ones));
+                key
+            },
+            |b| {
+                let key = b.fresh_value(uty);
+                b.push_instr(Instr::Bin(key, BinOp::Xor, raw, mask_v));
+                key
+            },
+        )
+    }
+
     fn lower_if(&mut self, then_branch: &[Term], else_branch: &[Term], tail: bool) {
         let test = self.stack.pop().expect("if: test value");
         let then_id = self.fresh_block();
@@ -3929,6 +4049,40 @@ mod tests {
             .flat_map(|b| b.instrs.iter())
             .filter(|i| pred(i))
             .count()
+    }
+
+    #[test]
+    fn lower_max_emits_a_compare_and_select_no_call() {
+        // R12: `max` lowers inline to `Cmp(Gt)` plus a `Phi`-joined select, no
+        // `Instr::Call` and no monomorphization.
+        let ir = lower_src(": main ( -- ) 3 5 max . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Cmp(_, CmpOp::Gt, ..))),
+            1
+        );
+        assert_eq!(count(main, |i| matches!(i, Instr::Phi(..))), 1);
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+    }
+
+    #[test]
+    fn lower_max_total_emits_no_float_compare() {
+        // R13: `max-total` orders by the bit-pattern rule, so the emitted
+        // `Cmp`s are all over the unsigned integer key, never `Instr::Cmp`
+        // with a float operand.
+        let ir = lower_src(": main ( -- ) 1.5 2.5 max-total . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        let float_cmps = instrs(main)
+            .iter()
+            .filter(|i| match i {
+                Instr::Cmp(_, _, a, _) => {
+                    matches!(main.value_types[a.0 as usize], IrType::Float { .. })
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(float_cmps, 0);
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
     }
 
     #[test]

@@ -1192,10 +1192,33 @@ fn check_extern_decls(
 /// the declaration's name in the parser, so they are not repeated here.
 const BUILTIN_WORDS: &[&str] = &[
     // check_shuffle
-    "dup", "drop", "swap", "over", "rot", // check_operator
-    "+", "-", "*", "/", "mod", "and", "or", "xor", "not", "shl", "shr", "=", "<", ">", "<=", ">=",
-    "<>", ".", // check_str_word
-    "len", "cstr", // check_array_word (`len` is shared with `check_str_word`)
+    "dup",
+    "drop",
+    "swap",
+    "over",
+    "rot", // check_operator
+    "+",
+    "-",
+    "*",
+    "/",
+    "mod",
+    "and",
+    "or",
+    "xor",
+    "not",
+    "shl",
+    "shr",
+    "=",
+    "<",
+    ">",
+    "<=",
+    ">=",
+    "<>",
+    ".",
+    "max",
+    "max-total", // check_str_word
+    "len",
+    "cstr", // check_array_word (`len` is shared with `check_str_word`)
     "fill",
 ];
 
@@ -3641,6 +3664,34 @@ fn mod_requires_int_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
     }
 }
 
+/// `max` applied to a float operand (X9): `max` is integer-only (D6);
+/// naming `max-total` is the point of the message, not just the mismatch.
+fn max_over_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `max` does not support float operands (found `{}` and `{}`); use `max-total` for a total-ordered float maximum\n  note: declared {}",
+            name, span.line, a, b, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: type mismatch: `max` does not support float operands (found `{a}` and `{b}`); use `max-total` for a total-ordered float maximum"
+        ),
+    }
+}
+
+/// `max-total` applied to a non-float or mixed-float-type pair (X10):
+/// `max-total` is float-only; naming `max` is the point of the message.
+fn max_total_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `max-total` requires two operands of the same float type, found `{}` and `{}`; use `max` for integers\n  note: declared {}",
+            name, span.line, a, b, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: type mismatch: `max-total` requires two operands of the same float type, found `{a}` and `{b}`; use `max` for integers"
+        ),
+    }
+}
+
 /// `and`/`or`/`xor` applied to a non-integer/non-bool or mixed-type pair:
 /// bitwise ops are homogeneous over the integer types and `bool`, same shape
 /// as `mod_requires_int_error`.
@@ -4600,6 +4651,49 @@ fn check_operator(
             })?;
             stack.truncate(n - 2);
             stack.push(Slot::computed(Type::Bool));
+        }
+        // R12 (S6): `max ( 'T 'T -- 'T )`, an internal `Ord` bound resolved
+        // against the integer tower (`is_int`, which already includes
+        // `usize`/`isize`, D7). A float pair is rejected by name (X9),
+        // directing to `max-total` (R13) rather than pretending IEEE `>` is
+        // total (D6); the pair must still agree on one concrete type exactly
+        // like `+`/`>`.
+        "max" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if a.ty.is_float() || b.ty.is_float() {
+                return Err(max_over_float_error(ctx, span, a.ty, b.ty));
+            }
+            if !a.ty.is_int() || !b.ty.is_int() {
+                return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
+            }
+            let ty = unify(a, b).map_err(|size_target| match size_target {
+                Some(target) => size_conversion_needed_error(ctx, span, name, target),
+                None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
+            })?;
+            stack.truncate(n - 2);
+            stack.push(Slot::computed(ty));
+        }
+        // R13 (S6): `max-total ( 'F 'F -- 'F )`, `f32`/`f64` only, ordered by
+        // the `total_cmp` bit-pattern rule rather than IEEE `>` (D6). An
+        // integer pair is rejected by name (X10), directing to `max`.
+        "max-total" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let (a, b) = (stack[n - 2], stack[n - 1]);
+            if !a.ty.is_float() || !b.ty.is_float() {
+                return Err(max_total_requires_float_error(ctx, span, a.ty, b.ty));
+            }
+            if a.ty != b.ty {
+                return Err(operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty));
+            }
+            stack.truncate(n - 2);
+            stack.push(Slot::computed(a.ty));
         }
         "." => {
             let n = stack.len();
@@ -6709,6 +6803,34 @@ mod tests {
         assert!(err.contains("`mod`"), "unexpected message: {err}");
         assert!(err.contains("integer"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_max_same_int_type_ok() {
+        check_src(": w ( -- i64 ) 3 5 max ;").unwrap();
+    }
+
+    #[test]
+    fn check_max_on_floats_is_error() {
+        // X9: `max` is integer-only; a float pair names `max-total`.
+        let src = ": w ( -- f64 ) 3.0 5.0 max ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`max`"), "unexpected message: {err}");
+        assert!(err.contains("`max-total`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_max_total_same_float_type_ok() {
+        check_src(": w ( -- f64 ) 3.0 5.0 max-total ;").unwrap();
+    }
+
+    #[test]
+    fn check_max_total_on_ints_is_error() {
+        // X10: `max-total` is float-only; an integer pair names `max`.
+        let src = ": w ( -- i64 ) 3 5 max-total ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`max-total`"), "unexpected message: {err}");
+        assert!(err.contains("`max`"), "unexpected message: {err}");
     }
 
     #[test]

@@ -151,3 +151,34 @@ fn two_output_word_result_feeds_another_call() {
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn max_over_the_integer_tower_prints_the_larger_operand() {
+    // Criterion 6 (R12): `max` over `i64`, `u8`, and `usize`, each printing
+    // the larger operand of its pair.
+    let (stdout, code) = run_src(
+        "maxint",
+        ": main ( -- )\n\
+         3 5 max .\n\
+         7 >u8 2 >u8 max .\n\
+         9 >usize 20 >usize max . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "5\n7\n20\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn max_total_over_floats_prints_the_total_ordered_larger() {
+    // Criterion 7 (R13): `max-total` over two `f64` and two `f32`, both cases
+    // where IEEE order and total order agree.
+    let (stdout, code) = run_src(
+        "maxtotal",
+        ": main ( -- )\n\
+         1.5 2.5 max-total .\n\
+         3.5 >f32 1.5 >f32 max-total . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "2.5\n3.5\n");
+    assert_eq!(code, 0);
+}
