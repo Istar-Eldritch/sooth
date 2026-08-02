@@ -90,6 +90,55 @@ fn two_output_word_with_a_linear_output_frees_its_cell_exactly_once() {
 }
 
 #[test]
+fn copy_bounded_type_variable_word_runs_at_two_concrete_types() {
+    // Criterion 3 (R1, R4–R7, R9, R14): a `'T: Copy` word `dup`s its variable
+    // and is called at `i64` and `bool`. Each call site resolves to its own
+    // monomorphized `IrFunc` through the instantiation table, so both
+    // instantiations run and print both copies.
+    let (stdout, code) = run_src(
+        "dupit",
+        ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+         : main ( -- ) 5 dupit . . true dupit . . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "5\n5\ntrue\ntrue\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn length_polymorphic_word_runs_over_two_array_lengths() {
+    // Criterion 4 (R1, R5, R9): the recon-2 "unwritable" case, now written. A
+    // length variable is opaque through `len`; monomorphization discharges it
+    // to a concrete `N` per instantiation, so `alen` runs over both `[i64 4]`
+    // and `[i64 8]` and prints each length.
+    let (stdout, code) = run_src(
+        "alen",
+        ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+         : main ( -- ) 5 4 fill alen . drop 5 8 fill alen . drop ;\n",
+        false,
+    );
+    assert_eq!(stdout, "4\n8\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn row_variable_word_expands_to_a_multi_output_bundle_and_runs() {
+    // Criterion 5 (R1, R5, R9, R10, R11, R14): a row-variable word passes its
+    // deeper stack through untouched and `over over`s the two `Copy`
+    // variables. Its resolved instantiation has four concrete outputs, so it
+    // lowers through the same pack/unpack bundle a fixed multi-output word
+    // does (D4, one mechanism): `1 2 dup2` leaves `1 2 1 2`, printed top-first.
+    let (stdout, code) = run_src(
+        "dup2",
+        ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+         : main ( -- ) 1 2 dup2 . . . . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "2\n1\n2\n1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn two_output_word_result_feeds_another_call() {
     // R11: the unpacked values are ordinary stack values, so they flow into
     // the next word exactly as any other operands do.

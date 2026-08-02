@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::mem;
 
 use crate::ast::{
-    ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, RefDecl,
-    StructDecl, StructId, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
+    ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module, OwnedCellDecl,
+    OwnedCellId, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term,
+    TermKind, Type, TypedSlot, WordBody, WordDef,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -1025,6 +1026,31 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let drop_overloads = crate::check::find_drop_overloads(&module.words, &module.structs)?;
     let drop_overload_indices: std::collections::HashSet<usize> =
         drop_overloads.values().copied().collect();
+    // R9: a polymorphic word carries no concrete `Sig`, is never called by its
+    // plain name (every call site resolves through the R14 instantiation
+    // table), and lowers not once but once per recorded instantiation below.
+    // So it is excluded from the plain-name env and per-word pass, exactly as
+    // a `drop` overload is.
+    let poly_indices: std::collections::HashSet<usize> = module
+        .words
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| w.poly.is_some())
+        .map(|(idx, _)| idx)
+        .collect();
+    // R11/R14: the fixed input arity of each polymorphic word, name-keyed. A
+    // call site pops this many args (the row prefix, if any, stays on the
+    // caller's stack, S2); it is constant across a word's instantiations, so
+    // it lives here rather than per-`CallInst`.
+    let poly_arities: HashMap<String, usize> = module
+        .words
+        .iter()
+        .filter_map(|w| {
+            w.poly
+                .as_ref()
+                .map(|sig| (w.name.clone(), sig.inputs.len()))
+        })
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -1045,7 +1071,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx) && !poly_indices.contains(idx))
         .map(|(_, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
@@ -1091,9 +1117,59 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !drop_overload_indices.contains(idx))
-        .map(|(_, w)| lower_word(w, &env, &resolve, regs))
+        .filter(|(idx, _)| !drop_overload_indices.contains(idx) && !poly_indices.contains(idx))
+        .map(|(_, w)| {
+            let self_tail = crate::check::has_self_tail_call(w);
+            lower_word_parts(
+                &w.name,
+                &w.effect,
+                &w.body,
+                self_tail,
+                &env,
+                &resolve,
+                regs,
+                &module.instantiations,
+                &poly_arities,
+            )
+        })
         .collect();
+
+    // R9: one monomorphized `IrFunc` per distinct recorded instantiation.
+    // Every call site of a polymorphic word wrote a `CallInst` keyed by its
+    // span; distinct instantiations dedup by their mangled symbol (a pure
+    // function of `(word, θ)`, minted the same way the call site's symbol was,
+    // so the two provably agree). θ is ground, so the substituted effect
+    // carries concrete array types with concrete `N` and the body lowers with
+    // no length-variable handling (length polymorphism is discharged here).
+    let poly_words: HashMap<&str, &WordDef> = module
+        .words
+        .iter()
+        .filter(|w| w.poly.is_some())
+        .map(|w| (w.name.as_str(), w))
+        .collect();
+    let mut emitted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for inst in module.instantiations.values() {
+        if !emitted.insert(inst.symbol.as_str()) {
+            continue;
+        }
+        let word = poly_words[inst.callee.as_str()];
+        let sig = word
+            .poly
+            .as_ref()
+            .expect("a recorded callee is polymorphic");
+        let effect = concrete_effect(sig, &inst.subst, &module.arrays);
+        funcs.push(lower_word_parts(
+            &inst.symbol,
+            &effect,
+            &word.body,
+            false,
+            &env,
+            &resolve,
+            regs,
+            &module.instantiations,
+            &poly_arities,
+        ));
+    }
 
     // R2: the override's body, by reference, keyed the way synthesis is keyed.
     // The REPL builds the same map from its own session-level store instead of
@@ -1758,25 +1834,97 @@ fn bundle_of(outputs: &[TypedSlot], structs: &Structs) -> Option<StructId> {
     structs.bundle_for(&tys)
 }
 
+/// R9: build the concrete `StackEffect` of one instantiation `(word, θ)`,
+/// substituting the ground `θ` into the polymorphic signature's fixed inputs
+/// and outputs. The row variable (`..s`) is not materialized: it is a
+/// pass-through that stays on the caller's stack (S2), so it never enters the
+/// monomorphized function's frame.
+fn concrete_effect(sig: &PolySig, subst: &Subst, arrays: &[ArrayDecl]) -> StackEffect {
+    let slot = |pt: &PolyType| TypedSlot {
+        name: None,
+        ty: subst_polytype(pt, subst, arrays),
+    };
+    StackEffect {
+        inputs: sig.inputs.iter().map(&slot).collect(),
+        outputs: sig.outputs.iter().map(&slot).collect(),
+    }
+}
+
+/// R9: apply a ground `θ` to a `PolyType`, yielding a concrete `Type`. A
+/// variable resolves through `θ`; a variable-bearing array folds to its already
+/// interned concrete shape (the caller pushed that shape, so it exists in the
+/// module's array registry — lowering only reads it, it never interns).
+fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl]) -> Type {
+    match pt {
+        PolyType::Concrete(t) => *t,
+        PolyType::Var(v) => subst
+            .ty_of(*v)
+            .expect("checked: unification bound every input type variable"),
+        PolyType::Array(elem, len) => {
+            let element = subst_polytype(elem, subst, arrays);
+            let count = match len {
+                Len::Concrete(k) => *k,
+                Len::Var(ln) => subst
+                    .len_of(*ln)
+                    .expect("checked: unification bound every length variable"),
+            };
+            let idx = arrays
+                .iter()
+                .position(|d| d.element == element && d.count == count)
+                .expect("checked: the concrete array shape was interned at the call site");
+            Type::Array(ArrayId::from_index(idx), arrays[idx].name_static)
+        }
+    }
+}
+
 /// Lower a single word body against an external env/resolver. The REPL uses
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
-/// so a definition compiles against previously-loaded words.
+/// so a definition compiles against previously-loaded words. A REPL line has
+/// no polymorphic words (D2), so its calls carry no instantiation table.
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
 ) -> IrFunc {
-    let params: Vec<IrType> = word
-        .effect
-        .inputs
-        .iter()
-        .map(|s| ir_type_of(s.ty))
-        .collect();
-    let bundle = bundle_of(&word.effect.outputs, regs.structs);
-    let ret = word_ret_ty(&word.effect.outputs, regs.structs);
+    let self_tail = crate::check::has_self_tail_call(word);
+    lower_word_parts(
+        &word.name,
+        &word.effect,
+        &word.body,
+        self_tail,
+        env,
+        resolve,
+        regs,
+        empty_instantiations(),
+        empty_poly_arities(),
+    )
+}
 
-    let mut b = FuncBuilder::new(env, resolve, regs, word.name.clone());
+/// The shared word-body lowering, parameterized by name/effect/body so a
+/// monomorphized instantiation (R9) can lower a polymorphic word's body under
+/// its mangled symbol against a `θ`-substituted concrete effect. The
+/// instantiation table and poly-arity map thread through so a call to a
+/// polymorphic word inside this body resolves to its per-site symbol (R14).
+#[allow(clippy::too_many_arguments)]
+fn lower_word_parts(
+    name: &str,
+    effect: &StackEffect,
+    body: &WordBody,
+    self_tail: bool,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    poly_arities: &HashMap<String, usize>,
+) -> IrFunc {
+    let params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
+    let bundle = bundle_of(&effect.outputs, regs.structs);
+    let ret = word_ret_ty(&effect.outputs, regs.structs);
+
+    let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
+    b.instantiations = instantiations;
+    b.poly_arities = poly_arities;
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -1786,7 +1934,6 @@ pub(crate) fn lower_word(
     // the params and jumps to a header carrying one phi per loop-carried slot;
     // the body reads the phi outputs so each iteration rebinds them. A word
     // with no tail self-call lowers exactly as before (no header, no phi).
-    let self_tail = crate::check::has_self_tail_call(word);
     let entry_values = if self_tail {
         b.begin_loop(&params_values)
     } else {
@@ -1797,13 +1944,13 @@ pub(crate) fn lower_word(
     // shape every projection and access needs comes from the declared type,
     // not from the value. Seeded against `entry_values` so a loop reads it off
     // the header phi output the body actually uses.
-    for (slot, value) in word.effect.inputs.iter().zip(&entry_values) {
+    for (slot, value) in effect.inputs.iter().zip(&entry_values) {
         if let Type::Ref(id, _, _) = slot.ty {
             b.ref_inner.insert(*value, regs.refs.referent[id.index()]);
         }
     }
 
-    match &word.body {
+    match body {
         WordBody::Terms { terms } => {
             // Every input starts on the stack (D6: the header phi outputs when
             // looping); an entry `| ... |` binding pops from it like any other
@@ -1812,8 +1959,7 @@ pub(crate) fn lower_word(
             b.lower_terms(terms, self_tail);
         }
         WordBody::Clauses(clauses) => {
-            let scrutinee_ty = word
-                .effect
+            let scrutinee_ty = effect
                 .inputs
                 .last()
                 .expect("clause word has a scrutinee input")
@@ -1842,12 +1988,27 @@ pub(crate) fn lower_word(
     }
 
     IrFunc {
-        name: word.name.clone(),
+        name: name.to_string(),
         params,
         ret,
         blocks: b.blocks,
         value_types: b.value_types,
     }
+}
+
+/// A shared empty instantiation table for lowering paths with no polymorphic
+/// call sites (the REPL, D2; destructor synthesis; unit tests), so
+/// `FuncBuilder::new` can hand out a valid reference without every caller
+/// threading one.
+fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+/// The poly-arity companion of `empty_instantiations`.
+fn empty_poly_arities() -> &'static HashMap<String, usize> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, usize>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
 }
 
 struct FuncBuilder<'a> {
@@ -1861,6 +2022,15 @@ struct FuncBuilder<'a> {
     /// reference-mode clause scrutinee's `EnumId` when the referent itself is
     /// an enum.
     refs: &'a Refs,
+    /// R14: the per-call-site instantiation table. A `Call` term whose span
+    /// keys an entry here is a call to a polymorphic word and resolves to that
+    /// entry's mangled symbol and per-θ output shape, not the name-keyed
+    /// `env`/`resolve`. Empty on the REPL/destructor/test paths.
+    instantiations: &'a HashMap<Span, CallInst>,
+    /// R14: the fixed input arity of each polymorphic word, name-keyed. How
+    /// many args a polymorphic call pops (the `CallInst` carries the output
+    /// shape, but the input count is name-constant across θ, so it lives here).
+    poly_arities: &'a HashMap<String, usize>,
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
@@ -1938,6 +2108,8 @@ impl<'a> FuncBuilder<'a> {
             arrays,
             cells,
             refs,
+            instantiations: empty_instantiations(),
+            poly_arities: empty_poly_arities(),
             cur_word_name,
             header: None,
             header_phis: Vec::new(),
@@ -2091,7 +2263,7 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::StrLit(v, s.clone()));
                 self.stack.push(v);
             }
-            TermKind::Call(name) => self.lower_call(name, term.span.line, tail),
+            TermKind::Call(name) => self.lower_call(name, term.span, tail),
             TermKind::Bind(names) => {
                 // R10: a binding is a compile-time rebinding of SSA values, so
                 // it emits nothing. Leftmost name takes the deepest value.
@@ -2108,9 +2280,20 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    fn lower_call(&mut self, name: &str, line: u32, tail: bool) {
+    fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
+        let line = span.line;
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
+            return;
+        }
+        // R14/R11: a call to a polymorphic word resolves entirely through the
+        // instantiation table keyed by this call site's span, never the
+        // name-keyed `env`/`resolve` (which cannot distinguish one θ from
+        // another). This is checked before the builtin/user dispatch below
+        // because a polymorphic callee is always a user word whose name is
+        // none of the builtins.
+        if let Some(inst) = self.instantiations.get(&span).cloned() {
+            self.lower_poly_call(&inst);
             return;
         }
         match name {
@@ -3039,6 +3222,38 @@ impl<'a> FuncBuilder<'a> {
         self.lower_struct_word(StructWord::Destructure(id));
     }
 
+    /// R14/R11: lower a call to a polymorphic word through its per-call-site
+    /// `CallInst`. The mangled symbol (not `(self.resolve)(name)`), the
+    /// per-θ output arity, and the bundle come straight from the table, so
+    /// two instantiations of one word reach two distinct symbols and two
+    /// distinct return shapes even though `env`/`resolve` are name-keyed. The
+    /// input arity is name-constant across θ and read from `poly_arities`; the
+    /// row prefix, if any, stays on the stack below the popped args (S2). The
+    /// bundle unpack is the same pack/unpack path a monomorphic multi-output
+    /// call takes (R10/R11), so a row-variable-expanded count lowers
+    /// identically to a fixed multi-output word — D4's one mechanism.
+    fn lower_poly_call(&mut self, inst: &CallInst) {
+        let in_arity = self.poly_arities[&inst.callee];
+        let split = self.stack.len() - in_arity;
+        let args = self.stack.split_off(split);
+        let ret_ty: Option<IrType> = match inst.bundle {
+            Some(id) => Some(IrType::Struct(id)),
+            None => inst.output_types.first().map(|t| ir_type_of(*t)),
+        };
+        let ret = if inst.out_arity == 1 || inst.bundle.is_some() {
+            Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+        } else {
+            None
+        };
+        self.push_instr(Instr::Call(ret, inst.symbol.clone(), args));
+        if let Some(v) = ret {
+            self.stack.push(v);
+        }
+        if let Some(id) = inst.bundle {
+            self.unpack_bundle(id);
+        }
+    }
+
     fn lower_struct_word(&mut self, sw: StructWord) {
         match sw {
             StructWord::Construct(id) => {
@@ -3725,6 +3940,34 @@ mod tests {
         assert_eq!(count(main, |i| matches!(i, Instr::Call(Some(_), ..))), 1);
         assert_eq!(count(main, |i| matches!(i, Instr::FieldLoad(..))), 2);
         assert_eq!(count(main, |i| matches!(i, Instr::Print(_))), 2);
+    }
+
+    #[test]
+    fn monomorphization_emits_one_mangled_func_per_instantiation() {
+        // R9/R14: a polymorphic word is never emitted under its plain name;
+        // instead one mangled `IrFunc` is emitted per distinct ground θ, and
+        // each call site targets its own instantiation's symbol through the
+        // R14 table, not `dupit`.
+        let ir = lower_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) 5 dupit . . true dupit . . ;",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "dupit"),
+            "the polymorphic word must not lower under its plain name"
+        );
+        let mono: Vec<&str> = ir
+            .funcs
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|n| n.starts_with("sooth_mono_dupit"))
+            .collect();
+        assert_eq!(mono.len(), 2, "one IrFunc per θ (i64 and bool)");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        let calls = call_symbols(main);
+        for sym in &mono {
+            assert!(calls.contains(sym), "main should call `{sym}` directly");
+        }
     }
 
     #[test]
@@ -4819,7 +5062,7 @@ mod tests {
         let x = b.fresh_value(u8);
         let y = b.fresh_value(u8);
         b.stack = vec![x, y];
-        b.lower_call("+", 0, false);
+        b.lower_call("+", Span::default(), false);
         let top = *b.stack.last().unwrap();
         assert_eq!(b.value_type(top), u8);
     }
