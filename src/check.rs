@@ -11,9 +11,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
-    intern_array_type, intern_owned_cell_type, intern_ref_type, ArrayDecl, Clause, EnumDecl,
-    EnumId, ExternDecl, Module, OwnedCellDecl, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Term, TermKind, Type, VariantDecl, WordBody, WordDef,
+    intern_array_type, intern_bundle_struct, intern_owned_cell_type, intern_ref_type, ArrayDecl,
+    Clause, EnumDecl, EnumId, ExternDecl, Module, OwnedCellDecl, RefDecl, Span, StackEffect,
+    StructDecl, StructId, Term, TermKind, Type, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -1059,7 +1059,32 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         owned_cells,
         &drop_overloads,
         &dropped,
-    )
+    )?;
+
+    // R8/R10: the multi-output return bundles, interned into the same
+    // `module.structs` the layout pass reads, so a bundle is laid out (and
+    // flagged, so no destructor is synthesized for it) like any other struct.
+    // Last, after every type-level check and after `struct_generated_sigs`:
+    // a bundle is an ABI detail, not a nameable type, so it takes part in
+    // neither name resolution nor generated-word registration.
+    intern_output_bundles(module);
+    Ok(())
+}
+
+/// R10: one interned bundle struct per distinct output tuple of length >= 2,
+/// over every declared word. Gated on the output count alone, not on anything
+/// about the word: a `drop` overload has no outputs and an `extern:` is
+/// rejected above one, so neither reaches this.
+fn intern_output_bundles(module: &mut Module) {
+    let tuples: Vec<Vec<Type>> = module
+        .words
+        .iter()
+        .filter(|w| w.effect.outputs.len() >= 2)
+        .map(|w| w.effect.outputs.iter().map(|s| s.ty).collect())
+        .collect();
+    for outputs in tuples {
+        intern_bundle_struct(&mut module.structs, &outputs);
+    }
 }
 
 /// R1/R2/R3/R7/R12/R13/R14: every `extern:` declaration's own checks, run
@@ -4804,6 +4829,44 @@ mod tests {
     }
 
     #[test]
+    fn check_two_output_word_interns_its_return_bundle() {
+        // R8/R10: a word with two outputs gets a bundle struct in the same
+        // registry the layout pass reads, flagged as a bundle and carrying the
+        // output tuple in order (deepest output first).
+        let module = checked_module(": pair ( -- i64 bool ) 1 true ; : main ( -- ) ;");
+        let bundles: Vec<&StructDecl> = module.structs.iter().filter(|d| d.is_bundle).collect();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(
+            bundles[0]
+                .fields
+                .iter()
+                .map(|(_, ty)| *ty)
+                .collect::<Vec<Type>>(),
+            vec![Type::I64, Type::Bool]
+        );
+    }
+
+    #[test]
+    fn check_one_output_word_interns_no_bundle() {
+        // R2: nothing changes for a word the aggregate ABI does not apply to.
+        let module = checked_module(": inc ( i64 -- i64 ) 1 + ; : main ( -- ) ;");
+        assert!(module.structs.iter().all(|d| !d.is_bundle));
+    }
+
+    #[test]
+    fn check_two_words_of_one_output_shape_share_one_bundle() {
+        // R8: interning dedups structurally on the output tuple, so two words
+        // of the same shape share a bundle and a differing shape gets its own.
+        let module = checked_module(
+            ": pair ( i64 -- i64 i64 ) dup ;\n\
+             : twice ( i64 -- i64 i64 ) dup ;\n\
+             : flags ( -- i64 bool ) 1 true ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(module.structs.iter().filter(|d| d.is_bundle).count(), 2);
+    }
+
+    #[test]
     fn check_gcd_is_ok() {
         let src = std::fs::read_to_string("examples/gcd.sth").unwrap();
         check_src(&src).unwrap();
@@ -6973,6 +7036,7 @@ mod tests {
             fields: vec![("tag".to_string(), Type::I64)],
             span: Span::default(),
             has_drop_overload: true,
+            is_bundle: false,
         }];
         let res = Type::Struct(StructId::from_index(0), "Res");
         assert!(!is_copy(res, &structs, &[], &[]));
@@ -7047,6 +7111,7 @@ mod tests {
                 fields: vec![("x".to_string(), Type::I64), ("y".to_string(), Type::I64)],
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             },
             StructDecl {
                 name: "Holds".to_string(),
@@ -7054,6 +7119,7 @@ mod tests {
                 fields: vec![("a".to_string(), cell_ty), ("b".to_string(), Type::I64)],
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             },
             StructDecl {
                 name: "Wraps".to_string(),
@@ -7064,6 +7130,7 @@ mod tests {
                 )],
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             },
         ];
         let plain = Type::Struct(StructId::from_index(0), "Plain");
@@ -7090,6 +7157,7 @@ mod tests {
             fields: vec![("a".to_string(), cell_ty), ("b".to_string(), Type::I64)],
             span: Span::default(),
             has_drop_overload: false,
+            is_bundle: false,
         }];
         let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
             name: name.to_string(),

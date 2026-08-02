@@ -102,6 +102,16 @@ pub struct StructDecl {
     /// fact reach every `is_copy` call site, the layout fold, and the REPL's
     /// persistent registries without threading a table through any of them.
     pub has_drop_overload: bool,
+    /// R10 (phase 4 slice 1): whether this is a synthesized *return bundle*
+    /// rather than a user `type:` declaration — the aggregate a word with two
+    /// or more outputs returns through. A separately set bit, never re-derived
+    /// from the fields (nothing about them says "bundle"), mirroring
+    /// `has_drop_overload`. It rides the ordinary struct registry so the layout
+    /// pass sizes it like any other struct, and `StructLayout::bundle` carries
+    /// it on to destructor synthesis, which skips a bundle: its fields are the
+    /// caller's outputs, moved out by the unpack in the same breath, so drop
+    /// glue here would double-free a linear one.
+    pub is_bundle: bool,
 }
 
 /// A small `Copy` index into `Module::structs`. Two `Type::Struct` values are
@@ -305,6 +315,40 @@ pub fn intern_array_type(arrays: &mut Vec<ArrayDecl>, element: Type, count: u32)
         name_static,
     });
     Type::Array(id, name_static)
+}
+
+/// R10 (phase 4 slice 1): intern the synthesized return-bundle struct for a
+/// word's `outputs` tuple (two or more outputs), deduping structurally by that
+/// tuple exactly as `intern_array_type` dedups an array shape. The checker
+/// calls this so the bundle is in `Module::structs` before the layout pass;
+/// lowering only reads it back (`Structs::bundle_for`).
+pub fn intern_bundle_struct(structs: &mut Vec<StructDecl>, outputs: &[Type]) -> StructId {
+    if let Some(idx) = structs.iter().position(|d| {
+        d.is_bundle
+            && d.fields.len() == outputs.len()
+            && d.fields.iter().zip(outputs).all(|((_, f), o)| f == o)
+    }) {
+        return StructId::from_index(idx);
+    }
+    let id = StructId::from_index(structs.len());
+    // Positional, like the backend's array type symbols: an output tuple's own
+    // spelling (`[i64 4]`, `&!Buf`) is not a legal QBE aggregate name, and the
+    // name is never the dedup key.
+    let name = format!("__ret_{}", structs.len());
+    let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
+    structs.push(StructDecl {
+        name,
+        name_static,
+        fields: outputs
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| (format!("f{i}"), *ty))
+            .collect(),
+        span: Span::default(),
+        has_drop_overload: false,
+        is_bundle: true,
+    });
+    id
 }
 
 /// One REPL input unit: either a word definition or a bare term sequence
@@ -748,6 +792,7 @@ mod tests {
                 fields,
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             }],
             enums: Vec::new(),
             arrays: Vec::new(),
@@ -855,6 +900,7 @@ mod tests {
                 fields: Vec::new(),
                 span: Span::default(),
                 has_drop_overload: false,
+                is_bundle: false,
             }],
             enums: vec![EnumDecl {
                 name: "Dup".to_string(),
@@ -897,6 +943,36 @@ mod tests {
             other => panic!("expected Type::Array, got {other:?}"),
         }
         assert_eq!(a.to_string(), "[i64 4]");
+    }
+
+    #[test]
+    fn intern_bundle_struct_same_tuple_dedups_expected() {
+        let mut structs = Vec::new();
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        let b = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        assert_eq!(a, b);
+        assert_eq!(structs.len(), 1);
+        assert!(structs[0].is_bundle);
+        assert_eq!(
+            structs[0].fields,
+            vec![
+                ("f0".to_string(), Type::I64),
+                ("f1".to_string(), Type::Bool)
+            ]
+        );
+    }
+
+    #[test]
+    fn intern_bundle_struct_distinct_tuples_and_orders_are_distinct_expected() {
+        // Two outputs of the same types in the other order are a different
+        // bundle: the tuple is ordered, deepest output first.
+        let mut structs = Vec::new();
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        let b = intern_bundle_struct(&mut structs, &[Type::Bool, Type::I64]);
+        let c = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool, Type::I64]);
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(structs.len(), 3);
     }
 
     #[test]

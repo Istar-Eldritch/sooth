@@ -408,6 +408,7 @@ impl Session {
             fields: Vec::new(),
             span,
             has_drop_overload: false,
+            is_bundle: false,
         });
         let result = parser::parse_typedef_line(
             tokens,
@@ -1057,6 +1058,7 @@ mod tests {
             fields: vec![],
             is_linear: false,
             has_drop_overload: false,
+            bundle: false,
             drop_generation: None,
         }];
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");

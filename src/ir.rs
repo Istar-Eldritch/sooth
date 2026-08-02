@@ -12,7 +12,7 @@ use std::mem;
 
 use crate::ast::{
     ArrayDecl, ArrayId, Clause, EnumDecl, EnumId, Module, OwnedCellDecl, OwnedCellId, RefDecl,
-    StructDecl, StructId, Term, TermKind, Type, WordBody, WordDef,
+    StructDecl, StructId, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -198,6 +198,14 @@ pub struct StructLayout {
     /// `expand_path` (R7), which sees only `Registries` and so cannot reach the
     /// declaration.
     pub has_drop_overload: bool,
+    /// R10 (phase 4 slice 1): whether this is a synthesized multi-output return
+    /// bundle, copied from `StructDecl::is_bundle`. Two readers:
+    /// `synthesize_aggregate_destructors` skips a bundle however linear its
+    /// fields fold (they are the caller's outputs, moved out by the unpack, so
+    /// glue here would double-free one), and `lower_call` uses it as the
+    /// discriminator for the unpack branch — bundle presence, not a raw output
+    /// count, since the REPL's registries intern no bundle at all.
+    pub bundle: bool,
     /// R11 (slice 8b): the session-wide override epoch (`Session::override_epoch`),
     /// `None` on the build path and for the whole REPL session until its first
     /// `drop` override is ever defined. Set by the session after
@@ -342,6 +350,12 @@ pub enum StructWord {
 pub struct Structs {
     pub layouts: Vec<StructLayout>,
     pub words: HashMap<String, StructWord>,
+    /// R10: the interned return bundles as `(output tuple, its id)`, the
+    /// lookup a word's declared outputs go through to find the aggregate it
+    /// returns. Keyed on the frontend `Type` tuple the checker interned by,
+    /// not on the lowered `IrType`s (every reference collapses to `Ptr`, so
+    /// those are not a faithful key). Empty when nothing interned one.
+    pub bundles: Vec<(Vec<Type>, StructId)>,
 }
 
 /// The computed tagged layout of one enum (D3, M1), word-width-neutral: a
@@ -489,6 +503,17 @@ impl Structs {
     pub fn from_structs(structs: &[StructDecl]) -> Structs {
         build_registries(structs, &[], &[], &[], &[]).0
     }
+
+    /// R10: the synthesized bundle struct a word with these declared outputs
+    /// returns, or `None` when none was interned for the tuple — a word with
+    /// fewer than two outputs, or any registry the checker never interned into
+    /// (the REPL's), which then keeps its pre-slice single-value lowering.
+    pub fn bundle_for(&self, outputs: &[Type]) -> Option<StructId> {
+        self.bundles
+            .iter()
+            .find(|(tys, _)| tys == outputs)
+            .map(|(_, id)| *id)
+    }
 }
 
 /// The IR's view of a program's owning cells: the per-`OwnedCellId` payload
@@ -587,7 +612,10 @@ pub fn build_registries_ww(
         .collect();
 
     let mut swords = HashMap::new();
-    for (idx, decl) in structs.iter().enumerate() {
+    // R10: a synthesized bundle is an ABI detail with no source spelling, so it
+    // contributes no generated words; lowering reaches its pack and unpack
+    // through `StructWord` directly, never by name.
+    for (idx, decl) in structs.iter().enumerate().filter(|(_, d)| !d.is_bundle) {
         let id = StructId::from_index(idx);
         swords.insert(decl.name.clone(), StructWord::Construct(id));
         swords.insert(format!("{}>", decl.name), StructWord::Destructure(id));
@@ -613,10 +641,23 @@ pub fn build_registries_ww(
     let cell_drop_generations = vec![None; cell_payloads.len()];
     let ref_referents: Vec<IrType> = refs.iter().map(|d| ir_type_of(d.referent)).collect();
 
+    let bundles: Vec<(Vec<Type>, StructId)> = structs
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.is_bundle)
+        .map(|(idx, d)| {
+            (
+                d.fields.iter().map(|(_, ty)| *ty).collect(),
+                StructId::from_index(idx),
+            )
+        })
+        .collect();
+
     (
         Structs {
             layouts: struct_layouts,
             words: swords,
+            bundles,
         },
         Enums {
             layouts: enum_layouts,
@@ -723,6 +764,10 @@ impl LayoutBuilder<'_> {
             align,
             is_linear,
             has_drop_overload,
+            // R10: carried through unchanged; a bundle is sized and laid out
+            // exactly like a user struct, and differs only in getting no
+            // destructor.
+            bundle: structs[idx].is_bundle,
             // R11: the build path never suffixes a destructor symbol; the
             // REPL sets this from its own override registry after the build.
             drop_generation: None,
@@ -1002,7 +1047,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .enumerate()
         .filter(|(idx, _)| !drop_overload_indices.contains(idx))
         .map(|(_, w)| {
-            let ret_ty = w.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
+            let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
                 w.name.clone(),
                 (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
@@ -1119,7 +1164,10 @@ pub fn synthesize_aggregate_destructors(
         .layouts
         .iter()
         .enumerate()
-        .filter(|(_, layout)| layout.is_linear)
+        // R10/R11: a linear *bundle* gets no glue. Its fields are the caller's
+        // outputs, moved out by the unpack the instant the call returns, so a
+        // destructor for the shell would free a linear one a second time.
+        .filter(|(_, layout)| layout.is_linear && !layout.bundle)
         .filter_map(|(idx, _)| {
             let id = StructId::from_index(idx);
             match overrides.get(&id) {
@@ -1687,6 +1735,29 @@ pub fn lower_line(
     (func, m, out_bytes as usize)
 }
 
+/// R10: the `IrType` a word returns — its one output, or the synthesized
+/// bundle struct for two or more. The single derivation both the lowering env's
+/// `ret_ty` and `lower_word`'s own `ret` go through, so a caller reading the
+/// env and the callee it calls can never disagree about the return shape.
+/// Falls back to the first output where no bundle was interned (the REPL's
+/// registries, D2): that path keeps its pre-slice lowering rather than
+/// half-entering the bundle ABI.
+fn word_ret_ty(outputs: &[TypedSlot], structs: &Structs) -> Option<IrType> {
+    match bundle_of(outputs, structs) {
+        Some(id) => Some(IrType::Struct(id)),
+        None => outputs.first().map(|slot| ir_type_of(slot.ty)),
+    }
+}
+
+/// R10: the bundle a word with these declared outputs returns through.
+fn bundle_of(outputs: &[TypedSlot], structs: &Structs) -> Option<StructId> {
+    if outputs.len() < 2 {
+        return None;
+    }
+    let tys: Vec<Type> = outputs.iter().map(|slot| slot.ty).collect();
+    structs.bundle_for(&tys)
+}
+
 /// Lower a single word body against an external env/resolver. The REPL uses
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
 /// so a definition compiles against previously-loaded words.
@@ -1702,7 +1773,8 @@ pub(crate) fn lower_word(
         .iter()
         .map(|s| ir_type_of(s.ty))
         .collect();
-    let ret = word.effect.outputs.first().map(|s| ir_type_of(s.ty));
+    let bundle = bundle_of(&word.effect.outputs, regs.structs);
+    let ret = word_ret_ty(&word.effect.outputs, regs.structs);
 
     let mut b = FuncBuilder::new(env, resolve, regs, word.name.clone());
 
@@ -1758,7 +1830,14 @@ pub(crate) fn lower_word(
     // The fall-through (base-case) block returns; a body that ended entirely in
     // back-edges is already terminated and needs no Ret.
     if !b.terminated {
-        let result = if ret.is_some() { b.stack.pop() } else { None };
+        // R10: two or more outputs leave the frame packed into the bundle,
+        // deepest output in the first field; one or none is the single value
+        // (or nothing) it always was.
+        let result = match bundle {
+            Some(id) => Some(b.pack_bundle(id)),
+            None if ret.is_some() => b.stack.pop(),
+            None => None,
+        };
         b.seal_block(Terminator::Ret(result));
     }
 
@@ -2234,7 +2313,17 @@ impl<'a> FuncBuilder<'a> {
                     *self.env.get(name).expect("checked user word exists");
                 let split = self.stack.len() - in_arity;
                 let args = self.stack.split_off(split);
-                let ret = if out_arity == 1 {
+                // R11: a multi-output callee returns one bundle, unpacked back
+                // onto the stack below, so the lowering stack matches the
+                // stack the checker verified. The discriminator is the
+                // bundle's own flag, not `out_arity >= 2`: the REPL's env
+                // derives a multi-output `ret_ty` from the first output alone
+                // and interns no bundle, and must not enter this branch.
+                let bundle = match ret_ty {
+                    Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+                    _ => None,
+                };
+                let ret = if out_arity == 1 || bundle.is_some() {
                     Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
                 } else {
                     None
@@ -2243,6 +2332,9 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Call(ret, sym, args));
                 if let Some(v) = ret {
                     self.stack.push(v);
+                }
+                if let Some(id) = bundle {
+                    self.unpack_bundle(id);
                 }
             }
         }
@@ -2929,6 +3021,24 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Lower a generated struct word inline, first field deepest.
+    /// R10, callee side: pop the top `n` stack values into a fresh bundle of
+    /// `id` (deepest output first, matching the field order the checker
+    /// interned) and yield it as the word's single returned value. Literally
+    /// the struct constructor, which is the point: the bundle is the struct
+    /// users hand-wrote before this ABI existed.
+    fn pack_bundle(&mut self, id: StructId) -> Value {
+        self.lower_struct_word(StructWord::Construct(id));
+        self.stack.pop().expect("pack: the bundle just constructed")
+    }
+
+    /// R11, caller side: replace the returned bundle on the stack with its
+    /// fields, deepest first — the exact reverse of `pack_bundle`, through the
+    /// same destructure a generated `S>` uses, so a linear field is moved out
+    /// of the shell exactly as `S>` moves one.
+    fn unpack_bundle(&mut self, id: StructId) {
+        self.lower_struct_word(StructWord::Destructure(id));
+    }
+
     fn lower_struct_word(&mut self, sw: StructWord) {
         match sw {
             StructWord::Construct(id) => {
@@ -3579,6 +3689,91 @@ mod tests {
             .flat_map(|b| b.instrs.iter())
             .filter(|i| pred(i))
             .count()
+    }
+
+    #[test]
+    fn lower_two_output_word_returns_one_bundle_holding_both() {
+        // Criterion 9 (R10): a two-output word's body ends in one `Ret` of the
+        // synthesized bundle, with both outputs stored into it -- not a single
+        // value returned and the other silently dropped.
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let pair = ir.funcs.iter().find(|f| f.name == "pair").unwrap();
+        let IrType::Struct(bundle) = pair.ret.expect("a two-output word returns its bundle") else {
+            panic!("expected a struct return, got {:?}", pair.ret);
+        };
+        assert!(ir.structs[bundle.index()].bundle);
+        assert_eq!(ir.structs[bundle.index()].fields.len(), 2);
+
+        let last = pair.blocks.last().unwrap();
+        let Terminator::Ret(Some(returned)) = last.term else {
+            panic!("expected a value return, got {:?}", last.term);
+        };
+        assert_eq!(
+            pair.value_types[returned.0 as usize],
+            IrType::Struct(bundle)
+        );
+        assert_eq!(count(pair, |i| matches!(i, Instr::FieldStore(..))), 2);
+    }
+
+    #[test]
+    fn lower_call_of_two_output_word_unpacks_the_bundle_onto_the_stack() {
+        // R11: the caller reads both outputs back out of the returned bundle
+        // (two field loads), so its lowering stack matches the stack the
+        // checker verified -- the recon-3 desync that used to panic.
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(Some(_), ..))), 1);
+        assert_eq!(count(main, |i| matches!(i, Instr::FieldLoad(..))), 2);
+        assert_eq!(count(main, |i| matches!(i, Instr::Print(_))), 2);
+    }
+
+    #[test]
+    fn lower_single_output_word_keeps_its_scalar_return() {
+        // R2/R15: nothing about the bundle path reaches a word with one
+        // output; it returns its scalar directly, as before the slice.
+        let ir = lower_src(": inc ( i64 -- i64 ) 1 + ;");
+        let inc = ir.funcs.iter().find(|f| f.name == "inc").unwrap();
+        assert_eq!(inc.ret, Some(IrType::I64));
+        assert!(ir.structs.is_empty());
+    }
+
+    #[test]
+    fn lower_bundle_with_a_linear_field_gets_no_destructor() {
+        // Criterion 10 (R10/R11, key risk 1): the bundle for `( -- ^i64 i64 )`
+        // folds linear (its first field is an owning cell), yet no drop glue is
+        // synthesized for it -- the glue would free the cell the caller's
+        // unpack has already moved out.
+        let ir =
+            lower_src(": cell-and-tag ( -- ^i64 i64 ) 7 ^ 3 ; : main ( -- ) cell-and-tag . ^> . ;");
+        let (idx, layout) = ir
+            .structs
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.bundle)
+            .expect("the two-output word interned a bundle");
+        assert!(
+            layout.is_linear,
+            "an owning-cell field folds the bundle linear"
+        );
+        let glue = format!("sooth_struct_drop_{idx}");
+        assert!(
+            !ir.funcs.iter().any(|f| f.name == glue),
+            "a bundle must carry no destructor, found `{glue}`"
+        );
+    }
+
+    #[test]
+    fn lower_two_words_with_one_output_shape_share_one_bundle() {
+        // R8: bundles are interned by output tuple, deduped structurally like
+        // an array shape, so two words of the same shape share one struct and
+        // a third shape gets its own.
+        let ir = lower_src(
+            ": pair ( i64 -- i64 i64 ) dup ;\n\
+             : twice ( i64 -- i64 i64 ) dup ;\n\
+             : flags ( -- bool bool ) true false ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(ir.structs.iter().filter(|l| l.bundle).count(), 2);
     }
 
     #[test]
@@ -4701,10 +4896,14 @@ mod tests {
     fn lower_dup_of_struct_allocs_and_blits() {
         // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
         // blit), unlike a scalar `dup` which reuses the value id.
+        //
+        // R10 (phase 4 slice 1): the second alloc and the two further blits
+        // are the two-output return bundle this word now packs its outputs
+        // into; `dup`'s own copy is the first of the three blits.
         let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 Vec2 ) dup ;");
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
-        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
-        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 2);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 3);
     }
 
     #[test]
@@ -4881,12 +5080,15 @@ mod tests {
     fn lower_dup_of_enum_allocs_and_blits() {
         // R15: `dup` of an enum copies the aggregate bytes (fresh alloc +
         // blit), like a struct and unlike a scalar.
+        //
+        // R10 (phase 4 slice 1): as in the struct case, the second alloc and
+        // the two further blits are the two-output return bundle.
         let ir = lower_src(
             "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt MaybeInt ) dup ;",
         );
         let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
-        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
-        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 2);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 3);
     }
 
     #[test]
@@ -5408,6 +5610,7 @@ mod tests {
             fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
             span: crate::ast::Span::default(),
             has_drop_overload: false,
+            is_bundle: false,
         });
         let (structs, enums, arrays, ..) = build_registries(
             &module.structs,

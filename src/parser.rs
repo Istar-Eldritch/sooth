@@ -210,6 +210,7 @@ fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>,
                     fields: Vec::new(),
                     span: *span,
                     has_drop_overload: false,
+                    is_bundle: false,
                 });
             }
             TypeDeclKind::Enum(variant_names) => {
