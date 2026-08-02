@@ -1136,20 +1136,25 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
 
     // R9: one monomorphized `IrFunc` per distinct recorded instantiation.
     // Every call site of a polymorphic word wrote a `CallInst` keyed by its
-    // span; distinct instantiations dedup by their mangled symbol (a pure
-    // function of `(word, θ)`, minted the same way the call site's symbol was,
-    // so the two provably agree). θ is ground, so the substituted effect
-    // carries concrete array types with concrete `N` and the body lowers with
-    // no length-variable handling (length polymorphism is discharged here).
+    // span, carrying the symbol Phase 2 minted for its own R14 table entry.
+    // `IrFunc.name` here is *not* read from that field: `instantiation_symbol`
+    // is called again on `(word, θ)`, the same pure function Phase 2 called,
+    // so the emitted symbol and the call site's `Instr::Call` target are two
+    // independent computations that can only agree because the function is
+    // deterministic, not because one was copied from the other. θ is ground,
+    // so the substituted effect carries concrete array types with concrete
+    // `N` and the body lowers with no length-variable handling (length
+    // polymorphism is discharged here).
     let poly_words: HashMap<&str, &WordDef> = module
         .words
         .iter()
         .filter(|w| w.poly.is_some())
         .map(|w| (w.name.as_str(), w))
         .collect();
-    let mut emitted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for inst in module.instantiations.values() {
-        if !emitted.insert(inst.symbol.as_str()) {
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        if !emitted.insert(symbol.clone()) {
             continue;
         }
         let word = poly_words[inst.callee.as_str()];
@@ -1158,8 +1163,15 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             .as_ref()
             .expect("a recorded callee is polymorphic");
         let effect = concrete_effect(sig, &inst.subst, &module.arrays);
+        // R7/R14: a self-recursive polymorphic word is a nested polymorphic
+        // call (the body calling the very word being instantiated), out of
+        // scope this slice; `self_tail` stays `false` here rather than
+        // reusing `has_self_tail_call` (which only recognizes a plain-name
+        // `Call`, never a `CallInst` lookup), so such a body still lowers
+        // correctly as an ordinary recursive call, just without the
+        // loop/back-edge transform a monomorphic self-tail word gets.
         funcs.push(lower_word_parts(
-            &inst.symbol,
+            &symbol,
             &effect,
             &word.body,
             false,
