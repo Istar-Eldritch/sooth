@@ -16,10 +16,12 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    ArrayDecl, Clause, EnumDecl, ExternDecl, Line, Module, OwnedCellDecl, RefDecl, Span,
-    StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, Len, Line, Module,
+    OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, Term, TermKind, Type,
+    TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
+use std::collections::HashMap;
 
 /// Whether a `type:` body (starting at `body_start`, the token just after the
 /// declared name) is an enum: it contains a `Pipe` before its terminating
@@ -285,6 +287,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         owned_cells,
         refs,
         externs,
+        instantiations: HashMap::new(),
     })
 }
 
@@ -418,6 +421,146 @@ pub fn parse_enum_typedef_line(
     Ok(variant_fields)
 }
 
+/// A parsed polymorphic type before folding to `PolyType`: a concrete type, a
+/// type variable (already interned to its id), or an array whose element
+/// and/or count may itself be variable.
+enum RawTy {
+    Concrete(Type),
+    Var(u32),
+    Array(Box<RawTy>, RawLen),
+}
+
+enum RawLen {
+    Concrete(u32),
+    Var(u32),
+}
+
+/// The kind a `'`-name was first used as: X1 rejects the same name appearing
+/// as both a type variable and a length variable.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VarKind {
+    Ty,
+    Len,
+}
+
+/// Accumulates a polymorphic signature's variables as an effect is parsed
+/// left-to-right. Variable id spaces are per-signature and assigned in
+/// binding (first-mention) order; the `*_names` vectors are the id -> spelling
+/// tables the diagnostics and `PolySig` carry.
+#[derive(Default)]
+struct PolyBuilder {
+    ty_names: Vec<String>,
+    len_names: Vec<String>,
+    ty_index: HashMap<String, u32>,
+    len_index: HashMap<String, u32>,
+    kind: HashMap<String, VarKind>,
+    bounds: Vec<(u32, Bound)>,
+    row_in: Option<String>,
+    row_out: Option<String>,
+}
+
+impl PolyBuilder {
+    /// Record a side's row variable (`..s`), rejecting a second one on the
+    /// same side (X2). Placement (deepest only) is enforced by the caller.
+    fn set_row(&mut self, is_output: bool, name: String, span: Span) -> Result<(), String> {
+        let slot = if is_output {
+            &mut self.row_out
+        } else {
+            &mut self.row_in
+        };
+        if slot.is_some() {
+            return Err(row_var_misplaced_error(&name, span));
+        }
+        *slot = Some(name);
+        Ok(())
+    }
+
+    /// Intern a type variable, returning its id and whether this is its
+    /// binding (first) occurrence. A name already seen in a count position is
+    /// X1.
+    fn intern_ty_var(&mut self, name: &str, span: Span) -> Result<(u32, bool), String> {
+        if self.kind.get(name) == Some(&VarKind::Len) {
+            return Err(var_kind_conflict_error(name, span));
+        }
+        self.kind.insert(name.to_string(), VarKind::Ty);
+        if let Some(&id) = self.ty_index.get(name) {
+            return Ok((id, false));
+        }
+        let id = self.ty_names.len() as u32;
+        self.ty_names.push(name.to_string());
+        self.ty_index.insert(name.to_string(), id);
+        Ok((id, true))
+    }
+
+    /// Intern a length variable (an array count `'N`). A name already seen in
+    /// a type position is X1.
+    fn intern_len_var(&mut self, name: &str, span: Span) -> Result<u32, String> {
+        if self.kind.get(name) == Some(&VarKind::Ty) {
+            return Err(var_kind_conflict_error(name, span));
+        }
+        self.kind.insert(name.to_string(), VarKind::Len);
+        if let Some(&id) = self.len_index.get(name) {
+            return Ok(id);
+        }
+        let id = self.len_names.len() as u32;
+        self.len_names.push(name.to_string());
+        self.len_index.insert(name.to_string(), id);
+        Ok(id)
+    }
+
+    fn finish(self, inputs: Vec<PolyType>, outputs: Vec<PolyType>) -> PolySig {
+        let mut row_names: Vec<String> = Vec::new();
+        let mut row_id = |name: String| -> u32 {
+            if let Some(idx) = row_names.iter().position(|n| *n == name) {
+                idx as u32
+            } else {
+                row_names.push(name);
+                (row_names.len() - 1) as u32
+            }
+        };
+        let row_in = self.row_in.clone().map(&mut row_id);
+        let row_out = self.row_out.clone().map(&mut row_id);
+        PolySig {
+            row_in,
+            inputs,
+            outputs,
+            row_out,
+            bounds: self.bounds,
+            ty_var_names: self.ty_names,
+            len_var_names: self.len_names,
+            row_var_names: row_names,
+        }
+    }
+}
+
+fn row_var_misplaced_error(name: &str, span: Span) -> String {
+    format!(
+        "error: row variable `{name}` at line {}, col {} may appear only once, at the deepest (leftmost) slot of a side",
+        span.line, span.col
+    )
+}
+
+fn bound_on_use_error(name: &str, span: Span) -> String {
+    format!(
+        "error: bound on `{name}` at line {}, col {} must be written at its binding (first) occurrence, not a use",
+        span.line, span.col
+    )
+}
+
+fn unknown_capability_error(name: &str, span: Span) -> String {
+    format!(
+        "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy` or `Ord`)",
+        span.line, span.col
+    )
+}
+
+fn var_kind_conflict_error(name: &str, span: Span) -> String {
+    format!(
+        "error: variable `{name}` at line {}, col {} is used as both a type variable and a length variable; these are two different variables",
+        span.line, span.col
+    )
+}
+
 struct Parser<'t> {
     tokens: &'t [(Token, Span)],
     pos: usize,
@@ -520,7 +663,15 @@ impl<'t> Parser<'t> {
             return Err(shadowed_access_word_error(&name, name_span));
         }
         self.expect(Token::LParen)?;
-        let effect = self.parse_effect()?;
+        // R1/R2: a variable-bearing effect (`'T`, `'N`, `..s`) parses into a
+        // `PolySig`; every other effect stays a concrete `StackEffect`, byte
+        // for byte as before (the whole regression guarantee, R15).
+        let (effect, poly) = if self.effect_has_variable() {
+            let sig = self.parse_poly_effect()?;
+            (StackEffect::default(), Some(Box::new(sig)))
+        } else {
+            (self.parse_effect()?, None)
+        };
         self.expect(Token::RParen)?;
         // D8: a `|` immediately followed by a known variant name opens a
         // clause-style body; otherwise a `|` is an ordinary binding term.
@@ -531,7 +682,12 @@ impl<'t> Parser<'t> {
             WordBody::Terms { terms }
         };
         self.expect(Token::Semicolon)?;
-        Ok(WordDef { name, effect, body })
+        Ok(WordDef {
+            name,
+            effect,
+            body,
+            poly,
+        })
     }
 
     /// `extern:` declaration (R1): a top-level foreign-call binding. Grammar
@@ -647,6 +803,204 @@ impl<'t> Parser<'t> {
         self.expect_word("--")?;
         let outputs = self.parse_slots(|tok| matches!(tok, Token::RParen))?;
         Ok(StackEffect { inputs, outputs })
+    }
+
+    /// R1: whether the effect the parser is positioned at (just after `(`)
+    /// mentions any variable form, scanning to the matching `)`. `'` and `..`
+    /// are not lexer delimiters, so each form arrives as one `Word` token; a
+    /// `'`-led word is a type/length variable and a `..`-led word is the row
+    /// variable. A no-variable effect takes the concrete path untouched (R2).
+    fn effect_has_variable(&self) -> bool {
+        let mut i = self.pos;
+        while let Some((tok, _)) = self.tokens.get(i) {
+            match tok {
+                Token::RParen => return false,
+                Token::Word(w) if w.starts_with('\'') || w.starts_with("..") => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// R1/R3: parse a variable-bearing effect into a `PolySig`. Runs the
+    /// binding-occurrence analysis (X1/X3) and the row-variable placement rule
+    /// (X2) as it goes, left-to-right, inputs then outputs, so the first
+    /// (leftmost, deepest-first) mention of a `'`-name is its binding
+    /// occurrence and every later one a use.
+    fn parse_poly_effect(&mut self) -> Result<PolySig, String> {
+        let mut builder = PolyBuilder::default();
+        let raw_in = self.parse_poly_slots(&mut builder, false, |tok| {
+            matches!(tok, Token::RParen) || is_word(tok, "--")
+        })?;
+        self.expect_word("--")?;
+        let raw_out =
+            self.parse_poly_slots(&mut builder, true, |tok| matches!(tok, Token::RParen))?;
+        let inputs = raw_in
+            .into_iter()
+            .map(|r| self.raw_to_poly_type(r))
+            .collect();
+        let outputs = raw_out
+            .into_iter()
+            .map(|r| self.raw_to_poly_type(r))
+            .collect();
+        Ok(builder.finish(inputs, outputs))
+    }
+
+    /// Parse one side's slots into `RawTy`s, interning every variable into
+    /// `builder`. A leading `..s` (deepest slot) is the side's row variable;
+    /// a `..s` anywhere else, or a second one, is X2.
+    fn parse_poly_slots(
+        &mut self,
+        builder: &mut PolyBuilder,
+        is_output: bool,
+        stop: impl Fn(&Token) -> bool,
+    ) -> Result<Vec<RawTy>, String> {
+        if let Some((Token::Word(w), span)) = self.peek() {
+            if w.starts_with("..") && !is_word(&Token::Word(w.clone()), "--") {
+                let (w, span) = (w.clone(), *span);
+                self.pos += 1;
+                builder.set_row(is_output, w, span)?;
+            }
+        }
+        let mut slots = Vec::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.eof_error("`)` or `--`")),
+                Some((tok, _)) if stop(tok) => break,
+                Some((Token::Word(w), span)) if w.starts_with("..") => {
+                    return Err(row_var_misplaced_error(w, *span));
+                }
+                _ => slots.push(self.parse_poly_slot(builder)?),
+            }
+        }
+        Ok(slots)
+    }
+
+    /// One polymorphic type slot: an array (whose element and/or count may be a
+    /// variable), a type variable (with an optional bound at its binding
+    /// occurrence), or a plain concrete type expression.
+    fn parse_poly_slot(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+        if matches!(self.peek(), Some((Token::LBracket, _))) {
+            return self.parse_poly_array(builder);
+        }
+        if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
+            let (w, span) = self.expect_word_any_spanned()?;
+            let glued_colon = w.ends_with(':') && w.len() > 1;
+            let name = if glued_colon {
+                w[..w.len() - 1].to_string()
+            } else {
+                w.clone()
+            };
+            let bound_follows =
+                glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":");
+            if bound_follows && !glued_colon {
+                self.pos += 1; // the standalone `:`
+            }
+            let bounds = if bound_follows {
+                Some(self.parse_capabilities(span)?)
+            } else {
+                None
+            };
+            let (id, is_binding) = builder.intern_ty_var(&name, span)?;
+            if let Some(bounds) = bounds {
+                if !is_binding {
+                    return Err(bound_on_use_error(&name, span));
+                }
+                for b in bounds {
+                    builder.bounds.push((id, b));
+                }
+            }
+            return Ok(RawTy::Var(id));
+        }
+        let ty = self.parse_type_expr()?;
+        Ok(RawTy::Concrete(ty))
+    }
+
+    /// A polymorphic array `[ elem count ]`: `elem` recurses (so `['T 'N]`
+    /// nests a variable element), `count` is a decimal literal or a length
+    /// variable `'N`.
+    fn parse_poly_array(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+        self.expect(Token::LBracket)?;
+        let elem = self.parse_poly_slot(builder)?;
+        let count = match self.peek().cloned() {
+            Some((Token::Word(w), span)) if w.starts_with('\'') => {
+                self.pos += 1;
+                let id = builder.intern_len_var(&w, span)?;
+                RawLen::Var(id)
+            }
+            Some((Token::Int(n), _)) if (1..=i64::from(u32::MAX)).contains(&n) => {
+                self.pos += 1;
+                RawLen::Concrete(n as u32)
+            }
+            Some((Token::Int(n), span)) => {
+                self.pos += 1;
+                return Err(format!(
+                    "error: array type has invalid length {n} at line {}, col {} (`[T N]` requires 1 <= N <= {})",
+                    span.line, span.col, u32::MAX
+                ));
+            }
+            Some((tok, span)) => {
+                return Err(format!(
+                    "error: array count must be a decimal literal or a length variable `'N`, found `{}` at line {}, col {}",
+                    describe_token(&tok), span.line, span.col
+                ));
+            }
+            None => return Err(self.eof_error("an array count literal or `'N`")),
+        };
+        self.expect(Token::RBracket)?;
+        Ok(RawTy::Array(Box::new(elem), count))
+    }
+
+    /// The capability list after a bound colon (`'T: Copy Ord`): at least one
+    /// capability, then greedily every following capability word. The first
+    /// non-capability word after the colon is X3 (unknown capability), since
+    /// the colon has already committed to a bound.
+    fn parse_capabilities(&mut self, colon_span: Span) -> Result<Vec<Bound>, String> {
+        let mut out = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Word(c), _)) if c == "Copy" => {
+                    self.pos += 1;
+                    out.push(Bound::Copy);
+                }
+                Some((Token::Word(c), _)) if c == "Ord" => {
+                    self.pos += 1;
+                    out.push(Bound::Ord);
+                }
+                Some((Token::Word(c), span)) if out.is_empty() => {
+                    return Err(unknown_capability_error(c, *span));
+                }
+                _ => break,
+            }
+        }
+        if out.is_empty() {
+            return Err(unknown_capability_error("<none>", colon_span));
+        }
+        Ok(out)
+    }
+
+    /// Fold a parsed `RawTy` to a `PolyType`, interning any fully-concrete
+    /// array shape into the array registry so it becomes a plain
+    /// `PolyType::Concrete(Type::Array(..))`; only a variable-bearing array
+    /// stays `PolyType::Array` (R4).
+    fn raw_to_poly_type(&mut self, raw: RawTy) -> PolyType {
+        match raw {
+            RawTy::Concrete(t) => PolyType::Concrete(t),
+            RawTy::Var(id) => PolyType::Var(id),
+            RawTy::Array(elem, count) => {
+                let elem = self.raw_to_poly_type(*elem);
+                let len = match count {
+                    RawLen::Concrete(n) => Len::Concrete(n),
+                    RawLen::Var(id) => Len::Var(id),
+                };
+                if let (PolyType::Concrete(et), Len::Concrete(n)) = (&elem, &len) {
+                    PolyType::Concrete(intern_array_type(self.arrays, *et, *n))
+                } else {
+                    PolyType::Array(Box::new(elem), len)
+                }
+            }
+        }
     }
 
     fn parse_slots(&mut self, stop: impl Fn(&Token) -> bool) -> Result<Vec<TypedSlot>, String> {
@@ -2204,5 +2558,92 @@ mod tests {
         let err =
             parse_src(": main ( -- )\n  extern: foo ( i64 -- i64 ) \"foo\" ;\n;").unwrap_err();
         assert!(err.starts_with("parse error"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_monomorphic_word_carries_no_poly_sig() {
+        // R2: an effect with no variable is unchanged — the polymorphic
+        // representation is attached only when a variable is present.
+        let module = parse_src(": inc ( i64 -- i64 ) 1 + ;").unwrap();
+        assert!(module.words[0].poly.is_none());
+    }
+
+    #[test]
+    fn parse_poly_type_variable_word_attaches_a_poly_sig() {
+        // R1/R4: a `'T` effect parses into a `PolySig`, and the concrete
+        // effect is left empty (its whole signature lives in `poly`).
+        let module = parse_src(": dupit ( 'T: Copy -- 'T 'T ) dup ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        assert_eq!(sig.inputs.len(), 1);
+        assert_eq!(sig.outputs.len(), 2);
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert!(module.words[0].effect.inputs.is_empty());
+    }
+
+    #[test]
+    fn parse_length_variable_in_count_position() {
+        // R1: `'N` in an array count slot is a length variable, lexically
+        // identical to a type variable but distinguished by position.
+        let module = parse_src(": alen ( [i64 'N] -- [i64 'N] usize ) len ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
+        assert!(sig.ty_var_names.is_empty());
+        assert!(matches!(sig.inputs[0], PolyType::Array(_, Len::Var(0))));
+    }
+
+    #[test]
+    fn parse_row_variable_records_both_sides() {
+        // R1: a `..s` at the deepest slot of each side is the row variable.
+        let module =
+            parse_src(": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.row_in.is_some());
+        assert!(sig.row_out.is_some());
+        assert_eq!(sig.inputs.len(), 2);
+        assert_eq!(sig.outputs.len(), 4);
+    }
+
+    #[test]
+    fn parse_x1_name_as_both_type_and_length_variable_is_error() {
+        // X1: one `'`-name in both a type slot and a count slot is a located
+        // declaration error naming the variable.
+        let err = parse_src(": f ( 'N [i64 'N] -- i64 ) drop drop ;").unwrap_err();
+        assert!(err.contains("'N"), "unexpected message: {err}");
+        assert!(
+            err.contains("type variable") && err.contains("length variable"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_x2_row_variable_not_deepest_is_error() {
+        // X2: `..s` anywhere but the deepest (leftmost) slot is a located error.
+        let err = parse_src(": f ( i64 ..s -- i64 ) ;").unwrap_err();
+        assert!(err.contains("row variable"), "unexpected message: {err}");
+        assert!(err.contains("deepest"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_x2_row_variable_twice_on_one_side_is_error() {
+        // X2: a second `..s` on one side is a located error.
+        let err = parse_src(": f ( ..s ..t -- i64 ) ;").unwrap_err();
+        assert!(err.contains("row variable"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_x3_bound_on_use_occurrence_is_error() {
+        // X3: a bound must be written at the binding occurrence, not a use.
+        let err = parse_src(": f ( 'T: Copy 'T: Copy -- 'T ) drop ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("binding"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_x3_unknown_capability_is_error() {
+        // X3: an unknown capability name after a bound colon is a located error.
+        let err = parse_src(": f ( 'T: Frobnicate -- 'T ) ;").unwrap_err();
+        assert!(err.contains("Frobnicate"), "unexpected message: {err}");
+        assert!(err.contains("capability"), "unexpected message: {err}");
     }
 }
