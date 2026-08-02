@@ -1,0 +1,421 @@
+# Phase 4 Slice 1: Type variables + row variable + length variables + monomorphization (native)
+
+Base: `main` @ `9f8644c`. Design input: [the brief](./phase4-slice1-brief.md), whose D1–D7
+are locked and not reopened here. This spec answers the brief's "Open questions the spec must
+answer": the concrete `Sig`/environment representation change, the multi-output call-boundary
+ABI (D4), whether `Copy` is an ordinary or privileged constraint (D5), whether the core
+shuffles need any lowering change (D3), the surface syntax for each variable and for a bound,
+the `max`-over-floats surface (D6), and which existing example is the dogfood (D7).
+
+**Native only.** REPL monomorphization is Slice 2 (D2); nothing here touches `src/repl.rs`.
+
+## What ships
+
+A user `:` word may declare a polymorphic stack effect using three new variable forms:
+a **type variable** `'T`, the **row variable** `..s`, and a **length variable** in an array
+count position `['T 'N]`, optionally bounded (`'T: Copy`). The checker unifies each such word
+against the concrete stack at every call site, checks the bounds against the concrete
+instantiation Kitten-style, and records the instantiation; the backend emits one monomorphized
+`IrFunc` per distinct concrete instantiation. The long-standing multi-output call panic is
+closed by a synthesized aggregate-return ABI, which is also the path a row variable lowers
+through once monomorphization has resolved it to a concrete output count. `max` (integers) and
+`max-total` (floats, total-ordered) ship as new builtins. The core shuffles
+(`dup`/`swap`/`over`/`rot`/`drop`) are unchanged in both stages: they were already polymorphic
+by construction.
+
+## Why this is a real slice
+
+Three things that cannot be written today become writable, and one compiler panic is removed:
+
+1. **A length-polymorphic user word.** `[i64 8]` and `[i64 4]` are distinct types (confirmed:
+   recon 2), the builtin `len` accepts both but no user word can, so `each`/`fold` over a
+   fixed-size array (the whole Phase 4 combinator library and the phase's own exit criterion)
+   are unwritable without `'N`. This slice makes them expressible; the combinators themselves
+   are Slices 4–5.
+2. **A `Copy`-bounded type-polymorphic user word.** `dup`'s soundness depends on `'T: Copy`
+   (the linear spine), so a *constraint* appears whether wanted or not (D5). A user word that
+   `dup`s a `'T` must be able to require the bound and have it checked at each instantiation.
+3. **A multi-output user word that can be called.** Defining `( i64 -- i64 i64 )` checks and
+   lowers today (ten tests assert it), but *calling* it panics the compiler: `lower_call`
+   builds a result only when `out_arity == 1` and silently drops the rest, desyncing the
+   checker-verified stack from the lowering stack (recon 3, reproduced at `src/ir.rs:2233-2246`).
+   A `..s` in output position is exactly a word with a statically-unknown output count, so the
+   row variable cannot ship on a path that panics on two: closing this hole and lowering a row
+   variable are one question, answered once (D4).
+
+Polymorphic `dup`/`swap`/`max` (the literal exit-criterion phrase) is a **test**, not new
+code for the shuffles: `check_shuffle` (`src/check.rs:4717`) moves `Slot`s verbatim and gates
+only on `is_copy`, and `lower_call`'s shuffle arms (`src/ir.rs:2032`+) dispatch on the runtime
+`value_type`, so both are already type-transparent. The novelty is entirely in *user*
+polymorphic words, the multi-output ABI, and `max`/`max-total`.
+
+## Locked decisions
+
+Restating D1–D7 as they bind this spec, then the six decisions this spec adds (**S1–S6**),
+which are this spec's actual job.
+
+- **D1.** `'T`, `..s`, and `'N` land together as one change to what a signature is. `Sig`
+  stops being purely concrete exactly once.
+- **D2.** Native only; REPL is Slice 2. No `src/repl.rs` change.
+- **D3.** No inliner. Confirmed by S3 below: the core shuffles need no lowering change at all.
+- **D4.** The multi-output ABI is decided here (S2), and is the same mechanism a `..s` in
+  output position lowers through.
+- **D5.** `Copy` is per-variable, not phase-wide. S4 decides *how*.
+- **D6.** The float total-order surface lands here (S6).
+- **D7.** Dogfood is rewriting an existing example (S5 identifies it), or plainly reporting that
+  nothing is touched.
+
+**S1: A signature stops being `Vec<Type>` in exactly one bounded place; the simulated stack
+stays concrete.** The blast radius is bounded by *not* adding variable variants to `Type` (which
+is `Copy` and threaded through every match and through the checker's `Slot` stack). Instead a new
+`PolyType`/`PolySig` (checker-side) represents variables and lives only in a word's declared
+effect and in call-site unification. `Type`, the `Slot` virtual stack, and every existing
+concrete path are untouched: a monomorphic word still resolves to a concrete `Sig` exactly as
+today. See R1.
+
+**S2: The multi-output ABI is synthesized aggregate return.** Weighed against the two
+alternatives:
+
+- *Out-parameters* (caller allocs N slots, passes pointers, callee stores through them): needs a
+  new calling convention and out-pointer IR, hand-rolls a QBE by-ref ABI, and threads output
+  through pointer stores rather than the linear spine's move discipline. Rejected.
+- *Carried runtime stack*: that is the escaping-quotation uniform-runtime-stack fallback, which
+  depends on Phase 6's alloc layer and defeats the register/WCET goals. Out of scope here.
+  Rejected.
+- *Synthesized aggregate return* (recon 4's candidate): reuses the **already-shipping**
+  `out_arity == 1` struct-return path (`vm-pop ( Vm -- VmPop )` in `examples/vm.sth` returns a
+  struct today), synthesizes the exact bundling users write by hand (`VmPop`/`Fetched`/`Popped`),
+  needs no new `Instr`, and is count-agnostic so a row-variable-expanded count is free. **Chosen.**
+  See R7–R9.
+
+**S3: The core shuffles are checker-only, and in fact need no signature representation at
+all.** Confirmed by direct reading: `check_shuffle` (`src/check.rs:4717`) is fully
+type-transparent (`swap`/`rot` move slots; `dup`/`over` add an `is_copy` gate) and is intercepted
+*before* `env` lookup, so it never consults a `Sig`; `lower_call`'s `dup`/`swap`/`over`/`rot`/`drop`
+arms (`src/ir.rs:2032`+) dispatch on the runtime `value_type`, emitting no `Instr::Call`. The
+shuffles therefore acquire no `PolySig`, no unification, and no monomorphized `IrFunc`. The
+new machinery (R1–R6) is **for user-declared polymorphic words only**; the shuffles' "honest
+polymorphic signatures" are a documentation/`hover` concern, not an enforcement one.
+
+**S4: `Copy` is an ordinary required-operation constraint, not privileged.** A type variable
+carries a bound set; `Copy` is one entry, resolved at the concrete instantiation by the existing
+`is_copy` predicate, exactly as `>` for `max` resolves against the numeric tower, Kitten-style,
+no trait objects, no formal trait system. Inside a polymorphic body, `is_copy`/`is_linear` gain a
+type-variable arm that answers from the variable's bound set (a `'T: Copy` may be `dup`ed; an
+unbounded `'T` may not). Privileging `Copy` in the variable-binding machinery is rejected because
+it would foreclose the identical treatment a polymorphic `drop ( 'T -- )` needs in Slice 6 (the
+per-type `drop` overload resolution parked by 8b): `drop`, `Copy`, and `Ord` are then one
+mechanism pointed at three operations. See R4, R5.
+
+**S5: The dogfood is `examples/stack.sth`, rewritten to return multiple values directly,** and
+the plain D7 finding that polymorphic `dup`/`swap` touch no existing example (they already
+accepted every type) is reported, not papered over. See "Dogfood".
+
+**S6: `max` is integer-only; `max-total` is the float surface.** `max ( 'T -- 'T )` (informal
+spelling; two inputs, one output) is defined for any type whose `>` is a total order (the
+integer tower and `usize`/`isize`) and lowers inline to a compare-and-select on the concrete
+operand type. Over a float it is a located error naming `max-total`. `max-total ( 'F -- 'F )` is
+defined for `f32`/`f64` and orders by the Rust-`total_cmp` rule (a bit-pattern total order that
+sorts `-0.0 < +0.0` and places NaN at the ends), surfaced explicitly at the call site rather than
+pretending IEEE `>` is total (D6). Both are builtins (inline arms, like `>`); neither is a
+library word and neither is monomorphized. See R11, R12.
+
+## Requirements by stage
+
+Requirement IDs `Rn`; diagnostics `Xn` (each a behavioural negative test asserting the specific
+message *and* the named identifiers, per the test convention). "Golden" means source-in →
+expected-output or source-in → expected-diagnostic, runnable, never an IL-string assertion,
+except the two structural requirements (R6, R10) explicitly marked as emitted-IR assertions.
+
+### Surface syntax and parsing (`src/lexer.rs`, `src/parser.rs`, `src/ast.rs`)
+
+**R1: Three variable forms in a stack-effect declaration.** `'` and `..` are not lexer
+delimiters, so each form arrives as a single `Token::Word` and is recognised during effect
+parsing (`parse_slot` / `parse_type_expr`, `src/parser.rs:663`/`:709`), never as a resolvable
+concrete type name:
+
+| form | spelling | position | meaning |
+|---|---|---|---|
+| type variable | `'T` | any type-expression slot | one unknown type, ranged over per instantiation |
+| length variable | `'N` | the **count** slot of an array type, `['T 'N]` | one unknown array length |
+| row variable | `..s` | the **deepest** (leftmost) slot of the input and/or output list | an unknown-length stack prefix, passed through unchanged |
+
+A `'`-led word is a **binding occurrence** the first (leftmost, deepest-first) time it appears in
+the effect and a **use** thereafter; the same name in a *type* position and in an array *count*
+position is two different variables and is a located error (X1). Lexically `'T` and `'N` are
+identical (a leading-apostrophe word); they are distinguished purely by grammatical position
+(count slot vs. type slot), so no separate length-variable lexeme is introduced. `..s` may appear
+at most once on each side and only deepest; anywhere else is a located error (X2).
+
+**R2: A word with no variables is unchanged.** `parse_effect` still produces a concrete
+`StackEffect` for a monomorphic word; the polymorphic representation is attached only when at
+least one variable is present, so every existing example and test parses and resolves byte-for-byte
+as before (regression-checked, R17).
+
+**R3: Bound syntax: `'T: Copy` at the binding occurrence.** A bound is written immediately after
+a type variable's binding occurrence as `'T: Copy` (colon then a capability name), the capability
+names in this slice being `Copy` and `Ord`. Multiple bounds are space-separated after the colon
+(`'T: Copy Ord`); this slice's tests exercise `Copy` alone (the forcing case) and `Ord` only via
+`max`'s internal bound. A bound on a use occurrence rather than the binding occurrence, and an
+unknown capability name, are two located errors (X3). The bound binds to the nearest preceding
+type variable, terminating at the next slot word or `--`.
+
+### Representation and checking (`src/check.rs`, `src/ast.rs`)
+
+**R4: The representation (S1).** A new checker-side `PolyType`
+(`Concrete(Type) | Var(TyVarId) | Array(Box<PolyType>, Len)`, with
+`Len = Concrete(u32) | Var(LenVarId)`) and a `PolySig`
+(`{ row_in: Option<RowVarId>, inputs: Vec<PolyType>, outputs: Vec<PolyType>, row_out:
+Option<RowVarId>, bounds: Vec<(TyVarId, Bound)>` where `Bound ∈ {Copy, Ord}`}`). A`WordDef`
+gains an optional `PolySig`(`None` for a monomorphic word). `Type` gains **no** new variant and
+the `Slot` virtual stack stays concrete `Type`.`sig_of` is unchanged for the monomorphic path; a
+new `poly_sig_of` builds a `PolySig` from an effect containing variables.
+
+**R5: Call-site unification and substitution.** At a call to a word carrying a `PolySig`, the
+checker unifies `PolySig.inputs` (deepest-first) against the concrete top-of-stack `Slot` types,
+plus `row_in` against any deeper prefix, producing a substitution
+`θ: {TyVar→Type, LenVar→u32, RowVar→Vec<Type>}`:
+
+- a repeated `'T` must unify to the *same* concrete type at every occurrence, else X4 (`'T`
+  resolved to both `i64` and `bool`, naming both);
+- a repeated `'N` likewise for lengths, X4;
+- underflow (fewer stack slots than fixed inputs) is the existing `underflow_error`, unchanged;
+- a `'N` unifies only against an actual array's count; a non-array where `['T 'N]` is expected is
+  the existing type-mismatch error.
+
+θ is applied to `PolySig.outputs` (with `row_out` expanded to `θ(row_in)`), and the resulting
+**concrete** `Type`s are pushed onto the simulated stack. From this point every downstream check
+(`infer_line`, branch join, must-consume, aliasing) sees concrete types and is unchanged.
+
+**R6: Bound checking at the instantiation (S4).** For each `(v, bound)` in `PolySig.bounds`, the
+checker verifies `θ(v)` satisfies it: `Copy` via `is_copy` (`src/check.rs:177`), `Ord` via the
+numeric-tower/total-order predicate. Failure is a located error at the *call site*, naming the
+variable, the concrete type θ bound it to, and the unsatisfied capability (X5 for `Copy`, X6 for
+`Ord`). The message for `Copy` carries the linear-spine reason (a linear value cannot be
+duplicated), mirroring 8b's reason-carrying diagnostic.
+
+**R7: Body checking of a polymorphic word.** A polymorphic word's body is checked once, with
+each variable represented on the simulated stack by a distinct opaque placeholder type that
+unifies only with itself. `is_copy`/`is_linear` gain a type-variable arm reading the bound set:
+`dup`/`over` on a `'T: Copy` placeholder is accepted, on an unbounded `'T` is X7 (`dup` of a
+possibly-linear `'T`, naming the variable and the missing `Copy` bound); a `'T` value forgotten at
+body end is the existing must-consume error; `>` on a `'T` requires an `Ord` bound (X8). A length
+variable is opaque to the body except through `len`/`&>`/`fill`, which are already length-agnostic.
+The row variable is opaque: the body may not inspect a `..s` slot, only pass it through.
+
+**R8: Instantiation recording.** Each distinct ground θ for each polymorphic word is recorded in
+a per-module specialization set (deduped structurally, mirroring `intern_array_type`), consumed by
+lowering (R9). A word instantiated at only one concrete shape yields one specialization; at K
+shapes, K.
+
+### Lowering: monomorphization and the multi-output ABI (`src/ir.rs`, `src/backend/qbe.rs`)
+
+**R9: Monomorphization: one `IrFunc` per instantiation.** For each recorded specialization
+`(word, θ)`, `ir::lower` substitutes θ into the word's effect and body types and emits one
+`IrFunc` under a **mangled** name keyed on θ's ground types, reusing the existing symbol-mangling
+scheme (`struct_drop_symbol`'s epoch-suffix shape, `src/ir.rs:288`; the same `mangled_symbol`
+device 8b used). A monomorphic word lowers once under its plain name, unchanged. A call site
+resolves through the `Resolver` to the mangled symbol for its own instantiation. Because θ is
+ground, the monomorphized body carries concrete array types with concrete `N`, so
+`lower_array_word`, `&>`, `@`, and `len` need no length-variable handling: length polymorphism
+is fully discharged by monomorphization (confirming recon 2's "the compiler is already
+length-polymorphic by hand"). Builtins are exempt (S3).
+
+**R10: The multi-output aggregate ABI (S2), callee side.** A word (or monomorphized
+instantiation) whose **concrete** output count is ≥ 2 gets a synthesized *bundle struct*
+`__ret$<tuple>` interned in the struct registry, deduped by its output-type tuple. `lower_word`'s
+finalization (`src/ir.rs:1762`, today `let result = if ret.is_some() { b.stack.pop() }`) is
+extended: for arity ≥ 2 it allocates the bundle (`alloc_struct`), stores the top `out_arity`
+stack values into its fields deepest-first, and returns it via `Terminator::Ret(Some(bundle))`;
+`IrFunc.ret` becomes `Some(IrType::Struct(bundle_id))` and `env`'s `ret_ty` follows. `Instr::Call`
+keeps its single `Option<Value>`. No new IR variant. Structural check: a two-output word's emitted
+body ends in one `Ret` of a struct value, with the two outputs stored into it.
+
+**R11: The multi-output aggregate ABI, caller side (closes recon 3).** `lower_call`'s fallthrough
+(`src/ir.rs:2233-2246`) stops discarding results when `out_arity >= 2`: it receives the single
+bundle value and immediately **unpacks** it into `out_arity` field loads pushed back onto the
+stack deepest-first (the reverse of R10's pack, reusing the destructure path the generated `S>`
+word already uses), so the caller's lowering stack matches the checker-verified stack exactly and
+the `print: value` / subtract-overflow panic is gone. A field that is itself linear is moved out
+by the unpack exactly as `S>` moves a linear field; the bundle shell is left dead with no owned
+bytes, so no disposal runs on it (it is never surplus-checked; it exists only across the two
+adjacent pack/unpack steps). This is the same code path a row variable reaches: monomorphization
+(R9) has already resolved `row_out` to a concrete count, so a row-variable word and a fixed
+`( i64 -- i64 i64 )` word lower through R10/R11 identically. **One mechanism, D4 satisfied.**
+
+### `max` / `max-total` (`src/check.rs`, `src/ir.rs`, `src/backend/qbe.rs`)
+
+**R12: `max` (integers).** A new builtin arm in the shuffle/operator dispatch (checker) and in
+`lower_call` (lowering): checker signature `( 'T 'T -- 'T )` with an internal `Ord` bound, accepted
+for any two operands of one integer-tower type (`i8..i64`, `u8..u64`, `usize`, `isize`) and
+rejected for two floats (X9, naming `max-total`) and for a type mismatch or a non-`Ord` type (the
+existing operator-type errors). Lowers inline to a `Cmp(Gt)` plus a conditional select of the
+larger operand (a two-block select or QBE's compare-and-pick), on the concrete operand width. No
+`Instr::Call`, no monomorphization.
+
+**R13: `max-total` (floats).** A new builtin arm accepting exactly two `f32` or two `f64`
+operands, lowering to a total-ordered maximum by the `total_cmp` bit-pattern rule (map the IEEE
+bits to a monotone key: flip all bits if the sign bit is set, else flip only the sign bit, then
+integer-compare), inline, no `Instr::Call`. Applied to non-floats it is a located error (X10,
+directing integer operands to `max`). The lowering emits no float `>`; the golden asserts the
+total-order result on operands where IEEE and total order agree, and R13's negative test asserts
+that `max` refuses floats (X9) so the two surfaces stay disjoint.
+
+## Success criteria
+
+Every criterion maps to a runnable golden; each Xn maps to a behavioural negative test asserting
+the specific message and named identifiers. Goldens live in a new `tests/phase4_generics.rs`;
+unit tests sit beside their stage (`src/lexer.rs`, `src/parser.rs`, `src/check.rs`, `src/ir.rs`,
+`src/backend/qbe.rs`).
+
+| # | criterion | kind | maps |
+|---|---|---|---|
+| 1 | polymorphic `dup`/`swap` on `i64`, `bool`, and a struct in one program run correctly (already type-transparent; pins it) | golden, run | S3, R2 |
+| 2 | a user word `: pair ( i64 -- i64 i64 ) dup ;` called as `5 pair . .` prints `5` then `5` (recon-3 repro, no longer panics) | golden, run | R10, R11 |
+| 3 | a user word with a `'T: Copy` type variable, called at two concrete types, runs and prints both | golden, run | R1, R4–R7, R9 |
+| 4 | a length-polymorphic user word over `[i64 4]` and `[i64 8]` runs (the recon-2 "unwritable" case, now written) | golden, run | R1, R5, R9 |
+| 5 | a row-variable user word (e.g. `( ..s 'a 'b -- ..s 'a 'b 'a 'b )`, `'a`/`'b: Copy`) runs, exercising a ≥2-output row expansion through R10/R11 | golden, run | R1, R5, R9, R10, R11 |
+| 6 | `max` over `i64`, over `u8`, and over `usize` prints the larger operand each | golden, run | R12 |
+| 7 | `max-total` over two `f64` and two `f32` prints the total-ordered larger | golden, run | R13 |
+| 8 | the dogfood (`stack.sth`, rewritten) runs with output unchanged: `3` `3` `2` `1` `16` | golden, run | R10, R11, S5 |
+| 9 | a two-output word's emitted body ends in one struct `Ret` with both outputs stored (not a dropped second value) | structural (emitted IR) | R10 |
+| X1 | one `'`-name used in both a type slot and a count slot is a located declaration error | negative, message + `'T` | R1 |
+| X2 | `..s` in a non-deepest position, or twice on one side, is a located error | negative, message | R1 |
+| X3 | a bound on a use occurrence, or an unknown capability name, are two located errors | negative, message + name | R3 |
+| X4 | `'T` (or `'N`) forced to two different concretes at one call site is a located error naming both | negative, message + both types | R5 |
+| X5 | instantiating a `'T: Copy` word with a linear concrete type is a located call-site error naming the variable, the type, and the linear reason | negative, message + `'T` + type | R6 |
+| X6 | instantiating a `'T: Ord` requirement with a non-`Ord` type is a located error | negative, message | R6 |
+| X7 | `dup` of an unbounded `'T` inside a polymorphic body is a located error naming the missing `Copy` bound | negative, message + `'T` | R7 |
+| X8 | `>` on an unbounded `'T` inside a body requires `Ord` (located error) | negative, message + `'T` | R7 |
+| X9 | `max` on two floats is a located error naming `max-total` | negative, message + `max-total` | R12 |
+| X10 | `max-total` on two integers is a located error directing to `max` | negative, message + `max` | R13 |
+
+## Dogfood
+
+`examples/stack.sth`, rewritten. Today `pop`/`peek` bundle their two results (the updated `Stack`
+and the read value) into a hand-written `Popped` struct precisely because "a user-defined word may
+only return one value through a call" (the file's own comment). With the multi-output ABI (R10,
+R11) they return directly:
+
+```
+: pop  ( Stack -- Stack i64 ) ... ;
+: peek ( Stack -- Stack i64 ) ... ;
+```
+
+`type: Popped`, and every `Popped>` destructure at the call sites, are deleted; `main` calls
+`pop .` / `peek .` directly. Output is unchanged (`3` `3` `2` `1` `16`), so the golden pins the
+rewrite behaviourally. `Stack` is all-`Copy`, so the residual `Stack` after the last read is
+discarded by the trailing `drop` exactly as before.
+
+**The plain D7 finding (reported, not papered over):** polymorphic `dup`/`swap` simplify **no**
+existing example, because they already accepted every type: the shuffles were type-transparent
+before this slice (S3). `max`/`max-total` also touch no existing example (no checked-in program
+computes a maximum), so they are introduced by golden only. The honest example-level win of this
+slice is the multi-output ABI removing hand-bundled result structs; `list.sth` (`Popped`/`Summed`)
+and `vm.sth` (`VmPop`/`Fetched`) are the same pattern and could be migrated later, but are left
+untouched here to keep the dogfood to one example (the other four combinator-driven simplifications
+arrive with Slices 4–5).
+
+## Non-functional
+
+- **Green** unchanged: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
+- **No new `Instr` variant** and no new `Terminator`; the aggregate ABI reuses
+  `alloc_struct`/`Blit`/field-load and `Instr::Call`'s existing `Option<Value>` (R10, R11).
+- **`Type` gains no variant**; the `Slot` virtual stack stays concrete (S1/R4), so the checker's
+  existing invariant (the simulated stack carries concrete `Type`) holds.
+- **Backend stays QBE**; `Ptr` stays opaque; the bundle struct rides QBE's existing aggregate C-ABI
+  (the same one `vm-pop` uses today). No LLVM, no native backend, no WASM assumption broken.
+- **`core` stays `no_std`**; no JIT, no comptime interpreter, no inliner (D3).
+- Monomorphization is **compile-time only**; no runtime dispatch, no vtable, no boxed generic.
+
+## Out of scope
+
+Quotations and `call` (Slice 4). The combinator library `each`/`map`/`filter`/`fold`/`while`/`times`
+(Slices 4–5). The inliner (Slice 5; D3). Static overloading of `+` and open multimethods
+(`generic:`/`method:`), `if`-as-combinator, `Bool`-as-enum (Slices 6–7). REPL monomorphization
+(Slice 2; D2), no `src/repl.rs` change, and a polymorphic word defined at the REPL is out of
+scope. Generic `type:` declarations (Slice 3): this slice's variables are consumed by word
+signatures only, never by a `type:` declaration, even though Slice 3 parameterizes `type:` with
+the same variables. A polymorphic `drop ( 'T -- )` (Slice 6): S4 keeps its door open but does not
+build it. Migrating `list.sth`/`vm.sth` off their bundle structs. HM inference: unification here is
+one-directional (declared signature against a concrete stack), never full type inference. `max`'s
+`Ord` as user-writable on arbitrary types beyond the numeric tower.
+
+## Key risks
+
+- **Bundle-struct disposal (R11).** The synthesized bundle must never run a destructor on itself:
+  its fields are the real outputs, moved out by the unpack in the same breath. If a bundle field is
+  linear and the interning or the disposal fold treats the bundle as an owning aggregate, a double
+  free or a leak results. Mitigation: the bundle exists only across the adjacent pack/unpack, is
+  never bound to a local, never surplus-checked, and its fields are moved out through the existing
+  `S>` destructure path, the same shape `Popped` already exercises. Pinned by criterion 2/5's runs
+  and by a golden with a linear output field if one is reachable in this slice.
+- **Body checking with opaque variable placeholders (R7).** A placeholder must unify only with
+  itself and must not accidentally satisfy a concrete-type predicate (e.g. `is_aggregate`,
+  numeric-op dispatch) and thereby accept a body that a real instantiation would reject. Mitigation:
+  the placeholder answers `is_copy`/`is_linear`/`Ord` *only* from its bound set, and every other
+  type-directed operation on a bare `'T` is rejected (X7, X8).
+- **Instantiation explosion.** K distinct concrete shapes yield K `IrFunc`s. Acceptable at this
+  scale (a handful of goldens); no mitigation beyond structural dedup (R8). Flagged for Slice 5,
+  where combinator inlining changes the calculus.
+- **Row-variable scope creep.** Without quotations there is no library consumer of `..s`; the
+  temptation is to over-build its unification. Mitigation: `..s` is passed through opaquely (R7),
+  its only exercised consumer is criterion 5's synthetic word, and its lowering is *entirely*
+  subsumed by R9+R10+R11 (monomorphization resolves it to a concrete count before lowering sees it).
+
+## Current-state anchors (confirmed against `9f8644c`)
+
+- `Sig { inputs: Vec<Type>, outputs: Vec<Type> }`, `sig_of`: `src/check.rs:22-31`. Fully concrete.
+- `check_shuffle`: `src/check.rs:4717`. Type-transparent; `dup`/`over` gate on `is_copy`
+  (`src/check.rs:177`); intercepted before `env` lookup. → S3.
+- `lower_call` shuffle arms (`dup`/`swap`/`over`/`rot`/`drop`): `src/ir.rs:2032`+. Dispatch on
+  runtime `value_type`, emit no `Instr::Call`. → S3.
+- The multi-output desync, `src/ir.rs:2233-2246`: `ret = if out_arity == 1 { Some(...) } else
+  { None }`, second output silently dropped. → R11.
+- `lower_word` finalization pops one output: `src/ir.rs:1762`; `IrFunc.ret: Option<IrType>`,
+  `Terminator::Ret(Option<Value>)` single-valued. → R10.
+- `Arity = (usize, usize, Option<IrType>)`: `src/ir.rs:961`; `Instr::Call(Option<Value>, ...)`:
+  `src/ir.rs:861`. → R10, R11.
+- Aggregate return already ships: `vm-pop ( Vm -- VmPop )` returns a struct via the `out_arity == 1`
+  path: `examples/vm.sth:54`. → S2 precedent.
+- Symbol mangling precedent: `struct_drop_symbol(id, epoch)`: `src/ir.rs:288`. → R9.
+- `parse_effect`/`parse_slot`/`parse_type_expr`/`parse_array_type_expr`:
+  `src/parser.rs:644`/`:663`/`:709`/`:804`. `'`/`..` are not delimiters. → R1, R3.
+- `type: Popped` bundling in `examples/stack.sth` (and `list.sth`, `vm.sth`): the D7 dogfood. → S5.
+
+## Phases JSON
+
+```json
+{
+  "phases": [
+    {
+      "phase": 1,
+      "focus": "Multi-output aggregate-return ABI (S2): synthesize and intern a bundle struct for any word with a concrete output count >= 2; extend lower_word's finalization to pack the top out_arity stack values into it and Ret it (R10); stop lower_call's fallthrough discarding results when out_arity >= 2 and unpack the bundle back onto the stack via the S> destructure path (R11); update env's ret_ty and IrFunc.ret. Closes the recon-3 panic (src/ir.rs:2233-2246). No new Instr. Exit: criteria 2, 9.",
+      "effort": "high",
+      "difficulty": "hard"
+    },
+    {
+      "phase": 2,
+      "focus": "Checker-side variable machinery (S1/S4): PolyType/PolySig representation (R4) with no new Type variant and a concrete Slot stack; lex/parse 'T, 'N in count position, and ..s (R1) plus the 'T: Copy bound (R3); call-site unification and substitution (R5); bound checking at the instantiation (R6); polymorphic-body checking with opaque placeholders and the is_copy/is_linear variable arm (R7); instantiation recording (R8). Checker-only; polymorphic words do not lower yet. Exit: X1, X2, X3, X4, X5, X6, X7, X8 as diagnostic goldens.",
+      "effort": "high",
+      "difficulty": "hard"
+    },
+    {
+      "phase": 3,
+      "focus": "Monomorphization lowering (R9): emit one mangled IrFunc per recorded instantiation, substituting the ground theta into effect and body types, reusing the struct_drop_symbol-style mangling; resolve each call site to its instantiation's symbol; length variables discharged by concrete N in the monomorphized body. Depends on phase 1 (a polymorphic instantiation may be multi-output / row-expanded) and phase 2 (the recorded instantiations). Makes phase-2 polymorphic words run. Exit: criteria 3, 4, 5.",
+      "effort": "high",
+      "difficulty": "hard"
+    },
+    {
+      "phase": 4,
+      "focus": "max and max-total builtins (S6/D6): inline max over the integer tower (R12) with a compare-and-select lowering and a located rejection of floats naming max-total (X9); inline max-total over f32/f64 by the total_cmp bit-pattern rule (R13) with a located rejection of integers naming max (X10). Builtins only, no monomorphization. Exit: criteria 6, 7.",
+      "effort": "medium"
+    },
+    {
+      "phase": 5,
+      "focus": "Dogfood and docs (S5/D7): rewrite examples/stack.sth so pop/peek return ( Stack -- Stack i64 ) directly, delete type: Popped and every Popped> destructure, output unchanged 3/3/2/1/16 (criterion 8); record the plain D7 finding that polymorphic dup/swap/max touch no existing example; note the slice's decisions in DESIGN.md/ROADMAP.md; run the addition-only regression check (R2, R17). Exit: criterion 1, criterion 8.",
+      "effort": "low"
+    }
+  ]
+}
+```
