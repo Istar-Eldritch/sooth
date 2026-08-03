@@ -1019,3 +1019,88 @@ fn polymorphic_repl_definition_resolving_to_two_outputs_is_a_located_x3() {
         "must not silently truncate to one output"
     );
 }
+
+// Criterion 3 (trace C, R8): redefining a polymorphic word follows the
+// ordinary-word generation rule -- an earlier line's compiled call keeps the
+// old generation's body (frozen binding, D3/D4) while a new call site binds
+// the new generation. Single-output throughout: `id` starts unbounded
+// (`( 'T -- 'T )`, gen0), so it instantiates even at the linear `Spy`; `g`
+// binds `id`@`Spy` at gen0 and stays observable (`drop 7`). Redefining `id`
+// to add a `Copy` bound (gen1) leaves `g`'s compiled gen0 call untouched
+// (still `drop 7`) while a *new* `7 Spy id drop` line now fails the `Copy`
+// bound (X2). That is the generation-freezing property, witnessed without a
+// return bundle.
+#[test]
+fn redefined_polymorphic_word_freezes_earlier_call_while_new_call_rebinds() {
+    let out = run_session(&[
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        ": id ( 'T -- 'T ) ;",
+        ": g ( -- ) 7 Spy id drop ;",
+        "g",
+        ": id ( 'T: Copy -- 'T ) ;",
+        "g",
+        "7 Spy id drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 10, "unexpected output:\n{out}");
+    assert_eq!(
+        &lines[..9],
+        [
+            "defined type Spy",
+            "defined drop for Spy",
+            "defined id",
+            "defined g",
+            // `g` at gen0: id@Spy is the identity, `drop` prints once.
+            "drop 7",
+            "stack: (empty)",
+            // id redefined to gen1 (adds the Copy bound).
+            "defined id",
+            // `g` still runs its frozen gen0 id@Spy body: unchanged.
+            "drop 7",
+            "stack: (empty)",
+        ],
+        "an earlier line's compiled call must stay frozen to gen0 across the redefinition:\n{out}"
+    );
+    // The new bare line instantiates id at gen1, whose `Copy` bound rejects
+    // the linear `Spy` (X2's `Ctx::Line` phrasing), naming the variable, the
+    // callee, and `Spy`.
+    let err = lines[9];
+    assert!(
+        err.contains("'T") && err.contains("id") && err.contains("Spy") && err.contains("Copy"),
+        "expected the gen1 Copy-bound rejection naming 'T, `id`, and `Spy`: {err}"
+    );
+}
+
+// R8 (shared per-name counter, both directions): a name toggling
+// ordinary -> poly -> ordinary must not remint a resident symbol. The first
+// ordinary `id` exports `id__gen0`; defining `id` as poly evicts it from the
+// ordinary env; redefining `id` as ordinary again must take gen2 (past the
+// poly entry), not reset to gen0 and collide with the first body under
+// `RTLD_GLOBAL` first-loaded-wins. Witnessed by the last call observing the
+// *new* body (`+ 2` -> 7), not the shadowed first (`+ 1` -> 6).
+#[test]
+fn ordinary_word_redefined_across_a_poly_definition_does_not_remint_the_old_symbol() {
+    let out = run_session(&[
+        ": id ( i64 -- i64 ) | n | n 1 + ;",
+        "5 id",
+        ": id ( 'T -- 'T ) ;",
+        ": id ( i64 -- i64 ) | n | n 2 + ;",
+        "5 id",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined id",
+            "stack: 6",
+            "defined id",
+            "defined id",
+            // The `6` from line 2 persists on the session stack; the final
+            // `5 id` must run its own generation's body (5 + 2 = 7) on top,
+            // not the first `id__gen0` shadowing it (which would give 6).
+            "stack: 6 7",
+        ],
+        "the redefined ordinary `id` must not collide with the pre-poly generation:\n{out}"
+    );
+}

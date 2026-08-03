@@ -402,9 +402,9 @@ impl Session {
     /// holds it (a shared per-name counter, so a mono<->poly redefinition can
     /// never mint a colliding generation).
     fn next_shared_generation(&self, name: &str) -> u64 {
-        let ordinary = self.env.get(name).map(|e| e.generation + 1);
-        let polymorphic = self.poly_words.get(name).map(|e| e.generation + 1);
-        ordinary.max(polymorphic).unwrap_or(0)
+        let ordinary = next_generation(self.env.get(name));
+        let polymorphic = self.poly_words.get(name).map_or(0, |e| e.generation + 1);
+        ordinary.max(polymorphic)
     }
 
     /// R7 (Slice 2): the REPL analogue of native lowering's `poly_arities`
@@ -908,7 +908,12 @@ impl Session {
         // R5 (Slice 2): thread the session poly-env so this defined word's own
         // body can call a retained polymorphic word; the relayed instantiation
         // table drives the per-site lowering below (R7).
-        let poly_env = self.poly_env();
+        // R8: the definee's own name is removed so that redefining a name from
+        // poly to ordinary binds its self-calls to this new ordinary word, not
+        // the stale poly entry this line is about to evict (the two stores are
+        // mutually exclusive per name).
+        let mut poly_env = self.poly_env();
+        poly_env.remove(&name);
         let insts = check::check_def(
             &word,
             &self.enums,
@@ -921,7 +926,11 @@ impl Session {
         )?;
         let poly_arities = self.poly_arities();
 
-        let generation = next_generation(self.env.get(&name));
+        // R8: one past whichever of the ordinary env or the poly store holds
+        // the name (a shared per-name counter), so redefining across the
+        // mono<->poly boundary can never remint a resident generation's symbol
+        // under `RTLD_GLOBAL`.
+        let generation = self.next_shared_generation(&name);
         let symbol = mangled_symbol(&name, generation);
 
         // Self-recursive calls in the body must bind this new generation, not
@@ -988,6 +997,11 @@ impl Session {
 
         // Only commit on success: env stays untouched on any earlier failure.
         self.libs.push(lib);
+        // R8: an ordinary (re)definition evicts any prior poly entry for the
+        // name, so a name lives in exactly one of the two stores at a time and
+        // a later call never has to arbitrate between a poly and a concrete
+        // entry for it.
+        self.poly_words.remove(&name);
         self.env.insert(
             name.clone(),
             WordEntry {
