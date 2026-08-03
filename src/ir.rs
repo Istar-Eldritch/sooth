@@ -1158,7 +1158,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let mut distinct: Vec<(String, &CallInst)> = Vec::new();
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for inst in module.instantiations.values() {
-        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, None);
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
         if emitted.insert(symbol.clone()) {
             distinct.push((symbol, inst));
         }
