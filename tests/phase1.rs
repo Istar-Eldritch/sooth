@@ -972,6 +972,49 @@ fn polymorphic_repl_word_instantiated_twice_at_one_type_prints_both_values() {
     );
 }
 
+// D3 (both halves of the frozen callee-binding): a poly word's body calls a
+// concrete word that is then redefined at a *different arity/return type*
+// before the poly word is instantiated. The instantiation must resolve the
+// callee against the defining-line snapshot -- both its frozen symbol *and*
+// its frozen arity -- so `noise`'s gen0 `( -- )` no-op body runs, leaving `p`
+// the identity: `5 p .` prints `5`. Before arity was frozen, the frozen
+// symbol was called under the redefined `( i64 -- i64 )` ABI, reading an
+// uninitialized argument slot and printing garbage.
+#[test]
+fn poly_instantiation_freezes_callee_arity_across_a_differing_redefinition() {
+    let out = run_session(&[
+        ": noise ( -- ) ;",
+        ": p ( 'T -- 'T ) noise ;",
+        ": noise ( i64 -- i64 ) | n | n 100 + ;",
+        "5 p .",
+    ]);
+    assert_eq!(
+        out, "defined noise\ndefined p\ndefined noise\n5\nstack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// D3 same-arity control: when the redefined callee keeps its arity/return
+// type, the frozen-symbol binding alone already pins the old body. `noise`
+// stays `( -- i64 )`; `p`'s instantiation binds `noise`@gen0 (value 42), so
+// a later `noise` redefinition to 99 cannot change `p`'s meaning: `5 p .`
+// prints `42`, the frozen gen0 value, not `99`. This is the value-witnessed
+// counterpart to the arity case above, and guards the frozen-symbol property
+// independently of the arity fix.
+#[test]
+fn poly_instantiation_freezes_callee_value_across_a_same_arity_redefinition() {
+    let out = run_session(&[
+        ": noise ( -- i64 ) 42 ;",
+        ": p ( 'T -- i64 ) drop noise ;",
+        ": noise ( -- i64 ) 99 ;",
+        "5 p .",
+    ]);
+    assert_eq!(
+        out, "defined noise\ndefined p\ndefined noise\n42\nstack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
 // X2: instantiating a `'T: Copy` REPL word at a linear concrete type on a
 // later line is the native call-site error (`Ctx::Line` phrasing), naming
 // the variable, the callee, and the linear type.

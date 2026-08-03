@@ -65,7 +65,7 @@ Diagnostics `Xn` are behavioural negative tests asserting the message *and* name
 ## Key risks
 
 - **Symbol collision under `RTLD_GLOBAL`** — enforced by the generation component (R2) + (name, generation, subst) dedup (R7); symbol-level unit pin + criterion 3 end-to-end.
-- **Stale resolver at instantiation** — snapshot frozen at the defining line, stored per poly word (R4); lowering uses it, never `self.env`. Pinned by criterion 3's `g`.
+- **Stale callee binding at instantiation** — *both* halves of the callee binding are frozen at the defining line and stored per poly word (R4/D3): the callee→symbol `resolver` *and* the callee arity map (`ir_lower_env`). Lowering an instantiation uses both, never the instantiating line's live `self.env`, so a callee redefined at a different symbol *or* a different arity/return type in between cannot change the poly word's meaning (symbol swap) or its ABI (arity mismatch reading an uninitialized slot). Pinned by `poly_instantiation_freezes_callee_arity_across_a_differing_redefinition` (differing arity → correct frozen output, not garbage) and its same-arity value-witnessed control `poly_instantiation_freezes_callee_value_across_a_same_arity_redefinition` in `tests/phase1.rs`.
 - **`.so` growth per repeat** — `exported_insts` skips already-exported symbols. Pinned by criterion 2's unit.
 - **Native regression from R2/R2b** — every native site passes `None`; guarded by `tests/phase4_generics.rs` *and* the drop-overload goldens.
 

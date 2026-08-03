@@ -109,10 +109,17 @@ struct WordEntry {
 /// not the instantiating line's. `generation` stamps every minted
 /// instantiation symbol (`__gen{N}`), so a redefinition's instantiations can
 /// never collide with an earlier generation's under `RTLD_GLOBAL` (R8).
+///
+/// `ir_lower_env` is the **frozen** callee arity map (D3), the other half of
+/// the binding `resolver` freezes: lowering an instantiation must determine
+/// each callee's arity/return type from the defining line's env, not the
+/// instantiating line's, or a callee redefined at a different arity between
+/// the two lines emits the resolved (frozen) symbol under the wrong ABI.
 struct PolyWordEntry {
     generation: u64,
     word: WordDef,
     resolver: HashMap<String, String>,
+    ir_lower_env: HashMap<String, ir::Arity>,
 }
 
 /// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
@@ -438,7 +445,6 @@ impl Session {
     fn emit_instantiations(
         &mut self,
         insts: &HashMap<Span, CallInst>,
-        ir_lower_env: &HashMap<String, ir::Arity>,
         regs: ir::Registries,
     ) -> Vec<ir::IrFunc> {
         let mut pending: Vec<&CallInst> = insts
@@ -472,7 +478,7 @@ impl Session {
                 sig,
                 &inst.subst,
                 &entry.word.body,
-                ir_lower_env,
+                &entry.ir_lower_env,
                 &resolve,
                 regs,
                 &self.arrays,
@@ -876,6 +882,12 @@ impl Session {
             .iter()
             .map(|(callee, entry)| (callee.clone(), entry.symbol.clone()))
             .collect();
+        // D3: freeze the callee arity map from the same defining-line env the
+        // resolver is captured from. Lowering an instantiation reads callee
+        // arity/return type from this, not the instantiating line's live env,
+        // so a callee redefined at a different arity in between cannot make
+        // the frozen-resolved call emit under the wrong ABI.
+        let ir_lower_env = ir_arity_env(&env);
         // R8: the two stores stay mutually exclusive per name (a polymorphic
         // word never enters the concrete env, R3), so defining `name` as poly
         // evicts any prior ordinary entry for it.
@@ -886,6 +898,7 @@ impl Session {
                 generation,
                 word,
                 resolver,
+                ir_lower_env,
             },
         );
         writeln!(writer, "defined {name}").map_err(|e| format!("writing stdout: {e}"))?;
@@ -982,7 +995,7 @@ impl Session {
         };
         // R7 (Slice 2, D2): lower each not-yet-exported instantiation this
         // body recorded into this module, against the frozen snapshot resolver.
-        funcs.extend(self.emit_instantiations(&insts, &ir_lower_env, regs));
+        funcs.extend(self.emit_instantiations(&insts, regs));
 
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
@@ -1143,7 +1156,7 @@ impl Session {
         // R7 (Slice 2, D2): lower each not-yet-exported instantiation this line
         // recorded into this module, against each poly word's frozen snapshot
         // resolver; an already-exported symbol emits nothing (trace B dedup).
-        funcs.extend(self.emit_instantiations(&insts, &ir_lower_env, regs));
+        funcs.extend(self.emit_instantiations(&insts, regs));
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts.clone(),
