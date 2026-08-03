@@ -815,7 +815,15 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    problem that `drop_dropped_sites` caches around (re-checking an earlier body against a
    later line's env), and `RTLD_GLOBAL` symbol collision when two lines instantiate the same
    word at the same type, which is what the epoch-suffixing machinery already solves for
-   destructors.
+   destructors. A further collision the brief traced directly (`docs/phase4-slice2-brief.md`):
+   `instantiation_symbol` (S1) is a pure function of word name and substitution with no
+   generation component, so redefining a polymorphic word and re-instantiating it at a type it
+   was already instantiated at mints the same symbol as the old body and silently keeps running
+   it under `RTLD_GLOBAL`'s first-loaded-wins rule. And one binding question the brief settles
+   rather than leaves open: an instantiation lowers against the resolver live at the word's own
+   *defining* line, not the instantiating line's, matching the frozen-binding rule every other
+   REPL word already follows (see DESIGN.md's Open / deferred: REPL late binding, for the larger
+   live-patching question this brushed against and deferred rather than decided here).
 3. **Generic struct declarations.** A `type:` parameterized by the slice 1 variables, with
    layout and the `StructId`/`ArrayId` registries keyed per instantiation. Its own slice
    rather than part of slice 1, which is already the phase's largest, and placed immediately

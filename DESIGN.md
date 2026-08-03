@@ -690,6 +690,30 @@ rows, no borrow analysis needed to write the compiler in it.
   self-hosting, and only if the pull to own the vertical is genuine or a
   sub-millisecond in-image REPL is something you actually want; if taken, it is its
   own phase, never welded to the self-hosting rewrite.
+- **REPL late binding for redefinition.** Every REPL word today is frozen at whichever
+  generation of its callees existed when it was compiled: redefining `f` after `g`
+  already calls it leaves `g` calling the old `f` forever, verified even across a
+  signature-incompatible redefinition (`f` going from `( -- i64 )` to `( -- bool )`
+  does not perturb an already-compiled `g`). This is not a chosen UX principle, it
+  falls straight out of the architecture: each line compiles once to native code via
+  `dlopen` (no in-process JIT, see Decided), calls are direct and baked at the calling
+  line's compile time, and nothing ever recompiles an earlier line. It also matches
+  Forth's own long-standing convention (a colon-definition compiles its calls to fixed
+  execution tokens; redefining a word a later definition already calls does not
+  retroactively change that definition), which is Sooth's actual reference class, not
+  the late-bound convention of Python/Lisp/JS REPLs, where redefining a helper
+  immediately updates every existing caller. Phase 4 Slice 2 (REPL monomorphization)
+  surfaced the question by needing to decide which env a polymorphic word's
+  instantiation binds its callees against, and kept the existing frozen rule there for
+  consistency with ordinary words rather than deciding the bigger question in passing.
+  Genuine late binding needs every call to go through a mutable dispatch slot that
+  redefinition updates, rather than a direct symbol reference, for every word, not just
+  polymorphic ones (doing it only for generics would make a caller's behavior on
+  redefinition depend on whether the callee happens to be generic, a worse
+  inconsistency than either uniform choice), and it is a breaking change to already-
+  shipped, already-tested ordinary-word REPL semantics. Revisit only if live-patching is
+  something actually wanted, as its own design track with its own brief, not as a side
+  effect of a generics or monomorphization slice.
 
 ## Declined
 
