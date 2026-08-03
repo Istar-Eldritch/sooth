@@ -223,3 +223,134 @@ fn max_total_over_floats_prints_the_total_ordered_larger() {
     assert_eq!(stdout, "2.5\n3.5\n-3\n2\n");
     assert_eq!(code, 0);
 }
+
+// Phase 4 Slice 3: loop-carried aggregate aliasing and the back-edge copy.
+// Phase 1 lands the regression guards that already pass on the current tree,
+// before the lowering change (R1-R4) that could break them.
+
+/// Like `run_src`, but bounds the *stack* rather than the address space (1 MB
+/// via `ulimit -s`) and is signal-aware: a missed hoist is a `SIGSEGV`, which
+/// `run_src`'s `.code().expect(...)` would panic on rather than report.
+fn run_stack_bounded_src(name: &str, src: &str) -> Option<i32> {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("ulimit -s 1024 && exec \"{}\"", binary.display()))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .status()
+        .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    status.code()
+}
+
+#[test]
+fn two_aggregates_swapped_across_back_edge_stay_correct() {
+    // Criterion 5 (R4/D2 regression guard): neither carried `Box` is
+    // re-produced in the loop, so the back-edge is a pure swap (`b a`).
+    // Green today; the parallel-copy shape the fix's staging must not corrupt.
+    let (stdout, code) = run_src(
+        "swap",
+        "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box Box -- Box )\n\
+           | n a b |\n\
+           n 0 = if b else\n\
+             a Box>n .\n\
+             n 1 - b a loop\n\
+           end ;\n\
+         : main ( -- ) 4 1 mk 2 mk loop Box>n . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "1\n2\n1\n2\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn aggregate_carried_loop_runs_in_constant_stack() {
+    // Criterion 6 (R9): the carried `Box` is re-produced every iteration and
+    // is not forwarded-in-place, so it stages under the fix. Green today
+    // (the existing entry-hoisted alloc), guarding that the fix introduces
+    // no per-iteration stack bump.
+    let src = "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box -- Box ) | n b | n 0 = if b else n 1 - n mk loop end ;\n\
+         : main ( -- ) 1000000 0 mk loop Box>n . ;\n";
+    assert_eq!(
+        run_stack_bounded_src("aggloop", src),
+        Some(0),
+        "a fixed-count aggregate-carrying loop should run in constant stack, not overflow it"
+    );
+}
+
+#[test]
+fn forwarded_aggregate_reads_its_seeded_value() {
+    // Criterion 9 (R3/R4): `prev` is carried unchanged (never re-produced), so
+    // it is forwarded in place; today that means its phi arm is the seed
+    // param on the entry edge. Non-zero seed (42) so a fix that skips the
+    // entry-arm init blit reliably reads as not-42, not a QBE-zeroed alloc
+    // that happens to also read 0.
+    let (stdout, code) = run_src(
+        "seeded",
+        "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box -- Box ) | n prev | n 0 = if prev else n 1 - prev loop end ;\n\
+         : main ( -- ) 3 42 mk loop Box>n . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn recursive_type_destructor_disposes_right_contents() {
+    // Criterion 10 (R5, R1a behavioural regression guard): a three-node
+    // `List` whose payload is a `drop`-overloaded `Res`, disposed by the
+    // fused iterative destructor (Phase 3 slice 8b). Green today, and stays
+    // green whether or not R1a's gate is later missed (the destructor loop
+    // is correct today by its own read-then-overwrite ordering); the gate
+    // itself is pinned structurally, not by this behavioural golden.
+    let (stdout, code) = run_src(
+        "listdrop",
+        "type: Res n i64 ;\n\
+         : drop ( Res -- ) | r | r Res>n 5000 + . ;\n\
+         : mkres ( i64 -- Res ) | n | n Res ;\n\
+         type: List | Nil | Cons v Res next ^List ;\n\
+         : push-front ( List Res -- List ) | rest v | v rest ^ Cons ;\n\
+         : build ( i64 List -- List )\n\
+           | n acc |\n\
+           n 0 = if acc else n 1 - acc n mkres push-front build end ;\n\
+         : main ( -- ) 3 Nil build drop ;\n",
+        false,
+    );
+    assert_eq!(stdout, "5001\n5002\n5003\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn join_phi_over_carried_aggregate_survives() {
+    // Criterion 11 (R2 scoping guard): the inner `if` is not in tail
+    // position, so both arms fall through to a join phi over the carried
+    // `Box` (one arm re-produces, the other forwards); the merged value is
+    // then carried to the tail call as a normal arg. Green today, guarding
+    // that the fix's no-header-phi rule (R2) stays scoped to the loop header
+    // and does not suppress this ordinary join phi.
+    let (stdout, code) = run_src(
+        "joinphi",
+        "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box -- Box )\n\
+           | n b |\n\
+           n 0 = if b else\n\
+             n 3 = if n mk else b end\n\
+             | c |\n\
+             n 1 - c loop\n\
+           end ;\n\
+         : main ( -- ) 5 0 mk loop Box>n . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
