@@ -772,9 +772,11 @@ headline combinators (`each`/`fold`/`filter`/`while`) were hand-written against 
 planned feature set to see what they actually need. The exercise inverted the expected
 answer: quotation *capture*, the question that looked hardest, turned out to be a
 quality-of-life issue (see slice 4), while two things absent from the plan turned out to
-be load-bearing — length polymorphism and generic struct declarations, now slices 1 and 3.
-Same technique as `vm.sth`, which shipped with zero compiler changes and made that fact
-the Phase 2 exit verdict: write the program first, then find out what the compiler owes it.
+be load-bearing: length polymorphism (now slice 1) and generic struct declarations
+(originally slice 3, since moved to Phase 6 once slice 1's synthesized return bundles
+removed `filter`'s need for it). Same technique as `vm.sth`, which shipped with zero
+compiler changes and made that fact the Phase 2 exit verdict: write the program first,
+then find out what the compiler owes it.
 
 1. **Type variables + row variables + length variables + monomorphization (native).** The
    deepest change, and first for that reason: `'T` and `..s` mean a `Sig` stops being purely
@@ -859,17 +861,44 @@ the Phase 2 exit verdict: write the program first, then find out what the compil
    *defining* line, not the instantiating line's, matching the frozen-binding rule every other
    REPL word already follows (see DESIGN.md's Open / deferred: REPL late binding, for the larger
    live-patching question this brushed against and deferred rather than decided here).
-3. **Generic struct declarations.** A `type:` parameterized by the slice 1 variables, with
-   layout and the `StructId`/`ArrayId` registries keyed per instantiation. Its own slice
-   rather than part of slice 1, which is already the phase's largest, and placed immediately
-   after while that machinery is unbuilt-upon: monomorphising a *type declaration* extends
-   slice 1's interning and substitution directly, so discovering the requirement later means
-   reworking slice 1 rather than adding to it. Not speculative structure despite landing two
-   slices before its consumer — the consumer is named and concrete. **`filter` is why.** It
-   returns a filtered array plus a count, and with fixed-size arrays there is no dynamic
-   length, so the pair must be bundled into a generic struct exactly as `vm.sth` bundles
-   `VmPop`/`Fetched` today. That also makes this the workaround that keeps the multi-output
-   hole from being on `filter`'s critical path, independently of slice 1 closing it.
+3. **Aggregate-return aliasing: the loop-carried copy.** A word returning an aggregate
+   lowers to `%r =:T call $f()`, and QBE materialises that into **one stack slot per call
+   site**. A self-tail-recursive word lowers to a loop with header phis rather than a new
+   frame, so a result from iteration *k* carried across the back-edge points at the slot
+   iteration *k+1* overwrites: the value silently becomes the wrong one, with no diagnostic.
+   The mechanism is `field_value` in `src/ir.rs` handing back an interior pointer into that
+   slot rather than a copy. Reproduce with a two-field struct, a word returning it, and a
+   self-tail-recursive word that carries the previous iteration's struct while calling the
+   producer again before reading it: a 3-step countdown prints `0 2 1 1` where `0 3 2 1` is
+   correct. Slice 1's spec carried this as a documented known issue and the
+   post-implementation condense pass dropped it, which is why it is written down here
+   instead.
+   **This displaced generic struct declarations from the slot** (moved to Phase 6, see
+   there). That slice's whole claim to not being speculative structure was one named
+   consumer, `filter` needing to bundle a filtered array with a count, and slice 1's
+   synthesized multi-output return bundles closed that need: `: pass-through ( [i64 'N] --
+   [i64 'N] usize ) len ;` is `filter`'s exact shape and compiles and runs at two different
+   lengths today, verified against the built compiler.
+   **Pre-existing, not a slice 1 regression**: single-output struct return has it too, which
+   is why `vm-pop` could have hit it since Phase 2. What changed is reach and urgency. Slice
+   1 put *every* multi-output word on this path, and slices 4-5's combinators are recursive
+   by construction and will lean on it hard, so it moves from a corner of the struct feature
+   to the floor the phase's headline exit stands on. It is also exactly the defect class the
+   language exists to remove: a silent wrong answer where a compile error or a correct value
+   belongs.
+   **Why this wants a spec rather than one implementation pass.** The obvious fix, copying
+   the call result into a fresh slot at the call site, is wrong in both available placements:
+   hoisted to the entry block it is a single slot again and the bug returns unchanged, while
+   left in the loop body it is a stack bump per iteration, breaking the constant-stack
+   iteration guarantee this phase is built on. The fix therefore has to be phi-aware, giving
+   a loop-carried aggregate a stable slot with the copy on the back-edge, which touches
+   `begin_loop`/`finalize_loop` and the aggregate phi model rather than the call site alone.
+   The brief should start from the cheap half, though: **no new IR instruction is needed.**
+   `Alloc` (a frame-local aggregate slot) and `Blit` (a byte copy between aggregate pointers,
+   already the mechanism behind the byte-copy `dup`, a setter's copy-all, and a nested-struct
+   field store) both exist, so this is a lowering-shape question with no backend-neutrality
+   decision inside it. Whether every aggregate return takes a copy or only loop-carried ones
+   do is the cost-versus-simplicity call to settle in the spec.
 4. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
    primitive they compile down to for constant-stack iteration, plus call-site inlining.
    After slice 1 because a combinator's signature has to *say* `[ 'a -- 'b ]`, which needs
@@ -980,6 +1009,22 @@ without modules existing yet; this is where that debt gets paid.)
 as one program.
 **Dogfood:** split an existing multi-word example (`vm.sth` or `stack.sth`) across a `main`
 file and a small library file it imports from.
+
+**Generic struct declarations (moved from Phase 4 Slice 3).** A `type:` parameterized by
+Phase 4's type and length variables, with layout and the `StructId`/`ArrayId` registries
+keyed per instantiation. It was placed in Phase 4 on the strength of a single named
+consumer, `filter` needing to bundle a filtered array with a count, and moved here when
+that consumer evaporated: Phase 4 Slice 1's synthesized multi-output return bundles make
+`( [i64 'N] -- [i64 'N] usize )` an ordinary word signature, verified against the built
+compiler, so no user-declared generic type is needed to return the pair. The internal half
+of the machinery exists either way, since `intern_bundle_struct` already keys an interned
+struct per instantiation on concrete field types; what stays unbuilt is the user-facing
+half, a parameterized declaration with name resolution, per-instantiation generated words,
+and per-instantiation destructor synthesis, all of which the bundle path deliberately opts
+out of (a bundle is an ABI detail, not a nameable type). `Vec['T]` and `Map['K 'V]` are the
+real consumers and they live here, which is what makes this the right phase: specifying it
+in Phase 4 would have designed it against a consumer that does not exist, the same test
+that sends open multimethods here.
 
 **Worklist-based disposal for branching structures (moved from Phase 3 Slice 4).** A
 multi-child recursive type's synthesized destructor loops only its *last* recursive field
