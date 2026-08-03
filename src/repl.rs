@@ -16,7 +16,7 @@ use crate::ast::{
     ArrayDecl, EnumDecl, Line, OwnedCellDecl, RefDecl, Span, StructDecl, StructId, Term, TermKind,
     Type, VariantDecl, WordDef,
 };
-use crate::check::{self, Sig};
+use crate::check::{self, word_span, Sig};
 use crate::driver;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
@@ -689,9 +689,10 @@ impl Session {
         // it here, before that path ever runs, until a later phase adds real
         // support.
         if word.poly.is_some() {
+            let span = word_span(&word);
             return Err(format!(
-                "error: polymorphic word `{}` is not yet supported at the REPL",
-                word.name
+                "error: polymorphic word `{}` (line {}, col {}) is not yet supported at the REPL",
+                word.name, span.line, span.col
             ));
         }
 

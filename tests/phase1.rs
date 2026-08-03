@@ -917,6 +917,11 @@ fn polymorphic_repl_definition_is_a_located_rejection_not_a_silent_miscompile() 
             "expected a located polymorphic-REPL rejection, got: {line}"
         );
         assert!(
+            line.contains("(line ") && line.contains("col "),
+            "expected the rejection to carry a (line N, col N) locator like sibling REPL \
+             diagnostics, got: {line}"
+        );
+        assert!(
             !line.contains("declared ( -- )"),
             "must not be the recon-1 zero-arity mismatch: {line}"
         );

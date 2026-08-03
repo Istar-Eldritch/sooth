@@ -2124,7 +2124,7 @@ pub fn has_self_tail_call(word: &WordDef) -> bool {
 
 /// A word's location, derived from the first term (or clause) of its body,
 /// for locating a whole-word diagnostic like X1.
-fn word_span(word: &WordDef) -> Span {
+pub(crate) fn word_span(word: &WordDef) -> Span {
     match &word.body {
         WordBody::Terms { terms, .. } => terms.first().map(|t| t.span).unwrap_or_default(),
         WordBody::Clauses(clauses) => clauses.first().map(|c| c.span).unwrap_or_default(),
