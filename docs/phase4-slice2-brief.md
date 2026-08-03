@@ -134,7 +134,11 @@ a different route.
    unrelated later line redefines a callee. This is the sharper form of 8b's stale-env
    hazard: 8b could cache a check result to avoid re-checking an old body, but a
    polymorphic body *must* be re-lowered per instantiation, so the question cannot be
-   cached away.
+   cached away. This is a scoped instance of a larger, deliberately deferred question
+   (whether the REPL should ever be late-bound on redefinition at all, see DESIGN.md's
+   Open / deferred: REPL late binding): binding at the defining line keeps polymorphic
+   words consistent with how every ordinary REPL word already behaves, which is the
+   reason to pick it here, not merely that it is less code.
 
 4. **Redefinition invalidation scope.** 8b restamps every linear type on any override
    change, because destructors are woven pervasively. Polymorphic instantiations are
