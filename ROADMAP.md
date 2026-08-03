@@ -196,7 +196,42 @@ surfaces rather than pretending IEEE `>` is total. `examples/stack.sth` is the d
 existing example, since the core shuffles were already type-transparent before this slice
 and no checked-in program computed a maximum. REPL monomorphization, the combinator
 library, and the inliner stay out of scope, deferred to later slices.
-**Next action: Phase 4 Slice 2** (REPL monomorphization), the next of eight
+**Phase 4 Slice 2 (REPL monomorphization) is complete**: the REPL sees polymorphic words.
+`eval_def` routes a `word.poly.is_some()` definition through the native `check_poly_body`
+pass instead of the concrete `check_def`/`check_word` path, replacing the recon-1 silent
+miscompile (a bogus `( -- )` mismatch, or a silent `defined` that never checked the body)
+with either a real located error or real acceptance; a poly def resolving to two or more
+outputs is a clean located deferral rather than a silent single-output truncation, since
+REPL lowering interns no return bundle. A session store, `poly_words`, retains a
+polymorphic word's body alongside a generation and a **frozen resolver snapshot** captured
+at its *defining* line (not the instantiating line's), so an instantiation's callees bind
+to the generations live when the word was defined, matching the frozen-binding rule every
+ordinary REPL word already follows (the larger question of REPL late binding on
+redefinition stays deferred, DESIGN.md). One session poly-env threads into both check paths
+(a bare expression line and a defined word's own body, so a defined word can call a
+retained polymorphic word) and one instantiation table plus poly-arity map threads into
+both lowering entry points; a shared emit step lowers one monomorphized `IrFunc` per
+not-yet-exported instantiation into the compiling module with external linkage, deduped by
+an `exported_insts` set keyed by the instantiation symbol (which already encodes name,
+generation, and substitution) so a repeated same-type instantiation recompiles nothing.
+`instantiation_symbol` gained a `generation: Option<u64>` parameter (`None` natively,
+reproducing every existing symbol byte-for-byte; `Some(g)` at the REPL, appending a
+`__gen{g}` component matching `mangled_symbol`'s existing device), so the checker's mint
+and lowering's independent re-mint stay two deterministic computations of one function and
+can never disagree. Redefining a polymorphic word follows the ordinary-word generation
+rule (bump a shared per-name counter across `self.env` and `poly_words`, retain a fresh
+resolver snapshot, leave every old instantiation symbol resident and resolvable) rather
+than 8b's blanket restamp, so an earlier line's compiled call stays frozen to its old
+generation's body while a new call site binds the new generation — closing the symbol-
+collision hazard the brief traced (re-instantiating a redefined word at an already-seen
+type would otherwise mint the old body's symbol and silently run it under `RTLD_GLOBAL`
+first-loaded-wins). `examples/*.sth` and the native `tests/phase4_generics.rs`/
+`tests/phase3_resources.rs` suites are unchanged (every native call site still passes
+`None`); the exit is a `tests/phase1.rs` golden session covering the whole sequence: define
+once, instantiate at two different types, instantiate twice at one type without
+recompiling, redefine, and see the new body take effect on a new call while an earlier
+line's call keeps the old one.
+**Next action: Phase 4 Slice 3** (generic struct declarations), the next of eight
 dependency-ordered slices planned out under Phase 4.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler

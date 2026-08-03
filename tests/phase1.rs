@@ -1104,3 +1104,79 @@ fn ordinary_word_redefined_across_a_poly_definition_does_not_remint_the_old_symb
         "the redefined ordinary `id` must not collide with the pre-poly generation:\n{out}"
     );
 }
+
+// Criterion 4: the consolidated ROADMAP exit session for this slice, one
+// golden covering the whole sequence in the spec's own words: define `id`
+// once, instantiate it at two different concrete types on later lines,
+// instantiate it twice at one type without recompiling (dedup), redefine
+// it, and see the new body take effect on the next call while an earlier
+// line's call keeps the old one. The recon-1 silent miscompile (the bogus
+// `note: declared ( -- )` mismatch, or a silent `defined id` that never
+// checked the body) is gone throughout: every line here is either a real
+// printed value or, for the redefinition witness, a real X2 diagnostic
+// (single-output throughout, D5's flagged deviation from the brief's
+// 2-output trace-C witness, R7's multi-output carve-out).
+#[test]
+fn consolidated_exit_session_covers_define_instantiate_dedup_and_redefine() {
+    let out = run_session(&[
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        ": id ( 'T -- 'T ) ;",
+        // Instantiate at two different concrete types (trace A).
+        "5 id .",
+        "\"hi\" id .",
+        // A second same-type instantiation recompiles nothing (trace B).
+        "7 id .",
+        // A defined word's own body calls the retained poly word, binding
+        // `id`@`Spy` at gen0 (R5's word-def check path, R4's frozen
+        // resolver snapshot).
+        ": g ( -- ) 7 Spy id drop ;",
+        "g",
+        // Redefine `id`, adding a `Copy` bound: gen1. `g`'s already-compiled
+        // call stays frozen to gen0 (D3/D4); only a *new* instantiation
+        // sees gen1.
+        ": id ( 'T: Copy -- 'T ) ;",
+        "g",
+        "7 Spy id drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 15, "unexpected output:\n{out}");
+    assert_eq!(
+        &lines[..14],
+        [
+            "defined type Spy",
+            "defined drop for Spy",
+            "defined id",
+            "5",
+            "stack: (empty)",
+            // `.` on a `str` prints with no trailing newline, so it runs
+            // directly into this line's own stack printout.
+            "histack: (empty)",
+            // Dedup: the second `i64` instantiation just runs the symbol
+            // exported by the first, no recompile.
+            "7",
+            "stack: (empty)",
+            "defined g",
+            // `g` at gen0: id@Spy is the identity, `drop` prints once.
+            "drop 7",
+            "stack: (empty)",
+            "defined id",
+            // `g` still runs its frozen gen0 id@Spy body: unchanged.
+            "drop 7",
+            "stack: (empty)",
+        ],
+        "unexpected output:\n{out}"
+    );
+    // The new bare line instantiates `id` at gen1, whose `Copy` bound
+    // rejects the linear `Spy` -- the new body taking effect while the
+    // earlier `g` call kept the old one.
+    let err = lines[14];
+    assert!(
+        err.contains("'T") && err.contains("id") && err.contains("Spy") && err.contains("Copy"),
+        "expected the gen1 Copy-bound rejection naming 'T, `id`, and `Spy`: {err}"
+    );
+    assert!(
+        !out.contains("declared ( -- )"),
+        "must not be the recon-1 zero-arity mismatch: {out}"
+    );
+}
