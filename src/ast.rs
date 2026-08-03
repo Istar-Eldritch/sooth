@@ -472,6 +472,11 @@ pub struct CallInst {
     pub out_arity: usize,
     pub output_types: Vec<Type>,
     pub bundle: Option<StructId>,
+    /// D1: `None` for a native instantiation; `Some(g)` for a REPL
+    /// instantiation minted against a polymorphic word's generation `g`
+    /// (Slice 2), the same `__gen{N}` device `mangled_symbol` uses for
+    /// ordinary REPL words.
+    pub generation: Option<u64>,
 }
 
 /// R9/R14: the mangled symbol for one instantiation `(word, θ)`. A pure,
@@ -480,7 +485,7 @@ pub struct CallInst {
 /// one source of truth and can never disagree. Mirrors `struct_drop_symbol`'s
 /// positional, id-based shape (a word name or a type spelling may hold
 /// characters no QBE symbol admits, so both are sanitized here).
-pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
+pub fn instantiation_symbol(word: &str, subst: &Subst, generation: Option<u64>) -> String {
     fn sanitize(s: &str) -> String {
         s.chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -493,7 +498,11 @@ pub fn instantiation_symbol(word: &str, subst: &Subst) -> String {
     for (id, n) in &subst.len {
         parts.push(format!("n{id}_{n}"));
     }
-    format!("sooth_mono_{}__{}", sanitize(word), parts.join("_"))
+    let base = format!("sooth_mono_{}__{}", sanitize(word), parts.join("_"));
+    match generation {
+        None => base,
+        Some(g) => format!("{base}__gen{g}"),
+    }
 }
 
 /// One `extern:` declaration (R1): a typed foreign-call binding. `symbol` is
@@ -1125,5 +1134,35 @@ mod tests {
         let inner = intern_array_type(&mut arrays, Type::I64, 4);
         let outer = intern_array_type(&mut arrays, inner, 4);
         assert_eq!(outer.to_string(), "[[i64 4] 4]");
+    }
+
+    #[test]
+    fn instantiation_symbol_none_reproduces_native_spelling_expected() {
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::I64));
+        assert_eq!(
+            instantiation_symbol("id", &subst, None),
+            "sooth_mono_id__t0_i64"
+        );
+    }
+
+    #[test]
+    fn instantiation_symbol_some_appends_gen_component_expected() {
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::I64));
+        assert_eq!(
+            instantiation_symbol("id", &subst, Some(0)),
+            "sooth_mono_id__t0_i64__gen0"
+        );
+    }
+
+    #[test]
+    fn instantiation_symbol_distinct_generations_are_distinct_symbols_expected() {
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::I64));
+        assert_ne!(
+            instantiation_symbol("id", &subst, Some(0)),
+            instantiation_symbol("id", &subst, Some(1))
+        );
     }
 }

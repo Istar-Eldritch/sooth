@@ -905,3 +905,321 @@ fn repl_quit_frees_residual_recursive_value() {
          fused loop, top node's tag first (pre-order)"
     );
 }
+
+// Phase 3 upgrades criterion F: a clean-bodied polymorphic REPL definition
+// is now correctly *supported*, not rejected (recon-1's silent miscompile
+// stays gone either way, but the Phase 1 blanket rejection is no longer what
+// a valid definition like `id` sees).
+#[test]
+fn polymorphic_repl_definition_with_clean_body_is_accepted_not_rejected() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;"]);
+    assert_eq!(out, "defined id\n");
+}
+
+// Phase 3 upgrades `twice`'s half of criterion F: its rejection is now the
+// real X1 diagnostic from `check_poly_body` (naming `'T` and the missing
+// `Copy` bound an unbounded `dup` needs), not the Phase 1 blanket
+// "polymorphic ... REPL" wording, and not the recon-1 `( -- )` mismatch.
+#[test]
+fn polymorphic_repl_definition_with_ill_typed_body_is_the_real_x1_not_the_old_blanket_rejection() {
+    let out = run_session(&[": twice ( 'T -- 'T 'T ) dup ;"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "unexpected output:\n{out}");
+    assert!(
+        lines[0].contains("cannot `dup` the type variable `'T`") && lines[0].contains("`twice`"),
+        "expected the X1 dup-of-unbounded-variable diagnostic: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("'T") && lines[1].contains("Copy"),
+        "expected the missing-Copy-bound reason: {}",
+        lines[1]
+    );
+    assert!(
+        !out.contains("REPL"),
+        "must not be the Phase 1 blanket polymorphic-REPL rejection: {out}"
+    );
+    assert!(
+        !out.contains("declared ( -- )"),
+        "must not be the recon-1 zero-arity mismatch: {out}"
+    );
+}
+
+// Criterion 1 (trace A): defining `id` once and instantiating it at two
+// different concrete types on later lines prints each instantiation's value.
+#[test]
+fn polymorphic_repl_word_instantiates_at_two_different_types_across_lines() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;", "5 id .", "\"hi\" id ."]);
+    // `.` on a `str` prints via `%.*s` with no trailing newline (unlike every
+    // other printable type, see `backend/qbe.rs`'s `$strfmt`), so "hi" runs
+    // directly into the following "stack: (empty)" line; this is that
+    // formatter's real behaviour, not a test bug.
+    assert_eq!(
+        out, "defined id\n5\nstack: (empty)\nhistack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// Criterion 2 (trace B): a second same-type instantiation prints its value
+// without recompiling anything (the dedup itself is pinned by the
+// `exported_insts`-size unit assertion in `src/repl.rs`).
+#[test]
+fn polymorphic_repl_word_instantiated_twice_at_one_type_prints_both_values() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;", "5 id .", "7 id ."]);
+    assert_eq!(
+        out, "defined id\n5\nstack: (empty)\n7\nstack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// D3 (both halves of the frozen callee-binding): a poly word's body calls a
+// concrete word that is then redefined at a *different arity/return type*
+// before the poly word is instantiated. The instantiation must resolve the
+// callee against the defining-line snapshot -- both its frozen symbol *and*
+// its frozen arity -- so `noise`'s gen0 `( -- )` no-op body runs, leaving `p`
+// the identity: `5 p .` prints `5`. Before arity was frozen, the frozen
+// symbol was called under the redefined `( i64 -- i64 )` ABI, reading an
+// uninitialized argument slot and printing garbage.
+#[test]
+fn poly_instantiation_freezes_callee_arity_across_a_differing_redefinition() {
+    let out = run_session(&[
+        ": noise ( -- ) ;",
+        ": p ( 'T -- 'T ) noise ;",
+        ": noise ( i64 -- i64 ) | n | n 100 + ;",
+        "5 p .",
+    ]);
+    assert_eq!(
+        out, "defined noise\ndefined p\ndefined noise\n5\nstack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// D3 same-arity control: when the redefined callee keeps its arity/return
+// type, the frozen-symbol binding alone already pins the old body. `noise`
+// stays `( -- i64 )`; `p`'s instantiation binds `noise`@gen0 (value 42), so
+// a later `noise` redefinition to 99 cannot change `p`'s meaning: `5 p .`
+// prints `42`, the frozen gen0 value, not `99`. This is the value-witnessed
+// counterpart to the arity case above, and guards the frozen-symbol property
+// independently of the arity fix.
+#[test]
+fn poly_instantiation_freezes_callee_value_across_a_same_arity_redefinition() {
+    let out = run_session(&[
+        ": noise ( -- i64 ) 42 ;",
+        ": p ( 'T -- i64 ) drop noise ;",
+        ": noise ( -- i64 ) 99 ;",
+        "5 p .",
+    ]);
+    assert_eq!(
+        out, "defined noise\ndefined p\ndefined noise\n42\nstack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// X2: instantiating a `'T: Copy` REPL word at a linear concrete type on a
+// later line is the native call-site error (`Ctx::Line` phrasing), naming
+// the variable, the callee, and the linear type.
+#[test]
+fn polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2() {
+    let out = run_session(&[
+        ": id ( 'T: Copy -- 'T ) ;",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "0 Spy id drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "unexpected output:\n{out}");
+    assert_eq!(
+        &lines[..3],
+        ["defined id", "defined type Spy", "defined drop for Spy"]
+    );
+    let err = lines[3];
+    assert!(
+        err.contains("'T") && err.contains("id") && err.contains("Spy") && err.contains("Copy"),
+        "expected an X2 diagnostic naming 'T, `id`, and `Spy`'s Copy bound: {err}"
+    );
+}
+
+// X3: a polymorphic REPL definition resolving to two or more concrete
+// outputs is a clean located deferral, not a silent single-output
+// truncation, never `defined pair`.
+#[test]
+fn polymorphic_repl_definition_resolving_to_two_outputs_is_a_located_x3() {
+    let out = run_session(&[": pair ( 'T: Copy -- 'T 'T ) dup ;"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "unexpected output:\n{out}");
+    assert!(
+        lines[0].contains("`pair`") && lines[0].contains("2 outputs"),
+        "expected the X3 multi-output deferral naming `pair`: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("return bundle"),
+        "expected the deferred-return-bundle reason: {}",
+        lines[1]
+    );
+    assert_ne!(
+        out, "defined pair\n",
+        "must not silently truncate to one output"
+    );
+}
+
+// Criterion 3 (trace C, R8): redefining a polymorphic word follows the
+// ordinary-word generation rule -- an earlier line's compiled call keeps the
+// old generation's body (frozen binding, D3/D4) while a new call site binds
+// the new generation. Single-output throughout: `id` starts unbounded
+// (`( 'T -- 'T )`, gen0), so it instantiates even at the linear `Spy`; `g`
+// binds `id`@`Spy` at gen0 and stays observable (`drop 7`). Redefining `id`
+// to add a `Copy` bound (gen1) leaves `g`'s compiled gen0 call untouched
+// (still `drop 7`) while a *new* `7 Spy id drop` line now fails the `Copy`
+// bound (X2). That is the generation-freezing property, witnessed without a
+// return bundle.
+#[test]
+fn redefined_polymorphic_word_freezes_earlier_call_while_new_call_rebinds() {
+    let out = run_session(&[
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        ": id ( 'T -- 'T ) ;",
+        ": g ( -- ) 7 Spy id drop ;",
+        "g",
+        ": id ( 'T: Copy -- 'T ) ;",
+        "g",
+        "7 Spy id drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 10, "unexpected output:\n{out}");
+    assert_eq!(
+        &lines[..9],
+        [
+            "defined type Spy",
+            "defined drop for Spy",
+            "defined id",
+            "defined g",
+            // `g` at gen0: id@Spy is the identity, `drop` prints once.
+            "drop 7",
+            "stack: (empty)",
+            // id redefined to gen1 (adds the Copy bound).
+            "defined id",
+            // `g` still runs its frozen gen0 id@Spy body: unchanged.
+            "drop 7",
+            "stack: (empty)",
+        ],
+        "an earlier line's compiled call must stay frozen to gen0 across the redefinition:\n{out}"
+    );
+    // The new bare line instantiates id at gen1, whose `Copy` bound rejects
+    // the linear `Spy` (X2's `Ctx::Line` phrasing), naming the variable, the
+    // callee, and `Spy`.
+    let err = lines[9];
+    assert!(
+        err.contains("'T") && err.contains("id") && err.contains("Spy") && err.contains("Copy"),
+        "expected the gen1 Copy-bound rejection naming 'T, `id`, and `Spy`: {err}"
+    );
+}
+
+// R8 (shared per-name counter, both directions): a name toggling
+// ordinary -> poly -> ordinary must not remint a resident symbol. The first
+// ordinary `id` exports `id__gen0`; defining `id` as poly evicts it from the
+// ordinary env; redefining `id` as ordinary again must take gen2 (past the
+// poly entry), not reset to gen0 and collide with the first body under
+// `RTLD_GLOBAL` first-loaded-wins. Witnessed by the last call observing the
+// *new* body (`+ 2` -> 7), not the shadowed first (`+ 1` -> 6).
+#[test]
+fn ordinary_word_redefined_across_a_poly_definition_does_not_remint_the_old_symbol() {
+    let out = run_session(&[
+        ": id ( i64 -- i64 ) | n | n 1 + ;",
+        "5 id",
+        ": id ( 'T -- 'T ) ;",
+        ": id ( i64 -- i64 ) | n | n 2 + ;",
+        "5 id",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined id",
+            "stack: 6",
+            "defined id",
+            "defined id",
+            // The `6` from line 2 persists on the session stack; the final
+            // `5 id` must run its own generation's body (5 + 2 = 7) on top,
+            // not the first `id__gen0` shadowing it (which would give 6).
+            "stack: 6 7",
+        ],
+        "the redefined ordinary `id` must not collide with the pre-poly generation:\n{out}"
+    );
+}
+
+// Criterion 4: the consolidated ROADMAP exit session for this slice, one
+// golden covering the whole sequence in the spec's own words: define `id`
+// once, instantiate it at two different concrete types on later lines,
+// instantiate it twice at one type without recompiling (dedup), redefine
+// it, and see the new body take effect on the next call while an earlier
+// line's call keeps the old one. The recon-1 silent miscompile (the bogus
+// `note: declared ( -- )` mismatch, or a silent `defined id` that never
+// checked the body) is gone throughout: every line here is either a real
+// printed value or, for the redefinition witness, a real X2 diagnostic
+// (single-output throughout, D5's flagged deviation from the brief's
+// 2-output trace-C witness, R7's multi-output carve-out).
+#[test]
+fn consolidated_exit_session_covers_define_instantiate_dedup_and_redefine() {
+    let out = run_session(&[
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        ": id ( 'T -- 'T ) ;",
+        // Instantiate at two different concrete types (trace A).
+        "5 id .",
+        "\"hi\" id .",
+        // A second same-type instantiation recompiles nothing (trace B).
+        "7 id .",
+        // A defined word's own body calls the retained poly word, binding
+        // `id`@`Spy` at gen0 (R5's word-def check path, R4's frozen
+        // resolver snapshot).
+        ": g ( -- ) 7 Spy id drop ;",
+        "g",
+        // Redefine `id`, adding a `Copy` bound: gen1. `g`'s already-compiled
+        // call stays frozen to gen0 (D3/D4); only a *new* instantiation
+        // sees gen1.
+        ": id ( 'T: Copy -- 'T ) ;",
+        "g",
+        "7 Spy id drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 15, "unexpected output:\n{out}");
+    assert_eq!(
+        &lines[..14],
+        [
+            "defined type Spy",
+            "defined drop for Spy",
+            "defined id",
+            "5",
+            "stack: (empty)",
+            // `.` on a `str` prints with no trailing newline, so it runs
+            // directly into this line's own stack printout.
+            "histack: (empty)",
+            // Dedup: the second `i64` instantiation just runs the symbol
+            // exported by the first, no recompile.
+            "7",
+            "stack: (empty)",
+            "defined g",
+            // `g` at gen0: id@Spy is the identity, `drop` prints once.
+            "drop 7",
+            "stack: (empty)",
+            "defined id",
+            // `g` still runs its frozen gen0 id@Spy body: unchanged.
+            "drop 7",
+            "stack: (empty)",
+        ],
+        "unexpected output:\n{out}"
+    );
+    // The new bare line instantiates `id` at gen1, whose `Copy` bound
+    // rejects the linear `Spy` -- the new body taking effect while the
+    // earlier `g` call kept the old one.
+    let err = lines[14];
+    assert!(
+        err.contains("'T") && err.contains("id") && err.contains("Spy") && err.contains("Copy"),
+        "expected the gen1 Copy-bound rejection naming 'T, `id`, and `Spy`: {err}"
+    );
+    assert!(
+        !out.contains("declared ( -- )"),
+        "must not be the recon-1 zero-arity mismatch: {out}"
+    );
+}

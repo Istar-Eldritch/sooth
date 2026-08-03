@@ -1158,7 +1158,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     let mut distinct: Vec<(String, &CallInst)> = Vec::new();
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     for inst in module.instantiations.values() {
-        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst);
+        let symbol = crate::ast::instantiation_symbol(&inst.callee, &inst.subst, inst.generation);
         if emitted.insert(symbol.clone()) {
             distinct.push((symbol, inst));
         }
@@ -1550,7 +1550,14 @@ fn synthesize_struct_destructor_override(
 ) -> IrFunc {
     IrFunc {
         name: struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation),
-        ..lower_word(word, env, resolve, regs)
+        ..lower_word(
+            word,
+            env,
+            resolve,
+            regs,
+            empty_instantiations(),
+            empty_poly_arities(),
+        )
     }
 }
 
@@ -1675,6 +1682,7 @@ fn synthesize_cell_destructor(
 /// (the number of buffer bytes the epilogue actually wrote), so the caller
 /// sizes its buffer from the same numbers the wrapper uses rather than from a
 /// separately-computed depth that could in principle diverge.
+#[allow(clippy::too_many_arguments)]
 pub fn lower_line(
     seq: u64,
     terms: &[Term],
@@ -1683,10 +1691,16 @@ pub fn lower_line(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    poly_arities: &HashMap<String, usize>,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
+    // R7 (Slice 2): a call to a retained polymorphic word resolves through the
+    // instantiation table keyed by its call-site span, not the name-keyed env.
+    b.instantiations = instantiations;
+    b.poly_arities = poly_arities;
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -1906,6 +1920,8 @@ pub(crate) fn lower_word(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    poly_arities: &HashMap<String, usize>,
 ) -> IrFunc {
     let self_tail = crate::check::has_self_tail_call(word);
     lower_word_parts(
@@ -1913,6 +1929,38 @@ pub(crate) fn lower_word(
         &word.effect,
         &word.body,
         self_tail,
+        env,
+        resolve,
+        regs,
+        instantiations,
+        poly_arities,
+    )
+}
+
+/// R7 (Slice 2): lower one REPL polymorphic-word instantiation `(word, θ)`
+/// into a monomorphized `IrFunc` under its mangled `symbol`. The body is the
+/// retained polymorphic word's own body, checked once at its defining line;
+/// `resolve` is the frozen defining-line snapshot (D3), not the instantiating
+/// line's env, so an unrelated later redefinition of a callee cannot change
+/// this body's meaning. Nested polymorphic calls are out of scope (Slice 1
+/// R14), so the body carries no instantiation table of its own.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn lower_instantiation(
+    symbol: &str,
+    sig: &PolySig,
+    subst: &Subst,
+    body: &WordBody,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+    arrays: &[ArrayDecl],
+) -> IrFunc {
+    let effect = concrete_effect(sig, subst, arrays);
+    lower_word_parts(
+        symbol,
+        &effect,
+        body,
+        false,
         env,
         resolve,
         regs,
@@ -4381,6 +4429,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -4406,6 +4456,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -4744,6 +4796,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
@@ -4776,6 +4830,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -4811,6 +4867,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -4852,6 +4910,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -4888,6 +4948,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -4973,6 +5035,8 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         let loaded = func
             .blocks
@@ -5568,6 +5632,8 @@ mod tests {
                 cells: &cells,
                 refs: &refs,
             },
+            empty_instantiations(),
+            empty_poly_arities(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);

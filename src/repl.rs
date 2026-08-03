@@ -6,17 +6,17 @@
 //! emits/compiles/loads each line exactly like `build`, differing only in
 //! target (`.so` not a binary) and in carrying state across lines.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use crate::ast::{
-    ArrayDecl, EnumDecl, Line, OwnedCellDecl, RefDecl, Span, StructDecl, StructId, Term, TermKind,
-    Type, VariantDecl, WordDef,
+    ArrayDecl, CallInst, EnumDecl, Line, OwnedCellDecl, PolySig, RefDecl, Span, StructDecl,
+    StructId, Term, TermKind, Type, VariantDecl, WordDef,
 };
-use crate::check::{self, Sig};
+use crate::check::{self, word_span, Sig};
 use crate::driver;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
@@ -97,6 +97,29 @@ struct WordEntry {
     sig: Sig,
     generation: u64,
     symbol: String,
+}
+
+/// R4 (Slice 2): a session's knowledge of one polymorphic word. Unlike a
+/// `WordEntry`, no symbol is minted at the defining line: a polymorphic word
+/// has no concrete instantiation to lower there. The body is retained because
+/// it is lowered *later*, once per instantiating line, from an AST the session
+/// would otherwise have thrown away; `resolver` is the **frozen** callee-name
+/// -> mangled-symbol map captured from `self.env` at the defining line (D3), so
+/// an instantiation binds its callees against the defining line's generations,
+/// not the instantiating line's. `generation` stamps every minted
+/// instantiation symbol (`__gen{N}`), so a redefinition's instantiations can
+/// never collide with an earlier generation's under `RTLD_GLOBAL` (R8).
+///
+/// `ir_lower_env` is the **frozen** callee arity map (D3), the other half of
+/// the binding `resolver` freezes: lowering an instantiation must determine
+/// each callee's arity/return type from the defining line's env, not the
+/// instantiating line's, or a callee redefined at a different arity between
+/// the two lines emits the resolved (frozen) symbol under the wrong ABI.
+struct PolyWordEntry {
+    generation: u64,
+    word: WordDef,
+    resolver: HashMap<String, String>,
+    ir_lower_env: HashMap<String, ir::Arity>,
 }
 
 /// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
@@ -283,6 +306,20 @@ pub struct Session {
     /// R11.3 already fixed for lowering -- a recorded site's operand type
     /// never changes once observed, so caching it is exact, not stale.
     drop_dropped_sites: HashMap<StructId, Vec<Type>>,
+    /// R4 (Slice 2): every polymorphic word the session has defined, retained
+    /// out of `self.env` (a polymorphic word never enters the concrete env,
+    /// R3, so a concrete call-site lookup and `next_generation` never see it),
+    /// exactly as `drop_overloads` are. Holds the body, the frozen defining-
+    /// line resolver snapshot, and the generation each was retained at, so a
+    /// later line can instantiate it (R5/R7).
+    poly_words: HashMap<String, PolyWordEntry>,
+    /// R7 (Slice 2, D2): the mangled symbols of every polymorphic instantiation
+    /// already lowered with external linkage into some line's module. The
+    /// symbol encodes `(name, generation, subst)`, so it *is* the dedup key:
+    /// an instantiation whose symbol is already here emits nothing and binds,
+    /// under `RTLD_GLOBAL`, to the earlier line's export, bounding `.so`
+    /// growth across repeated same-type instantiations (trace B).
+    exported_insts: HashSet<String>,
     /// R11.2: the session-wide override epoch, `None` until this session's
     /// first `drop` override is ever defined, then incremented by one on
     /// every subsequent override define/redefine event (of any struct, not
@@ -320,6 +357,8 @@ impl Session {
             refs: Vec::new(),
             drop_overloads: HashMap::new(),
             drop_dropped_sites: HashMap::new(),
+            poly_words: HashMap::new(),
+            exported_insts: HashSet::new(),
             override_epoch: None,
             buf: Vec::new(),
             top: 0,
@@ -343,6 +382,113 @@ impl Session {
             env.insert(name.clone(), entry.sig.clone());
         }
         env
+    }
+
+    /// R5 (Slice 2): the session poly-env threaded into every REPL check path,
+    /// mapping each retained polymorphic word to its `PolySig` and the
+    /// generation it was retained at (so `check_poly_call` mints the
+    /// generation-stamped symbol, R2/R2b). Kept out of `typed_env` because a
+    /// polymorphic word never enters the concrete env (R3).
+    fn poly_env(&self) -> HashMap<String, (PolySig, Option<u64>)> {
+        self.poly_words
+            .iter()
+            .map(|(name, entry)| {
+                let sig = entry
+                    .word
+                    .poly
+                    .as_deref()
+                    .expect("a poly_words entry always has a polymorphic signature")
+                    .clone();
+                (name.clone(), (sig, Some(entry.generation)))
+            })
+            .collect()
+    }
+
+    /// R8 (Slice 2): the generation a new definition of `name` should take,
+    /// one past whichever of the ordinary env or the poly store currently
+    /// holds it (a shared per-name counter, so a mono<->poly redefinition can
+    /// never mint a colliding generation).
+    fn next_shared_generation(&self, name: &str) -> u64 {
+        let ordinary = next_generation(self.env.get(name));
+        let polymorphic = self.poly_words.get(name).map_or(0, |e| e.generation + 1);
+        ordinary.max(polymorphic)
+    }
+
+    /// R7 (Slice 2): the REPL analogue of native lowering's `poly_arities`
+    /// (`name -> input arity`), so a call site to a retained polymorphic word
+    /// resolves through `lower_poly_call` rather than the name-keyed env.
+    fn poly_arities(&self) -> HashMap<String, usize> {
+        self.poly_words
+            .iter()
+            .map(|(name, entry)| {
+                let arity = entry
+                    .word
+                    .poly
+                    .as_deref()
+                    .expect("a poly_words entry always has a polymorphic signature")
+                    .inputs
+                    .len();
+                (name.clone(), arity)
+            })
+            .collect()
+    }
+
+    /// R7 (Slice 2, D2): lower every not-yet-exported instantiation recorded
+    /// while checking one compile unit (a bare line or a defined word body)
+    /// into the compiling module, deduped against `exported_insts`. Each
+    /// monomorphized `IrFunc` is lowered against the retained polymorphic
+    /// word's frozen defining-line resolver snapshot (R4/D3), not the
+    /// instantiating line's env, and emitted with external linkage so a later
+    /// line resolves it under `RTLD_GLOBAL`. An already-exported symbol emits
+    /// nothing (bounds `.so` growth, trace B). Sorted by symbol so the emitted
+    /// order is deterministic across the `HashMap`'s randomized iteration.
+    fn emit_instantiations(
+        &mut self,
+        insts: &HashMap<Span, CallInst>,
+        regs: ir::Registries,
+    ) -> Vec<ir::IrFunc> {
+        let mut pending: Vec<&CallInst> = insts
+            .values()
+            .filter(|inst| !self.exported_insts.contains(&inst.symbol))
+            .collect();
+        pending.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        let mut funcs = Vec::new();
+        let mut newly: Vec<String> = Vec::new();
+        for inst in pending {
+            // Two call sites in one unit can share a symbol (same word, same
+            // θ, same generation): emit it once.
+            if newly.contains(&inst.symbol) {
+                continue;
+            }
+            let entry = &self.poly_words[&inst.callee];
+            let sig = entry
+                .word
+                .poly
+                .as_deref()
+                .expect("a recorded callee is a retained polymorphic word");
+            let resolve = |name: &str| {
+                entry
+                    .resolver
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| name.to_string())
+            };
+            funcs.push(ir::lower_instantiation(
+                &inst.symbol,
+                sig,
+                &inst.subst,
+                &entry.word.body,
+                &entry.ir_lower_env,
+                &resolve,
+                regs,
+                &self.arrays,
+            ));
+            newly.push(inst.symbol.clone());
+        }
+        for symbol in newly {
+            self.exported_insts.insert(symbol);
+        }
+        funcs
     }
 
     /// Evaluate one line of input, writing any success output to `writer`.
@@ -609,7 +755,12 @@ impl Session {
     /// override's body is ever lowered (R11.3).
     fn compile_drop_overload(&mut self, id: StructId, epoch: u64) -> Result<Library, String> {
         let env = self.typed_env();
-        let sites = check::check_def_collecting_drop_sites(
+        // R5 (Slice 2): the drop-overload site collector passes the **empty**
+        // poly-env so drop-reachability stays byte-identical to the pre-slice
+        // native path (a `drop` overload is never polymorphic, and the
+        // native-shared reachability code must not diverge). The relayed
+        // instantiation table is empty and discarded.
+        let (sites, _insts) = check::check_def_collecting_drop_sites(
             &self.drop_overloads[&id].1,
             &self.enums,
             &env,
@@ -617,6 +768,7 @@ impl Session {
             &mut self.owned_cells,
             &mut self.refs,
             &self.structs,
+            &HashMap::new(),
         )?;
         self.drop_dropped_sites.insert(id, sites);
 
@@ -679,12 +831,103 @@ impl Session {
         Library::open(&so_path)
     }
 
+    /// R3/R4/R7 (Slice 2): accept a polymorphic REPL definition. The body is
+    /// checked by the native poly body-checker `check_poly_body` (X1 on an
+    /// ill-typed body), a `>= 2`-output signature is a clean located deferral
+    /// (X3, no return bundle is interned at the REPL), and the word is retained
+    /// in `poly_words` with a frozen defining-line resolver snapshot and its
+    /// generation. Nothing is compiled here: a polymorphic word has no concrete
+    /// instantiation to lower until a later line calls it at a concrete type.
+    fn eval_poly_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
+        let sig = word
+            .poly
+            .as_deref()
+            .expect("eval_poly_def is only reached for a polymorphic word")
+            .clone();
+        let env = self.typed_env();
+        // R3: check the body over a `PolyType` stack, always first, so the
+        // multi-output gate below only ever sees a body that already
+        // type-checked (`: twice ( 'T -- 'T 'T ) dup ;` fails the `Copy` gate
+        // here as X1, never reaching the gate despite its two outputs).
+        check::check_poly_body(&word, &sig, &env, &self.structs, &self.enums, &self.arrays)?;
+
+        // R3/R7/X3: a body resolving to two or more concrete outputs, or an
+        // output row variable, is a clean located deferral. REPL lowering
+        // interns no return bundle (`word_ret_ty`'s first-output-only
+        // fallback), so lowering such an instantiation would silently drop all
+        // but the first output -- the exact miscompile this slice removes. A
+        // length variable sizes an array *within* one output slot and never
+        // changes the output count, so it is not part of the trigger.
+        if sig.outputs.len() >= 2 || sig.row_out.is_some() {
+            let span = word_span(&word);
+            let locator = if span == Span::default() {
+                String::new()
+            } else {
+                format!(" (line {}, col {})", span.line, span.col)
+            };
+            return Err(format!(
+                "error: polymorphic word `{}`{locator} resolves to {} outputs, which is not yet supported at the REPL\n  a REPL instantiation returning more than one value needs a return bundle, which is deferred to a later slice",
+                word.name,
+                sig.outputs.len()
+            ));
+        }
+
+        let name = word.name.clone();
+        let generation = self.next_shared_generation(&name);
+        // R4/D3: freeze the callee-name -> mangled-symbol map at this defining
+        // line, so an instantiation of this word binds its callees against the
+        // generations visible now, not the instantiating line's.
+        let resolver: HashMap<String, String> = self
+            .env
+            .iter()
+            .map(|(callee, entry)| (callee.clone(), entry.symbol.clone()))
+            .collect();
+        // D3: freeze the callee arity map from the same defining-line env the
+        // resolver is captured from. Lowering an instantiation reads callee
+        // arity/return type from this, not the instantiating line's live env,
+        // so a callee redefined at a different arity in between cannot make
+        // the frozen-resolved call emit under the wrong ABI.
+        let ir_lower_env = ir_arity_env(&env);
+        // R8: the two stores stay mutually exclusive per name (a polymorphic
+        // word never enters the concrete env, R3), so defining `name` as poly
+        // evicts any prior ordinary entry for it.
+        self.env.remove(&name);
+        self.poly_words.insert(
+            name.clone(),
+            PolyWordEntry {
+                generation,
+                word,
+                resolver,
+                ir_lower_env,
+            },
+        );
+        writeln!(writer, "defined {name}").map_err(|e| format!("writing stdout: {e}"))?;
+        Ok(())
+    }
+
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
+        // R3 (Slice 2): a polymorphic word's signature lives entirely in
+        // `word.poly` (`word.effect` is empty), so it takes a wholly separate
+        // acceptance path; the concrete path below would mis-check its body
+        // against a zero-arity `Sig` derived from that empty effect.
+        if word.poly.is_some() {
+            return self.eval_poly_def(word, writer);
+        }
+
         let name = word.name.clone();
         let sig = check::sig_of(&word.effect);
 
         let mut env = self.typed_env();
-        check::check_def(
+        // R5 (Slice 2): thread the session poly-env so this defined word's own
+        // body can call a retained polymorphic word; the relayed instantiation
+        // table drives the per-site lowering below (R7).
+        // R8: the definee's own name is removed so that redefining a name from
+        // poly to ordinary binds its self-calls to this new ordinary word, not
+        // the stale poly entry this line is about to evict (the two stores are
+        // mutually exclusive per name).
+        let mut poly_env = self.poly_env();
+        poly_env.remove(&name);
+        let insts = check::check_def(
             &word,
             &self.enums,
             &env,
@@ -692,9 +935,15 @@ impl Session {
             &mut self.owned_cells,
             &mut self.refs,
             &self.structs,
+            &poly_env,
         )?;
+        let poly_arities = self.poly_arities();
 
-        let generation = next_generation(self.env.get(&name));
+        // R8: one past whichever of the ordinary env or the poly store holds
+        // the name (a shared per-name counter), so redefining across the
+        // mono<->poly boundary can never remint a resident generation's symbol
+        // under `RTLD_GLOBAL`.
+        let generation = self.next_shared_generation(&name);
         let symbol = mangled_symbol(&name, generation);
 
         // Self-recursive calls in the body must bind this new generation, not
@@ -718,9 +967,13 @@ impl Session {
             cells: &cells,
             refs: &refs,
         };
-        let funcs = {
+        let mut funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
-            let mut func = ir::lower_word(&word, &ir_lower_env, &resolve, regs);
+            // R7 (Slice 2): thread the instantiation table + poly-arity map so
+            // a call to a retained polymorphic word inside this body lowers to
+            // its per-site symbol via `lower_poly_call`.
+            let mut func =
+                ir::lower_word(&word, &ir_lower_env, &resolve, regs, &insts, &poly_arities);
             func.name = symbol.clone();
             let mut funcs = vec![func];
             // R12: this module must carry its own struct/enum destructors
@@ -740,6 +993,9 @@ impl Session {
             ));
             funcs
         };
+        // R7 (Slice 2, D2): lower each not-yet-exported instantiation this
+        // body recorded into this module, against the frozen snapshot resolver.
+        funcs.extend(self.emit_instantiations(&insts, regs));
 
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
@@ -754,6 +1010,11 @@ impl Session {
 
         // Only commit on success: env stays untouched on any earlier failure.
         self.libs.push(lib);
+        // R8: an ordinary (re)definition evicts any prior poly entry for the
+        // name, so a name lives in exactly one of the two stores at a time and
+        // a later call never has to arbitrate between a poly and a concrete
+        // entry for it.
+        self.poly_words.remove(&name);
         self.env.insert(
             name.clone(),
             WordEntry {
@@ -818,7 +1079,11 @@ impl Session {
     ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
-        let net_stack = check::infer_line(
+        // R5 (Slice 2): thread the session poly-env so a bare line can call a
+        // retained polymorphic word; the relayed instantiation table drives
+        // the per-site lowering below (R7).
+        let poly_env = self.poly_env();
+        let (net_stack, insts) = check::infer_line(
             terms,
             &self.types,
             &env,
@@ -827,10 +1092,12 @@ impl Session {
             &mut self.refs,
             &self.structs,
             &self.enums,
+            &poly_env,
         )?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
+        let poly_arities = self.poly_arities();
 
         self.seq += 1;
         let seq = self.seq;
@@ -859,6 +1126,8 @@ impl Session {
                 &ir_lower_env,
                 &resolve,
                 regs,
+                &insts,
+                &poly_arities,
             );
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`
@@ -884,6 +1153,10 @@ impl Session {
 
         let mut funcs = vec![func];
         funcs.extend(aggregate_destructors);
+        // R7 (Slice 2, D2): lower each not-yet-exported instantiation this line
+        // recorded into this module, against each poly word's frozen snapshot
+        // resolver; an already-exported symbol emits nothing (trace B dedup).
+        funcs.extend(self.emit_instantiations(&insts, regs));
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts.clone(),
@@ -1371,5 +1644,23 @@ mod tests {
             .unwrap_err();
         assert!(err.contains("reserved"), "unexpected message: {err}");
         assert!(err.contains('^'), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn poly_instantiation_repeated_at_one_type_dedups_in_exported_insts() {
+        // Criterion 2 (R7/D2): a second same-type instantiation of a
+        // retained polymorphic word must not mint a second exported symbol,
+        // or `.so` growth is unbounded across the session's life (trace B).
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line(": id ( 'T -- 'T ) ;", &mut out).unwrap();
+        session.eval_line("5 id .", &mut out).unwrap();
+        session.eval_line("7 id .", &mut out).unwrap();
+        assert_eq!(
+            session.exported_insts.len(),
+            1,
+            "expected exactly one exported instantiation symbol, got: {:?}",
+            session.exported_insts
+        );
     }
 }
