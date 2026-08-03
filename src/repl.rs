@@ -680,6 +680,21 @@ impl Session {
     }
 
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
+        // Phase 1 floor (D5): a polymorphic word's signature lives entirely
+        // in `word.poly`, leaving `word.effect` empty. Routing it through the
+        // concrete `check_def` path below would check its body against a
+        // zero-arity `Sig` derived from that empty effect: not a clean
+        // rejection but a silent miscompile (a bogus stack-effect mismatch,
+        // or a no-op body "succeeding" against the wrong signature). Reject
+        // it here, before that path ever runs, until a later phase adds real
+        // support.
+        if word.poly.is_some() {
+            return Err(format!(
+                "error: polymorphic word `{}` is not yet supported at the REPL",
+                word.name
+            ));
+        }
+
         let name = word.name.clone();
         let sig = check::sig_of(&word.effect);
 

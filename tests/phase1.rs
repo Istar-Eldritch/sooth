@@ -905,3 +905,30 @@ fn repl_quit_frees_residual_recursive_value() {
          fused loop, top node's tag first (pre-order)"
     );
 }
+
+#[test]
+fn polymorphic_repl_definition_is_a_located_rejection_not_a_silent_miscompile() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;", ": twice ( 'T -- 'T 'T ) dup ;"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2);
+    for line in &lines {
+        assert!(
+            line.contains("error:") && line.contains("polymorphic") && line.contains("REPL"),
+            "expected a located polymorphic-REPL rejection, got: {line}"
+        );
+        assert!(
+            !line.contains("declared ( -- )"),
+            "must not be the recon-1 zero-arity mismatch: {line}"
+        );
+    }
+    assert!(
+        lines[0].contains("`id`"),
+        "expected the rejection to name `id`: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains("`twice`"),
+        "expected the rejection to name `twice`: {}",
+        lines[1]
+    );
+}
