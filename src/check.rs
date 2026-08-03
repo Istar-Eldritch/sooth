@@ -39,8 +39,13 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 /// into. A monomorphic body that never calls a polymorphic word touches
 /// neither; the REPL (`infer_line`) passes an empty one, so no `repl.rs`
 /// change is needed (D2).
+///
+/// R2b: each `PolySig` carries its generation alongside it (`None` natively,
+/// `Some(g)` for a REPL word retained at generation `g`, Slice 2), so
+/// `check_poly_call`'s mint reads both from one lookup with no second
+/// channel.
 struct PolyCtx<'a> {
-    env: &'a HashMap<String, PolySig>,
+    env: &'a HashMap<String, (PolySig, Option<u64>)>,
     insts: &'a mut HashMap<Span, CallInst>,
 }
 
@@ -1017,13 +1022,13 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // not concrete `Sig` types); it lives in `poly_env` instead, and a call
     // site is intercepted there before the concrete lookup, where its
     // `PolySig` is unified against the concrete stack.
-    let mut poly_env: HashMap<String, PolySig> = HashMap::new();
+    let mut poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
     for (idx, word) in module.words.iter().enumerate() {
         if drop_overload_indices.contains(&idx) {
             continue;
         }
         if let Some(sig) = &word.poly {
-            poly_env.insert(word.name.clone(), (**sig).clone());
+            poly_env.insert(word.name.clone(), ((**sig).clone(), None));
         } else {
             env.insert(word.name.clone(), sig_of(&word.effect));
         }
@@ -1808,7 +1813,7 @@ pub fn check_def_collecting_drop_sites(
     let mut sites = Vec::new();
     // A `drop` overload is never polymorphic, so it needs no poly context; the
     // empty one keeps the reachability walk on the concrete path (D2).
-    let empty_poly_env: HashMap<String, PolySig> = HashMap::new();
+    let empty_poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     let mut poly = PolyCtx {
         env: &empty_poly_env,
@@ -1868,7 +1873,7 @@ pub fn infer_line(
     let mut prov = Provenance::default();
     // D2: a REPL line has no polymorphic words (Slice 2), so it walks with an
     // empty poly context and discards the (never-filled) instantiation table.
-    let empty_poly_env: HashMap<String, PolySig> = HashMap::new();
+    let empty_poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     let mut poly = PolyCtx {
         env: &empty_poly_env,
@@ -3263,7 +3268,7 @@ fn check_poly_call(
     arrays: &mut Vec<ArrayDecl>,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
-    let sig = poly
+    let (sig, generation) = poly
         .env
         .get(name)
         .expect("caller checked membership")
@@ -3309,7 +3314,7 @@ fn check_poly_call(
     }
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
-    let symbol = instantiation_symbol(name, &subst);
+    let symbol = instantiation_symbol(name, &subst, generation);
     poly.insts.insert(
         span,
         CallInst {
@@ -3319,6 +3324,7 @@ fn check_poly_call(
             out_arity: outputs.len(),
             output_types: outputs.clone(),
             bundle: None,
+            generation,
         },
     );
     stack.truncate(base);
