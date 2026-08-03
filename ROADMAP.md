@@ -231,8 +231,9 @@ first-loaded-wins). `examples/*.sth` and the native `tests/phase4_generics.rs`/
 once, instantiate at two different types, instantiate twice at one type without
 recompiling, redefine, and see the new body take effect on a new call while an earlier
 line's call keeps the old one.
-**Next action: Phase 4 Slice 3** (generic struct declarations), the next of eight
-dependency-ordered slices planned out under Phase 4.
+**Next action: Phase 4 Slice 3** (aggregate-return aliasing: the loop-carried copy), the
+next of eight dependency-ordered slices planned out under Phase 4. See
+`docs/phase4-slice3-brief.md` for the measured recon and the decisions its spec owes.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
