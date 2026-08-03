@@ -689,10 +689,19 @@ impl Session {
         // it here, before that path ever runs, until a later phase adds real
         // support.
         if word.poly.is_some() {
+            // `word_span` points at the first body term; an empty-bodied poly
+            // word (e.g. `id`) has none, so it falls back to `Span::default()`
+            // -- a meaningless `(line 0, col 0)`. Omit the locator in that case
+            // rather than print a bogus one.
             let span = word_span(&word);
+            let locator = if span == Span::default() {
+                String::new()
+            } else {
+                format!(" (line {}, col {})", span.line, span.col)
+            };
             return Err(format!(
-                "error: polymorphic word `{}` (line {}, col {}) is not yet supported at the REPL",
-                word.name, span.line, span.col
+                "error: polymorphic word `{}`{locator} is not yet supported at the REPL",
+                word.name
             ));
         }
 
