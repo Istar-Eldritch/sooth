@@ -1777,6 +1777,7 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
 /// registry the clause-style checks (coverage, scrutinee type, variant-name
 /// collision) consult.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn check_def(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1785,9 +1786,11 @@ pub fn check_def(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-) -> Result<(), String> {
-    check_def_collecting_drop_sites(word, enums, env, arrays, cells, refs, structs)?;
-    Ok(())
+    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+) -> Result<HashMap<Span, CallInst>, String> {
+    let (_sites, insts) =
+        check_def_collecting_drop_sites(word, enums, env, arrays, cells, refs, structs, poly_env)?;
+    Ok(insts)
 }
 
 /// R6/R11: `check_def`'s own body-check, but returning this one word's
@@ -1799,6 +1802,7 @@ pub fn check_def(
 /// `drop` call site's resolved operand type does not change once recorded;
 /// only whether that type is *currently* overridden can, and that question
 /// is answered fresh, from `structs`, every time the graph is built.
+#[allow(clippy::too_many_arguments)]
 pub fn check_def_collecting_drop_sites(
     word: &WordDef,
     enums: &[EnumDecl],
@@ -1807,22 +1811,24 @@ pub fn check_def_collecting_drop_sites(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-) -> Result<Vec<Type>, String> {
+    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+) -> Result<(Vec<Type>, HashMap<Span, CallInst>), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
     let mut sites = Vec::new();
-    // A `drop` overload is never polymorphic, so it needs no poly context; the
-    // empty one keeps the reachability walk on the concrete path (D2).
-    let empty_poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
+    // R5 (Slice 2): the session poly-env threads through so a defined word's
+    // own body can call a retained polymorphic word; the REPL drop-overload
+    // collector passes the empty map (a `drop` overload is never polymorphic),
+    // keeping the reachability walk byte-identical on the concrete path (D2).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     let mut poly = PolyCtx {
-        env: &empty_poly_env,
+        env: poly_env,
         insts: &mut insts,
     };
     check_word(
         word, enums, &env, arrays, cells, refs, structs, &mut sites, &mut poly,
     )?;
-    Ok(sites)
+    Ok((sites, insts))
 }
 
 /// R6/R11: the REPL's own whole-session call to `check_drop_overload_recursion`,
@@ -1863,7 +1869,8 @@ pub fn infer_line(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-) -> Result<Vec<Type>, String> {
+    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+) -> Result<(Vec<Type>, HashMap<Span, CallInst>), String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
     // A line is one block: names it binds die with it, so its end is a scope
     // end like any other. It is not a word body, so nothing in it is in tail
@@ -1871,12 +1878,13 @@ pub fn infer_line(
     let ctx = Ctx::Line { structs, enums };
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
-    // D2: a REPL line has no polymorphic words (Slice 2), so it walks with an
-    // empty poly context and discards the (never-filled) instantiation table.
-    let empty_poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
+    // R5 (Slice 2): the session poly-env threads through so a bare line can
+    // call a retained polymorphic word; the filled instantiation table is
+    // relayed to the caller for lowering. A `build`-path caller passes the
+    // empty map (Slice 1's D2 behaviour).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
     let mut poly = PolyCtx {
-        env: &empty_poly_env,
+        env: poly_env,
         insts: &mut insts,
     };
     let final_stack = check_terms(
@@ -1896,7 +1904,7 @@ pub fn infer_line(
             slot.ty
         ));
     }
-    Ok(final_stack.into_iter().map(|s| s.ty).collect())
+    Ok((final_stack.into_iter().map(|s| s.ty).collect(), insts))
 }
 
 /// `main` is the program's entry point: nothing in the program calls it, so
@@ -2886,7 +2894,7 @@ impl PolyScope {
 /// comparisons need `Ord`), local bind/read, and being returned; every other
 /// type-directed operation on it is a located error naming the variable, so a
 /// body a real instantiation would reject can never slip through.
-fn check_poly_body(
+pub fn check_poly_body(
     word: &WordDef,
     sig: &PolySig,
     env: &HashMap<String, Sig>,
@@ -6404,6 +6412,7 @@ mod tests {
             &mut Vec::new(),
             &module.structs,
             &module.enums,
+            &HashMap::new(),
         )
         .unwrap_err();
         assert!(
@@ -7546,7 +7555,9 @@ mod tests {
             &mut Vec::new(),
             &[],
             &[],
+            &HashMap::new(),
         )
+        .map(|(stack, _insts)| stack)
     }
 
     #[test]
