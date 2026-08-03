@@ -1777,7 +1777,6 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
 /// registry the clause-style checks (coverage, scrutinee type, variant-name
 /// collision) consult.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn check_def(
     word: &WordDef,
     enums: &[EnumDecl],

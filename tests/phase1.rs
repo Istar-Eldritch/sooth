@@ -906,38 +906,116 @@ fn repl_quit_frees_residual_recursive_value() {
     );
 }
 
+// Phase 3 upgrades criterion F: a clean-bodied polymorphic REPL definition
+// is now correctly *supported*, not rejected (recon-1's silent miscompile
+// stays gone either way, but the Phase 1 blanket rejection is no longer what
+// a valid definition like `id` sees).
 #[test]
-fn polymorphic_repl_definition_is_a_located_rejection_not_a_silent_miscompile() {
-    let out = run_session(&[": id ( 'T -- 'T ) ;", ": twice ( 'T -- 'T 'T ) dup ;"]);
+fn polymorphic_repl_definition_with_clean_body_is_accepted_not_rejected() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;"]);
+    assert_eq!(out, "defined id\n");
+}
+
+// Phase 3 upgrades `twice`'s half of criterion F: its rejection is now the
+// real X1 diagnostic from `check_poly_body` (naming `'T` and the missing
+// `Copy` bound an unbounded `dup` needs), not the Phase 1 blanket
+// "polymorphic ... REPL" wording, and not the recon-1 `( -- )` mismatch.
+#[test]
+fn polymorphic_repl_definition_with_ill_typed_body_is_the_real_x1_not_the_old_blanket_rejection() {
+    let out = run_session(&[": twice ( 'T -- 'T 'T ) dup ;"]);
     let lines: Vec<&str> = out.lines().collect();
-    assert_eq!(lines.len(), 2);
-    for line in &lines {
-        assert!(
-            line.contains("error:") && line.contains("polymorphic") && line.contains("REPL"),
-            "expected a located polymorphic-REPL rejection, got: {line}"
-        );
-        assert!(
-            !line.contains("declared ( -- )"),
-            "must not be the recon-1 zero-arity mismatch: {line}"
-        );
-    }
+    assert_eq!(lines.len(), 2, "unexpected output:\n{out}");
     assert!(
-        lines[0].contains("`id`"),
-        "expected the rejection to name `id`: {}",
+        lines[0].contains("cannot `dup` the type variable `'T`") && lines[0].contains("`twice`"),
+        "expected the X1 dup-of-unbounded-variable diagnostic: {}",
         lines[0]
     );
-    // `twice` has a body (`dup`), so `word_span` yields a real location and the
-    // rejection carries a (line N, col N) locator like sibling REPL diagnostics.
     assert!(
-        lines[1].contains("`twice`") && lines[1].contains("(line ") && lines[1].contains("col "),
-        "expected the rejection to name `twice` with a (line N, col N) locator: {}",
+        lines[1].contains("'T") && lines[1].contains("Copy"),
+        "expected the missing-Copy-bound reason: {}",
         lines[1]
     );
-    // `id`'s body is empty, so no real span exists; the locator is omitted
-    // rather than printed as a meaningless `(line 0, col 0)`.
     assert!(
-        !lines[0].contains("(line "),
-        "an empty-bodied poly word has no real span, so no bogus locator should print: {}",
+        !out.contains("REPL"),
+        "must not be the Phase 1 blanket polymorphic-REPL rejection: {out}"
+    );
+    assert!(
+        !out.contains("declared ( -- )"),
+        "must not be the recon-1 zero-arity mismatch: {out}"
+    );
+}
+
+// Criterion 1 (trace A): defining `id` once and instantiating it at two
+// different concrete types on later lines prints each instantiation's value.
+#[test]
+fn polymorphic_repl_word_instantiates_at_two_different_types_across_lines() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;", "5 id .", "\"hi\" id ."]);
+    // `.` on a `str` prints via `%.*s` with no trailing newline (unlike every
+    // other printable type, see `backend/qbe.rs`'s `$strfmt`), so "hi" runs
+    // directly into the following "stack: (empty)" line; this is that
+    // formatter's real behaviour, not a test bug.
+    assert_eq!(
+        out, "defined id\n5\nstack: (empty)\nhistack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// Criterion 2 (trace B): a second same-type instantiation prints its value
+// without recompiling anything (the dedup itself is pinned by the
+// `exported_insts`-size unit assertion in `src/repl.rs`).
+#[test]
+fn polymorphic_repl_word_instantiated_twice_at_one_type_prints_both_values() {
+    let out = run_session(&[": id ( 'T -- 'T ) ;", "5 id .", "7 id ."]);
+    assert_eq!(
+        out, "defined id\n5\nstack: (empty)\n7\nstack: (empty)\n",
+        "unexpected output:\n{out}"
+    );
+}
+
+// X2: instantiating a `'T: Copy` REPL word at a linear concrete type on a
+// later line is the native call-site error (`Ctx::Line` phrasing), naming
+// the variable, the callee, and the linear type.
+#[test]
+fn polymorphic_repl_word_instantiated_at_linear_type_without_copy_bound_is_x2() {
+    let out = run_session(&[
+        ": id ( 'T: Copy -- 'T ) ;",
+        SPY_TYPE_LINE,
+        SPY_DROP_LINE,
+        "0 Spy id drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 4, "unexpected output:\n{out}");
+    assert_eq!(
+        &lines[..3],
+        ["defined id", "defined type Spy", "defined drop for Spy"]
+    );
+    let err = lines[3];
+    assert!(
+        err.contains("'T") && err.contains("id") && err.contains("Spy") && err.contains("Copy"),
+        "expected an X2 diagnostic naming 'T, `id`, and `Spy`'s Copy bound: {err}"
+    );
+}
+
+// X3: a polymorphic REPL definition resolving to two or more concrete
+// outputs is a clean located deferral, not a silent single-output
+// truncation, never `defined pair`.
+#[test]
+fn polymorphic_repl_definition_resolving_to_two_outputs_is_a_located_x3() {
+    let out = run_session(&[": pair ( 'T: Copy -- 'T 'T ) dup ;"]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "unexpected output:\n{out}");
+    assert!(
+        lines[0].contains("`pair`") && lines[0].contains("2 outputs"),
+        "expected the X3 multi-output deferral naming `pair`: {}",
         lines[0]
+    );
+    assert!(
+        lines[1].contains("return bundle"),
+        "expected the deferred-return-bundle reason: {}",
+        lines[1]
+    );
+    assert_ne!(
+        out, "defined pair\n",
+        "must not silently truncate to one output"
     );
 }

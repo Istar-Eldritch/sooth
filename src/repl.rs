@@ -1618,4 +1618,22 @@ mod tests {
         assert!(err.contains("reserved"), "unexpected message: {err}");
         assert!(err.contains('^'), "unexpected message: {err}");
     }
+
+    #[test]
+    fn poly_instantiation_repeated_at_one_type_dedups_in_exported_insts() {
+        // Criterion 2 (R7/D2): a second same-type instantiation of a
+        // retained polymorphic word must not mint a second exported symbol,
+        // or `.so` growth is unbounded across the session's life (trace B).
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_line(": id ( 'T -- 'T ) ;", &mut out).unwrap();
+        session.eval_line("5 id .", &mut out).unwrap();
+        session.eval_line("7 id .", &mut out).unwrap();
+        assert_eq!(
+            session.exported_insts.len(),
+            1,
+            "expected exactly one exported instantiation symbol, got: {:?}",
+            session.exported_insts
+        );
+    }
 }
