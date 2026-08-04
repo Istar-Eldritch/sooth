@@ -5018,7 +5018,18 @@ fn check_operator(
             | "max-total"
             | "."
     ) || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
+    // The unary members (`not`, print, the `>T` conversions) read only the
+    // top; every other operator reads a pair, so its deeper operand at
+    // `stack[n - 2]` is an operand of it too. Guarding the top alone lets a
+    // quotation there fall through to `operand_pair_mismatch_error`, which
+    // spells the `Cstr` placeholder into the message the audit exists to keep
+    // hidden.
+    let is_unary =
+        matches!(name, "not" | ".") || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
     if is_operator && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
+    if is_operator && !is_unary && stack.len() >= 2 && stack[stack.len() - 2].quot.is_some() {
         return Err(reject_quotation_operand(ctx, span, name));
     }
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
