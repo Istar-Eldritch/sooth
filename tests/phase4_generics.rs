@@ -564,3 +564,31 @@ fn zero_size_aggregate_carried_across_back_edge_runs_correctly() {
     assert_eq!(stdout, "3\n2\n1\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn three_aggregates_rotated_across_back_edge_stay_correct() {
+    // R4/D2 cycle-length generality: the back-edge is a three-cycle (`c a b`),
+    // so slot `a` takes `c`, `b` takes `a`, and `c` takes `b` -- every slot
+    // stages and none forwards in place. Read-before-write staging must
+    // snapshot all three sources before any store lands, exactly as it does for
+    // the two-slot swap; a staging keyed to the swap case (or that lost a slot)
+    // would corrupt the rotation. The per-iteration triples witness a clean
+    // rotation: `1 2 3` becomes `3 1 2` (each position shifted, not a pairwise
+    // swap and no dropped slot), and the base returns the twice-rotated `a`
+    // (`2`).
+    let (stdout, code) = run_src(
+        "rotate3",
+        "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box Box Box -- Box )\n\
+           | n a b c |\n\
+           n 0 = if a else\n\
+             a Box>n . b Box>n . c Box>n .\n\
+             n 1 - c a b loop\n\
+           end ;\n\
+         : main ( -- ) 2 1 mk 2 mk 3 mk loop Box>n . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "1\n2\n3\n3\n1\n2\n2\n");
+    assert_eq!(code, 0);
+}
