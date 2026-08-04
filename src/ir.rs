@@ -1516,7 +1516,10 @@ fn synthesize_struct_destructor(
         // A struct's own path always starts at one of its own fields: only an
         // enum expands into a `Branch`, and this level is not one.
         Some(path) => {
-            let node = b.begin_loop(&[param])[0];
+            // R1a: the aggregate-staging transform is gated OFF here; the fused
+            // destructor loop is correct by its own ordered hoisted-slot reuse
+            // and must stay byte-for-byte.
+            let node = b.begin_loop(&[param], false)[0];
             b.emit_field_level(node, &fields, &path);
             b.finalize_loop();
         }
@@ -1592,7 +1595,8 @@ fn synthesize_enum_destructor(
         // builds no other shape for an enum), so the loop's whole body is
         // that dispatch.
         Some(path) => {
-            let node = b.begin_loop(&[param])[0];
+            // R1a: aggregate staging gated OFF (see `synthesize_struct_destructor`).
+            let node = b.begin_loop(&[param], false)[0];
             b.emit_path_steps(node, &path);
             b.finalize_loop();
         }
@@ -2003,7 +2007,8 @@ fn lower_word_parts(
     // the body reads the phi outputs so each iteration rebinds them. A word
     // with no tail self-call lowers exactly as before (no header, no phi).
     let entry_values = if self_tail {
-        b.begin_loop(&params_values)
+        // R1a: aggregate staging gated ON for the user self-tail-call loop.
+        b.begin_loop(&params_values, true)
     } else {
         params_values
     };
@@ -2079,6 +2084,25 @@ fn empty_poly_arities() -> &'static HashMap<String, usize> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+fn is_aggregate(ty: IrType) -> bool {
+    matches!(ty, IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_))
+}
+
+/// Per-carried-slot loop metadata (R2), in full carried-slot order. A scalar
+/// keeps its header phi; an aggregate carries no header phi but a stable
+/// entry-hoisted slot (the pointer the body reads every iteration) plus a
+/// staging temp and blit `size` for the back-edge read-before-write copy (R4).
+enum CarriedSlot {
+    Scalar {
+        phi: Value,
+    },
+    Aggregate {
+        stable: Value,
+        temp: Value,
+        size: u32,
+    },
+}
+
 struct FuncBuilder<'a> {
     env: &'a HashMap<String, Arity>,
     resolve: Resolver<'a>,
@@ -2105,9 +2129,11 @@ struct FuncBuilder<'a> {
     /// The loop header block (R6), `Some` iff this word is self-tail-recursive
     /// and is being lowered as a loop. Tail self-calls back-edge to it (R7).
     header: Option<BlockId>,
-    /// One phi output value per loop-carried slot (input arity many), in slot
-    /// order (R6). The body reads these, not the raw params.
-    header_phis: Vec<Value>,
+    /// Per loop-carried slot metadata (input arity many), in full slot order
+    /// (R2). A scalar slot carries its header phi; an aggregate slot carries
+    /// its entry-hoisted stable slot, staging temp, and blit size instead of a
+    /// phi. `finalize_loop` dispatches on this per slot.
+    carried_slots: Vec<CarriedSlot>,
     /// Collected back-edges (R8): each is `(pred block, one arg value per
     /// carried slot)`. Finalized into the header phis after the body lowers,
     /// since the operands are only known on the back-edges.
@@ -2120,11 +2146,11 @@ struct FuncBuilder<'a> {
     /// a clause's variant re-scrutinee) would otherwise grow the frame by one
     /// slot per iteration and blow the stack well before the loop's constant-
     /// stack guarantee is exercised. Hoisting reserves one fixed slot per
-    /// static alloc site, reused (overwritten) every iteration instead. Safe
-    /// only because a same-site slot is read (its carried value marshalled onto
-    /// the back-edge) before the next iteration overwrites it: a future lowering
-    /// that constructed an inline aggregate into a same-site slot before reading
-    /// the prior iteration's value from it would alias.
+    /// static alloc site, reused (overwritten) every iteration instead. This is
+    /// safe even when a loop constructs an inline aggregate into a same-site
+    /// slot before reading the prior iteration's value, because a carried
+    /// aggregate is snapshotted onto its own stable slot on the back-edge (R4),
+    /// so hoisting no longer depends on the body's read-before-overwrite order.
     entry_block: Option<BlockId>,
     /// Whether the current block has already been sealed (by a back-edge Jmp or
     /// another terminator), so no fall-through Ret/Jmp should follow.
@@ -2180,7 +2206,7 @@ impl<'a> FuncBuilder<'a> {
             poly_arities: empty_poly_arities(),
             cur_word_name,
             header: None,
-            header_phis: Vec::new(),
+            carried_slots: Vec::new(),
             back_edges: Vec::new(),
             entry_block: None,
             terminated: false,
@@ -2218,9 +2244,11 @@ impl<'a> FuncBuilder<'a> {
         self.cur_instrs.push(instr);
     }
 
-    /// Emit an `Alloc` into the current block, unless looping (`entry_block`
-    /// is `Some`), in which case it goes into the entry block instead: see
-    /// `entry_block`'s doc comment for why a loop body must never alloc.
+    /// Hoist an `Alloc` (or a carried-aggregate init `Blit`, R3) into the entry
+    /// block while looping (`entry_block` is `Some`); otherwise emit it into the
+    /// current block. It appends whatever `Instr` it is given, not only an
+    /// `Alloc`. See `entry_block`'s doc comment for why a loop body must never
+    /// alloc.
     fn push_alloc(&mut self, instr: Instr) {
         match self.entry_block {
             Some(entry) => {
@@ -2250,13 +2278,27 @@ impl<'a> FuncBuilder<'a> {
         self.cur_id = id;
     }
 
-    /// R6: open the loop shape. The current (entry) block binds `params`,
-    /// jumps to a fresh header, and the header carries one phi per carried
-    /// slot, each seeded with the entry arm `(entry, param)`. Returns the phi
-    /// outputs, which the body reads instead of the raw params. An input arity
-    /// of 0 yields a header with zero phis (just a back-edge target), handled
-    /// without special-casing.
-    fn begin_loop(&mut self, params: &[Value]) -> Vec<Value> {
+    /// R6/R1-R3: open the loop shape. The current (entry) block binds `params`,
+    /// jumps to a fresh header, and the header carries one phi per *scalar*
+    /// carried slot, each seeded with the entry arm `(entry, param)`. Returns
+    /// the values the body reads instead of the raw params (a scalar's phi
+    /// output, an aggregate's stable-slot pointer). An input arity of 0 yields
+    /// a header with zero phis (just a back-edge target), handled without
+    /// special-casing.
+    ///
+    /// When `stage_aggregates` is on (the user self-tail-call loop, R1a), each
+    /// aggregate-typed carried slot instead gets an entry-hoisted stable slot
+    /// (no header phi, R2), an entry-arm init blit copying the incoming param
+    /// into it (R3), and a staging temp for the back-edge read-before-write
+    /// copy (R4). When it is off (the two fused destructor synthesizers), every
+    /// slot takes the scalar path, keeping their lowering byte-for-byte.
+    ///
+    /// A base case that returns the carried aggregate returns a pointer into
+    /// this frame's stable slot; that is safe only because an aggregate return
+    /// lowers to `ret %ptr` under a `:S`/`:E`/`:A` return type and QBE copies
+    /// the aggregate out by value at the boundary, as the by-value
+    /// aggregate-return ABI already relies on.
+    fn begin_loop(&mut self, params: &[Value], stage_aggregates: bool) -> Vec<Value> {
         let entry = self.cur_id;
         let header = self.fresh_block();
         self.seal_block(Terminator::Jmp(header));
@@ -2265,22 +2307,49 @@ impl<'a> FuncBuilder<'a> {
         self.entry_block = Some(entry);
         let mut outs = Vec::with_capacity(params.len());
         for &p in params {
-            let out = self.fresh_value(self.value_type(p));
-            self.push_instr(Instr::Phi(out, vec![(entry, p)]));
-            self.header_phis.push(out);
-            outs.push(out);
+            let ty = self.value_type(p);
+            if stage_aggregates && is_aggregate(ty) {
+                // R1: one entry-hoisted stable slot (the pointer the body reads)
+                // and one staging temp per aggregate slot; both route through
+                // `push_alloc` into the already-sealed entry block.
+                let size = self.value_size(ty);
+                let stable = self.alloc_aggregate(ty);
+                let temp = self.alloc_aggregate(ty);
+                // R3: seed the stable slot with the incoming param once, before
+                // the loop runs, so iteration 1 reads an initialised value. A
+                // zero-size aggregate has no bytes to copy.
+                if size > 0 {
+                    self.push_alloc(Instr::Blit(p, stable, size));
+                }
+                self.carried_slots
+                    .push(CarriedSlot::Aggregate { stable, temp, size });
+                outs.push(stable);
+            } else {
+                let out = self.fresh_value(ty);
+                self.push_instr(Instr::Phi(out, vec![(entry, p)]));
+                self.carried_slots.push(CarriedSlot::Scalar { phi: out });
+                outs.push(out);
+            }
         }
         outs
     }
 
-    /// R8: after the body lowers, append each collected back-edge's per-slot
-    /// operand to the matching header phi. The back-edge arms cannot be known
-    /// when the header is emitted (they are produced on the back-edges), so
-    /// they are finalized here in a second step.
+    /// R8/R4: after the body lowers, finalize the loop. A scalar slot gets each
+    /// collected back-edge's operand appended to its header phi. An aggregate
+    /// slot instead gets a read-before-write staging blit pair appended to each
+    /// back-edge's predecessor block: a forwarded-in-place arg (exactly its own
+    /// stable slot) emits nothing, every other arg is snapshotted into its temp
+    /// (read phase) before being stored into its stable slot (write phase), so
+    /// an arg that reads a stable slot (a swap) or points into one (an interior
+    /// `field_value` pointer) is copied out before any store lands, with no
+    /// aliasing analysis. The scalar phi back-patch mutates the header while the
+    /// staging blits append to predecessor blocks, so the two run as separate
+    /// passes rather than under one borrow.
     fn finalize_loop(&mut self) {
         let header = self.header.expect("finalize_loop: loop mode");
-        let phis = mem::take(&mut self.header_phis);
+        let slots = mem::take(&mut self.carried_slots);
         let back_edges = mem::take(&mut self.back_edges);
+        // Pass 1: scalar phi back-patch, header block only.
         let block = self
             .blocks
             .iter_mut()
@@ -2288,12 +2357,42 @@ impl<'a> FuncBuilder<'a> {
             .expect("header block");
         for instr in &mut block.instrs {
             if let Instr::Phi(v, arms) = instr {
-                if let Some(slot) = phis.iter().position(|&p| p == *v) {
+                if let Some(slot) = slots
+                    .iter()
+                    .position(|s| matches!(s, CarriedSlot::Scalar { phi } if *phi == *v))
+                {
                     for (pred, vals) in &back_edges {
                         arms.push((*pred, vals[slot]));
                     }
                 }
             }
+        }
+        // Pass 2: aggregate staging blits, per predecessor block. All read-phase
+        // snapshots precede all write-phase stores; the predecessor is already
+        // sealed with its `Jmp` to the header, so appending to `block.instrs`
+        // lands the blits before the stored terminator.
+        for (pred, vals) in &back_edges {
+            let mut reads = Vec::new();
+            let mut writes = Vec::new();
+            for (slot, meta) in slots.iter().enumerate() {
+                if let CarriedSlot::Aggregate { stable, temp, size } = *meta {
+                    if size == 0 || vals[slot] == stable {
+                        continue;
+                    }
+                    reads.push(Instr::Blit(vals[slot], temp, size));
+                    writes.push(Instr::Blit(temp, stable, size));
+                }
+            }
+            if reads.is_empty() {
+                continue;
+            }
+            let block = self
+                .blocks
+                .iter_mut()
+                .find(|b| b.id == *pred)
+                .expect("back-edge predecessor block");
+            block.instrs.append(&mut reads);
+            block.instrs.append(&mut writes);
         }
     }
 
@@ -5828,7 +5927,9 @@ mod tests {
         let f = ir.funcs.iter().find(|f| f.name == "loop2").unwrap();
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
-        assert_eq!(phis.len(), 2, "one header phi per input slot (i64, Flag)");
+        // R2: the `Flag` (enum) slot loses its header phi under the aggregate-
+        // staging transform, leaving only the `i64` scalar phi (was 2).
+        assert_eq!(phis.len(), 1, "only the i64 scalar slot keeps a header phi");
         assert!(phis.iter().all(|arms| arms.len() == 3));
         assert_eq!(jmps_to(f, header), 3, "entry + two clause back-edges");
         assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 0);
@@ -5848,7 +5949,8 @@ mod tests {
         let header = loop_header(f);
         let hb = header_block(f, header);
         let hphis = header_phis(hb);
-        assert_eq!(hphis.len(), 2);
+        // R2: the `Flag` (enum) slot loses its header phi, leaving the i64 one.
+        assert_eq!(hphis.len(), 1);
         // header preds: entry arm + the one Go back-edge.
         assert!(hphis.iter().all(|arms| arms.len() == 2));
         assert!(
@@ -5910,6 +6012,176 @@ mod tests {
                 block.id
             );
         }
+    }
+
+    // Phase 4 Slice 3: the aggregate-staging loop transform (R1-R4, R1a).
+    // Structural coverage beside the changed `begin_loop`/`finalize_loop`; the
+    // runtime witnesses are the `tests/phase4_generics.rs` goldens.
+
+    /// A self-tail loop carrying an i64 (scalar) and a re-produced `Box`
+    /// (aggregate), so the aggregate slot stages rather than forwards.
+    const STAGED_LOOP: &str = "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box -- Box ) | n b | n 0 = if b else n 1 - n mk loop end ;";
+
+    #[test]
+    fn aggregate_carried_slot_gets_no_header_phi_but_scalar_does() {
+        // R2: the aggregate (`Box`) slot contributes no header phi (it reads
+        // its entry-hoisted stable slot); the scalar (i64) slot keeps one.
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(
+            phis.len(),
+            1,
+            "only the i64 scalar slot carries a header phi"
+        );
+    }
+
+    #[test]
+    fn aggregate_stable_slot_and_temp_are_entry_hoisted_not_in_the_body() {
+        // R1/R9: the stable slot and staging temp are `alloc`ed in the entry
+        // block, not per-iteration in the body (which would bump the frame
+        // every iteration and break the constant-stack guarantee). `instrs`
+        // flattens across blocks, so this iterates `func.blocks` directly.
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let entry = &f.blocks[0];
+        let entry_allocs = entry
+            .instrs
+            .iter()
+            .filter(|i| matches!(i, Instr::Alloc(..)))
+            .count();
+        assert!(
+            entry_allocs >= 2,
+            "the stable slot and temp allocs should be hoisted into the entry block, saw {entry_allocs}"
+        );
+        let entry_id = entry.id;
+        for block in &f.blocks {
+            if block.id == entry_id || block.id == header {
+                continue;
+            }
+            assert!(
+                !block.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+                "block {:?} in the loop body must not alloc",
+                block.id
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_init_blit_lands_in_the_entry_block() {
+        // R3: `begin_loop` seeds the stable slot with the incoming param once,
+        // in the entry block, so iteration 1 reads an initialised value. It is
+        // the only Blit routed to the entry block (the back-edge staging blits
+        // go to predecessor blocks).
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let entry = &f.blocks[0];
+        assert!(
+            entry.instrs.iter().any(|i| matches!(i, Instr::Blit(..))),
+            "the entry-arm init blit should land in the entry block"
+        );
+    }
+
+    /// The back-edge predecessor block of a self-tail loop: the non-entry block
+    /// that jumps to the header.
+    fn back_edge_pred(f: &IrFunc, header: BlockId) -> &Block {
+        let entry_id = f.blocks[0].id;
+        f.blocks
+            .iter()
+            .find(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header))
+            .expect("a back-edge predecessor block")
+    }
+
+    #[test]
+    fn back_edge_stages_reads_before_writes() {
+        // R4: on a staged back-edge, every read-phase blit (a snapshot into a
+        // temp) precedes every write-phase blit (a store into the stable slot).
+        // A blit is write-phase when its source is an earlier blit's dest in
+        // the same predecessor block. `instrs` flattens across blocks, so this
+        // inspects the predecessor block directly.
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let pred = back_edge_pred(f, header);
+        let mut written: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut seen_write = false;
+        let mut blits = 0;
+        for instr in &pred.instrs {
+            if let Instr::Blit(src, dst, _) = instr {
+                blits += 1;
+                if written.contains(&src.0) {
+                    seen_write = true;
+                } else {
+                    assert!(!seen_write, "a read-phase blit follows a write-phase blit");
+                }
+                written.insert(dst.0);
+            }
+        }
+        assert!(
+            blits >= 2,
+            "the staged Box back-edge should emit a read and a write blit, saw {blits}"
+        );
+    }
+
+    #[test]
+    fn forwarded_in_place_aggregate_slot_emits_zero_back_edge_blits() {
+        // R4: an aggregate carried unchanged (`prev`, its back-edge arg is
+        // exactly its own stable slot) is forwarded in place and stages
+        // nothing.
+        let ir = lower_src(
+            "type: Box n i64 ;\n\
+             : mk ( i64 -- Box ) | n | n Box ;\n\
+             : loop ( i64 Box -- Box ) | n prev | n 0 = if prev else n 1 - prev loop end ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let pred = back_edge_pred(f, header);
+        assert_eq!(
+            pred.instrs
+                .iter()
+                .filter(|i| matches!(i, Instr::Blit(..)))
+                .count(),
+            0,
+            "a forwarded-in-place slot emits zero back-edge blits"
+        );
+    }
+
+    #[test]
+    fn recursive_type_destructor_is_not_transformed() {
+        // R1a: the fused iterative destructor's `begin_loop` is gated OFF, so a
+        // recursive type's synthesized destructor keeps its one header phi for
+        // the carried node (R2 would drop it to zero) and gains no entry-block
+        // init Blit (R3's blit is the only Blit the transform routes to the
+        // entry block; the destructor's own copy-out lands in a body block).
+        // This is the check that is red when the gate is missing.
+        let ir = lower_src(
+            "type: Res n i64 ;\n\
+             : drop ( Res -- ) | r | r Res>n 5000 + . ;\n\
+             : mkres ( i64 -- Res ) | n | n Res ;\n\
+             type: List | Nil | Cons v Res next ^List ;\n\
+             : w ( -- ) ;",
+        );
+        let dtor = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "sooth_enum_drop_0")
+            .expect("a fused destructor was synthesized for the recursive enum");
+        let header = loop_header(dtor);
+        let phis = header_phis(header_block(dtor, header));
+        assert_eq!(
+            phis.len(),
+            1,
+            "the ungated-off destructor keeps its one carried-node header phi"
+        );
+        let entry = &dtor.blocks[0];
+        assert!(
+            !entry.instrs.iter().any(|i| matches!(i, Instr::Blit(..))),
+            "the destructor gains no entry-block init blit (R1a gate holds)"
+        );
     }
 
     // Phase 3 Slice 1: the drop-spy's lowering (R5/R6/R16).

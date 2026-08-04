@@ -354,3 +354,148 @@ fn join_phi_over_carried_aggregate_survives() {
     assert_eq!(stdout, "3\n");
     assert_eq!(code, 0);
 }
+
+// Phase 2 fix-witnesses: red on the current tree, green only with the R1-R4
+// lowering fix. Each carried aggregate is re-produced (or projected) before the
+// prior iteration's value is read, so pre-fix it aliases the reused storage.
+
+#[test]
+fn struct_carried_across_back_edge_is_not_aliased() {
+    // Criterion 1 (R1-R4, R7): a two-field struct re-produced each iteration
+    // and read the iteration after. Was `0 2 1 1`; correct `0 3 2 1`.
+    let (stdout, code) = run_src(
+        "structalias",
+        "type: Box a i64 b i64 ;\n\
+         : mk ( i64 -- Box ) | n | n n Box ;\n\
+         : loop ( i64 Box -- Box )\n\
+           | n prev |\n\
+           n 0 = if prev else\n\
+             n mk | cur |\n\
+             prev Box>a .\n\
+             n 1 - cur loop\n\
+           end ;\n\
+         : main ( -- ) 3 0 mk loop Box>a . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "0\n3\n2\n1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn array_carried_across_back_edge_is_not_aliased() {
+    // Criterion 2 (R1-R4, R7): an `[i64 4]` via `4 fill`, re-produced each
+    // iteration and read (through `&>`/`@`) the iteration after. Was `0 2 1`;
+    // correct `0 3 2`.
+    let (stdout, code) = run_src(
+        "arrayalias",
+        ": mkarr ( i64 -- [i64 4] ) 4 fill ;\n\
+         : loop ( i64 [i64 4] -- [i64 4] )\n\
+           | n prev |\n\
+           n 0 = if prev else\n\
+             n mkarr | cur |\n\
+             &prev 0 &> @ .\n\
+             n 1 - cur loop\n\
+           end ;\n\
+         : main ( -- ) 3 0 mkarr loop drop ;\n",
+        false,
+    );
+    assert_eq!(stdout, "0\n3\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn enum_carried_across_back_edge_is_not_aliased() {
+    // Criterion 3 (R1-R4, R7): a single-variant enum re-produced each
+    // iteration and read the iteration after. Not by-construction: it
+    // reproduces the identical live miscompile. Was `0 2 1 1`; correct
+    // `0 3 2 1`.
+    let (stdout, code) = run_src(
+        "enumalias",
+        "type: E | Wrap v i64 ;\n\
+         : mk ( i64 -- E ) | n | n Wrap ;\n\
+         : get ( E -- i64 ) | Wrap ;\n\
+         : loop ( i64 E -- E )\n\
+           | n prev |\n\
+           n 0 = if prev else\n\
+             n mk | cur |\n\
+             prev get .\n\
+             n 1 - cur loop\n\
+           end ;\n\
+         : main ( -- ) 3 0 mk loop get . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "0\n3\n2\n1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn destructor_carried_across_back_edge_disposes_right_contents() {
+    // Criterion 4 (R4, R5): the resource-safety bar. A `drop`-overloaded `Res`
+    // disposed one iteration late; disposal stays exactly-once *and* disposes
+    // the right contents. Was `1000 1002 1001 1001` (a double-dispose by
+    // content and a leak); correct `1000 1003 1002 1001`.
+    let (stdout, code) = run_src(
+        "dtoralias",
+        "type: Res n i64 ;\n\
+         : drop ( Res -- ) | r | r Res>n 1000 + . ;\n\
+         : mk ( i64 -- Res ) | n | n Res ;\n\
+         : loop ( i64 Res -- Res )\n\
+           | n prev |\n\
+           n 0 = if prev else\n\
+             n mk | cur |\n\
+             prev drop\n\
+             n 1 - cur loop\n\
+           end ;\n\
+         : main ( -- ) 3 0 mk loop drop ;\n",
+        false,
+    );
+    assert_eq!(stdout, "1000\n1003\n1002\n1001\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn nested_projection_carried_across_back_edge_is_not_aliased() {
+    // Criterion 7 (R4/D2): the back-edge `Vec2` arg is `s Segment>from`, an
+    // interior pointer *into* the carried `Segment` stable slot (a distinct
+    // `Value` from the slot), which read-before-write staging snapshots before
+    // the `Segment` slot is overwritten. Was `99 0 2 1`; correct `99 0 3 2`.
+    let (stdout, code) = run_src(
+        "nestedproj",
+        "type: Vec2 x i64 y i64 ;\n\
+         type: Segment from Vec2 to Vec2 ;\n\
+         : mkseg ( i64 -- Segment ) | n | n n Vec2 n 100 * n Vec2 Segment ;\n\
+         : loop ( i64 Segment Vec2 -- Vec2 )\n\
+           | n s v |\n\
+           n 0 = if v else\n\
+             v Vec2>x .\n\
+             n 1 - n mkseg s Segment>from loop\n\
+           end ;\n\
+         : main ( -- ) 3 0 mkseg 99 99 Vec2 loop Vec2>x . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "99\n0\n3\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn inline_constructed_aggregate_carried_across_back_edge_is_not_aliased() {
+    // Criterion 8 (R1-R4): a carried `Vec2` built inline each iteration, with
+    // no producer call, read the iteration after. The storage-reuse witness
+    // that the cause is reused entry-hoisted storage, not the return ABI. Was
+    // `0 2 1 1`; correct `0 3 2 1`.
+    let (stdout, code) = run_src(
+        "inlinealias",
+        "type: Vec2 x i64 y i64 ;\n\
+         : loop ( i64 Vec2 -- Vec2 )\n\
+           | n prev |\n\
+           n 0 = if prev else\n\
+             n n Vec2 | cur |\n\
+             prev Vec2>x .\n\
+             n 1 - cur loop\n\
+           end ;\n\
+         : main ( -- ) 3 0 0 Vec2 loop Vec2>x . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "0\n3\n2\n1\n");
+    assert_eq!(code, 0);
+}
