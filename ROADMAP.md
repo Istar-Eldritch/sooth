@@ -242,7 +242,7 @@ aggregate-return ABI specifically: a by-value aggregate return is the common ins
 but an aggregate constructed inline each iteration with no call at all reused its
 entry-hoisted storage the same way and is fixed by the same change.
 **Next action: Phase 4 Slice 4** (quotations + the internal loop primitive), the next of
-nine dependency-ordered slices planned out under Phase 4. Its brief
+eight dependency-ordered slices planned out under Phase 4. Its brief
 (`docs/phase4-slice4-brief.md`) is written and its open questions are settled: the floor is
 the `times` intrinsic, the slice ships a runnable constant-stack loop, a quotation stays a
 compile-time marker until slice 6 makes it a real value, and the two polymorphic-path gaps
@@ -453,7 +453,7 @@ error, never a hang); `.`/`=`/arithmetic on an enum are sharp located errors; a 
 to enum slots across both the word-call and REPL-line boundary. The `examples/shapes.sth`
 dogfood (`Shape`'s `Circle`/`Rect` via `area`, `MaybeInt`'s `None`/`Some` via
 `unwrap-or`) runs both as a native binary and in the REPL. Generics, `Option<T>`/
-`Result<T,E>`, open multimethods, the `_` wildcard, inline `match`, and recursive/heap
+`Result<T,E>`, the `_` wildcard, inline `match`, and recursive/heap
 data are deferred (Phase 4 / Phase 3).
 
 `(value, type)` slot from day one, concrete types only. Numeric tower (i8..i64,
@@ -754,11 +754,8 @@ stops being a keyword, and a `cond` multi-way combinator lands alongside the oth
 **Dispatch and uniformity (bundled here on purpose).** Several deferred ideas are one
 conversation, and none is clean without quotations, so they land together in this phase:
 (a) **`if` becomes an ordinary combinator** over quotations (above); (b) **generics /
-minimal polymorphism** (above); (c) **ad-hoc dispatch**, both static **overloading** (one
-word name, several statically-known input types, e.g. `+` over `i64`/`f64`/`Vec2`) and
-**open multimethods** (`generic:`/`method:` on a sum, the open/dynamic dual of Slice 4's
-closed clause-style match, trading closed exhaustiveness for module-level extensibility,
-the expression-problem tradeoff); and (d) **`Bool` as a library enum**
+minimal polymorphism** (above); (c) **ad-hoc dispatch** as static **overloading** (one
+word name, several statically-known input types, e.g. `+` over `i64`/`f64`/`Vec2`); and (d) **`Bool` as a library enum**
 (`type: Bool | False | True ;`) rather than a primitive. (d) waits for here specifically
 because bool's specialness is not the *type* but that strict, quotation-less two-way
 branching needs inline syntax; once `if` is a quotation combinator, `Bool`-as-enum +
@@ -783,7 +780,7 @@ its Slice 8 had to split into 8a/8b/8c mid-flight (`close` had to exist before t
 destructor mechanism could be designed against it) and its Slice 3 shipped covering only
 direct self-recursion, needing Slice 4 as a follow-on — both boundaries discovered late,
 under load. Process is calibrated per slice, not uniformly: slices 1–6 carry real design
-risk and want full specs, while 9 is a mechanical migration that can run 8c-style (no
+risk and want full specs, while 8 is a mechanical migration that can run 8c-style (no
 spec, one implementation pass plus one review).
 
 **The paper pre-check that shaped this plan.** Before committing to the order, the four
@@ -968,7 +965,7 @@ then find out what the compiler owes it.
    but forfeiting the thing the phase is trying to prove, in the same way `vm.sth` shipping
    with zero compiler changes *was* the Phase 2 exit verdict.
    Accepts one known churn cost — the library is written against keyword `if` and gets
-   rewritten when slice 9 turns `if` into a word — which is a handful of library words,
+   rewritten when slice 8 turns `if` into a word — which is a handful of library words,
    cheaper than reordering the phase around it. Dogfood: rewrite an earlier program to use it.
    **This slice also closes the two polymorphic-path gaps slice 4's brief measured**, because
    this is where their first real consumers appear. A polymorphic body rejects `if`
@@ -1033,21 +1030,10 @@ then find out what the compiler owes it.
    overloads are the other such sites; the latter are explicitly parked for here ("`drop`
    becoming fully polymorphic is still Phase 4"), and absorbing them means retiring the
    hardcoded interception arms in `check.rs`/`ir.rs` that currently run before any env lookup.
-8. **Open multimethods.** `generic:`/`method:` on a sum: the open/dynamic dual of Phase 2
-   Slice 4's closed clause-style match, trading closed exhaustiveness for module-level
-   extensibility (the expression problem). Separate from slice 7 rather than bundled because
-   it needs a runtime dispatch table — the language's first — where static overloading needs
-   none. That table is literally a table of function values, so with slice 6 landed it is
-   built on the existing mechanism rather than minting a bespoke one; this is the
-   elevate-to-the-lowest-common-ancestor rule applied at plan scale, and it is a second
-   reason slice 6 sits ahead of here rather than at the end of the phase. **Deferral candidate to Phase 6, on the same reasoning that moved opt-in RC out of
-   Phase 3**: its stated payoff is extension across module boundaries, and Sooth is
-   single-file until Phase 6 introduces modules, so the benefit is unobservable here and the
-   design would be specified against a consumer that does not exist. Decide at its brief.
-9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
+8. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
-   the other eight enable: it needs quotations (slice 4) for `if` to be a word at all, and
+   the other seven enable: it needs quotations (slice 4) for `if` to be a word at all, and
    dispatch (slice 7) so `Bool`'s type-directed printing becomes an ordinary overload instead
    of a re-added special case — which is the whole point of waiting, per the bundle note
    above. Mechanically it is a large migration rather than a design problem: `bool` has been
@@ -1091,8 +1077,8 @@ qualified name. Type resolution, move-tracking, and the R21 aliasing rule are al
 value-flow-based, not file-based, so none of that checker machinery should need to know a
 boundary was crossed — the open design question is narrower: how struct/enum declarations
 from separate files join one shared type registry without a name collision or a duplicate
-registration. (Phase 4's open multimethods already lean on "module-level extensibility"
-without modules existing yet; this is where that debt gets paid.)
+registration. (Phase 4's static overloading already leans on "module-level
+extensibility" without modules existing yet; this is where that debt gets paid.)
 **Exit:** two files, one importing a type and a word from the other, compiling and linking
 as one program.
 **Dogfood:** split an existing multi-word example (`vm.sth` or `stack.sth`) across a `main`
@@ -1112,7 +1098,7 @@ and per-instantiation destructor synthesis, all of which the bundle path deliber
 out of (a bundle is an ABI detail, not a nameable type). `Vec['T]` and `Map['K 'V]` are the
 real consumers and they live here, which is what makes this the right phase: specifying it
 in Phase 4 would have designed it against a consumer that does not exist, the same test
-that sends open multimethods here.
+that sends open multimethods' former slot to Phase 6.
 
 **Worklist-based disposal for branching structures (moved from Phase 3 Slice 4).** A
 multi-child recursive type's synthesized destructor loops only its *last* recursive field

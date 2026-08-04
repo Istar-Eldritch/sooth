@@ -734,3 +734,24 @@ be written without it, never on principle.
   target (Phase 8) needs precomputed tables it genuinely can't build at startup; the
   answer then is a minimal comptime const-eval (a foldable-pure-word evaluator or a
   build-emitted data section), not a macro system and not an interpreter.
+- **Open multimethods** (`generic:`/`method:` on a sum). Declined. The expression
+  problem — extending both types and operations without modifying existing code — is
+  real, but open multimethods solve it at a cost that cuts against the language's core
+  property: dispatch resolution that depends on which modules are loaded is behaviour
+  coming from "who knows where," exactly the kind of implicit magic the linear spine
+  exists to eliminate. The exhaustiveness checking that closed match gives you is a
+  feature, not a tax: the compiler tells you every place a new variant is unhandled,
+  and that safety is worth more than the convenience of adding arms without touching
+  existing code. With Phase 4 Slice 6 (functions as values) landing first, the
+  handler-struct convention — a struct of quotations, one instance per variant,\   selected by a closed match — covers the extensible-types dimension using existing
+  language features, with exhaustiveness intact and no runtime dispatch table. The
+  expression problem's second dimension (adding new operations without touching
+  existing constructors) stays closed under that convention, but for a single-author
+  codebase updating constructors is a safety check, not a tax, because the compiler
+  names every site that needs it. Dropping open multimethods also keeps Elm-style
+  enforced semver fully sound: without orphan arms there is no scenario where a MINOR
+  addition silently shifts dispatch resolution for existing callers. **Revisit if** a
+  concrete program needs a third party to extend operations on a type they don't own
+  without modifying the type's defining module, and the handler-struct convention is
+  genuinely insufficient — but that is a plugin-system requirement, not a personal-product
+  one.
