@@ -4014,7 +4014,7 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
 /// A reference argument to a self-tail-call whose provenance traces to an
 /// owned local of *this* frame — a `place` naming an actual
 /// `Deriv::owned_root` — crosses a loop iteration boundary. Locals rebind at
-/// the loop header (`header_phis`), so the storage that local
+/// the loop header (`carried_slots`), so the storage that local
 /// named this iteration is not the storage the same name denotes next
 /// iteration, and a reference into it would alias a reused slot. A reference
 /// *parameter*, or one derived from it by projection, has no owned root
