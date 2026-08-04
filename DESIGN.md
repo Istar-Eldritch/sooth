@@ -306,6 +306,29 @@ dispatch loop and pulling quotations forward would be the larger change. Phases 
 the scalar/aggregate slices need only shallow recursion; the VM is the first golden that
 needs real iteration.
 
+**Phase 4 Slice 4 shipped the quotation literal and the `times` floor**, landing the first
+bullet above narrower than the design implies and the second bullet exactly as designed. A
+quotation stays a **compile-time-only marker** rather than a first-class runtime value
+(D1): it carries the identity of its literal body, rides the checker's `Slot`/`Binding` and
+lowering's phantom `Value` verbatim through shuffles and binds (D2), and is consumed only by
+fusion — `call` splices a literal's body at the consumption site, type-checking identically
+to writing the body inline, because there is no standalone effect to infer for a bare body
+(D3). `call` therefore accepts only a statically-known literal; every position that would
+need a real runtime value instead (a branch join, an array element, a user or polymorphic
+word argument, an operator operand, a REPL residual stack) is a located rejection, not a
+panic (D4). This defers the `Type`/`PolyType`/`IrType`/unification/mangling change a real
+runtime quotation type implies to the slice that gives escaping quotations a consumer for
+it (Phase 4 Slice 6). The floor is one intrinsic, `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`,
+passing the iteration index and requiring the body return the row it received, so effect
+realization only ever checks an inner row against itself (D6); `while` was weighed as a
+second floor member and declined, since its condition quotation returns a `bool` on a
+passthrough row, strictly harder than `times` needs. `times` drives the existing internal
+loop primitive (`begin_loop`/`finalize_loop`) unchanged, with a synthesized index; a `times`
+nested inside another loop is rejected in the checker rather than taught to the lowering
+primitive. The quotation-literal fusion this slice owns (splicing a literal's body at its
+`call` or `times`) never crosses a `:` word boundary (D5); the interprocedural user-word
+inliner that lowers the combinator library itself is Slice 5's.
+
 **Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
 error). Multi-way branching is a **`cond` combinator** (a library word taking

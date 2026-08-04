@@ -241,13 +241,30 @@ unchanged. The cause was storage reused across loop iterations generally, not th
 aggregate-return ABI specifically: a by-value aggregate return is the common instance,
 but an aggregate constructed inline each iteration with no call at all reused its
 entry-hoisted storage the same way and is fixed by the same change.
-**Next action: Phase 4 Slice 4** (quotations + the internal loop primitive), the next of
-eight dependency-ordered slices planned out under Phase 4. Its brief
-(`docs/phase4-slice4-brief.md`) is written and its open questions are settled: the floor is
-the `times` intrinsic, the slice ships a runnable constant-stack loop, a quotation stays a
-compile-time marker until slice 6 makes it a real value, and the two polymorphic-path gaps
-the brief measured (`if` rejected in a polymorphic body; no loop transform for a
-polymorphic self-tail word) land in slice 5. Spec next.
+**Phase 4 Slice 4 (quotations + the internal loop primitive) is complete**: a quotation
+literal `[ ... ]` parses to `TermKind::Quotation` and stays a **compile-time-only marker**
+until slice 6 gives it a runtime type — no `Type`/`PolyType`/`IrType` variant — carrying the
+identity of its literal body on a `Slot`/`Binding` side-channel (`quot`), forwarded through
+shuffles and binds, and consumed only by fusion: `call` splices a literal's body at the
+consumption site (type-checking identically to writing the body inline), and every other
+position that would need a runtime quotation value (an array element, a branch join, a
+user or polymorphic word argument, an operator operand, a REPL residual stack) is a located
+rejection instead of a panic. The one compiler-known intrinsic, `times ( ..s i64
+[ ..s i64 -- ..s ] -- ..s )`, drives the existing `begin_loop`/`finalize_loop` staging with a
+synthesized index, giving a runnable constant-stack loop (a header `Phi`/`Jnz` reached by a
+back-edge `Jmp`, no per-iteration `Instr::Call`, every loop-body `Alloc` entry-hoisted,
+verified at 1M+ iterations under a 1MB stack); a `times` nested inside another loop is
+rejected in the checker, which also restores loop state after a `times` returns so a second
+loop in the same word still runs. `while` was weighed as a second floor member and declined:
+its condition quotation returns a `bool` on a passthrough row, strictly harder than `times`
+needs. `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same
+total as `examples/countdown.sth`'s hand-threaded self-recursion.
+**Next action: Phase 4 Slice 5** (the combinator library in Sooth + inlining + closing the
+polymorphic-path gaps, the phase's headline exit): `each`/`map`/`filter`/`fold`/`while` as
+ordinary library words over quotations, the compiler's first inliner lowering them and their
+quotation arguments to tight loops, and the two polymorphic-path gaps slice 4 measured but
+did not need (`if` rejected in a polymorphic body; no loop transform for a polymorphic
+self-tail word) landing against their first real consumers, `filter` and `while`.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

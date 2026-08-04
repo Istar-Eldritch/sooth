@@ -60,6 +60,29 @@ struct PolyCtx<'a> {
 /// moves a `Slot` verbatim, so a literal duplicated by `dup` is still a
 /// literal at each copy; any operator, conversion, or word call produces a
 /// non-literal result (D8: no constant folding, no comptime interpreter).
+/// An index into a per-check `Provenance::quotations` table (D2): a
+/// quotation `Slot` carries the identity of the literal body it marks, so
+/// `call`/`times` can splice that body at the consumption site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuotId(usize);
+
+/// The identity a quotation `Slot` carries (D2/R4). A single variant: two
+/// *different* quotations at a branch join are rejected at the join (R7), so
+/// no poisoned/merged marker is ever carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotRef {
+    Known(QuotId),
+}
+
+/// One interned quotation literal: its body terms (spliced at `call`/`times`)
+/// and the literal's span, for a located diagnostic.
+#[derive(Debug, Clone)]
+struct QuotBody {
+    body: Vec<Term>,
+    #[allow(dead_code)]
+    span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Slot {
     ty: Type,
@@ -75,6 +98,11 @@ struct Slot {
     alias: Option<Alias>,
     /// The outstanding derivation a reference-typed value holds.
     deriv: Option<DerivId>,
+    /// D2/R4: set iff this is a quotation marker, carrying the identity of the
+    /// literal body it stands for. A `Cstr` placeholder `ty` no user op
+    /// accepts rides alongside it; a shuffle forwards this verbatim (`Slot` is
+    /// `Copy`), and `call`/`times` consume it by splicing the body.
+    quot: Option<QuotRef>,
 }
 
 impl Slot {
@@ -87,6 +115,7 @@ impl Slot {
             int_val: None,
             alias: None,
             deriv: None,
+            quot: None,
         }
     }
 
@@ -292,7 +321,7 @@ struct AliasSetId(u32);
 
 /// One outstanding derivation from a place, interned in `Provenance` so a
 /// `Slot` can carry it by id and stay `Copy`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DerivId(u32);
 
 /// What one live reference traces back to. Created by a fresh borrow
@@ -363,6 +392,21 @@ struct Provenance {
     /// arena is threaded at all: an `if` arm clones `Scope`, so an
     /// observation kept there would die with the arm.
     dropped: Vec<Type>,
+    /// D2/R4: the per-check quotation-literal side table, indexed by `QuotId`.
+    /// A quotation `Slot`/`Binding` carries only a `QuotId`, so the body it
+    /// marks is interned here and spliced from here at `call`/`times`. Rides
+    /// this arena because it is the one scratch already threaded `&mut`
+    /// through the walk, so a quotation pushed in one `if` arm and read in a
+    /// merge outlives the arm's cloned `Scope`.
+    quotations: Vec<QuotBody>,
+    /// R16/R18: how many `times` body splices are currently open around the
+    /// term being checked. Incremented across a `times` body splice and
+    /// **restored** after (not merely decremented), so two *sequential*
+    /// `times` in one word do not false-positive as nested. A non-zero value
+    /// at a `times` is the `times`-in-`times` case of R18's nested-loop
+    /// rejection; `scope.depth()` cannot substitute, since it counts every
+    /// block, not only a `times`.
+    times_depth: usize,
 }
 
 impl Provenance {
@@ -615,6 +659,11 @@ struct Binding {
     ty: Type,
     aliases: Option<AliasSetId>,
     deriv: Option<DerivId>,
+    /// D2/R4: a bound quotation's marker. A local read reconstructs a fresh
+    /// `Slot` that drops every non-`ty` side channel, so unlike a shuffle a
+    /// bind is a *second*, explicit forwarding site: this field carries the
+    /// marker across the bind and back onto the reconstructed slot.
+    quot: Option<QuotRef>,
 }
 
 impl Scope {
@@ -651,6 +700,7 @@ impl Scope {
             ty: slot.ty,
             aliases,
             deriv: prov.bind(slot.deriv),
+            quot: slot.quot,
         });
     }
 
@@ -817,6 +867,12 @@ enum Ctx<'a> {
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
+        /// R16/R18: whether this word is self-tail-recursive, precomputed in
+        /// `word_ctx` (`has_self_tail_call` takes a `&WordDef` that `check_term`
+        /// does not have). A `times` in a self-tail word is the whole-word case
+        /// of R18's nested-loop rejection: lowering opens `begin_loop` for the
+        /// whole word, so a `times` inside it would nest two loops.
+        self_tail: bool,
     },
     Line {
         structs: &'a [StructDecl],
@@ -832,6 +888,7 @@ fn word_ctx<'a>(word: &'a WordDef, structs: &'a [StructDecl], enums: &'a [EnumDe
         effect: &word.effect,
         structs,
         enums,
+        self_tail: has_self_tail_call(word),
     }
 }
 
@@ -1891,6 +1948,15 @@ pub fn infer_line(
     )?;
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
+    // R19: a REPL line has no declared outputs (so R10's route never runs),
+    // yet the session carries its residual stack into the next line while the
+    // `quot` side channel dies at the boundary and lowering has pushed a
+    // phantom the spill would marshal. Reject a quotation left here.
+    if final_stack.iter().any(|s| s.quot.is_some()) {
+        return Err(
+            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (higher-order values are Phase 6)".to_string(),
+        );
+    }
     // The sixth position of the no-stored-reference rule: the session's
     // inter-line stack outlives this line's
     // locals, so a reference that survived to here would outlive its referent.
@@ -2028,6 +2094,16 @@ fn check_outputs(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
 ) -> Result<(), String> {
+    // R10: a quotation left on the exit stack gets its own diagnostic, ahead
+    // of both the arity and type-mismatch routes. On a *matching* count the
+    // ordinary mismatch would otherwise fire and leak the `Cstr` placeholder
+    // spelling; a quotation cannot be a declared output regardless of count.
+    if final_stack.iter().any(|s| s.quot.is_some()) {
+        return Err(format!(
+            "error: `{}` (line {}) leaves a quotation on the stack; a quotation cannot be a declared output",
+            word.name, line
+        ));
+    }
     if final_stack.len() != declared.len() {
         // R13/R2: a *linear* surplus value is the forgotten-disposal case, so it
         // gets the disposal wording (and names its type) before the generic
@@ -3012,6 +3088,19 @@ fn poly_term(
                 name, span, stack, scope, sig, ctx, env, structs, enums, arrays,
             );
         }
+        // R5p: a quotation in a polymorphic body is rejected eagerly at the
+        // literal. `poly_term`'s stack is `Vec<PolyType>`, not `Vec<Slot>`, so
+        // there is nowhere to hang the `quot` marker, and D1 forbids a
+        // `PolyType` variant; pushing a placeholder would erase the identity
+        // into output unification/`Subst`/mangling. Mirrors the
+        // `if`-in-a-polymorphic-body rejection above.
+        TermKind::Quotation(_) => {
+            return Err(format!(
+                "error: a quotation in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
+        }
     }
     Ok(stack)
 }
@@ -3287,6 +3376,12 @@ fn check_poly_call(
     let base = stack.len() - n_in;
     let mut subst = Subst::default();
     for i in 0..n_in {
+        // R9p: `unify_poly_input` binds a `Var` to *any* concrete type, so a
+        // quotation would silently bind `'T` to the placeholder and
+        // monomorphize a call over a phantom. Reject before unification.
+        if stack[base + i].quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
         let slot_ty = stack[base + i].ty;
         unify_poly_input(
             &sig,
@@ -4086,6 +4181,80 @@ fn check_linear_across_back_edge(
 /// rejection is forced (the earlier binding would become unreachable, and its
 /// value could then never be consumed), and applying it to Copy values too
 /// keeps one rule and one message instead of two.
+/// `call` reached without a statically-known quotation literal on top (D4):
+/// the value there is not traceable to a single literal.
+fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            name, span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            span.line
+        ),
+    }
+}
+
+/// R18: `times` reached without a statically-known quotation literal on top
+/// (D4). Parallel to `call_needs_quotation_error`.
+fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            name, span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            span.line
+        ),
+    }
+}
+
+/// R18/N: a `times` nested in a loop -- inside a self-tail word, or inside
+/// another `times` body. Rejected in the checker (not lowering, which has no
+/// error channel): the clean hoist-target split that would allow nesting is a
+/// later slice's.
+fn times_nested_in_loop_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` cannot be nested in a loop yet{} (line {}): nested constant-stack loops need a hoist-target split deferred to a later slice",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18: the body is spliced once but runs N times, so a linear outer local it
+/// consumes would be disposed of more than once. The single most important
+/// `times` checker rule.
+fn times_body_consumes_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    format!(
+        "error: a `times` body cannot consume `{name}`{} (line {}): the body runs more than once, so the value would be disposed of more than once",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18: a reference the body derives would cross the back-edge into the next
+/// iteration. A borrow is idempotent per iteration, so a well-formed body
+/// leaves `live_derivs` unchanged; this fires when it does not.
+fn times_body_borrow_across_loop_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` body cannot leave a reference live across the loop{} (line {}): the local it borrows does not survive to the next iteration",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18/D6: the body's net effect on the row is not identity -- it must consume
+/// the index and return the row it received unchanged.
+fn times_body_row_effect_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` body must leave the row unchanged{} (line {}): it takes `( ..s i64 -- ..s )`, consuming the index and returning the same row",
+        in_word(ctx),
+        span.line,
+    )
+}
+
 fn rebound_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
     let scope_end = "a name may not be re-bound while it is in scope: the earlier binding would become unreachable, and a linear value in it could then never be consumed";
     match ctx {
@@ -4270,6 +4439,7 @@ fn check_term(
                 int_val: Some(*n),
                 alias: None,
                 deriv: None,
+                quot: None,
             });
             Ok(stack)
         }
@@ -4311,7 +4481,8 @@ fn check_term(
         }
         TermKind::Call(name) => {
             if let Some(binding) = scope.local(name) {
-                let (ty, aliases, held) = (binding.ty, binding.aliases, binding.deriv);
+                let (ty, aliases, held, quot) =
+                    (binding.ty, binding.aliases, binding.deriv, binding.quot);
                 match ref_parts(ty, refs) {
                     // Naming a reference local is a reborrow, not a move.
                     // A mutable one suspends its place: a second reborrow while
@@ -4371,10 +4542,164 @@ fn check_term(
                         // here so a later borrow can point at this naming.
                         stack.push(Slot {
                             alias: aliases.map(|set| Alias { set, span }),
+                            quot,
                             ..Slot::computed(ty)
                         });
                     }
                 }
+                return Ok(stack);
+            }
+            // R6: `call`/`times` are compiler-known words intercepted before
+            // every builtin family and user-word lookup (a local named `call`
+            // already won above). `call` requires a statically-known
+            // quotation literal on top (D4) and splices its interned body
+            // against the live stack, so `[ 1 + ] call` checks as `1 +` (D3).
+            if name == "call" {
+                let Some(top) = stack.pop() else {
+                    return Err(underflow_error(ctx, span, "call", 1, 0));
+                };
+                let Some(QuotRef::Known(id)) = top.quot else {
+                    return Err(call_needs_quotation_error(ctx, span));
+                };
+                // Splice the body against the current locals/scope in lexical
+                // extent (capture is free, recon 9), bracketed like an `if`
+                // arm so a body that binds does not leak past the `call` and a
+                // linear value bound inside it is caught by `leave_block`
+                // (R6). `tail` is pinned `false`: lowering emits a real call
+                // here, never a self-tail back-edge (R6/R13).
+                let body = prov.quotations[id.0].body.clone();
+                let depth = scope.depth();
+                stack = check_terms(
+                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                )?;
+                leave_block(
+                    ctx,
+                    scope,
+                    depth,
+                    BlockEnd::Arm {
+                        token: "call",
+                        span,
+                    },
+                )?;
+                return Ok(stack);
+            }
+            // R18: `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, the
+            // constant-stack loop primitive. Intercepted alongside `call`. The
+            // body is spliced against the row plus a synthesized index and must
+            // return the row unchanged (D6); nested `times` is rejected here,
+            // not in lowering, which has no error channel (R14 step 0).
+            if name == "times" {
+                let Some(top) = stack.pop() else {
+                    return Err(underflow_error(ctx, span, "times", 2, 0));
+                };
+                let Some(QuotRef::Known(id)) = top.quot else {
+                    return Err(times_needs_quotation_error(ctx, span));
+                };
+                let Some(count) = stack.pop() else {
+                    return Err(underflow_error(ctx, span, "times", 2, 1));
+                };
+                // The count is also a type-directed read, so a quotation there
+                // is the default-deny wording, not a `Cstr`-placeholder mismatch.
+                if count.quot.is_some() {
+                    return Err(reject_quotation_operand(ctx, span, "times"));
+                }
+                if count.ty != Type::I64 {
+                    return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
+                }
+                // R18: reject a `times` nested in a loop -- a self-tail word
+                // (whose whole-word `begin_loop` lowering would nest two loops)
+                // or another `times` body. Both are decided here, one stage
+                // before lowering's would-be `self.header.is_some()` test.
+                let in_self_tail = matches!(
+                    ctx,
+                    Ctx::Word {
+                        self_tail: true,
+                        ..
+                    }
+                );
+                if in_self_tail || prov.times_depth > 0 {
+                    return Err(times_nested_in_loop_error(ctx, span));
+                }
+                // R18: the row is the remaining stack; a quotation anywhere in
+                // it would reach `begin_loop`'s phi over a phantom (R14). Guard
+                // the whole row, not just the consumed top.
+                if stack.iter().any(|s| s.quot.is_some()) {
+                    return Err(reject_quotation_operand(ctx, span, "times"));
+                }
+                // R18: the body is spliced once but runs N times, so it must be
+                // identity on the move/borrow state (clone-and-compare), or a
+                // linear local it consumes would be disposed N times. Snapshot
+                // before the splice; `leave_block` drops the body's own
+                // bindings, so what remains changed is an *outer* local.
+                let moves_before = scope.moves.states.clone();
+                let derivs_before: HashSet<DerivId> = live_derivs(&stack, scope).collect();
+                let row = stack.clone();
+                // Splice the body against the row plus a synthesized index (the
+                // body's top input), bracketed like `call` (R6), `tail = false`.
+                // `times_depth` rides up across the splice so a `times` nested
+                // in the body trips the rejection above, and is *restored* (not
+                // decremented), so two sequential `times` do not false-positive.
+                stack.push(Slot::computed(Type::I64));
+                let body = prov.quotations[id.0].body.clone();
+                let depth = scope.depth();
+                let saved_times_depth = prov.times_depth;
+                prov.times_depth += 1;
+                let result = check_terms(
+                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                )?;
+                prov.times_depth = saved_times_depth;
+                leave_block(
+                    ctx,
+                    scope,
+                    depth,
+                    BlockEnd::Arm {
+                        token: "times",
+                        span,
+                    },
+                )?;
+                // R18: identity on the move state. A body's own bindings are
+                // already gone (`leave_block`), so a local left `Moved`/
+                // `MaybeMoved` where it was `Live` is an outer linear local the
+                // body consumed; name the first such one.
+                if let Some(local) = moves_before.iter().find_map(|(n, before)| {
+                    match (before, scope.moves.states.get(n)) {
+                        (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
+                            Some(n.clone())
+                        }
+                        _ => None,
+                    }
+                }) {
+                    return Err(times_body_consumes_local_error(ctx, span, &local));
+                }
+                // R18: identity on the borrow state. A borrow is idempotent per
+                // iteration, so a well-formed body leaves `live_derivs`
+                // unchanged; a difference means a reference would cross the
+                // back-edge into the next iteration.
+                let derivs_after: HashSet<DerivId> = live_derivs(&result, scope).collect();
+                if derivs_after != derivs_before {
+                    return Err(times_body_borrow_across_loop_error(ctx, span));
+                }
+                // D6: the body's net effect on the row must equal the row.
+                let same_shape = row.len() == result.len()
+                    && result.iter().zip(&row).all(|(found, want)| {
+                        matches!(
+                            match_slot(*found, want.ty),
+                            SlotMatch::Exact | SlotMatch::LiteralSizeType
+                        )
+                    });
+                if !same_shape {
+                    return Err(times_body_row_effect_error(ctx, span));
+                }
+                // R18: the whole-row guard runs on the *entry* row, but a body
+                // that consumes a real value and constructs a quotation into
+                // its place leaves a phantom in the output row that `match_slot`
+                // accepts as `Exact` against the `Cstr` placeholder. That
+                // phantom would be carried into the loop's back-edge phis, so
+                // reject it here with the same whole-row wording.
+                if result.iter().any(|s| s.quot.is_some()) {
+                    return Err(reject_quotation_operand(ctx, span, "times"));
+                }
+                stack = result;
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
@@ -4424,6 +4749,13 @@ fn check_term(
             let base = stack.len() - n;
             for (i, want) in sig.inputs.iter().enumerate() {
                 let found = stack[base + i];
+                // R9: a quotation argument rejects before ordinary unification,
+                // so the message names the word rather than mismatching the
+                // `Cstr` placeholder. Also covers generated struct
+                // constructors/setters and `extern` args (all `env` words).
+                if found.quot.is_some() {
+                    return Err(reject_quotation_argument(ctx, span, name));
+                }
                 match match_slot(found, *want) {
                     SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
                     SlotMatch::NeedsSizeConversion => {
@@ -4454,6 +4786,11 @@ fn check_term(
             let cond = stack
                 .pop()
                 .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
+            // R11: guard before the `Bool` mismatch, or the generic message
+            // names the `Cstr` placeholder instead of the `if` condition.
+            if cond.quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "if"));
+            }
             if cond.ty != Type::Bool {
                 return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
             }
@@ -4523,6 +4860,25 @@ fn check_term(
             }
             let mut merged = Vec::with_capacity(then_stack.len());
             for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
+                // R7: a branch merge cannot carry a quotation whose identity is
+                // ambiguous, so reject at the join (not at consumption, which
+                // is too late: `lower_if` would emit a `Phi` over the phantoms
+                // even for a merged quotation only ever `drop`ped). Two arms
+                // carrying the *same* literal are safe (`lower_if`'s `t == e`
+                // fast path emits no `Phi`) and forward the marker. The `Cstr`
+                // placeholder makes an arm's real `Cstr` compare equal to a
+                // quotation, so the ordinary `ty` mismatch below never catches
+                // the one-quotation shape; this guard has both phrasings.
+                let quot = match (t_then.quot, t_else.quot) {
+                    (None, None) => None,
+                    (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
+                        Some(QuotRef::Known(a))
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(different_quotations_at_join_error(ctx, span));
+                    }
+                    _ => return Err(quotation_versus_value_at_join_error(ctx, span)),
+                };
                 if t_then.ty != t_else.ty {
                     return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
                 }
@@ -4578,9 +4934,29 @@ fn check_term(
                     int_val: None,
                     alias,
                     deriv,
+                    // R7: only a marker both arms agree on survives the join.
+                    quot,
                 });
             }
             Ok(merged)
+        }
+        // R5: a quotation literal interns its body into the side table and
+        // pushes a compile-time-only marker (D1/D2). The body is *not* checked
+        // here (D3): a bare body's input row is unknown until its consumption
+        // site (`call`/`times`). The placeholder `ty` is `Cstr`, a
+        // registry-free scalar no user op accepts once R11's default-deny is
+        // in place (R4).
+        TermKind::Quotation(body) => {
+            let id = QuotId(prov.quotations.len());
+            prov.quotations.push(QuotBody {
+                body: body.clone(),
+                span,
+            });
+            stack.push(Slot {
+                quot: Some(QuotRef::Known(id)),
+                ..Slot::computed(Type::Cstr)
+            });
+            Ok(stack)
         }
     }
 }
@@ -4615,6 +4991,47 @@ fn check_operator(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // R11: every operator this function handles reads the top slot, so a
+    // quotation on top is always an operand of it. Guard once, gated on the
+    // name being one we handle (else fall through so a later dispatcher can
+    // claim it), before the type-directed reads that would otherwise spell the
+    // `Cstr` placeholder into a mismatch.
+    let is_operator = matches!(
+        name,
+        "+" | "-"
+            | "*"
+            | "/"
+            | "mod"
+            | "and"
+            | "or"
+            | "xor"
+            | "not"
+            | "shl"
+            | "shr"
+            | "="
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "<>"
+            | "max"
+            | "max-total"
+            | "."
+    ) || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
+    // The unary members (`not`, print, the `>T` conversions) read only the
+    // top; every other operator reads a pair, so its deeper operand at
+    // `stack[n - 2]` is an operand of it too. Guarding the top alone lets a
+    // quotation there fall through to `operand_pair_mismatch_error`, which
+    // spells the `Cstr` placeholder into the message the audit exists to keep
+    // hidden.
+    let is_unary =
+        matches!(name, "not" | ".") || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
+    if is_operator && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
+    if is_operator && !is_unary && stack.len() >= 2 && stack[stack.len() - 2].quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     // Unify a homogeneous binary op's operand pair, honoring D8's literal
     // coercion (`Ok`); `Err(Some(target))` is the size-type/computed-`i64`
@@ -4987,6 +5404,69 @@ fn in_word(ctx: &Ctx) -> String {
     }
 }
 
+/// R11: a quotation used as the operand of any type-directed consumer is an
+/// audited default-deny. A quotation is a compile-time-only marker with a
+/// `Cstr` placeholder `ty` (R4) that ordinary matching would silently accept
+/// or spell into a mismatch, so every consumer that inspects a popped slot's
+/// `ty` names itself through this one guard instead. Only `call`/`times`
+/// consume a quotation; the shuffles forward it and `drop` discards it.
+fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
+    format!(
+        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (higher-order values are Phase 6)",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R8: a quotation stored into an array (`fill`'s element) or through a
+/// reference (`!`/`+!`'s value, whether the referent is an array slot, a
+/// struct field, or an owned cell) would have to become a runtime value,
+/// which this slice cannot represent. The wording names no container because
+/// two of the three store paths have none. Shared by all of them (D4).
+fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a quotation cannot be stored (escaping quotations are Phase 6){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R9: a quotation passed as an argument to a user `:` word (or a polymorphic
+/// `'T`/row slot) rejects: only `call`/`times` accept a quotation this slice.
+/// The wording says "word", not "user `:` word", because the same guard covers
+/// generated struct constructors/setters and `extern` arguments (all `env`
+/// words too).
+fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
+    format!(
+        "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (higher-order user words are Phase 6){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R7, both arms leave a quotation but not the *same* literal: a quotation's
+/// body must be statically known where it is used, and a branch merge that
+/// picked one arm's would need a runtime code value (D4). Fires at the join,
+/// not at consumption (R12's containment rests on it).
+fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+        span.line,
+        in_word(ctx),
+    )
+}
+
+/// R7, one arm leaves a quotation and the other a value: the `Cstr`
+/// placeholder makes the two `ty`s compare equal, so the ordinary branch-type
+/// mismatch never catches this; the join guard does.
+fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (higher-order values are Phase 6)",
+        span.line,
+        in_word(ctx),
+    )
+}
+
 /// Only an aggregate or cell local may be borrowed. A scalar local is an
 /// SSA temporary with no address, and giving it one is work no criterion
 /// needs.
@@ -5218,6 +5698,9 @@ fn check_reference_word(
             if n < 2 {
                 return Err(need(name, 2, n));
             }
+            if stack[n - 1].quot.is_some() || stack[n - 2].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, name));
+            }
             let index = stack[n - 1];
             let Some((referent, recv_mut)) = ref_parts(stack[n - 2].ty, refs) else {
                 return Err(reference_word_operand_error(
@@ -5252,6 +5735,9 @@ fn check_reference_word(
             let n = stack.len();
             if n < 1 {
                 return Err(need(name, 1, n));
+            }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, name));
             }
             let Some((referent, recv_mut)) = ref_parts(stack[n - 1].ty, refs) else {
                 return Err(reference_word_operand_error(
@@ -5297,6 +5783,9 @@ fn check_reference_word(
                         if n < 1 {
                             return Err(need(name, 1, n));
                         }
+                        if stack[n - 1].quot.is_some() {
+                            return Err(reject_quotation_operand(ctx, span, name));
+                        }
                         if stack[n - 1].ty != want {
                             return Err(type_mismatch_error(
                                 ctx,
@@ -5332,6 +5821,12 @@ fn check_reference_word(
                 };
                 return Err(borrow_of_non_place_error(ctx, span, name, &found));
             };
+            // R11: `&q` on a quotation local currently reaches
+            // `borrow_of_scalar_local_error`, whose message lies about the
+            // `Cstr` placeholder; reject with the named-op wording instead.
+            if scope.local(rest).is_some_and(|b| b.quot.is_some()) {
+                return Err(reject_quotation_operand(ctx, span, name));
+            }
             if local_ty.is_ref() {
                 return Err(borrow_of_reference_local_error(ctx, span, rest, local_ty));
             }
@@ -5400,6 +5895,9 @@ fn check_access_word(
             if n < 1 {
                 return Err(need("@", 1, n));
             }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "@"));
+            }
             let Some((referent, _)) = ref_parts(stack[n - 1].ty, refs) else {
                 return Err(reference_word_operand_error(
                     ctx,
@@ -5421,6 +5919,16 @@ fn check_access_word(
                 return Err(need(name, 2, n));
             }
             let value = stack[n - 1];
+            // R8r: guard the stored value strictly above the `match_slot`
+            // below, which returns `Exact` on the `Cstr` placeholder into a
+            // `&!Cstr` referent (a silent accept) rather than a mismatch. The
+            // receiver operand is an ordinary R11 default-deny.
+            if value.quot.is_some() {
+                return Err(reject_quotation_stored(ctx, span));
+            }
+            if stack[n - 2].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, name));
+            }
             let Some((referent, mutable)) = ref_parts(stack[n - 2].ty, refs) else {
                 return Err(reference_word_operand_error(
                     ctx,
@@ -5487,6 +5995,11 @@ fn check_str_word(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // R11: `len`/`cstr` inspect the top operand's `ty`; reject a quotation
+    // here (before `len` falls through to the array path on a non-`str`).
+    if matches!(name, "len" | "cstr") && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     match name {
         "len" => {
             let Some(top) = stack.last() else {
@@ -5531,6 +6044,17 @@ fn check_array_word(
             }
             let count = stack[n - 1];
             let element = stack[n - 2];
+            // R8f: a quotation element would have to become a runtime array
+            // value. Guarded strictly above `contains_reference` below, whose
+            // registry index would panic on an aggregate placeholder (R4); the
+            // `Cstr` placeholder is registry-free but the guard order is what
+            // R4's reasoning pins. A quotation count is a plain operand (R11).
+            if element.quot.is_some() {
+                return Err(reject_quotation_stored(ctx, span));
+            }
+            if count.quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "fill"));
+            }
             let Some(count_val) = count.int_val else {
                 return Err(fill_count_not_literal_error(ctx, span, count.ty));
             };
@@ -5560,6 +6084,9 @@ fn check_array_word(
             if n < 1 {
                 return Err(need("len", 1, n));
             }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "len"));
+            }
             if !matches!(stack[n - 1].ty, Type::Array(..)) {
                 return Err(array_word_operand_error(ctx, span, "len", stack[n - 1].ty));
             }
@@ -5583,6 +6110,10 @@ fn check_owned_cell_word(
     arrays: &[ArrayDecl],
     cells: &mut Vec<OwnedCellDecl>,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // R11: `^`/`^>`/`^|>` each inspect the top operand's `ty`.
+    if matches!(name, "^" | "^>" | "^|>") && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
         "^" => {
@@ -5684,6 +6215,9 @@ fn check_struct_peek_word(
         return Err(underflow_error(ctx, span, name, 1, n));
     }
     let top = stack[n - 1];
+    if top.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     if top.ty != struct_ty {
         return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
     }
@@ -5737,6 +6271,9 @@ fn check_struct_get_word(
         return Err(underflow_error(ctx, span, name, 1, n));
     }
     let top = stack[n - 1];
+    if top.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     if top.ty != struct_ty {
         return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
     }
@@ -5783,7 +6320,12 @@ fn check_shuffle(
             // value of any type with no type check, exactly as before; the
             // recorded type is what lets `check`'s post-pass resolve which
             // concrete override (if any) this call site dispatches to.
-            prov.dropped.push(top.ty);
+            // R11 carve-out: `drop` of a compile-time-only quotation marker
+            // discards it with nothing to dispose, and its `Cstr` placeholder
+            // is inert in the drop-override graph; skip the push.
+            if top.quot.is_none() {
+                prov.dropped.push(top.ty);
+            }
         }
         "swap" => {
             let n = stack.len();
@@ -5845,6 +6387,311 @@ mod tests {
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
     const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+
+    #[test]
+    fn quotation_survives_dup_swap_and_bind() {
+        // Cu1 (D2/R4): a quotation `Slot` is `Copy`, so a shuffle moves it (and
+        // its `quot` marker) verbatim; a bind carries the marker into the
+        // `Binding`, from which a local read reconstructs it (the read-back is
+        // witnessed end-to-end by `quotation_forwarded_through_bind_still_calls`).
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let arrays: Vec<ArrayDecl> = Vec::new();
+        let mut prov = Provenance::default();
+        let span = Span { line: 1, col: 1 };
+        let marker = Some(QuotRef::Known(QuotId(0)));
+        let quot = Slot {
+            quot: marker,
+            ..Slot::computed(Type::Cstr)
+        };
+
+        // Every shuffle keeps the marker on the slot it moves.
+        for name in ["dup", "swap", "over", "rot"] {
+            let mut stack = match name {
+                "swap" | "over" => vec![Slot::computed(Type::I64), quot],
+                "rot" => vec![Slot::computed(Type::I64), Slot::computed(Type::I64), quot],
+                _ => vec![quot],
+            };
+            let out = check_shuffle(name, span, &mut stack, &ctx, &arrays, &mut prov)
+                .unwrap()
+                .unwrap();
+            assert!(
+                out.iter().any(|s| s.quot == marker),
+                "`{name}` dropped the quotation marker"
+            );
+        }
+
+        // A bind carries the marker into the `Binding`.
+        let mut scope = Scope::default();
+        scope.bind("q", quot, false, &mut prov);
+        assert_eq!(scope.local("q").unwrap().quot, marker);
+    }
+
+    #[test]
+    fn times_typing_obligations() {
+        // R18u: the three `times` typing obligations, each its own row, since a
+        // missed guard is a silent accept (the well-typed witness never trips
+        // them). Move-state identity, the whole-row guard, and row-effect
+        // equality.
+
+        // A well-typed `times` accepts (the body consumes the index and returns
+        // the row unchanged, touching no linear local).
+        check_src(": main ( -- ) 0 10 [ + ] times . ;\n").unwrap();
+
+        // (1) Move-state identity: consuming an outer linear local is rejected,
+        // named, with the repeated-disposal reason.
+        let consume = check_src(&format!(
+            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | s Spy>tag + ] times . ;\n"
+        ))
+        .expect_err("consuming a linear local should be rejected");
+        assert!(
+            consume.contains("a `times` body cannot consume `s`")
+                && consume.contains("the body runs more than once"),
+            "move-state identity should name `s`, got: {consume}"
+        );
+
+        // (2) Whole-row guard: a quotation anywhere in the row, not just the
+        // consumed top, is rejected.
+        let row_quot = check_src(": main ( -- ) [ + ] 3 [ drop ] times ;\n")
+            .expect_err("a quotation in the row should be rejected");
+        assert!(
+            row_quot.contains("`times`")
+                && row_quot.contains("cannot take a quotation as an operand"),
+            "whole-row guard should reject a row quotation, got: {row_quot}"
+        );
+
+        // (3) Row-effect equality: a body that changes the row's depth is
+        // rejected.
+        let row_effect = check_src(": main ( -- ) 0 10 [ + 1 ] times . ;\n")
+            .expect_err("a body that changes the row should be rejected");
+        assert!(
+            row_effect.contains("`times` body must leave the row unchanged"),
+            "row-effect equality should reject a changed row, got: {row_effect}"
+        );
+    }
+
+    #[test]
+    fn merged_quotations_are_rejected_at_the_join() {
+        // Cu2 (R7): two *different* quotations merged at an `if` join are
+        // rejected at the join (not at consumption), because `lower_if` would
+        // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
+        // both arms (one literal bound before the `if`, read in each) is safe:
+        // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
+        let different = check_src(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n")
+            .expect_err("two different quotations at a join should be rejected");
+        assert!(
+            different.contains("these two branches leave different quotations"),
+            "the join guard should fire, got: {different}"
+        );
+        check_src(": main ( -- ) [ + ] | q | true if q else q end drop ;\n")
+            .expect("the same `Known` id in both arms is safe and must not error");
+    }
+
+    #[test]
+    fn check_outputs_rejects_a_quotation_left_on_exit() {
+        // R10: a matching output *count* means the ordinary path would emit a
+        // type mismatch that leaks the `Cstr` placeholder; the dedicated
+        // quotation-at-exit branch in `check_outputs` fires first and names the
+        // word.
+        let err = check_src(": f ( -- i64 ) [ + ] ;\n")
+            .expect_err("a quotation left on a word's exit should be rejected");
+        assert!(
+            err.contains("`f`")
+                && err.contains("leaves a quotation on the stack")
+                && err.contains("declared output"),
+            "check_outputs should name `f` and the output, got: {err}"
+        );
+    }
+
+    #[test]
+    fn infer_line_rejects_a_quotation_left_on_the_residual() {
+        // R19: a REPL line has no declared outputs, so R10's route never runs;
+        // the `quot` side channel would die at the line boundary while lowering
+        // has already pushed a phantom the residual spill would marshal.
+        let err = infer_src("1 [ + ]", &[])
+            .expect_err("a quotation on a line's residual stack should be rejected");
+        assert!(
+            err.contains("a quotation cannot be left on the stack at the end of a line"),
+            "infer_line should reject the residual quotation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_poly_call_rejects_a_quotation_argument() {
+        // R9p: `check_poly_call` reads only `stack[base + i].ty`, so a quotation
+        // does not *fail* unification, it *succeeds* binding `'T` to the
+        // placeholder and monomorphizes a real call over a phantom. The guard
+        // before `unify_poly_input` is what makes the R9 rejection reachable.
+        let err = check_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) [ + ] dupit drop drop ;\n",
+        )
+        .expect_err("a quotation passed to a polymorphic word should be rejected");
+        assert!(
+            err.contains("a quotation cannot be passed to `dupit`"),
+            "check_poly_call should name `dupit`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn poly_term_rejects_a_quotation_literal() {
+        // R5p: a quotation literal in a polymorphic body is rejected eagerly at
+        // the literal (the polymorphic path cannot yet carry the marker).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("a quotation literal in a polymorphic body should be rejected");
+        assert!(
+            err.contains("a quotation in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn quotation_as_operand_is_rejected_at_every_audited_site() {
+        // R11t: the audit is a *test artifact*, not prose. A missed guard on the
+        // `Cstr` placeholder is a silent accept (R4), so every default-deny site
+        // gets a row here: a new consumer added later without a guard turns one
+        // row from `Err` to `Ok` and fails the test. The one `is_line` row is the
+        // REPL residual, checked through `infer_line` rather than `check`.
+        //
+        // Each row asserts TWO substrings, and this is load-bearing. `site` is
+        // the token the message names (the op, or the word for the argument
+        // family); `phrase` is text only the quotation rejection produces. The
+        // pre-existing generic diagnostics (`operand_pair_mismatch`,
+        // `type_mismatch`, `array_word_operand`, `reference_word_operand`,
+        // `fill_count_not_literal`, ...) all print the op in backticks too, so a
+        // `site`-only row stays green when its guard is removed and the fallback
+        // fires: it names the same op. Requiring `phrase` as well is what turns a
+        // removed guard from green to red. Every operand-family row shares the
+        // one `reject_quotation_operand` phrase; the store/argument/output/
+        // residual families carry their own wording no generic diagnostic emits.
+        //
+        // FIX 2 (verified, no row): the only `check_operator` op that would
+        // accept a `Cstr` operand if its guard were removed is `.` (print, whose
+        // printable set includes `Str`/`Cstr`), and it already has the `.` row.
+        // Every comparison (`=`/`<`/`>`/...), like every arithmetic/bitwise/
+        // shift op, requires `is_numeric`/`is_int`/`is_float` and rejects a
+        // `cstr` outright, so there is no silent-accept comparison path to row.
+        struct Row {
+            source: &'static str,
+            site: &'static str,
+            phrase: &'static str,
+            is_line: bool,
+        }
+        const OPERAND: &str = "cannot take a quotation as an operand";
+        // Operand-family row: `site` is the op, `phrase` is the shared wording.
+        let op = |source, site| Row {
+            source,
+            site,
+            phrase: OPERAND,
+            is_line: false,
+        };
+        // Any other family: spell both substrings out.
+        let w = |source, site, phrase| Row {
+            source,
+            site,
+            phrase,
+            is_line: false,
+        };
+        let rows = [
+            // check_operator, both operand positions, plus print.
+            op(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
+            op(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
+            op(": main ( -- ) [ + ] . ;\n", "`.`"),
+            // the `if` condition, before the `bool` mismatch.
+            op(": main ( -- ) [ + ] if 1 . else 2 . end ;\n", "`if`"),
+            // check_str_word (`len`/`cstr`).
+            op(": main ( -- ) [ + ] len ;\n", "`len`"),
+            op(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
+            // check_array_word: the `fill` count operand and the stored element.
+            op(": main ( -- ) 5 [ + ] fill ;\n", "`fill`"),
+            w(
+                ": main ( -- ) [ + ] 8 fill drop ;\n",
+                "a quotation cannot be stored",
+                "escaping quotations are Phase 6",
+            ),
+            // check_array_index, reached through the `&>` reference word.
+            op(
+                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &V>x [ + ] &> drop drop ;\n",
+                "`&>`",
+            ),
+            // check_owned_cell_word.
+            op(": main ( -- ) [ + ] ^ ;\n", "`^`"),
+            // check_reference_word's `&q` prefix-borrow-of-a-local form.
+            op(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
+            // check_struct_peek_word and check_struct_get_word (an aggregate
+            // field, so the getter is intercepted here, not by the env loop).
+            op("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
+            op(
+                "type: Inner a i64 ;\ntype: Outer b Inner ;\n: main ( -- ) [ + ] Outer>b ;\n",
+                "`Outer>b`",
+            ),
+            // check_access_word's store paths: the value and the receiver.
+            w(
+                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+                "a quotation cannot be stored",
+                "escaping quotations are Phase 6",
+            ),
+            op(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
+            // the env argument loop and check_poly_call's input loop (R9/R9p).
+            w(
+                ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n",
+                "passed to `foo`",
+                "only `call` and `times` accept one",
+            ),
+            w(
+                ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
+                "passed to `dupit`",
+                "only `call` and `times` accept one",
+            ),
+            // check_outputs (R10) and the `times` body-output row (blocker 2).
+            w(
+                ": f ( -- i64 ) [ + ] ;\n",
+                "declared output",
+                "leaves a quotation on the stack",
+            ),
+            op(
+                ": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n",
+                "`times`",
+            ),
+            // the REPL residual (R19), checked through `infer_line`.
+            Row {
+                source: "1 [ + ]",
+                site: "end of a line",
+                phrase: "a quotation cannot be left on the stack",
+                is_line: true,
+            },
+        ];
+        for Row {
+            source,
+            site,
+            phrase,
+            is_line,
+        } in rows
+        {
+            let err = match is_line {
+                true => infer_src(source, &[])
+                    .expect_err("an audited site must reject a quotation, not silently accept it"),
+                false => check_src(source)
+                    .expect_err("an audited site must reject a quotation, not silently accept it"),
+            };
+            assert!(
+                err.contains(site),
+                "audited site `{site}` was not named, got: {err}"
+            );
+            assert!(
+                err.contains(phrase),
+                "audited site `{site}` did not produce its quotation-rejection phrase `{phrase}`, got: {err}"
+            );
+        }
+    }
 
     #[test]
     fn check_poly_copy_word_accepts_and_instantiates() {

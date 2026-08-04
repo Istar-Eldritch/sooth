@@ -777,13 +777,13 @@ impl std::fmt::Display for Type {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Term {
     pub kind: TermKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TermKind {
     IntLit(i64),
     FloatLit(f64),
@@ -807,6 +807,10 @@ pub enum TermKind {
         /// too when there is no `else`.
         end_span: Span,
     },
+    /// A `[ ... ]` quotation literal (R1): an ordered term list, nested by
+    /// construction since the element list is parsed with `parse_terms`.
+    /// Compile-time-only marker in this slice (D1): never a runtime value.
+    Quotation(Vec<Term>),
 }
 
 #[cfg(test)]

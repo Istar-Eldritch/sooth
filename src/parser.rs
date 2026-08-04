@@ -1532,6 +1532,25 @@ impl<'t> Parser<'t> {
                 kind: TermKind::Call(w),
                 span,
             }),
+            // R2: the term-level `[` is unambiguous against the type-level
+            // `[` since every type-position bracket reader is reached only
+            // from signature/type parsing, never from `parse_term`.
+            Token::LBracket => {
+                let body = self.parse_terms("`]` (unterminated quotation)", |tok| {
+                    matches!(tok, Token::RBracket)
+                })?;
+                self.expect(Token::RBracket)?;
+                Ok(Term {
+                    kind: TermKind::Quotation(body),
+                    span,
+                })
+            }
+            // R3: a stray `]` with no opening `[`, parallel to the stray
+            // `end`/`else` arm above.
+            Token::RBracket => Err(format!(
+                "parse error: `]` without a matching `[` at line {}, col {}",
+                span.line, span.col
+            )),
             other => Err(format!(
                 "parse error: unexpected token {other:?} at line {}, col {}",
                 span.line, span.col
@@ -1699,6 +1718,60 @@ mod tests {
             TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
             other => panic!("expected If, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn quotation_literal_parses_into_quotation_term() {
+        // R1: `[ ... ]` parses into `TermKind::Quotation`, nested by
+        // construction since the element list is `parse_terms`.
+        let module = parse_src(": w ( -- ) [ 1 + ] drop [ [ ] ] drop ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 4);
+        match &body[0].kind {
+            TermKind::Quotation(terms) => {
+                assert_eq!(terms.len(), 2);
+                assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "+"));
+            }
+            other => panic!("expected Quotation, got {other:?}"),
+        }
+        match &body[2].kind {
+            TermKind::Quotation(outer) => {
+                assert_eq!(outer.len(), 1);
+                match &outer[0].kind {
+                    TermKind::Quotation(inner) => assert!(inner.is_empty()),
+                    other => panic!("expected nested Quotation, got {other:?}"),
+                }
+            }
+            other => panic!("expected Quotation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unterminated_quotation_is_located_parse_error() {
+        let result = parse_src(": w ( -- ) [ 1 +");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("unexpected end of input"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("unterminated quotation"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn stray_closing_bracket_is_located_parse_error() {
+        let result = parse_src(": w ( -- ) 1 ] drop ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("`]`"), "unexpected message: {err}");
+        assert!(
+            err.contains("without a matching `[`"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
