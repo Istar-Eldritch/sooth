@@ -6473,6 +6473,178 @@ mod tests {
     }
 
     #[test]
+    fn merged_quotations_are_rejected_at_the_join() {
+        // Cu2 (R7): two *different* quotations merged at an `if` join are
+        // rejected at the join (not at consumption), because `lower_if` would
+        // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
+        // both arms (one literal bound before the `if`, read in each) is safe:
+        // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
+        let different = check_src(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n")
+            .expect_err("two different quotations at a join should be rejected");
+        assert!(
+            different.contains("these two branches leave different quotations"),
+            "the join guard should fire, got: {different}"
+        );
+        check_src(": main ( -- ) [ + ] | q | true if q else q end drop ;\n")
+            .expect("the same `Known` id in both arms is safe and must not error");
+    }
+
+    #[test]
+    fn check_outputs_rejects_a_quotation_left_on_exit() {
+        // R10: a matching output *count* means the ordinary path would emit a
+        // type mismatch that leaks the `Cstr` placeholder; the dedicated
+        // quotation-at-exit branch in `check_outputs` fires first and names the
+        // word.
+        let err = check_src(": f ( -- i64 ) [ + ] ;\n")
+            .expect_err("a quotation left on a word's exit should be rejected");
+        assert!(
+            err.contains("`f`")
+                && err.contains("leaves a quotation on the stack")
+                && err.contains("declared output"),
+            "check_outputs should name `f` and the output, got: {err}"
+        );
+    }
+
+    #[test]
+    fn infer_line_rejects_a_quotation_left_on_the_residual() {
+        // R19: a REPL line has no declared outputs, so R10's route never runs;
+        // the `quot` side channel would die at the line boundary while lowering
+        // has already pushed a phantom the residual spill would marshal.
+        let err = infer_src("1 [ + ]", &[])
+            .expect_err("a quotation on a line's residual stack should be rejected");
+        assert!(
+            err.contains("a quotation cannot be left on the stack at the end of a line"),
+            "infer_line should reject the residual quotation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn check_poly_call_rejects_a_quotation_argument() {
+        // R9p: `check_poly_call` reads only `stack[base + i].ty`, so a quotation
+        // does not *fail* unification, it *succeeds* binding `'T` to the
+        // placeholder and monomorphizes a real call over a phantom. The guard
+        // before `unify_poly_input` is what makes the R9 rejection reachable.
+        let err = check_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) [ + ] dupit drop drop ;\n",
+        )
+        .expect_err("a quotation passed to a polymorphic word should be rejected");
+        assert!(
+            err.contains("a quotation cannot be passed to `dupit`"),
+            "check_poly_call should name `dupit`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn poly_term_rejects_a_quotation_literal() {
+        // R5p: a quotation literal in a polymorphic body is rejected eagerly at
+        // the literal (the polymorphic path cannot yet carry the marker).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("a quotation literal in a polymorphic body should be rejected");
+        assert!(
+            err.contains("a quotation in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn quotation_as_operand_is_rejected_at_every_audited_site() {
+        // R11t: the audit is a *test artifact*, not prose. A missed guard on the
+        // `Cstr` placeholder is a silent accept (R4), so every default-deny site
+        // gets a row here: a new consumer added later without a guard turns one
+        // row from `Err` to `Ok` and fails the test. Each row's needle is the
+        // token the site names (the op for the operand family, the word for the
+        // argument family, or the store/output phrasing where no op is named).
+        // The one `is_line` row is the REPL residual, checked through
+        // `infer_line` rather than `check`.
+        struct Row {
+            source: &'static str,
+            needle: &'static str,
+            is_line: bool,
+        }
+        let w = |source, needle| Row {
+            source,
+            needle,
+            is_line: false,
+        };
+        let rows = [
+            // check_operator, both operand positions, plus print.
+            w(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
+            w(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
+            w(": main ( -- ) [ + ] . ;\n", "`.`"),
+            // the `if` condition, before the `Bool` mismatch.
+            w(": main ( -- ) [ + ] if 1 . else 2 . end ;\n", "`if`"),
+            // check_str_word (`len`/`cstr`).
+            w(": main ( -- ) [ + ] len ;\n", "`len`"),
+            w(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
+            // check_array_word: the `fill` count operand and the stored element.
+            w(": main ( -- ) 5 [ + ] fill ;\n", "`fill`"),
+            w(": main ( -- ) [ + ] 8 fill drop ;\n", "stored in an array"),
+            // check_array_index, reached through the `&>` reference word.
+            w(
+                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &V>x [ + ] &> drop drop ;\n",
+                "`&>`",
+            ),
+            // check_owned_cell_word.
+            w(": main ( -- ) [ + ] ^ ;\n", "`^`"),
+            // check_reference_word's `&q` prefix-borrow-of-a-local form.
+            w(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
+            // check_struct_peek_word and check_struct_get_word (an aggregate
+            // field, so the getter is intercepted here, not by the env loop).
+            w("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
+            w(
+                "type: Inner a i64 ;\ntype: Outer b Inner ;\n: main ( -- ) [ + ] Outer>b ;\n",
+                "`Outer>b`",
+            ),
+            // check_access_word's store paths: the value and the receiver.
+            w(
+                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+                "stored in an array",
+            ),
+            w(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
+            // the env argument loop and check_poly_call's input loop (R9/R9p).
+            w(": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n", "passed to `foo`"),
+            w(
+                ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
+                "passed to `dupit`",
+            ),
+            // check_outputs (R10) and the `times` body-output row (blocker 2).
+            w(": f ( -- i64 ) [ + ] ;\n", "declared output"),
+            w(
+                ": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n",
+                "`times`",
+            ),
+            // the REPL residual (R19), checked through `infer_line`.
+            Row {
+                source: "1 [ + ]",
+                needle: "end of a line",
+                is_line: true,
+            },
+        ];
+        for Row {
+            source,
+            needle,
+            is_line,
+        } in rows
+        {
+            let err = match is_line {
+                true => infer_src(source, &[])
+                    .expect_err("an audited site must reject a quotation, not silently accept it"),
+                false => check_src(source)
+                    .expect_err("an audited site must reject a quotation, not silently accept it"),
+            };
+            assert!(
+                err.contains(needle),
+                "audited site for `{needle}` did not name it, got: {err}"
+            );
+        }
+    }
+
+    #[test]
     fn check_poly_copy_word_accepts_and_instantiates() {
         // R1/R4–R7: a `'T: Copy` word `dup`s its variable and is called at a
         // concrete `Copy` type; the body and the instantiation both check.

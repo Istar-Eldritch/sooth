@@ -2,9 +2,34 @@
 //! ABI (R10, R11): a user word may declare two or more outputs, and calling one
 //! now works instead of panicking the compiler.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use sooth::{check, lexer, parser};
+
+/// Run a scripted REPL session (one input line per element) against the built
+/// `sooth repl` binary and return the whole transcript (stdout + stderr), so a
+/// line-boundary diagnostic (R19) is observable. Mirrors `tests/phase1.rs`.
+fn repl_session(lines: &[&str]) -> String {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("repl should spawn");
+    let script = lines.join("\n") + "\n";
+    child
+        .stdin
+        .take()
+        .expect("stdin should be piped")
+        .write_all(script.as_bytes())
+        .expect("writing stdin should succeed");
+    let output = child.wait_with_output().expect("repl should exit");
+    let mut transcript = String::from_utf8(output.stdout).expect("stdout should be utf8");
+    transcript.push_str(&String::from_utf8(output.stderr).expect("stderr should be utf8"));
+    transcript
+}
 
 /// Phase 4 Slice 4, phase 2b/3: the sanctioned diagnostic helper (declared in
 /// the spec's *Sanctioned edits*), copied from `tests/phase3_locals.rs`. This
@@ -648,6 +673,202 @@ fn quotation_body_reads_enclosing_local() {
     assert_eq!(code, 0);
 }
 
+// --- Phase 4 Slice 4, phase 2b: the default-deny diagnostics. A quotation is a
+// `Cstr` placeholder, so a missed guard is a *silent accept*, not a mismatch;
+// each negative here pins that a specific consumer rejects it with the right,
+// site-naming wording (R7-R11, R19). The completeness of the operand family is
+// the load-bearing `quotation_as_operand_is_rejected_at_every_audited_site`
+// checker unit; these goldens pin the surface behaviour per criterion.
+
+#[test]
+fn different_quotations_at_a_join_are_error() {
+    // R7: two `if` arms each leaving a *different* quotation merge at the join;
+    // reject there (not at consumption), since `lower_if` would build a `Phi`
+    // over two phantoms even when the merge is only `drop`ped.
+    let err = check_error(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n");
+    assert!(
+        err.contains("these two branches leave different quotations") && err.contains("line 1"),
+        "R7 should fire at the join, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_versus_value_at_a_join_is_error() {
+    // R7n: one arm leaves a quotation, the other a *real* `cstr`. Their `ty`s
+    // are equal (the placeholder is `Cstr`), so the ordinary branch mismatch
+    // never fires; the join guard's second phrasing catches it.
+    let err = check_error(": main ( -- ) true if [ 1 + ] else \"x\" cstr end drop ;\n");
+    assert!(
+        err.contains("one branch of the `if`")
+            && err.contains("leaves a quotation and the other does not"),
+        "R7n should fire the second phrasing, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_stored_in_array_by_fill_is_error() {
+    // R8f: a quotation element to `fill` would become a runtime array value.
+    // The guard sits strictly above `contains_reference` (R4).
+    let err = check_error(": main ( -- ) [ + ] 8 fill drop ;\n");
+    assert!(
+        err.contains("a quotation cannot be stored in an array"),
+        "R8f should reject at `fill`, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_stored_through_a_reference_is_error() {
+    // R8r: storing a quotation into a `&!cstr` referent makes
+    // `match_slot(Cstr, Cstr)` return `Exact` -- a *silent accept* -- so the
+    // guard must sit strictly above `match_slot`. This proves guard placement,
+    // not merely wording.
+    let err = check_error(
+        "type: Box s cstr ;\n\
+         : main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+    );
+    assert!(
+        err.contains("a quotation cannot be stored in an array"),
+        "R8r should reject the stored value before `match_slot`, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_passed_to_user_word_is_error() {
+    // R9: only `call`/`times` accept a quotation this slice; a user `:` word
+    // rejects before ordinary unification, naming the word.
+    let err = check_error(": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n");
+    assert!(
+        err.contains("a quotation cannot be passed to `foo`"),
+        "R9 should name the word, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_passed_to_polymorphic_word_is_error() {
+    // R9p: `check_poly_call` reads only `.ty`, so a quotation *succeeds*
+    // unification and binds `'T` to the placeholder without the guard. Reject
+    // before `unify_poly_input`.
+    let err =
+        check_error(": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n");
+    assert!(
+        err.contains("a quotation cannot be passed to `dupit`"),
+        "R9p should name the polymorphic word, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_in_polymorphic_body_is_error() {
+    // R5p: a quotation literal in a polymorphic body rejects eagerly at the
+    // literal (the polymorphic path cannot carry the marker yet).
+    let err = check_error(": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n: main ( -- ) 1 bad . ;\n");
+    assert!(
+        err.contains("a quotation in the polymorphic body of `bad`")
+            && err.contains("not yet supported"),
+        "R5p should name the polymorphic word, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_left_on_stack_is_output_error() {
+    // R10: the output count matches (one output, one quotation), so the new
+    // branch must beat the ordinary type mismatch that would leak the `Cstr`
+    // placeholder.
+    let err = check_error(": f ( -- i64 ) [ + ] ;\n");
+    assert!(
+        err.contains("`f`")
+            && err.contains("leaves a quotation on the stack")
+            && err.contains("declared output"),
+        "R10 should be the dedicated output diagnostic, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_as_operator_operand_is_error() {
+    // R11: a quotation as an operator operand rejects, naming `+`.
+    let err = check_error(": main ( -- ) 1 [ + ] + ;\n");
+    assert!(
+        err.contains("`+`") && err.contains("cannot take a quotation as an operand"),
+        "R11 should name `+`, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_as_if_condition_is_error() {
+    // R11if: the `if` condition pop is guarded *before* the `cond.ty != Bool`
+    // return, so the message names `if`, not a `Bool` mismatch.
+    let err = check_error(": main ( -- ) [ + ] if 1 . else 2 . end ;\n");
+    assert!(
+        err.contains("`if`") && err.contains("cannot take a quotation as an operand"),
+        "R11if should name `if`, not a Bool mismatch, got: {err}"
+    );
+    assert!(
+        !err.contains("Bool"),
+        "R11if must not leak a Bool mismatch, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_dropped_is_a_pure_pop() {
+    // R11drop: the one legal unguarded consumer. `drop` of a compile-time-only
+    // marker discards it with nothing to dispose, so this runs and prints `1`.
+    let (stdout, code) = run_src("drop-quot", ": main ( -- ) 1 [ + ] drop . ;\n", false);
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn two_calls_of_a_binding_quotation_body_both_run() {
+    // R6br1 (blocker 1): the `call` splice must save-and-truncate `self.locals`,
+    // or the first body's `| x |` leaves a stale entry the second body's bind
+    // reads front-first. Without the fix this prints `4\n4\n`.
+    let (stdout, code) = run_src(
+        "call-rebind",
+        ": main ( -- ) 2 [ | x | x x + ] call . 3 [ | x | x x + ] call . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "4\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn linear_bound_inside_a_quotation_body_is_error() {
+    // R6br2: a linear value bound inside the body and left unconsumed is caught
+    // only because the splice is bracketed by `leave_block`; the `call` is where
+    // the body's scope ends, so the unconsumed `s` is rejected there.
+    let err = check_error(&format!(
+        "{SPY_DEF}: main ( -- ) [ 5 Spy | s | 42 ] call . ;\n"
+    ));
+    assert!(
+        err.contains("linear value `s`") && err.contains("never consumed"),
+        "R6br2 should reject the unconsumed linear local, got: {err}"
+    );
+}
+
+#[test]
+fn times_body_constructing_a_quotation_into_the_row_is_error() {
+    // Blocker 2: the entry-row guard runs before the splice, but a body that
+    // consumes a real value and constructs a quotation into that slot leaves a
+    // phantom in the *output* row. The output-row guard rejects it before it
+    // reaches `begin_loop`'s back-edge phis (where it died as a backend error).
+    let err = check_error(": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n");
+    assert!(
+        err.contains("`times`") && err.contains("cannot take a quotation as an operand"),
+        "blocker 2 should reject the body-output row quotation, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_left_on_repl_line_is_error() {
+    // R19: a REPL line has no declared outputs, so R10's route never runs; the
+    // `quot` side channel dies at the boundary while lowering has already pushed
+    // a phantom the residual spill would marshal. Reject at the line boundary.
+    let transcript = repl_session(&["1 [ + ]"]);
+    assert!(
+        transcript.contains("a quotation cannot be left on the stack at the end of a line"),
+        "R19 should reject the residual quotation, got: {transcript}"
+    );
+}
+
 // --- Phase 4 Slice 4, phase 3: the `times` intrinsic and the constant-stack loop.
 
 #[test]
@@ -734,11 +955,13 @@ fn two_sequential_times_in_one_word_both_run() {
     // Criterion 15 (R15): two `times` in one word both run, and an aggregate
     // constructed *between* them prints its field -- witnessing that R15 restores
     // `entry_block` (not only `header`), or the aggregate's `Alloc` would hoist
-    // into the first `times`'s dead entry block.
+    // into the first `times`'s dead entry block. Both bodies bind `| i |` so the
+    // `times` half of the locals-splice leak is witnessed too: without the
+    // save-and-truncate, the first body's stale `i` would shadow the second's.
     let (stdout, code) = run_src(
         "times-sequential",
         "type: Vec2 x i64 y i64 ;\n\
-         : main ( -- ) 0 10 [ + ] times . 5 6 Vec2 Vec2>x . 0 10 [ + ] times . ;\n",
+         : main ( -- ) 0 10 [ | i | i + ] times . 5 6 Vec2 Vec2>x . 0 10 [ | i | i + ] times . ;\n",
         false,
     );
     assert_eq!(stdout, "45\n5\n45\n");
