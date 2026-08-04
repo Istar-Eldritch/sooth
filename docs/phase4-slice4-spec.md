@@ -717,7 +717,7 @@ full located-rejection set (now widened by the blockers); each half leaves the t
   side-channel (D2/R4) over an off-stack table, because the `Copy`-moved-verbatim property of
   `Slot` gives *shuffle* forwarding for free and mirrors the existing `alias`/`deriv`
   discriminators. A bind is a **second, explicit** forwarding site on the checker side (a
-  local is a `Binding`, not a `Slot`, and a local read reconstructs a fresh `Slot`, D2/B2), so
+  local is a `Binding`, not a `Slot`, and a local read reconstructs a fresh `Slot`, D2), so
   `Binding` also grows the field; lowering has no such asymmetry. An off-stack table would
   have to re-derive stack ordering by hand.
 - **The lowering carrier.** The brief did not fix how a forwarded quotation reaches its
