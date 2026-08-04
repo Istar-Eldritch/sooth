@@ -2507,7 +2507,13 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("call: quotation on stack");
                 let id = self.quot_bodies[&v];
                 let body = self.quot_defs[id.0].clone();
+                // The body is a block: a name it binds is out of scope after
+                // the splice, and the front-first local resolver would else
+                // read a stale entry on a later same-named bind. Mirror the
+                // `if` arm's save-and-truncate.
+                let locals_depth = self.locals.len();
                 self.lower_terms(&body, false);
+                self.locals.truncate(locals_depth);
             }
             // R14: `times` lowers into a constant-stack loop, reusing
             // `begin_loop`/`finalize_loop` (D6). A synthesized index drives a
@@ -2563,7 +2569,9 @@ impl<'a> FuncBuilder<'a> {
                 self.terminated = false;
                 self.stack = row_phis;
                 self.stack.push(index_phi);
+                let locals_depth = self.locals.len();
                 self.lower_terms(&body, false);
+                self.locals.truncate(locals_depth);
 
                 // Back-edge: the body's result row plus index + 1.
                 let one = self.fresh_value(IrType::I64);
