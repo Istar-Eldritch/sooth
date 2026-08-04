@@ -499,3 +499,39 @@ fn inline_constructed_aggregate_carried_across_back_edge_is_not_aliased() {
     assert_eq!(stdout, "0\n3\n2\n1\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn back_edges_disagreeing_on_a_carried_slot_stage_independently() {
+    // R4/D2 per-predecessor partition: `finalize_loop` decides forward-vs-stage
+    // once *per back-edge*, so a word with two distinct tail self-calls into the
+    // same header can forward the carried `Box` in place on one edge and stage
+    // it on the other. Both `loop` calls target the same header; the even arm
+    // re-produces (`n mk` -> `cur`, a fresh slot -> staged) while the odd arm
+    // carries `prev` unchanged (exactly the stable slot -> forwarded in place),
+    // and each re-produce reads `prev` *after* `mk` has reused the storage. The
+    // single-back-edge goldens above never exercise two edges disagreeing on
+    // one slot. Pre-fix the forwarded `prev` was an interior pointer into the
+    // reused `mk` slot that a later re-produce clobbered: was `0 4 2 2 2`;
+    // correct `0 4 4 2 2`.
+    let (stdout, code) = run_src(
+        "twobackedge",
+        "type: Box n i64 ;\n\
+         : mk ( i64 -- Box ) | n | n Box ;\n\
+         : loop ( i64 Box -- Box )\n\
+           | n prev |\n\
+           n 0 = if prev else\n\
+             n 2 mod 0 = if\n\
+               n mk | cur |\n\
+               prev Box>n .\n\
+               n 1 - cur loop\n\
+             else\n\
+               prev Box>n .\n\
+               n 1 - prev loop\n\
+             end\n\
+           end ;\n\
+         : main ( -- ) 4 0 mk loop Box>n . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "0\n4\n4\n2\n2\n");
+    assert_eq!(code, 0);
+}
