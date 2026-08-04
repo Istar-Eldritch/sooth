@@ -326,8 +326,10 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
     unchanged after.** `Scope`/`Binding` derive only `Debug, Clone` (`src/check.rs:604`,
     `:612`), no `PartialEq`, so "unchanged" is spelled out concretely as two comparisons:
     `scope.moves.states` (a `HashMap<String, MoveState>`, `src/check.rs:532`, and `MoveState`
-    is `Copy + PartialEq`, `:520`) equal before and after, **and** the `live_derivs(stack,
-    scope)` set (`src/check.rs:677`) equal before and after. Do **not** "equivalently" invoke
+    is `Copy + PartialEq`, `:520`) equal before and after, **and** the derivations live across
+    the splice equal before and after. Note `live_derivs` (`src/check.rs:677`) returns
+    `impl Iterator<Item = DerivId>`, not a collection, so it cannot be compared with `==`:
+    `.collect()` each side into a `HashSet<DerivId>` and compare those. Do **not** "equivalently" invoke
     `check_linear_across_back_edge` / `check_reference_across_back_edge`: those are a *cruder*
     and *wrong* check here. `check_linear_across_back_edge` (`src/check.rs:4062-4083`) errors
     on **any** `is_linear` slot below the args, but for `times` the row *is* the stack, so it
@@ -351,9 +353,18 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
     - a `times` inside a **self-tail word**: `has_self_tail_call(word)` (`src/check.rs:2130`),
       the same whole-word predicate lowering uses to decide `begin_loop` (`begin_loop` runs
       before the body, so it is whole-word rather than lexical, matching R14's
-      `self.header.is_some()`);
+      `self.header.is_some()`). **Neither predicate is reachable from `check_term` as the tree
+      stands, so both need plumbing (R16).** `has_self_tail_call` takes a `&WordDef`, and
+      `check_term`'s only word-level input is `Ctx`, whose `Word` variant carries just
+      `name`/`effect`/`structs`/`enums` (`src/check.rs:814`) with no body and no self-tail
+      flag. Compute the predicate once in `word_ctx` (`:829`) and carry the resulting `bool`
+      on `Ctx::Word`; do not try to thread the `WordDef` itself.
     - a `times` inside **another `times` body**: a splice-depth counter incremented on the
-      checker's `times` path around the body splice.
+      checker's `times` path around the body splice. No threaded struct has such a field
+      today, so add one to `Provenance` (R16). `scope.depth()` is **not** a substitute: it
+      increments for every block, not only for a `times`. The counter must be **restored**
+      after each body splice, not merely decremented on a success path, or criterion 15's two
+      *sequential* `times` would false-positive as nested.
     Located wording: `` error: a `times` cannot be nested in a loop yet (line N): nested
     constant-stack loops need a hoist-target split deferred to a later slice ``. Criterion N is
     a `check_error` golden asserting this wording *with* a line number. R15's save/restore is
@@ -478,7 +489,11 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   (`header`/`entry_block`/`carried_slots`/`back_edges`) are back to their pre-`times` values
   after the `times` arm returns.
 
-- **R16: addition-only, but name the forced edits.** `Slot` and `Binding` each gain a
+- **R16: addition-only, but name the forced edits.** Two of these exist only to make R18's
+  nested-`times` rejection reachable, and both are additions rather than refactors:
+  `Ctx::Word` (`src/check.rs:814`) gains a `self_tail: bool` computed in `word_ctx` (`:829`),
+  and `Provenance` gains a `times` splice-depth counter. Beyond those, `Slot` and `Binding`
+  each gain a
   defaulted `quot` field; no existing golden or unit test changes expected output; no existing
   `Instr`/`Terminator` variant is added or changed (`Jnz`, `Cmp`, `Bin`, `Phi`, `Blit`,
   `Alloc` are all extant); `qbe.rs` is untouched. Rust has no default field values, so a new
@@ -728,7 +743,7 @@ full located-rejection set (now widened by the blockers); each half leaves the t
 The three open questions the draft left are now resolved by the blocker fixes, not left to
 the implementer:
 
-- **R5's polymorphic-body arm rejects eagerly at the literal** (R5/B6): forced, because
+- **R5's polymorphic-body arm rejects eagerly at the literal**: forced, because
   `poly_term`'s stack is `Vec<PolyType>` with no `Slot` to carry `quot`, and D1 forbids a
   `PolyType` variant.
 - **The placeholder `ty` is pinned to `Type::Cstr`** (R4/R12): an existing registry-free
