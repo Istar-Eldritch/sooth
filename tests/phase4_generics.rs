@@ -535,3 +535,32 @@ fn back_edges_disagreeing_on_a_carried_slot_stage_independently() {
     assert_eq!(stdout, "0\n4\n4\n2\n2\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn zero_size_aggregate_carried_across_back_edge_runs_correctly() {
+    // A zero-field struct is a zero-size aggregate, so `begin_loop`'s init blit
+    // (`size > 0`) and `finalize_loop`'s Pass-2 staging (`size == 0` skip) both
+    // guard against emitting a zero-byte `Blit`. Re-producing the `Unit` each
+    // iteration (a fresh `Unit`, not the carried stable slot) drives the staged
+    // branch rather than forward-in-place, so it is the Pass-2 `size == 0` skip
+    // that elides the blit, not the identity check. The carried `Unit` holds no
+    // bytes to witness; the scalar counter carries alongside it, so correct
+    // countdown output confirms the guarded paths run rather than trapping on a
+    // zero-size blit.
+    let (stdout, code) = run_src(
+        "zerosize",
+        "type: Unit ;\n\
+         : mku ( -- Unit ) Unit ;\n\
+         : loop ( i64 Unit -- Unit )\n\
+           | n u |\n\
+           n 0 = if u else\n\
+             u drop\n\
+             n .\n\
+             n 1 - mku loop\n\
+           end ;\n\
+         : main ( -- ) 3 Unit loop drop ;\n",
+        false,
+    );
+    assert_eq!(stdout, "3\n2\n1\n");
+    assert_eq!(code, 0);
+}
