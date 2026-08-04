@@ -1599,24 +1599,25 @@ mod tests {
         let gcd = &module.words[0];
         assert_eq!(gcd.name, "gcd");
         let gcd_body = terms_body(gcd);
-        assert!(entry_locals(gcd).is_empty());
+        assert_eq!(entry_locals(gcd), ["a", "b"]);
         assert_eq!(gcd.effect.inputs.len(), 2);
         assert_eq!(gcd.effect.outputs.len(), 1);
 
-        // dup 0 = if drop else swap over mod gcd end
-        assert_eq!(gcd_body.len(), 4);
-        assert!(matches!(&gcd_body[0].kind, TermKind::Call(w) if w == "dup"));
-        assert!(matches!(gcd_body[1].kind, TermKind::IntLit(0)));
-        assert!(matches!(&gcd_body[2].kind, TermKind::Call(w) if w == "="));
-        match &gcd_body[3].kind {
+        // | a b | b 0 = if a else b a b mod gcd end
+        assert_eq!(gcd_body.len(), 5);
+        assert!(matches!(&gcd_body[0].kind, TermKind::Bind(_)));
+        assert!(matches!(&gcd_body[1].kind, TermKind::Call(w) if w == "b"));
+        assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
+        assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "="));
+        match &gcd_body[4].kind {
             TermKind::If {
                 then_branch,
                 else_branch,
                 ..
             } => {
                 assert_eq!(then_branch.len(), 1);
-                assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "drop"));
-                assert_eq!(else_branch.len(), 4);
+                assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "a"));
+                assert_eq!(else_branch.len(), 5);
             }
             other => panic!("expected If, got {other:?}"),
         }

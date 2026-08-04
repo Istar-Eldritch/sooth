@@ -1,8 +1,9 @@
 : gcd ( i64 i64 -- i64 )
-  dup 0 = if
-    drop
+  | a b |
+  b 0 = if
+    a
   else
-    swap over mod gcd
+    b a b mod gcd
   end ;
 
 : main ( -- )
