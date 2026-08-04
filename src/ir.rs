@@ -6037,6 +6037,15 @@ mod tests {
             1,
             "only the i64 scalar slot carries a header phi"
         );
+        // `len() == 1` alone would also pass a transform that kept the `Box`
+        // slot's phi and dropped the scalar's; pin that the survivor carries
+        // the i64 counter, not a `Box` pointer, so "but scalar does" is checked.
+        let (_, incoming) = phis[0][0];
+        assert_eq!(
+            f.value_types[incoming.0 as usize],
+            IrType::I64,
+            "the surviving header phi carries the scalar slot, not the aggregate"
+        );
     }
 
     #[test]
