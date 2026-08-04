@@ -2,8 +2,8 @@
 
 A word is a named, reusable computation with a declared stack effect.
 You have been writing them since chapter 1. This chapter covers the
-full syntax: how to define them, how they call each other, how control
-flow works, and what the compiler checks.
+full syntax: how to define them, how names resolve, how control flow
+works, and what the compiler checks.
 
 ## Defining a word
 
@@ -15,58 +15,42 @@ body, and the terminating `;`:
 ```
 
 The colon starts the definition. The name follows — `inc`. The
-parentheses hold the stack effect. The body is everything between the
-effect and `;`. The semicolon ends the definition.
+parentheses hold the stack effect (chapter 2). The body is everything
+between the effect and `;`. The semicolon ends the definition.
 
 The body is a sequence of **terms**. A term is one of:
 
 - A **literal**: `42`, `3.14`, `true`, `"hello"`.
-- A **word call**: `inc`, `+`, `.`.
-- A **local reference**: using a name bound by `| names |`.
+- A **name**: a bare identifier like `inc`, `+`, `.`, or `x`. The
+  compiler resolves it to a local if one is in scope, otherwise to a
+  word. There is no syntactic difference between calling a word and
+  referencing a local — you write the name, the compiler figures out
+  which it is.
 - A **binding**: `| a b c |`, which pops values from the stack and
-  names them.
+  binds them to names for the rest of the surrounding block.
 - A **conditional**: `if … else … end`.
 
 There is no statement separator. Terms are whitespace-delimited, and
 the parser reads them left to right until it hits `;`.
 
-## The stack effect, revisited
+## Names
 
-The effect is a typed contract. We covered it in chapter 2, but here
-is the complete picture:
+When the compiler sees a bare name in a word body, it checks the
+locals in scope first. If the name matches a local, it pushes that
+value onto the stack. If not, it looks for a word with that name. If
+neither exists, it's a compile error.
 
-```sooth
-: square ( i64 -- i64 ) | x | x x * ;
-: answer ( -- i64 ) 42 ;
-: print-it ( i64 -- ) . ;
-: add3 ( i64 i64 i64 -- i64 ) | a b c | a b + c + ;
-```
+This means locals shadow words. If you bind `| add |` and there is
+also a word named `add`, the local wins for the rest of the block.
+In practice you rarely need to think about this — locals and words
+tend to have different names.
 
-Inputs come before `--`, outputs after. Both are bottom-to-top: the
-leftmost input is the deepest on the stack, the leftmost output lands
-deepest. If there are no inputs, the `--` still appears. If there are
-no outputs, nothing follows `--`.
+## Calling words
 
-The effect is not a comment. The compiler checks the body against it
-and checks every call site against it. Get either wrong and the
-program does not compile.
-
-## Words calling words
-
-A word's body can call other words. The calls compose by stack effect,
-as you saw in chapter 2:
-
-```text
-> : inc ( i64 -- i64 ) | x | x 1 + ;
-> : double ( i64 -- i64 ) | x | x 2 * ;
-> : inc-and-double ( i64 -- i64 ) inc double ;
-> 5 inc-and-double .
-12
-stack: (empty)
-```
-
-`inc` takes one `i64`, leaves one. `double` takes that, leaves one.
-The net effect is `( i64 -- i64 )`, which matches the declaration.
+A word's body can call other words. The calls compose by stack effect:
+the output of one becomes the input of the next. Chapter 2 covered how
+this composition is checked. What matters here is **when** the
+compiler resolves call targets.
 
 **In a file**, a word can call any other word in the same file,
 regardless of definition order. The compiler collects all definitions
@@ -91,8 +75,7 @@ session. Define helpers first, then words that use them.
 
 ## Recursion
 
-A word can call itself. The factorial example above is recursive:
-`factorial` calls `factorial`. The compiler resolves the self-reference
+A word can call itself. The compiler resolves the self-reference
 because the word's name is in scope from the moment its definition
 begins.
 
@@ -206,6 +189,6 @@ executed immediately.
 
 ## What's next
 
-You now know how to define words, compose them, branch with `if`, and
+You now know how to define words, resolve names, branch with `if`, and
 recurse. The next chapter covers the numeric types: the fixed-width
 integer tower, floating point, and the conversions between them.
