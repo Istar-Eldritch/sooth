@@ -56,6 +56,43 @@ value). A word with no outputs is a sink — it consumes everything it
 takes. Most words transform: they take some inputs and leave some
 outputs.
 
+A word can also leave more than one value. The effect lists each output
+in order, bottom to top, just like inputs:
+
+```sooth
+: dup2 ( i64 -- i64 i64 ) | x | x x ;
+: remainder-range ( i64 i64 -- i64 i64 )
+  | a b |
+  a b mod          \ remainder (first output, bottom)
+  a b - a b mod - ; \ difference of remainders (second output, top)
+```
+
+`dup2` takes one value and leaves two copies. `remainder-range` takes
+two values and leaves two: the remainder on the bottom, the difference
+of remainders on top. The caller receives both values on the stack in
+that order. Here is a program that uses it:
+
+```sooth
+: main ( -- )
+  17 5 remainder-range . . ;
+```
+
+```sh
+sooth build remainders.sth && ./remainders
+```
+
+```text
+10
+2
+```
+
+`17 5 mod` is `2` (bottom of stack). The difference is `17 - 5 - 2 = 10`
+(top of stack). `.` prints the top first, so `10` appears before `2`.
+The stack effect declared the order values land on the stack, and `.`
+reads top-first, so the output appears reversed from the declaration.
+This is the stack discipline at work: the effect tells you what lands on
+the stack, and the stack order tells you what comes off first.
+
 ## The effect is a contract the compiler checks
 
 The compiler checks two things: that the body produces what the effect
