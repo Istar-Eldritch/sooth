@@ -1,16 +1,17 @@
 # Getting Started
 
-## Build the compiler
+## Install the compiler
 
-Sooth is a Rust project. You need `cargo` and `qbe` on your `PATH`:
+Sooth is a Rust project. You need `cargo` and `qbe` on your `PATH`.
+Install the Sooth CLI with:
 
 ```sh
 git clone <repo-url> sooth
 cd sooth
-cargo build --release
+cargo install --path .
 ```
 
-The release binary is `target/release/sooth`. QBE must be installed
+This puts the `sooth` command on your `PATH`. QBE must be installed
 separately — it is the backend that generates native machine code. On
 Debian/Ubuntu, `apt install qbe` may give you a version that is too old
 (see the README build note); install from
@@ -39,7 +40,7 @@ algorithm:
 Compile and run it:
 
 ```sh
-cargo run --release -- build examples/gcd.sth
+sooth build examples/gcd.sth
 ./gcd
 ```
 
@@ -59,7 +60,7 @@ names instead of shuffling them around on the stack.
 The fastest way to learn is the REPL. Start it:
 
 ```sh
-cargo run --release -- repl
+sooth repl
 ```
 
 You get a prompt. Type a number and print it:
