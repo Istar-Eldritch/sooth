@@ -83,7 +83,7 @@ unification/mangling change is deferred to slice 6, where a consumer for it fina
 
 - **D7: `if` is unchanged, and the polymorphic-path gaps are not this slice's.** `if` stays
   a keyword and stays rejected in a polymorphic body (`src/check.rs:2997`); this slice does
-  not lift it to `PolyType` (slice 9). A polymorphic self-tail word still does not get the
+  not lift it to `PolyType` (slice 8). A polymorphic self-tail word still does not get the
   loop transform (`src/ir.rs:1176`). Both gaps land in slice 5 against their first real
   consumers (`filter`, `while`); neither blocks this slice, whose `times` witness is
   monomorphic.
@@ -625,7 +625,7 @@ uniform-runtime-stack fallback (Phase 6); the interprocedural user-word inliner 
 `each`/`map`/`filter`/`fold`/`while` library (slice 5); a `while` intrinsic as a second
 floor member (D6, declined); lifting `if` to polymorphic bodies and giving polymorphic
 self-tail words the loop transform (recon 6/7, both slice 5); `if` as a combinator and
-`Bool` as an enum (slice 9); nested/mutual quotation-loop optimization beyond R15's
+`Bool` as an enum (slice 8); nested/mutual quotation-loop optimization beyond R15's
 save/restore; any new `Instr`/`Terminator`; any backend (`qbe.rs`) change; any REPL-facing
 quotation work **beyond R19**: a REPL `times` rides the same `lower_call` arm, so it is in by
 construction, and no REPL-specific *retention* like slice 2's is added, but a quotation left
