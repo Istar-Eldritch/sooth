@@ -1,0 +1,6 @@
+: main ( -- )
+  0 1000000 [ 1 + + ] times . ;    \ prints 500000500000: sums i+1 for i in
+                                    \ 0..999999, the same total as
+                                    \ countdown.sth's hand-threaded sum 1..1e6,
+                                    \ via the internal loop primitive instead
+                                    \ of self-tail-call -> loop

@@ -803,3 +803,23 @@ fn times_nested_in_a_loop_is_rejected() {
         "N (times in self-tail word) should reject with a line number, got: {self_tail}"
     );
 }
+
+// --- Phase 4 Slice 4, phase 4: dogfood + docs.
+
+#[test]
+fn times_example_matches_hand_threaded_countdown() {
+    // Criterion 7: `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) builds and
+    // prints the same total as `examples/countdown.sth`'s hand-threaded
+    // self-recursive sum 1..1e6, demonstrating parity between the internal loop
+    // primitive and the slice 6 self-tail-call -> loop transform rather than a
+    // value off by 1e6.
+    let binary = sooth::driver::build(std::path::Path::new("examples/times.sth"))
+        .expect("build should succeed");
+    let output = Command::new(&binary).output().expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        "500000500000\n"
+    );
+    assert_eq!(output.status.code(), Some(0));
+}
