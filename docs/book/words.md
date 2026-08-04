@@ -2,8 +2,8 @@
 
 A word is a named, reusable computation with a declared stack effect.
 You have been writing them since chapter 1. This chapter covers the
-full syntax: how to define them, how names resolve, how control flow
-works, and what the compiler checks.
+definition syntax, how names resolve, and how words find each other at
+compile time.
 
 ## Defining a word
 
@@ -18,20 +18,11 @@ The colon starts the definition. The name follows — `inc`. The
 parentheses hold the stack effect (chapter 2). The body is everything
 between the effect and `;`. The semicolon ends the definition.
 
-The body is a sequence of **terms**. A term is one of:
-
-- A **literal**: `42`, `3.14`, `true`, `"hello"`.
-- A **name**: a bare identifier like `inc`, `+`, `.`, or `x`. The
-  compiler resolves it to a local if one is in scope, otherwise to a
-  word. There is no syntactic difference between calling a word and
-  referencing a local — you write the name, the compiler figures out
-  which it is.
-- A **binding**: `| a b c |`, which pops values from the stack and
-  binds them to names for the rest of the surrounding block.
-- A **conditional**: `if … else … end`.
-
-There is no statement separator. Terms are whitespace-delimited, and
-the parser reads them left to right until it hits `;`.
+The body is a sequence of terms. You have already seen every kind of
+term there is: literals (`42`, `"hello"`), names (`inc`, `+`, `x`),
+and bindings (`| a b |`). There is no statement separator — terms are
+whitespace-delimited, and the parser reads them left to right until it
+hits `;`.
 
 ## Names
 
@@ -40,10 +31,25 @@ locals in scope first. If the name matches a local, it pushes that
 value onto the stack. If not, it looks for a word with that name. If
 neither exists, it's a compile error.
 
-This means locals shadow words. If you bind `| add |` and there is
-also a word named `add`, the local wins for the rest of the block.
-In practice you rarely need to think about this — locals and words
-tend to have different names.
+There is no syntactic difference between calling a word and
+referencing a local — you write the name, the compiler figures out
+which it is. This means locals shadow words: if you bind `| foo |`
+and there is also a word named `foo`, the local wins for the rest of
+the block.
+
+```text
+> : foo ( -- i64 ) 1 ;
+> : bar ( i64 -- i64 ) | foo | foo foo + ;
+> 5 bar .
+10
+stack: (empty)
+> foo .
+1
+stack: (empty)
+```
+
+Inside `bar`, `foo` is the local (5), so `foo foo +` gives 10. Outside
+the block, `foo` is the word, which leaves 1.
 
 ## Calling words
 
@@ -102,57 +108,6 @@ sooth run countdown.sth
 Recursion is the primary looping mechanism in Sooth. There is no
 `while` or `for` — you use recursion, and later, quotations (Part V).
 
-## Control flow: if / else / end
-
-Sooth has one control-flow construct: `if`. It consumes a `bool` from
-the stack and runs one of two branches:
-
-```sooth
-: sign ( i64 -- i64 )
-  | n |
-  n 0 < if
-    -1
-  else
-    1
-  end ;
-```
-
-The `if` term reads the condition from the stack. The `then` branch
-runs between `if` and `else` (or `end` if there is no `else`). The
-`else` branch runs between `else` and `end`.
-
-Both branches must leave the same stack shape — same number of values,
-same types. This is because the caller does not know which branch ran;
-the stack effect must hold regardless. The compiler enforces this:
-
-```sooth
-: bad ( i64 -- i64 )
-  | n |
-  n 0 < if
-    -1
-  else
-    "oops"
-  end ;
-```
-
-The `then` branch leaves an `i64`, the `else` branch leaves a `str`.
-The compiler rejects this: the branches disagree on what they leave.
-
-An `if` without `else` is an `if` with an empty else branch. Both
-branches still must agree:
-
-```sooth
-: print-if-positive ( i64 -- )
-  | n |
-  0 n < if
-    n .
-  end ;
-```
-
-The `then` branch prints `n` and leaves nothing. The (implicit) `else`
-branch is empty and leaves nothing. Both leave zero values, so the
-effect checks out.
-
 ## Comments
 
 A backslash starts a line comment. Everything from `\` to the end of
@@ -189,6 +144,6 @@ executed immediately.
 
 ## What's next
 
-You now know how to define words, resolve names, branch with `if`, and
-recurse. The next chapter covers the numeric types: the fixed-width
-integer tower, floating point, and the conversions between them.
+You now know how to define words, resolve names, and recurse. The
+next chapter covers the numeric types: the fixed-width integer tower,
+floating point, and the conversions between them.
