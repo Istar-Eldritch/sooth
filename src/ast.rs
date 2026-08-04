@@ -777,13 +777,13 @@ impl std::fmt::Display for Type {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Term {
     pub kind: TermKind,
     pub span: Span,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TermKind {
     IntLit(i64),
     FloatLit(f64),

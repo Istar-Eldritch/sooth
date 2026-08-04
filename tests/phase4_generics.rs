@@ -592,3 +592,42 @@ fn three_aggregates_rotated_across_back_edge_stay_correct() {
     assert_eq!(stdout, "1\n2\n3\n3\n1\n2\n2\n");
     assert_eq!(code, 0);
 }
+
+// --- Phase 4 Slice 4, phase 2a: the quotation marker + `call`-of-literal fusion.
+
+#[test]
+fn call_of_literal_quotation_fuses_and_runs() {
+    // Criterion 2 (R6/R13): `[ + ] call` type-checks and lowers identically to
+    // writing the body inline, so the fused `+` runs against the live stack.
+    let (stdout, code) = run_src("call-literal", ": main ( -- ) 1 2 [ + ] call . ;\n", false);
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn quotation_forwarded_through_bind_still_calls() {
+    // Criterion 3 (R4's `Binding` forwarding): a quotation bound to a local and
+    // read back is still `call`-able, so the marker survives the bind's fresh
+    // `Slot` reconstruction.
+    let (stdout, code) = run_src(
+        "call-bind",
+        ": main ( -- ) [ + ] | q | 1 2 q call . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn quotation_body_reads_enclosing_local() {
+    // Criterion 3b (R6 capture): the spliced body sees the current scope in
+    // lexical extent, so `[ t + ]` reads the enclosing `t` with no capture
+    // machinery.
+    let (stdout, code) = run_src(
+        "call-capture",
+        ": main ( -- ) 7 | t | 1 [ t + ] call . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "8\n");
+    assert_eq!(code, 0);
+}

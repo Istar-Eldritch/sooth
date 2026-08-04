@@ -60,6 +60,29 @@ struct PolyCtx<'a> {
 /// moves a `Slot` verbatim, so a literal duplicated by `dup` is still a
 /// literal at each copy; any operator, conversion, or word call produces a
 /// non-literal result (D8: no constant folding, no comptime interpreter).
+/// An index into a per-check `Provenance::quotations` table (D2): a
+/// quotation `Slot` carries the identity of the literal body it marks, so
+/// `call`/`times` can splice that body at the consumption site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuotId(usize);
+
+/// The identity a quotation `Slot` carries (D2/R4). A single variant: two
+/// *different* quotations at a branch join are rejected at the join (R7), so
+/// no poisoned/merged marker is ever carried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotRef {
+    Known(QuotId),
+}
+
+/// One interned quotation literal: its body terms (spliced at `call`/`times`)
+/// and the literal's span, for a located diagnostic.
+#[derive(Debug, Clone)]
+struct QuotBody {
+    body: Vec<Term>,
+    #[allow(dead_code)]
+    span: Span,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Slot {
     ty: Type,
@@ -75,6 +98,11 @@ struct Slot {
     alias: Option<Alias>,
     /// The outstanding derivation a reference-typed value holds.
     deriv: Option<DerivId>,
+    /// D2/R4: set iff this is a quotation marker, carrying the identity of the
+    /// literal body it stands for. A `Cstr` placeholder `ty` no user op
+    /// accepts rides alongside it; a shuffle forwards this verbatim (`Slot` is
+    /// `Copy`), and `call`/`times` consume it by splicing the body.
+    quot: Option<QuotRef>,
 }
 
 impl Slot {
@@ -87,6 +115,7 @@ impl Slot {
             int_val: None,
             alias: None,
             deriv: None,
+            quot: None,
         }
     }
 
@@ -363,6 +392,13 @@ struct Provenance {
     /// arena is threaded at all: an `if` arm clones `Scope`, so an
     /// observation kept there would die with the arm.
     dropped: Vec<Type>,
+    /// D2/R4: the per-check quotation-literal side table, indexed by `QuotId`.
+    /// A quotation `Slot`/`Binding` carries only a `QuotId`, so the body it
+    /// marks is interned here and spliced from here at `call`/`times`. Rides
+    /// this arena because it is the one scratch already threaded `&mut`
+    /// through the walk, so a quotation pushed in one `if` arm and read in a
+    /// merge outlives the arm's cloned `Scope`.
+    quotations: Vec<QuotBody>,
 }
 
 impl Provenance {
@@ -615,6 +651,11 @@ struct Binding {
     ty: Type,
     aliases: Option<AliasSetId>,
     deriv: Option<DerivId>,
+    /// D2/R4: a bound quotation's marker. A local read reconstructs a fresh
+    /// `Slot` that drops every non-`ty` side channel, so unlike a shuffle a
+    /// bind is a *second*, explicit forwarding site: this field carries the
+    /// marker across the bind and back onto the reconstructed slot.
+    quot: Option<QuotRef>,
 }
 
 impl Scope {
@@ -651,6 +692,7 @@ impl Scope {
             ty: slot.ty,
             aliases,
             deriv: prov.bind(slot.deriv),
+            quot: slot.quot,
         });
     }
 
@@ -3012,12 +3054,18 @@ fn poly_term(
                 name, span, stack, scope, sig, ctx, env, structs, enums, arrays,
             );
         }
-        // TEMP-quotation stopgap (phase 1): `poly_term`'s permanent rejection
-        // (R5p) lands in phase 2a/2b; deleted by this exact string then.
+        // R5p: a quotation in a polymorphic body is rejected eagerly at the
+        // literal. `poly_term`'s stack is `Vec<PolyType>`, not `Vec<Slot>`, so
+        // there is nowhere to hang the `quot` marker, and D1 forbids a
+        // `PolyType` variant; pushing a placeholder would erase the identity
+        // into output unification/`Subst`/mangling. Mirrors the
+        // `if`-in-a-polymorphic-body rejection above.
         TermKind::Quotation(_) => {
-            return Err(
-                "error: TEMP-quotation consumer not yet wired (phase 1/2a stopgap)".to_string(),
-            );
+            return Err(format!(
+                "error: a quotation in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
         }
     }
     Ok(stack)
@@ -4093,6 +4141,21 @@ fn check_linear_across_back_edge(
 /// rejection is forced (the earlier binding would become unreachable, and its
 /// value could then never be consumed), and applying it to Copy values too
 /// keeps one rule and one message instead of two.
+/// `call` reached without a statically-known quotation literal on top (D4):
+/// the value there is not traceable to a single literal.
+fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            name, span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            span.line
+        ),
+    }
+}
+
 fn rebound_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
     let scope_end = "a name may not be re-bound while it is in scope: the earlier binding would become unreachable, and a linear value in it could then never be consumed";
     match ctx {
@@ -4277,6 +4340,7 @@ fn check_term(
                 int_val: Some(*n),
                 alias: None,
                 deriv: None,
+                quot: None,
             });
             Ok(stack)
         }
@@ -4318,7 +4382,8 @@ fn check_term(
         }
         TermKind::Call(name) => {
             if let Some(binding) = scope.local(name) {
-                let (ty, aliases, held) = (binding.ty, binding.aliases, binding.deriv);
+                let (ty, aliases, held, quot) =
+                    (binding.ty, binding.aliases, binding.deriv, binding.quot);
                 match ref_parts(ty, refs) {
                     // Naming a reference local is a reborrow, not a move.
                     // A mutable one suspends its place: a second reborrow while
@@ -4378,10 +4443,45 @@ fn check_term(
                         // here so a later borrow can point at this naming.
                         stack.push(Slot {
                             alias: aliases.map(|set| Alias { set, span }),
+                            quot,
                             ..Slot::computed(ty)
                         });
                     }
                 }
+                return Ok(stack);
+            }
+            // R6: `call`/`times` are compiler-known words intercepted before
+            // every builtin family and user-word lookup (a local named `call`
+            // already won above). `call` requires a statically-known
+            // quotation literal on top (D4) and splices its interned body
+            // against the live stack, so `[ 1 + ] call` checks as `1 +` (D3).
+            if name == "call" {
+                let Some(top) = stack.pop() else {
+                    return Err(underflow_error(ctx, span, "call", 1, 0));
+                };
+                let Some(QuotRef::Known(id)) = top.quot else {
+                    return Err(call_needs_quotation_error(ctx, span));
+                };
+                // Splice the body against the current locals/scope in lexical
+                // extent (capture is free, recon 9), bracketed like an `if`
+                // arm so a body that binds does not leak past the `call` and a
+                // linear value bound inside it is caught by `leave_block`
+                // (R6). `tail` is pinned `false`: lowering emits a real call
+                // here, never a self-tail back-edge (R6/R13).
+                let body = prov.quotations[id.0].body.clone();
+                let depth = scope.depth();
+                stack = check_terms(
+                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                )?;
+                leave_block(
+                    ctx,
+                    scope,
+                    depth,
+                    BlockEnd::Arm {
+                        token: "call",
+                        span,
+                    },
+                )?;
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
@@ -4394,6 +4494,16 @@ fn check_term(
             }
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
+            }
+            // TEMP-quotation stopgap (phase 2a): every consumer other than
+            // `call`/shuffle/bind is wired as R11's audited default-deny in
+            // phase 2b; until then a single guard here rejects a quotation
+            // reaching any of them, so no phantom flows into lowering. Deleted
+            // by this exact string in 2b.
+            if stack.last().is_some_and(|s| s.quot.is_some()) {
+                return Err(
+                    "error: TEMP-quotation consumer not yet wired (phase 1/2a stopgap)".to_string(),
+                );
             }
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
                 return Ok(stack);
@@ -4585,14 +4695,30 @@ fn check_term(
                     int_val: None,
                     alias,
                     deriv,
+                    // R7 lands in phase 2b; a merge of two different
+                    // quotations is rejected there before this push.
+                    quot: None,
                 });
             }
             Ok(merged)
         }
-        // TEMP-quotation stopgap (phase 1): every consumer is wired in
-        // phase 2a/2b; deleted by this exact string then.
-        TermKind::Quotation(_) => {
-            Err("error: TEMP-quotation consumer not yet wired (phase 1/2a stopgap)".to_string())
+        // R5: a quotation literal interns its body into the side table and
+        // pushes a compile-time-only marker (D1/D2). The body is *not* checked
+        // here (D3): a bare body's input row is unknown until its consumption
+        // site (`call`/`times`). The placeholder `ty` is `Cstr`, a
+        // registry-free scalar no user op accepts once R11's default-deny is
+        // in place (R4).
+        TermKind::Quotation(body) => {
+            let id = QuotId(prov.quotations.len());
+            prov.quotations.push(QuotBody {
+                body: body.clone(),
+                span,
+            });
+            stack.push(Slot {
+                quot: Some(QuotRef::Known(id)),
+                ..Slot::computed(Type::Cstr)
+            });
+            Ok(stack)
         }
     }
 }
@@ -5857,6 +5983,49 @@ mod tests {
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
     const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+
+    #[test]
+    fn quotation_survives_dup_swap_and_bind() {
+        // Cu1 (D2/R4): a quotation `Slot` is `Copy`, so a shuffle moves it (and
+        // its `quot` marker) verbatim; a bind carries the marker into the
+        // `Binding`, from which a local read reconstructs it (the read-back is
+        // witnessed end-to-end by `quotation_forwarded_through_bind_still_calls`).
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut prov = Provenance::default();
+        let span = Span { line: 1, col: 1 };
+        let marker = Some(QuotRef::Known(QuotId(0)));
+        let quot = Slot {
+            quot: marker,
+            ..Slot::computed(Type::Cstr)
+        };
+
+        // Every shuffle keeps the marker on the slot it moves.
+        for name in ["dup", "swap", "over", "rot"] {
+            let mut stack = match name {
+                "swap" | "over" => vec![Slot::computed(Type::I64), quot],
+                "rot" => vec![Slot::computed(Type::I64), Slot::computed(Type::I64), quot],
+                _ => vec![quot],
+            };
+            let out = check_shuffle(name, span, &mut stack, &ctx, &mut arrays, &mut prov)
+                .unwrap()
+                .unwrap();
+            assert!(
+                out.iter().any(|s| s.quot == marker),
+                "`{name}` dropped the quotation marker"
+            );
+        }
+
+        // A bind carries the marker into the `Binding`.
+        let mut scope = Scope::default();
+        scope.bind("q", quot, false, &mut prov);
+        assert_eq!(scope.local("q").unwrap().quot, marker);
+    }
 
     #[test]
     fn check_poly_copy_word_accepts_and_instantiates() {

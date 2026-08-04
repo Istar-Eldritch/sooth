@@ -885,6 +885,12 @@ impl LayoutBuilder<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Value(pub u32);
 
+/// R12: an index into `FuncBuilder::quot_defs`, the per-function table of
+/// quotation-literal bodies. A quotation lowers to a phantom `Value` (no
+/// defining `Instr`) mapped to its `QuotId`; `call`/`times` splice the body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuotId(usize);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BlockId(pub u32);
 
@@ -2178,6 +2184,16 @@ struct FuncBuilder<'a> {
     /// is carried here instead. Seeded from a word's declared reference
     /// parameters and extended by each projection.
     ref_inner: HashMap<Value, IrType>,
+    /// R12: the quotation-literal body table, indexed by `QuotId`. A quotation
+    /// literal lowers to a phantom `Value` that defines no `Instr`; its body is
+    /// interned here and spliced in place at `call`/`times` (D5 fusion), never
+    /// emitted as a runtime code value.
+    quot_defs: Vec<Vec<Term>>,
+    /// R12: the phantom quotation `Value` -> its `QuotId`. A shuffle/bind moves
+    /// the phantom verbatim (`self.locals`/`self.stack` carry `Value` ids), so
+    /// no `Binding` analogue is needed here (D2); `call`/`times` resolve the
+    /// body through this map.
+    quot_bodies: HashMap<Value, QuotId>,
 }
 
 impl<'a> FuncBuilder<'a> {
@@ -2220,6 +2236,8 @@ impl<'a> FuncBuilder<'a> {
             value_types: Vec::new(),
             const_vals: HashMap::new(),
             ref_inner: HashMap::new(),
+            quot_defs: Vec::new(),
+            quot_bodies: HashMap::new(),
         }
     }
 
@@ -2444,10 +2462,20 @@ impl<'a> FuncBuilder<'a> {
                 else_branch,
                 ..
             } => self.lower_if(then_branch, else_branch, tail),
-            // Unreachable in this slice: the checker's TEMP-quotation
-            // stopgap rejects every quotation before lowering ever runs.
-            TermKind::Quotation(_) => {
-                unreachable!("a quotation reached lowering; the checker must reject it first")
+            // R12: a quotation literal interns its body and lowers to a phantom
+            // `Value` with a placeholder `IrType` and *no* `Instr`. The checker
+            // guarantees this phantom reaches only `call`/`times`/shuffle/bind
+            // (R7's join rejection keeps it out of a `Phi`), so it never enters
+            // an operand, terminator, or runtime code value. `I64` is the
+            // plainest non-aggregate placeholder (the IR side has no
+            // `if`-condition concern, so the checker's `Cstr` choice does not
+            // bind here).
+            TermKind::Quotation(body) => {
+                let id = QuotId(self.quot_defs.len());
+                self.quot_defs.push(body.clone());
+                let v = self.fresh_value(IrType::I64);
+                self.quot_bodies.insert(v, id);
+                self.stack.push(v);
             }
         }
     }
@@ -2469,6 +2497,18 @@ impl<'a> FuncBuilder<'a> {
             return;
         }
         match name {
+            // R13: `call`-of-literal fusion. Pop the phantom quotation `Value`,
+            // resolve its body, and lower the body's terms in place, emitting
+            // no `Instr::Call` and creating no runtime code value: `[ 1 + ]
+            // call` lowers exactly as `1 +` (D5). `tail = false` is
+            // load-bearing: the checker never sanctions a spliced term as a
+            // self-tail call (R6/R13), so lowering must not back-edge here.
+            "call" => {
+                let v = self.stack.pop().expect("call: quotation on stack");
+                let id = self.quot_bodies[&v];
+                let body = self.quot_defs[id.0].clone();
+                self.lower_terms(&body, false);
+            }
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
                 // A scalar is `Copy`: reuse the value id (dup emits nothing). A
@@ -4197,6 +4237,68 @@ mod tests {
             .flat_map(|b| b.instrs.iter())
             .filter(|i| pred(i))
             .count()
+    }
+
+    fn empty_builder<'a>(
+        env: &'a HashMap<String, Arity>,
+        resolve: Resolver<'a>,
+        regs: Registries<'a>,
+    ) -> FuncBuilder<'a> {
+        FuncBuilder::new(env, resolve, regs, String::new())
+    }
+
+    #[test]
+    fn quotation_literal_emits_no_instr_and_records_body() {
+        // R12u: `lower_term`'s `TermKind::Quotation` arm mints a phantom
+        // `Value` that defines no `Instr`, records `Value -> QuotId`, and
+        // pushes it; the body is interned, not emitted.
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+            },
+        );
+        let term = &line_terms("[ + ]")[0];
+        assert!(matches!(term.kind, TermKind::Quotation(_)));
+        b.lower_term(term, false);
+        assert!(
+            b.cur_instrs.is_empty(),
+            "a quotation literal emits no instruction: {:?}",
+            b.cur_instrs
+        );
+        assert_eq!(b.stack.len(), 1);
+        let v = b.stack[0];
+        assert!(
+            b.quot_bodies.contains_key(&v),
+            "the phantom value is recorded in quot_bodies"
+        );
+        assert_eq!(b.quot_defs.len(), 1, "the body is interned once");
+    }
+
+    #[test]
+    fn call_of_literal_emits_no_call_instr() {
+        // Criterion 6b (R13): `[ + ] call` fuses in place, so lowered `main`
+        // contains no `Instr::Call`; the phantom quotation never becomes a
+        // runtime code value.
+        let module = lower_src(": main ( -- ) 1 2 [ + ] call . ;");
+        let main = func(&module, "main");
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
+            1
+        );
     }
 
     #[test]
