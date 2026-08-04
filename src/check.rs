@@ -1933,6 +1933,15 @@ pub fn infer_line(
     )?;
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))?;
+    // R19: a REPL line has no declared outputs (so R10's route never runs),
+    // yet the session carries its residual stack into the next line while the
+    // `quot` side channel dies at the boundary and lowering has pushed a
+    // phantom the spill would marshal. Reject a quotation left here.
+    if final_stack.iter().any(|s| s.quot.is_some()) {
+        return Err(
+            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (higher-order values are Phase 6)".to_string(),
+        );
+    }
     // The sixth position of the no-stored-reference rule: the session's
     // inter-line stack outlives this line's
     // locals, so a reference that survived to here would outlive its referent.
@@ -2070,6 +2079,16 @@ fn check_outputs(
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
 ) -> Result<(), String> {
+    // R10: a quotation left on the exit stack gets its own diagnostic, ahead
+    // of both the arity and type-mismatch routes. On a *matching* count the
+    // ordinary mismatch would otherwise fire and leak the `Cstr` placeholder
+    // spelling; a quotation cannot be a declared output regardless of count.
+    if final_stack.iter().any(|s| s.quot.is_some()) {
+        return Err(format!(
+            "error: `{}` (line {}) leaves a quotation on the stack; a quotation cannot be a declared output",
+            word.name, line
+        ));
+    }
     if final_stack.len() != declared.len() {
         // R13/R2: a *linear* surplus value is the forgotten-disposal case, so it
         // gets the disposal wording (and names its type) before the generic
@@ -3342,6 +3361,12 @@ fn check_poly_call(
     let base = stack.len() - n_in;
     let mut subst = Subst::default();
     for i in 0..n_in {
+        // R9p: `unify_poly_input` binds a `Var` to *any* concrete type, so a
+        // quotation would silently bind `'T` to the placeholder and
+        // monomorphize a call over a phantom. Reject before unification.
+        if stack[base + i].quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
         let slot_ty = stack[base + i].ty;
         unify_poly_input(
             &sig,
@@ -4495,16 +4520,6 @@ fn check_term(
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
-            // TEMP-quotation stopgap (phase 2a): every consumer other than
-            // `call`/shuffle/bind is wired as R11's audited default-deny in
-            // phase 2b; until then a single guard here rejects a quotation
-            // reaching any of them, so no phantom flows into lowering. Deleted
-            // by this exact string in 2b.
-            if stack.last().is_some_and(|s| s.quot.is_some()) {
-                return Err(
-                    "error: TEMP-quotation consumer not yet wired (phase 1/2a stopgap)".to_string(),
-                );
-            }
             if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
@@ -4541,6 +4556,13 @@ fn check_term(
             let base = stack.len() - n;
             for (i, want) in sig.inputs.iter().enumerate() {
                 let found = stack[base + i];
+                // R9: a quotation argument rejects before ordinary unification,
+                // so the message names the word rather than mismatching the
+                // `Cstr` placeholder. Also covers generated struct
+                // constructors/setters and `extern` args (all `env` words).
+                if found.quot.is_some() {
+                    return Err(reject_quotation_argument(ctx, span, name));
+                }
                 match match_slot(found, *want) {
                     SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
                     SlotMatch::NeedsSizeConversion => {
@@ -4571,6 +4593,11 @@ fn check_term(
             let cond = stack
                 .pop()
                 .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
+            // R11: guard before the `Bool` mismatch, or the generic message
+            // names the `Cstr` placeholder instead of the `if` condition.
+            if cond.quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "if"));
+            }
             if cond.ty != Type::Bool {
                 return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
             }
@@ -4640,6 +4667,25 @@ fn check_term(
             }
             let mut merged = Vec::with_capacity(then_stack.len());
             for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
+                // R7: a branch merge cannot carry a quotation whose identity is
+                // ambiguous, so reject at the join (not at consumption, which
+                // is too late: `lower_if` would emit a `Phi` over the phantoms
+                // even for a merged quotation only ever `drop`ped). Two arms
+                // carrying the *same* literal are safe (`lower_if`'s `t == e`
+                // fast path emits no `Phi`) and forward the marker. The `Cstr`
+                // placeholder makes an arm's real `Cstr` compare equal to a
+                // quotation, so the ordinary `ty` mismatch below never catches
+                // the one-quotation shape; this guard has both phrasings.
+                let quot = match (t_then.quot, t_else.quot) {
+                    (None, None) => None,
+                    (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
+                        Some(QuotRef::Known(a))
+                    }
+                    (Some(_), Some(_)) => {
+                        return Err(different_quotations_at_join_error(ctx, span));
+                    }
+                    _ => return Err(quotation_versus_value_at_join_error(ctx, span)),
+                };
                 if t_then.ty != t_else.ty {
                     return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
                 }
@@ -4695,9 +4741,8 @@ fn check_term(
                     int_val: None,
                     alias,
                     deriv,
-                    // R7 lands in phase 2b; a merge of two different
-                    // quotations is rejected there before this push.
-                    quot: None,
+                    // R7: only a marker both arms agree on survives the join.
+                    quot,
                 });
             }
             Ok(merged)
@@ -4753,6 +4798,36 @@ fn check_operator(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // R11: every operator this function handles reads the top slot, so a
+    // quotation on top is always an operand of it. Guard once, gated on the
+    // name being one we handle (else fall through so a later dispatcher can
+    // claim it), before the type-directed reads that would otherwise spell the
+    // `Cstr` placeholder into a mismatch.
+    let is_operator = matches!(
+        name,
+        "+" | "-"
+            | "*"
+            | "/"
+            | "mod"
+            | "and"
+            | "or"
+            | "xor"
+            | "not"
+            | "shl"
+            | "shr"
+            | "="
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "<>"
+            | "max"
+            | "max-total"
+            | "."
+    ) || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
+    if is_operator && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     // Unify a homogeneous binary op's operand pair, honoring D8's literal
     // coercion (`Ok`); `Err(Some(target))` is the size-type/computed-`i64`
@@ -5125,6 +5200,67 @@ fn in_word(ctx: &Ctx) -> String {
     }
 }
 
+/// R11: a quotation used as the operand of any type-directed consumer is an
+/// audited default-deny. A quotation is a compile-time-only marker with a
+/// `Cstr` placeholder `ty` (R4) that ordinary matching would silently accept
+/// or spell into a mismatch, so every consumer that inspects a popped slot's
+/// `ty` names itself through this one guard instead. Only `call`/`times`
+/// consume a quotation; the shuffles forward it and `drop` discards it.
+fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
+    format!(
+        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (higher-order values are Phase 6)",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R8: a quotation stored into an array (`fill`'s element) or through a
+/// reference (`!`/`+!`'s value) would have to become a runtime value, which
+/// this slice cannot represent. Shared by both store paths (D4).
+fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a quotation cannot be stored in an array (escaping quotations are Phase 6){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R9: a quotation passed as an argument to a user `:` word (or a polymorphic
+/// `'T`/row slot) rejects: only `call`/`times` accept a quotation this slice.
+/// The wording says "word", not "user `:` word", because the same guard covers
+/// generated struct constructors/setters and `extern` arguments (all `env`
+/// words too).
+fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
+    format!(
+        "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (higher-order user words are Phase 6){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R7, both arms leave a quotation but not the *same* literal: a quotation's
+/// body must be statically known where it is used, and a branch merge that
+/// picked one arm's would need a runtime code value (D4). Fires at the join,
+/// not at consumption (R12's containment rests on it).
+fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+        span.line,
+        in_word(ctx),
+    )
+}
+
+/// R7, one arm leaves a quotation and the other a value: the `Cstr`
+/// placeholder makes the two `ty`s compare equal, so the ordinary branch-type
+/// mismatch never catches this; the join guard does.
+fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (higher-order values are Phase 6)",
+        span.line,
+        in_word(ctx),
+    )
+}
+
 /// Only an aggregate or cell local may be borrowed. A scalar local is an
 /// SSA temporary with no address, and giving it one is work no criterion
 /// needs.
@@ -5356,6 +5492,9 @@ fn check_reference_word(
             if n < 2 {
                 return Err(need(name, 2, n));
             }
+            if stack[n - 1].quot.is_some() || stack[n - 2].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, name));
+            }
             let index = stack[n - 1];
             let Some((referent, recv_mut)) = ref_parts(stack[n - 2].ty, refs) else {
                 return Err(reference_word_operand_error(
@@ -5390,6 +5529,9 @@ fn check_reference_word(
             let n = stack.len();
             if n < 1 {
                 return Err(need(name, 1, n));
+            }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, name));
             }
             let Some((referent, recv_mut)) = ref_parts(stack[n - 1].ty, refs) else {
                 return Err(reference_word_operand_error(
@@ -5435,6 +5577,9 @@ fn check_reference_word(
                         if n < 1 {
                             return Err(need(name, 1, n));
                         }
+                        if stack[n - 1].quot.is_some() {
+                            return Err(reject_quotation_operand(ctx, span, name));
+                        }
                         if stack[n - 1].ty != want {
                             return Err(type_mismatch_error(
                                 ctx,
@@ -5470,6 +5615,12 @@ fn check_reference_word(
                 };
                 return Err(borrow_of_non_place_error(ctx, span, name, &found));
             };
+            // R11: `&q` on a quotation local currently reaches
+            // `borrow_of_scalar_local_error`, whose message lies about the
+            // `Cstr` placeholder; reject with the named-op wording instead.
+            if scope.local(rest).is_some_and(|b| b.quot.is_some()) {
+                return Err(reject_quotation_operand(ctx, span, name));
+            }
             if local_ty.is_ref() {
                 return Err(borrow_of_reference_local_error(ctx, span, rest, local_ty));
             }
@@ -5538,6 +5689,9 @@ fn check_access_word(
             if n < 1 {
                 return Err(need("@", 1, n));
             }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "@"));
+            }
             let Some((referent, _)) = ref_parts(stack[n - 1].ty, refs) else {
                 return Err(reference_word_operand_error(
                     ctx,
@@ -5559,6 +5713,16 @@ fn check_access_word(
                 return Err(need(name, 2, n));
             }
             let value = stack[n - 1];
+            // R8r: guard the stored value strictly above the `match_slot`
+            // below, which returns `Exact` on the `Cstr` placeholder into a
+            // `&!Cstr` referent (a silent accept) rather than a mismatch. The
+            // receiver operand is an ordinary R11 default-deny.
+            if value.quot.is_some() {
+                return Err(reject_quotation_stored(ctx, span));
+            }
+            if stack[n - 2].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, name));
+            }
             let Some((referent, mutable)) = ref_parts(stack[n - 2].ty, refs) else {
                 return Err(reference_word_operand_error(
                     ctx,
@@ -5625,6 +5789,11 @@ fn check_str_word(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // R11: `len`/`cstr` inspect the top operand's `ty`; reject a quotation
+    // here (before `len` falls through to the array path on a non-`str`).
+    if matches!(name, "len" | "cstr") && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     match name {
         "len" => {
             let Some(top) = stack.last() else {
@@ -5669,6 +5838,17 @@ fn check_array_word(
             }
             let count = stack[n - 1];
             let element = stack[n - 2];
+            // R8f: a quotation element would have to become a runtime array
+            // value. Guarded strictly above `contains_reference` below, whose
+            // registry index would panic on an aggregate placeholder (R4); the
+            // `Cstr` placeholder is registry-free but the guard order is what
+            // R4's reasoning pins. A quotation count is a plain operand (R11).
+            if element.quot.is_some() {
+                return Err(reject_quotation_stored(ctx, span));
+            }
+            if count.quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "fill"));
+            }
             let Some(count_val) = count.int_val else {
                 return Err(fill_count_not_literal_error(ctx, span, count.ty));
             };
@@ -5698,6 +5878,9 @@ fn check_array_word(
             if n < 1 {
                 return Err(need("len", 1, n));
             }
+            if stack[n - 1].quot.is_some() {
+                return Err(reject_quotation_operand(ctx, span, "len"));
+            }
             if !matches!(stack[n - 1].ty, Type::Array(..)) {
                 return Err(array_word_operand_error(ctx, span, "len", stack[n - 1].ty));
             }
@@ -5721,6 +5904,10 @@ fn check_owned_cell_word(
     arrays: &[ArrayDecl],
     cells: &mut Vec<OwnedCellDecl>,
 ) -> Result<Option<Vec<Slot>>, String> {
+    // R11: `^`/`^>`/`^|>` each inspect the top operand's `ty`.
+    if matches!(name, "^" | "^>" | "^|>") && stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
         "^" => {
@@ -5822,6 +6009,9 @@ fn check_struct_peek_word(
         return Err(underflow_error(ctx, span, name, 1, n));
     }
     let top = stack[n - 1];
+    if top.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     if top.ty != struct_ty {
         return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
     }
@@ -5875,6 +6065,9 @@ fn check_struct_get_word(
         return Err(underflow_error(ctx, span, name, 1, n));
     }
     let top = stack[n - 1];
+    if top.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
     if top.ty != struct_ty {
         return Err(type_mismatch_error(ctx, span, name, struct_ty, top.ty));
     }
@@ -5921,7 +6114,12 @@ fn check_shuffle(
             // value of any type with no type check, exactly as before; the
             // recorded type is what lets `check`'s post-pass resolve which
             // concrete override (if any) this call site dispatches to.
-            prov.dropped.push(top.ty);
+            // R11 carve-out: `drop` of a compile-time-only quotation marker
+            // discards it with nothing to dispose, and its `Cstr` placeholder
+            // is inert in the drop-override graph; skip the push.
+            if top.quot.is_none() {
+                prov.dropped.push(top.ty);
+            }
         }
         "swap" => {
             let n = stack.len();
