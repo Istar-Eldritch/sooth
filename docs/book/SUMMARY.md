@@ -7,6 +7,7 @@
 - [Getting Started](./getting-started.md)
 - [The Stack](./the-stack.md)
 - [Words](./words.md)
+- [Control Flow](./control-flow.md)
 - [Numbers](./numbers.md)
 
 # The Linear Spine
