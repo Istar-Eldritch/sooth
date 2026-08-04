@@ -231,9 +231,18 @@ first-loaded-wins). `examples/*.sth` and the native `tests/phase4_generics.rs`/
 once, instantiate at two different types, instantiate twice at one type without
 recompiling, redefine, and see the new body take effect on a new call while an earlier
 line's call keeps the old one.
-**Next action: Phase 4 Slice 3** (aggregate-return aliasing: the loop-carried copy), the
-next of eight dependency-ordered slices planned out under Phase 4. See
-`docs/phase4-slice3-brief.md` for the measured recon and the decisions its spec owes.
+**Phase 4 Slice 3 (aggregate-return aliasing: the loop-carried copy) is complete**: a
+self-tail-recursive loop carrying an aggregate across the back-edge now gets one
+entry-hoisted stable stack slot per carried slot (no header phi for it) plus an
+unconditional read-before-write staged blit on each back-edge, so a value from
+iteration *k* can no longer alias the slot iteration *k+1* overwrites; scalars,
+references, ordinary (non-loop) join phis, and the fused destructor loops are
+unchanged. The cause was storage reused across loop iterations generally, not the
+aggregate-return ABI specifically: a by-value aggregate return is the common instance,
+but an aggregate constructed inline each iteration with no call at all reused its
+entry-hoisted storage the same way and is fixed by the same change.
+**Next action: Phase 4 Slice 4** (quotations + the internal loop primitive), the next of
+eight dependency-ordered slices planned out under Phase 4.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -862,44 +871,27 @@ then find out what the compiler owes it.
    *defining* line, not the instantiating line's, matching the frozen-binding rule every other
    REPL word already follows (see DESIGN.md's Open / deferred: REPL late binding, for the larger
    live-patching question this brushed against and deferred rather than decided here).
-3. **Aggregate-return aliasing: the loop-carried copy.** A word returning an aggregate
-   lowers to `%r =:T call $f()`, and QBE materialises that into **one stack slot per call
-   site**. A self-tail-recursive word lowers to a loop with header phis rather than a new
-   frame, so a result from iteration *k* carried across the back-edge points at the slot
-   iteration *k+1* overwrites: the value silently becomes the wrong one, with no diagnostic.
-   The mechanism is `field_value` in `src/ir.rs` handing back an interior pointer into that
-   slot rather than a copy. Reproduce with a two-field struct, a word returning it, and a
-   self-tail-recursive word that carries the previous iteration's struct while calling the
-   producer again before reading it: a 3-step countdown prints `0 2 1 1` where `0 3 2 1` is
-   correct. Slice 1's spec carried this as a documented known issue and the
-   post-implementation condense pass dropped it, which is why it is written down here
-   instead.
+3. **Aggregate-return aliasing: the loop-carried copy (fixed).** A self-tail-recursive
+   loop lowers to header phis rather than a new frame each iteration, so any aggregate
+   *storage reused across iterations* that is carried across the back-edge could alias:
+   a value from iteration *k* pointed at the same slot iteration *k+1* overwrote, silently
+   becoming the wrong value with no diagnostic. A by-value aggregate return (`%r =:T call
+   $f()`, one QBE stack slot per call site) was the common instance and the reason this
+   became urgent, but it was one instance of the mechanism, not the mechanism itself: an
+   aggregate constructed inline each iteration, with no call at all, reused its
+   entry-hoisted storage and reproduced the identical bug. Fixed by giving each
+   loop-carried aggregate slot one entry-hoisted stable stack slot (no header phi for it)
+   and an unconditional read-before-write staged blit on the back-edge, immune by
+   construction to both a swap (two carried slots exchanging places) and an interior
+   pointer into a carried slot (`field_value`'s `PtrOffset`), with no aliasing analysis.
+   Scalars, references, ordinary (non-loop) join phis, and the fused destructor loops'
+   own lowering are unchanged.
    **This displaced generic struct declarations from the slot** (moved to Phase 6, see
    there). That slice's whole claim to not being speculative structure was one named
    consumer, `filter` needing to bundle a filtered array with a count, and slice 1's
    synthesized multi-output return bundles closed that need: `: pass-through ( [i64 'N] --
    [i64 'N] usize ) len ;` is `filter`'s exact shape and compiles and runs at two different
    lengths today, verified against the built compiler.
-   **Pre-existing, not a slice 1 regression**: single-output struct return has it too, which
-   is why `vm-pop` could have hit it since Phase 2. What changed is reach and urgency. Slice
-   1 put *every* multi-output word on this path, and slices 4-5's combinators are recursive
-   by construction and will lean on it hard, so it moves from a corner of the struct feature
-   to the floor the phase's headline exit stands on. It is also exactly the defect class the
-   language exists to remove: a silent wrong answer where a compile error or a correct value
-   belongs.
-   **Why this wants a spec rather than one implementation pass.** The obvious fix, copying
-   the call result into a fresh slot at the call site, is wrong in both available placements:
-   hoisted to the entry block it is a single slot again and the bug returns unchanged, while
-   left in the loop body it is a stack bump per iteration, breaking the constant-stack
-   iteration guarantee this phase is built on. The fix therefore has to be phi-aware, giving
-   a loop-carried aggregate a stable slot with the copy on the back-edge, which touches
-   `begin_loop`/`finalize_loop` and the aggregate phi model rather than the call site alone.
-   The brief should start from the cheap half, though: **no new IR instruction is needed.**
-   `Alloc` (a frame-local aggregate slot) and `Blit` (a byte copy between aggregate pointers,
-   already the mechanism behind the byte-copy `dup`, a setter's copy-all, and a nested-struct
-   field store) both exist, so this is a lowering-shape question with no backend-neutrality
-   decision inside it. Whether every aggregate return takes a copy or only loop-carried ones
-   do is the cost-versus-simplicity call to settle in the spec.
 4. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
    primitive they compile down to for constant-stack iteration, plus call-site inlining.
    After slice 1 because a combinator's signature has to *say* `[ 'a -- 'b ]`, which needs
