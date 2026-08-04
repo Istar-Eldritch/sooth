@@ -799,11 +799,11 @@ fn quotation_as_if_condition_is_error() {
     let err = check_error(": main ( -- ) [ + ] if 1 . else 2 . end ;\n");
     assert!(
         err.contains("`if`") && err.contains("cannot take a quotation as an operand"),
-        "R11if should name `if`, not a Bool mismatch, got: {err}"
+        "R11if should name `if`, not a bool mismatch, got: {err}"
     );
     assert!(
-        !err.contains("Bool"),
-        "R11if must not leak a Bool mismatch, got: {err}"
+        !err.contains("bool"),
+        "R11if must not leak a bool mismatch, got: {err}"
     );
 }
 
