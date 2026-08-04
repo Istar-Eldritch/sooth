@@ -127,19 +127,36 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   at the join (R7), so no poisoned marker ever exists to carry, and R12's phantom-containment
   argument no longer depends on rejecting at consumption.
 
-  The placeholder `ty` is a **registry-free scalar** (e.g. `Type::Bool`, or a dedicated
-  non-aggregate scalar sentinel), **never an aggregate / `Str` / `OwnedCell` / `Ref`**. This
-  is load-bearing, not free choice: an aggregate-shaped sentinel (`Type::Struct(StructId(9999),
-  ..)` and its `Enum`/`Array`/`OwnedCell` kin) panics by registry index at
-  `is_copy`/`is_linear`/`contains_reference`, and those run at `TermKind::Bind`
-  (`src/check.rs:4340`) **before** any R11 guard, so the forwarding-through-a-bind criterion
-  would crash rather than diagnose. A registry-free scalar never panics; what stops it being
-  *silently accepted* is R11's audited default-deny, not the placeholder itself. (Pin the
-  lowering-side placeholder `IrType` for the same reason: R12.)
+  The placeholder `ty` is pinned to **`Type::Cstr`** (`src/ast.rs:612`), an *existing*
+  registry-free scalar, **never an aggregate / `Str` / `OwnedCell` / `Ref`** and **never a new
+  `Type` variant** (D1 forbids one, and `Type` has no unit/never variant to borrow). Two
+  distinct facts make this pinned, not a free choice:
+  - *Registry-free, so it never panics.* An aggregate-shaped sentinel (`Type::Struct(
+    StructId(9999), ..)` and its `Enum`/`Array`/`OwnedCell` kin) panics by registry index at
+    `is_copy`/`is_linear`/`contains_reference` (`src/check.rs:194`/`:221`/`:240`), and those run
+    at `TermKind::Bind` (`src/check.rs:4288`) **before** any R11 guard, so the
+    forwarding-through-a-bind criterion would crash rather than diagnose. `Cstr` is a plain
+    scalar in all three predicates, so it never panics.
+  - *Fewest type-directed acceptors, so the audit is smallest.* A missed R11 guard on the
+    placeholder is a **silent accept**, not an error (`match_slot`, `src/check.rs:132`, returns
+    `Exact` on `ty` equality and reads no side channel), so the placeholder must be the scalar
+    with the fewest sites that accept it. `Cstr`'s only type-directed acceptors are `.` (print,
+    `src/check.rs:4782`), the `cstr` word and other `check_str_word` inputs, `extern`/`env`
+    arguments, and the equality/comparison operators, **all of which are on R11's audit list**.
+    `Bool` is the worst available choice and is deliberately rejected: it is the type of the
+    `if` condition (`src/check.rs:4457`) and of `and`/`or`/`xor`/`not` and `.`, so a missed
+    guard on the `if` condition would not even mismatch, it would *pass* `cond.ty != Type::Bool`
+    and lower a `Jnz` over a phantom `Value` (a silent miscompile, not a diagnostic).
 
-- **R5.** `check_term`'s `TermKind::Quotation` arm (`src/check.rs:4248`) interns the body
-  into the side table and pushes a quotation `Slot` (`quot: Some(Known(id))`). It does **not**
-  check the body here (D3): a bare body's input row is unknown until its consumption site.
+  State the consequence plainly: with `Cstr` (an inhabited scalar), a **missed** R11 guard is a
+  silent accept, not an error. That is exactly what makes R11's audit list load-bearing rather
+  than defensive, and why R11 is converted to a table-driven test (R11, criterion R11t) rather
+  than left as prose. (Pin the lowering-side placeholder `IrType` for the panic reason too: R12.)
+
+- **R5.** A new `TermKind::Quotation` arm in `check_term` (the `fn` is at `src/check.rs:4248`;
+  the arm sits beside the other `TermKind` arms) interns the body into the side table and pushes
+  a quotation `Slot` (`quot: Some(Known(id))`). It does **not** check the body here (D3): a bare
+  body's input row is unknown until its consumption site.
 
   The mirror `poly_term` arm (`src/check.rs:2990`) **rejects eagerly at the literal**, and
   this is forced, not a preference. `poly_term`'s stack is `Vec<PolyType>` (`src/check.rs:2952`),
@@ -164,7 +181,17 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   leaks `x` past the `call`, so a second `call` fails with `rebound_local_error`
   (`src/check.rs:4295`), and a linear value bound inside the body escapes `leave_block`'s
   unconsumed-linear check, which is the only thing that catches it. The `times` body splice
-  (R18) is bracketed the same way. On interception order: `call`/`times` are intercepted
+  (R18) is bracketed the same way.
+
+  The splice is driven with the `tail` flag pinned **`false`** (both the `call` splice here and
+  the `times` splice in R18), mirroring the lowering-side pin (R13/R14) and forced by the same
+  fact. `check_term`'s self-tail path fires on `tail && ctx.word_name() == Some(name)`
+  (`src/check.rs:4440`), so a `call` splice inheriting the enclosing term's `tail` in
+  `: f ( i64 -- i64 ) ... [ f ] call ;` would check the spliced `f` as a tail self-call and run
+  the back-edge checks, while `has_self_tail_call` is **false** (`collect_tail_calls` sees the
+  final term as `Call("call")`, `src/check.rs:2116`) so lowering emits a real `Instr::Call` and
+  the program recurses. Pinning `tail = false` keeps the checker from validating a loop that
+  lowering never builds. On interception order: `call`/`times` are intercepted
   **before every builtin family and user-word lookup** (see R11's dispatch-order list), not
   merely "before user-word lookup"; a local literally named `call` still wins.
 
@@ -173,9 +200,18 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   quotation in the same stack position merges them at the join (`check_term`'s `If` arm,
   `src/check.rs:4573`). **The rejection fires at the join, not at consumption.** In the merge
   loop, when either merged slot has `quot.is_some()` and the two are not the *identical*
-  `Known(id)`, error there: `` error: a quotation's body must be known where it is used, but
-  these two branches leave different quotations at line N (a quotation cannot be a runtime
-  value; higher-order values are Phase 6) ``. This is why R4 has no `Merged` variant, and it
+  `Known(id)`, error there. The rejection needs **two phrasings**, because the placeholder is
+  `Cstr` (an inhabited scalar), so a branch can genuinely leave a real `Cstr` opposite a
+  quotation with `t.ty == e.ty`, and the ordinary `t.ty != e.ty` mismatch (`src/check.rs:4525`)
+  never fires to catch it. When **both** arms leave a quotation but not the same `Known(id)`:
+  `` error: a quotation's body must be known where it is used, but these two branches leave
+  different quotations at line N (a quotation cannot be a runtime value; higher-order values are
+  Phase 6) ``. When **one** arm leaves a quotation and the other does not: `` error: one branch
+  of the `if` at line N leaves a quotation and the other does not; a quotation cannot be a
+  runtime value (higher-order values are Phase 6) ``. The single guard fires for both shapes
+  (`either merged slot has quot.is_some() and the two are not the identical Known(id)`); the
+  phrasing is selected on whether the *other* slot also has `quot.is_some()`. This is why R4 has
+  no `Merged` variant, and it
   is what makes R12's containment true: rejecting at consumption is too late, because
   `lower_if` (`src/ir.rs:3691-3701`) emits a `Phi` for every stack position where the two
   arms' `Value` ids differ, so a merged quotation that is only ever `drop`ped (R11 leaves
@@ -188,11 +224,17 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
 - **R8: array element is a located rejection** *(located)*. Storing a quotation into an
   array rejects, because it would have to become a runtime value: `` error: a quotation
   cannot be stored in an array (escaping quotations are Phase 6) ``. This must cover **both**
-  array-store paths: `fill` (guard placed *above* its `contains_reference(element.ty, ..)`
-  registry index at `src/check.rs:5542`, per R4's registry-free-scalar reasoning), and a
-  store through a reference `&!`/`!`/`+!` (`match_slot(value, referent)` at `src/check.rs:5447`,
-  which returns `Exact` on type equality and reads no side channel, so a scalar placeholder
-  is silently accepted without the guard).
+  array-store paths, each witnessed by its **own** golden (criteria R8f, R8r) since one golden
+  exercises one path:
+  1. `fill` (guard placed *strictly above* its `contains_reference(element.ty, ..)` registry
+     index at `src/check.rs:5543`, per R4's registry-free-scalar reasoning).
+  2. a store through a reference `&!`/`!`/`+!` (`match_slot(value, referent)` at
+     `src/check.rs:5447`). This path is the sharper one and its guard placement is
+     load-bearing: the placeholder is `Cstr`, so storing a quotation into a `&!Cstr` referent
+     makes `match_slot(value=Cstr, referent=Cstr)` return `Exact` (`src/check.rs:132`), a
+     **silent accept**, not a `Mismatch`. The guard must sit strictly above the `match_slot`
+     call or the store is accepted with no diagnostic at all. R8r therefore proves guard
+     placement, not merely message wording.
 
 - **R9: non-inlined word parameter is a located rejection** *(located)*. Passing a
   quotation as an argument to a user `:` word (or a polymorphic `'T`/row slot) rejects,
@@ -200,12 +242,13 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   passed to `{word}`; only `call` and `times` accept one (higher-order user words are
   Phase 6) ``. This fires at **two** sites, both before ordinary unification so the message
   is specific, not a generic mismatch:
-  1. the `env` argument loop (`src/check.rs:4419`), **before** `match_slot`, so
+  1. the `env` argument loop (`src/check.rs:4427`), **before** `match_slot`, so
      `SlotMatch::Mismatch`'s generic message does not win first. This loop also covers
      generated struct constructor/setter fields and `extern` arguments (they are `env` words
-     too, `src/check.rs:1011-1013`, `:4425`), so the wording says "word", not "user `:` word",
+     too, `src/check.rs:1011-1013`), so the wording says "word", not "user `:` word",
      to cover them.
-  2. `check_poly_call` (`src/check.rs:3290`), **before** `unify_poly_input`. This is not
+  2. `check_poly_call`'s input loop (`src/check.rs:3289`, `fn` at `:3270`), **before**
+     `unify_poly_input`. This is not
      optional: `check_poly_call` reads only `stack[base + i].ty` and `unify_poly_input` binds
      a `Var` to *any* concrete type, so a quotation passed to a polymorphic word does not
      fail unification, it **succeeds**, binds `'T` to the placeholder, and monomorphizes a
@@ -237,14 +280,24 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
     pop, which must be guarded **before** `src/check.rs:4457`'s `cond.ty != Type::Bool` return,
     or the generic mismatch (naming the placeholder) wins;
   - `check_str_word` (`cstr`/`len`), `check_access_word`, `check_array_word` and
-    `check_array_index` (`:4933`), `check_owned_cell_word`, `check_struct_peek_word`,
+    `check_array_index` (`:4940`), `check_owned_cell_word`, `check_struct_peek_word`,
     `check_struct_get_word`, `check_reference_word` (`&q` at `:5337` is currently
     `borrow_of_scalar_local_error`, whose message lies about the placeholder);
-  - the `env` argument loop (`:4419`) and `check_poly_call` (`:3290`) (these are R9's two
-    sites, listed here for completeness of the default-deny);
-  - the store paths (`:5447`, R8) and `fill` (`:5542`, R8);
-  - `check_outputs` (`:2022`, R10) and the self-tail back-edge row (R18);
-  - the REPL line boundary (`:1897`, R19).
+  - the `env` argument loop (`:4427`) and `check_poly_call`'s input loop (`:3289`) (these are
+    R9's two sites, listed here for completeness of the default-deny);
+  - the store paths (`:5447`, R8) and `fill` (`:5543`, R8);
+  - `check_outputs` (`:2049`, R10) and the self-tail back-edge row (R18);
+  - the REPL line boundary (`:1899`, R19).
+
+  **The audit is a test artifact, not prose** (criterion R11t). Because a missed guard on the
+  `Cstr` placeholder is a *silent accept* (R4), the completeness of this list is load-bearing
+  and must be a regression guard, not a reviewer's one-time walk. R11 adds one table-driven
+  checker unit over `(source, op_name)` pairs, one row per audited site (every op
+  `check_operator`/print/`check_str_word`/`check_array_word`/`check_array_index`/
+  `check_owned_cell_word`/`check_access_word`/`check_reference_word`/`check_struct_peek_word`/
+  `check_struct_get_word` recognises, plus the `if` condition, minus the shuffles and `drop`),
+  each asserting the shared `reject_quotation_operand` wording names that op. A new consumer
+  added later without a guard fails this table.
 
   **Audit method** (stated so completeness is checkable): the guard covers every site that
   matches, mismatches, or otherwise branches on a popped/inspected `Slot.ty` for a
@@ -254,7 +307,7 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   Shuffles (`dup`/`swap`/`over`/`rot`) and `drop` are **not** guarded: shuffles forward the
   marker verbatim (D2), and `drop` of a compile-time-only marker discards it with nothing to
   dispose. One caveat on `drop`: its checker arm pushes the dropped slot's `ty` into
-  `prov.dropped` (`src/check.rs:5784`), feeding the drop-override reachability graph
+  `prov.dropped` (`src/check.rs:5786`), feeding the drop-override reachability graph
   (`:2334`). Skip that push for a quotation slot (the registry-free scalar is inert in that
   graph regardless, but skipping is cleaner). Lowering's `drop` arm must treat the phantom as
   a pure pop (R12).
@@ -264,25 +317,55 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   dispatch alongside `call` (R6/R11 ordering). It requires a quotation `Slot` on top with
   `quot: Some(Known(id))` and an `i64` count beneath, and splices the body against the row
   plus a synthesized index via the ordinary term checker, bracketed by
-  `scope.depth()`/`leave_block` (R6). Three obligations the drafted spec missed:
+  `scope.depth()`/`leave_block` and with the `tail` flag pinned **`false`** (R6). Four
+  obligations, the first two of which the drafted spec got wrong:
   - **The splice must be identity on the move/borrow state, not only on the row.** The body
     is spliced *once* but runs *N* times, so a body that consumes a linear local checks clean
     (`scope.moves.take(name, span)` succeeds exactly once, `src/check.rs:4350`) and disposes
-    N times at runtime. Require the move-state and live-derivation set to be unchanged across
-    the splice: run it against a clone of `scope` and require it unchanged, or equivalently
-    invoke `check_linear_across_back_edge` / `check_reference_across_back_edge`
-    (`src/check.rs:4440-4441`) with the pre-splice stack/scope, exactly as the self-tail path
-    does. Located wording: `` error: a `times` body cannot consume `{name}` (line N): the
-    body runs more than once, so the value would be disposed of more than once ``. This is
-    the single most important checker fix; the `0 1000000 [ + ] times` witness never
-    exercises it, so a negative golden is required.
+    N times at runtime. The rule is: **clone `scope` before the splice and require it
+    unchanged after.** `Scope`/`Binding` derive only `Debug, Clone` (`src/check.rs:604`,
+    `:612`), no `PartialEq`, so "unchanged" is spelled out concretely as two comparisons:
+    `scope.moves.states` (a `HashMap<String, MoveState>`, `src/check.rs:532`, and `MoveState`
+    is `Copy + PartialEq`, `:520`) equal before and after, **and** the `live_derivs(stack,
+    scope)` set (`src/check.rs:677`) equal before and after. Do **not** "equivalently" invoke
+    `check_linear_across_back_edge` / `check_reference_across_back_edge`: those are a *cruder*
+    and *wrong* check here. `check_linear_across_back_edge` (`src/check.rs:4062-4083`) errors
+    on **any** `is_linear` slot below the args, but for `times` the row *is* the stack, so it
+    would reject any linear aggregate carried through the row, contradicting criterion 5c; its
+    second clause errors on **any** unconsumed linear local in scope whether the body touches
+    it or not; and its message (`linear_across_back_edge_error`) says "self-tail-call
+    back-edge", a lie at a `times`. The clone-and-compare rule neither over- nor under-rejects,
+    for three reasons: a body that only *borrows* an outer local consumes the derived reference
+    within the splice so `live_derivs` is unchanged (accepted, a borrow is idempotent per
+    iteration); a body that *binds and consumes its own* locals is fine because `Scope::leave`
+    removes departing bindings' `moves` entries (`src/check.rs:661-666`) so the map returns to
+    its pre-splice contents; and a body that reads a `Copy` local never enters `moves` at all
+    (`:528` doc, `Scope::bind` inserts only for linear values). Located wording: `` error: a
+    `times` body cannot consume `{name}` (line N): the body runs more than once, so the value
+    would be disposed of more than once ``. This is the single most important checker fix; the
+    `0 1000000 [ + ] times` witness never exercises it, so a negative golden is required.
+  - **Reject a `times` nested in a loop, here in the checker** (moved from R14 step 0, which
+    could not produce a located diagnostic: `src/ir.rs` has no error channel, `grep -c 'Err('
+    src/ir.rs` is `0`, and `lower_call`/`lower_term`/`lower_terms` all return `()`). Both cases
+    are decidable in the checker, where a span and the diagnostic machinery exist:
+    - a `times` inside a **self-tail word**: `has_self_tail_call(word)` (`src/check.rs:2130`),
+      the same whole-word predicate lowering uses to decide `begin_loop` (`begin_loop` runs
+      before the body, so it is whole-word rather than lexical, matching R14's
+      `self.header.is_some()`);
+    - a `times` inside **another `times` body**: a splice-depth counter incremented on the
+      checker's `times` path around the body splice.
+    Located wording: `` error: a `times` cannot be nested in a loop yet (line N): nested
+    constant-stack loops need a hoist-target split deferred to a later slice ``. Criterion N is
+    a `check_error` golden asserting this wording *with* a line number. R15's save/restore is
+    unaffected and still required.
   - **Guard every slot of the row, not just the consumed top.** `times`'s row is `..s`, the
     entire remaining stack; a quotation anywhere in the row reaches `begin_loop`, which does
     `value_type(p)` and emits `Instr::Phi` over a phantom with no defining instruction
     (`src/ir.rs:2311`, `:2329`). Reject a quotation in any row slot at `times` (same wording
     family as R9), and state the same for the self-tail back-edge row (R11's site list).
   - The body's net effect on the row must equal the row (D6); a mismatch is the ordinary
-    row-effect error, no new diagnostic.
+    row-effect error, no new diagnostic. This is a named obligation with its own negative
+    golden (criterion R18c).
 
 - **R19: a quotation left on a REPL line's residual stack is a located rejection** *(located)*.
   `infer_line` returns the line's final stack as types (`src/check.rs:1906`) and the session
@@ -306,8 +389,10 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   branch merge of two *different* quotations (`lower_if`, `src/ir.rs:3691-3701`), and R7 now
   rejects that at the join, so a merged quotation never reaches lowering even when it is only
   `drop`ped. The identical-`Known`-id case reaches `lower_if`'s `t == e` fast path
-  (`src/ir.rs:3696`), which emits no `Phi`. Pin the placeholder `IrType` to a **non-aggregate
-  scalar** (`I64` or `Bool`), never `Struct`/`Enum`/`Array`/`Str`/`OwnedCell`: `dup` blits for
+  (`src/ir.rs:3696`), which emits no `Phi`. Pin the placeholder `IrType` to **`I64`**, a
+  non-aggregate scalar, never `Struct`/`Enum`/`Array`/`Str`/`OwnedCell` (the IR side has no
+  `if`-condition concern, so the checker's `Cstr` choice does not bind here; any non-aggregate
+  scalar is safe and `I64` is the plainest): `dup` blits for
   aggregates (`src/ir.rs:2472-2496`) and `drop` emits a destructor `Instr::Call` for a linear
   aggregate (`:2503`, `:3378-3399`), both dispatching on `value_type`, and R11 deliberately
   leaves both unguarded, so an aggregate placeholder would blit from or call with the phantom.
@@ -328,15 +413,21 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
 
 - **R14: `times` lowering into the back-edge machinery.** `lower_call`'s new `"times"` arm
   drives a constant-stack loop, reusing `begin_loop`/`finalize_loop` (D6):
-  0. **Reject a nested `times` first.** If `self.header.is_some()` at the `times` arm (a
-     `times` inside a self-tail word's loop, since `begin_loop` runs before the body at
-     `src/ir.rs:2011`, or a `times` inside another `times` body), reject with a located
-     diagnostic and defer nesting to a later slice. The reason nesting cannot ride R15 alone:
-     `begin_loop` unconditionally sets `entry_block = entry` (`src/ir.rs:2307`), so an inner
-     loop either hoists its allocs into a block that runs once per *outer* iteration (killing
-     the outer constant-stack guarantee) or, if the outer `entry_block` is kept, seeds its
-     stable slot once and reads a stale slot on later outer iterations. The clean hoist-target
-     split is a later slice's.
+  0. **Nested `times` is already rejected by the checker (R18), so lowering may assume
+     `self.header.is_none()` here.** The rejection does **not** live in lowering: `src/ir.rs`
+     has no error channel (`grep -c 'Err(' src/ir.rs` is `0`; `lower_call`/`lower_term`/
+     `lower_terms` all return `()`), so a located diagnostic here would need either a `panic!`
+     (violating D4/R10's not-a-panic rule) or threading `Result` through all of lowering (the
+     refactor R16 disclaims). R18's two checker predicates (`has_self_tail_call` for a `times`
+     in a self-tail word, splice-depth for a `times` in a `times` body) are exactly R14's
+     would-be `self.header.is_some()` test, decided one stage earlier. The reason nesting
+     cannot ride R15 alone (recorded here since it is a lowering fact): `begin_loop`
+     unconditionally sets `entry_block = entry` (`src/ir.rs:2307`), so an inner loop either
+     hoists its allocs into a block that runs once per *outer* iteration (killing the outer
+     constant-stack guarantee) or, if the outer `entry_block` is kept, seeds its stable slot
+     once and reads a stale slot on later outer iterations. The clean hoist-target split is a
+     later slice's. Lowering may keep a `debug_assert!(self.header.is_none())` documenting the
+     checker's guarantee, but emits no user-facing diagnostic.
   1. Pop the phantom quotation `Value` (top) and resolve its body; pop the `i64` **count**.
   2. Synthesize an induction `Value` seeded `Const 0`. Call
      `begin_loop(&[row..., index_seed], true)` where `row` is the remaining stack (the `..s`
@@ -359,8 +450,11 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
      `body_block` with `Jmp(header)`.
   6. `finalize_loop()` back-patches the scalar phis (row scalars + index) and appends the
      aggregate read-before-write staging blits on the back-edge, unchanged from slice 3.
-  7. Start `exit_block`; `self.stack =` the `Vec<Value>` `begin_loop` returned, minus the
-     trailing index. Do **not** describe these as "header-phi outputs": an aggregate carried
+  7. Start `exit_block` and **reset `self.terminated = false`** (step 5's body seal set it, and
+     `lower_if` resets the same way at its own joins, `src/ir.rs:3688`+; miss this and every
+     term after the `times` is silently dropped). Then `self.stack =` the `Vec<Value>`
+     `begin_loop` returned, minus the trailing index. Do **not** describe these as
+     "header-phi outputs": an aggregate carried
      slot has no header phi, `begin_loop` returns the entry-hoisted stable slot pointer
      (`src/ir.rs:2312-2323`), and synthesizing an exit phi over it would be a bug. It is sound
      because pass 2's staging writes land before the already-stored back-edge `Jmp`
@@ -375,10 +469,14 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   (`src/ir.rs:2350-2351`) and **never clears `header`/`entry_block`**, so without the restore a
   `times` in an otherwise-ordinary word leaves `entry_block` set, and any later `Alloc` in the
   same word wrongly hoists into the dead `times` entry block (and a later same-word `times`
-  would see `header.is_some()` and be wrongly rejected by step 0). Restoring `header` to `None`
-  is exactly what lets two sequential `times` in one word both run (R15 golden). The headline
+  would trip R14 step 0's `debug_assert!(self.header.is_none())`). Restoring `header` to `None`
+  is exactly what lets two sequential `times` in one word both run (criterion 15). The headline
   witness `main` opens one `times` on an empty saved state, but the save/restore is correctness,
-  not decoration.
+  not decoration. R15 gets both an end-to-end golden (criterion 15, extended to construct an
+  aggregate *after* the first `times` and print its field, witnessing the `entry_block` leak,
+  not only the `header` leak) and an `ir.rs` unit asserting all four saved fields
+  (`header`/`entry_block`/`carried_slots`/`back_edges`) are back to their pre-`times` values
+  after the `times` arm returns.
 
 - **R16: addition-only, but name the forced edits.** `Slot` and `Binding` each gain a
   defaulted `quot` field; no existing golden or unit test changes expected output; no existing
@@ -400,71 +498,124 @@ Diagnostics `Rn` marked *(located)* are behavioural negative tests asserting the
   `entry_block` set across the body splice (it is, until `finalize_loop`), so the
   body-constructed aggregate hazard is neutralized by the exact mechanism slice 3 built.
 
+  R17 is witnessed **deterministically** by an IR-shape assertion, not only by the `ulimit`
+  subprocess (which is coarse and depends on frame-size arithmetic): for criterion 5a/5b's
+  source, every `Instr::Alloc` appears in the loop's **entry block** and **none** in the loop
+  **body block** (criterion 6, extended). That is the literal content of R17 and it fails the
+  moment hoisting is dropped, without relying on signal behaviour. The 1e6-iteration bounded
+  run (5b) stays as a coarse end-to-end backstop; the frame-size arithmetic that gives it
+  detection power is pinned in criterion 5a/5b's source (the 16-byte `Vec2` at 1e6 iterations).
+
 ## Success criteria
 
 Goldens in `tests/phase4_generics.rs` (the Phase 4 home). A value/effect assertion uses
 `run_src` (`tests/phase4_generics.rs:12`, `(String, i32)`); a constant-stack assertion uses
 the existing signal-aware `run_stack_bounded_src` (`:234-248`, `ulimit -s 1024`), which returns
 `Option<i32>` (the exit code only, **not** stdout), so a semantics claim can never ride it
-alone. Neither harness is changed. Naming is `thing_condition_expected`. `Rn` diagnostics are
-behavioural negatives asserting message + named identifiers. Phase labels `2a`/`2b` are the
-two halves of the split phase 2 (Delivery).
+alone. A diagnostic golden uses a `check_error`/`parse_error` helper this slice **adds** to
+`tests/phase4_generics.rs` (declared in *Sanctioned edits*, since roughly ten criteria are
+diagnostic negatives and the file has no such helper today, unlike `tests/phase3_locals.rs:59,65`
+and `tests/phase3_refs.rs:45`). `run_src`/`run_stack_bounded_src` are unchanged. Naming is
+`thing_condition_expected`. `Rn` diagnostics are behavioural negatives asserting message +
+named identifiers. Phase labels `2a`/`2b` are the two halves of the split phase 2 (Delivery).
 
-| # | criterion | golden | phase |
+Every source below is **pinned** (R8r pins the store path and guard placement rather than exact
+chars, since the reference-store surface syntax is intricate): an unpinned diagnostic golden can
+go green on the wrong message, and an unpinned value/constant-stack golden can lose its
+detection power (a small iteration count makes the 1 MB bound un-trippable). `SPY_DEF` is the
+linear stand-in at `tests/phase3_locals.rs:75` (`type: Spy tag i64 ;` + a `drop` overload); a
+source prefixed with it shifts every line number by 2.
+
+| # | criterion (pinned source) | golden | phase |
 |---|---|---|---|
 | 1 | `[ ... ]` parses into `TermKind::Quotation`; nested `[ [ ] ]` parses | `quotation_literal_parses_into_quotation_term` (parser unit) | 1 |
 | 1b | an unterminated `[` is a located parse error (R3) | `unterminated_quotation_is_located_parse_error` (parser unit) | 1 |
 | 1c | a stray `]` with no opening `[` is a located parse error (R3) | `stray_closing_bracket_is_located_parse_error` (parser unit) | 1 |
-| 2 | `1 2 [ + ] call .` prints `3` (fusion runs) | `call_of_literal_quotation_fuses_and_runs` | 2a |
-| 3 | a quotation forwarded through a bind then called runs (`[ + ] \| q \| 1 2 q call .` → `3`); cross-checks B2's `Binding` forwarding | `quotation_forwarded_through_bind_still_calls` | 2a |
-| 3b | a quotation body reads an enclosing local (`: f ( -- ) 7 \| t \| 1 [ t + ] call . ;` → `8`); the capture claim R6 makes | `quotation_body_reads_enclosing_local` | 2a |
+| 2 | `: main ( -- ) 1 2 [ + ] call . ;` prints `3` (fusion runs) | `call_of_literal_quotation_fuses_and_runs` | 2a |
+| 3 | quotation forwarded through a bind then called: `: main ( -- ) [ + ] \| q \| 1 2 q call . ;` → `3\n` (cross-checks R4's `Binding` forwarding) | `quotation_forwarded_through_bind_still_calls` | 2a |
+| 3b | quotation body reads an enclosing local: `: main ( -- ) 7 \| t \| 1 [ t + ] call . ;` → `8\n` (R6 capture) | `quotation_body_reads_enclosing_local` | 2a |
 | 6b | `call` of a literal emits no `Instr::Call` (R13 lowering unit) | `call_of_literal_emits_no_call_instr` (lowering unit) | 2a |
+| R12u | `lower_term`'s `TermKind::Quotation` arm emits no `Instr` and records `quot_bodies` (R12 lowering unit) | `quotation_literal_emits_no_instr_and_records_body` (lowering unit) | 2a |
 | Cu1 | a quotation survives `dup`/`swap`/`over`/`rot` and a bind (checker unit) | `quotation_survives_dup_swap_and_bind` (checker unit) | 2a |
-| R7 | `flag if [ 1 + ] else [ 1 - ] end drop` rejects **at `end`**, naming the join line | `different_quotations_at_a_join_are_error` | 2b |
-| Cu2 | two different quotations at a branch join are rejected at the join; the same `Known` id in both arms is not (checker unit) | `merged_quotations_are_rejected_at_the_join` (checker unit) | 2b |
-| R8 | storing a quotation into an array rejects, naming the array-store position (both `fill` and `&!`/`!` paths) | `quotation_stored_in_array_is_error` | 2b |
+| R7 | `: main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;` rejects **at `end`** naming the join line (both quotations) | `different_quotations_at_a_join_are_error` | 2b |
+| R7n | one arm leaves a quotation, the other a **real `Cstr`** (equal `ty`, so the ordinary mismatch cannot fire): `: main ( -- ) true if [ 1 + ] else "x" cstr end drop ;` fires R7's *second* phrasing | `quotation_versus_value_at_a_join_is_error` | 2b |
+| Cu2 | two different quotations at a join are rejected; the same `Known` id in both arms is not (checker unit) | `merged_quotations_are_rejected_at_the_join` (checker unit) | 2b |
+| R8f | `: main ( -- ) [ + ] 8 fill drop ;` rejects at `fill` (guard above `contains_reference`) | `quotation_stored_in_array_by_fill_is_error` | 2b |
+| R8r | storing a quotation through a `&!Cstr` reference rejects (guard strictly above `match_slot`, which would return `Exact` on the `Cstr` placeholder and silently accept) | `quotation_stored_through_a_reference_is_error` | 2b |
 | R9 | passing a quotation to a user `:` word rejects, naming the word | `quotation_passed_to_user_word_is_error` | 2b |
-| R9p | passing a quotation to a polymorphic word rejects (the `check_poly_call` guard, B6) | `quotation_passed_to_polymorphic_word_is_error` | 2b |
-| R5p | a quotation literal in a polymorphic body rejects (B6) | `quotation_in_polymorphic_body_is_error` | 2b |
-| R10 | a word leaving a quotation on the stack gets the dedicated output diagnostic (F2), not a panic | `quotation_left_on_stack_is_output_error` | 2b |
-| R11 | `1 [ + ] +` (a quotation as an operand) rejects, naming the operator | `quotation_as_operator_operand_is_error` | 2b |
-| R19 | a quotation left on a REPL line's residual stack rejects (B5) | `quotation_left_on_repl_line_is_error` | 2b |
-| 4a | headline value: `0 1000000 [ + ] times .` prints exactly `499999500000` (via `run_src`) | `times_loop_computes_the_index_sum` | 3 |
-| 4b | headline constant-stack: same source runs under 1 MB, `Some(0)` (via `run_stack_bounded_src`) | `times_loop_runs_in_constant_stack` | 3 |
-| 5a | a `times` body constructing an aggregate each iteration computes the expected value (pinned source, `run_src`) | `times_body_constructing_aggregate_computes_expected` | 3 |
-| 5b | same source runs in constant stack, `Some(0)` (R17) | `times_body_constructing_aggregate_runs_in_constant_stack` | 3 |
-| 5c | a `times` carrying an aggregate **through the row** (not constructed in the body) runs; first `CarriedSlot::Aggregate` staging from a non-self-tail driver | `times_carrying_an_aggregate_through_the_row_runs` | 3 |
-| 5z | zero-trip `0 0 [ + ] times` yields the seed row (the exit reads the seed) | `times_zero_trip_yields_seed_row` | 3 |
-| R18a | a `times` body consuming a linear local rejects (B1) | `times_body_consuming_a_linear_local_is_error` | 3 |
-| R18b | a `times` with a quotation anywhere in its row rejects (B8) | `times_with_a_quotation_in_its_row_is_error` | 3 |
-| N | a `times` nested in a loop (inside a self-tail word or another `times`) rejects (R14 step 0) | `times_nested_in_a_loop_is_rejected` | 3 |
-| 15 | two sequential `times` in one word both run (R15 save/restore) | `two_sequential_times_in_one_word_both_run` | 3 |
-| 6 | IR-shape: a `times` call built a header block with a back-edge `Jmp` and **no** per-iteration `Instr::Call` | `times_lowers_to_a_loop_header_not_a_per_iteration_call` (lowering unit) | 3 |
+| R9p | passing a quotation to a polymorphic word rejects (the `check_poly_call` guard) | `quotation_passed_to_polymorphic_word_is_error` | 2b |
+| R5p | a quotation literal in a polymorphic body rejects | `quotation_in_polymorphic_body_is_error` | 2b |
+| R10 | `: f ( -- i64 ) [ + ] ;` (count matches, so the new branch must beat the type mismatch) gets the dedicated output diagnostic, not a panic and not an arity error | `quotation_left_on_stack_is_output_error` | 2b |
+| R11 | `: main ( -- ) 1 [ + ] + ;` (quotation as an operator operand) rejects, naming `+` | `quotation_as_operator_operand_is_error` | 2b |
+| R11if | `: main ( -- ) [ + ] if 1 . else 2 . end ;` rejects with the `reject_quotation_operand` wording naming `if`, **not** a `Bool` mismatch | `quotation_as_if_condition_is_error` | 2b |
+| R11drop | the one legal unguarded-consumer program: `: main ( -- ) 1 [ + ] drop . ;` → `1\n` (`drop` is a pure pop, R11 carve-out + R12) | `quotation_dropped_is_a_pure_pop` | 2b |
+| R11t | table-driven checker unit over `(source, op_name)`, one row per audited site, each asserting the shared `reject_quotation_operand` wording names that op | `quotation_as_operand_is_rejected_at_every_audited_site` (checker unit) | 2b |
+| R6br1 | `: main ( -- ) 2 [ \| x \| x x + ] call . 3 [ \| x \| x x + ] call . ;` → `4\n6\n` (fails `rebound_local_error` if the `leave_block` bracket is dropped) | `two_calls_of_a_binding_quotation_body_both_run` | 2b |
+| R6br2 | `SPY_DEF` + `: main ( -- ) [ 5 Spy \| s \| 42 ] call . ;` rejects: a linear value bound inside the body is left unconsumed at the `call` | `linear_bound_inside_a_quotation_body_is_error` | 2b |
+| R19 | a quotation left on a REPL line's residual stack rejects (R19 wording) | `quotation_left_on_repl_line_is_error` | 2b |
+| 4a | headline value: `: main ( -- ) 0 1000000 [ + ] times . ;` prints exactly `499999500000` (via `run_src`) | `times_loop_computes_the_index_sum` | 3 |
+| 4b | cheap regression tripwire (not an R17 witness): 4a's source runs under 1 MB, `Some(0)`; emits no `Alloc`, so criterion 6 already witnesses its shape | `times_loop_runs_in_constant_stack` | 3 |
+| 5a | `type: Vec2 x i64 y i64 ;` + `: main ( -- ) 0 1000000 [ \| i \| i i Vec2 Vec2>x + ] times . ;` → `499999500000\n` (constructs a 16-byte `Vec2` each iteration; without the R17 hoist that is ~16 MB against the 1 MB bound) | `times_body_constructing_aggregate_computes_expected` | 3 |
+| 5b | same source as 5a runs in constant stack, `Some(0)` (R17 end-to-end backstop) | `times_body_constructing_aggregate_runs_in_constant_stack` | 3 |
+| 5c | carrying an aggregate **through the row**: `type: Vec2 x i64 y i64 ;` + `: main ( -- ) 3 4 Vec2 0 1000000 [ drop over Vec2>x + ] times . drop ;` → `3000000\n` (first `CarriedSlot::Aggregate` staging from a non-self-tail driver) | `times_carrying_an_aggregate_through_the_row_runs` | 3 |
+| 5z | non-zero, non-index seed so the exit cannot alias the index: `: main ( -- ) 7 0 [ + ] times . ;` → `7\n` | `times_zero_trip_yields_seed_row` | 3 |
+| R18a | `SPY_DEF` + `: main ( -- ) 5 Spy \| s \| 0 1000000 [ \| i \| s Spy>tag + ] times . ;` rejects naming `s` with R18's "body runs more than once" wording | `times_body_consuming_a_linear_local_is_error` | 3 |
+| R18b | a `times` with a quotation anywhere in its row rejects (whole-row guard) | `times_with_a_quotation_in_its_row_is_error` | 3 |
+| R18c | body net effect ≠ row: `: main ( -- ) 0 1000000 [ + 1 ] times . ;` fires the ordinary row-effect error | `times_body_changing_the_row_is_error` | 3 |
+| R18u | checker unit over R18's three typing obligations (move-state identity, whole-row guard, row-effect equality) | `times_typing_obligations` (checker unit) | 3 |
+| N | a `times` nested in a loop rejects **in the checker** with a line number (self-tail via `has_self_tail_call`; `times`-in-`times` via splice depth) | `times_nested_in_a_loop_is_rejected` (`check_error`) | 3 |
+| 15 | two sequential `times` in one word both run **and** an aggregate constructed after the first `times` prints its field (R15 restores `entry_block`, not only `header`) | `two_sequential_times_in_one_word_both_run` | 3 |
+| R15u | after the `times` arm returns, `header`/`entry_block`/`carried_slots`/`back_edges` equal their pre-`times` values (R15 lowering unit) | `times_saves_and_restores_loop_state` (lowering unit) | 3 |
+| 6 | IR-shape: `times` builds a header `Block` with an index header `Phi`, a header `Terminator::Jnz`, a back-edge `Terminator::Jmp`, **no** per-iteration `Instr::Call`, and (on 5a's source) every `Instr::Alloc` in the entry block, none in the body block | `times_lowers_to_a_loop_header_not_a_per_iteration_call` (lowering unit) | 3 |
 | 7 | dogfood `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) builds and prints `500000500000`, matching `examples/countdown.sth`'s hand-threaded sum 1..1e6 | `times_example_matches_hand_threaded_countdown` | 4 |
 
-Criterion 6 is the only direct witness the internal loop primitive gets, since the
+Criterion 6 is the primary direct witness the internal loop primitive gets, since the
 primitive is deliberately not user-facing (DESIGN.md:283): it asserts on IR structure (a
-header `Block` reached by a back-edge `Terminator::Jmp`, and the absence of an `Instr::Call`
-in the lowered `main`), mirroring slice 3's `header_phis`/`loop_header` structural tests,
-not on emitted IL text. Criteria 4/5 are split into a value golden (`run_src`, exact string)
-and a constant-stack golden (`run_stack_bounded_src`, `Some(0)`) because the bounded harness
-never captures stdout, so a single-number semantics claim would otherwise be a placebo (a
-`times` that ran zero, `count-1`, or wrong-index iterations still exits 0). Example 7 computes
-the **same** number as `countdown.sth` (`[ 1 + + ]` sums `i+1` for `i` in `0..999999`), so the
-dogfood actually demonstrates parity rather than a value off by 1e6.
+header `Block` with an index `Phi` and a `Terminator::Jnz`, reached by a back-edge
+`Terminator::Jmp`, the absence of an `Instr::Call` in the lowered `main`, and every `Alloc`
+hoisted into the entry block on 5a's source), mirroring slice 3's `header_phis`/`loop_header`
+structural tests, not on emitted IL text. The index `Phi` + header `Jnz` are pinned because
+"header + back-edge `Jmp` + no `Call`" alone is also true of a one-trip or infinite loop.
+Criteria 4/5 are split into a value golden (`run_src`, exact string) and a constant-stack
+golden (`run_stack_bounded_src`, `Some(0)`) because the bounded harness never captures stdout,
+so a single-number semantics claim would otherwise be a placebo (a `times` that ran zero,
+`count-1`, or wrong-index iterations still exits 0). 4b is a **cheap regression tripwire, not
+an R17 witness**: 4a's source emits no `Alloc`, so no plausible R14 lowering fails 4b while
+passing criterion 6; the real R17 witness is 5b plus criterion 6's entry-block `Alloc`
+assertion on 5a's source. Example 7 computes the **same** number as `countdown.sth`
+(`[ 1 + + ]` sums `i+1` for `i` in `0..999999`), so the dogfood actually demonstrates parity
+rather than a value off by 1e6.
+
+**Unit coverage beside every changed stage function** (CLAUDE.md convention; the three test
+mods already exist at `src/check.rs:5833`, `src/parser.rs:1559`, `src/ir.rs:3848`). The table
+rows tagged `(… unit)` are the load-bearing ones: R12u (`lower_term` quotation arm), R11t
+(`reject_quotation_operand` completeness), R18u (`times` typing's three obligations), R15u
+(loop-state save/restore), Cu1/Cu2 (checker forwarding + join). In addition, and required by
+the same convention, each of these changed checker functions gets a unit beside its
+end-to-end golden: `check_outputs`' quotation-at-exit branch (R10), `infer_line`'s REPL
+rejection (R19), `check_poly_call`'s guard (R9p), and `poly_term`'s rejection (R5p). These
+are cheaper and more targeted than leaning on the compile-and-run goldens alone, which would
+also go red for ten unrelated reasons.
 
 ## Sanctioned edits to existing tests
 
-None expected. This slice is addition-only at the representation level (R16): `Slot` and
-`Binding` each gain a defaulted `quot` field (edited at the two full `Slot` literals
+**One sanctioned addition, declared here:** phase 2b adds a `check_error` helper (and, if a
+parse-error negative wants it, a `parse_error` helper) to `tests/phase4_generics.rs`,
+copied from `tests/phase3_locals.rs:59,65` / `tests/phase3_refs.rs:45`. The file has neither
+today, and roughly ten of this slice's criteria are diagnostic goldens, so this is a required
+test-harness addition, not a behaviour change; it is called out so "addition-only" is not
+contradicted by an unannounced helper. No existing test's expected output changes.
+
+Otherwise none expected. This slice is addition-only at the representation level (R16): `Slot`
+and `Binding` each gain a defaulted `quot` field (edited at the two full `Slot` literals
 `src/check.rs:4267`/`:4573`, per R16, both addition-only, no test output changes),
 `parse_term` gains an arm that only fires on `[`, and `call`/`times` are new dispatch arms.
 The criterion-4/5 split rides two **existing** harnesses (`run_src`, `run_stack_bounded_src`)
-with no signature change, so it is not a sanctioned edit either. If a `parse_term` refactor
-forces a change to an existing `unexpected token LBracket` negative test, that is the one
-place a sanctioned edit could appear (no test asserts that string today, so it is unlikely);
-call it out explicitly in the implementing commit the way slice 3 sanctioned its two
-phi-count edits, so a reviewer can tell a sanctioned edit from a silently weakened one.
+with no signature change. If a `parse_term` refactor forces a change to an existing
+`unexpected token LBracket` negative test, that is the one other place a sanctioned edit could
+appear (no test asserts that string today, so it is unlikely); call it out explicitly in the
+implementing commit the way slice 3 sanctioned its two phi-count edits, so a reviewer can tell
+a sanctioned edit from a silently weakened one.
 
 ## Out of scope
 
@@ -491,8 +642,11 @@ test`) and coherent.
 - **Phase 1, surface syntax + AST (parse only).** `TermKind::Quotation` (R1); `parse_term`
   bracket arm + unterminated/stray diagnostics (R2, R3). Exhaustive-match stubs in
   `check_term`/`poly_term`/`lower_term` so the tree compiles: the checker temporarily rejects
-  a quotation as "not yet supported" (narrowed in 2a, retired in 2b), lowering is unreachable
-  behind it.
+  a quotation with a **deliberately distinct temporary string**, `"error: TEMP-quotation
+  consumer not yet wired (phase 1/2a stopgap)"`, chosen so it shares no wording with R5p's
+  *permanent* "is not yet supported" diagnostic; phase 2b must delete the stopgap **by that
+  exact string**, so a grep for `TEMP-quotation` returns nothing at slice end. Lowering is
+  unreachable behind it.
   Exit: criterion 1 (parser unit tests) + green build.
 
 Phase 2 is split into **2a** and **2b** because the original single phase carried a
@@ -501,22 +655,24 @@ full located-rejection set (now widened by the blockers); each half leaves the t
 
 - **Phase 2a, the marker + `call`-of-literal fusion.** `Slot`/`Binding` gain `quot` and the
   side table (R4, D2); `check_term` interns a literal and `poly_term` rejects one (R5); `call`
-  splices against the live stack, bracketed (R6); the fusion lowering (R12, R13) makes
-  `[ + ] call` end-to-end. Keep phase 1's coarse "quotations are not yet supported" rejection
-  for every *other* consumer (a one-line guard, replaced wholesale in 2b, not a stopgap that
-  outlives the slice), so no panic path opens between 2a and 2b. Exit: criteria 2, 3, 3b, 6b,
-  Cu1.
+  splices against the live stack, bracketed with `tail = false` (R6); the fusion lowering
+  (R12, R13) makes `[ + ] call` end-to-end. Keep phase 1's `TEMP-quotation` stopgap for every
+  *other* consumer (one guard, replaced wholesale in 2b), so no panic path opens between 2a
+  and 2b. Exit: criteria 2, 3, 3b, 6b, R12u, Cu1.
 
-- **Phase 2b, the located rejections replace the coarse guard.** R7 (join), R8, R9/R9p, R5p,
-  R10, R11's audited default-deny, and R19 land, retiring 2a's coarse guard. Exit: R7, Cu2,
-  R8, R9, R9p, R5p, R10, R11, R19.
+- **Phase 2b, the located rejections replace the stopgap.** R7 (join, both phrasings), R8
+  (fill + reference paths), R9/R9p, R5p, R10, R11's audited default-deny (including the `if`
+  condition and the `drop` carve-out), R6's `leave_block` bracketing, and R19 land, deleting
+  the `TEMP-quotation` stopgap by string. Exit: R7, R7n, Cu2, R8f, R8r, R9, R9p, R5p, R10,
+  R11, R11if, R11drop, R11t, R6br1, R6br2, R19.
 
 - **Phase 3, the `times` intrinsic and the constant-stack loop.** `times` typing (R18: splice
-  against row + index, requiring the body return the row, identity on move/borrow state, and
-  the row-slot guard) and its lowering into `begin_loop`/`finalize_loop` with a synthesized
-  index, header `Jnz`, and back-edge (R14, `tail = false`, nested-`times` rejection),
-  loop-state save/restore (R15), and the constant-stack guarantee (R17). Exit: criteria 4a,
-  4b, 5a, 5b, 5c, 5z, R18a, R18b, N, 15, 6.
+  against row + index, requiring the body return the row, identity on move/borrow state via
+  clone-and-compare, the whole-row guard, and the nested-`times` rejection in the checker) and
+  its lowering into `begin_loop`/`finalize_loop` with a synthesized index, header `Jnz`, and
+  back-edge (R14, `tail = false`, `debug_assert!(self.header.is_none())`), loop-state
+  save/restore (R15), and the constant-stack guarantee (R17). Exit: criteria 4a, 4b, 5a, 5b,
+  5c, 5z, R18a, R18b, R18c, R18u, N, 15, R15u, 6.
 
 - **Phase 4, dogfood + docs.** Add `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) beside
   `examples/countdown.sth`, computing the same sum; mark ROADMAP.md's slice-4 entry
@@ -532,7 +688,9 @@ full located-rejection set (now widened by the blockers); each half leaves the t
 - `Type`/`PolyType`/`IrType` gain **no** variant (D1); the runtime quotation type is slice 6.
 - `core` stays `no_std`; a non-escaping quotation is core (DESIGN.md:497,512).
 - Constant stack preserved: every loop-body `Alloc` is entry-hoisted (R17), no per-iteration
-  stack bump, witnessed under a 1 MB stack at 1e6 iterations (criteria 4b, 5b).
+  stack bump, witnessed deterministically by criterion 6's entry-block `Alloc` assertion on
+  5a's source and backed end-to-end by the 1 MB bounded run at 1e6 iterations (criterion 5b;
+  4b is a cheap tripwire only).
 
 ## Where the brief was underspecified, and what this spec did
 
@@ -552,11 +710,16 @@ full located-rejection set (now widened by the blockers); each half leaves the t
   over a checker→lowering Span map, because it needs no new cross-stage channel and reuses the
   fact that `lower_call` already moves `Value` ids verbatim through shuffles/binds; the
   checker's rejections guarantee the phantom never reaches a real `Instr`/`Phi`/`Terminator`.
-- **`times` nested in a loop.** The spec **rejects** a `times` nested inside a loop (R14 step
-  0, `self.header.is_some()`), and keeps loop-state save/restore (R15) regardless. The two are
-  not alternatives: rejection closes the hoist-target hazard (an inner loop's `Alloc` hoisting
-  once-per-outer-iteration, or seeding a stable slot once and reading it stale), while
-  save/restore closes a *separate* hazard (a `times` in an ordinary word leaves
+- **`times` nested in a loop.** The spec **rejects** a `times` nested inside a loop, and keeps
+  loop-state save/restore (R15) regardless. The rejection lives in the **checker** (R18), not
+  lowering: `src/ir.rs` has no error channel, so a located diagnostic there would need a panic
+  or a `Result`-threading refactor R16 disclaims. The checker decides both cases with a span
+  in hand (`has_self_tail_call` for a `times` in a self-tail word; splice depth for a `times`
+  in a `times` body), which is exactly R14's would-be `self.header.is_some()` test one stage
+  earlier; lowering keeps only a `debug_assert!(self.header.is_none())`. Rejection and
+  save/restore are not alternatives: rejection closes the hoist-target hazard (an inner loop's
+  `Alloc` hoisting once-per-outer-iteration, or seeding a stable slot once and reading it
+  stale), while save/restore closes a *separate* hazard (a `times` in an ordinary word leaves
   `header`/`entry_block` set because `finalize_loop` never clears them). The clean
   hoist-target split that would allow nesting is deferred to a later slice.
 
@@ -568,9 +731,12 @@ the implementer:
 - **R5's polymorphic-body arm rejects eagerly at the literal** (R5/B6): forced, because
   `poly_term`'s stack is `Vec<PolyType>` with no `Slot` to carry `quot`, and D1 forbids a
   `PolyType` variant.
-- **The placeholder `ty` is a registry-free scalar** (R4/R12/B3): an aggregate-shaped
-  sentinel panics by registry index at `is_copy`/`is_linear`/`contains_reference` before any
-  guard, and a scalar is safe only when paired with R11's audited default-deny.
+- **The placeholder `ty` is pinned to `Type::Cstr`** (R4/R12): an existing registry-free
+  scalar (an aggregate-shaped sentinel panics by registry index at
+  `is_copy`/`is_linear`/`contains_reference` before any guard, and a new variant is forbidden
+  by D1) chosen for the *fewest* type-directed acceptors, all on R11's audit list, so the
+  audit (converted to the table-driven R11t) is smallest. It is safe only when paired with
+  R11's audited default-deny, since a missed guard is a silent accept, not an error.
 - **`examples/times.sth` computes the same number as `countdown.sth`** (criterion 7/F4):
   `0 1000000 [ 1 + + ] times .` sums `1..1e6`, so the dogfood demonstrates parity; criterion
   5 gets its own pinned in-test source rather than doubling as the example.
@@ -578,10 +744,10 @@ the implementer:
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "Phase 1, surface syntax and AST: TermKind::Quotation, parse_term bracket arm distinct from type-position brackets, unterminated/stray located diagnostics, exhaustive-match stubs (checker rejects a quotation as not-yet-supported) keeping the tree green", "difficulty": "standard" },
-    { "phase": 2, "focus": "Phase 2a, the marker and call-of-literal fusion: Slot.quot and Binding.quot side-channels plus the body side table, check_term interns a literal and poly_term rejects one, call splices against the live stack with leave_block bracketing, and the call fusion lowering (tail=false), keeping phase 1's coarse guard for every other consumer", "difficulty": "hard" },
-    { "phase": 3, "focus": "Phase 2b, the located rejections replace the coarse guard: reject two different quotations at the if join, array store (fill and reference paths), user and polymorphic word arguments, a quotation literal in a polymorphic body, the dedicated word-exit output error, R11's audited default-deny over every type-directed slot read, and the REPL residual-stack rejection", "difficulty": "hard" },
-    { "phase": 4, "focus": "Phase 3, the times intrinsic and the constant-stack loop: times typing (splice identity on row and move/borrow state, row-slot guard), lowering into begin_loop/finalize_loop with a synthesized index, header Jnz and back-edge (tail=false, nested-times rejection), loop-state save/restore, the constant-stack guarantee, and the split value/constant-stack witnesses plus the IR-shape test", "difficulty": "hard" },
+    { "phase": 1, "focus": "Phase 1, surface syntax and AST: TermKind::Quotation, parse_term bracket arm distinct from type-position brackets, unterminated/stray located diagnostics, exhaustive-match stubs where the checker rejects a quotation with a distinct TEMP-quotation stopgap string (deleted by string in 2b) keeping the tree green", "difficulty": "standard" },
+    { "phase": 2, "focus": "Phase 2a, the marker and call-of-literal fusion: Slot.quot and Binding.quot side-channels plus the body side table with a Cstr placeholder ty, check_term interns a literal and poly_term rejects one, call splices against the live stack with leave_block bracketing and tail=false, and the call fusion lowering, keeping phase 1's TEMP-quotation stopgap for every other consumer", "difficulty": "hard" },
+    { "phase": 3, "focus": "Phase 2b, the located rejections replace the stopgap: reject two different quotations at the if join (both phrasings), array store (fill and reference paths), user and polymorphic word arguments, a quotation literal in a polymorphic body, the dedicated word-exit output error, R11's audited default-deny as a table-driven test over every type-directed slot read including the if condition and the drop carve-out, R6's leave_block bracketing, and the REPL residual-stack rejection", "difficulty": "hard" },
+    { "phase": 4, "focus": "Phase 3, the times intrinsic and the constant-stack loop: times typing (splice identity on row and move/borrow state via clone-and-compare, whole-row guard, row-effect equality, and the nested-times rejection in the checker), lowering into begin_loop/finalize_loop with a synthesized index, header Jnz and back-edge (tail=false, debug_assert self.header.is_none), loop-state save/restore, the constant-stack guarantee, and the split value/constant-stack witnesses plus the IR-shape test", "difficulty": "hard" },
     { "phase": 5, "focus": "Phase 4, dogfood and docs: examples/times.sth beside countdown.sth computing the same sum, mark ROADMAP slice 4 implemented, record the marker/fusion/times design in DESIGN.md", "difficulty": "standard" }
   ]
 }
