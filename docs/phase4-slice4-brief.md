@@ -224,75 +224,94 @@ can actually run, at the cost of a `Slot` change and a non-escape check rather t
    The spec should fix that this is the *only* inlining slice 4 owns, and that it never
    crosses a `:` word boundary (that is slice 5, recon 8).
 
-4. **The internal loop primitive's trigger and reuse.** The IR back-edge machinery
-   (`begin_loop`/`finalize_loop` plus slice 3's carried-slot staging) is reused unchanged;
-   what is new is the front-end path that drives it from a quotation loop rather than a
-   self-`Call` (recon 5). The spec must say what that path is: an intrinsic loop combinator
-   (a compiler-known word, e.g. an intrinsic `times`/`each`-floor, that consumes a fused
-   quotation and lowers to a back-edge loop), and it must state that the constant-stack
-   guarantee rides slice 3's stable-slot scheme so a per-iteration aggregate construction
-   in the quotation body does not reintroduce an `alloc` bump.
+4. **The internal loop primitive's trigger and reuse. Settled: the floor is `times`,
+   passing the index.** The IR back-edge machinery (`begin_loop`/`finalize_loop` plus
+   slice 3's carried-slot staging) is reused unchanged; what is new is the front-end path
+   that drives it from a quotation loop rather than a self-`Call` (recon 5). That path is a
+   single compiler-known intrinsic combinator:
 
-5. **The slice-4/slice-5 boundary (see open question 1).** The recon settles that the two
-   "inlining"s are different mechanisms (recon 8); it does not settle whether slice 4 ships
-   a runnable end-to-end constant-stack demo (which needs an intrinsic loop combinator plus
-   fusion, decisions 3+4) or ships quotation-literal + `call` + fusion as inert plumbing
-   and defers the first runnable loop to slice 5. The spec has to pick, and the pick
-   defines what slice 4's exit criterion can even assert.
+   ```
+   times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )
+   ```
+
+   The body quotation takes the iteration index and returns the same row it received, so
+   effect inference only ever unifies an inner row against itself. `while` was weighed as a
+   second floor member (DESIGN.md:285 allows "one or two") and **declined for this slice**:
+   its condition quotation returns a `bool` on top of a passthrough row, so its output row
+   differs from its input row, which is strictly harder inference than `times` needs. The
+   spec must also state that the constant-stack guarantee rides slice 3's stable-slot scheme
+   so a per-iteration aggregate construction in the quotation body does not reintroduce an
+   `alloc` bump.
+
+5. **The slice-4/slice-5 boundary. Settled: slice 4 ships a runnable loop.** The recon
+   settles that the two "inlining"s are different mechanisms (recon 8). The owner's call
+   settles the cut: slice 4 ships quotation literal + `call` + fusion + the `times`
+   intrinsic, so it has its own end-to-end constant-stack witness, and slice 5 adds the
+   library combinators and the interprocedural inliner on top of that floor. The floor is
+   permanent, not a bootstrap awaiting retirement: DESIGN.md:281-289 makes the loop
+   primitive internal ("not surface syntax, not user-facing") and the thin intrinsic floor
+   user-facing by design, so slice 5 builds on `times` rather than replacing it.
 
 6. **Interaction with `if`, unchanged this slice.** ROADMAP slice 8 turns `if` into a
    quotation combinator; this slice does not. `if` stays a keyword and stays rejected in
    polymorphic bodies (recon 7). The spec should say so, so the implementation does not
-   drift into lifting `if` to `PolyType` (a slice-8 job) while building quotations.
+   drift into lifting `if` to `PolyType` while building quotations.
+
+7. **The polymorphic-path gaps are slice 5's, not this slice's. Settled.** Recon 6
+   (a polymorphic self-tail word does not get the loop transform) and recon 7 (`if` is
+   rejected in a polymorphic body) are siblings: both are machinery the monomorphic path
+   has and the polymorphic path lacks. Neither blocks this slice, and neither blocks the
+   phase exit, since `each` and `fold` built on `times` need no branch and `max` is a
+   builtin (`src/check.rs:1223`, `:4739`). They block exactly two of slice 5's library
+   words: `filter` needs recon 7 to branch on its predicate, and `while` needs **both**,
+   since it is unbounded (so `times` cannot express it) and would be written as a
+   self-recursive polymorphic word. **Both land in slice 5**, designed against those two
+   words as first real consumers, with slice 5 free to split, or to grow a new slice
+   between 4 and 5, if that proves too large in its own brief. This corrects the earlier
+   filing of recon 7 as a slice-8 prerequisite: slice 8 needs it too, but slice 5 needs it
+   first.
 
 ## Scope
 
 In: quotation literal syntax `[ ... ]` and a new `TermKind`; `call`; the compile-time
 quotation marker and its effect inference; the non-escape check and its diagnostics; the
-`call`-of-literal fusion lowering; and the front-end trigger from a quotation loop into
-the existing back-edge machinery, with at least the intrinsic floor needed for the exit
-criterion the spec settles in decision 5.
+`call`-of-literal fusion lowering; and the `times` intrinsic (decision 4) as the front-end
+trigger from a quotation loop into the existing back-edge machinery.
 
 Out: a first-class runtime quotation type and the `Type`/`PolyType`/`IrType`/unification/
 mangling changes it implies (recon 2, deferred with escaping quotations to Phase 6);
 escaping quotations and the uniform-runtime-stack fallback (Phase 6); the interprocedural
-user-word inliner and the `each`/`map`/`filter`/`fold`/`while`/`times` library (slice 5);
-`if` as a combinator and `Bool` as an enum (slice 8); lifting `if` to polymorphic bodies
-(recon 7, a slice-8 prerequisite, not this slice); static overloading and multimethods
-(slices 6, 7).
+user-word inliner and the `each`/`map`/`filter`/`fold`/`while` library (slice 5); a `while`
+intrinsic as a second floor member (decision 4, declined for this slice); lifting `if` to
+polymorphic bodies and giving polymorphic self-tail words the loop transform (recon 6 and
+7, both slice 5 per decision 7); `if` as a combinator and `Bool` as an enum (slice 8);
+static overloading and multimethods (slices 6, 7).
 
 ## Exit
 
 A quotation literal parses and checks; `call` on a literal fuses to its body and runs; a
 quotation reaching a position where its effect is unknown (recon-2 nesting: a merged
 `if`, an array element, a non-inlined parameter) is a located rejection, not a panic; and
-the loop-primitive demo the spec settles in decision 5 runs in constant stack, witnessed
-the way slice 3 witnessed its fix (a deep iteration that would overflow a real recursion
-returns cleanly). Goldens for each, including the non-escape rejections as behavior, per
-the diagnostics-are-behavior convention.
+a `times` loop runs in constant stack, witnessed the way slice 3 witnessed its fix, through
+the existing `run_stack_bounded_src` harness (`tests/phase4_generics.rs:239`, `ulimit -s
+1024`, signal-aware) at an iteration count that would overflow a real recursion. The
+headline witness is that `0 1000000 [ + ] times .` prints `499999500000` in constant stack,
+next to `examples/countdown.sth`'s hand-threaded self-recursive equivalent. Goldens for
+each, plus IR-shape unit tests beside the lowering asserting the loop built a header block
+with a back-edge `Jmp` rather than emitting a per-iteration `Instr::Call` (the only direct
+witness the internal primitive gets), and the non-escape rejections as behavior, per the
+diagnostics-are-behavior convention.
 
 ## Open questions for the owner
 
-1. **Where is the slice-4/slice-5 boundary, and does slice 4 ship a runnable loop?**
-   Recon 8 settles that slice 4's "call-site inlining" (quotation-literal fusion) and slice
-   5's "the inliner" (interprocedural user-word inlining) are different mechanisms, so the
-   two ROADMAP statements do not actually conflict. What recon cannot settle is the cut:
-   (a) slice 4 ships quotation + `call` + fusion + an intrinsic loop combinator, so it has
-   a runnable constant-stack demo of its own, and slice 5 only adds inlining of the
-   *library* combinators on top; or (b) slice 4 ships quotation + `call` + fusion as
-   plumbing and the first runnable loop waits for slice 5's inliner to inline a library
-   `each` into a monomorphic context. Tradeoff: (a) gives slice 4 an honest exit criterion
-   and an integration test of the loop machinery against quotations one slice earlier, at
-   the cost of a compiler-known intrinsic that slice 5's library words may later subsume;
-   (b) keeps the intrinsic floor minimal but leaves slice 4 with nothing end-to-end to
-   demonstrate, which sits badly with this project's "write the program first" ethic.
-   Recommendation: (a). Recon 6/7 show the library path cannot run standalone, so without
-   an intrinsic floor in slice 4 there is no constant-stack witness until slice 5, and the
-   phase's riskiest integration (type machinery against quotations against the loop
-   primitive) would arrive untested until then. This is a judgment call because it is a
-   scope-and-sequencing preference, not something the code forces.
+Decisions 4, 5, and 7 were open questions when this brief was written and have since been
+settled by the owner: the floor is `times` passing the index (no `while` intrinsic this
+slice), slice 4 ships a runnable constant-stack loop rather than inert plumbing, and both
+polymorphic-path gaps land in slice 5. Question 3 (whether the intrinsic is user-facing)
+dissolved on reading DESIGN.md:281-289, which already separates the internal loop primitive
+from the user-facing intrinsic floor. One question remains.
 
-2. **Runtime quotation type now, or deferred to Phase 6?** Decision 1 recommends the
+1. **Runtime quotation type now, or deferred to Phase 6?** Decision 1 recommends the
    compile-time-only marker, which is enough for every quotation slice 4 can run and defers
    the slice-1-sized type-nesting change (recon 2). The counter-argument is that if a later
    slice or Phase 6 will pay that cost anyway, designing the marker now and the type later
@@ -303,61 +322,3 @@ the diagnostics-are-behavior convention.
    whether the marker's design should be *shaped* to extend cleanly into the eventual type,
    versus kept deliberately minimal, is the owner's call on how firm the Phase 6 commitment
    is.
-
-3. **Does the intrinsic loop combinator, if slice 4 ships one (open question 1a), get a
-   user-facing name or stay an internal lowering target?** DESIGN.md:285 allows "one or two
-   intrinsic combinators" as the floor. If one is user-callable it becomes surface API that
-   slice 5's library-word `each`/`times` must either wrap or shadow, and retiring it later
-   (if slice 5's inliner subsumes it) is a visible change; if it stays internal, slice 4's
-   demo must reach it through some already-legal syntax, which may force at least a minimal
-   library word forward into slice 4. Recommendation: keep it internal and reach the demo
-   through the thinnest possible intrinsic, but this depends entirely on the answer to open
-   question 1.
-
-```acceptance-report
-{
-  "criteriaSatisfied": [
-    {
-      "id": "criterion-1",
-      "status": "satisfied",
-      "evidence": "Brief reports concrete findings with src/file.rs:line citations and ran probes; severity-bearing findings flagged: recon 2 (no quotation type at any layer, slice-1-sized change) and recon 6+7 (polymorphic bodies reject `if` and skip the constant-stack loop transform, so combinators cannot be plain library words)."
-    }
-  ],
-  "changedFiles": [
-    "docs/phase4-slice4-brief.md"
-  ],
-  "testsAddedOrUpdated": [],
-  "commandsRun": [
-    {
-      "command": "cargo build",
-      "result": "passed",
-      "summary": "compiler built clean; used to run probes"
-    },
-    {
-      "command": "cargo run -- build /tmp/*.sth on multi-output, deep self-tail, and polymorphic-if probes",
-      "result": "passed",
-      "summary": "multi-output/`..s` outputs run correctly; monomorphic 50M self-tail returns cleanly (constant stack); polymorphic `if` body rejected with a located error"
-    }
-  ],
-  "validationOutput": [
-    "probe: `[` in body -> parse error: unexpected token LBracket",
-    "probe: `5 pair . .` -> 5 5; `7 trip . . .` -> 7 7 7; `..s` passthrough/consume -> 2 1 / 2 1",
-    "probe: monomorphic countdown 50000000 -> 42, exit 0 (no overflow)",
-    "probe: polymorphic countdown with `if` -> error: `if` in the polymorphic body of `countdown` is not yet supported",
-    "docs-only commit; untracked docs/concurrency-implementation-notes.md left unstaged"
-  ],
-  "residualRisks": [
-    "The brief recommends a compile-time-only quotation marker over a first-class runtime type; if the owner wants non-inlined/escaping quotations sooner, the deeper Type/PolyType/IrType change (recon 2) lands earlier than framed.",
-    "The slice-4/slice-5 boundary (open question 1) is escalated, not resolved; the spec-writer must settle it before scoping.",
-    "Probes exercised representative cases, not the full combinator library (which cannot be written today, recon 6/7); the paper pre-check is by construction, not by a running program."
-  ],
-  "noStagedFiles": false,
-  "diffSummary": "Adds docs/phase4-slice4-brief.md (recon brief for quotations + the internal loop primitive); no source or test changes.",
-  "reviewFindings": [
-    "no blockers: docs-only addition, no code paths touched",
-    "note: recon 6+7 (polymorphic bodies reject `if` and skip the loop transform) is the highest-value finding and reframes the inliner from a perf pass to an expressibility requirement",
-    "note: recon 8 resolves the ROADMAP slice-4/slice-5 inliner contradiction as two distinct mechanisms; the remaining boundary is escalated as open question 1"
-  ],
-  "manualNotes": "Probe files under /tmp were cleaned up. ROADMAP.md was left unmodified per instructions; the inliner contradiction is flagged in the brief (recon 8, open question 1) rather than resolved in the roadmap."
-}
-```
