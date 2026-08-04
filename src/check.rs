@@ -5419,11 +5419,13 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 }
 
 /// R8: a quotation stored into an array (`fill`'s element) or through a
-/// reference (`!`/`+!`'s value) would have to become a runtime value, which
-/// this slice cannot represent. Shared by both store paths (D4).
+/// reference (`!`/`+!`'s value, whether the referent is an array slot, a
+/// struct field, or an owned cell) would have to become a runtime value,
+/// which this slice cannot represent. The wording names no container because
+/// two of the three store paths have none. Shared by all of them (D4).
 fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation cannot be stored in an array (escaping quotations are Phase 6){} (line {})",
+        "error: a quotation cannot be stored (escaping quotations are Phase 6){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -6556,78 +6558,121 @@ mod tests {
         // R11t: the audit is a *test artifact*, not prose. A missed guard on the
         // `Cstr` placeholder is a silent accept (R4), so every default-deny site
         // gets a row here: a new consumer added later without a guard turns one
-        // row from `Err` to `Ok` and fails the test. Each row's needle is the
-        // token the site names (the op for the operand family, the word for the
-        // argument family, or the store/output phrasing where no op is named).
-        // The one `is_line` row is the REPL residual, checked through
-        // `infer_line` rather than `check`.
+        // row from `Err` to `Ok` and fails the test. The one `is_line` row is the
+        // REPL residual, checked through `infer_line` rather than `check`.
+        //
+        // Each row asserts TWO substrings, and this is load-bearing. `site` is
+        // the token the message names (the op, or the word for the argument
+        // family); `phrase` is text only the quotation rejection produces. The
+        // pre-existing generic diagnostics (`operand_pair_mismatch`,
+        // `type_mismatch`, `array_word_operand`, `reference_word_operand`,
+        // `fill_count_not_literal`, ...) all print the op in backticks too, so a
+        // `site`-only row stays green when its guard is removed and the fallback
+        // fires: it names the same op. Requiring `phrase` as well is what turns a
+        // removed guard from green to red. Every operand-family row shares the
+        // one `reject_quotation_operand` phrase; the store/argument/output/
+        // residual families carry their own wording no generic diagnostic emits.
+        //
+        // FIX 2 (verified, no row): the only `check_operator` op that would
+        // accept a `Cstr` operand if its guard were removed is `.` (print, whose
+        // printable set includes `Str`/`Cstr`), and it already has the `.` row.
+        // Every comparison (`=`/`<`/`>`/...), like every arithmetic/bitwise/
+        // shift op, requires `is_numeric`/`is_int`/`is_float` and rejects a
+        // `cstr` outright, so there is no silent-accept comparison path to row.
         struct Row {
             source: &'static str,
-            needle: &'static str,
+            site: &'static str,
+            phrase: &'static str,
             is_line: bool,
         }
-        let w = |source, needle| Row {
+        const OPERAND: &str = "cannot take a quotation as an operand";
+        // Operand-family row: `site` is the op, `phrase` is the shared wording.
+        let op = |source, site| Row {
             source,
-            needle,
+            site,
+            phrase: OPERAND,
+            is_line: false,
+        };
+        // Any other family: spell both substrings out.
+        let w = |source, site, phrase| Row {
+            source,
+            site,
+            phrase,
             is_line: false,
         };
         let rows = [
             // check_operator, both operand positions, plus print.
-            w(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
-            w(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
-            w(": main ( -- ) [ + ] . ;\n", "`.`"),
-            // the `if` condition, before the `Bool` mismatch.
-            w(": main ( -- ) [ + ] if 1 . else 2 . end ;\n", "`if`"),
+            op(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
+            op(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
+            op(": main ( -- ) [ + ] . ;\n", "`.`"),
+            // the `if` condition, before the `bool` mismatch.
+            op(": main ( -- ) [ + ] if 1 . else 2 . end ;\n", "`if`"),
             // check_str_word (`len`/`cstr`).
-            w(": main ( -- ) [ + ] len ;\n", "`len`"),
-            w(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
+            op(": main ( -- ) [ + ] len ;\n", "`len`"),
+            op(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
             // check_array_word: the `fill` count operand and the stored element.
-            w(": main ( -- ) 5 [ + ] fill ;\n", "`fill`"),
-            w(": main ( -- ) [ + ] 8 fill drop ;\n", "stored in an array"),
-            // check_array_index, reached through the `&>` reference word.
+            op(": main ( -- ) 5 [ + ] fill ;\n", "`fill`"),
             w(
+                ": main ( -- ) [ + ] 8 fill drop ;\n",
+                "a quotation cannot be stored",
+                "escaping quotations are Phase 6",
+            ),
+            // check_array_index, reached through the `&>` reference word.
+            op(
                 "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &V>x [ + ] &> drop drop ;\n",
                 "`&>`",
             ),
             // check_owned_cell_word.
-            w(": main ( -- ) [ + ] ^ ;\n", "`^`"),
+            op(": main ( -- ) [ + ] ^ ;\n", "`^`"),
             // check_reference_word's `&q` prefix-borrow-of-a-local form.
-            w(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
+            op(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
             // check_struct_peek_word and check_struct_get_word (an aggregate
             // field, so the getter is intercepted here, not by the env loop).
-            w("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
-            w(
+            op("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
+            op(
                 "type: Inner a i64 ;\ntype: Outer b Inner ;\n: main ( -- ) [ + ] Outer>b ;\n",
                 "`Outer>b`",
             ),
             // check_access_word's store paths: the value and the receiver.
             w(
                 "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
-                "stored in an array",
+                "a quotation cannot be stored",
+                "escaping quotations are Phase 6",
             ),
-            w(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
+            op(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
             // the env argument loop and check_poly_call's input loop (R9/R9p).
-            w(": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n", "passed to `foo`"),
+            w(
+                ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n",
+                "passed to `foo`",
+                "only `call` and `times` accept one",
+            ),
             w(
                 ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
                 "passed to `dupit`",
+                "only `call` and `times` accept one",
             ),
             // check_outputs (R10) and the `times` body-output row (blocker 2).
-            w(": f ( -- i64 ) [ + ] ;\n", "declared output"),
             w(
+                ": f ( -- i64 ) [ + ] ;\n",
+                "declared output",
+                "leaves a quotation on the stack",
+            ),
+            op(
                 ": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n",
                 "`times`",
             ),
             // the REPL residual (R19), checked through `infer_line`.
             Row {
                 source: "1 [ + ]",
-                needle: "end of a line",
+                site: "end of a line",
+                phrase: "a quotation cannot be left on the stack",
                 is_line: true,
             },
         ];
         for Row {
             source,
-            needle,
+            site,
+            phrase,
             is_line,
         } in rows
         {
@@ -6638,8 +6683,12 @@ mod tests {
                     .expect_err("an audited site must reject a quotation, not silently accept it"),
             };
             assert!(
-                err.contains(needle),
-                "audited site for `{needle}` did not name it, got: {err}"
+                err.contains(site),
+                "audited site `{site}` was not named, got: {err}"
+            );
+            assert!(
+                err.contains(phrase),
+                "audited site `{site}` did not produce its quotation-rejection phrase `{phrase}`, got: {err}"
             );
         }
     }

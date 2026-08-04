@@ -711,7 +711,7 @@ fn quotation_stored_in_array_by_fill_is_error() {
     // The guard sits strictly above `contains_reference` (R4).
     let err = check_error(": main ( -- ) [ + ] 8 fill drop ;\n");
     assert!(
-        err.contains("a quotation cannot be stored in an array"),
+        err.contains("a quotation cannot be stored"),
         "R8f should reject at `fill`, got: {err}"
     );
 }
@@ -727,7 +727,7 @@ fn quotation_stored_through_a_reference_is_error() {
          : main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
     );
     assert!(
-        err.contains("a quotation cannot be stored in an array"),
+        err.contains("a quotation cannot be stored"),
         "R8r should reject the stored value before `match_slot`, got: {err}"
     );
 }
