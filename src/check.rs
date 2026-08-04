@@ -321,7 +321,7 @@ struct AliasSetId(u32);
 
 /// One outstanding derivation from a place, interned in `Provenance` so a
 /// `Slot` can carry it by id and stay `Copy`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct DerivId(u32);
 
 /// What one live reference traces back to. Created by a fresh borrow
@@ -399,6 +399,14 @@ struct Provenance {
     /// through the walk, so a quotation pushed in one `if` arm and read in a
     /// merge outlives the arm's cloned `Scope`.
     quotations: Vec<QuotBody>,
+    /// R16/R18: how many `times` body splices are currently open around the
+    /// term being checked. Incremented across a `times` body splice and
+    /// **restored** after (not merely decremented), so two *sequential*
+    /// `times` in one word do not false-positive as nested. A non-zero value
+    /// at a `times` is the `times`-in-`times` case of R18's nested-loop
+    /// rejection; `scope.depth()` cannot substitute, since it counts every
+    /// block, not only a `times`.
+    times_depth: usize,
 }
 
 impl Provenance {
@@ -859,6 +867,12 @@ enum Ctx<'a> {
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
+        /// R16/R18: whether this word is self-tail-recursive, precomputed in
+        /// `word_ctx` (`has_self_tail_call` takes a `&WordDef` that `check_term`
+        /// does not have). A `times` in a self-tail word is the whole-word case
+        /// of R18's nested-loop rejection: lowering opens `begin_loop` for the
+        /// whole word, so a `times` inside it would nest two loops.
+        self_tail: bool,
     },
     Line {
         structs: &'a [StructDecl],
@@ -874,6 +888,7 @@ fn word_ctx<'a>(word: &'a WordDef, structs: &'a [StructDecl], enums: &'a [EnumDe
         effect: &word.effect,
         structs,
         enums,
+        self_tail: has_self_tail_call(word),
     }
 }
 
@@ -4181,6 +4196,65 @@ fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
     }
 }
 
+/// R18: `times` reached without a statically-known quotation literal on top
+/// (D4). Parallel to `call_needs_quotation_error`.
+fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            name, span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            span.line
+        ),
+    }
+}
+
+/// R18/N: a `times` nested in a loop -- inside a self-tail word, or inside
+/// another `times` body. Rejected in the checker (not lowering, which has no
+/// error channel): the clean hoist-target split that would allow nesting is a
+/// later slice's.
+fn times_nested_in_loop_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` cannot be nested in a loop yet{} (line {}): nested constant-stack loops need a hoist-target split deferred to a later slice",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18: the body is spliced once but runs N times, so a linear outer local it
+/// consumes would be disposed of more than once. The single most important
+/// `times` checker rule.
+fn times_body_consumes_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    format!(
+        "error: a `times` body cannot consume `{name}`{} (line {}): the body runs more than once, so the value would be disposed of more than once",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18: a reference the body derives would cross the back-edge into the next
+/// iteration. A borrow is idempotent per iteration, so a well-formed body
+/// leaves `live_derivs` unchanged; this fires when it does not.
+fn times_body_borrow_across_loop_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` body cannot leave a reference live across the loop{} (line {}): the local it borrows does not survive to the next iteration",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18/D6: the body's net effect on the row is not identity -- it must consume
+/// the index and return the row it received unchanged.
+fn times_body_row_effect_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` body must leave the row unchanged{} (line {}): it takes `( ..s i64 -- ..s )`, consuming the index and returning the same row",
+        in_word(ctx),
+        span.line,
+    )
+}
+
 fn rebound_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
     let scope_end = "a name may not be re-bound while it is in scope: the earlier binding would become unreachable, and a linear value in it could then never be consumed";
     match ctx {
@@ -4507,6 +4581,116 @@ fn check_term(
                         span,
                     },
                 )?;
+                return Ok(stack);
+            }
+            // R18: `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, the
+            // constant-stack loop primitive. Intercepted alongside `call`. The
+            // body is spliced against the row plus a synthesized index and must
+            // return the row unchanged (D6); nested `times` is rejected here,
+            // not in lowering, which has no error channel (R14 step 0).
+            if name == "times" {
+                let Some(top) = stack.pop() else {
+                    return Err(underflow_error(ctx, span, "times", 2, 0));
+                };
+                let Some(QuotRef::Known(id)) = top.quot else {
+                    return Err(times_needs_quotation_error(ctx, span));
+                };
+                let Some(count) = stack.pop() else {
+                    return Err(underflow_error(ctx, span, "times", 2, 1));
+                };
+                // The count is also a type-directed read, so a quotation there
+                // is the default-deny wording, not a `Cstr`-placeholder mismatch.
+                if count.quot.is_some() {
+                    return Err(reject_quotation_operand(ctx, span, "times"));
+                }
+                if count.ty != Type::I64 {
+                    return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
+                }
+                // R18: reject a `times` nested in a loop -- a self-tail word
+                // (whose whole-word `begin_loop` lowering would nest two loops)
+                // or another `times` body. Both are decided here, one stage
+                // before lowering's would-be `self.header.is_some()` test.
+                let in_self_tail = matches!(
+                    ctx,
+                    Ctx::Word {
+                        self_tail: true,
+                        ..
+                    }
+                );
+                if in_self_tail || prov.times_depth > 0 {
+                    return Err(times_nested_in_loop_error(ctx, span));
+                }
+                // R18: the row is the remaining stack; a quotation anywhere in
+                // it would reach `begin_loop`'s phi over a phantom (R14). Guard
+                // the whole row, not just the consumed top.
+                if stack.iter().any(|s| s.quot.is_some()) {
+                    return Err(reject_quotation_operand(ctx, span, "times"));
+                }
+                // R18: the body is spliced once but runs N times, so it must be
+                // identity on the move/borrow state (clone-and-compare), or a
+                // linear local it consumes would be disposed N times. Snapshot
+                // before the splice; `leave_block` drops the body's own
+                // bindings, so what remains changed is an *outer* local.
+                let moves_before = scope.moves.states.clone();
+                let derivs_before: HashSet<DerivId> = live_derivs(&stack, scope).collect();
+                let row = stack.clone();
+                // Splice the body against the row plus a synthesized index (the
+                // body's top input), bracketed like `call` (R6), `tail = false`.
+                // `times_depth` rides up across the splice so a `times` nested
+                // in the body trips the rejection above, and is *restored* (not
+                // decremented), so two sequential `times` do not false-positive.
+                stack.push(Slot::computed(Type::I64));
+                let body = prov.quotations[id.0].body.clone();
+                let depth = scope.depth();
+                let saved_times_depth = prov.times_depth;
+                prov.times_depth += 1;
+                let result = check_terms(
+                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                )?;
+                prov.times_depth = saved_times_depth;
+                leave_block(
+                    ctx,
+                    scope,
+                    depth,
+                    BlockEnd::Arm {
+                        token: "times",
+                        span,
+                    },
+                )?;
+                // R18: identity on the move state. A body's own bindings are
+                // already gone (`leave_block`), so a local left `Moved`/
+                // `MaybeMoved` where it was `Live` is an outer linear local the
+                // body consumed; name the first such one.
+                if let Some(local) = moves_before.iter().find_map(|(n, before)| {
+                    match (before, scope.moves.states.get(n)) {
+                        (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
+                            Some(n.clone())
+                        }
+                        _ => None,
+                    }
+                }) {
+                    return Err(times_body_consumes_local_error(ctx, span, &local));
+                }
+                // R18: identity on the borrow state. A borrow is idempotent per
+                // iteration, so a well-formed body leaves `live_derivs`
+                // unchanged; a difference means a reference would cross the
+                // back-edge into the next iteration.
+                let derivs_after: HashSet<DerivId> = live_derivs(&result, scope).collect();
+                if derivs_after != derivs_before {
+                    return Err(times_body_borrow_across_loop_error(ctx, span));
+                }
+                // D6: the body's net effect on the row must equal the row.
+                let same_shape = row.len() == result.len()
+                    && result.iter().zip(&row).all(|(found, want)| {
+                        matches!(
+                            match_slot(*found, want.ty),
+                            SlotMatch::Exact | SlotMatch::LiteralSizeType
+                        )
+                    });
+                if !same_shape {
+                    return Err(times_body_row_effect_error(ctx, span));
+                }
+                stack = result;
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
@@ -6223,6 +6407,49 @@ mod tests {
         let mut scope = Scope::default();
         scope.bind("q", quot, false, &mut prov);
         assert_eq!(scope.local("q").unwrap().quot, marker);
+    }
+
+    #[test]
+    fn times_typing_obligations() {
+        // R18u: the three `times` typing obligations, each its own row, since a
+        // missed guard is a silent accept (the well-typed witness never trips
+        // them). Move-state identity, the whole-row guard, and row-effect
+        // equality.
+
+        // A well-typed `times` accepts (the body consumes the index and returns
+        // the row unchanged, touching no linear local).
+        check_src(": main ( -- ) 0 10 [ + ] times . ;\n").unwrap();
+
+        // (1) Move-state identity: consuming an outer linear local is rejected,
+        // named, with the repeated-disposal reason.
+        let consume = check_src(&format!(
+            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | s Spy>tag + ] times . ;\n"
+        ))
+        .expect_err("consuming a linear local should be rejected");
+        assert!(
+            consume.contains("a `times` body cannot consume `s`")
+                && consume.contains("the body runs more than once"),
+            "move-state identity should name `s`, got: {consume}"
+        );
+
+        // (2) Whole-row guard: a quotation anywhere in the row, not just the
+        // consumed top, is rejected.
+        let row_quot = check_src(": main ( -- ) [ + ] 3 [ drop ] times ;\n")
+            .expect_err("a quotation in the row should be rejected");
+        assert!(
+            row_quot.contains("`times`")
+                && row_quot.contains("cannot take a quotation as an operand"),
+            "whole-row guard should reject a row quotation, got: {row_quot}"
+        );
+
+        // (3) Row-effect equality: a body that changes the row's depth is
+        // rejected.
+        let row_effect = check_src(": main ( -- ) 0 10 [ + 1 ] times . ;\n")
+            .expect_err("a body that changes the row should be rejected");
+        assert!(
+            row_effect.contains("`times` body must leave the row unchanged"),
+            "row-effect equality should reject a changed row, got: {row_effect}"
+        );
     }
 
     #[test]

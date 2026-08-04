@@ -4,6 +4,22 @@
 
 use std::process::Command;
 
+use sooth::{check, lexer, parser};
+
+/// Phase 4 Slice 4, phase 2b/3: the sanctioned diagnostic helper (declared in
+/// the spec's *Sanctioned edits*), copied from `tests/phase3_locals.rs`. This
+/// file had no such helper and this slice's `times` typing has several
+/// diagnostic negatives.
+fn check_error(src: &str) -> String {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect_err("check should fail")
+}
+
+/// The linear stand-in (a one-field struct with a `drop` overload). Two lines,
+/// so a source prefixed with it shifts every line number up by 2.
+const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+
 /// Compile and run `src`, returning its stdout and exit code. `name`
 /// distinguishes the temp source (and so the emitted binary) per test, since
 /// the goldens run in parallel in one process. `trace` sets the allocation
@@ -630,4 +646,160 @@ fn quotation_body_reads_enclosing_local() {
     );
     assert_eq!(stdout, "8\n");
     assert_eq!(code, 0);
+}
+
+// --- Phase 4 Slice 4, phase 3: the `times` intrinsic and the constant-stack loop.
+
+#[test]
+fn times_loop_computes_the_index_sum() {
+    // Criterion 4a (R14/R18): the headline value. `[ + ]` sums the index over
+    // 0..1e6, so the loop runs exactly `count` iterations passing each index.
+    let (stdout, code) = run_src(
+        "times-sum",
+        ": main ( -- ) 0 1000000 [ + ] times . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "499999500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_loop_runs_in_constant_stack() {
+    // Criterion 4b: a cheap regression tripwire (not the R17 witness). 4a's
+    // source emits no `Alloc`, so no plausible lowering fails this while passing
+    // criterion 6; the real R17 witness is 5b plus criterion 6's entry-block
+    // `Alloc` assertion.
+    let code = run_stack_bounded_src(
+        "times-sum-bounded",
+        ": main ( -- ) 0 1000000 [ + ] times . ;\n",
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn times_body_constructing_aggregate_computes_expected() {
+    // Criterion 5a (R17): the body constructs a 16-byte `Vec2` each iteration.
+    // Without the entry-block hoist that is ~16 MB against the 1 MB bound, so
+    // this value golden and 5b together witness the constant-stack guarantee.
+    let (stdout, code) = run_src(
+        "times-aggregate",
+        "type: Vec2 x i64 y i64 ;\n\
+         : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "499999500000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_body_constructing_aggregate_runs_in_constant_stack() {
+    // Criterion 5b (R17 end-to-end backstop): 5a's source runs under the 1 MB
+    // bound only because every per-iteration `Vec2` `Alloc` hoists into the
+    // entry block (one reused slot), not the body block.
+    let code = run_stack_bounded_src(
+        "times-aggregate-bounded",
+        "type: Vec2 x i64 y i64 ;\n\
+         : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;\n",
+    );
+    assert_eq!(code, Some(0));
+}
+
+#[test]
+fn times_carrying_an_aggregate_through_the_row_runs() {
+    // Criterion 5c (slice 3 `CarriedSlot::Aggregate` staging from a non-self-tail
+    // driver): a `Vec2` rides the row through 1e6 iterations, staged on its
+    // stable slot on the back-edge, never re-allocated.
+    let (stdout, code) = run_src(
+        "times-carry-aggregate",
+        "type: Vec2 x i64 y i64 ;\n\
+         : main ( -- ) 3 4 Vec2 0 1000000 [ drop over Vec2>x + ] times . drop ;\n",
+        false,
+    );
+    assert_eq!(stdout, "3000000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_zero_trip_yields_seed_row() {
+    // Criterion 5z: a zero count runs the body zero times, so the row leaves the
+    // loop untouched (the seed `7`), and a non-zero, non-index seed proves the
+    // exit reads the carried row, not the index.
+    let (stdout, code) = run_src("times-zero", ": main ( -- ) 7 0 [ + ] times . ;\n", false);
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn two_sequential_times_in_one_word_both_run() {
+    // Criterion 15 (R15): two `times` in one word both run, and an aggregate
+    // constructed *between* them prints its field -- witnessing that R15 restores
+    // `entry_block` (not only `header`), or the aggregate's `Alloc` would hoist
+    // into the first `times`'s dead entry block.
+    let (stdout, code) = run_src(
+        "times-sequential",
+        "type: Vec2 x i64 y i64 ;\n\
+         : main ( -- ) 0 10 [ + ] times . 5 6 Vec2 Vec2>x . 0 10 [ + ] times . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "45\n5\n45\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_body_consuming_a_linear_local_is_error() {
+    // Criterion R18a (R18 move-state identity): the body is spliced once but
+    // runs N times, so consuming the outer linear `s` would dispose it N times.
+    // Named `s`, with the "body runs more than once" wording.
+    let err = check_error(&format!(
+        "{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 [ | i | s Spy>tag + ] times . ;\n"
+    ));
+    assert!(
+        err.contains("a `times` body cannot consume `s`")
+            && err.contains("the body runs more than once"),
+        "R18a should name `s` and cite repeated disposal, got: {err}"
+    );
+}
+
+#[test]
+fn times_with_a_quotation_in_its_row_is_error() {
+    // Criterion R18b (R18 whole-row guard): a quotation anywhere in the row --
+    // not just the consumed top -- would reach `begin_loop`'s phi over a phantom,
+    // so it is rejected (same wording family as R9/R11).
+    let err = check_error(": main ( -- ) [ + ] 3 [ drop ] times ;\n");
+    assert!(
+        err.contains("`times`") && err.contains("cannot take a quotation as an operand"),
+        "R18b should reject a quotation in the row, got: {err}"
+    );
+}
+
+#[test]
+fn times_body_changing_the_row_is_error() {
+    // Criterion R18c (D6 row-effect equality): `[ + 1 ]` leaves the row one
+    // deeper than it received, so the body's net effect is not identity.
+    let err = check_error(": main ( -- ) 0 1000000 [ + 1 ] times . ;\n");
+    assert!(
+        err.contains("`times` body must leave the row unchanged"),
+        "R18c should fire the row-effect error, got: {err}"
+    );
+}
+
+#[test]
+fn times_nested_in_a_loop_is_rejected() {
+    // Criterion N (R18): a `times` nested in a loop is rejected in the checker
+    // with a line number -- both a `times` inside another `times` body (splice
+    // depth) and a `times` inside a self-tail word (`has_self_tail_call`).
+    let inner = check_error(": main ( -- ) 0 10 [ | i | 0 5 [ + ] times + ] times . ;\n");
+    assert!(
+        inner.contains("a `times` cannot be nested in a loop yet") && inner.contains("(line 1)"),
+        "N (times-in-times) should reject with a line number, got: {inner}"
+    );
+    let self_tail = check_error(
+        ": loop ( i64 -- i64 ) | n | n 0 = if 0 else n 1 - 0 5 [ + ] times drop n 1 - loop end ;\n\
+         : main ( -- ) 3 loop . ;\n",
+    );
+    assert!(
+        self_tail.contains("a `times` cannot be nested in a loop yet")
+            && self_tail.contains("(line 1)"),
+        "N (times in self-tail word) should reject with a line number, got: {self_tail}"
+    );
 }

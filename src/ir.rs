@@ -2509,6 +2509,101 @@ impl<'a> FuncBuilder<'a> {
                 let body = self.quot_defs[id.0].clone();
                 self.lower_terms(&body, false);
             }
+            // R14: `times` lowers into a constant-stack loop, reusing
+            // `begin_loop`/`finalize_loop` (D6). A synthesized index drives a
+            // header `Jnz(index < count)`; the body reads the index as its top
+            // input and returns the row on the back-edge (R18). `tail = false`
+            // for the same reason as `call`.
+            "times" => {
+                // R14 step 0: the checker rejects a nested `times` (R18), so no
+                // loop is open here; a `debug_assert` records that guarantee.
+                debug_assert!(
+                    self.header.is_none(),
+                    "checker (R18) rejects a `times` nested in a loop"
+                );
+                // R15: `finalize_loop` clears only `carried_slots`/`back_edges`,
+                // never `header`/`entry_block`, so save all four and restore
+                // them after the loop, or a later `Alloc` in the same word
+                // would wrongly hoist into this dead `times` entry block.
+                let saved_header = self.header;
+                let saved_entry = self.entry_block;
+                let saved_carried = mem::take(&mut self.carried_slots);
+                let saved_back_edges = mem::take(&mut self.back_edges);
+
+                let qv = self.stack.pop().expect("times: quotation on stack");
+                let id = self.quot_bodies[&qv];
+                let body = self.quot_defs[id.0].clone();
+                let count = self.stack.pop().expect("times: count on stack");
+
+                // Synthesize the induction variable seeded 0; the row is the
+                // remaining stack. `stage_aggregates = true` (R17): a carried
+                // aggregate rides slice 3's entry-hoisted stable slot, and the
+                // index gets a scalar phi.
+                let seed = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(seed, 0));
+                self.const_vals.insert(seed, 0);
+                let mut params = mem::take(&mut self.stack);
+                params.push(seed);
+                let outs = self.begin_loop(&params, true);
+                let index_phi = *outs.last().expect("times: index phi");
+                let row_phis: Vec<Value> = outs[..outs.len() - 1].to_vec();
+
+                // Header (current after `begin_loop`): loop while index < count.
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, count));
+                let body_block = self.fresh_block();
+                let exit_block = self.fresh_block();
+                self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
+
+                // Body: the row plus the index (top input), spliced `tail =
+                // false`. `entry_block` stays `Some` across the splice, so an
+                // aggregate the body constructs hoists its `Alloc` into the
+                // entry block (R17), not the per-iteration body block.
+                self.start_block(body_block);
+                self.terminated = false;
+                self.stack = row_phis;
+                self.stack.push(index_phi);
+                self.lower_terms(&body, false);
+
+                // Back-edge: the body's result row plus index + 1.
+                let one = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(one, 1));
+                self.const_vals.insert(one, 1);
+                let index_next = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
+                // With `tail = false` and no `Return` in a body, nothing can
+                // terminate the body block, so a double seal is impossible.
+                debug_assert!(
+                    !self.terminated,
+                    "a `tail = false` `times` body cannot terminate"
+                );
+                let mut args = mem::take(&mut self.stack);
+                args.push(index_next);
+                self.back_edges.push((self.cur_id, args));
+                self.seal_block(Terminator::Jmp(self.header.expect("times loop header")));
+
+                // Back-patch the scalar phis (row scalars + index) and append
+                // the aggregate staging blits on the back-edge (unchanged from
+                // slice 3).
+                self.finalize_loop();
+
+                // Exit: the carried row (scalar header-phi outputs / aggregate
+                // stable slots), minus the trailing index. Reset `terminated`
+                // (the body seal set it) or every term after the `times` is
+                // silently dropped.
+                self.start_block(exit_block);
+                self.terminated = false;
+                let mut exit_stack = outs;
+                exit_stack.pop();
+                self.stack = exit_stack;
+
+                // R15: restore the pre-`times` loop state so the `times`
+                // composes with a later `Alloc` or a second sequential `times`.
+                self.header = saved_header;
+                self.entry_block = saved_entry;
+                self.carried_slots = saved_carried;
+                self.back_edges = saved_back_edges;
+            }
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
                 // A scalar is `Copy`: reuse the value id (dup emits nothing). A
@@ -4299,6 +4394,110 @@ mod tests {
             count(main, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
             1
         );
+    }
+
+    #[test]
+    fn times_lowers_to_a_loop_header_not_a_per_iteration_call() {
+        // Criterion 6 (R14/R17): `times` builds a header `Block` carrying the
+        // index `Phi`, sealed with a `Terminator::Jnz`, reached by a back-edge
+        // `Terminator::Jmp`, with no per-iteration `Instr::Call`. The index
+        // `Phi` + header `Jnz` are pinned because "header + back-edge `Jmp` + no
+        // `Call`" alone also describes a one-trip or infinite loop.
+        let simple = lower_src(": main ( -- ) 0 1000000 [ + ] times . ;");
+        let main = func(&simple, "main");
+        let header = loop_header(main);
+        let hblock = header_block(main, header);
+        assert!(
+            !header_phis(hblock).is_empty(),
+            "the header carries the index phi"
+        );
+        assert!(
+            matches!(hblock.term, Terminator::Jnz(..)),
+            "the header is sealed with a Jnz (index < count), got {:?}",
+            hblock.term
+        );
+        let entry_id = main.blocks[0].id;
+        assert!(
+            main.blocks
+                .iter()
+                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
+            "a non-entry body block back-edges to the header"
+        );
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Call(..))),
+            0,
+            "no per-iteration Instr::Call"
+        );
+
+        // On 5a's source (a `Vec2` constructed each iteration): every `Alloc`
+        // hoists into the entry block, none into the body block (R17). This is
+        // the deterministic R17 witness, not the coarse `ulimit` run.
+        let agg = lower_src(
+            "type: Vec2 x i64 y i64 ;\n\
+             : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;",
+        );
+        let main = func(&agg, "main");
+        let header = loop_header(main);
+        let entry = &main.blocks[0];
+        let body = main
+            .blocks
+            .iter()
+            .find(|b| b.id != entry.id && matches!(b.term, Terminator::Jmp(h) if h == header))
+            .expect("a body block back-edging to the header");
+        assert!(
+            entry.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "the per-iteration Vec2 Alloc hoists into the entry block"
+        );
+        assert!(
+            !body.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "no Alloc in the loop body block (R17)"
+        );
+    }
+
+    #[test]
+    fn times_saves_and_restores_loop_state() {
+        // R15u: after the `times` arm returns, `header`/`entry_block`/
+        // `carried_slots`/`back_edges` are all back to their pre-`times` values.
+        // `finalize_loop` clears only two of the four, so the arm's explicit
+        // save/restore is what lets a later `Alloc` (or a second sequential
+        // `times`) not hoist into the dead `times` entry block.
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+            },
+        );
+        // A `times` over an empty row: push the count, then intern a body that
+        // consumes just the synthesized index (`[ drop ]`) so the row stays
+        // empty and the back-edge arity matches the single index slot.
+        let count = b.fresh_value(IrType::I64);
+        b.push_instr(Instr::Const(count, 3));
+        b.const_vals.insert(count, 3);
+        b.stack.push(count);
+        let quot_term = &line_terms("[ drop ]")[0];
+        b.lower_term(quot_term, false);
+        assert_eq!(b.stack.len(), 2, "count beneath the quotation phantom");
+
+        let saved_header = b.header;
+        let saved_entry = b.entry_block;
+        b.lower_call("times", Span { line: 1, col: 1 }, false);
+
+        assert_eq!(b.header, saved_header, "header restored");
+        assert_eq!(b.entry_block, saved_entry, "entry_block restored");
+        assert!(b.carried_slots.is_empty(), "carried_slots restored");
+        assert!(b.back_edges.is_empty(), "back_edges restored");
     }
 
     #[test]
