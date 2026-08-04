@@ -571,7 +571,8 @@ rows, no borrow analysis needed to write the compiler in it.
   are library words built on quotations and inlined at call sites. Raw recursion is
   legal but not the idiom. Self-tail-recursion is a guaranteed constant-stack transform
   (tail self-call → jump), implemented in Phase 2; mutual TCO is deferred (SCC
-  contraction, not a trampoline).
+  contraction, not a trampoline). A loop-carried aggregate gets an entry-hoisted stable
+  slot with a read-before-write staged move-blit on the back-edge, no header phi.
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.
