@@ -5996,7 +5996,7 @@ mod tests {
             structs: &structs,
             enums: &enums,
         };
-        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
         let span = Span { line: 1, col: 1 };
         let marker = Some(QuotRef::Known(QuotId(0)));
@@ -6012,7 +6012,7 @@ mod tests {
                 "rot" => vec![Slot::computed(Type::I64), Slot::computed(Type::I64), quot],
                 _ => vec![quot],
             };
-            let out = check_shuffle(name, span, &mut stack, &ctx, &mut arrays, &mut prov)
+            let out = check_shuffle(name, span, &mut stack, &ctx, &arrays, &mut prov)
                 .unwrap()
                 .unwrap();
             assert!(
