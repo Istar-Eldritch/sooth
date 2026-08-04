@@ -4690,6 +4690,15 @@ fn check_term(
                 if !same_shape {
                     return Err(times_body_row_effect_error(ctx, span));
                 }
+                // R18: the whole-row guard runs on the *entry* row, but a body
+                // that consumes a real value and constructs a quotation into
+                // its place leaves a phantom in the output row that `match_slot`
+                // accepts as `Exact` against the `Cstr` placeholder. That
+                // phantom would be carried into the loop's back-edge phis, so
+                // reject it here with the same whole-row wording.
+                if result.iter().any(|s| s.quot.is_some()) {
+                    return Err(reject_quotation_operand(ctx, span, "times"));
+                }
                 stack = result;
                 return Ok(stack);
             }
