@@ -242,7 +242,12 @@ aggregate-return ABI specifically: a by-value aggregate return is the common ins
 but an aggregate constructed inline each iteration with no call at all reused its
 entry-hoisted storage the same way and is fixed by the same change.
 **Next action: Phase 4 Slice 4** (quotations + the internal loop primitive), the next of
-eight dependency-ordered slices planned out under Phase 4.
+nine dependency-ordered slices planned out under Phase 4. Its brief
+(`docs/phase4-slice4-brief.md`) is written and its open questions are settled: the floor is
+the `times` intrinsic, the slice ships a runnable constant-stack loop, a quotation stays a
+compile-time marker until slice 6 makes it a real value, and the two polymorphic-path gaps
+the brief measured (`if` rejected in a polymorphic body; no loop transform for a
+polymorphic self-tail word) land in slice 5. Spec next.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -739,8 +744,10 @@ plus the **internal loop primitive** they compile down to for constant-stack
 iteration. Combinators (`each`/`map`/`filter`/`fold`/`while`/`times`) are ordinary
 **library words** written in Sooth on top of quotations, with the compiler inlining
 the common ones and their quotation arguments at the call site so they lower to tight
-loops rather than a `call` per element. Escaping quotations use the uniform-runtime-
-stack fallback and depend on the alloc layer (Phase 6). With quotations in hand, `if`
+loops rather than a `call` per element. Quotations then become genuine first-class code
+values in slice 6 (functions as values: downward closures on a frame-local environment,
+upward ones on a `^` cell), which is what makes the functional style the combinators
+imply actually writable. With quotations in hand, `if`
 is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-style) and
 stops being a keyword, and a `cond` multi-way combinator lands alongside the others.
 
@@ -762,9 +769,11 @@ this: clause structure maps 1:1 onto a future quotation arm-table, and `if` stay
 keyword for now is the honest strict-eval choice, not a commitment.
 
 **Exit:** polymorphic `dup`/`swap`/`max`; a constant-stack `each`/`fold` over a
-collection; combinators verified to inline to loops, not per-element calls.
+collection; combinators verified to inline to loops, not per-element calls; and a quotation
+held as a value, invoked through a path the compiler did not inline (slice 6).
 **Dogfood:** write the combinator library (`each`/`map`/`fold`/`while`) in Sooth
-itself, then rewrite an earlier program to use it.
+itself, then rewrite an earlier program to use it; and rewrite `examples/vm.sth`'s dispatch
+around a table of quotations.
 
 **Slice plan** (dependency-ordered; each its own brief -> spec -> implement -> review,
 same as Phases 2 and 3). None of these is a locked spec yet. The dispatch-and-uniformity
@@ -773,8 +782,8 @@ whole, land it in order. Phase 3's evidence for slicing rather than one big push
 its Slice 8 had to split into 8a/8b/8c mid-flight (`close` had to exist before the
 destructor mechanism could be designed against it) and its Slice 3 shipped covering only
 direct self-recursion, needing Slice 4 as a follow-on — both boundaries discovered late,
-under load. Process is calibrated per slice, not uniformly: slices 1–5 carry real design
-risk and want full specs, while 8 is a mechanical migration that can run 8c-style (no
+under load. Process is calibrated per slice, not uniformly: slices 1–6 carry real design
+risk and want full specs, while 9 is a mechanical migration that can run 8c-style (no
 spec, one implementation pass plus one review).
 
 **The paper pre-check that shaped this plan.** Before committing to the order, the four
@@ -894,6 +903,32 @@ then find out what the compiler owes it.
    lengths today, verified against the built compiler.
 4. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
    primitive they compile down to for constant-stack iteration, plus call-site inlining.
+   **Scoped by `docs/phase4-slice4-brief.md`; the decisions below are settled, not open.**
+   The floor is one compiler-known intrinsic, `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`,
+   passing the iteration index: its body quotation returns the row it received, so effect
+   inference only ever unifies an inner row against itself. `while` was weighed as a second
+   floor member (DESIGN.md:285 allows "one or two") and declined here, because its condition
+   quotation returns a `bool` on a passthrough row, which is strictly harder inference.
+   The slice ships a runnable constant-stack loop rather than inert plumbing, so the phase's
+   riskiest integration (type machinery against quotations against the loop primitive) gets
+   a witness in the slice that builds it; the headline is `0 1000000 [ + ] times .` printing
+   `499999500000` in constant stack, next to `examples/countdown.sth`'s hand-threaded
+   self-recursive equivalent. The floor is permanent, not a bootstrap: DESIGN.md:281-289
+   makes the loop primitive internal ("not surface syntax, not user-facing") and the thin
+   intrinsic floor user-facing by design, so slice 5 builds on `times` rather than retiring
+   it. A quotation here is a **compile-time marker** carrying its inferred effect and body,
+   fused at its `call`, never a runtime value: that defers the `Type`/`PolyType`/`IrType`/
+   unification/mangling change to slice 6, where a consumer for it finally exists. The two
+   "inlining"s the plan used to seem to double-book are different mechanisms and both are
+   real: slice 4 owns **quotation-literal fusion** (splicing a literal's body at its `call`,
+   never crossing a `:` word boundary), slice 5 owns the **interprocedural user-word
+   inliner**.
+   The brief's sharpest finding is what it rules *out* of this slice: a polymorphic word
+   today can neither branch (`if` is rejected in a polymorphic body, `src/check.rs:2997`)
+   nor loop in constant stack (`self_tail` is hardcoded `false` on the polymorphic
+   instantiation path, `src/ir.rs:1176`), so combinators cannot be written as ordinary
+   polymorphic library words at all. Both gaps land in slice 5 against their first real
+   consumers.
    After slice 1 because a combinator's signature has to *say* `[ 'a -- 'b ]`, which needs
    row variables to be expressible at all. **Capture is a quality-of-life question, not a
    soundness one** — downgraded by the pre-check, which expected the opposite. The fear was
@@ -909,8 +944,9 @@ then find out what the compiler owes it.
    scope after inlining — no environment, no allocation, and no `FnOnce`/`FnMut`/`Fn` split
    if capture is restricted to `Copy` locals. Escaping quotations stay out of scope
    regardless — they need the uniform-runtime-stack fallback and Phase 6's alloc layer.
-5. **The combinator library in Sooth + inlining (the phase's headline exit).**
-   `each`/`map`/`filter`/`fold`/`while`/`times` as ordinary library words over quotations,
+5. **The combinator library in Sooth + inlining + closing the polymorphic-path gaps (the
+   phase's headline exit).**
+   `each`/`map`/`filter`/`fold`/`while` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
    tight loops rather than a `call` per element. Depends on 1–4 only, and comes *before* the
    dispatch slices deliberately: it is the first real integration test of the type machinery
@@ -932,9 +968,62 @@ then find out what the compiler owes it.
    but forfeiting the thing the phase is trying to prove, in the same way `vm.sth` shipping
    with zero compiler changes *was* the Phase 2 exit verdict.
    Accepts one known churn cost — the library is written against keyword `if` and gets
-   rewritten when slice 8 turns `if` into a word — which is a handful of library words,
+   rewritten when slice 9 turns `if` into a word — which is a handful of library words,
    cheaper than reordering the phase around it. Dogfood: rewrite an earlier program to use it.
-6. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
+   **This slice also closes the two polymorphic-path gaps slice 4's brief measured**, because
+   this is where their first real consumers appear. A polymorphic body rejects `if`
+   (`src/check.rs:2997`: the monomorphic arm machinery, condition-pop, per-arm
+   unconsumed-linear check, and move-join, is not lifted to `PolyType`), and a polymorphic
+   self-tail word does not get the loop transform (`src/ir.rs:1176`, `self_tail` hardcoded
+   `false`). They are siblings: both are machinery the monomorphic path has and the
+   polymorphic path lacks. Neither blocks slice 4, and neither blocks the phase exit, since
+   `each` and `fold` built on `times` need no branch and `max` is a builtin. They block
+   exactly two library words: `filter` needs the `if` fix to branch on its predicate, and
+   `while` needs **both**, being unbounded (so `times` cannot express it) and naturally
+   written as a self-recursive polymorphic word. If that proves too much on top of the
+   inliner, this slice splits, or a slice lands between 4 and 5; decide at its brief.
+6. **Functions as values: closures.** The slice that makes a quotation a real runtime value
+   rather than a compile-time marker, so it can be branched to, stored, returned, and passed
+   to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
+   array of quotations, a strategy in a struct field, and genuine non-inlined higher-order
+   words. After slice 5 because the combinator library is the consumer that makes the calling
+   convention concrete (designing it with no caller is the anti-pattern this plan keeps
+   citing), and because slice 5 lifts the polymorphic `if` any interesting closure-taking
+   word needs.
+   **Most of the machinery already exists, which is why this is a slice and not a phase.**
+   The environment of a downward closure (passed in, never returned or stored beyond the
+   frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
+   discipline that keeps it sound is Phase 3 Slice 6's structural escape checking, pointed at
+   a new carrier, since a closure simply inherits its captures' restrictions. The
+   `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
+   question is how the call takes the closure, and Sooth already spells all three, `call`
+   through `&q`, through `&!q`, and by value. A closure capturing a linear value is itself
+   linear, so dropping it disposes the captures through the existing destructor mechanism.
+   **Upward closures are not blocked on Phase 6.** `^T` is already an owning heap pointer
+   backed by a real allocator (`src/backend/qbe.rs:672-685`, `malloc` plus an OOM trap) with
+   Phase 3's full disposal story, so an escaping closure is `(code pointer, ^Env)`: the
+   environment lives in a cell instead of a frame slot and drops through machinery that
+   exists. DESIGN.md:512's "a non-escaping quotation is core but an escaping one is `alloc`"
+   is a statement about which stdlib layer the feature belongs to, not about missing
+   machinery. What is genuinely new is the environment's *type*: each capturing quotation has
+   its own capture set, so the compiler synthesizes an env struct per quotation literal, the
+   way slice 1 already synthesizes and interns bundle structs for multi-output returns.
+   Known limit to take in with open eyes: `^` is single-owner, so a `^`-closure is linear and
+   two owners of one callback needs Rc, which stays deferred.
+   This also pays the real type cost slice 4 deferred: a quotation must become nameable, so
+   `Type`/`PolyType`/`IrType` gain a variant and unification, `apply_subst`, `Subst`,
+   `instantiation_symbol` mangling, the monomorphization walk, layout, and the backend all
+   follow. That is a slice-1-sized representation change and the second-largest item in the
+   phase; slice 4's brief sized it deliberately before deferring it here. Representation:
+   one uniform `(code, env)` pair, with a non-capturing quotation carrying an unused env,
+   revisited only if the RT subset demands a distinct bare-pointer type (DESIGN.md:480 names
+   dynamic dispatch through escaping quotations as a hot-path enemy). Decide at its brief
+   whether downward and upward land together; probably yes, since splitting means designing
+   the environment layout twice.
+   Dogfood: rewrite `examples/vm.sth`'s dispatch around a table of quotations and compare it
+   against the enum-plus-clause version it replaces.
+
+7. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
    concrete types is a rule that gets rewritten once type variables exist. **The compiler
    already does this by hand and this slice is where it stops**: the numeric-tower operators
@@ -944,19 +1033,22 @@ then find out what the compiler owes it.
    overloads are the other such sites; the latter are explicitly parked for here ("`drop`
    becoming fully polymorphic is still Phase 4"), and absorbing them means retiring the
    hardcoded interception arms in `check.rs`/`ir.rs` that currently run before any env lookup.
-7. **Open multimethods.** `generic:`/`method:` on a sum: the open/dynamic dual of Phase 2
+8. **Open multimethods.** `generic:`/`method:` on a sum: the open/dynamic dual of Phase 2
    Slice 4's closed clause-style match, trading closed exhaustiveness for module-level
-   extensibility (the expression problem). Separate from slice 6 rather than bundled because
+   extensibility (the expression problem). Separate from slice 7 rather than bundled because
    it needs a runtime dispatch table — the language's first — where static overloading needs
-   none. **Deferral candidate to Phase 6, on the same reasoning that moved opt-in RC out of
+   none. That table is literally a table of function values, so with slice 6 landed it is
+   built on the existing mechanism rather than minting a bespoke one; this is the
+   elevate-to-the-lowest-common-ancestor rule applied at plan scale, and it is a second
+   reason slice 6 sits ahead of here rather than at the end of the phase. **Deferral candidate to Phase 6, on the same reasoning that moved opt-in RC out of
    Phase 3**: its stated payoff is extension across module boundaries, and Sooth is
    single-file until Phase 6 introduces modules, so the benefit is unobservable here and the
    design would be specified against a consumer that does not exist. Decide at its brief.
-8. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
+9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
-   the other seven enable: it needs quotations (slice 4) for `if` to be a word at all, and
-   dispatch (slice 6) so `Bool`'s type-directed printing becomes an ordinary overload instead
+   the other eight enable: it needs quotations (slice 4) for `if` to be a word at all, and
+   dispatch (slice 7) so `Bool`'s type-directed printing becomes an ordinary overload instead
    of a re-added special case — which is the whole point of waiting, per the bundle note
    above. Mechanically it is a large migration rather than a design problem: `bool` has been
    in the test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special
@@ -979,7 +1071,10 @@ now even though hosted is built first: **core** (already accreting), **fixed**
 (allocation-free fixed-capacity vec/map/string/ringbuffer), **alloc** (growable
 Vec/Map/String, Box, opt-in Rc/Arc, escaping closures, bignum, against core's
 allocator interface), **hosted** (files, stdio, time, FFI-to-libc via safe
-wrappers). Tag every stdlib word with the layer it needs.
+wrappers). Tag every stdlib word with the layer it needs. Escaping closures appear in that
+list as a *layer tag*, not as unbuilt work: the feature itself lands in Phase 4 Slice 6 on
+`^`, and what belongs here is only the classification that a closure which escapes its
+frame needs an allocator present, so it is unavailable to the `fixed` layer.
 **Exit:** real hosted programs using libc via safe wrappers; a usable standard
 library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
@@ -1024,8 +1119,7 @@ multi-child recursive type's synthesized destructor loops only its *last* recurs
 and recurses the rest, so a left-leaning tree still disposes in O(depth); a worklist would
 let every child dispose iteratively instead. Waits for here because it needs a growable
 pending-pointer structure to hold onto siblings while descending, which is exactly the
-`alloc` layer's job (the same reasoning that sends Phase 4's escaping quotations to the
-`alloc` layer's uniform-runtime-stack fallback), and because a fallible push wants an
+`alloc` layer's job, and because a fallible push wants an
 optional to report through, which only exists after Phase 4's generics. Building a private
 version of either inside a Phase 3 destructor would be guessing at both. If the fixed-size
 bound turns out to be enough, the `fixed` layer's ringbuffer covers it without waiting for
