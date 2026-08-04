@@ -3012,6 +3012,13 @@ fn poly_term(
                 name, span, stack, scope, sig, ctx, env, structs, enums, arrays,
             );
         }
+        // TEMP-quotation stopgap (phase 1): `poly_term`'s permanent rejection
+        // (R5p) lands in phase 2a/2b; deleted by this exact string then.
+        TermKind::Quotation(_) => {
+            return Err(
+                "error: TEMP-quotation consumer not yet wired (phase 1/2a stopgap)".to_string(),
+            );
+        }
     }
     Ok(stack)
 }
@@ -4581,6 +4588,11 @@ fn check_term(
                 });
             }
             Ok(merged)
+        }
+        // TEMP-quotation stopgap (phase 1): every consumer is wired in
+        // phase 2a/2b; deleted by this exact string then.
+        TermKind::Quotation(_) => {
+            Err("error: TEMP-quotation consumer not yet wired (phase 1/2a stopgap)".to_string())
         }
     }
 }

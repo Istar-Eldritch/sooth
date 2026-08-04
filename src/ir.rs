@@ -2444,6 +2444,11 @@ impl<'a> FuncBuilder<'a> {
                 else_branch,
                 ..
             } => self.lower_if(then_branch, else_branch, tail),
+            // Unreachable in this slice: the checker's TEMP-quotation
+            // stopgap rejects every quotation before lowering ever runs.
+            TermKind::Quotation(_) => {
+                unreachable!("a quotation reached lowering; the checker must reject it first")
+            }
         }
     }
 
