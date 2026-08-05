@@ -267,6 +267,7 @@ pub fn parse_bodies(
     enums: &[EnumDecl],
     module: u32,
     imports: &HashMap<String, u32>,
+    exports: &[Vec<(String, Span)>],
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -288,6 +289,7 @@ pub fn parse_bodies(
         refs,
         module,
         imports,
+        exports,
     };
     while parser.pos < parser.tokens.len() {
         if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
@@ -338,6 +340,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &enums,
         0,
         &no_imports,
+        &[],
         &mut arrays,
         &mut owned_cells,
         &mut refs,
@@ -389,6 +392,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 refs: &mut refs,
                 module: 0,
                 imports: &no_imports,
+                exports: &[],
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -397,6 +401,42 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
         i += 1;
     }
     Ok(imports)
+}
+
+/// Scan a file's tokens for its `export:` forms (R7), parsing each in place
+/// so the driver can learn every module's export list ahead of any body
+/// parse: an importer's effect may name a cross-module type before the
+/// exporting file's own body has been parsed (`parse_bodies` runs per file in
+/// discovery order, not necessarily dependency order). Multiple `export:`
+/// lines accumulate (R7). Mirrors `scan_imports`.
+pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, String> {
+    let mut exports = Vec::new();
+    let mut arrays = Vec::new();
+    let mut owned_cells = Vec::new();
+    let mut refs = Vec::new();
+    let no_imports: HashMap<String, u32> = HashMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if matches!(&tokens[i], (Token::Word(w), _) if w == "export:") {
+            let mut parser = Parser {
+                tokens,
+                pos: i,
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                owned_cells: &mut owned_cells,
+                refs: &mut refs,
+                module: 0,
+                imports: &no_imports,
+                exports: &[],
+            };
+            exports.extend(parser.parse_export()?);
+            i = parser.pos;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(exports)
 }
 
 /// Parse a single REPL line: a `:`-led definition, or a bare term sequence run
@@ -435,6 +475,7 @@ pub fn parse_line_with_structs(
         refs,
         module: 0,
         imports: &no_imports,
+        exports: &[],
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -477,6 +518,7 @@ pub fn parse_typedef_line(
         refs,
         module: 0,
         imports: &no_imports,
+        exports: &[],
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -527,6 +569,7 @@ pub fn parse_enum_typedef_line(
         refs,
         module: 0,
         imports: &no_imports,
+        exports: &[],
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -664,6 +707,17 @@ fn bound_on_use_error(name: &str, span: Span) -> String {
     )
 }
 
+/// R16 (phase 2): a qualified reference to a name that exists in the target
+/// module but is not on its `export:` list. Distinct wording from an unknown
+/// name (which has its own error, `resolve_type`'s `unknown type` and
+/// `check.rs`'s `unknown_word_error`), so the two cases are never conflated.
+fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
 fn unknown_capability_error(name: &str, span: Span) -> String {
     format!(
         "error: unknown capability `{name}` at line {}, col {} (a bound names `Copy` or `Ord`)",
@@ -717,6 +771,13 @@ struct Parser<'t> {
     /// to resolve a `q::Type` type name. Empty for a single-file program and
     /// REPL line.
     imports: &'t std::collections::HashMap<String, u32>,
+    /// Phase 4 slice 5a phase 2 (R16): every module's `export:` list, indexed
+    /// by module id, scanned ahead of any body parse (`scan_exports`) so a
+    /// cross-module type name in an effect can be visibility-checked even
+    /// though the exporting file's own body may not have parsed yet. Empty for
+    /// a single-file program and every REPL line, where no qualified name can
+    /// occur.
+    exports: &'t [Vec<(String, Span)>],
 }
 
 impl<'t> Parser<'t> {
@@ -1448,7 +1509,7 @@ impl<'t> Parser<'t> {
     fn resolve_type(&self, name: &str, span: Span) -> Result<Type, String> {
         // Unknown-type is a semantic error, not a syntax error, so it uses the
         // `error:` prefix (matching check.rs) rather than `parse error:`.
-        crate::ast::resolve_type_name_in_module(
+        let ty = crate::ast::resolve_type_name_in_module(
             self.structs,
             self.enums,
             name,
@@ -1460,7 +1521,32 @@ impl<'t> Parser<'t> {
                 "error: unknown type `{name}` at line {}, col {}",
                 span.line, span.col
             )
-        })
+        })?;
+        // R14/R16 (phase 2): a qualified type name resolved above only
+        // because it exists in the target module's registry; it must also be
+        // exported, distinct from not existing at all (which the branch above
+        // already rejected as `unknown type`).
+        if let Some((qualifier, base)) = name.split_once("::") {
+            if !self.type_is_exported(qualifier, base) {
+                return Err(not_exported_error(base, qualifier, span));
+            }
+        }
+        Ok(ty)
+    }
+
+    /// Whether `base` is named in `qualifier`'s target module's `export:`
+    /// list (R16). The qualifier is assumed to already resolve (the caller
+    /// only reaches here after `resolve_type_name_in_module` succeeded via the
+    /// qualified branch), so a missing qualifier maps to `true`: nothing to
+    /// gate.
+    fn type_is_exported(&self, qualifier: &str, base: &str) -> bool {
+        match self.imports.get(qualifier) {
+            Some(&target) => self
+                .exports
+                .get(target as usize)
+                .is_some_and(|list| list.iter().any(|(n, _)| n == base)),
+            None => true,
+        }
     }
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
@@ -1788,6 +1874,7 @@ mod tests {
             &[],
             0,
             &no_imports,
+            &[],
             &mut arrays,
             &mut cells,
             &mut refs,

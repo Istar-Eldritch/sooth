@@ -15,7 +15,7 @@
 //! left byte-for-byte untouched (R22): the pass is a no-op below two modules,
 //! so today's symbols and output are unchanged.
 
-use crate::ast::{Clause, Module, Term, TermKind, WordBody};
+use crate::ast::{Clause, Module, Span, Term, TermKind, WordBody};
 use std::collections::HashSet;
 
 /// The surface `main` is never mangled: it must stay the symbol the C shim
@@ -73,46 +73,79 @@ impl NameTables {
     }
 
     /// Rewrite one call name occurring in a body owned by `module`, given that
-    /// module's qualifier->module import map and the locals currently in
-    /// scope. Returns `None` to leave the name unchanged.
+    /// module's qualifier->module import map, the locals currently in scope,
+    /// every module's `export:` list, and `span` for a located diagnostic.
+    /// Returns `Ok(None)` to leave the name unchanged (unqualified: an own-
+    /// module reference, which is never gated by export; qualified: absent
+    /// from the target module, left for `check.rs`'s unknown-word error).
+    /// Returns `Err` when the name resolves to a real decl in the target
+    /// module that is not on its export list (R14/R16): a qualified
+    /// `Type>field`/`Type<field`/`Type|>field`/`Type>` accessor is gated by
+    /// its type's export status, one unit per R15.
     fn rewrite(
         &self,
         name: &str,
         module: u32,
         imports: &std::collections::HashMap<String, u32>,
         scope: &HashSet<String>,
-    ) -> Option<String> {
+        exports: &[Vec<(String, Span)>],
+        span: Span,
+    ) -> Result<Option<String>, String> {
         if scope.contains(name) {
-            return None;
+            return Ok(None);
         }
         if let Some((qualifier, rest)) = name.split_once("::") {
-            let target = *imports.get(qualifier)?;
+            let target = match imports.get(qualifier) {
+                Some(&t) => t,
+                None => return Ok(None),
+            };
             let (type_part, suffix) = split_accessor(rest);
             if self.types[target as usize].contains(type_part) {
-                return Some(format!("{}{}", mangle(type_part, target), suffix));
+                if !is_exported(&exports[target as usize], type_part) {
+                    return Err(not_exported_error(type_part, qualifier, span));
+                }
+                return Ok(Some(format!("{}{}", mangle(type_part, target), suffix)));
             }
             if suffix.is_empty() && self.words[target as usize].contains(rest) {
-                return Some(mangle(rest, target));
+                if !is_exported(&exports[target as usize], rest) {
+                    return Err(not_exported_error(rest, qualifier, span));
+                }
+                return Ok(Some(mangle(rest, target)));
             }
-            return None;
+            return Ok(None);
         }
         let (type_part, suffix) = split_accessor(name);
         if self.types[module as usize].contains(type_part) {
-            return Some(format!("{}{}", mangle(type_part, module), suffix));
+            return Ok(Some(format!("{}{}", mangle(type_part, module), suffix)));
         }
         if suffix.is_empty() && self.words[module as usize].contains(name) {
-            return Some(mangle(name, module));
+            return Ok(Some(mangle(name, module)));
         }
-        None
+        Ok(None)
     }
+}
+
+/// Whether `name` is on an `export:` list (R14/R16's positive check).
+fn is_exported(exports: &[(String, Span)], name: &str) -> bool {
+    exports.iter().any(|(n, _)| n == name)
+}
+
+/// R16: a qualified reference to a name that exists in the target module but
+/// is not on its `export:` list. Distinct wording from an unknown name
+/// (`check.rs`'s `unknown_word_error`), so the two cases are never conflated.
+fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
+        span.line, span.col
+    )
 }
 
 /// Mangle every decl name for a multi-module closure and rewrite every body to
 /// match. A no-op below two modules, so a single-file program is unchanged
 /// (R22).
-pub fn resolve_modules(module: &mut Module) {
+pub fn resolve_modules(module: &mut Module) -> Result<(), String> {
     if module.modules.len() < 2 {
-        return;
+        return Ok(());
     }
     let tables = NameTables::build(module);
 
@@ -121,16 +154,18 @@ pub fn resolve_modules(module: &mut Module) {
     // split out so a body's own module id and import map drive its rewrite.
     let import_maps: Vec<std::collections::HashMap<String, u32>> =
         module.modules.iter().map(|m| m.imports.clone()).collect();
+    let exports: Vec<Vec<(String, Span)>> =
+        module.modules.iter().map(|m| m.exports.clone()).collect();
     for word in &mut module.words {
         let imports = &import_maps[word.module as usize];
         let mut scope = HashSet::new();
         match &mut word.body {
             WordBody::Terms { terms } => {
-                rewrite_terms(terms, word.module, imports, &tables, &mut scope);
+                rewrite_terms(terms, word.module, imports, &tables, &mut scope, &exports)?;
             }
             WordBody::Clauses(clauses) => {
                 for clause in clauses {
-                    rewrite_clause(clause, word.module, imports, &tables, &mut scope);
+                    rewrite_clause(clause, word.module, imports, &tables, &mut scope, &exports)?;
                 }
             }
         }
@@ -148,40 +183,48 @@ pub fn resolve_modules(module: &mut Module) {
     for x in &mut module.externs {
         x.name = mangle(&x.name, x.module);
     }
+    Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rewrite_clause(
     clause: &mut Clause,
     module: u32,
     imports: &std::collections::HashMap<String, u32>,
     tables: &NameTables,
     scope: &mut HashSet<String>,
-) {
+    exports: &[Vec<(String, Span)>],
+) -> Result<(), String> {
     let base = scope.len();
     let added: Vec<String> = clause.locals.clone();
     for name in &added {
         scope.insert(name.clone());
     }
-    rewrite_terms(&mut clause.body, module, imports, tables, scope);
+    rewrite_terms(&mut clause.body, module, imports, tables, scope, exports)?;
     truncate_scope(scope, base, &added);
+    Ok(())
 }
 
 /// Rewrite a block of terms left to right. A `Bind` extends the scope for the
 /// rest of this block (and any nested block that follows); the added names are
 /// removed when the block ends, so a sibling block does not see them.
+#[allow(clippy::too_many_arguments)]
 fn rewrite_terms(
     terms: &mut [Term],
     module: u32,
     imports: &std::collections::HashMap<String, u32>,
     tables: &NameTables,
     scope: &mut HashSet<String>,
-) {
+    exports: &[Vec<(String, Span)>],
+) -> Result<(), String> {
     let base = scope.len();
     let mut added: Vec<String> = Vec::new();
     for term in terms.iter_mut() {
         match &mut term.kind {
             TermKind::Call(name) => {
-                if let Some(new) = tables.rewrite(name, module, imports, scope) {
+                if let Some(new) =
+                    tables.rewrite(name, module, imports, scope, exports, term.span)?
+                {
                     *name = new;
                 }
             }
@@ -197,11 +240,11 @@ fn rewrite_terms(
                 else_branch,
                 ..
             } => {
-                rewrite_terms(then_branch, module, imports, tables, scope);
-                rewrite_terms(else_branch, module, imports, tables, scope);
+                rewrite_terms(then_branch, module, imports, tables, scope, exports)?;
+                rewrite_terms(else_branch, module, imports, tables, scope, exports)?;
             }
             TermKind::Quotation(inner) => {
-                rewrite_terms(inner, module, imports, tables, scope);
+                rewrite_terms(inner, module, imports, tables, scope, exports)?;
             }
             TermKind::IntLit(_)
             | TermKind::FloatLit(_)
@@ -210,6 +253,7 @@ fn rewrite_terms(
         }
     }
     truncate_scope(scope, base, &added);
+    Ok(())
 }
 
 /// Remove the names this block added, restoring the scope to its entry size.
@@ -246,6 +290,70 @@ mod tests {
         assert_eq!(mangle("Point", 0), "Point__m0");
     }
 
+    /// U5 (R16): a name that exists in the target module but is not on its
+    /// `export:` list is a located `Err`; a name absent from the target
+    /// module entirely is `Ok(None)`, left for `check.rs`'s unknown-word
+    /// error. The two must never collide on the same result shape.
+    #[test]
+    fn visibility_lookup_distinguishes_unexported_from_absent() {
+        let mut words = vec![HashSet::new(), HashSet::new()];
+        words[1].insert("grow".to_string());
+        let tables = NameTables {
+            types: vec![HashSet::new(), HashSet::new()],
+            words,
+        };
+        let mut imports = std::collections::HashMap::new();
+        imports.insert("q".to_string(), 1u32);
+        let exports = vec![Vec::new(), Vec::new()]; // module 1 exports nothing
+        let scope = HashSet::new();
+        let span = Span { line: 1, col: 1 };
+
+        let unexported = tables.rewrite("q::grow", 0, &imports, &scope, &exports, span);
+        assert!(
+            matches!(unexported, Err(ref e) if e.contains("not exported")),
+            "existing-but-private name is a located error: {unexported:?}"
+        );
+
+        let absent = tables.rewrite("q::missing", 0, &imports, &scope, &exports, span);
+        assert_eq!(absent, Ok(None), "absent name defers to unknown-word");
+    }
+
+    /// U6 (R15): naming a type in `export:` exports it and its five generated
+    /// words (constructor, destructure, getter, setter, peek) as one unit,
+    /// gated by the type's own single export entry rather than five separate
+    /// ones.
+    #[test]
+    fn export_of_type_includes_all_five_generated_words() {
+        let mut types = vec![HashSet::new(), HashSet::new()];
+        types[1].insert("Point".to_string());
+        let tables = NameTables {
+            types,
+            words: vec![HashSet::new(), HashSet::new()],
+        };
+        let mut imports = std::collections::HashMap::new();
+        imports.insert("geo".to_string(), 1u32);
+        let exports = vec![
+            Vec::new(),
+            vec![("Point".to_string(), Span { line: 1, col: 1 })],
+        ];
+        let scope = HashSet::new();
+        let span = Span { line: 2, col: 3 };
+
+        for spelling in [
+            "geo::Point",    // constructor
+            "geo::Point>",   // destructure
+            "geo::Point>x",  // getter
+            "geo::Point<x",  // setter
+            "geo::Point|>x", // peek
+        ] {
+            let result = tables.rewrite(spelling, 0, &imports, &scope, &exports, span);
+            assert!(
+                result.is_ok(),
+                "{spelling} resolves once its type is exported: {result:?}"
+            );
+        }
+    }
+
     /// U9 (ast/ir): two modules that each define a word `p` mint distinct
     /// names after resolution, so their symbols cannot collide; a single-module
     /// closure is left exactly as parsed.
@@ -256,9 +364,9 @@ mod tests {
         // driver would, then resolved.
         let mut module = assemble_two_modules(
             ": p ( -- i64 ) 1 ; : main ( -- ) lib::p drop p drop ;",
-            ": p ( -- i64 ) 2 ;",
+            ": p ( -- i64 ) 2 ;\nexport: p ;",
         );
-        resolve_modules(&mut module);
+        resolve_modules(&mut module).unwrap();
         let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
         assert!(names.contains(&"p__m0"), "module 0's p mangled: {names:?}");
         assert!(names.contains(&"p__m1"), "module 1's p mangled: {names:?}");
@@ -279,7 +387,7 @@ mod tests {
     fn single_module_closure_is_left_unchanged() {
         let tokens = lex(": p ( -- i64 ) 1 ; : main ( -- ) p drop ;").unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
-        resolve_modules(&mut module);
+        resolve_modules(&mut module).unwrap();
         let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, vec!["p", "main"]);
         let main = module.words.iter().find(|w| w.name == "main").unwrap();
@@ -334,12 +442,17 @@ mod tests {
         let mut imports0: HashMap<String, u32> = HashMap::new();
         imports0.insert("lib".to_string(), 1);
         let no_imports: HashMap<String, u32> = HashMap::new();
+        let exports_by_module = vec![
+            crate::parser::scan_exports(&entry_tokens).unwrap(),
+            crate::parser::scan_exports(&lib_tokens).unwrap(),
+        ];
         let entry_bodies = parse_bodies(
             &entry_tokens,
             &structs,
             &enums,
             0,
             &imports0,
+            &exports_by_module,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -351,6 +464,7 @@ mod tests {
             &enums,
             1,
             &no_imports,
+            &exports_by_module,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -370,11 +484,11 @@ mod tests {
             modules: vec![
                 ModuleInfo {
                     imports: imports0,
-                    exports: Vec::new(),
+                    exports: entry_bodies.exports,
                 },
                 ModuleInfo {
                     imports: no_imports,
-                    exports: Vec::new(),
+                    exports: lib_bodies.exports,
                 },
             ],
         }

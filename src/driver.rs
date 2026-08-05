@@ -159,6 +159,16 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
         parser::prepass_and_register(&node.tokens, m as u32, &mut structs, &mut enums)?;
     }
 
+    // R14/R16: every module's `export:` list, scanned upfront (independent
+    // of body-parse order, which is discovery order, not dependency order) so
+    // an importer's effect can visibility-check a cross-module type even
+    // before the exporting file's own body has parsed.
+    let exports_by_module: Vec<Vec<(String, Span)>> = closure
+        .nodes
+        .iter()
+        .map(|node| parser::scan_exports(&node.tokens))
+        .collect::<Result<_, _>>()?;
+
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
@@ -176,6 +186,7 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
             &enums,
             m as u32,
             &import_map,
+            &exports_by_module,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -192,7 +203,7 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
         externs.extend(bodies.externs);
         modules.push(ModuleInfo {
             imports: import_map,
-            exports: bodies.exports,
+            exports: exports_by_module[m].clone(),
         });
     }
 
@@ -207,7 +218,7 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
         instantiations: HashMap::new(),
         modules,
     };
-    resolve::resolve_modules(&mut module);
+    resolve::resolve_modules(&mut module)?;
     Ok(module)
 }
 

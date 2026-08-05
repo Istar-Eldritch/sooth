@@ -190,6 +190,119 @@ fn import_path_is_relative_to_importing_file() {
 }
 
 #[test]
+fn unexported_word_is_not_exported_error() {
+    // Criterion 10: `grow` exists in `queue` but is never exported, so a
+    // qualified call to it is a `not exported` error, distinct from unknown
+    // word.
+    let c = Closure::new("unexported-word");
+    c.write(
+        "queue.sth",
+        ": grow ( -- i64 ) 1 ;\n: p ( -- i64 ) 42 ;\nexport: p ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: queue \"queue.sth\" ;\n: main ( -- ) queue::grow . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("not exported"),
+        "distinguishing wording: {err}"
+    );
+    assert!(err.contains("grow"), "names the word: {err}");
+    assert!(err.contains("queue"), "names the module: {err}");
+    assert!(
+        !err.contains("unknown word"),
+        "must not be the unknown-word error: {err}"
+    );
+}
+
+#[test]
+fn absent_word_in_module_is_unknown_not_unexported() {
+    // Criterion 11: `missing` does not exist in `queue` at all, so the error
+    // is the ordinary unknown-word error, not `not exported` (differs from
+    // criterion 10).
+    let c = Closure::new("absent-word");
+    c.write("queue.sth", ": p ( -- i64 ) 42 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: queue \"queue.sth\" ;\n: main ( -- ) queue::missing . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        !err.contains("not exported"),
+        "an absent name is not a visibility error: {err}"
+    );
+}
+
+#[test]
+fn qualified_accessors_get_set_peek_all_resolve() {
+    // Criterion 12: an exported type's getter, setter, and peek accessors
+    // (`>`, `<`, `|>`) all resolve when qualified.
+    let c = Closure::new("accessors");
+    c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: geo \"geo.sth\" ;\n: main ( -- ) 1 2 geo::Point geo::Point|>x . 9 geo::Point<x geo::Point>x . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "1\n9\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn unexported_type_is_not_exported_error() {
+    // Criterion 13: `geo::Point` is never exported, so naming it qualified is
+    // a `not exported` error, not unknown word/type.
+    let c = Closure::new("unexported-type");
+    c.write("geo.sth", "type: Point x i64 ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: geo \"geo.sth\" ;\n: mk ( -- geo::Point ) 3 geo::Point ;\n: main ( -- ) mk drop ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("not exported"),
+        "distinguishing wording: {err}"
+    );
+    assert!(err.contains("Point"), "names the type: {err}");
+    assert!(err.contains("geo"), "names the module: {err}");
+}
+
+#[test]
+fn unexported_type_named_only_in_an_effect_is_not_exported_error() {
+    // Criterion 13 (isolation): `geo::Point` never appears in a body call
+    // here, only in `takes`'s effect, so this exercises the parser's own
+    // effect-time visibility check independently of the body-call rewrite
+    // path `unexported_type_is_not_exported_error` also exercises.
+    let c = Closure::new("unexported-type-effect-only");
+    c.write("geo.sth", "type: Point x i64 ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: geo \"geo.sth\" ;\n: takes ( geo::Point -- ) drop ;\n: main ( -- ) 0 . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("not exported"),
+        "distinguishing wording: {err}"
+    );
+    assert!(err.contains("Point"), "names the type: {err}");
+    assert!(err.contains("geo"), "names the module: {err}");
+}
+
+#[test]
+fn malformed_import_form_is_located_parse_error() {
+    // Criterion 14: a malformed `import:` (missing qualifier or path string,
+    // unterminated before `;`) is a located parse error naming the construct.
+    let c = Closure::new("malformed-import");
+    let entry = c.write("main.sth", "import: \"lib.sth\" ;\n: main ( -- ) 0 . ;\n");
+    let err = build_err(&entry);
+    assert!(
+        err.contains("parse error") || err.contains("import:"),
+        "names the construct: {err}"
+    );
+}
+
+#[test]
 fn import_at_repl_is_located_rejection() {
     // Criterion 9: `import:` at the REPL is a located rejection, not a silent
     // parse error pointing at the `;`.
