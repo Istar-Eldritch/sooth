@@ -88,11 +88,13 @@ impl NameTables {
     /// module that is not on its export list (R14/R16): a qualified
     /// `Type>field`/`Type<field`/`Type|>field`/`Type>` accessor is gated by
     /// its type's export status, one unit per R15.
+    #[allow(clippy::too_many_arguments)]
     fn rewrite(
         &self,
         name: &str,
         module: u32,
         imports: &std::collections::HashMap<String, u32>,
+        selective: &std::collections::HashMap<String, u32>,
         scope: &HashSet<String>,
         exports: &[Vec<(String, Span)>],
         span: Span,
@@ -127,6 +129,23 @@ impl NameTables {
         if suffix.is_empty() && self.words[module as usize].contains(name) {
             return Ok(Some(mangle(name, module)));
         }
+        // R20/R15c: own module first, then a selectively imported name. The
+        // map (validated by `check::check_selective_imports`) exposes a bare
+        // `Type` together with its generated words as one unit, so a
+        // `Type>field` call whose `type_part` is selectively imported rewrites
+        // against the target module just like a plain word does.
+        if let Some(&target) = selective.get(type_part) {
+            if self.types[target as usize].contains(type_part) {
+                return Ok(Some(format!("{}{}", mangle(type_part, target), suffix)));
+            }
+        }
+        if suffix.is_empty() {
+            if let Some(&target) = selective.get(name) {
+                if self.words[target as usize].contains(name) {
+                    return Ok(Some(mangle(name, target)));
+                }
+            }
+        }
         Ok(None)
     }
 }
@@ -160,18 +179,37 @@ pub fn resolve_modules(module: &mut Module) -> Result<(), String> {
     // split out so a body's own module id and import map drive its rewrite.
     let import_maps: Vec<std::collections::HashMap<String, u32>> =
         module.modules.iter().map(|m| m.imports.clone()).collect();
+    let selectives: Vec<std::collections::HashMap<String, u32>> =
+        module.modules.iter().map(|m| m.selective.clone()).collect();
     let exports: Vec<Vec<(String, Span)>> =
         module.modules.iter().map(|m| m.exports.clone()).collect();
     for word in &mut module.words {
         let imports = &import_maps[word.module as usize];
+        let selective = &selectives[word.module as usize];
         let mut scope = HashSet::new();
         match &mut word.body {
             WordBody::Terms { terms } => {
-                rewrite_terms(terms, word.module, imports, &tables, &mut scope, &exports)?;
+                rewrite_terms(
+                    terms,
+                    word.module,
+                    imports,
+                    selective,
+                    &tables,
+                    &mut scope,
+                    &exports,
+                )?;
             }
             WordBody::Clauses(clauses) => {
                 for clause in clauses {
-                    rewrite_clause(clause, word.module, imports, &tables, &mut scope, &exports)?;
+                    rewrite_clause(
+                        clause,
+                        word.module,
+                        imports,
+                        selective,
+                        &tables,
+                        &mut scope,
+                        &exports,
+                    )?;
                 }
             }
         }
@@ -197,6 +235,7 @@ fn rewrite_clause(
     clause: &mut Clause,
     module: u32,
     imports: &std::collections::HashMap<String, u32>,
+    selective: &std::collections::HashMap<String, u32>,
     tables: &NameTables,
     scope: &mut HashSet<String>,
     exports: &[Vec<(String, Span)>],
@@ -206,7 +245,15 @@ fn rewrite_clause(
     for name in &added {
         scope.insert(name.clone());
     }
-    rewrite_terms(&mut clause.body, module, imports, tables, scope, exports)?;
+    rewrite_terms(
+        &mut clause.body,
+        module,
+        imports,
+        selective,
+        tables,
+        scope,
+        exports,
+    )?;
     truncate_scope(scope, base, &added);
     Ok(())
 }
@@ -219,6 +266,7 @@ fn rewrite_terms(
     terms: &mut [Term],
     module: u32,
     imports: &std::collections::HashMap<String, u32>,
+    selective: &std::collections::HashMap<String, u32>,
     tables: &NameTables,
     scope: &mut HashSet<String>,
     exports: &[Vec<(String, Span)>],
@@ -229,7 +277,7 @@ fn rewrite_terms(
         match &mut term.kind {
             TermKind::Call(name) => {
                 if let Some(new) =
-                    tables.rewrite(name, module, imports, scope, exports, term.span)?
+                    tables.rewrite(name, module, imports, selective, scope, exports, term.span)?
                 {
                     *name = new;
                 }
@@ -246,11 +294,27 @@ fn rewrite_terms(
                 else_branch,
                 ..
             } => {
-                rewrite_terms(then_branch, module, imports, tables, scope, exports)?;
-                rewrite_terms(else_branch, module, imports, tables, scope, exports)?;
+                rewrite_terms(
+                    then_branch,
+                    module,
+                    imports,
+                    selective,
+                    tables,
+                    scope,
+                    exports,
+                )?;
+                rewrite_terms(
+                    else_branch,
+                    module,
+                    imports,
+                    selective,
+                    tables,
+                    scope,
+                    exports,
+                )?;
             }
             TermKind::Quotation(inner) => {
-                rewrite_terms(inner, module, imports, tables, scope, exports)?;
+                rewrite_terms(inner, module, imports, selective, tables, scope, exports)?;
             }
             TermKind::IntLit(_)
             | TermKind::FloatLit(_)
@@ -314,13 +378,30 @@ mod tests {
         let scope = HashSet::new();
         let span = Span { line: 1, col: 1 };
 
-        let unexported = tables.rewrite("q::grow", 0, &imports, &scope, &exports, span);
+        let no_selective = std::collections::HashMap::new();
+        let unexported = tables.rewrite(
+            "q::grow",
+            0,
+            &imports,
+            &no_selective,
+            &scope,
+            &exports,
+            span,
+        );
         assert!(
             matches!(unexported, Err(ref e) if e.contains("not exported")),
             "existing-but-private name is a located error: {unexported:?}"
         );
 
-        let absent = tables.rewrite("q::missing", 0, &imports, &scope, &exports, span);
+        let absent = tables.rewrite(
+            "q::missing",
+            0,
+            &imports,
+            &no_selective,
+            &scope,
+            &exports,
+            span,
+        );
         assert_eq!(absent, Ok(None), "absent name defers to unknown-word");
     }
 
@@ -352,7 +433,9 @@ mod tests {
             "geo::Point<x",  // setter
             "geo::Point|>x", // peek
         ] {
-            let result = tables.rewrite(spelling, 0, &imports, &scope, &exports, span);
+            let no_selective = std::collections::HashMap::new();
+            let result =
+                tables.rewrite(spelling, 0, &imports, &no_selective, &scope, &exports, span);
             assert!(
                 result.is_ok(),
                 "{spelling} resolves once its type is exported: {result:?}"
@@ -459,6 +542,7 @@ mod tests {
             0,
             &imports0,
             &exports_by_module,
+            &no_imports,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -471,6 +555,7 @@ mod tests {
             1,
             &no_imports,
             &exports_by_module,
+            &no_imports,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -491,10 +576,12 @@ mod tests {
                 ModuleInfo {
                     imports: imports0,
                     exports: entry_bodies.exports,
+                    selective: HashMap::new(),
                 },
                 ModuleInfo {
                     imports: no_imports,
                     exports: lib_bodies.exports,
+                    selective: HashMap::new(),
                 },
             ],
         }

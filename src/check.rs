@@ -1493,6 +1493,121 @@ fn exported_word_names_private_type_error(word: &WordDef, type_name: &str) -> St
     )
 }
 
+/// Phase 4 slice 5a phase 4 (R20/R15c): one selectively-imported name, carried
+/// from the driver's closure assembly with the qualifier and target module it
+/// came from and the span of the name in the `import:` form, for the R20/R21
+/// validation. A type name exposes its generated words as one unit (R15c), so
+/// only the base name appears here; a member (`Type>field`) can only collide
+/// when its base does.
+pub struct SelectiveName {
+    pub name: String,
+    pub qualifier: String,
+    pub target: u32,
+    pub span: Span,
+}
+
+/// R20/R21: validate every module's selective imports on the raw, pre-mangle
+/// module. Each listed name must be exported by its source module (R20, the
+/// R16 visibility error). No two selective imports may expose the same
+/// unqualified name, and a selective name may not collide with one of the
+/// importing module's own words or types (R21, a located error at the second
+/// source naming both). The collision is decided on the base name because a
+/// selectively imported type and its generated words are one unit (R15c) and a
+/// member name collides only when its base does.
+pub fn check_selective_imports(
+    module: &Module,
+    selective_by_module: &[Vec<SelectiveName>],
+) -> Result<(), String> {
+    for (m, entries) in selective_by_module.iter().enumerate() {
+        let locals = local_decl_names(module, m as u32);
+        // name -> the qualifier that first exposed it, for R21's both-sources error.
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for entry in entries {
+            let exports = &module.modules[entry.target as usize].exports;
+            if !exports.iter().any(|(n, _)| n == &entry.name) {
+                return Err(selective_not_exported_error(
+                    &entry.name,
+                    &entry.qualifier,
+                    entry.span,
+                ));
+            }
+            if locals.contains(entry.name.as_str()) {
+                return Err(selective_collides_with_local_error(
+                    &entry.name,
+                    &entry.qualifier,
+                    entry.span,
+                ));
+            }
+            if let Some(first) = seen.insert(entry.name.as_str(), entry.qualifier.as_str()) {
+                return Err(selective_collision_error(
+                    &entry.name,
+                    first,
+                    &entry.qualifier,
+                    entry.span,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every raw decl name owned by module `m`: its structs, enums, words, and
+/// externs, for R21's selective-vs-local collision check. Runs pre-mangle, so
+/// the names are the source spellings a selective import would collide with.
+fn local_decl_names(module: &Module, m: u32) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    for s in &module.structs {
+        if s.module == m {
+            names.insert(s.name.as_str());
+        }
+    }
+    for e in &module.enums {
+        if e.module == m {
+            names.insert(e.name.as_str());
+        }
+    }
+    for w in &module.words {
+        if w.module == m {
+            names.insert(w.name.as_str());
+        }
+    }
+    for x in &module.externs {
+        if x.module == m {
+            names.insert(x.name.as_str());
+        }
+    }
+    names
+}
+
+/// R20: a selectively imported name absent from its source module's `export:`
+/// list is the R16 visibility error, same wording as a qualified private
+/// reference.
+fn selective_not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// R21: a second selective import exposing a name a prior one already exposed,
+/// naming both source modules. No precedence, no shadowing: the collision is
+/// the error.
+fn selective_collision_error(name: &str, first: &str, second: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
+        span.line, span.col
+    )
+}
+
+/// R21: a selective import exposing a name the importing module already defines
+/// locally, naming the source module and the local definition.
+fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
+        span.line, span.col
+    )
+}
+
 /// Type-level checks that must pass before any generated-word signature or
 /// word body is type-checked: no two `type:` declarations share a name across
 /// the combined struct+enum registries, and no struct or enum contains itself
@@ -6515,6 +6630,7 @@ mod tests {
             modules: vec![ModuleInfo {
                 imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
+                selective: HashMap::new(),
             }],
         };
 
@@ -6528,6 +6644,145 @@ mod tests {
         assert!(
             check_exported_signatures(&module).is_ok(),
             "exporting the type clears the rule"
+        );
+    }
+
+    /// U8 (R20/R21): the selective-import validator rejects a name absent from
+    /// its source module's export list (R20), two selective imports of one name
+    /// (R21, naming both sources), and a selective name colliding with a local
+    /// word (R21), while a clean import passes.
+    #[test]
+    fn selective_import_collision_is_rejected() {
+        use crate::ast::ModuleInfo;
+
+        fn info(exports: &[&str]) -> ModuleInfo {
+            ModuleInfo {
+                imports: HashMap::new(),
+                exports: exports
+                    .iter()
+                    .map(|n| (n.to_string(), Span::default()))
+                    .collect(),
+                selective: HashMap::new(),
+            }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect::default(),
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+            }
+        }
+        fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
+            Module {
+                words,
+                structs: Vec::new(),
+                enums: Vec::new(),
+                arrays: Vec::new(),
+                owned_cells: Vec::new(),
+                refs: Vec::new(),
+                externs: Vec::new(),
+                instantiations: HashMap::new(),
+                modules,
+            }
+        }
+        fn sel(name: &str, qualifier: &str, target: u32, line: u32) -> SelectiveName {
+            SelectiveName {
+                name: name.to_string(),
+                qualifier: qualifier.to_string(),
+                target,
+                span: Span { line, col: 1 },
+            }
+        }
+
+        // R21: modules 1 and 2 each export `p`; module 0 selectively imports it
+        // from both, colliding at the second.
+        let m = module_with(
+            vec![word("p", 1), word("p", 2)],
+            vec![info(&[]), info(&["p"]), info(&["p"])],
+        );
+        let entries = vec![
+            vec![sel("p", "a", 1, 1), sel("p", "b", 2, 2)],
+            Vec::new(),
+            Vec::new(),
+        ];
+        let err = check_selective_imports(&m, &entries).unwrap_err();
+        assert!(err.contains("collides"), "selective collision: {err}");
+        assert!(
+            err.contains("`a`") && err.contains("`b`"),
+            "names both sources: {err}"
+        );
+
+        // R20: a name absent from its source's export list is the visibility
+        // error, distinct from a collision.
+        let m = module_with(vec![word("grow", 1)], vec![info(&[]), info(&[])]);
+        let err =
+            check_selective_imports(&m, &[vec![sel("grow", "lib", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(err.contains("not exported"), "R20 export gate: {err}");
+        assert!(!err.contains("collides"), "not the collision error: {err}");
+
+        // R21: a selective name colliding with the importer's own local word.
+        let m = module_with(
+            vec![word("p", 0), word("p", 1)],
+            vec![info(&[]), info(&["p"])],
+        );
+        let err =
+            check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(
+            err.contains("collides") && err.contains("local"),
+            "local collision: {err}"
+        );
+
+        // A clean selective import of an exported, non-colliding name passes.
+        let m = module_with(vec![word("p", 1)], vec![info(&[]), info(&["p"])]);
+        assert!(check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).is_ok());
+    }
+
+    /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
+    /// the one shared registry the driver assembles across the closure,
+    /// deduping to a single `ArrayId` rather than one per file.
+    #[test]
+    fn array_shape_dedupes_across_files() {
+        use crate::parser::parse_bodies;
+        let a = lex(": fa ( [i64 8] -- ) drop ;").unwrap();
+        let b = lex(": fb ( [i64 8] -- ) drop ;").unwrap();
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let no_imports = HashMap::new();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        parse_bodies(
+            &a,
+            &structs,
+            &enums,
+            0,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        parse_bodies(
+            &b,
+            &structs,
+            &enums,
+            1,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        assert_eq!(
+            arrays.len(),
+            1,
+            "two files' [i64 8] dedupe to one ArrayId in the shared registry"
         );
     }
 

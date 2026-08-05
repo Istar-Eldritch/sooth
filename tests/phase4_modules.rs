@@ -383,3 +383,117 @@ fn import_at_repl_is_located_rejection() {
         "not the old misdirected error: {transcript}"
     );
 }
+
+// Phase 4 goldens: selective import (the optional additive `| name... |`
+// clause). A selectively imported name is exposed unqualified in addition to
+// the always-available qualifier (R20), a private one is a visibility error,
+// and a collision (with another selective import or a local word) is a located
+// error naming both sources (R21). A selectively imported type brings its
+// generated words unqualified too (R15c).
+
+#[test]
+fn selective_import_exposes_names_unqualified() {
+    // Criterion 18: `p` is exposed unqualified by the `| p |` clause, and the
+    // `lib::p` qualifier is still available alongside it.
+    let c = Closure::new("selective-word");
+    c.write("lib.sth", ": p ( -- i64 ) 42 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: lib | p | \"lib.sth\" ;\n: main ( -- ) p . lib::p . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "42\n42\n", "unqualified and qualified both resolve");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn selective_import_of_private_name_is_error() {
+    // Criterion 19: `grow` exists in `lib` but is never exported, so listing it
+    // in the selective clause is the R16 visibility error (R20).
+    let c = Closure::new("selective-private");
+    c.write(
+        "lib.sth",
+        ": grow ( -- i64 ) 1 ;\n: p ( -- i64 ) 42 ;\nexport: p ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib | grow | \"lib.sth\" ;\n: main ( -- ) grow . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("not exported"),
+        "distinguishing wording: {err}"
+    );
+    assert!(err.contains("grow"), "names the name: {err}");
+    assert!(err.contains("lib"), "names the module: {err}");
+}
+
+#[test]
+fn colliding_selective_imports_are_error_at_second() {
+    // Criterion 20: two modules both expose `p` unqualified; the second
+    // selective import is a located collision error naming both modules.
+    let c = Closure::new("selective-collide");
+    c.write("a.sth", ": p ( -- i64 ) 1 ;\nexport: p ;\n");
+    c.write("b.sth", ": p ( -- i64 ) 2 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: a | p | \"a.sth\" ;\nimport: b | p | \"b.sth\" ;\n: main ( -- ) p . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(err.contains("collides"), "distinguishing wording: {err}");
+    assert!(err.contains("`p`"), "names the colliding name: {err}");
+    assert!(err.contains("`a`"), "names the first module: {err}");
+    assert!(err.contains("`b`"), "names the second module: {err}");
+}
+
+#[test]
+fn selective_import_colliding_with_local_word_is_error() {
+    // Criterion 21: a selectively-exposed name that collides with a locally
+    // defined word is the same located error, naming both sources.
+    let c = Closure::new("selective-local-collide");
+    c.write("lib.sth", ": p ( -- i64 ) 1 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: lib | p | \"lib.sth\" ;\n: p ( -- i64 ) 2 ;\n: main ( -- ) p . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(err.contains("collides"), "distinguishing wording: {err}");
+    assert!(err.contains("`p`"), "names the colliding name: {err}");
+    assert!(err.contains("`lib`"), "names the import source: {err}");
+    assert!(err.contains("local"), "names the local definition: {err}");
+}
+
+#[test]
+fn selective_import_of_type_exposes_members_unqualified() {
+    // Criterion 21a: selectively importing `Point` exposes the type unqualified
+    // and its generated words unqualified too (constructor, peek `|>`, set `<`,
+    // get `>`), as one unit (R15c).
+    let c = Closure::new("selective-type");
+    c.write("geo.sth", "type: Point x i64 y i64 ;\nexport: Point ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: geo | Point | \"geo.sth\" ;\n: main ( -- ) 1 2 Point Point|>x . 9 Point<x Point>x . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "1\n9\n", "peek/set/get all resolve unqualified");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn selective_type_import_member_collision_is_error() {
+    // Criterion 21b: two modules each expose a `Point`; selectively importing
+    // both collides on the base name (and thus on every generated member),
+    // a located error at the second naming both modules.
+    let c = Closure::new("selective-type-collide");
+    c.write("a.sth", "type: Point x i64 ;\nexport: Point ;\n");
+    c.write("b.sth", "type: Point v i64 ;\nexport: Point ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: a | Point | \"a.sth\" ;\nimport: b | Point | \"b.sth\" ;\n: main ( -- ) 0 . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(err.contains("collides"), "distinguishing wording: {err}");
+    assert!(err.contains("`Point`"), "names the colliding type: {err}");
+    assert!(err.contains("`a`"), "names the first module: {err}");
+    assert!(err.contains("`b`"), "names the second module: {err}");
+}

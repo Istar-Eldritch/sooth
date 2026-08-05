@@ -268,6 +268,7 @@ pub fn parse_bodies(
     module: u32,
     imports: &HashMap<String, u32>,
     exports: &[Vec<(String, Span)>],
+    selective: &HashMap<String, u32>,
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -290,6 +291,7 @@ pub fn parse_bodies(
         module,
         imports,
         exports,
+        selective,
     };
     while parser.pos < parser.tokens.len() {
         if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
@@ -341,6 +343,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         0,
         &no_imports,
         &[],
+        &no_imports,
         &mut arrays,
         &mut owned_cells,
         &mut refs,
@@ -365,6 +368,7 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
         modules: vec![ModuleInfo {
             imports: HashMap::new(),
             exports: bodies.exports,
+            selective: HashMap::new(),
         }],
     })
 }
@@ -393,6 +397,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 module: 0,
                 imports: &no_imports,
                 exports: &[],
+                selective: &no_imports,
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -429,6 +434,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 module: 0,
                 imports: &no_imports,
                 exports: &[],
+                selective: &no_imports,
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -476,6 +482,7 @@ pub fn parse_line_with_structs(
         module: 0,
         imports: &no_imports,
         exports: &[],
+        selective: &no_imports,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -519,6 +526,7 @@ pub fn parse_typedef_line(
         module: 0,
         imports: &no_imports,
         exports: &[],
+        selective: &no_imports,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -570,6 +578,7 @@ pub fn parse_enum_typedef_line(
         module: 0,
         imports: &no_imports,
         exports: &[],
+        selective: &no_imports,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -778,6 +787,12 @@ struct Parser<'t> {
     /// a single-file program and every REPL line, where no qualified name can
     /// occur.
     exports: &'t [Vec<(String, Span)>],
+    /// Phase 4 slice 5a phase 4 (R20/R15c): this module's selectively-imported
+    /// unqualified names, each mapping to the target module it resolves in. A
+    /// bare `Type` (or word) exposed by `import: q | Type | "..."` resolves
+    /// here after the own-module lookup fails (own-module-first, R11). Empty
+    /// for a single-file program and every REPL line.
+    selective: &'t std::collections::HashMap<String, u32>,
 }
 
 impl<'t> Parser<'t> {
@@ -1515,6 +1530,7 @@ impl<'t> Parser<'t> {
             name,
             self.module,
             self.imports,
+            self.selective,
         )
         .ok_or_else(|| {
             format!(
@@ -1875,6 +1891,7 @@ mod tests {
             0,
             &no_imports,
             &[],
+            &no_imports,
             &mut arrays,
             &mut cells,
             &mut refs,

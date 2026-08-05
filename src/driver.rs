@@ -175,11 +175,34 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
     let mut words = Vec::new();
     let mut externs = Vec::new();
     let mut modules = Vec::with_capacity(closure.nodes.len());
+    // R20/R21: every module's selective-import entries, kept with their source
+    // qualifier and span for the post-assembly validation (`check::check_selective_imports`).
+    let mut selective_by_module: Vec<Vec<check::SelectiveName>> =
+        Vec::with_capacity(closure.nodes.len());
     for (m, node) in closure.nodes.iter().enumerate() {
         let mut import_map: HashMap<String, u32> = HashMap::new();
         for (imp, &target) in node.imports.iter().zip(&node.import_targets) {
             import_map.insert(imp.qualifier.clone(), target);
         }
+        // R20/R15c: the module's unqualified selective names -> target module.
+        // Built unvalidated here so body parsing can resolve a bare selective
+        // `Type`; `check::check_selective_imports` below rejects a private or
+        // colliding name before any codegen (own-module-first resolution means
+        // a collision shadows to the local decl at parse, never miscompiles).
+        let mut selective_map: HashMap<String, u32> = HashMap::new();
+        let mut selective_entries: Vec<check::SelectiveName> = Vec::new();
+        for (imp, &target) in node.imports.iter().zip(&node.import_targets) {
+            for (name, span) in &imp.selective {
+                selective_map.insert(name.clone(), target);
+                selective_entries.push(check::SelectiveName {
+                    name: name.clone(),
+                    qualifier: imp.qualifier.clone(),
+                    target,
+                    span: *span,
+                });
+            }
+        }
+        selective_by_module.push(selective_entries);
         let bodies = parser::parse_bodies(
             &node.tokens,
             &structs,
@@ -187,6 +210,7 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
             m as u32,
             &import_map,
             &exports_by_module,
+            &selective_map,
             &mut arrays,
             &mut owned_cells,
             &mut refs,
@@ -204,6 +228,7 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
+            selective: selective_map,
         });
     }
 
@@ -222,6 +247,9 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
     // module's `export:` list are both still their raw source spellings here,
     // which `resolve::resolve_modules` would otherwise mangle apart.
     check::check_exported_signatures(&module)?;
+    // R20/R21: validate selective imports (each name exported by its source,
+    // no collision) on the raw, pre-mangle module.
+    check::check_selective_imports(&module, &selective_by_module)?;
     resolve::resolve_modules(&mut module)?;
     Ok(module)
 }
