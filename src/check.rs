@@ -1113,6 +1113,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         refs,
         externs: _,
         instantiations: _,
+        modules: _,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below
@@ -1535,14 +1536,18 @@ pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
     check_types(structs, &[], &[], &[])
 }
 
-/// A duplicate `type:` name is a sharp located error naming the type.
+/// A duplicate `type:` name is a sharp located error naming the type. R12
+/// (phase 4 slice 5a): the check is per-module, so two modules each declaring
+/// `Point` is not a duplicate. Keyed by `(module, name_static)`: `name_static`
+/// stays the raw surface name even after the resolver mangles `name` for
+/// symbol disambiguation, so the error still reads `Point`, not `Point__m1`.
 fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
-    let mut seen: HashMap<&str, ()> = HashMap::new();
+    let mut seen: HashMap<(u32, &str), ()> = HashMap::new();
     for decl in structs {
-        if seen.insert(decl.name.as_str(), ()).is_some() {
+        if seen.insert((decl.module, decl.name_static), ()).is_some() {
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
-                decl.name, decl.span.line, decl.span.col
+                decl.name_static, decl.span.line, decl.span.col
             ));
         }
     }
@@ -1557,15 +1562,15 @@ fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
 /// re-scanning `structs` twice.
 fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
     check_duplicate_struct_names(structs)?;
-    let mut seen: HashMap<&str, ()> = structs
+    let mut seen: HashMap<(u32, &str), ()> = structs
         .iter()
-        .map(|decl| (decl.name.as_str(), ()))
+        .map(|decl| ((decl.module, decl.name_static), ()))
         .collect();
     for decl in enums {
-        if seen.insert(decl.name.as_str(), ()).is_some() {
+        if seen.insert((decl.module, decl.name_static), ()).is_some() {
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
-                decl.name, decl.span.line, decl.span.col
+                decl.name_static, decl.span.line, decl.span.col
             ));
         }
     }
@@ -6384,6 +6389,48 @@ mod tests {
         check(&mut module)
     }
 
+    /// U3 (R12): the duplicate-type-name check partitions by owning module, so
+    /// two modules each declaring `Point` is not a duplicate, while two `Point`
+    /// decls in one module still is (reported by the raw `name_static`, not the
+    /// resolver's mangled `name`).
+    #[test]
+    fn duplicate_type_check_is_per_module() {
+        let mk = |module: u32| StructDecl {
+            name: format!("Point__m{module}"),
+            name_static: "Point",
+            fields: Vec::new(),
+            span: crate::ast::Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        // Two modules, one `Point` each: not a duplicate.
+        assert!(check_duplicate_type_names(&[mk(0), mk(1)], &[]).is_ok());
+        // Same module, two `Point`: a duplicate, named by the raw surface name.
+        let same_module = vec![
+            StructDecl {
+                name: "Point".to_string(),
+                name_static: "Point",
+                fields: Vec::new(),
+                span: crate::ast::Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "Point".to_string(),
+                name_static: "Point",
+                fields: Vec::new(),
+                span: crate::ast::Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+        ];
+        let err = check_duplicate_type_names(&same_module, &[]).unwrap_err();
+        assert!(err.contains("duplicate type `Point`"), "raw name: {err}");
+    }
+
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
     const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
@@ -9145,6 +9192,7 @@ mod tests {
             span: Span::default(),
             has_drop_overload: true,
             is_bundle: false,
+            module: 0,
         }];
         let res = Type::Struct(StructId::from_index(0), "Res");
         assert!(!is_copy(res, &structs, &[], &[]));
@@ -9220,6 +9268,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             },
             StructDecl {
                 name: "Holds".to_string(),
@@ -9228,6 +9277,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             },
             StructDecl {
                 name: "Wraps".to_string(),
@@ -9239,6 +9289,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             },
         ];
         let plain = Type::Struct(StructId::from_index(0), "Plain");
@@ -9266,6 +9317,7 @@ mod tests {
             span: Span::default(),
             has_drop_overload: false,
             is_bundle: false,
+            module: 0,
         }];
         let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
             name: name.to_string(),
@@ -9279,6 +9331,7 @@ mod tests {
                 name_static: "Plain",
                 variants: vec![variant("A", vec![]), variant("B", vec![])],
                 span: Span::default(),
+                module: 0,
             },
             EnumDecl {
                 name: "Item".to_string(),
@@ -9288,6 +9341,7 @@ mod tests {
                     variant("Full", vec![("v".to_string(), cell_ty)]),
                 ],
                 span: Span::default(),
+                module: 0,
             },
             EnumDecl {
                 name: "Boxed".to_string(),
@@ -9303,6 +9357,7 @@ mod tests {
                     variant("None", vec![]),
                 ],
                 span: Span::default(),
+                module: 0,
             },
         ];
         let plain = Type::Enum(EnumId::from_index(0), "Plain");

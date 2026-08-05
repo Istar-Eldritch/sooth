@@ -6687,6 +6687,7 @@ mod tests {
             span: crate::ast::Span::default(),
             has_drop_overload: false,
             is_bundle: false,
+            module: 0,
         });
         let (structs, enums, arrays, ..) = build_registries(
             &module.structs,

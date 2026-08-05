@@ -496,6 +496,19 @@ impl Session {
     /// prints the returned diagnostic.
     fn eval_line(&mut self, src: &str, writer: &mut impl Write) -> Result<(), String> {
         let tokens = lexer::lex(src)?;
+        // R23 (phase 4 slice 5a, D7): a native `import:` is a located REPL
+        // rejection, not the misdirected `unexpected Semicolon` parse error
+        // `parse_line_with_structs` would raise. Slice 5b defines what an
+        // import means in a session; this slice only refuses it, guarded here
+        // beside the `type:` special-case and before the parser is reached.
+        if let Some((Token::Word(w), span)) = tokens.first() {
+            if w == "import:" {
+                return Err(format!(
+                    "`import:` is not supported at the REPL yet (line {}, col {})",
+                    span.line, span.col
+                ));
+            }
+        }
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
@@ -555,6 +568,7 @@ impl Session {
             span,
             has_drop_overload: false,
             is_bundle: false,
+            module: 0,
         });
         let result = parser::parse_typedef_line(
             tokens,
@@ -605,6 +619,7 @@ impl Session {
             name_static: Box::leak(name.into_boxed_str()),
             variants,
             span,
+            module: 0,
         });
         let result = parser::parse_enum_typedef_line(
             tokens,
@@ -1474,6 +1489,29 @@ mod tests {
         assert!(!session.env.contains_key("drop"));
         assert_eq!(session.drop_overloads[&id].0, 0);
         assert!(session.structs[0].has_drop_overload);
+    }
+
+    #[test]
+    fn repl_rejects_import_with_located_error() {
+        // U10 / R23 (D7): `import:` as the first token of a REPL line is a
+        // located rejection naming `import:`, not the misdirected
+        // `unexpected Semicolon` parse error, and it leaves the session
+        // untouched.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("import: q \"lib.sth\" ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("`import:` is not supported at the REPL yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 1, col 1"), "located: {err}");
+        assert!(
+            !err.contains("Semicolon"),
+            "must not be the old misdirected parse error: {err}"
+        );
+        assert!(out.is_empty(), "a rejected line writes nothing");
     }
 
     #[test]

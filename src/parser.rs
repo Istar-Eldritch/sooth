@@ -16,9 +16,9 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, Len, Line, Module,
-    OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, Term, TermKind, Type,
-    TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, Import, Len, Line, Module,
+    ModuleInfo, OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, Term,
+    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -200,9 +200,12 @@ fn scan_variant_names(tokens: &[(Token, Span)], start: usize) -> Vec<(String, Sp
 /// variant names, populated by the pre-pass; fields filled in once the real
 /// `type:` bodies are parsed) from the pre-pass decls, leaking each name once
 /// so every `Type::Struct`/`Type::Enum` naming it renders without a registry.
-fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>, Vec<EnumDecl>) {
-    let mut structs = Vec::new();
-    let mut enums = Vec::new();
+fn build_registries_into(
+    decls: &[(String, Span, TypeDeclKind)],
+    module: u32,
+    structs: &mut Vec<StructDecl>,
+    enums: &mut Vec<EnumDecl>,
+) {
     for (name, span, kind) in decls {
         match kind {
             TypeDeclKind::Struct => {
@@ -213,6 +216,7 @@ fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>,
                     span: *span,
                     has_drop_overload: false,
                     is_bundle: false,
+                    module,
                 });
             }
             TypeDeclKind::Enum(variant_names) => {
@@ -230,65 +234,169 @@ fn build_registries(decls: &[(String, Span, TypeDeclKind)]) -> (Vec<StructDecl>,
                     name_static: Box::leak(name.clone().into_boxed_str()),
                     variants,
                     span: *span,
+                    module,
                 });
             }
         }
     }
-    (structs, enums)
 }
 
-pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
-    let decls = prepass_type_decls(tokens)?;
-    let (mut structs, mut enums) = build_registries(&decls);
-    let mut words = Vec::new();
-    let mut externs = Vec::new();
-    let mut struct_fields_by_decl = Vec::new();
-    let mut enum_fields_by_decl = Vec::new();
-    let mut arrays = Vec::new();
-    let mut owned_cells = Vec::new();
-    let mut refs = Vec::new();
-    {
-        let mut parser = Parser {
-            tokens,
-            pos: 0,
-            structs: &structs,
-            enums: &enums,
-            arrays: &mut arrays,
-            owned_cells: &mut owned_cells,
-            refs: &mut refs,
-        };
-        while parser.pos < parser.tokens.len() {
-            if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
-                if parser.current_typedef_is_enum() {
-                    enum_fields_by_decl.push(parser.parse_enum_typedef()?);
-                } else {
-                    struct_fields_by_decl.push(parser.parse_typedef()?);
-                }
-            } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "extern:") {
-                externs.push(parser.parse_extern_decl()?);
-            } else {
-                words.push(parser.parse_worddef()?);
-            }
-        }
-    }
-    for (idx, fields) in struct_fields_by_decl.into_iter().enumerate() {
-        structs[idx].fields = fields;
-    }
-    for (idx, variant_fields) in enum_fields_by_decl.into_iter().enumerate() {
-        for (vidx, fields) in variant_fields.into_iter().enumerate() {
-            enums[idx].variants[vidx].fields = fields;
-        }
-    }
-    Ok(Module {
-        words,
+/// The words, externs, and per-`type:`-body field lists parsed from one file's
+/// tokens, plus its `export:` list. The field lists are in this module's
+/// `type:` declaration order, so a caller fills them back into the registry at
+/// this module's base offset.
+pub struct ParsedBodies {
+    pub words: Vec<WordDef>,
+    pub externs: Vec<ExternDecl>,
+    pub struct_fields_by_decl: Vec<Vec<(String, Type)>>,
+    pub enum_fields_by_decl: Vec<Vec<Vec<(String, Type)>>>,
+    pub exports: Vec<(String, Span)>,
+}
+
+/// Parse one module's bodies (R3): the word/extern definitions and `type:`
+/// field bodies, resolving type names module-aware against the already-merged
+/// `structs`/`enums` (own module first, then imports). `import:` forms are
+/// consumed and discarded (the driver resolved the graph from a prior scan);
+/// `export:` forms accumulate into the returned list (R7). Array/cell/ref
+/// shapes intern into the shared registries so two files' `[i64 8]` dedupe to
+/// one `ArrayId` (R13).
+#[allow(clippy::too_many_arguments)]
+pub fn parse_bodies(
+    tokens: &[(Token, Span)],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    module: u32,
+    imports: &HashMap<String, u32>,
+    arrays: &mut Vec<ArrayDecl>,
+    owned_cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+) -> Result<ParsedBodies, String> {
+    let mut out = ParsedBodies {
+        words: Vec::new(),
+        externs: Vec::new(),
+        struct_fields_by_decl: Vec::new(),
+        enum_fields_by_decl: Vec::new(),
+        exports: Vec::new(),
+    };
+    let mut parser = Parser {
+        tokens,
+        pos: 0,
         structs,
         enums,
         arrays,
         owned_cells,
         refs,
-        externs,
+        module,
+        imports,
+    };
+    while parser.pos < parser.tokens.len() {
+        if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
+            if parser.current_typedef_is_enum() {
+                out.enum_fields_by_decl.push(parser.parse_enum_typedef()?);
+            } else {
+                out.struct_fields_by_decl.push(parser.parse_typedef()?);
+            }
+        } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "extern:") {
+            out.externs.push(parser.parse_extern_decl()?);
+        } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "import:") {
+            parser.parse_import()?;
+        } else if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "export:") {
+            out.exports.extend(parser.parse_export()?);
+        } else {
+            out.words.push(parser.parse_worddef()?);
+        }
+    }
+    Ok(out)
+}
+
+/// Run one file's type pre-pass and append its structs/enums (names only,
+/// fields filled later by `parse_bodies`) to the shared merged registries under
+/// module id `module` (R3/R10). The driver calls this once per file across the
+/// whole closure before any body parses.
+pub fn prepass_and_register(
+    tokens: &[(Token, Span)],
+    module: u32,
+    structs: &mut Vec<StructDecl>,
+    enums: &mut Vec<EnumDecl>,
+) -> Result<(), String> {
+    let decls = prepass_type_decls(tokens)?;
+    build_registries_into(&decls, module, structs, enums);
+    Ok(())
+}
+
+pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
+    let mut structs = Vec::new();
+    let mut enums = Vec::new();
+    prepass_and_register(tokens, 0, &mut structs, &mut enums)?;
+    let mut arrays = Vec::new();
+    let mut owned_cells = Vec::new();
+    let mut refs = Vec::new();
+    let no_imports: HashMap<String, u32> = HashMap::new();
+    let bodies = parse_bodies(
+        tokens,
+        &structs,
+        &enums,
+        0,
+        &no_imports,
+        &mut arrays,
+        &mut owned_cells,
+        &mut refs,
+    )?;
+    for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
+        structs[idx].fields = fields;
+    }
+    for (idx, variant_fields) in bodies.enum_fields_by_decl.into_iter().enumerate() {
+        for (vidx, fields) in variant_fields.into_iter().enumerate() {
+            enums[idx].variants[vidx].fields = fields;
+        }
+    }
+    Ok(Module {
+        words: bodies.words,
+        structs,
+        enums,
+        arrays,
+        owned_cells,
+        refs,
+        externs: bodies.externs,
         instantiations: HashMap::new(),
+        modules: vec![ModuleInfo {
+            imports: HashMap::new(),
+            exports: bodies.exports,
+        }],
     })
+}
+
+/// Scan a file's tokens for its `import:` forms (R2), parsing each in place so
+/// the driver can resolve the import graph before any body parses. Mirrors
+/// `prepass_type_decls`: it jumps to each `import:` keyword and parses the
+/// whole form, so it needs no registries.
+pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
+    let mut imports = Vec::new();
+    let mut arrays = Vec::new();
+    let mut owned_cells = Vec::new();
+    let mut refs = Vec::new();
+    let no_imports: HashMap<String, u32> = HashMap::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        if matches!(&tokens[i], (Token::Word(w), _) if w == "import:") {
+            let mut parser = Parser {
+                tokens,
+                pos: i,
+                structs: &[],
+                enums: &[],
+                arrays: &mut arrays,
+                owned_cells: &mut owned_cells,
+                refs: &mut refs,
+                module: 0,
+                imports: &no_imports,
+            };
+            imports.push(parser.parse_import()?);
+            i = parser.pos;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(imports)
 }
 
 /// Parse a single REPL line: a `:`-led definition, or a bare term sequence run
@@ -316,6 +424,7 @@ pub fn parse_line_with_structs(
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
 ) -> Result<Line, String> {
+    let no_imports: HashMap<String, u32> = HashMap::new();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -324,6 +433,8 @@ pub fn parse_line_with_structs(
         arrays,
         owned_cells,
         refs,
+        module: 0,
+        imports: &no_imports,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -355,6 +466,7 @@ pub fn parse_typedef_line(
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
 ) -> Result<Vec<(String, Type)>, String> {
+    let no_imports: HashMap<String, u32> = HashMap::new();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -363,6 +475,8 @@ pub fn parse_typedef_line(
         arrays,
         owned_cells,
         refs,
+        module: 0,
+        imports: &no_imports,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -402,6 +516,7 @@ pub fn parse_enum_typedef_line(
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
+    let no_imports: HashMap<String, u32> = HashMap::new();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -410,6 +525,8 @@ pub fn parse_enum_typedef_line(
         arrays,
         owned_cells,
         refs,
+        module: 0,
+        imports: &no_imports,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -591,6 +708,15 @@ struct Parser<'t> {
     /// shape has no declared name either, so it grows as type expressions
     /// resolve and persists across REPL lines.
     refs: &'t mut Vec<RefDecl>,
+    /// Phase 4 slice 5a (R11): the module id whose body this parser is
+    /// currently reading. `0` for a single-file program and every REPL line;
+    /// the driver's closure assembly sets it per file. An unqualified type
+    /// name resolves against this module first.
+    module: u32,
+    /// Phase 4 slice 5a (R8): this module's qualifier->module import map, used
+    /// to resolve a `q::Type` type name. Empty for a single-file program and
+    /// REPL line.
+    imports: &'t std::collections::HashMap<String, u32>,
 }
 
 impl<'t> Parser<'t> {
@@ -687,7 +813,51 @@ impl<'t> Parser<'t> {
             effect,
             body,
             poly,
+            module: self.module,
         })
+    }
+
+    /// Parse one `import:` form (R6): `import: <qualifier> [ | <name>... | ]
+    /// "<path>" ;`. The optional `| ... |` clause is the selective import list
+    /// (recorded, enforced in phase 4). `self.pos` must point at `import:`.
+    fn parse_import(&mut self) -> Result<Import, String> {
+        let span = self.expect_word("import:")?;
+        let qualifier = self.expect_word_any()?;
+        let mut selective = Vec::new();
+        if matches!(self.peek(), Some((Token::Pipe, _))) {
+            self.expect(Token::Pipe)?;
+            while let Some((Token::Word(w), wspan)) = self.peek() {
+                let name = w.clone();
+                let wspan = *wspan;
+                self.pos += 1;
+                selective.push((name, wspan));
+            }
+            self.expect(Token::Pipe)?;
+        }
+        let (path, _) = self.expect_str_literal()?;
+        self.expect(Token::Semicolon)?;
+        Ok(Import {
+            qualifier,
+            selective,
+            path,
+            span,
+        })
+    }
+
+    /// Parse one `export:` form (R7): `export: <name>... ;`. Returns the named
+    /// words/types with their spans; the list is recorded now and enforced in
+    /// phase 2. `self.pos` must point at `export:`.
+    fn parse_export(&mut self) -> Result<Vec<(String, Span)>, String> {
+        self.expect_word("export:")?;
+        let mut names = Vec::new();
+        while let Some((Token::Word(w), wspan)) = self.peek() {
+            let name = w.clone();
+            let wspan = *wspan;
+            self.pos += 1;
+            names.push((name, wspan));
+        }
+        self.expect(Token::Semicolon)?;
+        Ok(names)
     }
 
     /// `extern:` declaration (R1): a top-level foreign-call binding. Grammar
@@ -714,6 +884,7 @@ impl<'t> Parser<'t> {
             symbol,
             effect,
             span,
+            module: self.module,
         })
     }
 
@@ -1277,7 +1448,14 @@ impl<'t> Parser<'t> {
     fn resolve_type(&self, name: &str, span: Span) -> Result<Type, String> {
         // Unknown-type is a semantic error, not a syntax error, so it uses the
         // `error:` prefix (matching check.rs) rather than `parse error:`.
-        crate::ast::resolve_type_name(self.structs, self.enums, name).ok_or_else(|| {
+        crate::ast::resolve_type_name_in_module(
+            self.structs,
+            self.enums,
+            name,
+            self.module,
+            self.imports,
+        )
+        .ok_or_else(|| {
             format!(
                 "error: unknown type `{name}` at line {}, col {}",
                 span.line, span.col
@@ -1583,6 +1761,48 @@ mod tests {
     fn parse_src(src: &str) -> Result<Module, String> {
         let tokens = lex(src).unwrap();
         parse(&tokens)
+    }
+
+    /// U11 (R6/R7): the `import:` and `export:` forms parse into their records,
+    /// including the optional selective-import name list.
+    #[test]
+    fn import_and_export_forms_parse() {
+        let tokens =
+            lex("import: queue | push pop | \"lib/queue.sth\" ;\nexport: Queue drain ;\n").unwrap();
+        let imports = scan_imports(&tokens).unwrap();
+        assert_eq!(imports.len(), 1);
+        let imp = &imports[0];
+        assert_eq!(imp.qualifier, "queue");
+        assert_eq!(imp.path, "lib/queue.sth");
+        let selective: Vec<&str> = imp.selective.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(selective, vec!["push", "pop"]);
+        assert_eq!(imp.span.line, 1, "the import span locates `import:`");
+
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let bodies = parse_bodies(
+            &tokens,
+            &[],
+            &[],
+            0,
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        let exports: Vec<&str> = bodies.exports.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(exports, vec!["Queue", "drain"]);
+    }
+
+    /// R9: a malformed `import:` (no path string) is a located parse error.
+    #[test]
+    fn malformed_import_missing_path_is_located_error() {
+        let tokens = lex("import: q ;\n").unwrap();
+        let err = scan_imports(&tokens).unwrap_err();
+        assert!(err.contains("parse error"), "located parse error: {err}");
     }
 
     /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler

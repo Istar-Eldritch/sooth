@@ -1,0 +1,382 @@
+//! Phase 4 slice 5a (R10/R11/R22): the module-resolution pass that runs between
+//! parse and check on a multi-file import closure assembled into one `Module`.
+//!
+//! The merged registry holds every file's decls in one set, each tagged with an
+//! owning module id. Two files may each declare a `Point` or a `push`; left
+//! alone they would collide in the checker's word environment and in the
+//! emitted symbols. This pass mangles every decl name to a module-unique form
+//! (`push__m1`) and rewrites every body reference to match, so the existing
+//! single-module checker and backend need no notion of modules: a qualified
+//! `q::word` is resolved to a concrete decl here (D8: no `::` reaches the
+//! symbol minter) and a same-named word in another module already carries a
+//! distinct name by the time a symbol is spelled (R22).
+//!
+//! A single-module closure (every single-file program, every REPL session) is
+//! left byte-for-byte untouched (R22): the pass is a no-op below two modules,
+//! so today's symbols and output are unchanged.
+
+use crate::ast::{Clause, Module, Term, TermKind, WordBody};
+use std::collections::HashSet;
+
+/// The surface `main` is never mangled: it must stay the symbol the C shim
+/// links against (`sooth_main`, via the backend's `qbe_name`). Every other
+/// name gains a `__m{module}` component, minted so no punctuation reaches a
+/// symbol sanitizer (D8).
+fn mangle(name: &str, module: u32) -> String {
+    if name == "main" {
+        return name.to_string();
+    }
+    format!("{name}__m{module}")
+}
+
+/// Split a call name into its leading identifier and the accessor suffix a
+/// generated word carries: `Point>x` -> (`Point`, `>x`), `Point|>x` ->
+/// (`Point`, `|>x`), `Point` -> (`Point`, ``). The generated-word spellings are
+/// `Type>field` / `Type<field` / `Type|>field` (`check.rs`, `ir.rs`), and a
+/// type name never contains `<`, `>`, or `|`, so the first of those characters
+/// is the boundary.
+fn split_accessor(name: &str) -> (&str, &str) {
+    match name.find(['>', '<', '|']) {
+        Some(i) => name.split_at(i),
+        None => (name, ""),
+    }
+}
+
+/// The per-module name tables the rewrite consults: which bare names are this
+/// module's types (so a constructor/accessor call rewrites) and which are its
+/// words/externs (so a plain call rewrites). Builtins and genuinely unknown
+/// names appear in neither and are left raw for the checker to resolve or
+/// reject.
+struct NameTables {
+    types: Vec<HashSet<String>>,
+    words: Vec<HashSet<String>>,
+}
+
+impl NameTables {
+    fn build(module: &Module) -> NameTables {
+        let n = module.modules.len();
+        let mut types = vec![HashSet::new(); n];
+        let mut words = vec![HashSet::new(); n];
+        for s in &module.structs {
+            types[s.module as usize].insert(s.name.clone());
+        }
+        for e in &module.enums {
+            types[e.module as usize].insert(e.name.clone());
+        }
+        for w in &module.words {
+            words[w.module as usize].insert(w.name.clone());
+        }
+        for x in &module.externs {
+            words[x.module as usize].insert(x.name.clone());
+        }
+        NameTables { types, words }
+    }
+
+    /// Rewrite one call name occurring in a body owned by `module`, given that
+    /// module's qualifier->module import map and the locals currently in
+    /// scope. Returns `None` to leave the name unchanged.
+    fn rewrite(
+        &self,
+        name: &str,
+        module: u32,
+        imports: &std::collections::HashMap<String, u32>,
+        scope: &HashSet<String>,
+    ) -> Option<String> {
+        if scope.contains(name) {
+            return None;
+        }
+        if let Some((qualifier, rest)) = name.split_once("::") {
+            let target = *imports.get(qualifier)?;
+            let (type_part, suffix) = split_accessor(rest);
+            if self.types[target as usize].contains(type_part) {
+                return Some(format!("{}{}", mangle(type_part, target), suffix));
+            }
+            if suffix.is_empty() && self.words[target as usize].contains(rest) {
+                return Some(mangle(rest, target));
+            }
+            return None;
+        }
+        let (type_part, suffix) = split_accessor(name);
+        if self.types[module as usize].contains(type_part) {
+            return Some(format!("{}{}", mangle(type_part, module), suffix));
+        }
+        if suffix.is_empty() && self.words[module as usize].contains(name) {
+            return Some(mangle(name, module));
+        }
+        None
+    }
+}
+
+/// Mangle every decl name for a multi-module closure and rewrite every body to
+/// match. A no-op below two modules, so a single-file program is unchanged
+/// (R22).
+pub fn resolve_modules(module: &mut Module) {
+    if module.modules.len() < 2 {
+        return;
+    }
+    let tables = NameTables::build(module);
+
+    // The word bodies are rewritten first, reading the still-raw decl names via
+    // `tables`; only then are the decl names themselves mangled. `words` is
+    // split out so a body's own module id and import map drive its rewrite.
+    let import_maps: Vec<std::collections::HashMap<String, u32>> =
+        module.modules.iter().map(|m| m.imports.clone()).collect();
+    for word in &mut module.words {
+        let imports = &import_maps[word.module as usize];
+        let mut scope = HashSet::new();
+        match &mut word.body {
+            WordBody::Terms { terms } => {
+                rewrite_terms(terms, word.module, imports, &tables, &mut scope);
+            }
+            WordBody::Clauses(clauses) => {
+                for clause in clauses {
+                    rewrite_clause(clause, word.module, imports, &tables, &mut scope);
+                }
+            }
+        }
+    }
+
+    for s in &mut module.structs {
+        s.name = mangle(&s.name, s.module);
+    }
+    for e in &mut module.enums {
+        e.name = mangle(&e.name, e.module);
+    }
+    for w in &mut module.words {
+        w.name = mangle(&w.name, w.module);
+    }
+    for x in &mut module.externs {
+        x.name = mangle(&x.name, x.module);
+    }
+}
+
+fn rewrite_clause(
+    clause: &mut Clause,
+    module: u32,
+    imports: &std::collections::HashMap<String, u32>,
+    tables: &NameTables,
+    scope: &mut HashSet<String>,
+) {
+    let base = scope.len();
+    let added: Vec<String> = clause.locals.clone();
+    for name in &added {
+        scope.insert(name.clone());
+    }
+    rewrite_terms(&mut clause.body, module, imports, tables, scope);
+    truncate_scope(scope, base, &added);
+}
+
+/// Rewrite a block of terms left to right. A `Bind` extends the scope for the
+/// rest of this block (and any nested block that follows); the added names are
+/// removed when the block ends, so a sibling block does not see them.
+fn rewrite_terms(
+    terms: &mut [Term],
+    module: u32,
+    imports: &std::collections::HashMap<String, u32>,
+    tables: &NameTables,
+    scope: &mut HashSet<String>,
+) {
+    let base = scope.len();
+    let mut added: Vec<String> = Vec::new();
+    for term in terms.iter_mut() {
+        match &mut term.kind {
+            TermKind::Call(name) => {
+                if let Some(new) = tables.rewrite(name, module, imports, scope) {
+                    *name = new;
+                }
+            }
+            TermKind::Bind(names) => {
+                for name in names.iter() {
+                    if scope.insert(name.clone()) {
+                        added.push(name.clone());
+                    }
+                }
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                rewrite_terms(then_branch, module, imports, tables, scope);
+                rewrite_terms(else_branch, module, imports, tables, scope);
+            }
+            TermKind::Quotation(inner) => {
+                rewrite_terms(inner, module, imports, tables, scope);
+            }
+            TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::BoolLit(_)
+            | TermKind::StrLit(_) => {}
+        }
+    }
+    truncate_scope(scope, base, &added);
+}
+
+/// Remove the names this block added, restoring the scope to its entry size.
+/// Only names newly inserted here are removed (a `Bind` that re-bound an outer
+/// name added nothing), so an outer local survives an inner shadow.
+fn truncate_scope(scope: &mut HashSet<String>, base: usize, added: &[String]) {
+    if scope.len() == base {
+        return;
+    }
+    for name in added {
+        scope.remove(name);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse_bodies, scan_imports};
+
+    #[test]
+    fn split_accessor_finds_the_type_prefix() {
+        assert_eq!(split_accessor("Point"), ("Point", ""));
+        assert_eq!(split_accessor("Point>x"), ("Point", ">x"));
+        assert_eq!(split_accessor("Point<x"), ("Point", "<x"));
+        assert_eq!(split_accessor("Point|>x"), ("Point", "|>x"));
+        assert_eq!(split_accessor(">"), ("", ">"));
+    }
+
+    #[test]
+    fn mangle_keeps_main_and_suffixes_others() {
+        assert_eq!(mangle("main", 0), "main");
+        assert_eq!(mangle("push", 1), "push__m1");
+        assert_eq!(mangle("Point", 0), "Point__m0");
+    }
+
+    /// U9 (ast/ir): two modules that each define a word `p` mint distinct
+    /// names after resolution, so their symbols cannot collide; a single-module
+    /// closure is left exactly as parsed.
+    #[test]
+    fn same_named_words_across_modules_get_distinct_symbols() {
+        // Two modules, module 1 imported by module 0 under qualifier `lib`,
+        // each with a word `p`. Assembled by hand into one module the way the
+        // driver would, then resolved.
+        let mut module = assemble_two_modules(
+            ": p ( -- i64 ) 1 ; : main ( -- ) lib::p drop p drop ;",
+            ": p ( -- i64 ) 2 ;",
+        );
+        resolve_modules(&mut module);
+        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
+        assert!(names.contains(&"p__m0"), "module 0's p mangled: {names:?}");
+        assert!(names.contains(&"p__m1"), "module 1's p mangled: {names:?}");
+        assert!(names.contains(&"main"), "main is never mangled: {names:?}");
+        // The body call to `lib::p` resolved to module 1's mangled name, and
+        // the unqualified `p` to module 0's, so check/emit see two distinct
+        // callees.
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        let calls = call_names(&main.body);
+        assert!(calls.contains(&"p__m1".to_string()), "qualified: {calls:?}");
+        assert!(
+            calls.contains(&"p__m0".to_string()),
+            "unqualified: {calls:?}"
+        );
+    }
+
+    #[test]
+    fn single_module_closure_is_left_unchanged() {
+        let tokens = lex(": p ( -- i64 ) 1 ; : main ( -- ) p drop ;").unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        resolve_modules(&mut module);
+        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, vec!["p", "main"]);
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        assert_eq!(
+            call_names(&main.body),
+            vec!["p".to_string(), "drop".to_string()]
+        );
+    }
+
+    fn call_names(body: &WordBody) -> Vec<String> {
+        let mut out = Vec::new();
+        if let WordBody::Terms { terms } = body {
+            collect_calls(terms, &mut out);
+        }
+        out
+    }
+
+    fn collect_calls(terms: &[Term], out: &mut Vec<String>) {
+        for t in terms {
+            match &t.kind {
+                TermKind::Call(n) => out.push(n.clone()),
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    collect_calls(then_branch, out);
+                    collect_calls(else_branch, out);
+                }
+                TermKind::Quotation(inner) => collect_calls(inner, out),
+                _ => {}
+            }
+        }
+    }
+
+    /// Assemble module 0 (`entry`, importing module 1 as `lib`) and module 1
+    /// (`lib_src`) into one merged module, mirroring the driver's two-file
+    /// closure assembly closely enough to drive `resolve_modules`.
+    fn assemble_two_modules(entry: &str, lib_src: &str) -> Module {
+        use crate::ast::ModuleInfo;
+        use std::collections::HashMap;
+        let entry_tokens = lex(entry).unwrap();
+        let lib_tokens = lex(lib_src).unwrap();
+        let _ = scan_imports(&entry_tokens).unwrap();
+        let mut structs = Vec::new();
+        let mut enums = Vec::new();
+        crate::parser::prepass_and_register(&entry_tokens, 0, &mut structs, &mut enums).unwrap();
+        crate::parser::prepass_and_register(&lib_tokens, 1, &mut structs, &mut enums).unwrap();
+        let mut arrays = Vec::new();
+        let mut owned_cells = Vec::new();
+        let mut refs = Vec::new();
+        let mut imports0: HashMap<String, u32> = HashMap::new();
+        imports0.insert("lib".to_string(), 1);
+        let no_imports: HashMap<String, u32> = HashMap::new();
+        let entry_bodies = parse_bodies(
+            &entry_tokens,
+            &structs,
+            &enums,
+            0,
+            &imports0,
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+        )
+        .unwrap();
+        let lib_bodies = parse_bodies(
+            &lib_tokens,
+            &structs,
+            &enums,
+            1,
+            &no_imports,
+            &mut arrays,
+            &mut owned_cells,
+            &mut refs,
+        )
+        .unwrap();
+        let mut words = entry_bodies.words;
+        words.extend(lib_bodies.words);
+        Module {
+            words,
+            structs,
+            enums,
+            arrays,
+            owned_cells,
+            refs,
+            externs: Vec::new(),
+            instantiations: HashMap::new(),
+            modules: vec![
+                ModuleInfo {
+                    imports: imports0,
+                    exports: Vec::new(),
+                },
+                ModuleInfo {
+                    imports: no_imports,
+                    exports: Vec::new(),
+                },
+            ],
+        }
+    }
+}
