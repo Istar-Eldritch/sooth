@@ -1407,6 +1407,92 @@ fn extern_owned_pointer_output_error(decl: &ExternDecl, ty: Type) -> String {
     )
 }
 
+/// R18 (phase 4 slice 5a phase 3): an exported word whose stack effect names
+/// a non-primitive type of its own module that is not itself exported is a
+/// declaration-site error naming the word and the private type. R15 makes a
+/// type and its generated words one exported unit, so exporting the type
+/// clears every word of its own module that mentions it. Runs on the raw,
+/// pre-mangle module the driver assembles (`driver::assemble_module`),
+/// before `resolve::resolve_modules` renames decls: the check matches a
+/// word's raw name against its own module's raw `export:` list, and both
+/// would already be mangled by the time `check::check` runs.
+pub fn check_exported_signatures(module: &Module) -> Result<(), String> {
+    for word in &module.words {
+        let exports = match module.modules.get(word.module as usize) {
+            Some(m) => &m.exports,
+            None => continue,
+        };
+        if !exports.iter().any(|(n, _)| n == &word.name) {
+            continue;
+        }
+        for ty in effect_types(word) {
+            if let Some(name) = private_type_name(ty, word.module, module) {
+                return Err(exported_word_names_private_type_error(word, name));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every concrete `Type` a word's declared effect mentions: its ordinary
+/// input/output slots, plus, for a polymorphic word, every `Concrete` leaf
+/// its `PolySig` mentions (a type variable itself names no type, so `Var`
+/// contributes nothing).
+fn effect_types(word: &WordDef) -> Vec<Type> {
+    let mut out: Vec<Type> = word
+        .effect
+        .inputs
+        .iter()
+        .chain(&word.effect.outputs)
+        .map(|slot| slot.ty)
+        .collect();
+    if let Some(sig) = &word.poly {
+        for t in sig.inputs.iter().chain(&sig.outputs) {
+            collect_poly_concrete(t, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
+    match t {
+        PolyType::Concrete(ty) => out.push(*ty),
+        PolyType::Var(_) => {}
+        PolyType::Array(elem, _) => collect_poly_concrete(elem, out),
+    }
+}
+
+/// Whether `ty` is a struct/enum owned by `owner_module` and absent from that
+/// module's `export:` list, i.e. the R18 violation. A type owned by a
+/// *different* module is not this rule's problem (R16 already gates whether
+/// it could even be named here), and a primitive/array/etc. names no
+/// declared type at all.
+fn private_type_name(ty: Type, owner_module: u32, module: &Module) -> Option<&'static str> {
+    let (decl_module, name) = match ty {
+        Type::Struct(id, name) => (module.structs[id.index()].module, name),
+        Type::Enum(id, name) => (module.enums[id.index()].module, name),
+        _ => return None,
+    };
+    if decl_module != owner_module {
+        return None;
+    }
+    let exports = &module.modules[decl_module as usize].exports;
+    if exports.iter().any(|(n, _)| n == name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// R18: a located error naming the exported word and the private type its
+/// effect mentions. Exporting the type satisfies the rule.
+fn exported_word_names_private_type_error(word: &WordDef, type_name: &str) -> String {
+    let span = word_span(word);
+    format!(
+        "error: exported word `{}` (line {}, col {}) names private type `{}`, which is not exported\n  export `{}` too, or remove it from the effect",
+        word.name, span.line, span.col, type_name, type_name
+    )
+}
+
 /// Type-level checks that must pass before any generated-word signature or
 /// word body is type-checked: no two `type:` declarations share a name across
 /// the combined struct+enum registries, and no struct or enum contains itself
@@ -6387,6 +6473,62 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
+    }
+
+    /// U7 (R18): the exported-signature helper flags a word whose effect
+    /// names a private type of its own module, and clears once that type is
+    /// exported too (the positive half, R18's own escape hatch).
+    #[test]
+    fn exported_signature_rule_flags_private_type() {
+        use crate::ast::{ModuleInfo, TypedSlot};
+        let structs = vec![StructDecl {
+            name: "Res".to_string(),
+            name_static: "Res",
+            fields: vec![("n".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let mk_word = WordDef {
+            name: "mk".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: vec![TypedSlot {
+                    name: None,
+                    ty: Type::Struct(StructId::from_index(0), "Res"),
+                }],
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+        };
+        let mut module = Module {
+            words: vec![mk_word],
+            structs,
+            enums: Vec::new(),
+            arrays: Vec::new(),
+            owned_cells: Vec::new(),
+            refs: Vec::new(),
+            externs: Vec::new(),
+            instantiations: HashMap::new(),
+            modules: vec![ModuleInfo {
+                imports: HashMap::new(),
+                exports: vec![("mk".to_string(), Span::default())],
+            }],
+        };
+
+        let err = check_exported_signatures(&module).unwrap_err();
+        assert!(err.contains("mk"), "names the word: {err}");
+        assert!(err.contains("Res"), "names the private type: {err}");
+
+        module.modules[0]
+            .exports
+            .push(("Res".to_string(), Span::default()));
+        assert!(
+            check_exported_signatures(&module).is_ok(),
+            "exporting the type clears the rule"
+        );
     }
 
     /// U3 (R12): the duplicate-type-name check partitions by owning module, so

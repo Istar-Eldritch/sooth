@@ -303,6 +303,65 @@ fn malformed_import_form_is_located_parse_error() {
 }
 
 #[test]
+fn exported_word_naming_private_type_is_error() {
+    // Criterion 15: `lib` exports `mk` but never exports `Res`, the struct
+    // `mk`'s own effect returns -- the module author's bug, caught at `mk`'s
+    // declaration.
+    let c = Closure::new("private-in-export");
+    c.write(
+        "lib.sth",
+        "type: Res n i64 ;\n: mk ( -- Res ) 1 Res ;\nexport: mk ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) 0 . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("not exported"),
+        "distinguishing wording: {err}"
+    );
+    assert!(err.contains("mk"), "names the word: {err}");
+    assert!(err.contains("Res"), "names the private type: {err}");
+}
+
+#[test]
+fn exported_word_naming_exported_type_is_accepted() {
+    // Criterion 16: exporting `Res` too satisfies the rule (positive).
+    let c = Closure::new("private-in-export-fixed");
+    c.write(
+        "lib.sth",
+        "type: Res n i64 ;\n: mk ( -- Res ) 1 Res ;\nexport: mk Res ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk lib::Res>n . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn imported_linear_type_is_disposed_by_drop() {
+    // Criterion 17: `Res` is linear (a `drop` overload) and exported; the
+    // consumer disposes one with a bare `drop`, whose destructor glue runs
+    // whether or not it was itself exported (D6/R19).
+    let c = Closure::new("imported-linear-drop");
+    c.write(
+        "lib.sth",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "7\n", "the module's own destructor observably ran");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn import_at_repl_is_located_rejection() {
     // Criterion 9: `import:` at the REPL is a located rejection, not a silent
     // parse error pointing at the `;`.

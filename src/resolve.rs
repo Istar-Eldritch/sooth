@@ -19,11 +19,17 @@ use crate::ast::{Clause, Module, Span, Term, TermKind, WordBody};
 use std::collections::HashSet;
 
 /// The surface `main` is never mangled: it must stay the symbol the C shim
-/// links against (`sooth_main`, via the backend's `qbe_name`). Every other
-/// name gains a `__m{module}` component, minted so no punctuation reaches a
-/// symbol sanitizer (D8).
+/// links against (`sooth_main`, via the backend's `qbe_name`). A `drop`
+/// overload is never mangled either (R19): `find_drop_overloads`
+/// (`check.rs`) dispatches it by the literal name `drop` plus the struct id
+/// its one input names, never through the ordinary word environment a
+/// mangled name would otherwise need to be looked up in, so mangling it would
+/// only break that lookup for no benefit -- two modules' `drop` overloads for
+/// two different structs never collide on the name, since neither is ever
+/// registered under it. Every other name gains a `__m{module}` component,
+/// minted so no punctuation reaches a symbol sanitizer (D8).
 fn mangle(name: &str, module: u32) -> String {
-    if name == "main" {
+    if name == "main" || name == "drop" {
         return name.to_string();
     }
     format!("{name}__m{module}")

@@ -218,6 +218,10 @@ fn assemble_module(closure: &Closure) -> Result<Module, String> {
         instantiations: HashMap::new(),
         modules,
     };
+    // R18: checked on the raw, pre-mangle module -- a word's name and its
+    // module's `export:` list are both still their raw source spellings here,
+    // which `resolve::resolve_modules` would otherwise mangle apart.
+    check::check_exported_signatures(&module)?;
     resolve::resolve_modules(&mut module)?;
     Ok(module)
 }
