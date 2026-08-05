@@ -1,0 +1,20 @@
+\ Dogfood: Phase 4 Slice 5a (R24). The words half of the two-file library:
+\ componentwise `add` and squared length `len2` over `point::Point`, imported
+\ by type from `examples/modules_point.sth` and exported for
+\ `examples/modules.sth` to call qualified.
+
+import: point "modules_point.sth" ;
+
+: add ( point::Point point::Point -- point::Point )
+  | a b |
+  a point::Point>x b point::Point>x +
+  a point::Point>y b point::Point>y +
+  point::Point ;
+
+: len2 ( point::Point -- i64 )
+  | p |
+  p point::Point>x p point::Point>x *
+  p point::Point>y p point::Point>y *
+  + ;
+
+export: add len2 ;

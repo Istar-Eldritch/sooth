@@ -497,3 +497,18 @@ fn selective_type_import_member_collision_is_error() {
     assert!(err.contains("`a`"), "names the first module: {err}");
     assert!(err.contains("`b`"), "names the second module: {err}");
 }
+
+#[test]
+fn modules_example_builds_and_runs() {
+    // Criterion 22: the committed dogfood, `examples/modules.sth` importing a
+    // type from `examples/modules_point.sth` and words from
+    // `examples/modules_ops.sth`, builds, links, and runs.
+    let binary = sooth::driver::build(std::path::Path::new("examples/modules.sth"))
+        .expect("the dogfood closure should build");
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(String::from_utf8(output.stdout).unwrap(), "4\n52\n");
+    assert_eq!(output.status.code().unwrap(), 0);
+}

@@ -347,6 +347,125 @@ is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-styl
 stops being a keyword. This shrinks the core the honest way, by making `if` a word
 rather than by replacing it with a bigger feature.
 
+## Modules and encapsulation
+
+A file is a compilation unit (Phase 4 Slice 5a, native only; REPL imports are 5b).
+`import: q "path.sth" ;` binds a qualifier to another file, resolved relative to the
+*importing* file, with an explicit `.sth` and no search path (consistent with
+`extern:` naming its C symbol verbatim: no implicit extension is one fewer resolution
+rule to learn). `export: name... ;` (lines accumulate) is the only way a name leaves
+its file; a module with none exports nothing, so every pre-5a example is unaffected
+— it exports nothing and stays a program, not a library.
+
+**Why resolution has to happen as one merged pass, not a parse-then-merge.** The
+parser resolves every type name in a pre-pass over raw tokens *before any word body
+parses* (`prepass_type_decls`, then `build_registries`, both inside `parse`). An
+importing file's own pre-pass needs the imported file's type names present before its
+bodies can parse at all, so parsing each file independently and merging the two ASTs
+afterward would mean remapping every positional `StructId`/`EnumId`/`ArrayId` in the
+second file's already-parsed tree — strictly more work, and more places to get it
+wrong, than doing it once. The model instead: resolve the import graph from the entry
+file, canonicalize and dedupe by path (a diamond import is parsed once), order it
+topologically and reject a cycle or self-import with a located error naming both
+files, then run **one shared pre-pass** across the whole closure's tokens into **one
+shared registry set**, and only then parse bodies per file against that shared set.
+The closure still assembles into one `Module`, so `check::check` keeps its
+single-module signature; module identity rides on a per-decl owning-module tag, not on
+threading multiple `Module`s through the pipeline.
+
+**Name resolution is "own module first, then qualifier," not filtering at merge
+time.** The registry stores a bare name plus its owning module (rather than, say, a
+fully-qualified stored name), so an unqualified reference resolves in its own module
+first and a `q::base` splits on the qualifier, maps `q` through the current module's
+import table, and resolves in the target module subject to its export list. Every
+module's names are spliced into one shared environment and *marked* with their module
+and export status; rejecting an unqualified-but-private reference happens at the use
+site, never by hiding the name at merge time — filtering there would collapse two
+distinct failure modes (a name that exists but is private, vs. a name that is simply
+absent) into one `unknown word`, which is a worse diagnostic for a language that
+otherwise turns Forth's silent failures into sharp errors. Two modules may each
+declare `Point`; the duplicate-type-name check is per-module, not global. Same-named
+words in two modules mint distinct emitted symbols via a module-disambiguating
+component, added to `instantiation_symbol` the same way its `generation` suffix
+already is, so `::` never has to survive to the symbol sanitizer and a single-module
+closure (every pre-5a program, every REPL session) is byte-for-byte unchanged.
+
+**A `type:` declaration is a name-scope, and visibility is the ordinary export
+mechanism applied to it, not a special rule for types.** Its generated words
+(constructor, getter, peek, setter, destructure) are literally named by string
+concatenation (`Type>field` and siblings) — an ad-hoc qualified namespace the compiler
+already builds for every struct. Exporting `Type` therefore exports that whole
+name-scope as one unit: naming a type in `export:` is **transparent**, with no opacity
+mechanism and no per-member withholding in this slice. A consumer may name `q::Type`
+in an effect, construct one, and reach every field through `q::Type>field` /
+`q::Type<field` / `q::Type|>field` (each resolved by splitting on the *first* `::`,
+since `>` is not a lexer delimiter and the whole qualified accessor is one token).
+
+This was a reversal mid-design, not the obvious choice: the first draft made export
+opaque by default, Elm-style, distinguishing "export the type" from "export its
+constructor." It didn't survive contact with what Sooth actually is. Structs are dumb
+data; a violated field invariant is a bug in the *consumer's* program, not unsoundness,
+because there is no UB, indexing traps at the bound, and linearity already prevents
+aliasing a value into two invariant-breaking places at once. And the resource argument
+for opacity fails on a fact measurable in the single-file compiler today: destructuring
+a type with a `drop` override already skips that override (`type: R tag i64 ;` with a
+`drop` override, then `r R>tag .`, prints the tag and never runs the destructor) — so
+visibility was never actually protecting resource discipline, opaque or not. Hiding an
+accessor behind a visibility rule is the OOP ceremony this language is declining to
+need; a withhold marker on `export:` is an additive feature for a real consumer that
+wants it, not a default this slice should guess at.
+
+That destructure-bypasses-`drop` gap is real and becomes newly *reachable* across a
+file boundary once types are transparent — a library consumer can now destructure an
+imported linear type down to `Copy` leaves without running its destructor, the same way
+a single-file program already could. It is not a new hole class, and this slice does
+not half-fix it with a partial guard: the honest fix is a Rust-E0509-style rule
+(reject destructuring a type that has a `drop` override) belonging to the ownership
+checker, independent of modules, and it is recorded against Phase 4 Slice 8 rather than
+grown here.
+
+**Disposal crosses the export boundary for free, so this slice adds no new disposal
+rule.** `drop` is compiler-known and dispatches on the concrete type (Slice 3/8b), so a
+consumer disposes an imported linear value with a bare `drop` whichever destructor glue
+runs whether or not that glue was named in `export:` — "a destructor runs without being
+named." Combined with transparent types' second route (destructuring to `Copy` leaves),
+no case in this slice lets a consumer hold an undisposable imported value, so the
+ROADMAP's hypothesized "an exported linear type must also export its discharging word"
+rule has nothing to fire on yet. It only becomes a live question once a polymorphic
+`drop ( 'T -- )` could be structurally total — exactly what Slice 8's own constraint
+forbids — so enforcement is deferred there, not decided here.
+
+**Declaration-site and selective-import rules round out encapsulation.** An exported
+word whose stack effect names a private, non-primitive type of its own module is
+rejected at the `export:` declaration itself (the module author's bug, not the
+consumer's), naming the word and the private type; exporting the type satisfies it.
+Selective import, `import: q | a b | "path.sth" ;`, is additive to the qualifier: `q`
+is always bound, and the listed names are *additionally* exposed unqualified (a
+selectively-imported type brings its generated words unqualified too, one unit as
+ever). The collision rule is deliberately dumb, with no precedence and no use-site
+disambiguation: two selective imports exposing the same unqualified name is an error at
+the second, naming both modules, and a selectively-exposed name colliding with a local
+definition is the same error.
+
+**REPL imports are split off as Slice 5b**, on the precedent Phase 4 Slice 1/2 and
+Phase 3's 8b already set for native/REPL splits: the REPL carries session state native
+compilation does not (`drop_overloads` keyed by struct id, frozen resolver snapshots,
+per-name generations, every `.so` resident under `RTLD_GLOBAL`), so what an import
+*means* in a live session — reload-on-edit vs. frozen bindings, generation-mangled
+redefinition of an imported module — is a separate design problem, not this slice's to
+answer by omission. This slice ships a *located* rejection of `import:` at the REPL
+(naming the construct, not the misdirected token error a naive parse would otherwise
+produce) rather than a silently degraded path, on the precedent of a gap Slice 2's
+recon found had already produced a silent miscompile once.
+
+Out of scope for this slice, all deferred to Phase 6's eventual package/versioning
+layer or later: a serializable API description and semver enforcement (which will
+consume this slice's export list, not redefine it), package manifests and a registry,
+re-exports or aliasing an import to a different local qualifier, a `mod.sth`-style
+directory-mirrors-module-tree convention (declined: flat file-is-a-module plus
+qualified access covers the only consumer that exists), and generic type declarations
+crossing files (they don't exist yet).
+
 ## Codegen and backend
 
 Codegen model (unchanged from first principles, it's the good part): don't model
