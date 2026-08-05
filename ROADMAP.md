@@ -243,7 +243,7 @@ but an aggregate constructed inline each iteration with no call at all reused it
 entry-hoisted storage the same way and is fixed by the same change.
 **Phase 4 Slice 4 (quotations + the internal loop primitive) is complete**: a quotation
 literal `[ ... ]` parses to `TermKind::Quotation` and stays a **compile-time-only marker**
-until slice 6 gives it a runtime type — no `Type`/`PolyType`/`IrType` variant — carrying the
+until slice 7 gives it a runtime type — no `Type`/`PolyType`/`IrType` variant — carrying the
 identity of its literal body on a `Slot`/`Binding` side-channel (`quot`), forwarded through
 shuffles and binds, and consumed only by fusion: `call` splices a literal's body at the
 consumption site (type-checking identically to writing the body inline), and every other
@@ -259,12 +259,20 @@ loop in the same word still runs. `while` was weighed as a second floor member a
 its condition quotation returns a `bool` on a passthrough row, strictly harder than `times`
 needs. `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same
 total as `examples/countdown.sth`'s hand-threaded self-recursion.
-**Next action: Phase 4 Slice 5** (the combinator library in Sooth + inlining + closing the
-polymorphic-path gaps, the phase's headline exit): `each`/`map`/`filter`/`fold`/`while` as
-ordinary library words over quotations, the compiler's first inliner lowering them and their
-quotation arguments to tight loops, and the two polymorphic-path gaps slice 4 measured but
-did not need (`if` rejected in a polymorphic body; no loop transform for a polymorphic
-self-tail word) landing against their first real consumers, `filter` and `while`.
+**Next action: Phase 4 Slice 5a** (native multi-file compilation, word and type imports,
+and encapsulation, pulled forward from Phase 6; REPL imports split off as 5b on the slice
+1/slice 2 precedent): a file becomes a compilation unit and an import resolves a
+word or a struct/enum declaration by qualified name from another file, so slice 6's
+combinator library has somewhere to live besides copy-pasted into every consumer, and so a
+reusable component — which is usually a type plus its operations — is actually writable
+across files. Encapsulation lands with it, since a `type:` generates a setter per field and
+without a visibility rule an imported type can hold no invariant: default private, a
+per-file `export:` list, and Elm-style opaque types (exporting a type *name* and exporting
+its *constructors* are separable). Still narrower than Phase 6's eventual module system: no
+serializable API description and no version diffing, since those are a packaging/publishing
+concern rather than a personal-reuse one, and `docs/dependency-management.md` still depends
+on Phase 6 for them, consuming the export list this slice introduces rather than defining
+it.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -762,7 +770,7 @@ iteration. Combinators (`each`/`map`/`filter`/`fold`/`while`/`times`) are ordina
 **library words** written in Sooth on top of quotations, with the compiler inlining
 the common ones and their quotation arguments at the call site so they lower to tight
 loops rather than a `call` per element. Quotations then become genuine first-class code
-values in slice 6 (functions as values: downward closures on a frame-local environment,
+values in slice 7 (functions as values: downward closures on a frame-local environment,
 upward ones on a `^` cell), which is what makes the functional style the combinators
 imply actually writable. With quotations in hand, `if`
 is redefined as an ordinary combinator (`cond [ then ] [ else ] if`, Factor-style) and
@@ -784,7 +792,7 @@ keyword for now is the honest strict-eval choice, not a commitment.
 
 **Exit:** polymorphic `dup`/`swap`/`max`; a constant-stack `each`/`fold` over a
 collection; combinators verified to inline to loops, not per-element calls; and a quotation
-held as a value, invoked through a path the compiler did not inline (slice 6).
+held as a value, invoked through a path the compiler did not inline (slice 7).
 **Dogfood:** write the combinator library (`each`/`map`/`fold`/`while`) in Sooth
 itself, then rewrite an earlier program to use it; and rewrite `examples/vm.sth`'s dispatch
 around a table of quotations.
@@ -796,8 +804,8 @@ whole, land it in order. Phase 3's evidence for slicing rather than one big push
 its Slice 8 had to split into 8a/8b/8c mid-flight (`close` had to exist before the
 destructor mechanism could be designed against it) and its Slice 3 shipped covering only
 direct self-recursion, needing Slice 4 as a follow-on — both boundaries discovered late,
-under load. Process is calibrated per slice, not uniformly: slices 1–6 carry real design
-risk and want full specs, while 8 is a mechanical migration that can run 8c-style (no
+under load. Process is calibrated per slice, not uniformly: slices 1–7 carry real design
+risk and want full specs, while 9 is a mechanical migration that can run 8c-style (no
 spec, one implementation pass plus one review).
 
 **The paper pre-check that shaped this plan.** Before committing to the order, the four
@@ -820,7 +828,7 @@ then find out what the compiler owes it.
    **Native only — the REPL is slice 2**, split off because this slice already carries more
    than 8b did and 8b was Phase 3's largest, needing three review rounds precisely because it
    did the native and REPL halves together.
-   **No inlining here** (see slice 5). The phrase "force-inline the small core words" that
+   **No inlining here** (see slice 6). The phrase "force-inline the small core words" that
    this entry used to carry is probably already satisfied and costs nothing: `dup`/`swap`/`+`
    and friends are match arms in `lower_call` that never emit an `Instr::Call`, and
    `check_shuffle` already dispatches on the concrete operand type, so "honest polymorphic
@@ -846,8 +854,9 @@ then find out what the compiler owes it.
    6 restricts to a `Copy` referent, so `each`'s element variable needs the bound — while
    `fold`'s accumulator needs none and may legitimately be linear. **Per-variable, not a
    blanket "generics are Copy-only" rule.** The signature of a polymorphic `drop ( 'T -- )`
-   is the same question pointed at 8b's per-type overloads; parked for slice 6, but its
-   answer must not be foreclosed here.
+   is the same question pointed at 8b's per-type overloads; parked for slice 8 (static
+   overloading, which says the same thing from its side), but its answer must not be
+   foreclosed here.
    **Closes the multi-output lowering hole**, which stops being deferrable here: a `..s` in
    output position *is* a word with a statically-unknown number of outputs, so row variables
    cannot ship on a lowering path that panics on two. The defect is long-standing and
@@ -929,19 +938,19 @@ then find out what the compiler owes it.
    `499999500000` in constant stack, next to `examples/countdown.sth`'s hand-threaded
    self-recursive equivalent. The floor is permanent, not a bootstrap: DESIGN.md:281-289
    makes the loop primitive internal ("not surface syntax, not user-facing") and the thin
-   intrinsic floor user-facing by design, so slice 5 builds on `times` rather than retiring
+   intrinsic floor user-facing by design, so slice 6 builds on `times` rather than retiring
    it. A quotation here is a **compile-time marker** carrying its inferred effect and body,
    fused at its `call`, never a runtime value: that defers the `Type`/`PolyType`/`IrType`/
-   unification/mangling change to slice 6, where a consumer for it finally exists. The two
+   unification/mangling change to slice 7, where a consumer for it finally exists. The two
    "inlining"s the plan used to seem to double-book are different mechanisms and both are
    real: slice 4 owns **quotation-literal fusion** (splicing a literal's body at its `call`,
-   never crossing a `:` word boundary), slice 5 owns the **interprocedural user-word
+   never crossing a `:` word boundary), slice 6 owns the **interprocedural user-word
    inliner**.
    The brief's sharpest finding is what it rules *out* of this slice: a polymorphic word
    today can neither branch (`if` is rejected in a polymorphic body, `src/check.rs:2997`)
    nor loop in constant stack (`self_tail` is hardcoded `false` on the polymorphic
    instantiation path, `src/ir.rs:1176`), so combinators cannot be written as ordinary
-   polymorphic library words at all. Both gaps land in slice 5 against their first real
+   polymorphic library words at all. Both gaps land in slice 6 against their first real
    consumers.
    After slice 1 because a combinator's signature has to *say* `[ 'a -- 'b ]`, which needs
    row variables to be expressible at all. **Capture is a quality-of-life question, not a
@@ -958,12 +967,104 @@ then find out what the compiler owes it.
    scope after inlining — no environment, no allocation, and no `FnOnce`/`FnMut`/`Fn` split
    if capture is restricted to `Copy` locals. Escaping quotations stay out of scope
    regardless — they need the uniform-runtime-stack fallback and Phase 6's alloc layer.
-5. **The combinator library in Sooth + inlining + closing the polymorphic-path gaps (the
+5. **Modules: multi-file compilation, word and type imports.** Pulled forward from Phase 6
+   for two converging reasons, not one. Slice 6's combinator library needs somewhere to live
+   besides copy-pasted into every dogfood — the original motivation — but the bigger one
+   surfaced at this slice's brief conversation: a reusable component worth writing is rarely
+   just words. A queue, a small `Result`-like type, a `Point`/`Vec2` bundle — the type is
+   usually the component, the words around it are secondary. Word-only imports would serve
+   the combinator library and almost nothing else worth calling a library, so this slice
+   takes the harder half too: a file becomes a compilation unit, and an import brings
+   another file's words *and* struct/enum declarations into scope by qualified name.
+   **Split native/REPL, 8a-style**, on the precedent that already exists twice in this
+   project: slice 1 held REPL monomorphization back to slice 2 rather than carry both, and
+   Phase 3's 8b needed three review rounds precisely because it did the native and REPL
+   halves together. The REPL has no file-loading path at all today and carries session state
+   the native path does not (`drop_overloads` keyed by `StructId`, frozen resolver snapshots,
+   per-name generations, every `.so` resident under `RTLD_GLOBAL`), so what an import *means*
+   there is a separate design problem, not the same one repeated.
+   **This settles the open design question Phase 6 had named**: how struct/enum
+   declarations from separate files join one shared type registry without a name collision
+   or a duplicate registration. Type resolution, move-tracking, and the R21 aliasing rule
+   are value-flow-based, not file-based, so none of that checker machinery should need to
+   know a boundary was crossed. But the *front* of the pipeline is not additive, and the
+   brief should start from that: `driver::build` today is straight-line `read_to_string` ->
+   `lex` -> `parse` -> `check` -> `lower` -> `emit`, and `check::check(&mut module)` takes
+   exactly one module, so something has to locate imports, parse N files, reject import
+   cycles, and merge before checking runs.
+   **Encapsulation lands here too, because without it a type cannot hold an invariant.**
+   A `type:` generates a constructor, getter, peek, setter, and destructure word per field,
+   all ordinary words in the flat environment, so with no visibility rule an imported
+   `Queue` hands every consumer `Queue<back` and the invariant it was written to protect is
+   gone. Default private, with a per-file `export:` form naming what crosses. Because the
+   generated accessors are just words, that list gives per-word granularity for free (export
+   the type and its operations, withhold the raw setter) with no new visibility algebra.
+   Elm's opaque types are the precedent and answer the one subtle question: exposing a type
+   *name* and exposing its *constructors* are separable exports, and that separation is the
+   whole encapsulation mechanism.
+   Syntax proposal, to be confirmed at the brief: `import: queue "collections/queue.sth" ;`
+   and `export: Queue push pop ;`, following the existing `name: ... ;` defining-word family,
+   with access as a single token `queue::push`. `::` because `.` is the print word and `>`
+   is already the generated field getter (`queue>push` would read as a getter on a type
+   named `queue`). Qualified-only, so there is no cross-module collision rule to invent. A
+   file with no `export:` exports nothing: it is a program, not a library, which keeps every
+   existing single-file example valid.
+   **Still narrower than Phase 6's eventual module system.** No serializable API description
+   and no version diffing. Those are a packaging/publishing concern — letting other people
+   depend on you with enforced semver — not a personal-reuse one, and
+   `docs/dependency-management.md` still depends on Phase 6 for them; it consumes the export
+   list this slice introduces rather than defining it.
+   **Disposal crosses the export boundary, which constrains the export rule.** Two
+   consequences of linearity meeting encapsulation, both wanting settled at this slice's
+   brief. First, a destructor runs without being named, so an unexported `close` still
+   executes in a consumer's program through the generated glue: the export list describes
+   what a consumer can *call*, not what can *run*. Second, and sharper: whenever a type's
+   disposal is not reachable through `drop` alone (see slice 8's constraint), an exported
+   opaque linear type must also export the word that discharges its obligation, or a
+   consumer who obtains one is stuck holding a value it cannot legally consume — unusable
+   rather than encapsulated. That is a checkable rule; decide here whether the compiler
+   enforces it or it stays the library author's job.
+
+   **5a — native multi-file compilation, imports, and encapsulation.** Everything above, on
+   the native path only. **`import:` at the REPL must be a clean located error in this
+   slice, specified and tested, not left to whatever the parser happens to do.** This is the
+   one lesson 5b cannot be trusted to carry: slice 1 shipped without pinning REPL behaviour
+   for polymorphic words and slice 2's recon found the gap had produced a *silent
+   miscompile* (a bogus `( -- )` mismatch, or a silent `defined` that never checked the
+   body). An unimplemented feature that rejects is a deferral; one that quietly does the
+   wrong thing is a defect, and the difference is one specified diagnostic.
+   Open questions for its brief beyond the pipeline shape above: whether a qualified name
+   becomes part of the `StructId` key and what that does to existing interning (structs are
+   nominal, so two files each declaring `Point` collide); whether 8b's epoch/generation
+   destructor-symbol scheme stays collision-free once two modules synthesize destructors for
+   same-named types; and where privacy is enforced, since filtering unexported names at
+   splice time is the simplest implementation but reports "unknown word" where it should say
+   "`grow` is not exported by `queue`", and diagnostics are behaviour here.
+   **Exit:** two files, one importing a type and a word from the other, compiling and
+   linking as one program, with a non-exported word rejected at a use site in the second and
+   `import:` at the REPL rejected with a located error.
+
+   **5b — imports at the REPL.** What an import means in a session: whether a line may
+   `import:` at all or only a loaded file may, how an imported module interacts with
+   generation-mangled redefinition, whether re-importing after an edit reloads or is frozen
+   the way every other REPL binding is frozen (DESIGN.md's deferred REPL late-binding
+   question is adjacent and should not be reopened here by accident), and whether the export
+   list is enforced against REPL lines or a session sees everything. Sized at its own brief;
+   the honest possibility is that the frozen-binding rule makes this smaller than it looks,
+   since an imported file is just more words entering the env at a known generation.
+   **Exit:** a REPL session importing a file and calling an exported word from it, with the
+   frozen-binding rule holding across a redefinition.
+
+   **Dogfood (5a):** the combinator library (slice 6) lives in its own file; a small
+   standalone type (e.g. a `Point`/`Vec2` or a stack-like struct) lives in another, exported
+   opaquely, and is imported by an example that uses both.
+6. **The combinator library in Sooth + inlining + closing the polymorphic-path gaps (the
    phase's headline exit).**
    `each`/`map`/`filter`/`fold`/`while` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
-   tight loops rather than a `call` per element. Depends on 1–4 only, and comes *before* the
-   dispatch slices deliberately: it is the first real integration test of the type machinery
+   tight loops rather than a `call` per element. Depends on 1–5a (5a is where the library
+   gets its own file to live in instead of every consumer's; 5b is not a prerequisite), and
+   comes *before* the dispatch slices deliberately: it is the first real integration test of the type machinery
    against quotations, so if the two are awkward together, that feedback should arrive before
    three more mechanisms are built on top. The paper pre-check is not a substitute for this,
    only a filter on the plan.
@@ -982,7 +1083,7 @@ then find out what the compiler owes it.
    but forfeiting the thing the phase is trying to prove, in the same way `vm.sth` shipping
    with zero compiler changes *was* the Phase 2 exit verdict.
    Accepts one known churn cost — the library is written against keyword `if` and gets
-   rewritten when slice 8 turns `if` into a word — which is a handful of library words,
+   rewritten when slice 9 turns `if` into a word — which is a handful of library words,
    cheaper than reordering the phase around it. Dogfood: rewrite an earlier program to use it.
    **This slice also closes the two polymorphic-path gaps slice 4's brief measured**, because
    this is where their first real consumers appear. A polymorphic body rejects `if`
@@ -995,14 +1096,15 @@ then find out what the compiler owes it.
    exactly two library words: `filter` needs the `if` fix to branch on its predicate, and
    `while` needs **both**, being unbounded (so `times` cannot express it) and naturally
    written as a self-recursive polymorphic word. If that proves too much on top of the
-   inliner, this slice splits, or a slice lands between 4 and 5; decide at its brief.
-6. **Functions as values: closures.** The slice that makes a quotation a real runtime value
+   inliner, this slice splits, or the polymorphic-path gaps peel into their own slice;
+   decide at its brief.
+7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
    array of quotations, a strategy in a struct field, and genuine non-inlined higher-order
-   words. After slice 5 because the combinator library is the consumer that makes the calling
+   words. After slice 6 because the combinator library is the consumer that makes the calling
    convention concrete (designing it with no caller is the anti-pattern this plan keeps
-   citing), and because slice 5 lifts the polymorphic `if` any interesting closure-taking
+   citing), and because slice 6 lifts the polymorphic `if` any interesting closure-taking
    word needs.
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The environment of a downward closure (passed in, never returned or stored beyond the
@@ -1037,7 +1139,7 @@ then find out what the compiler owes it.
    Dogfood: rewrite `examples/vm.sth`'s dispatch around a table of quotations and compare it
    against the enum-plus-clause version it replaces.
 
-7. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
+8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
    concrete types is a rule that gets rewritten once type variables exist. **The compiler
    already does this by hand and this slice is where it stops**: the numeric-tower operators
@@ -1047,11 +1149,40 @@ then find out what the compiler owes it.
    overloads are the other such sites; the latter are explicitly parked for here ("`drop`
    becoming fully polymorphic is still Phase 4"), and absorbing them means retiring the
    hardcoded interception arms in `check.rs`/`ir.rs` that currently run before any env lookup.
-8. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
+   **One constraint from the destructor side, which the polymorphic `drop` must not
+   violate: it cannot be structurally total.** A generic `drop ( 'T -- )` that accepts a
+   resource type discharges the linear obligation while leaking the resource, turning
+   today's compile error into a silent leak. `type: File fd i32 ;` is structurally an
+   `i32`, so derived disposal pops it and never calls `close`, and the checker sees the
+   debt paid. Linearity buys use-exactly-once, not use-correctly. So either `drop` carries
+   a bound satisfied only by structurally-derivable types (declared-consumer types rejected
+   outright, disposed by their named word), or the resource case resolves through the
+   constraint system to that named word. A structural default is not on the menu. Note this
+   is a hazard of the *destination*, not of what shipped: 8b's overrides are sound precisely
+   because the user body substitutes for the derived glue rather than sitting beside it.
+   The residual decision is the container boundary — whether generated traversal of a
+   `List[File]` may call `close` implicitly (composability, some ambience) or must be
+   hand-written (neither) — probably the former, since that call sits inside
+   compiler-generated traversal nobody reads while direct code keeps `close` visible, but
+   decide it rather than inherit it. Slice 5's export rule depends on the answer: whatever
+   `drop` cannot dispose, a module must export a disposal word for.
+   **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
+   override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
+   the field and never runs the destructor. So today a `File` can have its fd extracted and the
+   linear obligation discharged with no `close` and no diagnostic. Rust closes exactly this with
+   E0509 (cannot move out of a type implementing `Drop`); Sooth has no such rule. It belongs
+   here rather than anywhere earlier because it is the same question as the constraint above,
+   asked of a different consumer: *what counts as discharging a linear obligation*, where a
+   structural answer silently drops the resource-specific one. Slice 5a's transparent type
+   export makes it reachable across a file boundary for the first time (its earlier
+   opaque-by-default draft would have papered over it, and only for types whose author chose
+   opacity), which is an argument for fixing it properly here rather than with a visibility
+   rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
+9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
-   the other seven enable: it needs quotations (slice 4) for `if` to be a word at all, and
-   dispatch (slice 7) so `Bool`'s type-directed printing becomes an ordinary overload instead
+   the other eight enable: it needs quotations (slice 4) for `if` to be a word at all, and
+   dispatch (slice 8) so `Bool`'s type-directed printing becomes an ordinary overload instead
    of a re-added special case — which is the whole point of waiting, per the bundle note
    above. Mechanically it is a large migration rather than a design problem: `bool` has been
    in the test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special
@@ -1075,7 +1206,7 @@ now even though hosted is built first: **core** (already accreting), **fixed**
 Vec/Map/String, Box, opt-in Rc/Arc, escaping closures, bignum, against core's
 allocator interface), **hosted** (files, stdio, time, FFI-to-libc via safe
 wrappers). Tag every stdlib word with the layer it needs. Escaping closures appear in that
-list as a *layer tag*, not as unbuilt work: the feature itself lands in Phase 4 Slice 6 on
+list as a *layer tag*, not as unbuilt work: the feature itself lands in Phase 4 Slice 7 on
 `^`, and what belongs here is only the classification that a closure which escapes its
 frame needs an allocator present, so it is unavailable to the `fixed` layer.
 **Exit:** real hosted programs using libc via safe wrappers; a usable standard
@@ -1083,23 +1214,46 @@ library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
-**Modules and imports.** Sooth has been single-file through every phase so far, deliberately:
-no dogfood before this one has ever needed a second file, so introducing the machinery
-earlier would be pure speculative structure with nothing pushing on it. That stops being
-true right here — the stdlib layers need somewhere to live that isn't the user's own source
-file, so this lands first in the phase, before `Vec`/`Map`/`String`/`Box`/`Rc`/`Arc` do,
-otherwise "stdlib" is just a rebrand of "more compiler intrinsics." A file becomes a
-compilation unit; an import brings another file's declarations into scope, at minimum by
-qualified name. Type resolution, move-tracking, and the R21 aliasing rule are all
-value-flow-based, not file-based, so none of that checker machinery should need to know a
-boundary was crossed — the open design question is narrower: how struct/enum declarations
-from separate files join one shared type registry without a name collision or a duplicate
-registration. (Phase 4's static overloading already leans on "module-level
-extensibility" without modules existing yet; this is where that debt gets paid.)
-**Exit:** two files, one importing a type and a word from the other, compiling and linking
-as one program.
-**Dogfood:** split an existing multi-word example (`vm.sth` or `stack.sth`) across a `main`
-file and a small library file it imports from.
+**Modules: what's left after Slice 5.** Phase 4 Slice 5 already pulled the whole
+compilation-unit story forward: a file is a compilation unit, and an import brings a word
+or a struct/enum declaration across a file boundary by qualified name, landed once writing
+a reusable component — usually a type plus its operations — needed somewhere to live
+besides copy-pasted into every consumer. `Vec`/`Map`/`String`/`Box`/`Rc`/`Arc` already have
+somewhere to live, courtesy of that slice.
+Encapsulation went with it: default private, a per-file `export:` list, and the Elm-style
+split between exporting a type name and exporting its constructors. So "which words, types,
+and externs are public" is already answered, and answered where it had to be, since a type
+cannot hold an invariant while its generated setters cross the boundary unchecked.
+What's left here is one thing, not two: a **serializable API description**, a compiler pass
+that walks the checked AST, filters to the exported declarations Slice 5 already
+distinguishes, and emits a file listing every exported signature for the API diff to
+compare between versions. That is the remaining prerequisite in
+`docs/dependency-management.md`, and it is a packaging/publishing concern (letting other
+people depend on you with enforced semver) rather than a personal-reuse one, which is why
+it waited.
+**Exit:** a published package's API diff correctly classifies a PATCH/MINOR/MAJOR bump
+across a two-file change.
+**Dogfood:** `sooth publish --check` on a two-version bump of a small library, one that adds
+a word (MINOR) and one that removes one (MAJOR).
+
+**Accessors as lenses, and it lands before the stdlib.** Retire the per-field generated
+accessor words in favour of separating the *location* from the *operation*: `q buf &>`
+instead of `q Queue&>buf`, matching how arrays already read (`l 0 &>`). See DESIGN.md's
+Open / deferred for the full case; the short version is that `>` / `<` / `|>` currently
+conflate which field with what ownership transfer happens, lenses separate them, and the
+generated-word count drops from O(fields x operations) to O(fields + operations), which is
+also what makes the module export list stop needing three entries per field.
+**Ordered first in this phase, before `Vec`/`Map`/`String`**, for exactly the reason modules
+were pulled forward: writing the collections against the old accessors and migrating them
+afterwards is the waste. It cannot land earlier than this phase either, since one `&>`
+accepting both an array and a struct *is* static overloading (Phase 4 slice 8).
+**Not a locked design.** The open question is what a selector *is*: a compile-time-only
+marker (the machinery slice 4 built for quotations, cheap and known, but no composition) or
+a first-class `Lens['S 'A]` value (composable, expressible once type variables exist, but it
+needs unambiguous selector names, which means qualification, which undoes the terseness that
+motivated the change). Its brief has to settle that before anything else, and should size
+the corpus migration honestly: every struct access in `examples/` and the test suite, which
+is 8c-shaped mechanical work on top of a real design decision.
 
 **Generic struct declarations (moved from Phase 4 Slice 3).** A `type:` parameterized by
 Phase 4's type and length variables, with layout and the `StructId`/`ArrayId` registries

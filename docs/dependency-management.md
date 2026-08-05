@@ -37,12 +37,19 @@ Two properties, both enforced by tooling at publish time:
 
 ## Why Sooth's type system makes this simpler than Elm
 
-Elm's type system has higher-kinded types, type aliases, custom type
-constructors, and record types. The API diff must handle all of them.
+Elm's type system has parameterized custom types, type aliases, and
+extensible record types. The API diff must handle all of them, and the
+last two are the awkward ones: an alias can expand to a different
+structure without its name changing, and record types are structural, so
+"same fields" is the comparison rather than "same name." (Elm
+deliberately has *no* higher-kinded types — no abstraction over type
+constructors, which is why it has no user-definable typeclasses and why
+`andThen` is written once per type rather than once for all monads.)
 
 Sooth's type system is simpler for this purpose. The stack effect
 `( in -- out )` is a flat tuple of types — no higher-kinded types, no
-type classes, no associated types, no coherence rules. Computing a
+type classes, no associated types, no coherence rules, and no structural
+record subtyping. Computing a
 module's public API is: enumerate exported words, emit their `(name,
 stack effect)` pairs; enumerate exported types, emit their `(name,
 fields/variants)` definitions. Diff is structural comparison. The
@@ -89,11 +96,11 @@ previously went to a different arm. The enforcement has a gap: the API
 didn't change, the behavior did.
 
 Without open multimethods, this gap doesn't exist. Static overloading
-(Slice 7) dispatches on the concrete type at the call site — adding a
+(Slice 8) dispatches on the concrete type at the call site — adding a
 new overload is a pure addition (MINOR) that can't shift resolution for
 existing callers, because existing callers' concrete types already
 resolve to their existing overloads. The handler-struct convention
-(functions as values, Slice 6) dispatches through a closed match the
+(functions as values, Slice 7) dispatches through a closed match the
 caller can see — adding a new handler is a new match clause (MINOR),
 and the exhaustiveness check tells the caller to update, which is a
 compile-time event, not a silent runtime shift.
@@ -149,14 +156,23 @@ languages where transitive dependency builds take minutes.
 - **Extends "Concurrency: a library, not a core feature" (DESIGN.md)**
   only in spirit — both reflect the "own the small thing" philosophy.
   Dependency management is a tooling concern, not a language feature.
-- **Depends on Phase 6 (modules).** Export lists and a serializable API
-  description are prerequisites. This doc records the design so the
-  reasoning survives, but implementation waits for Phase 6.
+- **Consumes Phase 4 Slice 5's export list; the tooling stays Phase 6.**
+  Multi-file compilation, word and type imports, and the `export:` list
+  itself all land early (Phase 4 Slice 5, pulled forward once a reusable
+  component — usually a type plus its operations — needed somewhere to
+  live, and encapsulation came with it because a type cannot hold an
+  invariant while its generated setters cross the boundary). So the
+  "what's public" half of this doc's first prerequisite is answered there,
+  including the Elm-style opaque-type distinction between exporting a type
+  name and exporting its constructors. What stays Phase 6 is the second
+  prerequisite: a serializable API description and the diffing that reads
+  it. This doc records the design so the reasoning survives, but the
+  tooling still waits.
 - **Interacts with "Open multimethods: Declined" (DESIGN.md).** The
   soundness argument in this doc relies on that decision. If open
   multimethods were ever revisited, the semver soundness section would
   need to be revisited with it.
-- **Interacts with static overloading (Phase 4 Slice 7).** Adding a new
+- **Interacts with static overloading (Phase 4 Slice 8).** Adding a new
   overload is a MINOR addition that can't shift existing dispatch —
   this is the property that keeps the enforcement sound for overloaded
   words.

@@ -739,6 +739,46 @@ rows, no borrow analysis needed to write the compiler in it.
   something actually wanted, as its own design track with its own brief, not as a side
   effect of a generics or monomorphization slice.
 
+- **Accessors as lenses: separate the location from the operation.** Today a struct field
+  access bakes the type, the field, and the ownership semantics into one generated word
+  name, built by string concatenation: `format!("{}>{}")` for get/destructure,
+  `"{}<{}"` for drop-on-overwrite, `"{}|>{}"` for the non-consuming `Copy` peek. Arrays
+  already work the other way: `arr_ref idx &>` is receiver, selector, operation, with the
+  selector an ordinary runtime value. The direction is to make structs match, so
+  `q buf &>` reads like `l 0 &>`.
+
+  **The strongest argument is the factoring, not the syntax.** `>` / `<` / `|>` conflate
+  *which field* with *what ownership transfer happens*. Lenses put ownership in the
+  operation and location in the selector, which for a language whose point is an explicit
+  linear spine is the more principled decomposition. It also collapses generated words from
+  O(fields x operations) to O(fields + operations), which is the same problem the module
+  export list runs into from a different direction (listing three words per field to control
+  visibility), and two independent routes to one root cause is a signal it is real. A
+  further benefit: with few explicit operations, the destructure-bypasses-`drop` hole
+  (recorded on ROADMAP Phase 4 slice 8) becomes one rule about one operation rather than a
+  property spread across three generated words per field.
+
+  **The hard problem is heterogeneity.** An array is homogeneous, so its index does not
+  affect the result type; a struct's fields have different types, so the selector
+  *determines* it. Two coherent designs follow. A **compile-time selector marker** (no
+  runtime representation, identity on a side channel, consumed only at projection sites,
+  default-denied elsewhere) is exactly the machinery Phase 4 slice 4 built for quotations,
+  so its cost is known, but it buys no composition and is close to alternative syntax for
+  what exists. A **first-class lens** (`buf : Lens['S 'A]`, with
+  `&> ( &'S Lens['S 'A] -- &'A )`) is expressible once type variables exist, is cheap at
+  runtime since a lens is a field offset, and buys real composition of paths. The tension to
+  resolve: composition needs first-class selectors, first-class selectors need unambiguous
+  names, unambiguous names need qualification, and qualification undoes the terseness that
+  motivated the change. Pick two.
+
+  **Placement.** Needs one `&>` to accept both arrays and structs, i.e. static overloading
+  (Phase 4 slice 8), so it cannot precede that. It belongs *before* the stdlib is written,
+  for the same reason modules did: writing `Vec`/`Map`/`String` against the old accessors
+  and migrating them afterwards is the waste. Filed as a Phase 6 prerequisite item rather
+  than its own phase, since it is a surface-syntax direction plus a corpus migration rather
+  than a theme on the scale of the other phases. Not settled; the selector-representation
+  question above is genuinely open.
+
 ## Declined
 
 Recorded so it isn't relitigated. Revisit only against a concrete program that can't
