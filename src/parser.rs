@@ -898,7 +898,18 @@ impl<'t> Parser<'t> {
     /// (recorded, enforced in phase 4). `self.pos` must point at `import:`.
     fn parse_import(&mut self) -> Result<Import, String> {
         let span = self.expect_word("import:")?;
-        let qualifier = self.expect_word_any()?;
+        // R9: the qualifier, path string, and terminating `;` each fail with a
+        // located error naming `import:` and the missing part, not the generic
+        // token-level message (which would say `expected a word` or wrongly
+        // name the C symbol borrowed from `extern:`).
+        let qualifier = match self.peek() {
+            Some((Token::Word(w), _)) => {
+                let w = w.clone();
+                self.pos += 1;
+                w
+            }
+            _ => return Err(self.form_error("a qualifier naming the imported module in `import:`")),
+        };
         let mut selective = Vec::new();
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.expect(Token::Pipe)?;
@@ -910,14 +921,37 @@ impl<'t> Parser<'t> {
             }
             self.expect(Token::Pipe)?;
         }
-        let (path, _) = self.expect_str_literal()?;
-        self.expect(Token::Semicolon)?;
+        let path = match self.peek() {
+            Some((Token::Str(s), _)) => {
+                let s = s.clone();
+                self.pos += 1;
+                s
+            }
+            _ => return Err(self.form_error("the import path as a quoted string in `import:`")),
+        };
+        match self.peek() {
+            Some((Token::Semicolon, _)) => self.pos += 1,
+            _ => return Err(self.form_error("`;` terminating `import:`")),
+        }
         Ok(Import {
             qualifier,
             selective,
             path,
             span,
         })
+    }
+
+    /// A located parse error for a malformed `import:`/`export:` form (R9),
+    /// naming the construct and what it expected. Reads the current token
+    /// without advancing; on end of input it defers to `eof_error`.
+    fn form_error(&self, expected: &str) -> String {
+        match self.peek() {
+            Some((tok, span)) => format!(
+                "parse error: expected {expected}, found {tok:?} at line {}, col {}",
+                span.line, span.col
+            ),
+            None => self.eof_error(expected),
+        }
     }
 
     /// Parse one `export:` form (R7): `export: <name>... ;`. Returns the named
@@ -932,7 +966,12 @@ impl<'t> Parser<'t> {
             self.pos += 1;
             names.push((name, wspan));
         }
-        self.expect(Token::Semicolon)?;
+        // R9: a stray non-word token before `;` is a located error naming
+        // `export:`, not the generic `expected Semicolon`.
+        match self.peek() {
+            Some((Token::Semicolon, _)) => self.pos += 1,
+            _ => return Err(self.form_error("`;` terminating `export:`")),
+        }
         Ok(names)
     }
 

@@ -292,14 +292,51 @@ fn unexported_type_named_only_in_an_effect_is_not_exported_error() {
 #[test]
 fn malformed_import_form_is_located_parse_error() {
     // Criterion 14: a malformed `import:` (missing qualifier or path string,
-    // unterminated before `;`) is a located parse error naming the construct.
+    // unterminated before `;`) is a located parse error naming the construct
+    // and what it expected, not a generic token-level message.
     let c = Closure::new("malformed-import");
-    let entry = c.write("main.sth", "import: \"lib.sth\" ;\n: main ( -- ) 0 . ;\n");
+
+    // Missing qualifier: `import:` followed straight by the path string.
+    let missing_qualifier = c.write("mq.sth", "import: \"lib.sth\" ;\n: main ( -- ) 0 . ;\n");
+    let err = build_err(&missing_qualifier);
+    assert!(
+        err.contains("parse error") && err.contains("`import:`") && err.contains("qualifier"),
+        "names `import:` and the missing qualifier: {err}"
+    );
+    assert!(err.contains("line 1"), "locates the qualifier error: {err}");
+
+    // Missing path string: qualifier present, then `;` with no `\"...\"`.
+    let missing_path = c.write("mp.sth", "import: lib ;\n: main ( -- ) 0 . ;\n");
+    let err = build_err(&missing_path);
+    assert!(
+        err.contains("parse error") && err.contains("`import:`") && err.contains("path"),
+        "names `import:` and the missing path string: {err}"
+    );
+    assert!(err.contains("line 1"), "locates the path error: {err}");
+
+    // Unterminated before `;`: qualifier and path present, no terminator.
+    let unterminated = c.write("un.sth", "import: lib \"lib.sth\"\n: main ( -- ) 0 . ;\n");
+    let err = build_err(&unterminated);
+    assert!(
+        err.contains("parse error") && err.contains("`import:`") && err.contains("`;`"),
+        "names `import:` and the missing terminator: {err}"
+    );
+    assert!(err.contains("line "), "locates the terminator error: {err}");
+}
+
+#[test]
+fn malformed_export_form_is_located_parse_error() {
+    // Criterion 14 (R9, `export:` half): a stray non-word token before `;` in
+    // an `export:` list is a located parse error naming `export:`, not the
+    // generic `expected Semicolon`.
+    let c = Closure::new("malformed-export");
+    let entry = c.write("main.sth", "export: \"oops\" ;\n: main ( -- ) 0 . ;\n");
     let err = build_err(&entry);
     assert!(
-        err.contains("parse error") || err.contains("import:"),
-        "names the construct: {err}"
+        err.contains("parse error") && err.contains("`export:`") && err.contains("`;`"),
+        "names `export:` and the expected terminator: {err}"
     );
+    assert!(err.contains("line 1"), "locates the export error: {err}");
 }
 
 #[test]
