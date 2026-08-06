@@ -3,18 +3,18 @@
 \ by type from `examples/modules_point.sth` and exported for
 \ `examples/modules.sth` to call qualified.
 
-import: point "modules_point.sth" ;
+import: point | Point | "modules_point.sth" ;
 
-: add ( point::Point point::Point -- point::Point )
+: add ( Point Point -- Point )
   | a b |
-  a point::Point>x b point::Point>x +
-  a point::Point>y b point::Point>y +
-  point::Point ;
+  a Point>x b Point>x +
+  a Point>y b Point>y +
+  Point ;
 
-: len2 ( point::Point -- i64 )
+: len2 ( Point -- i64 )
   | p |
-  p point::Point>x p point::Point>x *
-  p point::Point>y p point::Point>y *
+  p Point>x p Point>x *
+  p Point>y p Point>y *
   + ;
 
 export: add len2 ;
