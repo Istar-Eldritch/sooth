@@ -1098,6 +1098,25 @@ then find out what the compiler owes it.
    against quotations, so if the two are awkward together, that feedback should arrive before
    three more mechanisms are built on top. The paper pre-check is not a substitute for this,
    only a filter on the plan.
+   **Split in three, on fault lines a paper pre-check against the built compiler measured**
+   (findings below, all verified by compiling, not read off this document). `each`/`map`/
+   `fold` are expressible over `times` alone and need none of the polymorphic-path machinery
+   `filter` and `while` need; and the REPL half is its own design problem, exactly as it was
+   at slice 1/2 and 5a/5b. Separate them rather than risk a slice splitting mid-flight the
+   way Phase 3's 8 did.
+   **What the pre-check overturned:** the combinator library is not "writable but slow"
+   today, it is **not expressible at all**, so the inliner is the enabling mechanism rather
+   than an optimization laid over a working library. Two independent walls, both measured: a
+   quotation type cannot be spelled in a signature (`( i64 [ i64 -- i64 ] -- i64 )` fails in
+   the *parser*, since `[ ... ]` is already the array-type syntax and the count must be a
+   literal), and passing a quotation to any user word, monomorphic or polymorphic, is a hard
+   located rejection. What the inliner must *produce*, by contrast, is fully expressible:
+   hand-inlined `each`, `fold`, and `map` over a `[i64 4]` (a `times` loop, `&a i &> @`
+   reads, `&!b i &!> v !` writes) compile and run correctly today, and the length/element
+   polymorphism they need is already there (`: size ( ['T 'N] -- ['T 'N] usize ) len ;` runs
+   at `[i64 4]` and `[f64 7]`). The gap is entirely front-end.
+
+   **6a — quotation types in signatures + the inliner + `each`/`map`/`fold`** (native).
    **This slice owns the inliner, and it is the only one** — there is no inlining anywhere in
    the compiler today. Everything the source calls "inline" means "lowered straight to
    instructions rather than a call" (builtins and generated struct/enum words are match arms
@@ -1112,30 +1131,77 @@ then find out what the compiler owes it.
    alternative is making combinators compiler-known and lowering them as match arms, cheaper
    but forfeiting the thing the phase is trying to prove, in the same way `vm.sth` shipping
    with zero compiler changes *was* the Phase 2 exit verdict.
+   **A quotation becomes nameable in a signature here, and that is decided, not open.** For
+   `: each ( ['T 'N] [ 'T -- ] -- )` to be checkable standalone, `Type`/`PolyType` gain a
+   quotation variant carrying a declared effect, with unification, `apply_subst`, and
+   mangling following, and `call`/`times` must accept an **abstract** quotation — one whose
+   effect is known only from a declared parameter type — instead of demanding a
+   statically-known literal as they do today (`src/check.rs:4763,4797`). New surface syntax
+   is needed for the spelling, since `[ ... -- ... ]` collides with the array type. This is a
+   slice-1-shaped change and the reason 6a is `hard`, **but it stops at the type**: no
+   `IrType` variant, no calling convention, no per-literal environment struct, no `(code,
+   env)` representation, no escape rules, no quotation in an array, struct field, or branch
+   join. Every consumption site still resolves to a known literal, so lowering is untouched.
+   Slice 7 keeps the representation half and gets cheaper by exactly what this pre-pays.
+   Not split off into its own slice precisely because a quotation type with no inliner
+   compiles no call site at all: it would be inert plumbing, which slice 4 refused on the
+   same grounds, and "what is a quotation parameter's type" and "what happens at a call site
+   that must inline" are one question in the way row variables and multi-output returns were.
+   **Two constraints that fall out and belong in the brief.** Inlining stops being an
+   optimization and becomes **total**: with a quotation type but no runtime value there is no
+   fallback, so every call to a quotation-taking word must inline, transitively (`map` over
+   `each` inlines twice), and anything un-inlinable — recursion among quotation-taking words,
+   for one — must be a located error, never a silent real call. And the new variant must not
+   bake in "a quotation is always statically known": keep that a predicate on the value, or
+   slice 7 has to unpick it out of unification and the monomorphization walk to allow a
+   genuine runtime closure.
+   **The REPL is 6c, and 6a must pin its behaviour with a located rejection**, specified and
+   tested — the 5a lesson, which slice 2's recon proved the hard way when slice 1 left REPL
+   polymorphic words unpinned and the gap turned out to be a silent miscompile. The checker
+   sees only signatures at a call site (`env: &HashMap<String, Sig>`), never bodies, so an
+   inliner needs bodies threaded in; at the REPL bodies are discarded except drop overrides
+   and `poly_words`, which is a retention problem, not the same problem repeated.
+   Needs none of 6b's checker fixes, since `each`/`fold`/`map` need no branch.
    Accepts one known churn cost — the library is written against keyword `if` and gets
    rewritten when slice 9 turns `if` into a word — which is a handful of library words,
-   cheaper than reordering the phase around it. Dogfood: rewrite an earlier program to use it.
-   **This slice also closes the two polymorphic-path gaps slice 4's brief measured**, because
-   this is where their first real consumers appear. A polymorphic body rejects `if`
-   (`src/check.rs:2997`: the monomorphic arm machinery, condition-pop, per-arm
-   unconsumed-linear check, and move-join, is not lifted to `PolyType`), and a polymorphic
-   self-tail word does not get the loop transform (`src/ir.rs:1176`, `self_tail` hardcoded
-   `false`). They are siblings: both are machinery the monomorphic path has and the
-   polymorphic path lacks. Neither blocks slice 4, and neither blocks the phase exit, since
-   `each` and `fold` built on `times` need no branch and `max` is a builtin. They block
-   exactly two library words: `filter` needs the `if` fix to branch on its predicate, and
-   `while` needs **both**, being unbounded (so `times` cannot express it) and naturally
-   written as a self-recursive polymorphic word. If that proves too much on top of the
-   inliner, this slice splits, or the polymorphic-path gaps peel into their own slice;
-   decide at its brief.
+   cheaper than reordering the phase around it. **Exit:** `each`/`map`/`fold` written in
+   Sooth over `times`, verified to inline to a tight loop rather than a `call` per element,
+   with a quotation-taking word at the REPL a located rejection.
+   Dogfood: rewrite an earlier program to use `each`/`map`/`fold`.
+
+   **6b — the polymorphic-path gaps + `filter`/`while`.** Closes the two polymorphic-path
+   gaps slice 4's brief measured, because this is where their first real consumers appear.
+   A polymorphic body rejects `if` (`src/check.rs:2997`: the monomorphic arm machinery,
+   condition-pop, per-arm unconsumed-linear check, and move-join, is not lifted to
+   `PolyType`), and a polymorphic self-tail word does not get the loop transform
+   (`src/ir.rs:1176`, `self_tail` hardcoded `false`). They are siblings: both are machinery
+   the monomorphic path has and the polymorphic path lacks. Neither blocked slice 4 or 6a's
+   phase-exit words. They block exactly two library words: `filter` needs the `if` fix to
+   branch on its predicate, and `while` needs **both**, being unbounded (so `times` cannot
+   express it) and naturally written as a self-recursive polymorphic word. Depends on 6a for
+   the inliner and the library's file/shape; decide at its brief whether a fixed-up poly
+   body needs any inliner change of its own or whether 6a's pass already covers it unchanged.
+   **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are.
+
+   **6c — quotation-taking words at the REPL.** Lifts 6a's located rejection: what it means
+   to define and call a combinator in a live session. The problem is retention, the same
+   shape slice 2 solved for polymorphic words and 8b for drop overrides — a session discards
+   ordinary word bodies once a line compiles to its `.so`, and an inliner needs the body —
+   plus the frozen-binding question of which generation of a callee an inlined body binds to,
+   which slice 2 already answered for instantiations (the *defining* line's resolver
+   snapshot, not the instantiating line's) and this should follow rather than reopen. Last
+   of the three because the phase exit is a native criterion and nothing else builds on it;
+   its order against 6b is free. **Exit:** a session defining a quotation-taking word,
+   calling it, and redefining it, with the frozen-binding rule holding across the
+   redefinition.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
    array of quotations, a strategy in a struct field, and genuine non-inlined higher-order
-   words. After slice 6 because the combinator library is the consumer that makes the calling
-   convention concrete (designing it with no caller is the anti-pattern this plan keeps
-   citing), and because slice 6 lifts the polymorphic `if` any interesting closure-taking
-   word needs.
+   words. After slice 6a because the combinator library is the consumer that makes the
+   calling convention concrete (designing it with no caller is the anti-pattern this plan
+   keeps citing), and after slice 6b because it lifts the polymorphic `if` any interesting
+   closure-taking word needs.
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The environment of a downward closure (passed in, never returned or stored beyond the
    frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
