@@ -111,28 +111,43 @@ the stack per a *declared effect* instead of a visible body. Take each obligatio
    disposing it N times is a no-op. The obligation is discharged where the declared effect
    is checked; **it does not move to the inline site.**
 
-2. **Borrow-state identity: implied by D3, expressible on the declared effect.** `f call`'s
-   declared effect consumes its inputs and produces its outputs on the stack row and
-   captures no borrow of an enclosing place (D3's "no borrows of enclosing places"), so
-   `live_derivs` before vs after the `f call` term is unchanged: no reference `f` produces
-   can outlive the call, because the output row is the whole of what `f` yields and D3
-   forbids a captured enclosing borrow surviving in the closure. `each`'s *own* per-element
-   borrow (`&arr i &>`) is created and consumed inside one iteration and is `each`'s
-   business, checked by the visible ops. **It does not move to the inline site.**
+2. **Borrow-state identity: enforced in two places, and both are needed.** At the def site,
+   `f call`'s declared effect consumes its inputs and produces its outputs on the stack row
+   and captures no borrow of an enclosing place (D3's "no borrows of enclosing places"), so
+   `live_derivs` before vs after the `f call` term is unchanged and the def-site check is
+   sound *for what it can see*. `each`'s own per-element borrow (`&arr i &>`) is created and
+   consumed inside one iteration and is checked by the visible ops. But the def-site check
+   is **not sufficient on its own**, and the spec states this rather than overclaiming: D3
+   forbids *capturing* an enclosing borrow, and does not forbid a substituted literal from
+   *creating* a borrow of a captured `Copy` local and leaving the resulting reference on its
+   output row, which would ride the back-edge into the next iteration. That case is caught,
+   but by the **splice-site re-check**: D2/R18 re-checks the spliced body in the caller's
+   scope, where the existing `check_reference_across_back_edge` and `times`' own
+   `live_derivs` comparison run against the now-concrete body. So obligation 2 is discharged
+   by the def-site check plus the ordinary re-check the splice already performs, not by the
+   def-site check alone. The diagnostic still lands at a call the **caller** wrote (their own
+   literal created the borrow), never at a call `each`'s author never wrote, which is the
+   property the brief actually asked for.
 
 3. **Row-effect equality: expressible on the declared effect.** The times-body's net row
    effect is computed by composing its visible ops with `f`'s declared effect, entirely at
    the def site (`[ 'T -- ]` pops a `'T`, pushes nothing). No part of this needs the real
    literal. **It does not move to the inline site.**
 
-**Conclusion, stated plainly and without papering over the set: none of the three moves to
-the inline site.** The def-site check is **total**, not partial, and D3 is precisely
-calibrated to make it so: the `Copy`-only capture restriction is exactly the premise that
-lets a declared effect stand in for every literal that will ever be substituted. The only
-checks that *do* land at a call site are (a) D3's own capture restriction and (b) the
-directional literal-versus-declared-effect check (R11/R12), and both land at a call the
-**caller** wrote (they wrote the literal), never at a call the author of `each` never
-wrote. The cost the brief warned about does not materialize.
+**Conclusion, stated plainly and without papering over the set.** Obligations 1 and 3 are
+discharged entirely at the def site: `Copy`-only capture (D3) is exactly the premise that
+lets a declared effect stand in for every literal that will ever be substituted, so no
+literal can consume an outer linear local, and the row effect composes from the declared
+effect alone. Obligation 2 is discharged at the def site **for captured state** and by the
+splice-site re-check **for borrows a literal creates internally** (above). No obligation is
+*deferred* to the inline site in the sense the brief warned about — none of them produces a
+diagnostic at a call the author of `each` never wrote. The checks that land at a call site
+land on the caller's own literal: D3's capture restriction, the directional
+literal-versus-declared-effect check (R11/R12), and a literal-created borrow crossing the
+back-edge. The cost the brief warned about (a partial def-site check surfacing errors in
+someone else's word) does not materialize; the weaker claim that every obligation is
+*checkable from the declared effect alone* is not made, because it is not true of
+obligation 2.
 
 ## Open questions the brief left for this spec (resolved here)
 
@@ -211,7 +226,40 @@ named identifiers/positions, never an op name or an exit code.
   never reaches the backend. The mangling and `IrType`-lowering arms for a `Type::Quotation`
   are `unreachable!` with a comment pinning the reachable case to slice 7, guarded by a unit
   (R20u) asserting no quotation-taking word mints a symbol. This keeps D6 honest: the
-  variant exists at the type layer without a runtime representation.
+  variant exists at the type layer without a runtime representation. **R7's `unreachable!`
+  arms are only sound because of R7a; neither ships without the other.**
+- **R7a** *(located)*. **The type-position audit: exactly one position accepts a quotation
+  type, every other is a located rejection.** R2 parses a quotation effect through the
+  ordinary `parse_type_expr`, so the new variant becomes writable in *every* type position
+  the language has, and "out of scope" (R28) means unspecified, not rejected. Unspecified
+  plus R7's `unreachable!` is a compiler panic, which is precisely the failure mode slice 4
+  avoided for quotation *values* with its audit-table sweep
+  (`quotation_as_operand_is_rejected_at_every_audited_site`, `src/check.rs:7001`). This is
+  the same sweep for quotation *types*. The one legal position is a **direct input in a
+  word's declared effect** (the quotation parameter this slice exists to add). Every other
+  position is rejected with a located error naming the position and the offending type,
+  before layout or lowering can see it:
+  - a struct field or enum-variant payload field (`type: S f [ i64 -- ] ;`);
+  - an **array element**, including the parse path R1's scan creates: `[ [ i64 -- ] 3 ]` has
+    no *top-depth* `--` (the inner one sits at depth 1), so it takes the array branch and
+    parses as an array of quotations. R1's justification ("arrays cannot hold quotations,
+    slice 4") is a rule about quotation *values*; this is the first time a declared
+    array-of-quotation *type* is expressible, and it must reject here rather than reach
+    `check_no_linear_array_elements`-adjacent layout code;
+  - an owned-cell payload (`^[ i64 -- ]`) and a reference referent (`&[ i64 -- ]`,
+    `&![ i64 -- ]`);
+  - a word's **output** position (there is no runtime value to return, D6/R28);
+  - an `extern:` boundary type, in either direction (`check_extern_boundary_types`);
+  - `main`'s signature;
+  - **nested inside another quotation effect** (`[ [ i64 -- ] -- ]`, a quotation taking a
+    quotation): unbudgeted here, deferred to slice 7, rejected rather than half-supported;
+  - at the REPL, a session `type:` line and a session word signature reach the same
+    rejections (R23 covers the parameter case; a `type:` field goes through the struct-field
+    rejection above).
+  Each rejection names slice 7 as the milestone that lifts it, matching R26's rewording so
+  no diagnostic in the tree points at the wrong slice. The witness is one table-driven test
+  in slice 4's audit shape, one row per position, asserting the message text and the named
+  identifiers — not merely that compilation failed.
 
 ### Checking, monomorphic path (`src/check.rs`)
 
@@ -419,6 +467,9 @@ or an exit code.
 | 1b | `[i64]` (no top-depth `--`) is *still* the array-count diagnostic, unchanged | `array_type_without_arrow_stays_array_diagnostic` | golden | 1 |
 | 1c | malformed quotation effect (`[ i64 -- ]` unterminated, bad type list) is a located parse error naming the token | `malformed_quotation_type_is_located_parse_error` | golden | 1 |
 | 2 | `[ 'T -- ]` unifies against `[ i64 -- ]` binding `'T = i64`; arity mismatch is a located type mismatch | `quotation_effect_unifies_and_binds_variable` | unit (check) | 1 |
+| 2b | a quotation type in every audited non-parameter position (struct field, enum payload, array element, cell payload, reference referent, word output, `extern:` either direction, `main`, nested inside another effect) is a located rejection naming the position and slice 7 | `quotation_type_is_rejected_at_every_audited_position` | golden (table-driven) | 1 |
+| 2c | `[ [ i64 -- ] 3 ]` (no top-depth `--`, so it takes the array branch) is a located rejection naming the array element position — not an array-count error, not a panic | `array_of_quotation_type_is_located_rejection` | golden | 1 |
+| 2d | every R7 `unreachable!` arm stays unreached: no audited position reaches mangling or `IrType` lowering | `quotation_type_never_reaches_mangling_or_irtype` | unit (ir) | 1 |
 | 3 | `: apply ( i64 [ i64 -- i64 ] -- i64 ) call ;` with `3 [ 1 + ] apply .` prints `4` | `monomorphic_quotation_taking_word_inlines_and_runs` | golden | 1 |
 | 3b | the lowered caller of `apply` contains no `Instr::Call` and no `IrFunc` named `apply` | `quotation_taking_word_emits_no_call_and_no_irfunc` | unit (ir) | 1 |
 | 4 | a literal whose effect disagrees with the declared parameter is a located error naming word, parameter, both effects | `literal_effect_mismatch_against_parameter_is_error` | golden | 1 |
@@ -435,8 +486,9 @@ or an exit code.
 | 10 | `arr [ . ] each` over `[i64 4]` prints each element (inlined) | `each_over_array_inlines_and_runs` | golden | 2 |
 | 10b | `map` over `each` inlines twice; the lowered caller has no `Instr::Call` | `map_over_each_inlines_transitively` | unit (ir) | 2 |
 | 11 | `fold` sums `[i64 4]` to `28` | `fold_computes_sum` | golden | 2 |
-| 12 | a poly combinator whose times-body consumes an outer linear local is located, naming it | `poly_combinator_consuming_local_is_error` | golden | 2 |
-| 12b | a poly combinator whose times-body borrow crosses the back-edge is located | `poly_combinator_borrow_across_loop_is_error` | golden | 2 |
+| 12 | a poly combinator whose times-body consumes an outer linear local is located, naming it (fires at the combinator's own def site) | `poly_combinator_consuming_local_is_error` | golden | 2 |
+| 12b | a poly combinator whose times-body borrow crosses the back-edge is located (def site) | `poly_combinator_borrow_across_loop_is_error` | golden | 2 |
+| 12c | a caller's literal that creates a borrow of a captured `Copy` local and leaves the reference on its output row is located at the **splice site**, naming the caller's own literal | `literal_created_borrow_across_loop_is_error_at_splice_site` | golden | 2 |
 | 13 | a quotation literal at a runtime-value position in a poly body is rejected, reworded | `quotation_at_runtime_position_in_poly_body_is_error` | golden | 2 |
 | 14 | `each` over 1_000_000+ elements runs in constant stack under a reduced `ulimit` (`Some(0)`) | `each_over_a_million_runs_in_constant_stack` | golden | 2 |
 | 14b | the inlined `each` lowers to a loop header/back-edge, no per-element `Instr::Call` | `each_lowers_to_a_loop_not_a_per_element_call` | unit (ir) | 2 |
@@ -445,13 +497,18 @@ or an exit code.
 | 17 | the eight reworded diagnostics name slice 7 (runtime values), not "Phase 6" | `stale_phase6_diagnostics_are_reworded` | golden | 3 |
 | 18 | an earlier program rewritten over `each`/`map`/`fold` builds and matches its hand-threaded result | `combinators_dogfood_matches_hand_threaded` | golden | 4 |
 
-Load-bearing units (mutation-test the guards): 2, 3b, 6b, U20, 10b, 14b. Criterion 14 is the
+Load-bearing units (mutation-test the guards): 2, 2b, 2c, 2d, 3b, 6b, U20, 10b, 14b.
+Criteria 2b/2c/2d are what make R7's `unreachable!` arms sound rather than hopeful, so
+deleting any one audited rejection must make its row fail, not merely change a message.
+Criterion 14 is the
 primary constant-stack witness (the `times` precedent); 3b/10b/14b are regression guards
 against a future silent fallback (with total inlining, "it compiled" already implies "it
 inlined", so a zero-`Call` count exists to catch a fallback being added silently). Criteria
 5/5b are the D3 pair (a linear capture rejects, a Copy capture runs); 12/12b are the
-regression witnesses for the two `times` obligations that "The hardest question" proves stay
-at the def site (they must fire from `each`'s own def-site check, not at a call site).
+regression witnesses for the obligations that "The hardest question" resolves at the def
+site (they must fire from `each`'s own def-site check, not at a call site), and 12c is its
+counterpart for the one case obligation 2 leaves to the splice-site re-check — the three
+together pin *where* each check lives, which is the claim a reviewer should attack.
 
 ## Sanctioned edits to existing tests
 
@@ -469,7 +526,7 @@ way slice 3 called out its phi-count edits.
     {
       "phase": 1,
       "title": "Quotation type + the monomorphic inliner",
-      "focus": "Disambiguate a type-position `[` on a top-depth `--` (quotation effect vs array), keeping the malformed-array diagnostic sharp; add a `Type`/`PolyType` quotation-effect variant carrying an interned declared effect with unification and apply_subst, and unreachable-and-guarded mangling/IrType arms (no runtime representation, D6); make `call`/`times` accept an abstract quotation checked against its declared effect beside the literal they accept today; make the user-word and poly-call argument sites accept a quotation literal for a declared quotation parameter, checked directionally against the declared effect, enforcing D3's Copy-only capture restriction at the literal; build the interprocedural term-splice inliner for a monomorphic quotation-taking word so it emits no Instr::Call and no IrFunc (total inlining, forced by recon 5); reject recursion among quotation-taking words with a located cycle error reusing the 3-colour DFS precedent; change reject_quotation_argument's behaviour and wording and update the slice-4 goldens it touches. Exit: a monomorphic quotation-taking word inlines and runs, recursion is located. R1-R13, R18-R22, part of R26.",
+      "focus": "Disambiguate a type-position `[` on a top-depth `--` (quotation effect vs array), keeping the malformed-array diagnostic sharp; add a `Type`/`PolyType` quotation-effect variant carrying an interned declared effect with unification and apply_subst, and unreachable-and-guarded mangling/IrType arms (no runtime representation, D6); sweep every other type position with a located rejection naming the position and slice 7 (R7a: struct field, enum payload, array element including the `[ [ i64 -- ] 3 ]` parse path the top-depth scan creates, cell payload, reference referent, word output, extern either direction, main, and nesting inside another effect), table-driven in slice 4's audit shape, since without it the unreachable arms are a panic rather than a guarantee; make `call`/`times` accept an abstract quotation checked against its declared effect beside the literal they accept today; make the user-word and poly-call argument sites accept a quotation literal for a declared quotation parameter, checked directionally against the declared effect, enforcing D3's Copy-only capture restriction at the literal; build the interprocedural term-splice inliner for a monomorphic quotation-taking word so it emits no Instr::Call and no IrFunc (total inlining, forced by recon 5); reject recursion among quotation-taking words with a located cycle error reusing the 3-colour DFS precedent; change reject_quotation_argument's behaviour and wording and update the slice-4 goldens it touches. Exit: a monomorphic quotation-taking word inlines and runs, recursion is located. R1-R13, R18-R22, part of R26.",
       "effort": "L",
       "difficulty": "hard"
     },
