@@ -386,6 +386,11 @@ fn repl_reimport_of_type_resolution_does_not_diverge() {
         out.contains("defined id"),
         "a signature typed after the reload resolves against the same new decl: {out}"
     );
+    let out = r.send("1 2 q::T id q::T>w");
+    assert!(
+        out.contains('2'),
+        "a value built via the post-reload constructor cross-fed through the post-reload-typed word resolves through one StructId, not a stale one: {out}"
+    );
     r.finish();
 }
 
