@@ -66,6 +66,57 @@ fn import_line(qualifier: &str, path: &Path) -> String {
     format!("import: {qualifier} \"{}\" ;", path.display())
 }
 
+/// Phase 2: a session driven one line at a time, reading back each line's own
+/// output before sending the next, so the test can edit a library file on
+/// disk *between* two `import:` lines in the same process (proving R6's
+/// frozen-caller behavior against a real reload, not two different paths).
+/// `Session`'s writer is `std::io::stdout()`'s `LineWriter`, which flushes on
+/// every embedded newline regardless of pipe-vs-tty, so one line in yields
+/// one line out.
+struct InteractiveRepl {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    stdout: std::io::BufReader<std::process::ChildStdout>,
+}
+
+impl InteractiveRepl {
+    fn spawn(cwd: &Path) -> InteractiveRepl {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_sooth"))
+            .arg("repl")
+            .current_dir(cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the sooth binary spawns");
+        let stdin = child.stdin.take().unwrap();
+        let stdout = std::io::BufReader::new(child.stdout.take().unwrap());
+        InteractiveRepl {
+            child,
+            stdin,
+            stdout,
+        }
+    }
+
+    /// Send one line, read back exactly the one line of output it produces.
+    fn send(&mut self, line: &str) -> String {
+        writeln!(self.stdin, "{line}").expect("stdin writes");
+        self.stdin.flush().expect("stdin flushes");
+        let mut out = String::new();
+        std::io::BufRead::read_line(&mut self.stdout, &mut out).expect("stdout reads");
+        out
+    }
+
+    /// Close stdin (EOF) and let the session exit.
+    fn finish(self) {
+        let InteractiveRepl {
+            mut child, stdin, ..
+        } = self;
+        drop(stdin);
+        child.wait().expect("the session exits");
+    }
+}
+
 #[test]
 fn repl_import_word_is_callable_qualified() {
     // Criterion 1: import a two-word library, call `q::w`, run to a value.
@@ -250,5 +301,155 @@ fn repl_failed_import_leaves_session_intact() {
     assert!(
         out.contains("5"),
         "the session survives the failed import and runs `keep`: {out}"
+    );
+}
+
+#[test]
+fn repl_reimport_freezes_existing_caller() {
+    // Criterion 10: redefine the library, re-import; a caller compiled
+    // against the first epoch stays frozen while a fresh reference sees the
+    // new resolution (R6). Editing the file *between* the two `import:`
+    // lines, in the same process, is the point -- a static two-file rebind
+    // would not exercise reload of the *same* path.
+    let d = LibDir::new("reimport");
+    let lib = d.write("lib.sth", ": w ( -- i64 ) 1 ;\nexport: w ;\n");
+    let mut r = InteractiveRepl::spawn(&d.0);
+
+    let out = r.send(&import_line("q", &lib));
+    assert!(out.contains("imported q"), "first import: {out}");
+    let out = r.send(": caller ( -- i64 ) q::w ;");
+    assert!(out.contains("defined caller"), "defines caller: {out}");
+    let out = r.send("caller");
+    assert!(out.contains('1'), "caller runs the first epoch's w: {out}");
+
+    d.write("lib.sth", ": w ( -- i64 ) 2 ;\nexport: w ;\n");
+    let out = r.send(&import_line("q", &lib));
+    assert!(out.contains("imported q"), "re-import: {out}");
+
+    let out = r.send("caller");
+    assert!(
+        out.contains('1'),
+        "the already-compiled caller stays frozen on the old epoch: {out}"
+    );
+    let out = r.send("q::w");
+    assert!(
+        out.contains('2'),
+        "a fresh reference resolves against the new epoch: {out}"
+    );
+    r.finish();
+}
+
+#[test]
+fn repl_reimport_of_type_leaves_unrelated_typedef_unaffected() {
+    // Criterion 10a: reload a library exporting a type, then declare an
+    // unrelated `type:` line; it succeeds -- a regression witness for the
+    // duplicate-type-name hazard (each import event's rows carry a fresh
+    // module id, so a reload's two same-`name_static` rows never collide as
+    // a literal repeat).
+    let d = LibDir::new("reimport-type");
+    let lib = d.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
+    let mut r = InteractiveRepl::spawn(&d.0);
+    r.send(&import_line("q", &lib));
+    r.send(&import_line("q", &lib));
+    let out = r.send("type: Other z i64 ;");
+    assert!(
+        out.contains("defined type Other"),
+        "an unrelated type: line still succeeds after a reload: {out}"
+    );
+    r.finish();
+}
+
+#[test]
+fn repl_reimport_of_type_resolution_does_not_diverge() {
+    // Criterion 10b: reload a library exporting a type with a changed shape;
+    // a value built via the post-reload `q::T` constructor and a word typed
+    // after the reload both agree on the new shape.
+    let d = LibDir::new("reimport-shape");
+    let lib = d.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
+    let mut r = InteractiveRepl::spawn(&d.0);
+    r.send(&import_line("q", &lib));
+
+    d.write("lib.sth", "type: T v i64 w i64 ;\nexport: T ;\n");
+    r.send(&import_line("q", &lib));
+
+    let out = r.send("1 2 q::T q::T>w");
+    assert!(
+        out.contains('2'),
+        "the post-reload constructor takes the new shape: {out}"
+    );
+    let out = r.send(": id ( q::T -- q::T ) ;");
+    assert!(
+        out.contains("defined id"),
+        "a signature typed after the reload resolves against the same new decl: {out}"
+    );
+    r.finish();
+}
+
+#[test]
+fn repl_qualifier_rebind_frozen_and_rejudged() {
+    // Criterion 11: rebind `q` to a different file; a frozen `q::old` keeps
+    // working, while a *new* reference to `q::old` is judged against the new
+    // file only (not exported, since the new file declares `old` privately),
+    // never a stale hit on the old file's export status.
+    let d = LibDir::new("rebind");
+    let lib_a = d.write("a.sth", ": old ( -- i64 ) 1 ;\nexport: old ;\n");
+    let lib_b = d.write(
+        "b.sth",
+        ": old ( -- i64 ) 9 ;\n: other ( -- i64 ) 2 ;\nexport: other ;\n",
+    );
+    let mut r = InteractiveRepl::spawn(&d.0);
+
+    r.send(&import_line("q", &lib_a));
+    r.send(": caller ( -- i64 ) q::old ;");
+    let out = r.send("caller");
+    assert!(
+        out.contains('1'),
+        "caller runs against the first file: {out}"
+    );
+
+    let out = r.send(&import_line("q", &lib_b));
+    assert!(
+        out.contains("imported q"),
+        "rebinds to a different file: {out}"
+    );
+
+    let out = r.send("caller");
+    assert!(
+        out.contains('1'),
+        "the frozen caller still runs the first file's `old`: {out}"
+    );
+    let out = r.send("q::old");
+    assert!(
+        out.contains("not exported") && out.contains("old"),
+        "a new reference is judged against the new file only, which declares `old` privately: {out}"
+    );
+    let out = r.send("q::other");
+    assert!(
+        out.contains('2'),
+        "the new file's own export resolves: {out}"
+    );
+    r.finish();
+}
+
+#[test]
+fn repl_import_of_library_declaring_main_is_rejected() {
+    // Criterion 12: an imported file declaring `main` is a located rejection
+    // naming the file and the word, and leaves the session untouched.
+    let d = LibDir::new("main");
+    let lib = d.write(
+        "lib.sth",
+        ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+    );
+    let out = repl(&format!(
+        ": keep ( -- i64 ) 5 ;\n{}\nkeep\n",
+        import_line("q", &lib)
+    ));
+    assert!(
+        out.contains("main") && out.contains("lib.sth"),
+        "the rejection names the file and the word: {out}"
+    );
+    assert!(
+        out.contains("defined keep") && out.contains('5'),
+        "the session survives the rejected import and runs `keep`: {out}"
     );
 }

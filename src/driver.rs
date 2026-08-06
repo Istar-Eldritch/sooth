@@ -105,6 +105,13 @@ pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
 }
 
 impl Closure {
+    /// R14 (slice 5b): the canonical file path a module id in an assembled
+    /// closure came from, for a located error naming the file (e.g. an
+    /// imported `main`).
+    pub(crate) fn path_of(&self, module: u32) -> &Path {
+        &self.nodes[module as usize].canon
+    }
+
     /// R4: reject any import cycle (a self-import is the degenerate case), with
     /// a located error naming both files at the edge that closes the cycle.
     fn reject_cycles(&self) -> Result<(), String> {

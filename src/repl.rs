@@ -187,6 +187,26 @@ fn reject_double_colon_name(kind: &str, name: &str, span: Span) -> Result<(), St
     Ok(())
 }
 
+/// R14/D4 (slice 5b): reject an imported closure that declares a word named
+/// `main`, naming the declaring file and the word, before any codegen.
+/// `mangle` (`src/resolve.rs`) never renames `main` regardless of module, so
+/// a plain name scan over every file in the closure finds it, whichever file
+/// it came from (recon #4's native collision turned into a diagnostic here;
+/// the native path's own exposure stays unfixed, per D4).
+fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Result<(), String> {
+    let Some(main) = module.words.iter().find(|w| w.name == "main") else {
+        return Ok(());
+    };
+    let path = closure.path_of(main.module);
+    let span = word_span(main);
+    Err(format!(
+        "error: cannot import `{}`: it declares a word named `main` (line {}, col {}); a library file may not declare `main`",
+        path.display(),
+        span.line,
+        span.col
+    ))
+}
+
 /// R5/R6 (slice 5b): bulk-lower a whole checked import closure to one `.so`.
 /// Reuses `ir::lower` (the native single-module lowerer), then renames every
 /// user word's func and its intra-closure call sites to the word's import-epoch
@@ -827,6 +847,10 @@ impl Session {
         let closure = driver::discover_closure(Path::new(&import.path))?;
         let mut module = driver::assemble_module(&closure)?;
         check::check(&mut module)?;
+        // R14/D4: an imported closure declaring `main` (in any of its files,
+        // not only module 0) is rejected before any codegen, naming the file
+        // and the word.
+        check_no_main_in_closure(&module, &closure)?;
         // R6/R9: read (do not yet advance) this event's epoch and module-id
         // base, so every fallible step below leaves `self` untouched (R16).
         let epoch = self.import_epoch;
@@ -852,6 +876,19 @@ impl Session {
     /// qualifier's aliases / private names / export lists.
     fn splice_import(&mut self, import: &Import, module: &Module, epoch: u64, module_base: u32) {
         let q = &import.qualifier;
+        // R13: a rebind (`q` already bound, same path or a different one)
+        // must not leave a stale alias from the old epoch's export set that
+        // this splice doesn't recreate -- e.g. the old file exported `foo`
+        // and the new one doesn't, at all. Purging every `q::`-prefixed alias
+        // up front, before this splice re-adds whatever the new closure
+        // actually exports, is what makes a post-rebind `q::foo` fall through
+        // to `not exported`/`unknown word` judged against the new file only,
+        // never a stale hit on the old file's export status. The underlying
+        // `self.env`/`self.structs` rows the old alias pointed at are never
+        // touched here (R9 positional stability): only the alias, the lookup
+        // key, is replaced.
+        let prefix = format!("{q}::");
+        self.import_aliases.retain(|k, _| !k.starts_with(&prefix));
         let struct_base = self.structs.len();
         let enum_base = self.enums.len();
         let array_base = self.arrays.len();
@@ -2101,6 +2138,64 @@ mod tests {
                 .unwrap()
                 .is_none(),
             "a genuinely absent name falls through to unknown-word"
+        );
+    }
+
+    #[test]
+    fn import_epoch_symbols_are_session_fresh_across_a_reimport() {
+        // U7 (phase 2): reloading the same qualifier overwrites its
+        // `import_aliases` entry to the new epoch's spelling -- the old
+        // epoch's registry row (its env entry / symbol) stays resident, only
+        // unreferenced by any current alias, never removed (R9 positional
+        // stability, R13).
+        let d = LibDir::new("u7");
+        let lib = d.write("lib.sth", ": w ( -- i64 ) 1 ;\nexport: w ;\n");
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+
+        assert_eq!(
+            session.import_aliases.len(),
+            1,
+            "a reload overwrites the alias rather than appending a second one"
+        );
+        assert_eq!(
+            session.import_aliases["q::w"], "q::w__import1",
+            "the alias now resolves to the second import event's spelling"
+        );
+        assert!(
+            session.env.contains_key("q::w__import0"),
+            "the first event's env row stays resident, unremoved"
+        );
+        assert!(
+            session.env.contains_key("q::w__import1"),
+            "the second event's row is the fresh one"
+        );
+    }
+
+    #[test]
+    fn imported_main_is_rejected_by_scan() {
+        // U4: the main-in-closure scan rejects an imported `main`, naming the
+        // declaring file and the word, regardless of where in the closure it
+        // sits (`mangle` never renames `main`).
+        let d = LibDir::new("u4");
+        let lib = d.write(
+            "lib.sth",
+            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+        );
+        let closure = driver::discover_closure(&lib).expect("closure resolves");
+        let mut module = driver::assemble_module(&closure).expect("assembles");
+        check::check(&mut module).expect("checks");
+        let err = check_no_main_in_closure(&module, &closure).unwrap_err();
+        assert!(err.contains("main"), "names the word: {err}");
+        assert!(
+            err.contains(lib.file_name().unwrap().to_str().unwrap()),
+            "names the file: {err}"
         );
     }
 
