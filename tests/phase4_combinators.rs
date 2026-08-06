@@ -462,13 +462,13 @@ fn repl_poly_quotation_taking_definition_is_rejected() {
 fn combinators_dogfood_matches_hand_threaded() {
     // R27: `examples/array_totals.sth` sums and doubles a small array through
     // `fold`/`map`/`each` imported from `lib/combinators.sth`. This asserts
-    // it builds and runs to the same total and doubled elements as the
-    // earlier program it rewrites, `examples/array_totals_hand.sth`: three
-    // manual `times` loops over the same array, each with a synthesized
-    // `>usize` index, a `&arr i &> @` read, and (for the doubling loop) a
+    // it builds and runs to the same total and doubled elements as its
+    // hand-threaded twin, `examples/array_totals_hand.sth`: three manual
+    // `times` loops over the same array, each with a synthesized `>usize`
+    // index, a `&arr i &> @` read, and (for the doubling loop) a
     // `&!arr i &!> v !` write, the exact shape the inliner must produce
-    // (recon 2). Both are real committed files, not a string invented
-    // inside this test, so the rewrite has an actual earlier artifact.
+    // (recon 2). Both are real committed files, not a string invented inside
+    // this test, so the equivalence is pinned against an actual baseline.
     fn build_and_run(path: &str) -> (String, Option<i32>) {
         let binary =
             sooth::driver::build(std::path::Path::new(path)).expect("example should build");

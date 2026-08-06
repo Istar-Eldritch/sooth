@@ -1,9 +1,11 @@
-\ Dogfood: Phase 4 slice 6a. Rewrites `examples/array_totals_hand.sth`'s
-\ hand-threaded array walk (three manual `times` loops with a synthesized
-\ `>usize` index, `&arr i &> @` reads and `&!arr i &!> v !` writes) over
-\ `each`/`map`/`fold` from `lib/combinators.sth`: the total and the doubled
-\ elements, now three one-line combinator calls instead of three
-\ hand-threaded loop bodies.
+\ Dogfood: Phase 4 slice 6a. The combinator half of a matched pair with
+\ `examples/array_totals_hand.sth`: both compute the same total and doubled
+\ elements over one array, one over `each`/`map`/`fold` from
+\ `lib/combinators.sth` and one hand-threaded, so the golden can pin them to the
+\ same output and show the combinators lower to the hand-threaded shape. Here
+\ the walk is three one-line combinator calls; the twin spells out three `times`
+\ loops with a synthesized `>usize` index, `&arr i &> @` reads and a
+\ `&!arr i &!> v !` write.
 
 import: c "../lib/combinators.sth" ;
 
