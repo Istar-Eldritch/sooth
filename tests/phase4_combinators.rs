@@ -217,7 +217,12 @@ fn literal_effect_mismatch_against_parameter_is_error() {
 #[test]
 fn quotation_literal_capturing_linear_local_is_error() {
     // A literal that consumes a linear enclosing local (`s`, a `Spy`) is a
-    // located D3 rejection naming the local.
+    // located D3 rejection naming the local. Asserts the R12-specific
+    // wording ("consumes the enclosing local" / "(D3)"), not just `s` and
+    // "linear": the inliner's second (splice-time) run of the literal body
+    // also rejects a moved `s` with a generic use-after-move message that
+    // shares those two substrings, so a weaker assertion here would stay
+    // green even if R12's own capture guard were deleted.
     let src = format!(
         "{SPY_DEF}\
          : apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
@@ -225,8 +230,23 @@ fn quotation_literal_capturing_linear_local_is_error() {
     );
     let err = check_error(&src);
     assert!(
-        err.contains("`s`") && err.contains("linear"),
-        "capturing a linear local should be a located D3 rejection naming `s`, got: {err}"
+        err.contains("`s`") && err.contains("consumes the enclosing local") && err.contains("(D3)"),
+        "capturing a linear local should be R12's located D3 rejection naming `s`, got: {err}"
+    );
+}
+
+#[test]
+fn quotation_literal_borrowing_enclosing_place_is_error() {
+    // The other half of criterion 5: a literal that leaves a borrow of an
+    // enclosing place (`v`, a struct local) on its exit row, rather than
+    // consuming it outright, is also a located D3 rejection naming the local.
+    let src = "type: V x i64 y i64 ;\n\
+               : apply ( [ -- &V ] -- ) call drop ;\n\
+               : main ( -- ) 1 2 V | v | [ &v ] apply ;\n";
+    let err = check_error(src);
+    assert!(
+        err.contains("`v`") && err.contains("borrows the enclosing place") && err.contains("(D3)"),
+        "borrowing an enclosing place should be a located D3 rejection naming `v`, got: {err}"
     );
 }
 
