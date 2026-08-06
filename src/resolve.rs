@@ -41,7 +41,7 @@ fn mangle(name: &str, module: u32) -> String {
 /// `Type>field` / `Type<field` / `Type|>field` (`check.rs`, `ir.rs`), and a
 /// type name never contains `<`, `>`, or `|`, so the first of those characters
 /// is the boundary.
-fn split_accessor(name: &str) -> (&str, &str) {
+pub(crate) fn split_accessor(name: &str) -> (&str, &str) {
     match name.find(['>', '<', '|']) {
         Some(i) => name.split_at(i),
         None => (name, ""),
@@ -158,7 +158,7 @@ fn is_exported(exports: &[(String, Span)], name: &str) -> bool {
 /// R16: a qualified reference to a name that exists in the target module but
 /// is not on its `export:` list. Distinct wording from an unknown name
 /// (`check.rs`'s `unknown_word_error`), so the two cases are never conflated.
-fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+pub(crate) fn not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
     format!(
         "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
         span.line, span.col

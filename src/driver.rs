@@ -29,7 +29,7 @@ struct FileNode {
 
 /// The whole import closure, one `FileNode` per file, indexed by module id
 /// (entry is id 0, R10).
-struct Closure {
+pub(crate) struct Closure {
     nodes: Vec<FileNode>,
 }
 
@@ -68,7 +68,7 @@ fn missing_import_error(importer: &Path, imp: &Import) -> String {
 /// dedupes by canonical path (a diamond imports a file once). Rejects a cycle
 /// and a self-import with a located both-files error (R4) and a missing file
 /// with a located error (R5).
-fn discover_closure(entry: &Path) -> Result<Closure, String> {
+pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
     let entry_canon =
         std::fs::canonicalize(entry).map_err(|e| format!("reading {}: {e}", entry.display()))?;
     let mut id_of: HashMap<PathBuf, u32> = HashMap::new();
@@ -148,7 +148,7 @@ impl Closure {
 /// bodies module-aware against that shared registry, then hands the merged
 /// module to the resolver to mangle same-named decls apart (a no-op for a
 /// single-file closure, R22).
-fn assemble_module(closure: &Closure) -> Result<Module, String> {
+pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
     let mut structs = Vec::new();
     let mut enums = Vec::new();
     let mut struct_base = Vec::with_capacity(closure.nodes.len());

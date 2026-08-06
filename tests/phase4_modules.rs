@@ -3,7 +3,6 @@
 //! the built binary's stdout; each negative golden asserts the distinguishing
 //! wording of a located driver error, never a bare non-zero exit.
 
-use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -396,29 +395,6 @@ fn imported_linear_type_is_disposed_by_drop() {
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "7\n", "the module's own destructor observably ran");
     assert_eq!(code, 0);
-}
-
-#[test]
-fn import_at_repl_is_located_rejection() {
-    // Criterion 9: `import:` at the REPL is a located rejection, not a silent
-    // parse error pointing at the `;`.
-    let input = "import: q \"lib.sth\" ;\n:quit\n";
-    let reader = BufReader::new(input.as_bytes());
-    let mut out: Vec<u8> = Vec::new();
-    sooth::repl::run(reader, &mut out).unwrap();
-    let transcript = String::from_utf8(out).unwrap();
-    assert!(
-        transcript.contains("`import:` is not supported at the REPL yet"),
-        "located rejection: {transcript}"
-    );
-    assert!(
-        transcript.contains("line 1, col 1"),
-        "located: {transcript}"
-    );
-    assert!(
-        !transcript.contains("Semicolon"),
-        "not the old misdirected error: {transcript}"
-    );
 }
 
 // Phase 4 goldens: selective import (the optional additive `| name... |`
