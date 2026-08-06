@@ -2356,7 +2356,7 @@ pub fn infer_line(
     // phantom the spill would marshal. Reject a quotation left here.
     if final_stack.iter().any(|s| s.quot.is_some()) {
         return Err(
-            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (higher-order values are Phase 6)".to_string(),
+            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (a runtime quotation value is slice 7)".to_string(),
         );
     }
     // The sixth position of the no-stored-reference rule: the session's
@@ -4750,11 +4750,11 @@ fn check_linear_across_back_edge(
 fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
     match ctx {
         Ctx::Word { name, .. } => format!(
-            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             name, span.line
         ),
         Ctx::Line { .. } => format!(
-            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             span.line
         ),
     }
@@ -4864,9 +4864,16 @@ fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
 /// sits in `sig.inputs` as either a variable-bearing `PolyType::Quotation` or,
 /// when its effect is fully concrete, a `Concrete(Type::Quotation)`.
 pub(crate) fn is_combinator(word: &WordDef) -> bool {
-    if !matches!(word.body, WordBody::Terms { .. }) {
-        return false;
-    }
+    matches!(word.body, WordBody::Terms { .. }) && word_declares_quotation_parameter(word)
+}
+
+/// R23 (D7): whether a word's declared effect names a quotation parameter,
+/// regardless of body kind (a clause body is rejected separately by
+/// `clause_bodied_quotation_word_error`, and a session never reaches a clause
+/// body via `eval_def`/`eval_poly_def` at all -- this is the coarser gate the
+/// REPL uses, since it cannot retain *any* quotation-taking word's body past
+/// the defining line, term-body or not).
+pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
     match &word.poly {
         None => word
             .effect
@@ -5189,11 +5196,11 @@ fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str)
 fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
     match ctx {
         Ctx::Word { name, .. } => format!(
-            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             name, span.line
         ),
         Ctx::Line { .. } => format!(
-            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             span.line
         ),
     }
@@ -6436,7 +6443,7 @@ fn in_word(ctx: &Ctx) -> String {
 /// consume a quotation; the shuffles forward it and `drop` discards it.
 fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
     format!(
-        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (higher-order values are Phase 6)",
+        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (a runtime quotation value is slice 7)",
         in_word(ctx),
         span.line,
     )
@@ -6449,7 +6456,7 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 /// two of the three store paths have none. Shared by all of them (D4).
 fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation cannot be stored (escaping quotations are Phase 6){} (line {})",
+        "error: a quotation cannot be stored (escaping quotations are slice 7){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -6475,7 +6482,7 @@ fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
 /// not at consumption (R12's containment rests on it).
 fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
         span.line,
         in_word(ctx),
     )
@@ -6486,7 +6493,7 @@ fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
 /// mismatch never catches this; the join guard does.
 fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (higher-order values are Phase 6)",
+        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (a runtime quotation value is slice 7)",
         span.line,
         in_word(ctx),
     )
@@ -7878,7 +7885,7 @@ mod tests {
             w(
                 ": main ( -- ) [ + ] 8 fill drop ;\n",
                 "a quotation cannot be stored",
-                "escaping quotations are Phase 6",
+                "escaping quotations are slice 7",
             ),
             // check_array_index, reached through the `&>` reference word.
             op(
@@ -7900,7 +7907,7 @@ mod tests {
             w(
                 "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
                 "a quotation cannot be stored",
-                "escaping quotations are Phase 6",
+                "escaping quotations are slice 7",
             ),
             op(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
             // the env argument loop and check_poly_call's input loop (R9/R9p).

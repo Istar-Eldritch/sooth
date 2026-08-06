@@ -921,6 +921,26 @@ impl Session {
     }
 
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
+        // R23 (D7): a session line defining a quotation-taking word is a
+        // located rejection, checked before either acceptance path below. The
+        // inliner splices a callee's AST body at every call site (R18), but a
+        // session discards a defining line's body once it compiles (only its
+        // `Sig`/`PolyWordEntry.word` for later instantiation is retained, and
+        // even the latter is never spliced into a *different* line's module);
+        // there is nothing to splice into a later line that calls it. 6c lifts
+        // this once the REPL retains what the inliner needs.
+        if check::word_declares_quotation_parameter(&word) {
+            let span = word_span(&word);
+            let locator = if span == Span::default() {
+                String::new()
+            } else {
+                format!(" (line {}, col {})", span.line, span.col)
+            };
+            return Err(format!(
+                "error: `{}`{locator} declares a quotation parameter, which is not yet supported at the REPL\n  the inliner needs the callee's body, which a session line does not retain past its own definition (quotation-taking words at the REPL are slice 6c)",
+                word.name
+            ));
+        }
         // R3 (Slice 2): a polymorphic word's signature lives entirely in
         // `word.poly` (`word.effect` is empty), so it takes a wholly separate
         // acceptance path; the concrete path below would mis-check its body
