@@ -12,15 +12,18 @@ use std::io::{BufRead, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
+use crate::ast::Module;
 use crate::ast::{
-    ArrayDecl, CallInst, EnumDecl, Line, OwnedCellDecl, PolySig, RefDecl, Span, StructDecl,
-    StructId, Term, TermKind, Type, VariantDecl, WordDef,
+    ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, Import, Line, OwnedCellDecl, OwnedCellId,
+    PolySig, RefDecl, RefId, Span, StructDecl, StructId, Term, TermKind, Type, VariantDecl,
+    WordBody, WordDef,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
 use crate::lexer::Token;
+use crate::resolve::split_accessor;
 use crate::{backend, lexer, parser};
 
 // RTLD_NOW is 2 on both Linux and macOS; RTLD_GLOBAL's value differs.
@@ -136,6 +139,126 @@ fn ir_arity_env(env: &HashMap<String, Sig>) -> HashMap<String, ir::Arity> {
 /// The mangled export symbol for `name` at `generation`.
 fn mangled_symbol(name: &str, generation: u64) -> String {
     format!("{name}__gen{generation}")
+}
+
+/// R6 (slice 5b): the import-epoch symbol for a closure word. The `__import`
+/// marker and the globally-unique `epoch` make it collision-free against an
+/// ordinary word's `{name}__gen{N}` and against any other import event's
+/// symbols, by construction.
+fn import_symbol(name: &str, epoch: u64) -> String {
+    format!("{name}__import{epoch}")
+}
+
+/// R9 (slice 5b): shift a closure-local `Type`'s registry id into session
+/// space by the session's registry lengths captured at splice time. A scalar
+/// type carries no id and passes through unchanged.
+fn remap_type(
+    ty: Type,
+    struct_base: usize,
+    enum_base: usize,
+    array_base: usize,
+    cell_base: usize,
+    ref_base: usize,
+) -> Type {
+    match ty {
+        Type::Struct(id, n) => Type::Struct(StructId::from_index(id.index() + struct_base), n),
+        Type::Enum(id, n) => Type::Enum(EnumId::from_index(id.index() + enum_base), n),
+        Type::Array(id, n) => Type::Array(ArrayId::from_index(id.index() + array_base), n),
+        Type::OwnedCell(id, n) => {
+            Type::OwnedCell(OwnedCellId::from_index(id.index() + cell_base), n)
+        }
+        Type::Ref(id, m, n) => Type::Ref(RefId::from_index(id.index() + ref_base), m, n),
+        other => other,
+    }
+}
+
+/// R8e (slice 5b): a REPL-declared name may not contain `::`, the separator
+/// reserved for a qualified imported spelling; otherwise a user could forge an
+/// import's internal epoch-tagged name and hijack its accessor sigs. A new,
+/// REPL-only guard (native `.sth` declarations have the same latent gap but no
+/// tag to collide with), located, naming the offending spelling.
+fn reject_double_colon_name(kind: &str, name: &str, span: Span) -> Result<(), String> {
+    if name.contains("::") {
+        return Err(format!(
+            "error: a REPL-declared {kind} name may not contain `::` (`{name}` at line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    Ok(())
+}
+
+/// R12 (slice 5b, phase 3): a selectively-exposed name colliding with a
+/// session-local definition, naming the source qualifier and the local name --
+/// the session-scope analogue of `check::selective_collides_with_local_error`.
+fn session_selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
+        span.line, span.col
+    )
+}
+
+/// R12 (slice 5b, phase 3): a selectively-exposed name colliding with an
+/// earlier selective import's unqualified name, naming both source
+/// qualifiers -- the session-scope analogue of `check::selective_collision_error`.
+fn session_selective_collision_error(name: &str, first: &str, second: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
+        span.line, span.col
+    )
+}
+
+/// R14/D4 (slice 5b): reject an imported closure that declares a word named
+/// `main`, naming the declaring file and the word, before any codegen.
+/// `mangle` (`src/resolve.rs`) never renames `main` regardless of module, so
+/// a plain name scan over every file in the closure finds it, whichever file
+/// it came from (recon #4's native collision turned into a diagnostic here;
+/// the native path's own exposure stays unfixed, per D4).
+fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Result<(), String> {
+    let Some(main) = module.words.iter().find(|w| w.name == "main") else {
+        return Ok(());
+    };
+    let path = closure.path_of(main.module);
+    let span = word_span(main);
+    Err(format!(
+        "error: cannot import `{}`: it declares a word named `main` (line {}, col {}); a library file may not declare `main`",
+        path.display(),
+        span.line,
+        span.col
+    ))
+}
+
+/// R5/R6 (slice 5b): bulk-lower a whole checked import closure to one `.so`.
+/// Reuses `ir::lower` (the native single-module lowerer), then renames every
+/// user word's func and its intra-closure call sites to the word's import-epoch
+/// symbol, so the exported symbols are session-fresh and intra-closure calls
+/// still resolve within this one `.so`.
+fn compile_import_closure(module: &Module, epoch: u64) -> Result<Library, String> {
+    let mut ir = ir::lower(module)?;
+    let rename: HashMap<String, String> = module
+        .words
+        .iter()
+        .filter(|w| w.poly.is_none() && w.name != "main" && w.name != "drop")
+        .map(|w| (w.name.clone(), import_symbol(&w.name, epoch)))
+        .collect();
+    for func in &mut ir.funcs {
+        if let Some(s) = rename.get(&func.name) {
+            func.name = s.clone();
+        }
+        for block in &mut func.blocks {
+            for instr in &mut block.instrs {
+                if let ir::Instr::Call(_, sym, _) = instr {
+                    if let Some(s) = rename.get(sym) {
+                        *sym = s.clone();
+                    }
+                }
+            }
+        }
+    }
+    let ssa = backend::qbe::emit(&ir)?;
+    let dir = driver::tempfile_dir()?;
+    let so_path = dir.join(format!("import_epoch{epoch}.so"));
+    driver::compile_so(&ssa, &so_path)?;
+    Library::open(&so_path)
 }
 
 /// The generation a new definition of `name` should take: 0 if never defined,
@@ -344,6 +467,38 @@ pub struct Session {
     types: Vec<Type>,
     libs: Vec<Library>,
     seq: u64,
+    /// Slice 5b (R6): the next import event's epoch, incremented once per
+    /// successful `import:` line. Tags every spliced symbol and internal type
+    /// name so a re-run `import:` (a redefinition of a whole batch of names)
+    /// mints session-fresh spellings that never collide with a prior event's,
+    /// leaving frozen callers bound to their own generation.
+    import_epoch: u64,
+    /// Slice 5b (R9): the next free session module id for an import event. An
+    /// event's closure of N files reserves N consecutive ids (entry = base),
+    /// and the counter only ever advances, so a rebind's ids never reuse a
+    /// prior event's. Session-local decls live in module 0; import ids start
+    /// at 1.
+    next_import_module: u32,
+    /// Slice 5b (R8c): every qualifier-bound user-facing spelling (`q::w`,
+    /// `q::T`) mapped to its *current* internal (epoch-tagged) name. The
+    /// body-position rewrite pass consults this before ordinary checking.
+    import_aliases: HashMap<String, String>,
+    /// Slice 5b (R15): per qualifier, the module-0 names that exist but are
+    /// not `export:`ed (bare word names and every private type's accessor
+    /// spellings), so a `q::x` that misses `import_aliases` can be told apart
+    /// as `not exported` rather than unknown.
+    import_private: HashMap<String, HashSet<String>>,
+    /// Slice 5b (R8a/R8d): each bound qualifier mapped to its entry module's
+    /// session id, the `imports` map the parser's type-position resolver reads.
+    import_qualifier_module: HashMap<String, u32>,
+    /// Slice 5b (R11, phase 3): each selectively-imported bare type name mapped
+    /// to its target module id, the parser's `selective` map. Empty until
+    /// selective import lands.
+    import_selective_module: HashMap<String, u32>,
+    /// Slice 5b (R8d): per session module id, that module's `export:` list,
+    /// the parser's `exports` slice for gating a `q::T` type reference. Index 0
+    /// (session-local decls) stays empty; import ids fill in from 1.
+    import_exports: Vec<Vec<(String, Span)>>,
 }
 
 impl Session {
@@ -365,6 +520,13 @@ impl Session {
             types: Vec::new(),
             libs: Vec::new(),
             seq: 0,
+            import_epoch: 0,
+            next_import_module: 1,
+            import_aliases: HashMap::new(),
+            import_private: HashMap::new(),
+            import_qualifier_module: HashMap::new(),
+            import_selective_module: HashMap::new(),
+            import_exports: Vec::new(),
         }
     }
 
@@ -496,15 +658,19 @@ impl Session {
     /// prints the returned diagnostic.
     fn eval_line(&mut self, src: &str, writer: &mut impl Write) -> Result<(), String> {
         let tokens = lexer::lex(src)?;
-        // R23 (phase 4 slice 5a, D7): a native `import:` is a located REPL
-        // rejection, not the misdirected `unexpected Semicolon` parse error
-        // `parse_line_with_structs` would raise. Slice 5b defines what an
-        // import means in a session; this slice only refuses it, guarded here
-        // beside the `type:` special-case and before the parser is reached.
+        // R1 (slice 5b): `import:` as the first token routes to `eval_import`
+        // (5a's R23 rejection is gone), guarded beside the `type:` special-case
+        // and before `parse_line_with_structs` (which never learns qualifiers).
+        // `export:` at the REPL is a new located rejection: a live session has
+        // no export boundary to cross, and without this guard it would fall
+        // through to an unrelated parse error.
         if let Some((Token::Word(w), span)) = tokens.first() {
             if w == "import:" {
+                return self.eval_import(&tokens, writer);
+            }
+            if w == "export:" {
                 return Err(format!(
-                    "`import:` is not supported at the REPL yet (line {}, col {})",
+                    "error: `export:` has no meaning at the REPL (line {}, col {})\n  note: a live session has no export boundary to cross",
                     span.line, span.col
                 ));
             }
@@ -512,20 +678,39 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
-        let line = parser::parse_line_with_structs(
+        let ctx = parser::ImportCtx {
+            imports: &self.import_qualifier_module,
+            selective: &self.import_selective_module,
+            exports: &self.import_exports,
+        };
+        let mut line = parser::parse_line_with_structs(
             &tokens,
             &self.structs,
             &self.enums,
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            ctx,
         )?;
+        // R8c: rewrite body-position `q::w` / `q::T>field` calls to their
+        // current internal (epoch-tagged) spelling before ordinary checking
+        // runs; also raises R15's `not exported` for a private qualified name.
+        self.rewrite_line_imports(&mut line)?;
         match line {
             // R11: a `: drop` line never enters `self.env` or gets lowered
             // under its own name; it becomes the struct's destructor, the
             // same substitution `ir::lower` performs for a compiled module.
-            Line::Def(word) if word.name == "drop" => self.eval_drop_overload(word, writer),
-            Line::Def(word) => self.eval_def(word, writer),
+            Line::Def(word) => {
+                // R8e: a declared word name containing `::` would collide with
+                // an imported name's internal tag; reject it up front (covers
+                // the drop / def / poly fan-out with one check).
+                reject_double_colon_name("word", &word.name, word_span(&word))?;
+                if word.name == "drop" {
+                    self.eval_drop_overload(word, writer)
+                } else {
+                    self.eval_def(word, writer)
+                }
+            }
             Line::Expr(terms) => self.eval_expr(&terms, writer),
         }
     }
@@ -545,6 +730,9 @@ impl Session {
             _ => return Err("parse error: `type:` must be followed by a type name".to_string()),
         };
         parser::reject_reserved_name("type", &name, span)?;
+        // R8e: a REPL-declared type name may not carry the `::` reserved for
+        // qualified imported spellings.
+        reject_double_colon_name("type", &name, span)?;
         if parser::typedef_line_is_enum(tokens) {
             self.eval_enum_typedef(tokens, name.clone(), span)?;
         } else {
@@ -570,6 +758,11 @@ impl Session {
             is_bundle: false,
             module: 0,
         });
+        let ctx = parser::ImportCtx {
+            imports: &self.import_qualifier_module,
+            selective: &self.import_selective_module,
+            exports: &self.import_exports,
+        };
         let result = parser::parse_typedef_line(
             tokens,
             &self.structs,
@@ -577,6 +770,7 @@ impl Session {
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            ctx,
         )
         .and_then(|fields| {
             self.structs[idx].fields = fields;
@@ -621,6 +815,11 @@ impl Session {
             span,
             module: 0,
         });
+        let ctx = parser::ImportCtx {
+            imports: &self.import_qualifier_module,
+            selective: &self.import_selective_module,
+            exports: &self.import_exports,
+        };
         let result = parser::parse_enum_typedef_line(
             tokens,
             &self.structs,
@@ -628,6 +827,7 @@ impl Session {
             &mut self.arrays,
             &mut self.owned_cells,
             &mut self.refs,
+            ctx,
         )
         .and_then(|variant_fields| {
             for (vidx, fields) in variant_fields.into_iter().enumerate() {
@@ -640,6 +840,426 @@ impl Session {
             return Err(e);
         }
         Ok(())
+    }
+
+    /// R12: the session-scope selective-collision check. A bare selected name
+    /// colliding with an existing session name -- a locally-defined word or
+    /// type (bare, `module == 0` in the session's own registries; import
+    /// splices always carry `module >= 1`), or a prior selective import's
+    /// unqualified name (a bare `import_aliases` key, which only a selective
+    /// import ever inserts) -- is a located error at the second occurrence,
+    /// naming both sources. No precedence, no shadowing, no use-site
+    /// disambiguation, exactly 5a R21's rule.
+    fn check_session_selective_collisions(
+        &self,
+        qualifier: &str,
+        selective: &[(String, Span)],
+    ) -> Result<(), String> {
+        for (name, span) in selective {
+            if self.env.contains_key(name)
+                || self
+                    .structs
+                    .iter()
+                    .any(|s| s.module == 0 && s.name_static == name)
+                || self
+                    .enums
+                    .iter()
+                    .any(|e| e.module == 0 && e.name_static == name)
+            {
+                return Err(session_selective_collides_with_local_error(
+                    name, qualifier, *span,
+                ));
+            }
+            if let Some(existing) = self.import_aliases.get(name) {
+                let first = existing
+                    .split_once("::")
+                    .map_or(existing.as_str(), |(q, _)| q);
+                // A rebind of the same qualifier is a reload (R13), not a
+                // collision: its own prior bare alias is purged in
+                // `splice_import` before the new one lands. Only a *different*
+                // qualifier already exposing `name` is R12's collision.
+                if first != qualifier {
+                    return Err(session_selective_collision_error(
+                        name, first, qualifier, *span,
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// R1-R10/R15/R16 (slice 5b): evaluate an `import:` line. Reuses the native
+    /// pipeline (`discover_closure` -> `assemble_module` -> `check::check`) to
+    /// produce a checked closure `Module`, bulk-lowers it to one `.so` with
+    /// each word minted a session-fresh import-epoch symbol (R6), and splices
+    /// module 0's exports into the session's env and registries with a full
+    /// positional type-id remap (R9). Every fallible step runs before any
+    /// mutation of `self`, so a failed import leaves the session untouched
+    /// (R16).
+    fn eval_import(
+        &mut self,
+        tokens: &[(Token, Span)],
+        writer: &mut impl Write,
+    ) -> Result<(), String> {
+        // R2: parse the line through the shared form parser, so a malformed
+        // `import:` yields R9's construct-naming located error unchanged.
+        let import = parser::scan_imports(tokens)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "parse error: expected an `import:` form".to_string())?;
+        // R3: the REPL's own top-level path resolves relative to the process
+        // cwd; every transitive import inside the closure keeps 5a's
+        // importer-relative rule (inside `discover_closure`).
+        let closure = driver::discover_closure(Path::new(&import.path))?;
+        let mut module = driver::assemble_module(&closure)?;
+        check::check(&mut module)?;
+        // R14/D4: an imported closure declaring `main` (in any of its files,
+        // not only module 0) is rejected before any codegen, naming the file
+        // and the word.
+        check_no_main_in_closure(&module, &closure)?;
+        // R11: each selectively-imported name must be exported by module 0,
+        // the R16 visibility error, checked against a synthesized entry for
+        // the REPL's own top-level selection (the closure-internal check,
+        // `check::check_selective_imports`, validates a module's own selective
+        // imports against its own locals, the wrong scope for the REPL's,
+        // which has no module of its own to be local to).
+        for (name, span) in &import.selective {
+            if !module.modules[0].exports.iter().any(|(n, _)| n == name) {
+                return Err(check::selective_not_exported_error(
+                    name,
+                    &import.qualifier,
+                    *span,
+                ));
+            }
+        }
+        // R12: a selectively-exposed name colliding with an existing session
+        // name (a locally-defined word/type, or a prior selective import's
+        // unqualified name) is a located error at the second, naming both
+        // sources -- 5a R21's dumb collision rule extended to session scope.
+        self.check_session_selective_collisions(&import.qualifier, &import.selective)?;
+        // R6/R9: read (do not yet advance) this event's epoch and module-id
+        // base, so every fallible step below leaves `self` untouched (R16).
+        let epoch = self.import_epoch;
+        let module_base = self.next_import_module;
+        let n_modules = module.modules.len() as u32;
+        // R5/R6: bulk-lower the whole closure to one `.so`, each word renamed
+        // to its import-epoch symbol.
+        let lib = compile_import_closure(&module, epoch)?;
+        // ---- commit (infallible from here) ----
+        self.import_epoch += 1;
+        self.next_import_module += n_modules;
+        self.libs.push(lib);
+        self.splice_import(&import, &module, epoch, module_base);
+        writeln!(writer, "imported {}", import.qualifier)
+            .map_err(|e| format!("writing stdout: {e}"))
+    }
+
+    /// R8/R9/R15: splice module 0's exports into the session. Infallible: every
+    /// error path is upstream in `eval_import`. Appends the whole closure's
+    /// registries with a constant positional-id shift (R9), tags each decl
+    /// with its event module id and epoch `.name` (R8a/R8b), binds exported
+    /// words into `self.env` under their import-epoch symbol, records the
+    /// qualifier's aliases / private names / export lists.
+    fn splice_import(&mut self, import: &Import, module: &Module, epoch: u64, module_base: u32) {
+        let q = &import.qualifier;
+        // R13: a rebind (`q` already bound, same path or a different one)
+        // must not leave a stale alias from the old epoch's export set that
+        // this splice doesn't recreate -- e.g. the old file exported `foo`
+        // and the new one doesn't, at all. Purging every `q::`-prefixed alias
+        // up front, before this splice re-adds whatever the new closure
+        // actually exports, is what makes a post-rebind `q::foo` fall through
+        // to `not exported`/`unknown word` judged against the new file only,
+        // never a stale hit on the old file's export status. The underlying
+        // `self.env`/`self.structs` rows the old alias pointed at are never
+        // touched here (R9 positional stability): only the alias, the lookup
+        // key, is replaced.
+        let prefix = format!("{q}::");
+        // R11/R13: a selective import also adds a *bare* alias (no `q::`
+        // prefix on the key), so a rebind must purge those too, or a stale
+        // bare alias from the old epoch's selective list would survive a
+        // rebind that no longer selects that name. A bare alias's *value*
+        // always carries the `q::` prefix (it points at the same internal
+        // spelling the qualified alias does), so purging on either side of
+        // the entry catches both shapes without needing a separate ownership
+        // map.
+        self.import_aliases
+            .retain(|k, v| !k.starts_with(&prefix) && !v.starts_with(&prefix));
+        // R11/R13: purge any selective type-position mapping this qualifier's
+        // old epoch installed, so a rebind that no longer selectively imports
+        // a type doesn't leave a stale `selective` entry resolving to the old
+        // event's module id.
+        if let Some(&old_module) = self.import_qualifier_module.get(q) {
+            self.import_selective_module.retain(|_, m| *m != old_module);
+        }
+        let selective_names: HashSet<&str> =
+            import.selective.iter().map(|(n, _)| n.as_str()).collect();
+        let struct_base = self.structs.len();
+        let enum_base = self.enums.len();
+        let array_base = self.arrays.len();
+        let cell_base = self.owned_cells.len();
+        let ref_base = self.refs.len();
+        let remap =
+            |ty: Type| remap_type(ty, struct_base, enum_base, array_base, cell_base, ref_base);
+        // Module 0's export list (words and types), the only names that cross
+        // into callable session state (R8).
+        let exports0: HashSet<&str> = module.modules[0]
+            .exports
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
+        // A multi-file closure mangles module-0 words to `{name}__m0`
+        // (`resolve_modules`); a single-file one leaves them raw. This maps an
+        // export's raw name to the word's post-resolve `.name`.
+        let multi = module.modules.len() >= 2;
+        let mangled_of = |raw: &str| -> String {
+            if multi && raw != "main" && raw != "drop" {
+                format!("{raw}__m0")
+            } else {
+                raw.to_string()
+            }
+        };
+
+        // R9: append arrays / owned-cells / refs, remapping the ids their inner
+        // types carry, order preserved so each id shifts by a constant base.
+        for a in &module.arrays {
+            self.arrays.push(ArrayDecl {
+                element: remap(a.element),
+                count: a.count,
+                name_static: a.name_static,
+            });
+        }
+        for c in &module.owned_cells {
+            self.owned_cells.push(OwnedCellDecl {
+                payload: remap(c.payload),
+                name_static: c.name_static,
+            });
+        }
+        for r in &module.refs {
+            self.refs.push(RefDecl {
+                referent: remap(r.referent),
+                mutable: r.mutable,
+                name_static: r.name_static,
+            });
+        }
+
+        // R8a/R8b/R9: append every struct, remapping field ids and its own
+        // module id, tagging `.name`. An exported module-0 struct gets the
+        // alias-target tag `{q}::{T}__import{epoch}`; every other row gets a
+        // unique inert tag so it never collides in `struct_generated_sigs`.
+        for (i, s) in module.structs.iter().enumerate() {
+            let fields = s
+                .fields
+                .iter()
+                .map(|(f, ty)| (f.clone(), remap(*ty)))
+                .collect();
+            let is_export = s.module == 0 && !s.is_bundle && exports0.contains(s.name_static);
+            let name = if is_export {
+                format!("{q}::{}__import{epoch}", s.name_static)
+            } else {
+                format!("{}__import{epoch}__i{}", s.name_static, struct_base + i)
+            };
+            self.structs.push(StructDecl {
+                name: name.clone(),
+                name_static: s.name_static,
+                fields,
+                span: s.span,
+                has_drop_overload: s.has_drop_overload,
+                is_bundle: s.is_bundle,
+                module: module_base + s.module,
+            });
+            if is_export {
+                self.import_aliases
+                    .insert(format!("{q}::{}", s.name_static), name.clone());
+                // R11: a selectively-imported type's bare name is a *second*
+                // alias at the same internal spelling (one `StructId` behind
+                // both), plus the parallel `selective` map entry R8d's
+                // type-position resolver reads, pointing at the same module
+                // id the qualified spelling already targets.
+                if selective_names.contains(s.name_static) {
+                    self.import_aliases.insert(s.name_static.to_string(), name);
+                    self.import_selective_module
+                        .insert(s.name_static.to_string(), module_base + s.module);
+                }
+            }
+        }
+
+        // R9: append every enum with remapped variant-field ids and module id.
+        // No aliases are built this phase (enums are out of phase-1 fixtures),
+        // but the ids must still remap so a later reference stays consistent.
+        for (i, e) in module.enums.iter().enumerate() {
+            let variants = e
+                .variants
+                .iter()
+                .map(|v| VariantDecl {
+                    name: v.name.clone(),
+                    name_static: v.name_static,
+                    fields: v
+                        .fields
+                        .iter()
+                        .map(|(f, ty)| (f.clone(), remap(*ty)))
+                        .collect(),
+                    span: v.span,
+                })
+                .collect();
+            self.enums.push(EnumDecl {
+                name: format!("{}__import{epoch}__e{}", e.name_static, enum_base + i),
+                name_static: e.name_static,
+                variants,
+                span: e.span,
+                module: module_base + e.module,
+            });
+        }
+
+        // R8: bind each exported module-0 word into `self.env` under its
+        // epoch-tagged internal spelling, symbol = its import-epoch symbol,
+        // `Sig` remapped.
+        for (raw, _span) in &module.modules[0].exports {
+            let mangled = mangled_of(raw);
+            let Some(w) = module
+                .words
+                .iter()
+                .find(|w| w.module == 0 && w.poly.is_none() && w.name == mangled)
+            else {
+                continue; // an exported type name, handled in the struct/enum loop
+            };
+            let sig = Sig {
+                inputs: w.effect.inputs.iter().map(|s| remap(s.ty)).collect(),
+                outputs: w.effect.outputs.iter().map(|s| remap(s.ty)).collect(),
+            };
+            let internal = format!("{q}::{raw}__import{epoch}");
+            let symbol = import_symbol(&w.name, epoch);
+            self.env.insert(
+                internal.clone(),
+                WordEntry {
+                    sig,
+                    generation: epoch,
+                    symbol,
+                },
+            );
+            self.import_aliases
+                .insert(format!("{q}::{raw}"), internal.clone());
+            // R11: a selectively-imported word is exposed unqualified too, a
+            // second alias at the same internal spelling.
+            if selective_names.contains(raw.as_str()) {
+                self.import_aliases.insert(raw.clone(), internal);
+            }
+        }
+
+        // R15: retain module 0's private names (bare word names, and for a
+        // private type its bare name plus every accessor spelling), so a
+        // `q::x` that misses the aliases can be told `not exported` rather than
+        // unknown.
+        let mut private: HashSet<String> = HashSet::new();
+        for w in &module.words {
+            if w.module != 0 || w.poly.is_some() || w.name == "main" || w.name == "drop" {
+                continue;
+            }
+            let raw = if multi {
+                w.name.strip_suffix("__m0").unwrap_or(&w.name)
+            } else {
+                w.name.as_str()
+            };
+            if !exports0.contains(raw) {
+                private.insert(raw.to_string());
+            }
+        }
+        for s in &module.structs {
+            if s.module != 0 || s.is_bundle || exports0.contains(s.name_static) {
+                continue;
+            }
+            let t = s.name_static;
+            private.insert(t.to_string());
+            private.insert(format!("{t}>"));
+            for (f, _) in &s.fields {
+                private.insert(format!("{t}>{f}"));
+                private.insert(format!("{t}<{f}"));
+                private.insert(format!("{t}|>{f}"));
+            }
+        }
+        self.import_private.insert(q.clone(), private);
+
+        // R8a/R8d: bind the qualifier to module 0's session id and record every
+        // event-module's export list, the parser's type-position resolver maps.
+        self.import_qualifier_module.insert(q.clone(), module_base);
+        while self.import_exports.len() < (module_base + module.modules.len() as u32) as usize {
+            self.import_exports.push(Vec::new());
+        }
+        for (m, info) in module.modules.iter().enumerate() {
+            self.import_exports[module_base as usize + m] = info.exports.clone();
+        }
+    }
+
+    /// R8c/R15: rewrite a just-parsed line's body-position calls, translating a
+    /// user-facing `q::w` / `q::T>field` spelling to its current internal
+    /// (epoch-tagged) one before ordinary checking runs, and raising R15's
+    /// `not exported` for a private qualified name. Type-position references
+    /// are already resolved by the parser (R8d) and are untouched here.
+    fn rewrite_line_imports(&self, line: &mut Line) -> Result<(), String> {
+        match line {
+            Line::Expr(terms) => self.rewrite_terms_imports(terms),
+            Line::Def(word) => self.rewrite_wordbody_imports(&mut word.body),
+        }
+    }
+
+    fn rewrite_wordbody_imports(&self, body: &mut WordBody) -> Result<(), String> {
+        match body {
+            WordBody::Terms { terms } => self.rewrite_terms_imports(terms),
+            WordBody::Clauses(clauses) => {
+                for c in clauses.iter_mut() {
+                    self.rewrite_terms_imports(&mut c.body)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn rewrite_terms_imports(&self, terms: &mut [Term]) -> Result<(), String> {
+        for term in terms.iter_mut() {
+            match &mut term.kind {
+                TermKind::Call(name) => {
+                    if let Some(new) = self.rewrite_import_call(name, term.span)? {
+                        *name = new;
+                    }
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    self.rewrite_terms_imports(then_branch)?;
+                    self.rewrite_terms_imports(else_branch)?;
+                }
+                TermKind::Quotation(inner) => self.rewrite_terms_imports(inner)?,
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// The single-call rewrite: `Some(new)` to replace the spelling, `None` to
+    /// leave it (a local or a genuinely absent name falls through to the
+    /// ordinary unknown-word path), `Err` for R15's `not exported`.
+    fn rewrite_import_call(&self, name: &str, span: Span) -> Result<Option<String>, String> {
+        let (base, suffix) = split_accessor(name);
+        if let Some(internal) = self.import_aliases.get(base) {
+            return Ok(Some(format!("{internal}{suffix}")));
+        }
+        // R15: a `q::x` whose base misses the aliases but names a private
+        // word/type of a bound qualifier is `not exported`, distinct from
+        // unknown.
+        if let Some((qualifier, rest)) = name.split_once("::") {
+            if self.import_qualifier_module.contains_key(qualifier) {
+                if let Some(private) = self.import_private.get(qualifier) {
+                    if private.contains(rest) {
+                        let (base_name, _) = split_accessor(rest);
+                        return Err(crate::resolve::not_exported_error(
+                            base_name, qualifier, span,
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// R11: the retained overrides as the map destructor synthesis consumes,
@@ -1491,27 +2111,261 @@ mod tests {
         assert!(session.structs[0].has_drop_overload);
     }
 
+    /// A scratch directory of `.sth` library files, removed on drop; mirrors
+    /// `driver`'s own closure-test sandbox. Import lines in these unit tests
+    /// embed the returned absolute path, so cwd (R3) is not exercised here (a
+    /// golden covers that under a lock).
+    struct LibDir(std::path::PathBuf);
+    impl LibDir {
+        fn new(tag: &str) -> LibDir {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let seq = N.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("sooth-replimp-{}-{tag}-{seq}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            LibDir(dir)
+        }
+        fn write(&self, name: &str, contents: &str) -> std::path::PathBuf {
+            let path = self.0.join(name);
+            std::fs::write(&path, contents).unwrap();
+            path
+        }
+    }
+    impl Drop for LibDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn import_line(qualifier: &str, path: &std::path::Path) -> String {
+        format!("import: {qualifier} \"{}\" ;", path.display())
+    }
+
     #[test]
-    fn repl_rejects_import_with_located_error() {
-        // U10 / R23 (D7): `import:` as the first token of a REPL line is a
-        // located rejection naming `import:`, not the misdirected
-        // `unexpected Semicolon` parse error, and it leaves the session
-        // untouched.
+    fn repl_assembles_checked_module_for_library() {
+        // U3: `discover_closure` / `assemble_module` are reachable as
+        // `pub(crate)` and yield a checked module for a library path (a
+        // plumbing smoke test, no guarded invariant).
+        let d = LibDir::new("u3");
+        let lib = d.write("lib.sth", ": w ( -- i64 ) 42 ;\nexport: w ;\n");
+        let closure = driver::discover_closure(&lib).expect("closure resolves");
+        let mut module = driver::assemble_module(&closure).expect("assembles");
+        check::check(&mut module).expect("checks");
+        assert!(module.words.iter().any(|w| w.name == "w"));
+    }
+
+    #[test]
+    fn imported_aggregate_ids_remap_to_session_space() {
+        // U1: a spliced imported struct's field id points at the *session*
+        // index of the struct it names, not the closure-local index. A local
+        // struct declared first forces a non-zero base, so a naive splice that
+        // kept closure-local ids would point one entry too low.
+        let d = LibDir::new("u1");
+        let lib = d.write(
+            "lib.sth",
+            "type: Inner a i64 ;\ntype: Outer i Inner ;\nexport: Inner Outer ;\n",
+        );
         let mut session = Session::new();
         let mut out = Vec::new();
+        session.eval_line("type: Local z i64 ;", &mut out).unwrap();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+
+        let inner_idx = session
+            .structs
+            .iter()
+            .position(|s| s.name_static == "Inner" && s.module != 0)
+            .expect("Inner spliced");
+        let outer = session
+            .structs
+            .iter()
+            .find(|s| s.name_static == "Outer" && s.module != 0)
+            .expect("Outer spliced");
+        match outer.fields[0].1 {
+            Type::Struct(id, _) => assert_eq!(
+                id.index(),
+                inner_idx,
+                "Outer's field id must point at Inner's session index"
+            ),
+            other => panic!("expected Outer's field to be a struct, got {other:?}"),
+        }
+        assert!(inner_idx > 0, "the local struct forced a non-zero base");
+    }
+
+    #[test]
+    fn import_epoch_symbols_are_session_fresh() {
+        // U2: a spliced word's symbol carries the `__import{epoch}` marker,
+        // is distinct across import events, and never collides with an
+        // ordinary word's `__gen{N}`.
+        let d = LibDir::new("u2");
+        let lib = d.write("lib.sth", ": w ( -- i64 ) 7 ;\nexport: w ;\n");
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+        session
+            .eval_line(&import_line("r", &lib), &mut out)
+            .unwrap();
+        session
+            .eval_line(": ordinary ( -- i64 ) 1 ;", &mut out)
+            .unwrap();
+
+        let q_sym = &session.env["q::w__import0"].symbol;
+        let r_sym = &session.env["r::w__import1"].symbol;
+        assert_eq!(q_sym, "w__import0");
+        assert_eq!(r_sym, "w__import1");
+        assert_ne!(q_sym, r_sym, "each import event mints a distinct symbol");
+        assert!(!q_sym.contains("__gen"), "never an ordinary-word symbol");
+        assert!(
+            session.env["ordinary"].symbol.contains("__gen"),
+            "an ordinary word still mints `__gen`"
+        );
+    }
+
+    #[test]
+    fn import_private_names_distinguish_not_exported_from_absent() {
+        // U6: the retained private-name set answers `not exported` for a real
+        // but unexported name and leaves a genuinely absent name to fall
+        // through to the ordinary unknown-word path.
+        let d = LibDir::new("u6");
+        let lib = d.write(
+            "lib.sth",
+            ": pub ( -- i64 ) 1 ;\n: secret ( -- i64 ) 2 ;\nexport: pub ;\n",
+        );
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+
+        let private = &session.import_private["q"];
+        assert!(private.contains("secret"), "a private word is retained");
+        assert!(!private.contains("pub"), "an exported word is not private");
+
         let err = session
-            .eval_line("import: q \"lib.sth\" ;", &mut out)
+            .rewrite_import_call("q::secret", Span::default())
             .unwrap_err();
         assert!(
-            err.contains("`import:` is not supported at the REPL yet"),
-            "unexpected message: {err}"
+            err.contains("not exported") && err.contains("secret"),
+            "a private name is `not exported`: {err}"
         );
-        assert!(err.contains("line 1, col 1"), "located: {err}");
         assert!(
-            !err.contains("Semicolon"),
-            "must not be the old misdirected parse error: {err}"
+            session
+                .rewrite_import_call("q::absent", Span::default())
+                .unwrap()
+                .is_none(),
+            "a genuinely absent name falls through to unknown-word"
         );
-        assert!(out.is_empty(), "a rejected line writes nothing");
+    }
+
+    #[test]
+    fn import_epoch_symbols_are_session_fresh_across_a_reimport() {
+        // U7 (phase 2): reloading the same qualifier overwrites its
+        // `import_aliases` entry to the new epoch's spelling -- the old
+        // epoch's registry row (its env entry / symbol) stays resident, only
+        // unreferenced by any current alias, never removed (R9 positional
+        // stability, R13).
+        let d = LibDir::new("u7");
+        let lib = d.write("lib.sth", ": w ( -- i64 ) 1 ;\nexport: w ;\n");
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+        session
+            .eval_line(&import_line("q", &lib), &mut out)
+            .unwrap();
+
+        assert_eq!(
+            session.import_aliases.len(),
+            1,
+            "a reload overwrites the alias rather than appending a second one"
+        );
+        assert_eq!(
+            session.import_aliases["q::w"], "q::w__import1",
+            "the alias now resolves to the second import event's spelling"
+        );
+        assert!(
+            session.env.contains_key("q::w__import0"),
+            "the first event's env row stays resident, unremoved"
+        );
+        assert!(
+            session.env.contains_key("q::w__import1"),
+            "the second event's row is the fresh one"
+        );
+    }
+
+    #[test]
+    fn session_selective_collision_is_rejected() {
+        // U5 (phase 3): the session-scope selective-collision check (R12)
+        // rejects a selectively-exposed name that already names an existing
+        // session word, and a second selective import that exposes a name a
+        // prior one already exposed, naming both sources.
+        let d = LibDir::new("u5");
+        let lib_a = d.write("a.sth", ": shared ( -- i64 ) 1 ;\nexport: shared ;\n");
+        let lib_b = d.write("b.sth", ": other ( -- i64 ) 2 ;\nexport: other ;\n");
+        let lib_c = d.write("c.sth", ": other ( -- i64 ) 3 ;\nexport: other ;\n");
+
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(": shared ( -- i64 ) 9 ;", &mut out)
+            .unwrap();
+        let err = session
+            .eval_line(
+                &format!("import: q | shared | \"{}\" ;", lib_a.display()),
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("shared") && err.contains('q'),
+            "collides with a local definition, naming both: {err}"
+        );
+        assert!(
+            !session.import_qualifier_module.contains_key("q"),
+            "the rejected import leaves the session untouched"
+        );
+
+        session
+            .eval_line(
+                &format!("import: r | other | \"{}\" ;", lib_c.display()),
+                &mut out,
+            )
+            .unwrap();
+        let err = session
+            .eval_line(
+                &format!("import: s | other | \"{}\" ;", lib_b.display()),
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("other") && err.contains('r') && err.contains('s'),
+            "collides with an earlier selective import, naming both sources: {err}"
+        );
+    }
+
+    #[test]
+    fn imported_main_is_rejected_by_scan() {
+        // U4: the main-in-closure scan rejects an imported `main`, naming the
+        // declaring file and the word, regardless of where in the closure it
+        // sits (`mangle` never renames `main`).
+        let d = LibDir::new("u4");
+        let lib = d.write(
+            "lib.sth",
+            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+        );
+        let closure = driver::discover_closure(&lib).expect("closure resolves");
+        let mut module = driver::assemble_module(&closure).expect("assembles");
+        check::check(&mut module).expect("checks");
+        let err = check_no_main_in_closure(&module, &closure).unwrap_err();
+        assert!(err.contains("main"), "names the word: {err}");
+        assert!(
+            err.contains(lib.file_name().unwrap().to_str().unwrap()),
+            "names the file: {err}"
+        );
     }
 
     #[test]

@@ -298,11 +298,51 @@ dogfoods it: a `Point` type exported from `examples/modules_point.sth`, `add`/`l
 exported from `examples/modules_ops.sth` (itself importing the type file), used
 together by the entry file via both a qualified accessor and a qualified word call.
 
-**Next action: Phase 4 Slice 5b** (REPL imports): what an import means in a live
-session — generation-mangled redefinition of an imported module, reload-on-edit vs
-frozen bindings — split off on the slice 1/slice 2 precedent, since the REPL carries
-session state (`drop_overloads`, frozen resolver snapshots, per-name generations,
-every `.so` resident under `RTLD_GLOBAL`) that native compilation does not.
+**Phase 4 Slice 5b (REPL imports) is complete**: `import:` at the REPL reuses the native
+pipeline unchanged (`discover_closure` / `assemble_module` / `check::check`, elevated to
+`pub(crate)`), resolving the REPL's own top-level path relative to the process cwd while
+every transitive import inside the closure keeps 5a's importer-relative rule. The whole
+closure bulk-lowers to one `.so` via the same call sequence `eval_def` already uses for a
+single word, `dlopen`ed and retained under `RTLD_GLOBAL`. Each `import:` line is an
+ordinary redefinition event applied to a batch of names rather than a new rule: it mints
+one fresh, session-wide import epoch, symbol-tags every compiled word by it
+(`{name}__import{epoch}`, collision-free by construction against an ordinary word's
+`{name}__gen{N}` and against every other import epoch), and assigns the event its own
+module id, so a re-import recompiles every word fresh and a caller already compiled
+against the old epoch stays frozen exactly as any other redefinition freezes its callers
+(DESIGN.md's separate REPL-late-binding question is unchanged, not reopened). Splicing an
+imported closure into the session's flat, positionally-indexed registries remaps every
+type id it carries (struct/enum fields, arrays, cells, refs, and every spliced word's
+`Sig`) from closure-local indices to session indices, the append-with-remap the
+`StructId = index` invariant forces once a session — unlike a fresh native compile — has
+an already-populated registry to append onto. A body-position user-facing spelling
+(`q::name`, or a selective import's bare name) resolves through an alias indirection to
+its current internal, epoch-tagged entry, while a type-*position* reference (a signature,
+a `type:` field) resolves through the same module-aware resolver a native multi-file
+closure's own `q::Type` already uses; a REPL-declared name containing `::` is rejected up
+front so nothing can forge the internal tag. Registry growth on re-import is accepted, not
+derived, so the growth is not deduplicated or capped, matching a redefined word minting a fresh
+generation every time. Only module 0's `export:`ed names are nameable; a third file
+imported *by* the imported file contributes no session-visible name (transitive
+re-export stays closed, as 5a already declined). An imported file declaring `main` is a
+located rejection naming the file and the word, at import time, before any codegen — the
+same `main`-collision on the *native* path (recon #4) stays unfixed and recorded below.
+Selective import, `import: q | a b | "path.sth" ;`, ships at native parity: `q` binds and
+`a b` are additionally spliced unqualified, pointing at the same internal entry the
+qualified splice already created (a value built through either spelling is the same
+type), with 5a's collision rule extended to session scope (a selectively-exposed name
+colliding with an existing session name is a located error at the second, naming both).
+Any failure in `eval_import` (parse, missing file, cycle, `main`-in-library, selective
+collision, check error) leaves the session untouched, matching `eval_line`'s existing
+commit-only-on-success contract. `tests/phase4_repl_imports.rs` dogfoods it end to end in
+one piped-stdin session: a qualified word and accessor, a redefine-and-reimport with a
+frozen caller beside a fresh resolution, the `main`-in-a-library rejection, and a
+selective import called unqualified.
+
+**Next action: Phase 4 item 6** (the combinator library in Sooth + inlining + closing
+the polymorphic-path gaps): `each`/`map`/`filter`/`fold`/`while` as ordinary library
+words over quotations, with the compiler's first inliner making them lower to tight
+loops instead of a `call` per element.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

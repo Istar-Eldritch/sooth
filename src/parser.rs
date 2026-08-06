@@ -452,7 +452,41 @@ pub fn parse_line(tokens: &[(Token, Span)]) -> Result<Line, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
-    parse_line_with_structs(tokens, &[], &[], &mut arrays, &mut owned_cells, &mut refs)
+    parse_line_with_structs(
+        tokens,
+        &[],
+        &[],
+        &mut arrays,
+        &mut owned_cells,
+        &mut refs,
+        ImportCtx::empty(),
+    )
+}
+
+/// The three module-resolution tables a REPL parser entry point threads to
+/// `Parser::resolve_type` (slice 5b, R8d): the qualifier->module `imports`
+/// map, the selective bare-name->module map, and the per-module `export:`
+/// lists that gate a qualified type reference. They always travel together, so
+/// they ride one borrowed struct rather than three parallel parameters.
+pub struct ImportCtx<'a> {
+    pub imports: &'a HashMap<String, u32>,
+    pub selective: &'a HashMap<String, u32>,
+    pub exports: &'a [Vec<(String, Span)>],
+}
+
+impl ImportCtx<'_> {
+    /// The no-import context: the native `.sth` parse path and any
+    /// import-free REPL line resolve types with empty maps, exactly as before
+    /// slice 5b threaded real ones.
+    pub fn empty() -> ImportCtx<'static> {
+        static NO_IMPORTS: std::sync::OnceLock<HashMap<String, u32>> = std::sync::OnceLock::new();
+        let no_imports = NO_IMPORTS.get_or_init(HashMap::new);
+        ImportCtx {
+            imports: no_imports,
+            selective: no_imports,
+            exports: &[],
+        }
+    }
 }
 
 /// Parse a REPL line resolving struct and enum type names in a `:`
@@ -469,8 +503,8 @@ pub fn parse_line_with_structs(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    ctx: ImportCtx,
 ) -> Result<Line, String> {
-    let no_imports: HashMap<String, u32> = HashMap::new();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -480,9 +514,9 @@ pub fn parse_line_with_structs(
         owned_cells,
         refs,
         module: 0,
-        imports: &no_imports,
-        exports: &[],
-        selective: &no_imports,
+        imports: ctx.imports,
+        exports: ctx.exports,
+        selective: ctx.selective,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -513,8 +547,8 @@ pub fn parse_typedef_line(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    ctx: ImportCtx,
 ) -> Result<Vec<(String, Type)>, String> {
-    let no_imports: HashMap<String, u32> = HashMap::new();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -524,9 +558,9 @@ pub fn parse_typedef_line(
         owned_cells,
         refs,
         module: 0,
-        imports: &no_imports,
-        exports: &[],
-        selective: &no_imports,
+        imports: ctx.imports,
+        exports: ctx.exports,
+        selective: ctx.selective,
     };
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
@@ -565,8 +599,8 @@ pub fn parse_enum_typedef_line(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    ctx: ImportCtx,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
-    let no_imports: HashMap<String, u32> = HashMap::new();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -576,9 +610,9 @@ pub fn parse_enum_typedef_line(
         owned_cells,
         refs,
         module: 0,
-        imports: &no_imports,
-        exports: &[],
-        selective: &no_imports,
+        imports: ctx.imports,
+        exports: ctx.exports,
+        selective: ctx.selective,
     };
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
