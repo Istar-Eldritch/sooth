@@ -298,11 +298,33 @@ dogfoods it: a `Point` type exported from `examples/modules_point.sth`, `add`/`l
 exported from `examples/modules_ops.sth` (itself importing the type file), used
 together by the entry file via both a qualified accessor and a qualified word call.
 
-**Next action: Phase 4 Slice 5b** (REPL imports): what an import means in a live
-session — generation-mangled redefinition of an imported module, reload-on-edit vs
-frozen bindings — split off on the slice 1/slice 2 precedent, since the REPL carries
-session state (`drop_overloads`, frozen resolver snapshots, per-name generations,
-every `.so` resident under `RTLD_GLOBAL`) that native compilation does not.
+**Phase 4 Slice 6a (quotation types in signatures + the inliner + `each`/`map`/`fold`) is
+complete**: `Type`/`PolyType` gain a `Quotation` variant carrying an interned declared
+effect (`[ 'T -- ]`), with unification and `apply_subst` following, so a word may declare a
+quotation parameter and be checked standalone against it — no `IrType` variant and no
+"statically known" bit (D6): knownness stays a predicate on the value (`Slot.quot`), and
+every other type position (a struct field, an array element, a cell payload, a reference
+referent, a word's output, an `extern:` boundary, `main`, nesting inside another effect) is
+a located rejection naming slice 7. `call`/`times` accept an *abstract* quotation typed only
+by a declared parameter, beside the literal they accept today; a quotation literal passed to
+a declared parameter is checked directionally against the declared effect, enforcing a
+`Copy`-only capture restriction (D3) at the literal. Every call to a quotation-taking word is
+inlined by term-splicing the callee's AST body against the caller's live stack — the
+compiler's only inliner, forced by there being no `IrFunc` for a quotation-taking word to
+call (D2) — transitively (`map` over `each` inlines twice) and totally: anything
+un-inlinable, starting with recursion among quotation-taking words, is a located error, never
+a silent real call (D5). `each`/`map`/`fold` are ordinary polymorphic Sooth words at
+`lib/combinators.sth` (D8), each driving a `times` loop directly over an array's elements and
+handing one to its quotation parameter per iteration, verified to lower to a tight loop with
+no per-element `Instr::Call` and to run 1M+ elements in constant stack. Native only: the
+REPL is a located rejection at both the defining line and an imported closure exporting a
+quotation-taking word (D7), lifted by 6c. `examples/array_totals.sth` dogfoods it, rewriting a
+hand-threaded array walk (three manual `times` loops) over three one-line combinator calls to
+the same total and doubled elements.
+
+**Next action: Phase 4 Slice 6b** (the polymorphic-path gaps + `filter`/`while`): a
+polymorphic body's `if` and a polymorphic self-tail word's loop transform, the two gaps 6a's
+combinators needed neither of, closed for `filter`/`while`'s first real use of them.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
