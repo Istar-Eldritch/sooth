@@ -292,8 +292,9 @@ where a polymorphic `drop` could first be structurally total). Selective import,
 `import: q | a b | "path.sth" ;`, additionally exposes the listed names unqualified
 (a type brings its generated words too); two selective imports of one name, or a
 collision with a local word, is a located error at the second, naming both. REPL
-imports are **not** in this slice (5b): `import:` at the REPL is a located rejection
-naming the construct, so no phase ships a degraded REPL. `examples/modules.sth`
+imports were not in this slice: `import:` at the REPL was a located rejection naming
+the construct until slice 5b (below) shipped the real thing, so no phase shipped a
+degraded REPL in between. `examples/modules.sth`
 dogfoods it: a `Point` type exported from `examples/modules_point.sth`, `add`/`len2`
 exported from `examples/modules_ops.sth` (itself importing the type file), used
 together by the entry file via both a qualified accessor and a qualified word call.
