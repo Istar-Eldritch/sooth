@@ -1217,6 +1217,16 @@ then find out what the compiler owes it.
    `main`) but leaves the native path unfixed. Whoever picks this up: reject it the same way
    slice 5a already rejects an exported word naming a private type, at the declaration, naming
    both the file and the word.
+   **A third sibling hole, measured while designing slice 5b's import-symbol scheme: two
+   words of the same name in one file are not rejected by any check and leak a bare
+   assembler `symbol already defined` error, native build included.** `check_duplicate_type_names`
+   (`src/check.rs`) covers structs/enums only; the word env (`HashMap<String, Sig>` built by
+   plain `insert`) silently overwrites on a repeat name, so both `WordDef`s still lower to
+   codegen and only the linker notices. Slice 5b's REPL-side import-symbol design inherits
+   this pre-existing gap unfixed (an imported closure with a duplicate word name gets the
+   same leaky error) rather than patching it as a drive-by. Whoever picks this up: a located
+   duplicate-word-name check, parallel to `check_duplicate_type_names`, naming both
+   definitions' locations.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
