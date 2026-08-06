@@ -1208,6 +1208,15 @@ then find out what the compiler owes it.
    opaque-by-default draft would have papered over it, and only for types whose author chose
    opacity), which is an argument for fixing it properly here rather than with a visibility
    rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
+   **A second, unrelated sibling hole, measured while scoping slice 5b: two modules can each
+   declare `main` and nothing rejects it.** `mangle` (`src/resolve.rs`) exempts `main`/`drop`
+   from module-disambiguating suffixes, and `check_main_effect` (`src/check.rs`) finds the
+   *first* word literally named `main` in the whole checked module with no uniqueness check.
+   Slice 5a shipped with this latent (a library file has no reason to declare `main`); slice 5b
+   closes it on the REPL path it's building (a located rejection of an imported file declaring
+   `main`) but leaves the native path unfixed. Whoever picks this up: reject it the same way
+   slice 5a already rejects an exported word naming a private type, at the declaration, naming
+   both the file and the word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
