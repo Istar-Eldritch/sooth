@@ -874,9 +874,15 @@ impl Session {
                 let first = existing
                     .split_once("::")
                     .map_or(existing.as_str(), |(q, _)| q);
-                return Err(session_selective_collision_error(
-                    name, first, qualifier, *span,
-                ));
+                // A rebind of the same qualifier is a reload (R13), not a
+                // collision: its own prior bare alias is purged in
+                // `splice_import` before the new one lands. Only a *different*
+                // qualifier already exposing `name` is R12's collision.
+                if first != qualifier {
+                    return Err(session_selective_collision_error(
+                        name, first, qualifier, *span,
+                    ));
+                }
             }
         }
         Ok(())

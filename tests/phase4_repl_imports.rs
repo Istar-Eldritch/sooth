@@ -542,3 +542,32 @@ fn repl_selective_import_collides_with_local() {
         "the rejected import leaves the session untouched: {out}"
     );
 }
+
+#[test]
+fn repl_selective_reimport_same_qualifier_reloads() {
+    // R11 + R13 regression: re-running a selective `import: q | w | ...` under
+    // an already-bound qualifier is a reload, not a self-collision. The old
+    // bare alias is purged and re-minted; a fresh call sees the edited body.
+    let d = LibDir::new("selective-reload");
+    let lib = d.write("lib.sth", ": w ( -- i64 ) 42 ;\nexport: w ;\n");
+    let line = selective_import_line("q", "w", &lib);
+
+    let mut repl = InteractiveRepl::spawn(d.0.as_path());
+    assert!(repl.send(&line).contains("imported q"));
+    assert!(
+        repl.send("w").contains("42"),
+        "first epoch runs unqualified"
+    );
+
+    std::fs::write(&lib, ": w ( -- i64 ) 99 ;\nexport: w ;\n").unwrap();
+    let reload = repl.send(&line);
+    assert!(
+        !reload.contains("collides") && reload.contains("imported q"),
+        "reload of a same-qualifier selective import must not self-collide: {reload}"
+    );
+    assert!(
+        repl.send("w").contains("99"),
+        "the reloaded selective name resolves to the new epoch's body"
+    );
+    repl.finish();
+}
