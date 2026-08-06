@@ -1,0 +1,14 @@
+\ Dogfood: Phase 4 Slice 5a exit (R24). Native multi-file compilation: a type
+\ exported from `examples/modules_point.sth`, words exported from
+\ `examples/modules_ops.sth` (which itself imports the type file), and this
+\ entry file importing both and using them together — the type via a direct
+\ qualified accessor (`point::Point>x`), the words via their qualifier
+\ (`ops::add`/`len2`).
+
+import: point "modules_point.sth" ;
+import: ops "modules_ops.sth" ;
+
+: main ( -- )
+  1 2 point::Point 3 4 point::Point ops::add
+  dup point::Point>x .   \ 4
+  ops::len2 . ;          \ 4*4 + 6*6 = 52

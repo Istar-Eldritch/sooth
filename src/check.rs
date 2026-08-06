@@ -1113,6 +1113,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         refs,
         externs: _,
         instantiations: _,
+        modules: _,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below
@@ -1406,6 +1407,207 @@ fn extern_owned_pointer_output_error(decl: &ExternDecl, ty: Type) -> String {
     )
 }
 
+/// R18 (phase 4 slice 5a phase 3): an exported word whose stack effect names
+/// a non-primitive type of its own module that is not itself exported is a
+/// declaration-site error naming the word and the private type. R15 makes a
+/// type and its generated words one exported unit, so exporting the type
+/// clears every word of its own module that mentions it. Runs on the raw,
+/// pre-mangle module the driver assembles (`driver::assemble_module`),
+/// before `resolve::resolve_modules` renames decls: the check matches a
+/// word's raw name against its own module's raw `export:` list, and both
+/// would already be mangled by the time `check::check` runs.
+pub fn check_exported_signatures(module: &Module) -> Result<(), String> {
+    for word in &module.words {
+        let exports = match module.modules.get(word.module as usize) {
+            Some(m) => &m.exports,
+            None => continue,
+        };
+        if !exports.iter().any(|(n, _)| n == &word.name) {
+            continue;
+        }
+        for ty in effect_types(word) {
+            if let Some(name) = private_type_name(ty, word.module, module) {
+                return Err(exported_word_names_private_type_error(word, name));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every concrete `Type` a word's declared effect mentions: its ordinary
+/// input/output slots, plus, for a polymorphic word, every `Concrete` leaf
+/// its `PolySig` mentions (a type variable itself names no type, so `Var`
+/// contributes nothing).
+fn effect_types(word: &WordDef) -> Vec<Type> {
+    let mut out: Vec<Type> = word
+        .effect
+        .inputs
+        .iter()
+        .chain(&word.effect.outputs)
+        .map(|slot| slot.ty)
+        .collect();
+    if let Some(sig) = &word.poly {
+        for t in sig.inputs.iter().chain(&sig.outputs) {
+            collect_poly_concrete(t, &mut out);
+        }
+    }
+    out
+}
+
+fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
+    match t {
+        PolyType::Concrete(ty) => out.push(*ty),
+        PolyType::Var(_) => {}
+        PolyType::Array(elem, _) => collect_poly_concrete(elem, out),
+    }
+}
+
+/// Whether `ty` is a struct/enum owned by `owner_module` and absent from that
+/// module's `export:` list, i.e. the R18 violation. A type owned by a
+/// *different* module is not this rule's problem (R16 already gates whether
+/// it could even be named here), and a primitive/array/etc. names no
+/// declared type at all.
+fn private_type_name(ty: Type, owner_module: u32, module: &Module) -> Option<&'static str> {
+    let (decl_module, name) = match ty {
+        Type::Struct(id, name) => (module.structs[id.index()].module, name),
+        Type::Enum(id, name) => (module.enums[id.index()].module, name),
+        _ => return None,
+    };
+    if decl_module != owner_module {
+        return None;
+    }
+    let exports = &module.modules[decl_module as usize].exports;
+    if exports.iter().any(|(n, _)| n == name) {
+        return None;
+    }
+    Some(name)
+}
+
+/// R18: a located error naming the exported word and the private type its
+/// effect mentions. Exporting the type satisfies the rule.
+fn exported_word_names_private_type_error(word: &WordDef, type_name: &str) -> String {
+    let span = word_span(word);
+    format!(
+        "error: exported word `{}` (line {}, col {}) names private type `{}`, which is not exported\n  export `{}` too, or remove it from the effect",
+        word.name, span.line, span.col, type_name, type_name
+    )
+}
+
+/// Phase 4 slice 5a phase 4 (R20/R15c): one selectively-imported name, carried
+/// from the driver's closure assembly with the qualifier and target module it
+/// came from and the span of the name in the `import:` form, for the R20/R21
+/// validation. A type name exposes its generated words as one unit (R15c), so
+/// only the base name appears here; a member (`Type>field`) can only collide
+/// when its base does.
+pub struct SelectiveName {
+    pub name: String,
+    pub qualifier: String,
+    pub target: u32,
+    pub span: Span,
+}
+
+/// R20/R21: validate every module's selective imports on the raw, pre-mangle
+/// module. Each listed name must be exported by its source module (R20, the
+/// R16 visibility error). No two selective imports may expose the same
+/// unqualified name, and a selective name may not collide with one of the
+/// importing module's own words or types (R21, a located error at the second
+/// source naming both). The collision is decided on the base name because a
+/// selectively imported type and its generated words are one unit (R15c) and a
+/// member name collides only when its base does.
+pub fn check_selective_imports(
+    module: &Module,
+    selective_by_module: &[Vec<SelectiveName>],
+) -> Result<(), String> {
+    for (m, entries) in selective_by_module.iter().enumerate() {
+        let locals = local_decl_names(module, m as u32);
+        // name -> the qualifier that first exposed it, for R21's both-sources error.
+        let mut seen: HashMap<&str, &str> = HashMap::new();
+        for entry in entries {
+            let exports = &module.modules[entry.target as usize].exports;
+            if !exports.iter().any(|(n, _)| n == &entry.name) {
+                return Err(selective_not_exported_error(
+                    &entry.name,
+                    &entry.qualifier,
+                    entry.span,
+                ));
+            }
+            if locals.contains(entry.name.as_str()) {
+                return Err(selective_collides_with_local_error(
+                    &entry.name,
+                    &entry.qualifier,
+                    entry.span,
+                ));
+            }
+            if let Some(first) = seen.insert(entry.name.as_str(), entry.qualifier.as_str()) {
+                return Err(selective_collision_error(
+                    &entry.name,
+                    first,
+                    &entry.qualifier,
+                    entry.span,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every raw decl name owned by module `m`: its structs, enums, words, and
+/// externs, for R21's selective-vs-local collision check. Runs pre-mangle, so
+/// the names are the source spellings a selective import would collide with.
+fn local_decl_names(module: &Module, m: u32) -> HashSet<&str> {
+    let mut names = HashSet::new();
+    for s in &module.structs {
+        if s.module == m {
+            names.insert(s.name.as_str());
+        }
+    }
+    for e in &module.enums {
+        if e.module == m {
+            names.insert(e.name.as_str());
+        }
+    }
+    for w in &module.words {
+        if w.module == m {
+            names.insert(w.name.as_str());
+        }
+    }
+    for x in &module.externs {
+        if x.module == m {
+            names.insert(x.name.as_str());
+        }
+    }
+    names
+}
+
+/// R20: a selectively imported name absent from its source module's `export:`
+/// list is the R16 visibility error, same wording as a qualified private
+/// reference.
+fn selective_not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// R21: a second selective import exposing a name a prior one already exposed,
+/// naming both source modules. No precedence, no shadowing: the collision is
+/// the error.
+fn selective_collision_error(name: &str, first: &str, second: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
+        span.line, span.col
+    )
+}
+
+/// R21: a selective import exposing a name the importing module already defines
+/// locally, naming the source module and the local definition.
+fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
+        span.line, span.col
+    )
+}
+
 /// Type-level checks that must pass before any generated-word signature or
 /// word body is type-checked: no two `type:` declarations share a name across
 /// the combined struct+enum registries, and no struct or enum contains itself
@@ -1535,14 +1737,18 @@ pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
     check_types(structs, &[], &[], &[])
 }
 
-/// A duplicate `type:` name is a sharp located error naming the type.
+/// A duplicate `type:` name is a sharp located error naming the type. R12
+/// (phase 4 slice 5a): the check is per-module, so two modules each declaring
+/// `Point` is not a duplicate. Keyed by `(module, name_static)`: `name_static`
+/// stays the raw surface name even after the resolver mangles `name` for
+/// symbol disambiguation, so the error still reads `Point`, not `Point__m1`.
 fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
-    let mut seen: HashMap<&str, ()> = HashMap::new();
+    let mut seen: HashMap<(u32, &str), ()> = HashMap::new();
     for decl in structs {
-        if seen.insert(decl.name.as_str(), ()).is_some() {
+        if seen.insert((decl.module, decl.name_static), ()).is_some() {
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
-                decl.name, decl.span.line, decl.span.col
+                decl.name_static, decl.span.line, decl.span.col
             ));
         }
     }
@@ -1557,15 +1763,15 @@ fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
 /// re-scanning `structs` twice.
 fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Result<(), String> {
     check_duplicate_struct_names(structs)?;
-    let mut seen: HashMap<&str, ()> = structs
+    let mut seen: HashMap<(u32, &str), ()> = structs
         .iter()
-        .map(|decl| (decl.name.as_str(), ()))
+        .map(|decl| ((decl.module, decl.name_static), ()))
         .collect();
     for decl in enums {
-        if seen.insert(decl.name.as_str(), ()).is_some() {
+        if seen.insert((decl.module, decl.name_static), ()).is_some() {
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
-                decl.name, decl.span.line, decl.span.col
+                decl.name_static, decl.span.line, decl.span.col
             ));
         }
     }
@@ -6384,6 +6590,244 @@ mod tests {
         check(&mut module)
     }
 
+    /// U7 (R18): the exported-signature helper flags a word whose effect
+    /// names a private type of its own module, and clears once that type is
+    /// exported too (the positive half, R18's own escape hatch).
+    #[test]
+    fn exported_signature_rule_flags_private_type() {
+        use crate::ast::{ModuleInfo, TypedSlot};
+        let structs = vec![StructDecl {
+            name: "Res".to_string(),
+            name_static: "Res",
+            fields: vec![("n".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let mk_word = WordDef {
+            name: "mk".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: vec![TypedSlot {
+                    name: None,
+                    ty: Type::Struct(StructId::from_index(0), "Res"),
+                }],
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+        };
+        let mut module = Module {
+            words: vec![mk_word],
+            structs,
+            enums: Vec::new(),
+            arrays: Vec::new(),
+            owned_cells: Vec::new(),
+            refs: Vec::new(),
+            externs: Vec::new(),
+            instantiations: HashMap::new(),
+            modules: vec![ModuleInfo {
+                imports: HashMap::new(),
+                exports: vec![("mk".to_string(), Span::default())],
+                selective: HashMap::new(),
+            }],
+        };
+
+        let err = check_exported_signatures(&module).unwrap_err();
+        assert!(err.contains("mk"), "names the word: {err}");
+        assert!(err.contains("Res"), "names the private type: {err}");
+
+        module.modules[0]
+            .exports
+            .push(("Res".to_string(), Span::default()));
+        assert!(
+            check_exported_signatures(&module).is_ok(),
+            "exporting the type clears the rule"
+        );
+    }
+
+    /// U8 (R20/R21): the selective-import validator rejects a name absent from
+    /// its source module's export list (R20), two selective imports of one name
+    /// (R21, naming both sources), and a selective name colliding with a local
+    /// word (R21), while a clean import passes.
+    #[test]
+    fn selective_import_collision_is_rejected() {
+        use crate::ast::ModuleInfo;
+
+        fn info(exports: &[&str]) -> ModuleInfo {
+            ModuleInfo {
+                imports: HashMap::new(),
+                exports: exports
+                    .iter()
+                    .map(|n| (n.to_string(), Span::default()))
+                    .collect(),
+                selective: HashMap::new(),
+            }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect::default(),
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+            }
+        }
+        fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
+            Module {
+                words,
+                structs: Vec::new(),
+                enums: Vec::new(),
+                arrays: Vec::new(),
+                owned_cells: Vec::new(),
+                refs: Vec::new(),
+                externs: Vec::new(),
+                instantiations: HashMap::new(),
+                modules,
+            }
+        }
+        fn sel(name: &str, qualifier: &str, target: u32, line: u32) -> SelectiveName {
+            SelectiveName {
+                name: name.to_string(),
+                qualifier: qualifier.to_string(),
+                target,
+                span: Span { line, col: 1 },
+            }
+        }
+
+        // R21: modules 1 and 2 each export `p`; module 0 selectively imports it
+        // from both, colliding at the second.
+        let m = module_with(
+            vec![word("p", 1), word("p", 2)],
+            vec![info(&[]), info(&["p"]), info(&["p"])],
+        );
+        let entries = vec![
+            vec![sel("p", "a", 1, 1), sel("p", "b", 2, 2)],
+            Vec::new(),
+            Vec::new(),
+        ];
+        let err = check_selective_imports(&m, &entries).unwrap_err();
+        assert!(err.contains("collides"), "selective collision: {err}");
+        assert!(
+            err.contains("`a`") && err.contains("`b`"),
+            "names both sources: {err}"
+        );
+
+        // R20: a name absent from its source's export list is the visibility
+        // error, distinct from a collision.
+        let m = module_with(vec![word("grow", 1)], vec![info(&[]), info(&[])]);
+        let err =
+            check_selective_imports(&m, &[vec![sel("grow", "lib", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(err.contains("not exported"), "R20 export gate: {err}");
+        assert!(!err.contains("collides"), "not the collision error: {err}");
+
+        // R21: a selective name colliding with the importer's own local word.
+        let m = module_with(
+            vec![word("p", 0), word("p", 1)],
+            vec![info(&[]), info(&["p"])],
+        );
+        let err =
+            check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(
+            err.contains("collides") && err.contains("local"),
+            "local collision: {err}"
+        );
+
+        // A clean selective import of an exported, non-colliding name passes.
+        let m = module_with(vec![word("p", 1)], vec![info(&[]), info(&["p"])]);
+        assert!(check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).is_ok());
+    }
+
+    /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
+    /// the one shared registry the driver assembles across the closure,
+    /// deduping to a single `ArrayId` rather than one per file.
+    #[test]
+    fn array_shape_dedupes_across_files() {
+        use crate::parser::parse_bodies;
+        let a = lex(": fa ( [i64 8] -- ) drop ;").unwrap();
+        let b = lex(": fb ( [i64 8] -- ) drop ;").unwrap();
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let no_imports = HashMap::new();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        parse_bodies(
+            &a,
+            &structs,
+            &enums,
+            0,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        parse_bodies(
+            &b,
+            &structs,
+            &enums,
+            1,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        assert_eq!(
+            arrays.len(),
+            1,
+            "two files' [i64 8] dedupe to one ArrayId in the shared registry"
+        );
+    }
+
+    /// U3 (R12): the duplicate-type-name check partitions by owning module, so
+    /// two modules each declaring `Point` is not a duplicate, while two `Point`
+    /// decls in one module still is (reported by the raw `name_static`, not the
+    /// resolver's mangled `name`).
+    #[test]
+    fn duplicate_type_check_is_per_module() {
+        let mk = |module: u32| StructDecl {
+            name: format!("Point__m{module}"),
+            name_static: "Point",
+            fields: Vec::new(),
+            span: crate::ast::Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        // Two modules, one `Point` each: not a duplicate.
+        assert!(check_duplicate_type_names(&[mk(0), mk(1)], &[]).is_ok());
+        // Same module, two `Point`: a duplicate, named by the raw surface name.
+        let same_module = vec![
+            StructDecl {
+                name: "Point".to_string(),
+                name_static: "Point",
+                fields: Vec::new(),
+                span: crate::ast::Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "Point".to_string(),
+                name_static: "Point",
+                fields: Vec::new(),
+                span: crate::ast::Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+        ];
+        let err = check_duplicate_type_names(&same_module, &[]).unwrap_err();
+        assert!(err.contains("duplicate type `Point`"), "raw name: {err}");
+    }
+
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
     const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
@@ -9145,6 +9589,7 @@ mod tests {
             span: Span::default(),
             has_drop_overload: true,
             is_bundle: false,
+            module: 0,
         }];
         let res = Type::Struct(StructId::from_index(0), "Res");
         assert!(!is_copy(res, &structs, &[], &[]));
@@ -9220,6 +9665,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             },
             StructDecl {
                 name: "Holds".to_string(),
@@ -9228,6 +9674,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             },
             StructDecl {
                 name: "Wraps".to_string(),
@@ -9239,6 +9686,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             },
         ];
         let plain = Type::Struct(StructId::from_index(0), "Plain");
@@ -9266,6 +9714,7 @@ mod tests {
             span: Span::default(),
             has_drop_overload: false,
             is_bundle: false,
+            module: 0,
         }];
         let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
             name: name.to_string(),
@@ -9279,6 +9728,7 @@ mod tests {
                 name_static: "Plain",
                 variants: vec![variant("A", vec![]), variant("B", vec![])],
                 span: Span::default(),
+                module: 0,
             },
             EnumDecl {
                 name: "Item".to_string(),
@@ -9288,6 +9738,7 @@ mod tests {
                     variant("Full", vec![("v".to_string(), cell_ty)]),
                 ],
                 span: Span::default(),
+                module: 0,
             },
             EnumDecl {
                 name: "Boxed".to_string(),
@@ -9303,6 +9754,7 @@ mod tests {
                     variant("None", vec![]),
                 ],
                 span: Span::default(),
+                module: 0,
             },
         ];
         let plain = Type::Enum(EnumId::from_index(0), "Plain");

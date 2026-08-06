@@ -259,20 +259,50 @@ loop in the same word still runs. `while` was weighed as a second floor member a
 its condition quotation returns a `bool` on a passthrough row, strictly harder than `times`
 needs. `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same
 total as `examples/countdown.sth`'s hand-threaded self-recursion.
-**Next action: Phase 4 Slice 5a** (native multi-file compilation, word and type imports,
-and encapsulation, pulled forward from Phase 6; REPL imports split off as 5b on the slice
-1/slice 2 precedent): a file becomes a compilation unit and an import resolves a
-word or a struct/enum declaration by qualified name from another file, so slice 6's
-combinator library has somewhere to live besides copy-pasted into every consumer, and so a
-reusable component — which is usually a type plus its operations — is actually writable
-across files. Encapsulation lands with it, since a `type:` generates a setter per field and
-without a visibility rule an imported type can hold no invariant: default private, a
-per-file `export:` list, and Elm-style opaque types (exporting a type *name* and exporting
-its *constructors* are separable). Still narrower than Phase 6's eventual module system: no
-serializable API description and no version diffing, since those are a packaging/publishing
-concern rather than a personal-reuse one, and `docs/dependency-management.md` still depends
-on Phase 6 for them, consuming the export list this slice introduces rather than defining
-it.
+**Phase 4 Slice 5a (native multi-file compilation, word and type imports, and
+encapsulation) is complete**: a file is a compilation unit, and `import: q "path.sth" ;`
+resolves the import graph from the entry file, canonicalizes and dedupes by path,
+orders it topologically, and rejects a cycle or self-import with a located error naming
+both files. The whole closure is lexed and pre-passed once into one shared registry
+set (structs/enums/arrays/cells/refs) — the parser's pre-pass over raw tokens
+(`prepass_type_decls`) needs every imported type name present before any body parses,
+so an import cannot be a post-parse merge — then bodies parse per file against that
+shared set and `check::check` runs once over the assembled `Module`. A qualified
+`q::name` resolves own-module-first, then by qualifier; two modules may each declare
+`Point` (duplicate-type-name checking is per-module) and same-named words in two
+modules mint distinct symbols via a module-disambiguating component minted the way
+`generation` already is, so no `::` ever reaches the symbol sanitizer and a
+single-module closure is byte-for-byte unchanged. **Encapsulation is default-private**,
+with a per-file `export:` list (multiple lines accumulate); naming a type in `export:`
+is **transparent** (D3, no opacity mechanism in this slice): it exports the type
+*and* its five generated words (constructor, getter, peek, setter, destructure) as
+one unit, since Sooth structs are dumb data and hiding accessors buys little against
+no UB, trapped indexing, and linearity — and since destructure already bypasses a
+`drop` override today, single-file, visibility never protected resource discipline
+anyway (that gap is real, newly reachable across a file boundary, and stays
+out of scope for slice 8's ownership checker to fix properly, `E0509`-style, rather
+than a partial guard here). A qualified accessor (`q::Type>field`, `q::Type<field`,
+`q::Type|>field`) resolves by splitting on the *first* `::`, since `>` is not a
+delimiter. Using an unexported name qualified is a located `not exported` error,
+distinct from unknown-word; an exported word naming a private type of its own module
+is rejected at the `export:` declaration. Disposal crosses the boundary for free: a
+bare `drop` dispatches on the concrete type whether or not its destructor glue was
+exported, so this slice adds no export-site disposal rule (that waits on slice 8,
+where a polymorphic `drop` could first be structurally total). Selective import,
+`import: q | a b | "path.sth" ;`, additionally exposes the listed names unqualified
+(a type brings its generated words too); two selective imports of one name, or a
+collision with a local word, is a located error at the second, naming both. REPL
+imports are **not** in this slice (5b): `import:` at the REPL is a located rejection
+naming the construct, so no phase ships a degraded REPL. `examples/modules.sth`
+dogfoods it: a `Point` type exported from `examples/modules_point.sth`, `add`/`len2`
+exported from `examples/modules_ops.sth` (itself importing the type file), used
+together by the entry file via both a qualified accessor and a qualified word call.
+
+**Next action: Phase 4 Slice 5b** (REPL imports): what an import means in a live
+session — generation-mangled redefinition of an imported module, reload-on-edit vs
+frozen bindings — split off on the slice 1/slice 2 precedent, since the REPL carries
+session state (`drop_overloads`, frozen resolver snapshots, per-name generations,
+every `.so` resident under `RTLD_GLOBAL`) that native compilation does not.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

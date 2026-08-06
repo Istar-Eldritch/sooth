@@ -44,6 +44,43 @@ pub struct Module {
     /// keyed by the call site's `Span`, emitted by the checker and consumed by
     /// lowering. Empty for a program with no polymorphic calls.
     pub instantiations: std::collections::HashMap<Span, CallInst>,
+    /// Phase 4 slice 5a (R10): one entry per file in the import closure, in
+    /// topological order, module 0 being the entry file. A single-file program
+    /// (and every REPL session) has exactly one entry. Every `StructDecl`/
+    /// `EnumDecl`/`WordDef`/`ExternDecl` carries an owning module id indexing
+    /// this vector; the entry carries that module's qualifier->module import
+    /// map and its parsed `export:` list.
+    pub modules: Vec<ModuleInfo>,
+}
+
+/// Phase 4 slice 5a (R10): per-module resolution context assembled by the
+/// driver's closure resolution. Carries the import map (a qualifier binds to
+/// the module id of the file it names) and the parsed export list; the export
+/// list is recorded from phase 1 but not enforced until phase 2.
+#[derive(Debug, Default, Clone)]
+pub struct ModuleInfo {
+    pub imports: std::collections::HashMap<String, u32>,
+    pub exports: Vec<(String, Span)>,
+    /// Phase 4 slice 5a phase 4 (R20/R15c): unqualified names this module
+    /// selectively imports, name -> the target module id it resolves to.
+    /// Built from every import's `| name... |` clause; a name naming a type
+    /// is exposed the same way (R15c), since a type and its generated words
+    /// resolve through the ordinary unqualified type/word lookup once the
+    /// base name is in this map, with no separate enumeration of its
+    /// accessors needed.
+    pub selective: std::collections::HashMap<String, u32>,
+}
+
+/// Phase 4 slice 5a (R6): a parsed `import:` form:
+/// `import: <qualifier> [ | <name>... | ] "<path>" ;`. The optional selective
+/// name list is empty when the `| ... |` clause is absent (D9, phase 4). Spans
+/// locate the `import:` keyword and each selective name for later diagnostics.
+#[derive(Debug, Clone)]
+pub struct Import {
+    pub qualifier: String,
+    pub selective: Vec<(String, Span)>,
+    pub path: String,
+    pub span: Span,
 }
 
 impl Module {
@@ -88,6 +125,58 @@ pub fn resolve_type_name(structs: &[StructDecl], enums: &[EnumDecl], name: &str)
         })
 }
 
+/// Phase 4 slice 5a (R8/R11): module-aware type-name resolution over the merged
+/// registry. The scalar table wins first (a `Point` struct can no more shadow
+/// `i64` here than in `resolve_type_name`). A bare name resolves against the
+/// current module only (own-module-first; a same-named type in another module
+/// is invisible unqualified until selective import, phase 4). A `q::Base` name
+/// maps `q` through the current module's import map to a target module and
+/// resolves `Base` there. Called by the parser while decl names are still raw,
+/// so the `name ==` comparisons are raw-against-raw.
+pub fn resolve_type_name_in_module(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    name: &str,
+    module: u32,
+    imports: &std::collections::HashMap<String, u32>,
+    selective: &std::collections::HashMap<String, u32>,
+) -> Option<Type> {
+    if let Some(t) = Type::from_name(name) {
+        return Some(t);
+    }
+    if let Some((qualifier, base)) = name.split_once("::") {
+        let target = *imports.get(qualifier)?;
+        return find_type_in_module(structs, enums, base, target);
+    }
+    find_type_in_module(structs, enums, name, module).or_else(|| {
+        // R15c (phase 4): a selectively imported type's bare name resolves
+        // unqualified against its target module, the same one unit its
+        // generated words resolve through in `resolve.rs`'s `NameTables`.
+        let target = *selective.get(name)?;
+        find_type_in_module(structs, enums, name, target)
+    })
+}
+
+fn find_type_in_module(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    name: &str,
+    module: u32,
+) -> Option<Type> {
+    structs
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.name == name && s.module == module)
+        .map(|(idx, s)| Type::Struct(StructId(idx), s.name_static))
+        .or_else(|| {
+            enums
+                .iter()
+                .enumerate()
+                .find(|(_, e)| e.name == name && e.module == module)
+                .map(|(idx, e)| Type::Enum(EnumId(idx), e.name_static))
+        })
+}
+
 /// A registered struct: its declared name, an ordered `(field-name, Type)`
 /// list, and the leaked `&'static str` copy of its name every `Type::Struct`
 /// naming it carries directly, so a struct name renders without threading
@@ -116,6 +205,11 @@ pub struct StructDecl {
     /// caller's outputs, moved out by the unpack in the same breath, so drop
     /// glue here would double-free a linear one.
     pub is_bundle: bool,
+    /// Phase 4 slice 5a (R10): the owning module id (index into
+    /// `Module::modules`). `0` for a single-file program's decls and for a
+    /// synthesized bundle. Two modules may each declare a `Point`; the id is
+    /// how the merged registry keeps them apart (R12).
+    pub module: u32,
 }
 
 /// A small `Copy` index into `Module::structs`. Two `Type::Struct` values are
@@ -146,6 +240,9 @@ pub struct EnumDecl {
     pub name_static: &'static str,
     pub variants: Vec<VariantDecl>,
     pub span: Span,
+    /// Phase 4 slice 5a (R10): the owning module id, mirroring
+    /// `StructDecl::module`.
+    pub module: u32,
 }
 
 /// One variant of an `EnumDecl`: its declared name, the leaked `&'static
@@ -351,6 +448,7 @@ pub fn intern_bundle_struct(structs: &mut Vec<StructDecl>, outputs: &[Type]) -> 
         span: Span::default(),
         has_drop_overload: false,
         is_bundle: true,
+        module: 0,
     });
     id
 }
@@ -378,6 +476,9 @@ pub struct WordDef {
     /// or the row variable `..s`. `None` for a monomorphic word, whose whole
     /// signature is `effect`.
     pub poly: Option<Box<PolySig>>,
+    /// Phase 4 slice 5a (R10): the owning module id, mirroring
+    /// `StructDecl::module`.
+    pub module: u32,
 }
 
 /// R3/R6 (phase 4 slice 1): a capability a type variable can be bounded by.
@@ -515,6 +616,9 @@ pub struct ExternDecl {
     pub symbol: String,
     pub effect: StackEffect,
     pub span: Span,
+    /// Phase 4 slice 5a (R10): the owning module id, mirroring
+    /// `StructDecl::module`.
+    pub module: u32,
 }
 
 /// A word's body: either a term sequence, or a clause list (a clause-style
@@ -936,6 +1040,7 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             }],
             enums: Vec::new(),
             arrays: Vec::new(),
@@ -943,6 +1048,7 @@ mod tests {
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            modules: Vec::new(),
         }
     }
 
@@ -959,6 +1065,62 @@ mod tests {
         }
         assert_eq!(ty.name(), "Vec2");
         assert_eq!(ty.to_string(), "Vec2");
+    }
+
+    /// U4 (R11): module-aware resolution prefers the current module for a bare
+    /// name, and maps a `q::Base` through the import map to the qualified
+    /// module. Two modules each declare `Foo`; from module 0 a bare `Foo`
+    /// finds module 0's, `lib::Foo` finds module 1's.
+    #[test]
+    fn type_resolution_prefers_own_module_then_qualifier() {
+        let mk = |name: &'static str, module: u32| StructDecl {
+            name: name.to_string(),
+            name_static: name,
+            fields: Vec::new(),
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        // Module 0's Foo is index 0, module 1's Foo is index 1.
+        let structs = vec![mk("Foo", 0), mk("Foo", 1)];
+        let mut imports = std::collections::HashMap::new();
+        imports.insert("lib".to_string(), 1u32);
+        let no_selective = std::collections::HashMap::new();
+
+        let bare =
+            resolve_type_name_in_module(&structs, &[], "Foo", 0, &imports, &no_selective).unwrap();
+        assert_eq!(bare, Type::Struct(StructId(0), "Foo"), "own module first");
+        let qualified =
+            resolve_type_name_in_module(&structs, &[], "lib::Foo", 0, &imports, &no_selective)
+                .unwrap();
+        assert_eq!(
+            qualified,
+            Type::Struct(StructId(1), "Foo"),
+            "qualifier maps to the imported module"
+        );
+        // An unmapped qualifier resolves to nothing.
+        assert!(resolve_type_name_in_module(
+            &structs,
+            &[],
+            "nope::Foo",
+            0,
+            &imports,
+            &no_selective
+        )
+        .is_none());
+        // R15c: a bare name absent from the own module resolves against a
+        // module it is selectively imported from.
+        let mut selective = std::collections::HashMap::new();
+        selective.insert("Foo".to_string(), 1u32);
+        let via_selective =
+            resolve_type_name_in_module(&[mk("Foo", 1)], &[], "Foo", 0, &imports, &selective)
+                .unwrap();
+        assert_eq!(
+            via_selective,
+            Type::Struct(StructId(0), "Foo"),
+            "a selectively imported type resolves bare against its source module"
+        );
     }
 
     #[test]
@@ -995,12 +1157,14 @@ mod tests {
                 name_static,
                 variants,
                 span: Span::default(),
+                module: 0,
             }],
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            modules: Vec::new(),
         }
     }
 
@@ -1046,18 +1210,21 @@ mod tests {
                 span: Span::default(),
                 has_drop_overload: false,
                 is_bundle: false,
+                module: 0,
             }],
             enums: vec![EnumDecl {
                 name: "Dup".to_string(),
                 name_static,
                 variants: vec![variant("V", vec![])],
                 span: Span::default(),
+                module: 0,
             }],
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            modules: Vec::new(),
         };
         assert!(matches!(
             module.resolve_type_name("Dup"),

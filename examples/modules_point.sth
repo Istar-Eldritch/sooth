@@ -1,0 +1,8 @@
+\ Dogfood: Phase 4 Slice 5a (R24). The type half of a small two-file library:
+\ a 2D point, exported so `examples/modules_ops.sth` and `examples/modules.sth`
+\ can both name it by qualified reference (`point::Point`) across a file
+\ boundary, the same struct `examples/vectors.sth` uses single-file.
+
+type: Point x i64 y i64 ;
+
+export: Point ;
