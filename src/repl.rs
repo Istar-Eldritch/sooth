@@ -187,6 +187,26 @@ fn reject_double_colon_name(kind: &str, name: &str, span: Span) -> Result<(), St
     Ok(())
 }
 
+/// R12 (slice 5b, phase 3): a selectively-exposed name colliding with a
+/// session-local definition, naming the source qualifier and the local name --
+/// the session-scope analogue of `check::selective_collides_with_local_error`.
+fn session_selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
+        span.line, span.col
+    )
+}
+
+/// R12 (slice 5b, phase 3): a selectively-exposed name colliding with an
+/// earlier selective import's unqualified name, naming both source
+/// qualifiers -- the session-scope analogue of `check::selective_collision_error`.
+fn session_selective_collision_error(name: &str, first: &str, second: &str, span: Span) -> String {
+    format!(
+        "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
+        span.line, span.col
+    )
+}
+
 /// R14/D4 (slice 5b): reject an imported closure that declares a word named
 /// `main`, naming the declaring file and the word, before any codegen.
 /// `mangle` (`src/resolve.rs`) never renames `main` regardless of module, so
@@ -822,6 +842,46 @@ impl Session {
         Ok(())
     }
 
+    /// R12: the session-scope selective-collision check. A bare selected name
+    /// colliding with an existing session name -- a locally-defined word or
+    /// type (bare, `module == 0` in the session's own registries; import
+    /// splices always carry `module >= 1`), or a prior selective import's
+    /// unqualified name (a bare `import_aliases` key, which only a selective
+    /// import ever inserts) -- is a located error at the second occurrence,
+    /// naming both sources. No precedence, no shadowing, no use-site
+    /// disambiguation, exactly 5a R21's rule.
+    fn check_session_selective_collisions(
+        &self,
+        qualifier: &str,
+        selective: &[(String, Span)],
+    ) -> Result<(), String> {
+        for (name, span) in selective {
+            if self.env.contains_key(name)
+                || self
+                    .structs
+                    .iter()
+                    .any(|s| s.module == 0 && s.name_static == name)
+                || self
+                    .enums
+                    .iter()
+                    .any(|e| e.module == 0 && e.name_static == name)
+            {
+                return Err(session_selective_collides_with_local_error(
+                    name, qualifier, *span,
+                ));
+            }
+            if let Some(existing) = self.import_aliases.get(name) {
+                let first = existing
+                    .split_once("::")
+                    .map_or(existing.as_str(), |(q, _)| q);
+                return Err(session_selective_collision_error(
+                    name, first, qualifier, *span,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// R1-R10/R15/R16 (slice 5b): evaluate an `import:` line. Reuses the native
     /// pipeline (`discover_closure` -> `assemble_module` -> `check::check`) to
     /// produce a checked closure `Module`, bulk-lowers it to one `.so` with
@@ -851,6 +911,26 @@ impl Session {
         // not only module 0) is rejected before any codegen, naming the file
         // and the word.
         check_no_main_in_closure(&module, &closure)?;
+        // R11: each selectively-imported name must be exported by module 0,
+        // the R16 visibility error, checked against a synthesized entry for
+        // the REPL's own top-level selection (the closure-internal check,
+        // `check::check_selective_imports`, validates a module's own selective
+        // imports against its own locals, the wrong scope for the REPL's,
+        // which has no module of its own to be local to).
+        for (name, span) in &import.selective {
+            if !module.modules[0].exports.iter().any(|(n, _)| n == name) {
+                return Err(check::selective_not_exported_error(
+                    name,
+                    &import.qualifier,
+                    *span,
+                ));
+            }
+        }
+        // R12: a selectively-exposed name colliding with an existing session
+        // name (a locally-defined word/type, or a prior selective import's
+        // unqualified name) is a located error at the second, naming both
+        // sources -- 5a R21's dumb collision rule extended to session scope.
+        self.check_session_selective_collisions(&import.qualifier, &import.selective)?;
         // R6/R9: read (do not yet advance) this event's epoch and module-id
         // base, so every fallible step below leaves `self` untouched (R16).
         let epoch = self.import_epoch;
@@ -888,7 +968,25 @@ impl Session {
         // touched here (R9 positional stability): only the alias, the lookup
         // key, is replaced.
         let prefix = format!("{q}::");
-        self.import_aliases.retain(|k, _| !k.starts_with(&prefix));
+        // R11/R13: a selective import also adds a *bare* alias (no `q::`
+        // prefix on the key), so a rebind must purge those too, or a stale
+        // bare alias from the old epoch's selective list would survive a
+        // rebind that no longer selects that name. A bare alias's *value*
+        // always carries the `q::` prefix (it points at the same internal
+        // spelling the qualified alias does), so purging on either side of
+        // the entry catches both shapes without needing a separate ownership
+        // map.
+        self.import_aliases
+            .retain(|k, v| !k.starts_with(&prefix) && !v.starts_with(&prefix));
+        // R11/R13: purge any selective type-position mapping this qualifier's
+        // old epoch installed, so a rebind that no longer selectively imports
+        // a type doesn't leave a stale `selective` entry resolving to the old
+        // event's module id.
+        if let Some(&old_module) = self.import_qualifier_module.get(q) {
+            self.import_selective_module.retain(|_, m| *m != old_module);
+        }
+        let selective_names: HashSet<&str> =
+            import.selective.iter().map(|(n, _)| n.as_str()).collect();
         let struct_base = self.structs.len();
         let enum_base = self.enums.len();
         let array_base = self.arrays.len();
@@ -965,7 +1063,17 @@ impl Session {
             });
             if is_export {
                 self.import_aliases
-                    .insert(format!("{q}::{}", s.name_static), name);
+                    .insert(format!("{q}::{}", s.name_static), name.clone());
+                // R11: a selectively-imported type's bare name is a *second*
+                // alias at the same internal spelling (one `StructId` behind
+                // both), plus the parallel `selective` map entry R8d's
+                // type-position resolver reads, pointing at the same module
+                // id the qualified spelling already targets.
+                if selective_names.contains(s.name_static) {
+                    self.import_aliases.insert(s.name_static.to_string(), name);
+                    self.import_selective_module
+                        .insert(s.name_static.to_string(), module_base + s.module);
+                }
             }
         }
 
@@ -1022,7 +1130,13 @@ impl Session {
                     symbol,
                 },
             );
-            self.import_aliases.insert(format!("{q}::{raw}"), internal);
+            self.import_aliases
+                .insert(format!("{q}::{raw}"), internal.clone());
+            // R11: a selectively-imported word is exposed unqualified too, a
+            // second alias at the same internal spelling.
+            if selective_names.contains(raw.as_str()) {
+                self.import_aliases.insert(raw.clone(), internal);
+            }
         }
 
         // R15: retain module 0's private names (bare word names, and for a
@@ -2175,6 +2289,55 @@ mod tests {
         assert!(
             session.env.contains_key("q::w__import1"),
             "the second event's row is the fresh one"
+        );
+    }
+
+    #[test]
+    fn session_selective_collision_is_rejected() {
+        // U5 (phase 3): the session-scope selective-collision check (R12)
+        // rejects a selectively-exposed name that already names an existing
+        // session word, and a second selective import that exposes a name a
+        // prior one already exposed, naming both sources.
+        let d = LibDir::new("u5");
+        let lib_a = d.write("a.sth", ": shared ( -- i64 ) 1 ;\nexport: shared ;\n");
+        let lib_b = d.write("b.sth", ": other ( -- i64 ) 2 ;\nexport: other ;\n");
+        let lib_c = d.write("c.sth", ": other ( -- i64 ) 3 ;\nexport: other ;\n");
+
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(": shared ( -- i64 ) 9 ;", &mut out)
+            .unwrap();
+        let err = session
+            .eval_line(
+                &format!("import: q | shared | \"{}\" ;", lib_a.display()),
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("shared") && err.contains('q'),
+            "collides with a local definition, naming both: {err}"
+        );
+        assert!(
+            !session.import_qualifier_module.contains_key("q"),
+            "the rejected import leaves the session untouched"
+        );
+
+        session
+            .eval_line(
+                &format!("import: r | other | \"{}\" ;", lib_c.display()),
+                &mut out,
+            )
+            .unwrap();
+        let err = session
+            .eval_line(
+                &format!("import: s | other | \"{}\" ;", lib_b.display()),
+                &mut out,
+            )
+            .unwrap_err();
+        assert!(
+            err.contains("other") && err.contains('r') && err.contains('s'),
+            "collides with an earlier selective import, naming both sources: {err}"
         );
     }
 

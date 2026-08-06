@@ -66,6 +66,10 @@ fn import_line(qualifier: &str, path: &Path) -> String {
     format!("import: {qualifier} \"{}\" ;", path.display())
 }
 
+fn selective_import_line(qualifier: &str, names: &str, path: &Path) -> String {
+    format!("import: {qualifier} | {names} | \"{}\" ;", path.display())
+}
+
 /// Phase 2: a session driven one line at a time, reading back each line's own
 /// output before sending the next, so the test can edit a library file on
 /// disk *between* two `import:` lines in the same process (proving R6's
@@ -451,5 +455,90 @@ fn repl_import_of_library_declaring_main_is_rejected() {
     assert!(
         out.contains("defined keep") && out.contains('5'),
         "the session survives the rejected import and runs `keep`: {out}"
+    );
+}
+
+#[test]
+fn repl_selective_import_exposes_unqualified() {
+    // Criterion 13: selective import exposes the name unqualified; the
+    // qualifier still binds too.
+    let d = LibDir::new("selective");
+    let lib = d.write(
+        "lib.sth",
+        ": w ( -- i64 ) 42 ;\n: other ( -- i64 ) 0 ;\nexport: w other ;\n",
+    );
+    let out = repl(&format!(
+        "{}\nw\nq::other\n",
+        selective_import_line("q", "w", &lib)
+    ));
+    assert!(out.contains("imported q"), "acknowledges the import: {out}");
+    assert!(
+        out.contains("42"),
+        "the selective name runs unqualified: {out}"
+    );
+    assert!(
+        out.contains('0'),
+        "the qualifier still binds its own export too: {out}"
+    );
+}
+
+#[test]
+fn repl_selective_type_import_aliases_one_struct_id() {
+    // Criterion 13a: a value constructed via the unqualified spelling and one
+    // via the qualified spelling are the same type -- one `StructId` behind
+    // both aliases, not two incompatible ones.
+    let d = LibDir::new("selective-type");
+    let lib = d.write("lib.sth", "type: T v i64 ;\nexport: T ;\n");
+    let out = repl(&format!(
+        "{}\n1 T\n2 q::T\n: id ( T -- q::T ) ;\n",
+        selective_import_line("q", "T", &lib)
+    ));
+    assert!(
+        out.contains("defined id"),
+        "a word typed `T` in and `q::T` out type-checks -- same StructId behind both spellings: {out}"
+    );
+}
+
+#[test]
+fn repl_selective_import_of_private_is_error() {
+    // Criterion 14: selective import of a private name is a visibility
+    // error, and leaves the session untouched.
+    let d = LibDir::new("selective-private");
+    let lib = d.write(
+        "lib.sth",
+        ": pub ( -- i64 ) 1 ;\n: secret ( -- i64 ) 2 ;\nexport: pub ;\n",
+    );
+    let out = repl(&selective_import_line("q", "secret", &lib));
+    assert!(
+        out.contains("not exported") && out.contains("secret"),
+        "a private selective name is a visibility error, naming it: {out}"
+    );
+    assert!(
+        !out.contains("imported q"),
+        "the rejected import leaves the session untouched: {out}"
+    );
+}
+
+#[test]
+fn repl_selective_import_collides_with_local() {
+    // Criterion 15: a selective name colliding with a session-local word
+    // errors at the second, naming both sources.
+    let d = LibDir::new("selective-collide");
+    let lib = d.write("lib.sth", ": shared ( -- i64 ) 1 ;\nexport: shared ;\n");
+    let out = repl(&format!(
+        ": shared ( -- i64 ) 9 ;\n{}\n",
+        selective_import_line("q", "shared", &lib)
+    ));
+    assert!(
+        out.contains("defined shared"),
+        "the local definition takes first: {out}"
+    );
+    assert!(
+        out.contains("shared") && out.contains('q'),
+        "the selective collision names the colliding name and its source qualifier: {out}"
+    );
+    assert!(
+        !out.contains("imported q"),
+        "the rejected import leaves the session untouched: {out}"
     );
 }
