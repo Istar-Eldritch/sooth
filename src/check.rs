@@ -4742,16 +4742,36 @@ fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
 /// `Type::Quotation` input. The checker inlines a call to one (splicing its
 /// body) and lowering mints no `IrFunc` for it, so `check` and `ir::lower`
 /// must agree on the predicate exactly; it lives here as the single source.
-/// A polymorphic combinator is handled on the poly path (phase 2), so it is
-/// excluded.
+/// Slice 6a phase 2: a **polymorphic** quotation-taking word (`each`/`map`/
+/// `fold`) is a combinator too. It never monomorphizes to a standalone
+/// `IrFunc` (R20); its body is spliced concretely at each call site, where the
+/// element/length variables become the caller's concrete types, so the same
+/// splice mechanism serves both the mono and poly cases (the poly signature
+/// only drives the standalone def-site check, R17). The quotation parameter
+/// sits in `sig.inputs` as either a variable-bearing `PolyType::Quotation` or,
+/// when its effect is fully concrete, a `Concrete(Type::Quotation)`.
 pub(crate) fn is_combinator(word: &WordDef) -> bool {
-    word.poly.is_none()
-        && matches!(word.body, WordBody::Terms { .. })
-        && word
+    if !matches!(word.body, WordBody::Terms { .. }) {
+        return false;
+    }
+    match &word.poly {
+        None => word
             .effect
             .inputs
             .iter()
-            .any(|s| matches!(s.ty, Type::Quotation(_)))
+            .any(|s| matches!(s.ty, Type::Quotation(_))),
+        Some(sig) => sig.inputs.iter().any(poly_input_is_quotation),
+    }
+}
+
+/// A polymorphic input slot that declares a quotation parameter: either a
+/// variable-bearing effect (`[ 'T -- ]`) or a fully-concrete one that folded
+/// to `Concrete(Type::Quotation)`.
+fn poly_input_is_quotation(p: &PolyType) -> bool {
+    matches!(
+        p,
+        PolyType::Quotation(..) | PolyType::Concrete(Type::Quotation(_))
+    )
 }
 
 /// R22 (D5): reject a cycle in the quotation-taking-word call subgraph. Edge
