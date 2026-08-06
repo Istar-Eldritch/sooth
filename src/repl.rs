@@ -501,6 +501,14 @@ impl Session {
         // `parse_line_with_structs` would raise. Slice 5b defines what an
         // import means in a session; this slice only refuses it, guarded here
         // beside the `type:` special-case and before the parser is reached.
+        //
+        // Known gap (slice 6a spec, R24): once 5b's per-name import path
+        // replaces this blanket rejection, importing a closure that exports
+        // a quotation-taking word must become its own located rejection
+        // here (naming file and word), pinned against what 5b actually
+        // shipped. This branch is based pre-5b, so that path does not exist
+        // yet and R24 cannot be implemented or tested against it; add it
+        // when this slice lands on a post-5b base, not silently later.
         if let Some((Token::Word(w), span)) = tokens.first() {
             if w == "import:" {
                 return Err(format!(

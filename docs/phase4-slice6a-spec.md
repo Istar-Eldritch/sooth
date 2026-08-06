@@ -375,6 +375,15 @@ named identifiers/positions, never an op name or an exit code.
   imported closure inlines fine during that closure's native compilation; only *exporting*
   it to the session (where a later line would call it, needing the discarded body) is the
   chokepoint. This is a second located rejection beside R23, both lifted by 6c.
+  *Known gap found in review:* this slice's implementation branch is based at `d033b2d`,
+  which predates the slice-5b "REPL imports" merge (`df3cee0`, now on `main`). On that
+  base, `import:` at the REPL is still 5a's blanket located rejection, so 5b's per-name
+  import path R24 targets does not exist and R24 is unreachable, not merely untested.
+  Left unimplemented rather than faked; whoever rebases/merges this slice onto a
+  post-5b `main` must add R24's import-time rejection then, before the phase is
+  considered closed, since the gap is a silent-miscompile hazard the moment the 5b
+  import path returns (an imported closure could retain its `PolyWordEntry` while
+  discarding the body the inliner needs).
 
 ### Stale diagnostics (recon 9) and dogfood/docs
 
@@ -493,7 +502,7 @@ or an exit code.
 | 14 | `each` over 1_000_000+ elements runs in constant stack under a reduced `ulimit` (`Some(0)`) | `each_over_a_million_runs_in_constant_stack` | golden | 2 |
 | 14b | the inlined `each` lowers to a loop header/back-edge, no per-element `Instr::Call` | `each_lowers_to_a_loop_not_a_per_element_call` | unit (ir) | 2 |
 | 15 | a session line defining a quotation-taking word is a located REPL rejection naming the word | `repl_quotation_taking_definition_is_rejected` | golden | 3 |
-| 16 | importing a closure that *exports* a quotation-taking word is a located rejection naming file and word; a purely-internal one imports fine | `repl_import_exporting_quotation_word_is_rejected` | golden | 3 |
+| 16 | importing a closure that *exports* a quotation-taking word is a located rejection naming file and word; a purely-internal one imports fine — **deferred**, see R24's known-gap note (unreachable on this branch's pre-5b base) | `repl_import_exporting_quotation_word_is_rejected` | golden | 3 |
 | 17 | the eight reworded diagnostics name slice 7 (runtime values), not "Phase 6" | `stale_phase6_diagnostics_are_reworded` | golden | 3 |
 | 18 | an earlier program rewritten over `each`/`map`/`fold` builds and matches its hand-threaded result | `combinators_dogfood_matches_hand_threaded` | golden | 4 |
 
