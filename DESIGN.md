@@ -447,16 +447,25 @@ disambiguation: two selective imports exposing the same unqualified name is an e
 the second, naming both modules, and a selectively-exposed name colliding with a local
 definition is the same error.
 
-**REPL imports are split off as Slice 5b**, on the precedent Phase 4 Slice 1/2 and
-Phase 3's 8b already set for native/REPL splits: the REPL carries session state native
-compilation does not (`drop_overloads` keyed by struct id, frozen resolver snapshots,
-per-name generations, every `.so` resident under `RTLD_GLOBAL`), so what an import
-*means* in a live session — reload-on-edit vs. frozen bindings, generation-mangled
-redefinition of an imported module — is a separate design problem, not this slice's to
-answer by omission. This slice ships a *located* rejection of `import:` at the REPL
-(naming the construct, not the misdirected token error a naive parse would otherwise
-produce) rather than a silently degraded path, on the precedent of a gap Slice 2's
-recon found had already produced a silent miscompile once.
+**REPL imports (Slice 5b) answer what an import means in a live session by treating it
+as an ordinary redefinition event applied to a batch of names, not a new rule.** The
+REPL's own top-level `import:` path resolves relative to the *process current working
+directory* (every transitive import inside the discovered closure keeps 5a's
+importer-relative rule unchanged, so exactly one frame of reference is new). Each
+`import:` line mints one fresh, session-wide import epoch and recompiles every word in
+the closure under it, exactly the way redefining an ordinary word mints a fresh
+generation every time: a caller already compiled against the old epoch stays frozen
+under `RTLD_GLOBAL`, while a fresh reference resolves against the new one. Splicing the
+closure into the session's flat, positionally-indexed registries (`StructId = index` and
+siblings) remaps every type id it carries from closure-local to session indices — the
+remap a fresh native compile never needs, since it never has an already-populated
+registry to append onto. Transitive re-export stays closed at the REPL exactly as
+natively: a third file imported by the imported file contributes no session-visible
+name. Registry growth on re-import is accepted, not deduplicated or capped, matching a
+redefined word's fresh generation every time. An imported file declaring `main` is a
+located rejection naming the file and the word, at import time — the native path's own
+exposure to the same collision (recon #4, ROADMAP) stays unfixed. `export:` as a REPL
+line is its own located rejection: a live session has no export boundary to cross.
 
 Out of scope for this slice, all deferred to Phase 6's eventual package/versioning
 layer or later: a serializable API description and semver enforcement (which will
@@ -856,7 +865,10 @@ rows, no borrow analysis needed to write the compiler in it.
   inconsistency than either uniform choice), and it is a breaking change to already-
   shipped, already-tested ordinary-word REPL semantics. Revisit only if live-patching is
   something actually wanted, as its own design track with its own brief, not as a side
-  effect of a generics or monomorphization slice.
+  effect of a generics or monomorphization slice. Import reload (Slice 5b) rides this
+  same frozen-generation rule rather than reopening it: a re-run `import:` line mints a
+  fresh epoch and recompiles every word in the closure under it, but an already-compiled
+  caller stays exactly as frozen as it would after any other word's redefinition.
 
 - **Accessors as lenses: separate the location from the operation.** Today a struct field
   access bakes the type, the field, and the ownership semantics into one generated word

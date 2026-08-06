@@ -571,3 +571,78 @@ fn repl_selective_reimport_same_qualifier_reloads() {
     );
     repl.finish();
 }
+
+#[test]
+fn repl_modules_dogfood_session_runs() {
+    // Criterion 16 (R17): one session narrative exercising (a) a qualified
+    // word and accessor, (b) redefine-and-reimport with a frozen caller
+    // beside a fresh resolution, (c) the main-in-a-library rejection, and
+    // (d) a selective import called unqualified.
+    let d = LibDir::new("dogfood");
+    let lib = d.write(
+        "lib.sth",
+        "type: T v i64 ;\n: w ( -- i64 ) 42 ;\nexport: T w ;\n",
+    );
+    let mut r = InteractiveRepl::spawn(&d.0);
+
+    // (a) a qualified word and a qualified accessor, run to a value.
+    let out = r.send(&import_line("q", &lib));
+    assert!(out.contains("imported q"), "imports the library: {out}");
+    let out = r.send("1 q::T q::T>v");
+    assert!(
+        out.contains('1'),
+        "the qualified accessor reads back: {out}"
+    );
+    let out = r.send(": caller ( -- i64 ) q::w ;");
+    assert!(out.contains("defined caller"), "defines caller: {out}");
+    let out = r.send("caller");
+    assert!(out.contains("42"), "the qualified word runs: {out}");
+
+    // (b) edit the library and re-import: the frozen caller keeps the old
+    // epoch's `w` while a fresh reference sees the new one.
+    d.write(
+        "lib.sth",
+        "type: T v i64 ;\n: w ( -- i64 ) 99 ;\nexport: T w ;\n",
+    );
+    let out = r.send(&import_line("q", &lib));
+    assert!(out.contains("imported q"), "re-imports: {out}");
+    let out = r.send("caller");
+    assert!(
+        out.contains("42"),
+        "the frozen caller stays on the old epoch: {out}"
+    );
+    let out = r.send("q::w");
+    assert!(
+        out.contains("99"),
+        "a fresh reference sees the new epoch: {out}"
+    );
+
+    // (c) an imported file declaring `main` is rejected, and the session
+    // survives -- `caller` still runs its old value.
+    let bad_lib = d.write(
+        "badlib.sth",
+        ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+    );
+    let out = r.send(&import_line("bad", &bad_lib));
+    assert!(
+        out.contains("main") && out.contains("badlib.sth"),
+        "the main-in-library rejection names the file and the word: {out}"
+    );
+    let out = r.send("caller");
+    assert!(
+        out.contains("42"),
+        "the rejected import left the session untouched: {out}"
+    );
+
+    // (d) a selective import exposes a name unqualified.
+    let sel_lib = d.write("sel.sth", ": s ( -- i64 ) 7 ;\nexport: s ;\n");
+    let out = r.send(&selective_import_line("r", "s", &sel_lib));
+    assert!(out.contains("imported r"), "selective import: {out}");
+    let out = r.send("s");
+    assert!(
+        out.contains('7'),
+        "the selective name runs unqualified: {out}"
+    );
+
+    r.finish();
+}
