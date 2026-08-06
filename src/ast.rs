@@ -982,6 +982,91 @@ pub enum TermKind {
     Quotation(Vec<Term>),
 }
 
+/// R18/R21: clone a combinator body, appending a unique per-inline suffix to
+/// every name a `| ... |` binds and to every later reference to such a name,
+/// so the spliced body's locals are fresh in the caller's scope and a
+/// passed-down quotation literal keeps capturing its *definition*-scope
+/// binding under transitive inlining. A `Call` that is not a body-bound local
+/// (a word, a builtin, another combinator, a cast) is left untouched. Scoping
+/// follows the language's: a bind's extent is the rest of its block, and a
+/// nested quotation or `if` arm inherits the outer binds by value. Both the
+/// checker's and lowering's inliners call this with the same `uid` discipline,
+/// so a body they both splice is renamed identically.
+pub fn alpha_rename_locals(terms: &[Term], uid: u32) -> Vec<Term> {
+    let mut bound: Vec<String> = Vec::new();
+    rename_terms(terms, uid, &mut bound)
+}
+
+fn rename_local(name: &str, uid: u32) -> String {
+    format!("{name}__inl{uid}")
+}
+
+/// Rename a `Call` naming a body-bound local. A borrow reads its local through
+/// a `&`/`&!` sigil (`&arr`, `&!arr`), so the sigil is split off, the local
+/// part renamed if bound, and the sigil re-attached; a `Call` that is not a
+/// bound local (a word, `&>`, a cast) is returned unchanged.
+fn rename_call(name: &str, uid: u32, bound: &[String]) -> String {
+    let is_bound = |n: &str| bound.iter().any(|b| b == n);
+    if let Some(inner) = name.strip_prefix("&!") {
+        if is_bound(inner) {
+            return format!("&!{}", rename_local(inner, uid));
+        }
+    } else if let Some(inner) = name.strip_prefix('&') {
+        if is_bound(inner) {
+            return format!("&{}", rename_local(inner, uid));
+        }
+    } else if is_bound(name) {
+        return rename_local(name, uid);
+    }
+    name.to_string()
+}
+
+fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> {
+    let start = bound.len();
+    let mut out = Vec::with_capacity(terms.len());
+    for term in terms {
+        let kind = match &term.kind {
+            TermKind::Bind(names) => {
+                let renamed = names
+                    .iter()
+                    .map(|n| {
+                        bound.push(n.clone());
+                        rename_local(n, uid)
+                    })
+                    .collect();
+                TermKind::Bind(renamed)
+            }
+            TermKind::Call(name) => TermKind::Call(rename_call(name, uid, bound)),
+            TermKind::Quotation(inner) => {
+                let mut inner_bound = bound.clone();
+                TermKind::Quotation(rename_terms(inner, uid, &mut inner_bound))
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                else_span,
+                end_span,
+            } => {
+                let mut tb = bound.clone();
+                let mut eb = bound.clone();
+                TermKind::If {
+                    then_branch: rename_terms(then_branch, uid, &mut tb),
+                    else_branch: rename_terms(else_branch, uid, &mut eb),
+                    else_span: *else_span,
+                    end_span: *end_span,
+                }
+            }
+            other => other.clone(),
+        };
+        out.push(Term {
+            kind,
+            span: term.span,
+        });
+    }
+    bound.truncate(start);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

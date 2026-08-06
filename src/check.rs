@@ -14,7 +14,7 @@ use crate::ast::{
     instantiation_symbol, intern_array_type, intern_bundle_struct, intern_owned_cell_type,
     intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId, ExternDecl, Len, Module,
     OwnedCellDecl, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Subst, Term, TermKind, Type, VariantDecl, WordBody, WordDef,
+    Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -423,6 +423,13 @@ struct Provenance {
     /// rejection; `scope.depth()` cannot substitute, since it counts every
     /// block, not only a `times`.
     times_depth: usize,
+    /// R18/R21: a monotonic counter minting a fresh suffix each time a
+    /// combinator body is spliced, so the callee's `| ... |` locals are
+    /// alpha-renamed to names no caller local (or outer combinator, under
+    /// transitive inlining) can collide with. Term-splice binds names in the
+    /// caller's scope (R18: binding, not string rewriting), so without this a
+    /// nested `each` inside a `map` would re-bind the outer `arr`/`f`.
+    inline_uid: u32,
 }
 
 impl Provenance {
@@ -1267,9 +1274,38 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
-            // R7: a polymorphic body is checked over a `PolyType` stack by a
-            // dedicated pass, deliberately separate from the concrete walk.
-            check_poly_body(word, sig, &env, structs, enums, arrays)?;
+            if is_combinator(word) {
+                // R14-R17: a polymorphic combinator (`each`/`map`/`fold`) is
+                // checked standalone by instantiating its signature at
+                // concrete stand-in types and running the ordinary checker on
+                // the body, which already handles the abstract quotation
+                // `call`/`times` (R8/R9) and the three `times` obligations
+                // (R16). It mints no `IrFunc` (R20): a call to it is inlined
+                // by term-splice at its concrete call sites, so the
+                // instantiation records it produces here are scratch.
+                let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+                let mut poly = PolyCtx {
+                    env: &poly_env,
+                    insts: &mut scratch,
+                    combinators: &combinators,
+                };
+                check_poly_combinator_standalone(
+                    word,
+                    sig,
+                    enums,
+                    &env,
+                    arrays,
+                    owned_cells,
+                    refs,
+                    structs,
+                    &mut poly,
+                )?;
+            } else {
+                // R7: a polymorphic body is checked over a `PolyType` stack by
+                // a dedicated pass, deliberately separate from the concrete
+                // walk.
+                check_poly_body(word, sig, &env, structs, enums, arrays)?;
+            }
         } else {
             let mut poly = PolyCtx {
                 env: &poly_env,
@@ -3328,6 +3364,83 @@ impl PolyScope {
     }
 }
 
+/// R14-R17: check a polymorphic combinator standalone by instantiating its
+/// signature at concrete stand-in types and running the ordinary concrete
+/// checker on the body. `i64` is Copy/Ord/numeric, so a body that only moves,
+/// reads, and hands an element to its quotation parameter checks exactly as it
+/// will at every Copy instantiation; the abstract `call`/`times` paths (R8/R9)
+/// type `f call`/`f times` against the declared effect, and the three `times`
+/// obligations (R16) fall out of the ordinary `times` check at the def site.
+/// Instantiating every type variable at the same `i64` cannot mask a real
+/// error the library relies on: the combinators never combine two distinct
+/// element/accumulator variables directly (that arithmetic lives in the
+/// caller's literal), and a type-specific misuse in some other combinator's
+/// body is caught at its concrete splice site, the same place obligation 2's
+/// borrow re-check lands (D4/R21). The array length is irrelevant to type
+/// checking (`times` supplies a runtime index), so any value serves.
+#[allow(clippy::too_many_arguments)]
+fn check_poly_combinator_standalone(
+    word: &WordDef,
+    sig: &PolySig,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    structs: &[StructDecl],
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    const STANDALONE_LEN: u32 = 4;
+    let ctx = word_ctx(word, structs, enums);
+    let span = word_span(word);
+    let mut subst = Subst::default();
+    for v in 0..sig.ty_var_names.len() as u32 {
+        subst.ty.push((v, Type::I64));
+    }
+    for ln in 0..sig.len_var_names.len() as u32 {
+        subst.len.push((ln, STANDALONE_LEN));
+    }
+    let mut inputs = Vec::with_capacity(sig.inputs.len());
+    for pty in &sig.inputs {
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        inputs.push(TypedSlot { name: None, ty });
+    }
+    let mut outputs = Vec::with_capacity(sig.outputs.len());
+    for pty in &sig.outputs {
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        outputs.push(TypedSlot { name: None, ty });
+    }
+    let terms = match &word.body {
+        WordBody::Terms { terms } => terms.clone(),
+        WordBody::Clauses(_) => {
+            return Err(format!(
+                "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
+                word.name
+            ));
+        }
+    };
+    // A concrete stand-in for the combinator, checked by the ordinary path.
+    let concrete = WordDef {
+        name: word.name.clone(),
+        effect: StackEffect { inputs, outputs },
+        body: WordBody::Terms { terms },
+        poly: None,
+        module: word.module,
+    };
+    let mut dropped = Vec::new();
+    check_word(
+        &concrete,
+        enums,
+        env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &mut dropped,
+        poly,
+    )
+}
+
 /// R7: check a polymorphic word's body once, over a virtual stack of
 /// `PolyType` (never the concrete `Slot` stack, S1/R4). Seeded from the
 /// declared fixed inputs; the input row variable is an opaque below-stack
@@ -4912,9 +5025,16 @@ fn inline_combinator(
             }
         }
     }
+    // R18/R21: splice the callee body, alpha-renamed so its `| ... |` locals
+    // cannot collide with a caller local or, under transitive inlining, an
+    // outer combinator's locals already in scope. Lowering renames identically
+    // (`ir`), so a passed-down literal's captured name stays lexical.
+    let uid = prov.inline_uid;
+    prov.inline_uid += 1;
+    let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
     let depth = scope.depth();
     stack = check_terms(
-        comb.terms, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+        &renamed, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
     )?;
     leave_block(
         ctx,

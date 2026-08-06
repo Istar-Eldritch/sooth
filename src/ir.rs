@@ -2260,6 +2260,12 @@ struct FuncBuilder<'a> {
     /// no `Binding` analogue is needed here (D2); `call`/`times` resolve the
     /// body through this map.
     quot_bodies: HashMap<Value, QuotId>,
+    /// R18/R21: a monotonic per-function suffix counter, mirroring the
+    /// checker's, so a combinator body spliced here is alpha-renamed exactly as
+    /// it was for checking. Without it a passed-down literal's captured name
+    /// would rebind to an inner combinator's same-named local (dynamic, not
+    /// lexical, capture).
+    inline_uid: u32,
 }
 
 impl<'a> FuncBuilder<'a> {
@@ -2305,6 +2311,7 @@ impl<'a> FuncBuilder<'a> {
             ref_inner: HashMap::new(),
             quot_defs: Vec::new(),
             quot_bodies: HashMap::new(),
+            inline_uid: 0,
         }
     }
 
@@ -2859,7 +2866,13 @@ impl<'a> FuncBuilder<'a> {
                 // splice above. Checked before the `&`/conversion/struct
                 // dispatch since a combinator name is an ordinary word name.
                 if let Some(body) = self.combinators.get(name) {
-                    let body = body.clone();
+                    // R18/R21: alpha-rename the callee body identically to the
+                    // checker, so its `| ... |` locals are fresh and a
+                    // passed-down literal keeps its lexical capture under
+                    // transitive inlining.
+                    let uid = self.inline_uid;
+                    self.inline_uid += 1;
+                    let body = crate::ast::alpha_rename_locals(body, uid);
                     let locals_depth = self.locals.len();
                     self.lower_terms(&body, false);
                     self.locals.truncate(locals_depth);

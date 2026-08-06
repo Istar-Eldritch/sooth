@@ -1,0 +1,28 @@
+\ Phase 4 slice 6a: the polymorphic array combinators, written in Sooth and
+\ inlined (term-spliced) at every concrete call site, so each lowers to a tight
+\ `times` loop with no per-element call and runs in constant stack.
+\
+\ Each is a leaf combinator: it drives a `times` loop directly and hands one
+\ element to its quotation parameter per iteration. `map`/`fold` are NOT built
+\ on `each`: `fold` must thread an accumulator and `map` must write each result
+\ back, and this slice's quotation effects are a fixed input/output list with no
+\ row variable (R28) and no captured borrow (D3), so neither can be expressed
+\ through `each`'s `[ 'T -- ]` element quotation. They share the loop shape, not
+\ a call.
+
+export: each map fold ;
+
+: each ( ['T 'N] [ 'T -- ] -- )
+  | f | len >i64 | count | | arr |
+  count [ | i | &arr i >usize &> @ f call ] times
+  arr drop ;
+
+: map ( ['T 'N] [ 'T -- 'T ] -- ['T 'N] )
+  | f | len >i64 | count | | arr |
+  count [ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times
+  arr ;
+
+: fold ( ['T 'N] 'A [ 'A 'T -- 'A ] -- 'A )
+  | f | | acc | len >i64 | count | | arr |
+  acc count [ | i | &arr i >usize &> @ f call ] times
+  arr drop ;
