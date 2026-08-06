@@ -318,9 +318,9 @@ a silent real call (D5). `each`/`map`/`fold` are ordinary polymorphic Sooth word
 handing one to its quotation parameter per iteration, verified to lower to a tight loop with
 no per-element `Instr::Call` and to run 1M+ elements in constant stack. Native only: the
 REPL is a located rejection at both the defining line and an imported closure exporting a
-quotation-taking word (D7), lifted by 6c. `examples/array_totals.sth` dogfoods it, rewriting a
-hand-threaded array walk (three manual `times` loops) over three one-line combinator calls to
-the same total and doubled elements.
+quotation-taking word (D7), lifted by 6c. `examples/array_totals.sth` dogfoods it, rewriting
+the earlier hand-threaded array walk `examples/array_totals_hand.sth` (three manual `times`
+loops) over three one-line combinator calls to the same total and doubled elements.
 
 **Next action: Phase 4 Slice 6b** (the polymorphic-path gaps + `filter`/`while`): a
 polymorphic body's `if` and a polymorphic self-tail word's loop transform, the two gaps 6a's

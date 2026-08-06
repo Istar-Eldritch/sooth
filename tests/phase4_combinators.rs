@@ -462,37 +462,31 @@ fn repl_poly_quotation_taking_definition_is_rejected() {
 fn combinators_dogfood_matches_hand_threaded() {
     // R27: `examples/array_totals.sth` sums and doubles a small array through
     // `fold`/`map`/`each` imported from `lib/combinators.sth`. This asserts
-    // it builds and runs to the same total and doubled elements as its
-    // hand-threaded original: three manual `times` loops over the same
-    // array, each with a synthesized `>usize` index, a `&arr i &> @` read,
-    // and (for the doubling loop) a `&!arr i &!> v !` write, the exact shape
-    // the inliner must produce (recon 2).
-    let hand_threaded = ": scores ( -- [i64 5] )\n\
-         0 5 fill | s |\n\
-         &!s 0 >usize &!> 3 !\n\
-         &!s 1 >usize &!> 7 !\n\
-         &!s 2 >usize &!> 1 !\n\
-         &!s 3 >usize &!> 9 !\n\
-         &!s 4 >usize &!> 5 !\n\
-         s ;\n\
-         : main ( -- )\n\
-         scores | arr |\n\
-         0 5 [ | i | &arr i >usize &> @ + ] times .\n\
-         5 [ | i | &arr i >usize &> @ 2 * | v | &!arr i >usize &!> v ! ] times\n\
-         5 [ | i | &arr i >usize &> @ . ] times\n\
-         arr drop ;\n";
-    let (hand_stdout, hand_code) = run_src("dogfood-hand", hand_threaded);
-    assert_eq!(hand_code, 0);
+    // it builds and runs to the same total and doubled elements as the
+    // earlier program it rewrites, `examples/array_totals_hand.sth`: three
+    // manual `times` loops over the same array, each with a synthesized
+    // `>usize` index, a `&arr i &> @` read, and (for the doubling loop) a
+    // `&!arr i &!> v !` write, the exact shape the inliner must produce
+    // (recon 2). Both are real committed files, not a string invented
+    // inside this test, so the rewrite has an actual earlier artifact.
+    fn build_and_run(path: &str) -> (String, Option<i32>) {
+        let binary =
+            sooth::driver::build(std::path::Path::new(path)).expect("example should build");
+        let output = std::process::Command::new(&binary)
+            .output()
+            .expect("binary should run");
+        std::fs::remove_file(&binary).ok();
+        (
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            output.status.code(),
+        )
+    }
+
+    let (hand_stdout, hand_code) = build_and_run("examples/array_totals_hand.sth");
+    assert_eq!(hand_code, Some(0));
     assert_eq!(hand_stdout, "25\n6\n14\n2\n18\n10\n");
 
-    let binary = sooth::driver::build(std::path::Path::new("examples/array_totals.sth"))
-        .expect("examples/array_totals.sth should build");
-    let output = std::process::Command::new(&binary)
-        .output()
-        .expect("binary should run");
-    std::fs::remove_file(&binary).ok();
-    let combinator_stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
-
+    let (combinator_stdout, combinator_code) = build_and_run("examples/array_totals.sth");
     assert_eq!(combinator_stdout, hand_stdout);
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(combinator_code, Some(0));
 }
