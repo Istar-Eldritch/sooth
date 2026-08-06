@@ -509,6 +509,12 @@ pub enum PolyType {
     /// A type variable (index into `PolySig::ty_var_names`).
     Var(u32),
     Array(Box<PolyType>, Len),
+    /// Slice 6a (R5): a declared quotation effect whose rows may mention the
+    /// signature's type/length variables (`[ 'T -- ]` where `'T` is the
+    /// element variable). Folds to `Concrete(Type::Quotation(..))` when fully
+    /// concrete (`raw_to_poly_type`); only a variable-bearing effect stays
+    /// here.
+    Quotation(Vec<PolyType>, Vec<PolyType>),
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature
@@ -714,6 +720,64 @@ pub enum Type {
     /// R5): what a C `char*` parameter wants and what one hands back. `Copy`
     /// like `Str`, for the same reason.
     Cstr,
+    /// Slice 6a (R4): a quotation effect type `[ <inputs> -- <outputs> ]`, the
+    /// type a word declares for a quotation parameter. Holds a `&'static`
+    /// `QuotEffect` carrying the declared input/output rows and the leaked
+    /// `[ ... -- ... ]` spelling, so `Type` stays `Copy` and self-renders like
+    /// every other variant. Structural `PartialEq` through the reference gives
+    /// value equality (what unification needs) with no interning table to
+    /// thread. **No "statically known" bit** (D6): the type says only "a
+    /// quotation of this effect", never that a literal is known here; knownness
+    /// stays on the checker's `Slot.quot`. Never lowered to an `IrType` this
+    /// slice: a quotation-taking word mints no standalone `IrFunc` (R20), so
+    /// this type never reaches the backend (the runtime representation is
+    /// slice 7).
+    Quotation(&'static QuotEffect),
+}
+
+/// Slice 6a (R4): a declared quotation effect, the payload behind
+/// `Type::Quotation`. Leaked as a `&'static` (like `ArrayDecl::name_static`)
+/// rather than threaded through a per-module registry, since it needs no dedup
+/// key beyond its own structural equality. Derived `PartialEq`/`Eq` give the
+/// value equality unification relies on; `name_static` is a pure function of
+/// the rows, so comparing it too is harmless.
+#[derive(Debug, PartialEq, Eq)]
+pub struct QuotEffect {
+    pub inputs: Vec<Type>,
+    pub outputs: Vec<Type>,
+    pub name_static: &'static str,
+}
+
+/// Build a `Type::Quotation` for a declared effect, leaking its rows and its
+/// rendered `[ ... -- ... ]` spelling. Two quotation types with equal rows
+/// compare equal through the `&'static` reference, so a repeated spelling is
+/// harmless duplication, never a correctness hazard.
+pub fn quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
+    let name = render_quotation_effect(&inputs, &outputs);
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let eff: &'static QuotEffect = Box::leak(Box::new(QuotEffect {
+        inputs,
+        outputs,
+        name_static,
+    }));
+    Type::Quotation(eff)
+}
+
+/// Render a quotation effect's spelling `[ <in>... -- <out>... ]`. The nil
+/// effect renders `[ -- ]`.
+fn render_quotation_effect(inputs: &[Type], outputs: &[Type]) -> String {
+    let mut s = String::from("[ ");
+    for t in inputs {
+        s.push_str(t.name());
+        s.push(' ');
+    }
+    s.push_str("--");
+    for t in outputs {
+        s.push(' ');
+        s.push_str(t.name());
+    }
+    s.push_str(" ]");
+    s
 }
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
@@ -859,6 +923,7 @@ impl Type {
             Type::Isize => "isize",
             Type::Str => "str",
             Type::Cstr => "cstr",
+            Type::Quotation(eff) => eff.name_static,
         }
     }
 }

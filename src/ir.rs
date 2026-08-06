@@ -179,6 +179,15 @@ pub fn ir_type_of(ty: Type) -> IrType {
         Type::Isize => IrType::Isize,
         Type::Str => IrType::Str,
         Type::Cstr => IrType::Cstr,
+        // Slice 6a (R7): a quotation type has no runtime representation this
+        // slice (D6). A quotation-taking word mints no standalone `IrFunc`
+        // (R20) and is inlined at every call site, so its declared effect
+        // never reaches the backend; the audit (R7a) rejects a quotation type
+        // at every position that would layout or lower one before this is
+        // reached. Slice 7 lifts this with a `(code, env)` runtime value.
+        Type::Quotation(_) => {
+            unreachable!("a quotation type has no IrType this slice (R7/R7a/R20; slice 7)")
+        }
     }
 }
 
@@ -1057,6 +1066,27 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 .map(|sig| (w.name.clone(), sig.inputs.len()))
         })
         .collect();
+    // R20: a monomorphic quotation-taking word (a combinator) mints no
+    // standalone `IrFunc`: every call to it is inlined (R19, the splice in
+    // `lower_call`), so it is excluded from both the plain-name env and the
+    // per-word pass, exactly as a poly word or a `drop` overload is. Its body
+    // is registered in `combinator_bodies` so the inliner can splice it.
+    let combinator_indices: std::collections::HashSet<usize> = module
+        .words
+        .iter()
+        .enumerate()
+        .filter(|(_, w)| crate::check::is_combinator(w))
+        .map(|(idx, _)| idx)
+        .collect();
+    let combinator_bodies: HashMap<String, Vec<Term>> = module
+        .words
+        .iter()
+        .filter(|w| crate::check::is_combinator(w))
+        .map(|w| match &w.body {
+            WordBody::Terms { terms } => (w.name.clone(), terms.clone()),
+            WordBody::Clauses(_) => unreachable!("a combinator is `WordBody::Terms` (R18)"),
+        })
+        .collect();
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -1077,7 +1107,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !drop_overload_indices.contains(idx) && !poly_indices.contains(idx))
+        .filter(|(idx, _)| {
+            !drop_overload_indices.contains(idx)
+                && !poly_indices.contains(idx)
+                && !combinator_indices.contains(idx)
+        })
         .map(|(_, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
@@ -1123,7 +1157,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .words
         .iter()
         .enumerate()
-        .filter(|(idx, _)| !drop_overload_indices.contains(idx) && !poly_indices.contains(idx))
+        .filter(|(idx, _)| {
+            !drop_overload_indices.contains(idx)
+                && !poly_indices.contains(idx)
+                && !combinator_indices.contains(idx)
+        })
         .map(|(_, w)| {
             let self_tail = crate::check::has_self_tail_call(w);
             lower_word_parts(
@@ -1136,6 +1174,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 regs,
                 &module.instantiations,
                 &poly_arities,
+                &combinator_bodies,
             )
         })
         .collect();
@@ -1194,6 +1233,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             regs,
             &module.instantiations,
             &poly_arities,
+            &combinator_bodies,
         ));
     }
 
@@ -1918,6 +1958,13 @@ fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl]) -> Type {
                 .expect("checked: the concrete array shape was interned at the call site");
             Type::Array(ArrayId::from_index(idx), arrays[idx].name_static)
         }
+        // Slice 6a (R7): a quotation-taking word is never monomorphized to a
+        // standalone `IrFunc` (R20), so no `θ` is ever applied to a declared
+        // quotation effect at lowering. Unreachable, guarded by R7a's audit
+        // and R20u.
+        PolyType::Quotation(..) => {
+            unreachable!("a quotation effect never reaches monomorphized lowering (R7/R20)")
+        }
     }
 }
 
@@ -1944,6 +1991,7 @@ pub(crate) fn lower_word(
         regs,
         instantiations,
         poly_arities,
+        empty_combinators(),
     )
 }
 
@@ -1976,6 +2024,7 @@ pub(crate) fn lower_instantiation(
         regs,
         empty_instantiations(),
         empty_poly_arities(),
+        empty_combinators(),
     )
 }
 
@@ -1995,6 +2044,7 @@ fn lower_word_parts(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     let params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     let bundle = bundle_of(&effect.outputs, regs.structs);
@@ -2003,6 +2053,7 @@ fn lower_word_parts(
     let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
     b.instantiations = instantiations;
     b.poly_arities = poly_arities;
+    b.combinators = combinators;
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -2090,6 +2141,14 @@ fn empty_poly_arities() -> &'static HashMap<String, usize> {
     EMPTY.get_or_init(HashMap::new)
 }
 
+/// R19: the combinator-body companion of `empty_instantiations`. A path with
+/// no monomorphic quotation-taking words to inline (the REPL, D2; destructor
+/// synthesis; unit tests) hands out this empty map.
+fn empty_combinators() -> &'static HashMap<String, Vec<Term>> {
+    static EMPTY: std::sync::OnceLock<HashMap<String, Vec<Term>>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
 fn is_aggregate(ty: IrType) -> bool {
     matches!(ty, IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_))
 }
@@ -2129,6 +2188,13 @@ struct FuncBuilder<'a> {
     /// many args a polymorphic call pops (the `CallInst` carries the output
     /// shape, but the input count is name-constant across θ, so it lives here).
     poly_arities: &'a HashMap<String, usize>,
+    /// R19/R20: monomorphic quotation-taking words (combinators), name-keyed
+    /// to their bodies. A `Call` of such a name is spliced in place rather
+    /// than lowered to an `Instr::Call`, mirroring the checker's inliner
+    /// (R18): the callee mints no `IrFunc` (it is absent from `funcs`/`env`),
+    /// so its only reachable form is the splice. Empty on the REPL/destructor/
+    /// test paths.
+    combinators: &'a HashMap<String, Vec<Term>>,
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
@@ -2220,6 +2286,7 @@ impl<'a> FuncBuilder<'a> {
             refs,
             instantiations: empty_instantiations(),
             poly_arities: empty_poly_arities(),
+            combinators: empty_combinators(),
             cur_word_name,
             header: None,
             carried_slots: Vec::new(),
@@ -2781,6 +2848,23 @@ impl<'a> FuncBuilder<'a> {
             "^" | "^>" | "^|>" => self.lower_owned_cell_word(name),
             "@" | "!" | "+!" => self.lower_access_word(name),
             _ => {
+                // R19: a call to a monomorphic combinator is inlined, not
+                // lowered to an `Instr::Call` -- the callee mints no `IrFunc`
+                // (R20), so its only reachable form is this splice. The
+                // caller's quotation literals sit on `self.stack` as phantom
+                // `Value`s already (a `TermKind::Quotation` earlier in this
+                // body recorded each `Value -> QuotId`), so the spliced body's
+                // own `call`/`times` resolves them with no extra plumbing.
+                // `tail = false` and the locals-truncate mirror the `call`
+                // splice above. Checked before the `&`/conversion/struct
+                // dispatch since a combinator name is an ordinary word name.
+                if let Some(body) = self.combinators.get(name) {
+                    let body = body.clone();
+                    let locals_depth = self.locals.len();
+                    self.lower_terms(&body, false);
+                    self.locals.truncate(locals_depth);
+                    return;
+                }
                 // Every `&`-led word: the two prefix borrow operators and the
                 // reference-mode accessor family.
                 if name.starts_with('&') {
@@ -7289,6 +7373,56 @@ mod tests {
                     ]),
                 ],
             }])
+        );
+    }
+
+    #[test]
+    fn quotation_taking_word_emits_no_call_and_no_irfunc() {
+        // Criterion 3b/R20: a monomorphic quotation-taking word is inlined, so
+        // it mints no `IrFunc` and its caller emits no `Instr::Call`. The
+        // lowered `main` is just `1 +` (the spliced literal over `3`), a pure
+        // arithmetic body. Deleting the `combinator_indices` filter would put
+        // an `apply` func back, and deleting the `lower_call` inline branch
+        // would leave an `Instr::Call apply` in `main`.
+        let ir = lower_src(
+            ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+             : main ( -- ) 3 [ 1 + ] apply . ;\n",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "apply"),
+            "a combinator mints no `IrFunc`, but one named `apply` was emitted"
+        );
+        let main = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("`main` is emitted");
+        assert!(
+            call_symbols(main).is_empty(),
+            "the inlined caller emits no `Instr::Call`, got: {:?}",
+            call_symbols(main)
+        );
+    }
+
+    #[test]
+    fn quotation_type_never_reaches_mangling_or_irtype() {
+        // Criterion 2d: R7's `unreachable!` arms are only sound because R7a's
+        // audit and R20's lowering filter keep a quotation type away from
+        // `ir_type_of` (layout) and `subst_polytype` (mangling). This asserts
+        // the arms *are* the guard: each panics on a quotation, so replacing
+        // an `unreachable!` with a real mapping (a silent accept) flips the
+        // corresponding half of this test from panic to value and fails it.
+        use crate::ast::{quotation_type, PolyType};
+        let quot = quotation_type(vec![Type::I64], vec![Type::I64]);
+        assert!(
+            std::panic::catch_unwind(|| ir_type_of(quot)).is_err(),
+            "`ir_type_of` on a quotation must hit the R7 `unreachable!` arm"
+        );
+        let poly_quot = PolyType::Quotation(vec![PolyType::Concrete(Type::I64)], Vec::new());
+        let subst = Subst::default();
+        assert!(
+            std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[])).is_err(),
+            "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
         );
     }
 }
