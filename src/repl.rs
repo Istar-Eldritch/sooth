@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -20,6 +20,7 @@ use crate::ast::{
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
+use crate::editor;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
 use crate::lexer::Token;
@@ -1855,11 +1856,55 @@ fn end_session(session: &mut Session, writer: &mut impl Write) -> Result<(), Str
     Ok(())
 }
 
-/// The read-eval-print loop: blank lines are skipped silently, `:quit` or EOF
-/// exits cleanly (disposing any residual linear values first), and any stage
-/// error prints the diagnostic without mutating session state.
-pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
+/// What the shared dispatch helper decided about a committed line.
+enum Dispatch {
+    Continue,
+    Quit,
+}
+
+/// D1: the single point every committed logical line funnels through, on both
+/// the piped and the tty path, so the call sequence the piped goldens observe
+/// is preserved by construction. Blank lines are skipped, `:quit` requests a
+/// clean exit, and any stage error prints the diagnostic without mutating
+/// session state.
+fn dispatch_line(
+    session: &mut Session,
+    line: &str,
+    writer: &mut impl Write,
+) -> Result<Dispatch, String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(Dispatch::Continue);
+    }
+    if trimmed == ":quit" {
+        return Ok(Dispatch::Quit);
+    }
+    if let Err(e) = session.eval_line(trimmed, writer) {
+        writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
+    }
+    Ok(Dispatch::Continue)
+}
+
+/// The read-eval-print loop. D1: branch once, at entry, on whether stdin is a
+/// terminal. Not a tty -> the piped `read_line` loop, byte-for-byte as today
+/// (F2). A tty -> the raw-mode line editor. Both funnel each committed line
+/// through `dispatch_line`.
+pub fn run(reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
     let mut session = Session::new();
+    if std::io::stdin().is_terminal() {
+        run_tty(&mut session, &mut writer)
+    } else {
+        run_piped(&mut session, reader, &mut writer)
+    }
+}
+
+/// The piped (non-tty) path: identical in shape and order to the pre-editor
+/// REPL, only routed through the shared `dispatch_line` (F2/D1).
+fn run_piped(
+    session: &mut Session,
+    mut reader: impl BufRead,
+    writer: &mut impl Write,
+) -> Result<(), String> {
     let mut line = String::new();
     loop {
         line.clear();
@@ -1867,18 +1912,57 @@ pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Strin
             .read_line(&mut line)
             .map_err(|e| format!("reading stdin: {e}"))?;
         if n == 0 {
-            return end_session(&mut session, &mut writer);
+            return end_session(session, writer);
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        match dispatch_line(session, &line, writer)? {
+            Dispatch::Quit => return end_session(session, writer),
+            Dispatch::Continue => {}
         }
-        if trimmed == ":quit" {
-            return end_session(&mut session, &mut writer);
+    }
+}
+
+/// The primary prompt (tty only; never written on the piped path, F2).
+const PROMPT: &str = "sooth> ";
+
+/// The tty path: put stdin in raw mode (restored on any exit by the guard's
+/// `Drop`, D5), then read bytes into the line editor, dispatching each
+/// committed line through `dispatch_line`. Ctrl-C abandons the line; Ctrl-D on
+/// an empty line and a closed stdin both end the session.
+fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
+    let _guard = editor::raw_mode_stdin();
+    let mut ed = editor::Editor::new(PROMPT, editor::History::load());
+    let w = |r: std::io::Result<()>| r.map_err(|e| format!("writing stdout: {e}"));
+    w(ed.redraw(writer))?;
+    w(writer.flush())?;
+    loop {
+        let byte = editor::read_stdin_byte().map_err(|e| format!("reading stdin: {e}"))?;
+        let Some(byte) = byte else {
+            w(writer.write_all(b"\r\n"))?;
+            return end_session(session, writer);
+        };
+        let action = ed
+            .push_byte(byte, writer)
+            .map_err(|e| format!("writing stdout: {e}"))?;
+        match action {
+            None => {}
+            Some(editor::Action::Commit(cmd)) => {
+                w(writer.write_all(b"\r\n"))?;
+                match dispatch_line(session, &cmd, writer)? {
+                    Dispatch::Quit => return end_session(session, writer),
+                    Dispatch::Continue => {}
+                }
+                w(ed.redraw(writer))?;
+            }
+            Some(editor::Action::Abort) => {
+                w(writer.write_all(b"\r\n"))?;
+                w(ed.redraw(writer))?;
+            }
+            Some(editor::Action::Eof) => {
+                w(writer.write_all(b"\r\n"))?;
+                return end_session(session, writer);
+            }
         }
-        if let Err(e) = session.eval_line(trimmed, &mut writer) {
-            writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
-        }
+        w(writer.flush())?;
     }
 }
 
