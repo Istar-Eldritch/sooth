@@ -334,6 +334,8 @@ pub enum Action {
 /// escape sequence spanning several 1-byte reads still decodes as one key.
 pub struct Editor {
     prompt: String,
+    /// Shown instead of `prompt` while `pending_lines` is non-empty (R10).
+    continuation_prompt: String,
     buf: Vec<u8>,
     cursor: usize,
     pending: Vec<u8>,
@@ -342,18 +344,33 @@ pub struct Editor {
     /// fresh line. `stash` holds the fresh line set aside on the first recall.
     hist_nav: Option<usize>,
     stash: Vec<u8>,
+    /// Committed physical lines not yet forming a `Complete` logical line
+    /// (slice 2, R9/R10). Joined with `\n` and re-checked after each Enter.
+    pending_lines: Vec<String>,
+    /// Pure predicate injected so this module stays decoupled from the lexer
+    /// (per the growth-structure split): `true` iff the joined pending text
+    /// is a complete logical line.
+    is_complete: fn(&str) -> bool,
 }
 
 impl Editor {
-    pub fn new(prompt: &str, history: History) -> Editor {
+    pub fn new(
+        prompt: &str,
+        continuation_prompt: &str,
+        history: History,
+        is_complete: fn(&str) -> bool,
+    ) -> Editor {
         Editor {
             prompt: prompt.to_string(),
+            continuation_prompt: continuation_prompt.to_string(),
             buf: Vec::new(),
             cursor: 0,
             pending: Vec::new(),
             history,
             hist_nav: None,
             stash: Vec::new(),
+            pending_lines: Vec::new(),
+            is_complete,
         }
     }
 
@@ -430,10 +447,23 @@ impl Editor {
                 let line = String::from_utf8_lossy(&self.buf).into_owned();
                 self.history.record(&line)?;
                 self.reset_line();
-                return Ok(Some(Action::Commit(line)));
+                self.pending_lines.push(line);
+                let joined = self.pending_lines.join("\n");
+                if (self.is_complete)(&joined) {
+                    // R10: a complete logical line, possibly joined from
+                    // several physical lines, dispatched as one unit.
+                    self.pending_lines.clear();
+                    return Ok(Some(Action::Commit(joined)));
+                }
+                // NeedMore: buffer the physical line and switch to the
+                // continuation prompt instead of compiling a partial line.
+                self.redraw(out)?;
             }
             Key::CtrlC => {
                 self.reset_line();
+                // R11: Ctrl-C discards any pending multi-line buffer too,
+                // not just the current line, returning to the primary prompt.
+                self.pending_lines.clear();
                 return Ok(Some(Action::Abort));
             }
             Key::CtrlD => {
@@ -492,12 +522,17 @@ impl Editor {
     /// prompt + buffer, erase any trailing remnant, then reposition the cursor.
     /// Assumes an ASCII prompt (its byte length is its column width).
     pub fn redraw(&self, out: &mut impl Write) -> io::Result<()> {
+        let prompt = if self.pending_lines.is_empty() {
+            &self.prompt
+        } else {
+            &self.continuation_prompt
+        };
         out.write_all(b"\r")?;
-        out.write_all(self.prompt.as_bytes())?;
+        out.write_all(prompt.as_bytes())?;
         out.write_all(&self.buf)?;
         out.write_all(b"\x1b[K")?;
         out.write_all(b"\r")?;
-        let col = self.prompt.len() + self.cursor;
+        let col = prompt.len() + self.cursor;
         if col > 0 {
             write!(out, "\x1b[{col}C")?;
         }
@@ -512,7 +547,7 @@ mod tests {
     use std::rc::Rc;
 
     fn editor(history: History) -> Editor {
-        Editor::new("> ", history)
+        Editor::new("> ", "... ", history, |_| true)
     }
 
     fn empty_history() -> History {
@@ -607,6 +642,39 @@ mod tests {
         assert_eq!(actions, vec![Action::Abort]);
         assert!(ed.buf.is_empty());
         assert_eq!(ed.cursor, 0);
+    }
+
+    #[test]
+    fn editor_multiline_def_submits_as_one_line() {
+        // R10/R14: real completeness predicate, driven by two physical lines
+        // of an unclosed `:` definition followed by the closing `;`.
+        let mut ed = Editor::new("> ", "... ", empty_history(), crate::repl::text_is_complete);
+        let none = feed(&mut ed, b": sq ( i64 -- i64 )\r");
+        assert!(none.is_empty(), "unclosed def must not commit yet");
+        let actions = feed(&mut ed, b"dup * ;\r");
+        assert_eq!(
+            actions,
+            vec![Action::Commit(": sq ( i64 -- i64 )\ndup * ;".to_string())]
+        );
+    }
+
+    #[test]
+    fn continuation_ctrl_c_discards_pending_buffer() {
+        // R11: Ctrl-C with a non-empty pending multi-line buffer discards the
+        // buffer (not the process) and returns to the primary prompt.
+        let mut ed = Editor::new("> ", "... ", empty_history(), crate::repl::text_is_complete);
+        let none = feed(&mut ed, b": sq ( i64 -- i64 )\r");
+        assert!(none.is_empty());
+        assert!(!ed.pending_lines.is_empty());
+
+        let actions = feed(&mut ed, b"\x03");
+        assert_eq!(actions, vec![Action::Abort]);
+        assert!(ed.pending_lines.is_empty());
+
+        // A fresh, complete line after the abort commits normally, proving
+        // the process (and the editor) survived.
+        let actions = feed(&mut ed, b"1 2 +\r");
+        assert_eq!(actions, vec![Action::Commit("1 2 +".to_string())]);
     }
 
     #[test]

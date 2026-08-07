@@ -1862,6 +1862,53 @@ enum Dispatch {
     Quit,
 }
 
+/// R9: whether a committed-so-far token stream is a complete logical line or
+/// still has an open construct. A balance count, not a full parse: it must
+/// never reject a well-formed prefix, only defer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completeness {
+    Complete,
+    NeedMore,
+}
+
+/// `NeedMore` while a `:` word definition or `type:` declaration is open
+/// (opened by the leading `Word(":")`/`Word("type:")`, closed by
+/// `Token::Semicolon`) or while `[`/`]` brackets are unbalanced. `Complete`
+/// otherwise, including on an over-closed bracket (a real error, left for the
+/// parser to report rather than buffered forever).
+pub fn input_is_complete(tokens: &[Token]) -> Completeness {
+    let mut bracket_depth: i32 = 0;
+    let mut open_def = false;
+    for tok in tokens {
+        match tok {
+            Token::LBracket => bracket_depth += 1,
+            Token::RBracket => bracket_depth -= 1,
+            Token::Word(w) if w == ":" || w == "type:" => open_def = true,
+            Token::Semicolon => open_def = false,
+            _ => {}
+        }
+    }
+    if bracket_depth > 0 || open_def {
+        Completeness::NeedMore
+    } else {
+        Completeness::Complete
+    }
+}
+
+/// Lex `text` and apply `input_is_complete` (R10). A lex error is treated as
+/// complete: a permanent lexical error (e.g. a bad character) should surface
+/// immediately rather than buffer forever waiting for input that can never
+/// close it.
+pub fn text_is_complete(text: &str) -> bool {
+    match lexer::lex(text) {
+        Ok(tokens) => {
+            let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+            input_is_complete(&toks) == Completeness::Complete
+        }
+        Err(_) => true,
+    }
+}
+
 /// D1: the single point every committed logical line funnels through, on both
 /// the piped and the tty path, so the call sequence the piped goldens observe
 /// is preserved by construction. Blank lines are skipped, `:quit` requests a
@@ -1924,13 +1971,23 @@ fn run_piped(
 /// The primary prompt (tty only; never written on the piped path, F2).
 const PROMPT: &str = "sooth> ";
 
+/// The continuation prompt (tty only), shown while a multi-line definition
+/// or bracket is still open (R10).
+const CONTINUATION_PROMPT: &str = "  ... ";
+
 /// The tty path: put stdin in raw mode (restored on any exit by the guard's
 /// `Drop`, D5), then read bytes into the line editor, dispatching each
-/// committed line through `dispatch_line`. Ctrl-C abandons the line; Ctrl-D on
-/// an empty line and a closed stdin both end the session.
+/// committed line through `dispatch_line`. Ctrl-C abandons the line (and any
+/// pending multi-line buffer, R11); Ctrl-D on an empty line and a closed
+/// stdin both end the session.
 fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
     let _guard = editor::raw_mode_stdin();
-    let mut ed = editor::Editor::new(PROMPT, editor::History::load());
+    let mut ed = editor::Editor::new(
+        PROMPT,
+        CONTINUATION_PROMPT,
+        editor::History::load(),
+        text_is_complete,
+    );
     let w = |r: std::io::Result<()>| r.map_err(|e| format!("writing stdout: {e}"));
     w(ed.redraw(writer))?;
     w(writer.flush())?;
@@ -1990,6 +2047,38 @@ mod tests {
         // C-ABI `l`-taking, `l`-returning function on this 64-bit target.
         let sq: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(sym) };
         assert_eq!(sq(5), 25);
+    }
+
+    #[test]
+    fn continuation_unclosed_def_needs_more() {
+        let tokens = lexer::lex(": sq ( i64 -- i64 )").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+    }
+
+    #[test]
+    fn continuation_unclosed_typedef_needs_more() {
+        let tokens = lexer::lex("type: Vec2 x i64 y i64").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+    }
+
+    #[test]
+    fn continuation_unbalanced_bracket_needs_more() {
+        let tokens = lexer::lex("[ i64 4").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+    }
+
+    #[test]
+    fn continuation_balanced_line_is_complete() {
+        let tokens = lexer::lex(": sq ( i64 -- i64 ) dup * ;").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::Complete);
+
+        let tokens = lexer::lex("1 2 +").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::Complete);
     }
 
     #[test]
