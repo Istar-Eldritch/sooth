@@ -43,6 +43,22 @@ fn parse_error(src: &str) -> String {
     parser::parse(&tokens).expect_err("parsing should fail")
 }
 
+/// Assert `src` type-checks (a positive standalone-check golden).
+fn check_ok(src: &str) {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+}
+
+/// An `import:` line for the committed combinator library by *absolute* path,
+/// so a temp source built under `temp_dir()` resolves it regardless of cwd.
+fn combinators_import(qualifier: &str) -> String {
+    format!(
+        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 /// The linear stand-in: a one-field struct with a `drop` overload, so a
 /// capture of it is a linear (not `Copy`) capture (D3).
 const SPY_DEF: &str = "type: Spy tag i64 ;\n\
@@ -560,6 +576,260 @@ fn combinator_through_helper_recursion_is_not_a_splice_cycle() {
     let (stdout, code) = run_src("helper_recursion", src);
     assert_eq!(stdout, "3\n2\n1\n0\n");
     assert_eq!(code, 0);
+}
+
+// == phase 2: the polymorphic path and the combinator library ================
+
+// -- criterion 9: `each` checks standalone -----------------------------------
+
+#[test]
+fn each_checks_standalone() {
+    // Criterion 9 (R16/R17/D4): `each`'s polymorphic body type-checks at its
+    // own def site with no call site and no concrete literal, because `f call`
+    // in its `times` body checks against `f`'s *declared* effect `[ 'T -- ]`
+    // exactly as an ordinary word call checks against a `Sig`. The signature is
+    // not documentation over a macro.
+    let each = ": each ( ['T 'N] [ 'T -- ] -- )\n\
+                | f | len >i64 | count | | arr |\n\
+                count [ | i | &arr i >usize &> @ f call ] times\n\
+                arr drop ;\n";
+    check_ok(each);
+
+    // Pin the isolated copy to the committed library: if the real file stopped
+    // checking standalone, the copy above could silently drift from it.
+    let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
+        .expect("the combinator library should be readable");
+    check_ok(&lib);
+}
+
+// -- criterion 9b: `map`/`fold` check compositionally ------------------------
+
+#[test]
+fn map_and_fold_check_compositionally() {
+    // Criterion 9b (respecified, item 4): `map`/`fold` are NOT built on `each`
+    // (the library header explains why: `each`'s `[ 'T -- ]` element quotation
+    // hands neither the array nor the index, so a write-back or an accumulator
+    // needs either a captured mutable borrow (D3-forbidden) or a row variable
+    // in the effect (R28, out of scope)). Each is a leaf combinator driving its
+    // own `times`. "Compositional" (D4) therefore means each body checks
+    // `f call` against `f`'s *declared quotation effect*, not a concrete
+    // literal body. Both check standalone:
+    let map = ": map ( ['T 'N] [ 'T -- 'T ] -- ['T 'N] )\n\
+               | f | len >i64 | count | | arr |\n\
+               count [ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times\n\
+               arr ;\n";
+    let fold = ": fold ( ['T 'N] 'A [ 'A 'T -- 'A ] -- 'A )\n\
+                | f | | acc | len >i64 | count | | arr |\n\
+                acc count [ | i | &arr i >usize &> @ f call ] times\n\
+                arr drop ;\n";
+    check_ok(map);
+    check_ok(fold);
+
+    // ...and the compositional check bites at the def site: declaring `f` as
+    // `[ 'T -- 'T ]` (producing a value) but leaving that value on the floor
+    // unbalances the `times` row. That this is located -- naming `m`, at its
+    // own def site -- is proof `f call` was checked to *produce* a `'T` per the
+    // declared effect, not rubber-stamped.
+    let err = check_error(
+        ": m ( ['T 'N] [ 'T -- 'T ] -- )\n\
+         | f | len >i64 | count | | arr |\n\
+         count [ | i | &arr i >usize &> @ f call ] times\n\
+         arr drop ;\n",
+    );
+    assert!(
+        err.contains("`m`") && err.contains("times") && err.contains("leave the row unchanged"),
+        "mishandling `f`'s declared result should be a located def-site row error naming `m`, got: {err}"
+    );
+}
+
+// -- criterion 10: `each` over an array inlines and runs ----------------------
+
+#[test]
+fn each_over_array_inlines_and_runs() {
+    // Criterion 10 (R17/R19/R21): `arr [ . ] c::each` over an `[i64 4]` inlines
+    // the imported combinator to a `times` loop and prints each element in
+    // order.
+    let src = format!(
+        "{}: arr ( -- [i64 4] )\n\
+         0 4 fill | s |\n\
+         &!s 0 >usize &!> 1 !\n\
+         &!s 1 >usize &!> 2 !\n\
+         &!s 2 >usize &!> 3 !\n\
+         &!s 3 >usize &!> 4 !\n\
+         s ;\n\
+         : main ( -- ) arr [ . ] c::each ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("each_over_array", &src);
+    assert_eq!(stdout, "1\n2\n3\n4\n");
+    assert_eq!(code, 0);
+}
+
+// -- criterion 11: `fold` computes a sum -------------------------------------
+
+#[test]
+fn fold_computes_sum() {
+    // Criterion 11 (R17/R19): `fold` threads an accumulator across an `[i64 4]`
+    // and sums 4 + 8 + 7 + 9 to 28.
+    let src = format!(
+        "{}: arr ( -- [i64 4] )\n\
+         0 4 fill | s |\n\
+         &!s 0 >usize &!> 4 !\n\
+         &!s 1 >usize &!> 8 !\n\
+         &!s 2 >usize &!> 7 !\n\
+         &!s 3 >usize &!> 9 !\n\
+         s ;\n\
+         : main ( -- ) arr 0 [ + ] c::fold . ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("fold_sum", &src);
+    assert_eq!(stdout, "28\n");
+    assert_eq!(code, 0);
+}
+
+// -- criterion 12 / 12b: obligations 1 and 2 discharged at the def site -------
+
+#[test]
+fn poly_combinator_consuming_local_is_error() {
+    // Criterion 12 (R16, load-bearing): "The hardest question" discharges
+    // obligation 1 (move-state identity) at the *def site*. A poly combinator
+    // whose `times` body consumes an outer linear local (`s`, a `Spy`) is
+    // located there -- the body runs N times, so the linear value would be
+    // disposed N times -- with no call site involved. Pins *where* the check
+    // lives (def site, not splice site).
+    let src = format!(
+        "{SPY_DEF}\
+         : bad ( ['T 'N] Spy [ 'T -- ] -- )\n\
+         | f | | s | len >i64 | count | | arr |\n\
+         count [ | i | &arr i >usize &> @ f call s drop ] times\n\
+         arr drop ;\n"
+    );
+    let err = check_error(&src);
+    assert!(
+        err.contains("`bad`") && err.contains("cannot consume `s`"),
+        "consuming a linear local in a poly `times` body should be located at the def site naming `bad` and `s`, got: {err}"
+    );
+}
+
+#[test]
+fn poly_combinator_borrow_across_loop_is_error() {
+    // Criterion 12b (R16, load-bearing): obligation 2 (borrow-state identity)
+    // for *captured* state is discharged at the def site. A poly combinator
+    // whose `times` body leaves a reference to an outer local (`v`) live on the
+    // row rides the back-edge into the next iteration, and is located at the
+    // def site.
+    let src = "type: V x i64 ;\n\
+               : bad ( ['T 'N] V [ 'T -- ] -- )\n\
+               | f | | v | len >i64 | count | | arr |\n\
+               count [ | i | &arr i >usize &> @ f call &v ] times\n\
+               arr drop v drop ;\n";
+    let err = check_error(src);
+    assert!(
+        err.contains("`bad`") && err.contains("cannot leave a reference live across the loop"),
+        "a borrow crossing the back-edge in a poly `times` body should be located at the def site naming `bad`, got: {err}"
+    );
+}
+
+// -- criterion 13: a quotation at a runtime-value position in a poly body -----
+
+#[test]
+fn quotation_at_runtime_position_in_poly_body_is_error() {
+    // Criterion 13 (R14): the poly `quot` marker lets a combinator's body track
+    // a quotation literal to its consumption, but a quotation reaching a
+    // *runtime-value* position (here a `fill` store) in that poly body is still
+    // rejected, reworded to name slice 7 (runtime quotation values). The
+    // `!not yet supported` assertion pins that the R14 marker path ran (the
+    // word carries a quotation parameter, so the body is checked on the
+    // `Slot`-with-`quot` path), not slice 4's blanket `poly_term` rejection.
+    let err = check_error(
+        ": bad ( ['T 'N] [ 'T -- ] -- ['T 'N] )\n\
+         | f arr | [ 1 + ] 4 fill drop arr ;\n",
+    );
+    assert!(
+        err.contains("`bad`")
+            && err.contains("a quotation cannot be stored")
+            && err.contains("slice 7"),
+        "a quotation at a store position in a poly body should be the reworded slice-7 rejection, got: {err}"
+    );
+    assert!(
+        !err.contains("Phase 6") && !err.contains("not yet supported"),
+        "it must be the R14 marker-path rejection naming slice 7, not the stale wording, got: {err}"
+    );
+}
+
+// -- criterion 14: combinator == hand-threaded across stack limits ------------
+
+/// Build `src` to a native binary and return its path (the caller runs it and
+/// removes it). Split from the run so criterion 14 compiles each program once
+/// and runs it at several stack limits.
+fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    binary
+}
+
+/// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code, or
+/// `None` if it died by signal (a `SIGSEGV` from an overflowed stack).
+fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> Option<i32> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -s {limit_kb} && exec \"{}\"",
+            binary.display()
+        ))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .status()
+        .expect("binary should run");
+    status.code()
+}
+
+#[test]
+fn each_over_a_million_runs_in_constant_stack() {
+    // Criterion 14 (respecified, item 7). The original "1M+ elements under a
+    // reduced `ulimit`" witness is infeasible and mis-specified: a Sooth array
+    // is a *stack* value (1M i64 = 8 MB on the stack before any loop frame
+    // exists), and `fill`'s compile cost is superlinear and pre-existing
+    // (measured: 10k ~= 0.36 s, 100k ~= 25 s, 1M > 300 s), not caused by the
+    // inliner (a hand-threaded `times` twin is equally slow). So this is an
+    // *equivalence* witness instead: the combinator version and the
+    // hand-threaded `times` twin behave identically across stack limits, which
+    // is what "the inliner adds no stack cost" means. N is 10_000 to keep
+    // `cargo test` fast (~0.36 s to compile each); the *structural* constant-
+    // stack guarantee (loop header + back-edge, no per-element `Call`) is
+    // carried by the `each_lowers_to_a_loop_not_a_per_element_call` unit.
+    const N: usize = 10_000;
+    let comb = format!(
+        "{}: main ( -- ) 0 {N} fill 0 [ + ] c::fold . ;\n",
+        combinators_import("c")
+    );
+    let hand = format!(
+        ": main ( -- ) 0 {N} fill | arr | 0 {N} [ | i | &arr i >usize &> @ + ] times . arr drop ;\n"
+    );
+    let comb_bin = build_binary("eq-comb", &comb);
+    let hand_bin = build_binary("eq-hand", &hand);
+
+    // Across a sweep straddling the array-doesn't-fit boundary, the two must
+    // cross together: identical exit codes at each limit (a tight limit both
+    // die by signal -> `None`; a generous limit both exit 0). Equality holds
+    // wherever the boundary sits, so this is robust to the exact machine.
+    for limit in [64u32, 256, 1024] {
+        assert_eq!(
+            run_at_stack_limit(&comb_bin, limit),
+            run_at_stack_limit(&hand_bin, limit),
+            "combinator and hand-threaded twin must behave identically at ulimit -s {limit}"
+        );
+    }
+    // And at a generous limit the combinator version actually runs to 0.
+    assert_eq!(
+        run_at_stack_limit(&comb_bin, 1024),
+        Some(0),
+        "at a generous stack limit the combinator version runs to completion"
+    );
+
+    std::fs::remove_file(&comb_bin).ok();
+    std::fs::remove_file(&hand_bin).ok();
 }
 
 // -- criterion 15 (phase 3): a session line defining a quotation-taking word -

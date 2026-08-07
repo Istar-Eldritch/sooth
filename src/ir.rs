@@ -7457,6 +7457,63 @@ mod tests {
     }
 
     #[test]
+    fn each_lowers_to_a_loop_not_a_per_element_call() {
+        // Criterion 14b (R19, load-bearing): the inlined `each` lowers to a
+        // real loop -- an entry `Jmp` to a header carrying the index `Phi`,
+        // sealed with a `Jnz`, reached by a back-edge `Jmp` -- with no
+        // per-element `Instr::Call` (the element quotation is spliced, not
+        // called). This is the *structural* constant-stack guarantee behind
+        // criterion 14's equivalence witness: deleting the `lower_call` inline
+        // branch would leave an `Instr::Call` for `each` and no loop, and
+        // unrolling per element would drop the back-edge. `each` is defined
+        // inline here so the unit needs no import closure.
+        let ir = lower_src(
+            ": each ( ['T 'N] [ 'T -- ] -- )\n\
+             | f | len >i64 | count | | arr |\n\
+             count [ | i | &arr i >usize &> @ f call ] times\n\
+             arr drop ;\n\
+             : main ( -- ) 0 4 fill [ . ] each ;\n",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "each"),
+            "the inlined `each` mints no IrFunc, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = func(&ir, "main");
+        let header = loop_header(main);
+        let hblock = header_block(main, header);
+        assert!(
+            !header_phis(hblock).is_empty(),
+            "the header carries the index phi"
+        );
+        assert!(
+            matches!(hblock.term, Terminator::Jnz(..)),
+            "the header is sealed with a Jnz (index < count), got {:?}",
+            hblock.term
+        );
+        let entry_id = main.blocks[0].id;
+        assert!(
+            main.blocks
+                .iter()
+                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
+            "a non-entry body block back-edges to the header"
+        );
+        // The array read `&arr i &>` emits the mandatory `sooth_oob_trap`
+        // bounds-check call (the hand-threaded twin emits it too); it is not a
+        // per-element call to the combinator or its element quotation, so it is
+        // excluded. What must be absent is any call to `each` or a spliced
+        // element op: the loop body is the spliced literal, not a call.
+        let user_calls: Vec<&str> = call_symbols(main)
+            .into_iter()
+            .filter(|s| *s != "sooth_oob_trap")
+            .collect();
+        assert!(
+            user_calls.is_empty(),
+            "the inlined `each` body is spliced, not called; unexpected calls: {user_calls:?}"
+        );
+    }
+
+    #[test]
     fn quotation_type_never_reaches_mangling_or_irtype() {
         // Criterion 2d: R7's `unreachable!` arms are only sound because R7a's
         // audit and R20's lowering filter keep a quotation type away from
