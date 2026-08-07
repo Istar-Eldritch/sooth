@@ -416,9 +416,11 @@ against a hand-threaded twin, with the array passed straight from its producer w
 `filter` rather than bound to a local first, so it does not trip 6a's bind-then-pass alias
 limitation.
 
-**Next action: Phase 4 Slice 6c or 6d.** Neither depends on the other; 6c (quotation-taking
-words at the REPL) and 6d (nested constant-stack loops, lifting the limit 6b inherited) may
-land in either order.
+**Next action: Phase 4 Slice 6c, 6d, or 10.** None depends on the others; 6c (quotation-taking
+words at the REPL), 6d (nested constant-stack loops, lifting the limit 6b inherited), and 10
+(`if` in a polymorphic body) may land in any order. Slice 10 was added after 6b shipped, once
+it became clear that no slice owned the polymorphic-`if` gap even though slice 7 depends on
+it and the core library's intrinsic-vs-library split is gated on it.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1096,8 +1098,12 @@ then find out what the compiler owes it.
    today can neither branch (`if` is rejected in a polymorphic body, `src/check.rs:2997`)
    nor loop in constant stack (`self_tail` is hardcoded `false` on the polymorphic
    instantiation path, `src/ir.rs:1176`), so combinators cannot be written as ordinary
-   polymorphic library words at all. Both gaps land in slice 6 against their first real
-   consumers.
+   polymorphic library words at all. *This paragraph used to end "both gaps land in slice 6
+   against their first real consumers"; slice 6b's paper pre-check falsified that by building
+   the programs. Neither gap gates a combinator, because a combinator is checked by
+   term-splicing at the concrete call site and never goes through `poly_term` at all. Both
+   gaps survived slice 6 untouched: the polymorphic `if` is now slice 10, and the `self_tail`
+   hardcode is unreachable until a polymorphic body can call a polymorphic word (slice 7).*
    After slice 1 because a combinator's signature has to *say* `[ 'a -- 'b ]`, which needs
    row variables to be expressible at all. **Capture is a quality-of-life question, not a
    soundness one** — downgraded by the pre-check, which expected the opposite. The fear was
@@ -1204,8 +1210,10 @@ then find out what the compiler owes it.
    **Dogfood (5a):** the combinator library (slice 6) lives in its own file; a small
    standalone type (e.g. a `Point`/`Vec2` or a stack-like struct) lives in another, exported
    opaquely, and is imported by an example that uses both.
-6. **The combinator library in Sooth + inlining + closing the polymorphic-path gaps (the
-   phase's headline exit).**
+6. **The combinator library in Sooth + inlining (the phase's headline exit).** *This heading
+   used to end "+ closing the polymorphic-path gaps". It did not close them and no longer
+   claims to: 6b's pre-check established that neither gap gates a combinator. The polymorphic
+   `if` is slice 10.*
    `each`/`map`/`filter`/`fold`/`while` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
    tight loops rather than a `call` per element. Depends on 1–5a (5a is where the library
@@ -1354,8 +1362,10 @@ then find out what the compiler owes it.
    array of quotations, a strategy in a struct field, and genuine non-inlined higher-order
    words. After slice 6a because the combinator library is the consumer that makes the
    calling convention concrete (designing it with no caller is the anti-pattern this plan
-   keeps citing), and after slice 6b because it lifts the polymorphic `if` any interesting
-   closure-taking word needs.
+   keeps citing). *This entry used to add "and after slice 6b because it lifts the polymorphic
+   `if`"; 6b did not, and never claimed to once its pre-check corrected the charter. The
+   polymorphic `if` any interesting closure-taking word needs is slice 10, which is therefore
+   a real prerequisite here despite the higher number.*
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The environment of a downward closure (passed in, never returned or stored beyond the
    frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
@@ -1457,6 +1467,35 @@ then find out what the compiler owes it.
    in the test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special
    cases, let the exhaustiveness checker find the arms, migrate the call sites) and should
    run 8c's lightweight process.
+10. **`if` in a polymorphic body.** Lifts the rejection at `src/check.rs:3690` (`` `if` in
+   the polymorphic body of `{word}` is not yet supported ``), which has stood since slice 1
+   deferred it and which no later slice picked up. Numbered last because it was found last;
+   it must land **before slice 7**, whose own entry names it as a prerequisite.
+   **Two consumers, both real, which is the bar this plan keeps applying.** Slice 7: any
+   closure-taking word worth writing branches on something. And the core library: a word is
+   only a library word if it can be written in Sooth, and `max` cannot be, so it sits in
+   `BUILTIN_WORDS` next to `+` as a compiler builtin. `: mymax ( 'T: Copy Ord 'T -- 'T ) over
+   over > if drop else swap drop end ;` is rejected today (verified by compiling; its
+   monomorphic `i64` twin builds and runs), and the `Ord` bound it needs already exists. That
+   makes this the gate on separating the irreducible intrinsics (`+`, the shuffles, `fill`,
+   the `>uN` conversions: things that lower to instructions no Sooth source can express) from
+   the words that are builtins only because the front end cannot yet express them.
+   **Three pieces, and shipping a subset is worse than shipping none** (`docs/phase4-slice1-spec.md:80`,
+   which is the only existing plan for this): pop the condition off the `PolyType` stack, run
+   a per-arm unconsumed-linear check, and join the two arms' move-state. None of the three is
+   lifted to `PolyType` yet. The rejection exists *because* the half-built arm it replaced
+   both spuriously rejected valid programs (`: choose ( 'T 'T bool -- 'T ) ...`, whose
+   monomorphic sibling builds) and panicked the compiler outright (a `^i64` allocated on one
+   arm reaching `ir.rs`'s `drop: non-empty stack`). `max`'s own body is a fair test rather
+   than a trivial one: its arms `drop` different operands, so it exercises exactly the
+   move-state join that is missing.
+   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3708`).
+   It is a sibling wall, not this one, and it belongs to slice 7, which is where a quotation
+   acquires the runtime representation that would let a polymorphic body carry one.
+   Depends on slice 1 only; independent of 6b/6c/6d and orderable against them.
+   **Exit:** a polymorphic word that branches, including one whose arms consume different
+   operands, compiles and runs at two instantiations, with the linear checks that motivated
+   the original deferral proven by tests that fail without them.
 
 ### Phase 5 — Errors as values  `[S]`
 
