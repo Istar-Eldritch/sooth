@@ -1588,6 +1588,12 @@ goal (dropped). A formatter and an auto-generated reference doc (word list + sta
 effects) once the surface stabilises around Phase 4. An LSP is optional and low
 priority for a craft language; add it only if you're using it enough to want it.
 
+The REPL (`src/repl.rs`, `src/editor.rs`) grew a hand-rolled raw-mode line editor
+(prompt, cursor movement, history, Ctrl-C/Ctrl-D handling), multi-line continuation
+for an open `:`/`type:` definition or bracket, typed/rich stack rendering on the tty
+path, and `:help`/`:words`/`:type`/`:stack`/`:clear` meta-commands with tab
+completion. The piped (non-tty) path is unchanged byte-for-byte.
+
 ## Shape of the risk
 
 - **Phase 0 is done and the go/no-go came back *go***: the virtual-stack → IR → QBE

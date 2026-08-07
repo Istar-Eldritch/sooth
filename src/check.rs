@@ -4402,7 +4402,7 @@ fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var: &str) -> 
 
 /// Render a `PolyType` for a diagnostic: a variable by its declared spelling,
 /// a concrete type by its name, an array structurally.
-fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
+pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
     match pt {
         PolyType::Concrete(t) => t.name().to_string(),
         PolyType::Var(v) => sig.ty_var_names[*v as usize].clone(),

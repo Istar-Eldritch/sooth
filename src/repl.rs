@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
@@ -20,6 +20,7 @@ use crate::ast::{
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
+use crate::editor;
 use crate::ir::ArrayLayout;
 use crate::ir::{self, EnumLayout, IrModule, StructLayout};
 use crate::lexer::Token;
@@ -417,6 +418,221 @@ pub fn format_stack(
     format!("stack: {}", vals.join(" "))
 }
 
+/// Reinterpret the carried-stack cells as bytes (R13/R14). Sound because `i64`
+/// has no padding and every bit pattern is valid; this is the same native
+/// memory `run_terms`'s wrapper already read/wrote through a raw pointer into
+/// this allocation, so no copy or conversion changes what is observed.
+fn as_bytes(buf: &[i64]) -> &[u8] {
+    // SAFETY: `buf` is a valid, initialized `&[i64]`; every `i64` bit pattern
+    // reads back as 8 valid bytes, and the resulting slice's lifetime is tied
+    // to `buf`'s.
+    unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, std::mem::size_of_val(buf)) }
+}
+
+/// Read up to 8 little-endian bytes of `region` into a `u64`, zero-padding any
+/// width narrower than 8 bytes. The building block both scalar rendering and
+/// enum-tag decoding read through.
+fn read_uint_le(region: &[u8], width: usize) -> u64 {
+    let mut tmp = [0u8; 8];
+    tmp[..width].copy_from_slice(&region[..width]);
+    u64::from_le_bytes(tmp)
+}
+
+/// The byte extent one `IrType`'s value occupies: a scalar's own width (not
+/// rounded to a cell, unlike `ir::carried_slot_bytes`), or an aggregate's
+/// `size` from its layout. Used to slice out exactly the bytes a nested field,
+/// array element, or owning-cell payload spans for recursive rendering.
+fn rich_value_size(
+    ty: ir::IrType,
+    layouts: &[StructLayout],
+    enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
+) -> usize {
+    match ty {
+        ir::IrType::Bool => 1,
+        ir::IrType::Int { bits, .. } => (bits / 8) as usize,
+        ir::IrType::Float { bits } => (bits / 8) as usize,
+        ir::IrType::Usize | ir::IrType::Isize => ir::WORD_WIDTH as usize,
+        ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
+        ir::IrType::Struct(id) => layouts[id.index()].size as usize,
+        ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
+        ir::IrType::Array(id) => array_layouts[id.index()].size as usize,
+    }
+}
+
+/// R14/R15/R16 (Slice 3): render one value's bytes with its type recoverable
+/// from the rendering. A struct/enum/array descends into its fields/variant/
+/// elements via the same offset arithmetic `format_stack` uses only to *skip*
+/// an aggregate slot; an owning cell (R16) dereferences its live heap payload
+/// to render it, which is a read (no bookkeeping here ever marks a value
+/// consumed or runs a destructor, so linearity is untouched). An
+/// otherwise-ambiguous scalar carries a Rust-literal-style width/signedness
+/// suffix (`1u8` vs `1i64`, R15).
+fn render_rich_value(
+    ty: ir::IrType,
+    region: &[u8],
+    layouts: &[StructLayout],
+    enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
+    cell_payloads: &[ir::IrType],
+) -> String {
+    match ty {
+        ir::IrType::Bool => if region[0] != 0 { "true" } else { "false" }.to_string(),
+        ir::IrType::Int { bits, signed } => {
+            let raw = read_uint_le(region, (bits / 8) as usize);
+            let kind = if signed { 'i' } else { 'u' };
+            if signed {
+                let shift = 64 - bits as u32;
+                let v = ((raw << shift) as i64) >> shift;
+                format!("{v}{kind}{bits}")
+            } else {
+                format!("{raw}{kind}{bits}")
+            }
+        }
+        ir::IrType::Float { bits: 32 } => {
+            let bytes: [u8; 4] = region[..4].try_into().unwrap();
+            format!("{}f32", f32::from_le_bytes(bytes))
+        }
+        ir::IrType::Float { .. } => {
+            let bytes: [u8; 8] = region[..8].try_into().unwrap();
+            format!("{}f64", f64::from_le_bytes(bytes))
+        }
+        ir::IrType::Usize => format!("{}usize", read_uint_le(region, 8)),
+        ir::IrType::Isize => format!("{}isize", read_uint_le(region, 8) as i64),
+        ir::IrType::Ptr => "<ptr>".to_string(),
+        ir::IrType::Str => "<str>".to_string(),
+        ir::IrType::Cstr => "<cstr>".to_string(),
+        ir::IrType::Struct(id) => {
+            let layout = &layouts[id.index()];
+            let fields: Vec<String> = layout
+                .fields
+                .iter()
+                .map(|f| {
+                    let off = f.offset as usize;
+                    let span = rich_value_size(f.ty, layouts, enum_layouts, array_layouts);
+                    render_rich_value(
+                        f.ty,
+                        &region[off..off + span],
+                        layouts,
+                        enum_layouts,
+                        array_layouts,
+                        cell_payloads,
+                    )
+                })
+                .collect();
+            format!("<{} {}>", layout.name, fields.join(" "))
+        }
+        ir::IrType::Enum(id) => {
+            let layout = &enum_layouts[id.index()];
+            let tag_width = match layout.tag_ty {
+                ir::IrType::Int { bits, .. } => (bits / 8) as usize,
+                _ => unreachable!("an enum tag is always a fixed-width integer"),
+            };
+            let tag = read_uint_le(&region[layout.tag_offset as usize..], tag_width) as usize;
+            let variant = &layout.variants[tag];
+            let payload: Vec<String> = variant
+                .fields
+                .iter()
+                .map(|f| {
+                    let off = layout.payload_offset as usize + f.offset as usize;
+                    let span = rich_value_size(f.ty, layouts, enum_layouts, array_layouts);
+                    render_rich_value(
+                        f.ty,
+                        &region[off..off + span],
+                        layouts,
+                        enum_layouts,
+                        array_layouts,
+                        cell_payloads,
+                    )
+                })
+                .collect();
+            if payload.is_empty() {
+                format!("<{}#{}>", layout.name, tag)
+            } else {
+                format!("<{}#{} {}>", layout.name, tag, payload.join(" "))
+            }
+        }
+        ir::IrType::Array(id) => {
+            let layout = &array_layouts[id.index()];
+            let elem_size = rich_value_size(layout.elem, layouts, enum_layouts, array_layouts);
+            let elems: Vec<String> = (0..layout.count as usize)
+                .map(|i| {
+                    let off = i * layout.stride as usize;
+                    render_rich_value(
+                        layout.elem,
+                        &region[off..off + elem_size],
+                        layouts,
+                        enum_layouts,
+                        array_layouts,
+                        cell_payloads,
+                    )
+                })
+                .collect();
+            format!("<{} {}>", layout.name, elems.join(" "))
+        }
+        ir::IrType::OwnedCell(id) => {
+            let ptr = read_uint_le(region, 8) as usize as *const u8;
+            let payload_ty = cell_payloads[id.index()];
+            let payload_size = rich_value_size(payload_ty, layouts, enum_layouts, array_layouts);
+            // SAFETY (R16, load-bearing): a live owning cell on the residual
+            // stack always points at a `malloc`ed payload of exactly
+            // `payload_size` bytes (the shape `^`'s construction allocates,
+            // `Cells::payload[id]`); reading it here for display touches no
+            // linearity bookkeeping (that lives in `self.types`/the checker,
+            // never consulted by this function) and runs no destructor, so
+            // the value stays live and the carried stack is unchanged.
+            let payload_bytes = unsafe { std::slice::from_raw_parts(ptr, payload_size) };
+            format!(
+                "^{}",
+                render_rich_value(
+                    payload_ty,
+                    payload_bytes,
+                    layouts,
+                    enum_layouts,
+                    array_layouts,
+                    cell_payloads
+                )
+            )
+        }
+    }
+}
+
+/// D2/R13 (Slice 3): the tty-only rich stack formatter. Signature mirrors
+/// `format_stack`, plus the fourth layout table (`cell_payloads`, an owning
+/// cell's payload `IrType` per `OwnedCellId`) R16's read-through needs. The
+/// piped path never calls this (F2); `Session::rich_stack` gates the choice at
+/// the one shared call site (`eval_expr`).
+pub fn format_stack_rich(
+    buf: &[i64],
+    types: &[Type],
+    layouts: &[StructLayout],
+    enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
+    cell_payloads: &[ir::IrType],
+) -> String {
+    if types.is_empty() {
+        return "stack: (empty)".to_string();
+    }
+    let bytes = as_bytes(buf);
+    let mut cell = 0usize;
+    let mut vals = Vec::with_capacity(types.len());
+    for ty in types {
+        let ir_ty = ir::ir_type_of(*ty);
+        let span = rich_value_size(ir_ty, layouts, enum_layouts, array_layouts);
+        let off = cell * 8;
+        vals.push(render_rich_value(
+            ir_ty,
+            &bytes[off..off + span],
+            layouts,
+            enum_layouts,
+            array_layouts,
+            cell_payloads,
+        ));
+        cell += span.div_ceil(8);
+    }
+    format!("stack: {}", vals.join(" "))
+}
+
 /// A REPL session: the accumulated word env, the persistent stack buffer, and
 /// every loaded shared object (kept resident for the session's lifetime).
 pub struct Session {
@@ -534,6 +750,12 @@ pub struct Session {
     /// the parser's `exports` slice for gating a `q::T` type reference. Index 0
     /// (session-local decls) stays empty; import ids fill in from 1.
     import_exports: Vec<Vec<(String, Span)>>,
+    /// D2 (Slice 3): whether the residual stack renders through the rich
+    /// aggregate-contents formatter (`format_stack_rich`) instead of the
+    /// plain placeholder one. `false` for every piped session (F2 keeps the
+    /// existing goldens byte-for-byte); `run_tty` sets this once, at entry,
+    /// for an interactive session.
+    rich_stack: bool,
 }
 
 impl Session {
@@ -562,7 +784,184 @@ impl Session {
             import_qualifier_module: HashMap::new(),
             import_selective_module: HashMap::new(),
             import_exports: Vec::new(),
+            rich_stack: false,
         }
+    }
+
+    /// D2 (Slice 3): switch this session's residual-stack rendering to the
+    /// rich, aggregate-contents formatter. Called once by `run_tty`; never by
+    /// the piped path.
+    pub fn enable_rich_stack_rendering(&mut self) {
+        self.rich_stack = true;
+    }
+
+    /// R19: the user-facing spelling for an `self.env` key. A session-local
+    /// word's key already *is* its user-facing name, but an imported word's
+    /// key is its internal, import-epoch-mangled spelling (`splice_import`
+    /// inserts `q::raw__importN` as the env key and `q::raw` -> that spelling
+    /// into `import_aliases`, R9); this reverses that map back to what the
+    /// user actually typed. A selective import adds a second, unqualified
+    /// alias at the same internal spelling, so ties prefer the qualified one
+    /// (deterministic regardless of `HashMap` iteration order, not chosen by
+    /// which alias happened to be inserted last).
+    fn display_name(&self, internal: &str) -> String {
+        let mut best: Option<&str> = None;
+        for (alias, target) in &self.import_aliases {
+            if target == internal && (best.is_none() || alias.contains("::")) {
+                best = Some(alias);
+            }
+        }
+        best.map(str::to_string)
+            .unwrap_or_else(|| internal.to_string())
+    }
+
+    /// R19/R23: every defined word's user-facing name, sorted, at its current
+    /// generation, including polymorphic words (`self.poly_words`, kept out
+    /// of `self.env` per R3 so it needs folding in separately -- imports
+    /// never splice a polymorphic word, so `poly_words` keys are always
+    /// already user-facing and need no `display_name` reversal). Shared
+    /// between `:words` (D3) and the editor's tab completion (R23), which is
+    /// the point of pulling it out on its own.
+    pub fn word_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.env.keys().map(|k| self.display_name(k)).collect();
+        names.extend(self.poly_words.keys().cloned());
+        names.sort();
+        names
+    }
+
+    /// R19: `:words` listing, one `name ( ins -- outs )` line per defined
+    /// word (concrete and polymorphic), sorted for deterministic golden
+    /// output. Built directly from `self.env`/`self.poly_words` rather than
+    /// through `word_names()` so each display name stays paired with the
+    /// right signature lookup (an env key, not the possibly-aliased display
+    /// name).
+    fn words_listing(&self) -> Vec<String> {
+        let mut entries: Vec<(String, String)> = self
+            .env
+            .iter()
+            .map(|(internal, entry)| (self.display_name(internal), sig_str(&entry.sig)))
+            .collect();
+        entries.extend(self.poly_words.iter().map(|(name, entry)| {
+            let sig = entry
+                .word
+                .poly
+                .as_deref()
+                .expect("a poly_words entry always has a polymorphic signature");
+            (name.clone(), poly_sig_str(sig))
+        }));
+        entries.sort();
+        entries
+            .into_iter()
+            .map(|(name, sig)| format!("{name} {sig}"))
+            .collect()
+    }
+
+    /// R21: render the residual stack through whichever formatter the path
+    /// uses (D2), without pushing or consuming anything. Layout registries
+    /// are rebuilt (pure, no compilation) purely to size/skip aggregate slots.
+    fn render_stack(&self) -> String {
+        let (structs, enums, arrays, cells, _refs) = ir::build_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        );
+        let live_cells = self.top / 8;
+        if self.rich_stack {
+            format_stack_rich(
+                &self.buf[..live_cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts,
+                &cells.payload,
+            )
+        } else {
+            format_stack(
+                &self.buf[..live_cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts,
+            )
+        }
+    }
+
+    /// D4/R22: dispose the residual stack's linear values (the existing
+    /// `dispose_residual` path, as `end_session` runs) before resetting env,
+    /// stack, and every registry/generation counter to a fresh session --
+    /// reset is scope-end, not a silent forget of live linear values.
+    fn clear(&mut self, writer: &mut impl Write) -> Result<(), String> {
+        self.dispose_residual(writer)?;
+        let rich_stack = self.rich_stack;
+        *self = Session::new();
+        self.rich_stack = rich_stack;
+        Ok(())
+    }
+
+    /// R20: lex -> parse -> check the rest of a `:type` line against the
+    /// current stack types and print the resulting effect, executing and
+    /// mutating nothing (no lower/emit/dlopen, no env/stack change).
+    ///
+    /// *(hazard)* `parse_line_with_structs` interns array/owned-cell/ref types
+    /// into `self.arrays`/`owned_cells`/`refs` as a side effect of parsing; a
+    /// `:type` that mentions one of those types must not grow the session's
+    /// registries, so their lengths are snapshotted and restored regardless
+    /// of whether checking succeeds.
+    fn eval_type(&mut self, rest: &str, writer: &mut impl Write) -> Result<(), String> {
+        let arrays_len = self.arrays.len();
+        let cells_len = self.owned_cells.len();
+        let refs_len = self.refs.len();
+        let result = self.check_type_line(rest);
+        self.arrays.truncate(arrays_len);
+        self.owned_cells.truncate(cells_len);
+        self.refs.truncate(refs_len);
+        match result {
+            Ok(effect) => writeln!(writer, "{effect}").map_err(|e| format!("writing stdout: {e}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn check_type_line(&mut self, rest: &str) -> Result<String, String> {
+        let tokens = lexer::lex(rest)?;
+        let ctx = parser::ImportCtx {
+            imports: &self.import_qualifier_module,
+            selective: &self.import_selective_module,
+            exports: &self.import_exports,
+        };
+        let line = parser::parse_line_with_structs(
+            &tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &mut self.refs,
+            ctx,
+        )?;
+        let terms = match line {
+            Line::Expr(terms) => terms,
+            Line::Def(_) => {
+                return Err(
+                    "error: `:type` checks an expression against the current stack, not a word/type definition"
+                        .to_string(),
+                );
+            }
+        };
+        let env = self.typed_env();
+        let poly_env = self.poly_env();
+        let (net_stack, _insts) = check::infer_line(
+            &terms,
+            &self.types,
+            &env,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &mut self.refs,
+            &self.structs,
+            &self.enums,
+            &poly_env,
+        )?;
+        Ok(type_effect_str(&self.types, &net_stack))
     }
 
     /// The checker's typed env: builtins, the generated struct words, the
@@ -1805,20 +2204,30 @@ impl Session {
     }
 
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
-        let (structs, enums, arrays) = self.run_terms(terms, writer)?;
-        let cells = self.top / 8;
-        writeln!(
-            writer,
-            "{}",
-            format_stack(
-                &self.buf[..cells],
+        let (structs, enums, arrays, cells) = self.run_terms(terms, writer)?;
+        let live_cells = self.top / 8;
+        // D2/R13: the rich formatter is a tty-only affordance (`rich_stack`,
+        // set once by `run_tty`); the piped path always renders through the
+        // plain `format_stack`, keeping every piped golden byte-for-byte (F2).
+        let line = if self.rich_stack {
+            format_stack_rich(
+                &self.buf[..live_cells],
                 &self.types,
                 &structs.layouts,
                 &enums.layouts,
-                &arrays.layouts
+                &arrays.layouts,
+                &cells.payload,
             )
-        )
-        .map_err(|e| format!("writing stdout: {e}"))
+        } else {
+            format_stack(
+                &self.buf[..live_cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts,
+            )
+        };
+        writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))
     }
 
     /// The end of the REPL-main scope: dispose every linear value still on the
@@ -1853,7 +2262,7 @@ impl Session {
         &mut self,
         terms: &[Term],
         writer: &mut impl Write,
-    ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
+    ) -> Result<(ir::Structs, ir::Enums, ir::Arrays, ir::Cells), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
         // R5 (Slice 2): thread the session poly-env so a bare line can call a
@@ -1978,7 +2387,7 @@ impl Session {
         self.types = net_stack;
         self.libs.push(lib);
 
-        Ok((structs, enums, arrays))
+        Ok((structs, enums, arrays, cells))
     }
 }
 
@@ -1997,11 +2406,211 @@ fn end_session(session: &mut Session, writer: &mut impl Write) -> Result<(), Str
     Ok(())
 }
 
-/// The read-eval-print loop: blank lines are skipped silently, `:quit` or EOF
-/// exits cleanly (disposing any residual linear values first), and any stage
-/// error prints the diagnostic without mutating session state.
-pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
+/// What the shared dispatch helper decided about a committed line.
+enum Dispatch {
+    Continue,
+    Quit,
+}
+
+/// R9: whether a committed-so-far token stream is a complete logical line or
+/// still has an open construct. A balance count, not a full parse: it must
+/// never reject a well-formed prefix, only defer it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completeness {
+    Complete,
+    NeedMore,
+}
+
+/// `NeedMore` while a `:` word definition or `type:` declaration is open
+/// (opened by the leading `Word(":")`/`Word("type:")`, closed by
+/// `Token::Semicolon`) or while `[`/`]` brackets are unbalanced. `Complete`
+/// otherwise, including on an over-closed bracket (a real error, left for the
+/// parser to report rather than buffered forever).
+pub fn input_is_complete(tokens: &[Token]) -> Completeness {
+    let mut bracket_depth: i32 = 0;
+    let mut open_def = false;
+    for tok in tokens {
+        match tok {
+            Token::LBracket => bracket_depth += 1,
+            Token::RBracket => bracket_depth -= 1,
+            Token::Word(w) if w == ":" || w == "type:" => open_def = true,
+            Token::Semicolon => open_def = false,
+            _ => {}
+        }
+    }
+    if bracket_depth > 0 || open_def {
+        Completeness::NeedMore
+    } else {
+        Completeness::Complete
+    }
+}
+
+/// Lex `text` and apply `input_is_complete` (R10). A lex error is treated as
+/// complete: a permanent lexical error (e.g. a bad character) should surface
+/// immediately rather than buffer forever waiting for input that can never
+/// close it.
+pub fn text_is_complete(text: &str) -> bool {
+    match lexer::lex(text) {
+        Ok(tokens) => {
+            let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+            input_is_complete(&toks) == Completeness::Complete
+        }
+        Err(_) => true,
+    }
+}
+
+/// D1: the single point every committed logical line funnels through, on both
+/// the piped and the tty path, so the call sequence the piped goldens observe
+/// is preserved by construction. Blank lines are skipped, `:quit` requests a
+/// clean exit, and any stage error prints the diagnostic without mutating
+/// session state.
+/// `name ( ins -- outs )` for a defined word's signature (R19), mirroring
+/// `check::effect_str`'s notation but over a resolved `Sig` rather than a
+/// declared `StackEffect`.
+fn sig_str(sig: &Sig) -> String {
+    let ins: Vec<String> = sig.inputs.iter().map(|t| t.to_string()).collect();
+    let outs: Vec<String> = sig.outputs.iter().map(|t| t.to_string()).collect();
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
+}
+
+/// R19: `sig_str`'s polymorphic analogue for `:words`, reusing `check`'s own
+/// `PolyType` renderer (`poly_type_str`) so a type variable prints its
+/// declared surface spelling (`'T`) rather than a bare index. A row variable
+/// prints as `..name`; the REPL only ever retains a poly word with `row_out`
+/// `None` (`eval_poly_def`'s multi-output gate), but `row_in` alone is a
+/// legal signature, so both are handled.
+fn poly_sig_str(sig: &PolySig) -> String {
+    let mut ins: Vec<String> = Vec::new();
+    if let Some(r) = sig.row_in {
+        ins.push(format!("..{}", sig.row_var_names[r as usize]));
+    }
+    ins.extend(sig.inputs.iter().map(|t| check::poly_type_str(t, sig)));
+    let mut outs: Vec<String> = Vec::new();
+    if let Some(r) = sig.row_out {
+        outs.push(format!("..{}", sig.row_var_names[r as usize]));
+    }
+    outs.extend(sig.outputs.iter().map(|t| check::poly_type_str(t, sig)));
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
+}
+
+/// `( before -- after )` for a `:type` line's checked effect (R20): the stack
+/// types on entry and the resulting types after the checked expression.
+fn type_effect_str(before: &[Type], after: &[Type]) -> String {
+    let ins: Vec<String> = before.iter().map(|t| t.to_string()).collect();
+    let outs: Vec<String> = after.iter().map(|t| t.to_string()).collect();
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
+}
+
+/// R18: `:help`'s listing, one line per meta-command.
+const HELP_LINES: [&str; 6] = [
+    ":help              list the meta-commands",
+    ":words             list defined words with their signatures",
+    ":type <line>       check <line> against the current stack, print its effect, run nothing",
+    ":stack             print the residual stack",
+    ":clear             dispose the residual stack, then reset the session",
+    ":quit              end the session",
+];
+
+/// D3/R17: recognize a meta-command in the shared dispatch helper, before
+/// `eval_line`, so `:help`/`:words`/`:type`/`:stack`/`:clear` work piped
+/// (golden-testable) and interactively alike. `None` if `line` is not a
+/// meta-command (an ordinary Sooth line, dispatched by the caller).
+fn dispatch_meta(
+    session: &mut Session,
+    line: &str,
+    writer: &mut impl Write,
+) -> Option<Result<(), String>> {
+    let (cmd, rest) = match line.split_once(char::is_whitespace) {
+        Some((cmd, rest)) => (cmd, rest.trim()),
+        None => (line, ""),
+    };
+    let result = match cmd {
+        ":help" => (|| {
+            for line in HELP_LINES {
+                writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))?;
+            }
+            Ok(())
+        })(),
+        ":words" => (|| {
+            for line in session.words_listing() {
+                writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))?;
+            }
+            Ok(())
+        })(),
+        ":type" => session.eval_type(rest, writer),
+        ":stack" => writeln!(writer, "{}", session.render_stack())
+            .map_err(|e| format!("writing stdout: {e}")),
+        ":clear" => session.clear(writer),
+        _ => return None,
+    };
+    Some(result)
+}
+
+fn dispatch_line(
+    session: &mut Session,
+    line: &str,
+    writer: &mut impl Write,
+) -> Result<Dispatch, String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(Dispatch::Continue);
+    }
+    if trimmed == ":quit" {
+        return Ok(Dispatch::Quit);
+    }
+    if let Some(result) = dispatch_meta(session, trimmed, writer) {
+        if let Err(e) = result {
+            writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
+        }
+        return Ok(Dispatch::Continue);
+    }
+    if let Err(e) = session.eval_line(trimmed, writer) {
+        writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
+    }
+    Ok(Dispatch::Continue)
+}
+
+/// The read-eval-print loop. D1: branch once, at entry, on whether stdin is a
+/// terminal. Not a tty -> the piped `read_line` loop, byte-for-byte as today
+/// (F2). A tty -> the raw-mode line editor. Both funnel each committed line
+/// through `dispatch_line`.
+pub fn run(reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
     let mut session = Session::new();
+    if std::io::stdin().is_terminal() {
+        run_tty(&mut session, &mut writer)
+    } else {
+        run_piped(&mut session, reader, &mut writer)
+    }
+}
+
+/// The piped (non-tty) path: identical in shape and order to the pre-editor
+/// REPL, only routed through the shared `dispatch_line` (F2/D1).
+fn run_piped(
+    session: &mut Session,
+    mut reader: impl BufRead,
+    writer: &mut impl Write,
+) -> Result<(), String> {
     let mut line = String::new();
     loop {
         line.clear();
@@ -2009,18 +2618,95 @@ pub fn run(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Strin
             .read_line(&mut line)
             .map_err(|e| format!("reading stdin: {e}"))?;
         if n == 0 {
-            return end_session(&mut session, &mut writer);
+            return end_session(session, writer);
         }
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
+        match dispatch_line(session, &line, writer)? {
+            Dispatch::Quit => return end_session(session, writer),
+            Dispatch::Continue => {}
         }
-        if trimmed == ":quit" {
-            return end_session(&mut session, &mut writer);
+    }
+}
+
+/// The primary prompt (tty only; never written on the piped path, F2).
+const PROMPT: &str = "sooth> ";
+
+/// The continuation prompt (tty only), shown while a multi-line definition
+/// or bracket is still open (R10).
+const CONTINUATION_PROMPT: &str = "  ... ";
+
+/// The pure action-to-outcome mapping `run_tty`'s loop acts on: `Commit`
+/// dispatches the line, `Abort` (Ctrl-C) just continues the loop without
+/// dispatching or quitting, and `Eof` (Ctrl-D on an empty line, or a closed
+/// stdin) quits. Pulled out of `run_tty` -- which also does real termios/fd
+/// I/O and so cannot run under `cargo test` -- so the one decision that
+/// distinguishes "Ctrl-C aborts the line" from "Ctrl-C ends the session" is
+/// unit-testable on its own, independent of a real terminal.
+#[derive(Debug, PartialEq)]
+enum LoopStep {
+    Continue,
+    Dispatch(String),
+    Quit,
+}
+
+fn loop_step(action: editor::Action) -> LoopStep {
+    match action {
+        editor::Action::Commit(line) => LoopStep::Dispatch(line),
+        editor::Action::Abort => LoopStep::Continue,
+        editor::Action::Eof => LoopStep::Quit,
+    }
+}
+
+/// The tty path: put stdin in raw mode (restored on any exit by the guard's
+/// `Drop`, D5), then read bytes into the line editor, dispatching each
+/// committed line through `dispatch_line`. Ctrl-C abandons the line (and any
+/// pending multi-line buffer, R11); Ctrl-D on an empty line and a closed
+/// stdin both end the session.
+fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
+    session.enable_rich_stack_rendering();
+    // A failed `tcgetattr`/`tcsetattr` here means there is no sound cooked
+    // state to restore later; propagate rather than proceed into raw mode on
+    // a guard that would write back garbage termios on `Drop`.
+    let _guard = editor::raw_mode_stdin().map_err(|e| format!("entering raw mode: {e}"))?;
+    let mut ed = editor::Editor::new(
+        PROMPT,
+        CONTINUATION_PROMPT,
+        editor::History::load(),
+        text_is_complete,
+    );
+    let w = |r: std::io::Result<()>| r.map_err(|e| format!("writing stdout: {e}"));
+    w(ed.redraw(writer))?;
+    w(writer.flush())?;
+    loop {
+        let byte = editor::read_stdin_byte().map_err(|e| format!("reading stdin: {e}"))?;
+        let Some(byte) = byte else {
+            w(writer.write_all(b"\r\n"))?;
+            return end_session(session, writer);
+        };
+        let action = ed
+            .push_byte(byte, writer)
+            .map_err(|e| format!("writing stdout: {e}"))?;
+        let Some(action) = action else { continue };
+        match loop_step(action) {
+            LoopStep::Dispatch(cmd) => {
+                w(writer.write_all(b"\r\n"))?;
+                match dispatch_line(session, &cmd, writer)? {
+                    Dispatch::Quit => return end_session(session, writer),
+                    Dispatch::Continue => {}
+                }
+                // R23: a defined word is completable right away.
+                ed.set_words(session.word_names());
+                w(ed.redraw(writer))?;
+            }
+            LoopStep::Continue => {
+                w(writer.write_all(b"\r\n"))?;
+                w(ed.redraw(writer))?;
+            }
+            LoopStep::Quit => {
+                w(writer.write_all(b"\r\n"))?;
+                return end_session(session, writer);
+            }
         }
-        if let Err(e) = session.eval_line(trimmed, &mut writer) {
-            writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
-        }
+        w(writer.flush())?;
     }
 }
 
@@ -2048,6 +2734,89 @@ mod tests {
         // C-ABI `l`-taking, `l`-returning function on this 64-bit target.
         let sq: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(sym) };
         assert_eq!(sq(5), 25);
+    }
+
+    /// The Ctrl-C-doesn't-exit-the-process decision, guarded directly rather
+    /// than only through the editor's `Action::Abort` (which has no way to
+    /// exit a process at all): `run_tty`'s match on `loop_step` is the one
+    /// place that decision lives, so this asserts all three arms rather than
+    /// letting a swapped `Abort`/`Eof` mapping ship undetected.
+    #[test]
+    fn loop_step_maps_commit_abort_eof_expected() {
+        assert_eq!(
+            loop_step(editor::Action::Commit("1 2 +".to_string())),
+            LoopStep::Dispatch("1 2 +".to_string())
+        );
+        assert_eq!(loop_step(editor::Action::Abort), LoopStep::Continue);
+        assert_eq!(loop_step(editor::Action::Eof), LoopStep::Quit);
+    }
+
+    #[test]
+    fn continuation_unclosed_def_needs_more() {
+        let tokens = lexer::lex(": sq ( i64 -- i64 )").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+    }
+
+    #[test]
+    fn continuation_unclosed_typedef_needs_more() {
+        let tokens = lexer::lex("type: Vec2 x i64 y i64").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+    }
+
+    #[test]
+    fn continuation_unbalanced_bracket_needs_more() {
+        let tokens = lexer::lex("[ i64 4").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+    }
+
+    #[test]
+    fn continuation_balanced_line_is_complete() {
+        let tokens = lexer::lex(": sq ( i64 -- i64 ) dup * ;").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::Complete);
+
+        let tokens = lexer::lex("1 2 +").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::Complete);
+    }
+
+    /// #24: `:type` prints the checked effect and touches no session state.
+    #[test]
+    fn repl_type_prints_effect_without_executing() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_type("1 2 +", &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "( -- i64 )\n");
+        assert!(session.types.is_empty());
+        assert_eq!(session.top, 0);
+    }
+
+    /// #25 (load-bearing, mutation-tested): `:type` mentioning an array/
+    /// owned-cell/ref type must not grow the session's interning registries,
+    /// even though `parse_line_with_structs` interns as a side effect of
+    /// parsing (the hazard R20 calls out). The probe line mentions all three:
+    /// `0 4 fill` interns an array, `7 ^` an owned cell, and `&a 0 &> @` a ref
+    /// (borrowing an element of the freshly-bound array `a`) -- each registry
+    /// assertion below is load-bearing on its own probe term, not decorative.
+    /// `.unwrap()`, not `.unwrap_or(())`: a future `eval_type` regression that
+    /// makes this line stop checking must fail loudly here, not silently
+    /// degrade all three assertions to a vacuous pass.
+    #[test]
+    fn repl_type_does_not_grow_registries() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let arrays_before = session.arrays.len();
+        let cells_before = session.owned_cells.len();
+        let refs_before = session.refs.len();
+        session
+            .eval_type("0 4 fill | a | &a 0 &> @ 7 ^", &mut out)
+            .unwrap();
+        assert_eq!(session.arrays.len(), arrays_before);
+        assert_eq!(session.owned_cells.len(), cells_before);
+        assert_eq!(session.refs.len(), refs_before);
     }
 
     #[test]
@@ -2170,6 +2939,159 @@ mod tests {
             format_stack(&[-1], &[Type::Usize], &[], &[], &[]),
             "stack: 18446744073709551615"
         );
+    }
+
+    #[test]
+    fn format_rich_struct_shows_field_values() {
+        // D2/R14: unlike `format_stack`'s `<Vec2>` placeholder, the rich
+        // formatter walks the struct's fields and renders their values.
+        use crate::ast::StructId;
+        let layouts = vec![StructLayout {
+            name: "Vec2",
+            size: 16,
+            align: 8,
+            fields: vec![
+                ir::FieldLayout {
+                    offset: 0,
+                    ty: ir::IrType::I64,
+                    size: 8,
+                    align: 8,
+                },
+                ir::FieldLayout {
+                    offset: 8,
+                    ty: ir::IrType::I64,
+                    size: 8,
+                    align: 8,
+                },
+            ],
+            is_linear: false,
+            has_drop_overload: false,
+            bundle: false,
+            drop_generation: None,
+        }];
+        let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
+        assert_eq!(
+            format_stack_rich(&[5, 6], &[vec2], &layouts, &[], &[], &[]),
+            "stack: <Vec2 5i64 6i64>"
+        );
+    }
+
+    #[test]
+    fn format_rich_enum_shows_variant_and_payload() {
+        // D2/R14: the active variant (by discriminant) and its payload field
+        // values, not the `<TypeName>` placeholder.
+        use crate::ast::EnumId;
+        let enum_layouts = vec![EnumLayout {
+            name: "E",
+            tag_offset: 0,
+            tag_ty: ir::IrType::Int {
+                bits: 32,
+                signed: true,
+            },
+            payload_offset: 8,
+            size: 16,
+            align: 8,
+            variants: vec![
+                ir::VariantLayout { fields: vec![] },
+                ir::VariantLayout {
+                    fields: vec![ir::FieldLayout {
+                        offset: 0,
+                        ty: ir::IrType::I64,
+                        size: 8,
+                        align: 8,
+                    }],
+                },
+            ],
+            is_linear: false,
+            drop_generation: None,
+        }];
+        let e = Type::Enum(EnumId::from_index(0), "E");
+        // Tag 1 (second variant) in the low 32 bits of the first cell, the
+        // payload in the second.
+        assert_eq!(
+            format_stack_rich(&[1, 42], &[e], &[], &enum_layouts, &[], &[]),
+            "stack: <E#1 42i64>"
+        );
+    }
+
+    #[test]
+    fn format_rich_array_shows_elements() {
+        // D2/R14: every element, not the `<[T N]>` placeholder.
+        use crate::ast::ArrayId;
+        let array_layouts = vec![ArrayLayout {
+            name: "[i64 3]",
+            elem: ir::IrType::I64,
+            count: 3,
+            stride: 8,
+            size: 24,
+            align: 8,
+            is_linear: false,
+        }];
+        let arr = Type::Array(ArrayId::from_index(0), "[i64 3]");
+        assert_eq!(
+            format_stack_rich(&[10, 20, 30], &[arr], &[], &[], &array_layouts, &[]),
+            "stack: <[i64 3] 10i64 20i64 30i64>"
+        );
+    }
+
+    #[test]
+    fn format_rich_u8_distinguished_from_i64() {
+        // R15: a `u8` `1` and an `i64` `1` must not both render as bare `1`.
+        let u8_ty = Type::from_name("u8").unwrap();
+        assert_eq!(
+            format_stack_rich(&[1, 1], &[u8_ty, Type::I64], &[], &[], &[], &[]),
+            "stack: 1u8 1i64"
+        );
+    }
+
+    #[test]
+    fn format_rich_owned_cell_read_does_not_consume() {
+        // R16 (load-bearing): rendering an owning cell's payload is a read.
+        // The heap value must still be there, unchanged, afterward.
+        use crate::ast::OwnedCellId;
+        let payload = Box::into_raw(Box::new(99i64));
+        let cell_ty = Type::OwnedCell(OwnedCellId::from_index(0), "^i64");
+        let buf = [payload as i64];
+        let out = format_stack_rich(&buf, &[cell_ty], &[], &[], &[], &[ir::IrType::I64]);
+        assert_eq!(out, "stack: ^99i64");
+        // SAFETY: `payload` is still a live, exclusively-held allocation;
+        // rendering ran no destructor and freed nothing.
+        unsafe {
+            assert_eq!(
+                *payload, 99,
+                "rendering must not have freed or mutated the cell"
+            );
+            drop(Box::from_raw(payload));
+        }
+    }
+
+    /// F1/F2: everything above (`format_rich_*`) exercises `format_stack_rich`
+    /// directly with hand-built layout structs; `enable_rich_stack_rendering`,
+    /// `render_stack`'s rich branch, and `eval_expr`'s rich branch
+    /// (the actual live wiring `run_tty` uses) are otherwise never exercised
+    /// by any test, since a real tty is required to reach `run_tty` itself. A
+    /// wrong cell index or an off-by-one there would ship green without this.
+    #[test]
+    fn session_rich_rendering_shows_struct_contents_through_real_session() {
+        let mut session = Session::new();
+        session.enable_rich_stack_rendering();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Vec2 x i64 y i64 ;", &mut out)
+            .unwrap();
+        session.eval_line("5 6 Vec2", &mut out).unwrap();
+        assert_eq!(session.render_stack(), "stack: <Vec2 5i64 6i64>");
+
+        // R16's session-level half: after rendering an owning cell through
+        // the real session (not just the isolated formatter, per
+        // `format_rich_owned_cell_read_does_not_consume` above), it must
+        // still be genuinely live and droppable, not merely "not freed in
+        // isolation".
+        session.eval_line("drop", &mut out).unwrap(); // dispose the Vec2 first
+        session.eval_line("99 ^", &mut out).unwrap();
+        assert_eq!(session.render_stack(), "stack: ^99i64");
+        session.eval_line("drop", &mut out).unwrap();
+        assert_eq!(session.render_stack(), "stack: (empty)");
     }
 
     fn entry(generation: u64) -> WordEntry {
@@ -2437,6 +3359,39 @@ mod tests {
         assert!(
             session.env.contains_key("q::w__import1"),
             "the second event's row is the fresh one"
+        );
+    }
+
+    #[test]
+    fn word_names_includes_display_name_import_and_poly_word() {
+        // R23: `word_names()` is completion's actual feed (`:words`' own
+        // listing is a separate, parallel implementation and does not prove
+        // this function does the right thing on its own). Reverting either
+        // the `display_name` reversal or the `poly_words` fold inside
+        // `word_names()` must fail this test, not just `:words`' listing.
+        let d = LibDir::new("word_names");
+        let lib = d.write("lib.sth", ": inc ( i64 -- i64 ) 1 + ;\nexport: inc ;\n");
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("m", &lib), &mut out)
+            .unwrap();
+        session
+            .eval_line(": alen ( ['T 'N] -- ) drop ;", &mut out)
+            .unwrap();
+
+        let names = session.word_names();
+        assert!(
+            names.contains(&"m::inc".to_string()),
+            "an imported word is completable under its user-facing spelling, not the import-epoch-mangled env key: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("__import")),
+            "no mangled spelling leaks into completion: {names:?}"
+        );
+        assert!(
+            names.contains(&"alen".to_string()),
+            "a polymorphic word is completable, not just concrete ones: {names:?}"
         );
     }
 
