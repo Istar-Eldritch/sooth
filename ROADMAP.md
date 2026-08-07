@@ -387,12 +387,38 @@ every diagnostic naming a word leaked the internal `__m0` monomorphization mangl
 the module had an import (predating 6a, arriving with module support), and the now-unreachable
 `demangle_local` was deleted as dead code.
 
-**Next action: Phase 4 Slice 6b** (`filter`/`while`, and the self-tail combinator loop). Its
-paper pre-check (`docs/phase4-slice6b-brief.md`) falsified this slice's original charter by
-building the programs: `filter` needs no compiler change at all, and `while`'s blocker is
-6a's own combinator-cycle rejection rather than either "polymorphic-path gap", both of which
-stay in place. The work is relaxing that rejection for a self-*tail* combinator edge and
-lowering it to a splice-time loop back-edge.
+**Phase 4 Slice 6b (`filter`/`while`, and the self-tail combinator loop) is complete**: its
+paper pre-check (`docs/phase4-slice6b-brief.md`) falsified the slice's original charter
+before any code changed, by building the programs — `filter` needed no compiler change at
+all, and `while`'s actual blocker was 6a's own combinator-cycle rejection, not either
+"polymorphic-path gap" the roadmap had named, both of which stay in place, untouched
+(`src/check.rs:3672`'s polymorphic-`if` rejection, `src/ir.rs`'s poly-instantiation
+`self_tail` hardcode). `filter` ships as a `Copy`-element combinator compacting an array in
+place through 6a's inliner unchanged, no compiler change at all. `while`'s deliverable is
+the self-tail combinator loop: `check_combinator_cycles` is relaxed so a self-edge is
+permitted iff every occurrence of the self-name is in tail position (comparing
+`all_calls` against `tail_position_calls`); a non-tail self-call or a mutual cycle is still
+`combinator_cycle_error`, unchanged. `inline_combinator` gains a self-tail branch: while
+splicing a self-tail combinator's body, a tail-position call back to that same combinator is
+not re-spliced but treated as the loop back-edge, running the same two obligations the
+whole-word self-tail transform already runs (`check_linear_across_back_edge`,
+`check_reference_across_back_edge`) before terminating that branch. Lowering composes two
+existing ingredients rather than inventing a third: `times`'s mid-body `begin_loop` open and
+the whole-word transform's self-call-driven back-edge, including the `stage_aggregates`
+stable-slot path for a carried aggregate state (the slice-3 aliasing fix, reused verbatim).
+`while` inherits the R18 nested-loop limit in both directions (a `while` sited inside an open
+`times`, and a `times` sited inside a self-tail combinator body), which required renaming the
+guard's counter from `times_depth` to `loop_depth` since it now counts two kinds of loop; the
+limit itself is not lifted here (6d lifts it for all five combinators at once). The REPL
+definition chokepoint already rejects a self-tail combinator with no change, since it keys on
+the declared quotation parameter alone. `examples/filter_while.sth` dogfoods both words
+against a hand-threaded twin, with the array passed straight from its producer word into
+`filter` rather than bound to a local first, so it does not trip 6a's bind-then-pass alias
+limitation.
+
+**Next action: Phase 4 Slice 6c or 6d.** Neither depends on the other; 6c (quotation-taking
+words at the REPL) and 6d (nested constant-stack loops, lifting the limit 6b inherited) may
+land in either order.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

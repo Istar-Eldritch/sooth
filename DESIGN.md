@@ -347,6 +347,36 @@ then "always" is the only implementable answer. The REPL
 stays a located rejection, both at a session line defining a quotation-taking word and at an
 imported closure exporting one (D7); 6c lifts it.
 
+**Phase 4 Slice 6b relaxed the self-tail edge of 6a's D5 and lowered it to a loop
+back-edge.** `filter` needed no compiler change at all: a combinator body is checked by
+term-splicing at the concrete call site, never through `poly_term`, so the polymorphic-`if`
+rejection never gates one. `while`'s blocker was 6a's own combinator-cycle rejection, which
+fired identically for a *monomorphic* self-recursive combinator, so it was never a
+polymorphism question. `check_combinator_cycles` now permits a self-edge iff every
+occurrence of the self-name is in tail position (its `all_calls` count equal to its
+`tail_position_calls` count); a non-tail self-call or any cycle of length ≥ 2 still returns
+`combinator_cycle_error` unchanged, since those need slice 7's runtime quotation values.
+`inline_combinator` gains a matching branch: while splicing a self-tail combinator's body, a
+tail-position self-call is not re-spliced (which would recurse forever) but is treated as the
+loop back-edge, discharging the same two obligations the whole-word self-tail transform
+already runs at its self-call site — `check_linear_across_back_edge` and
+`check_reference_across_back_edge` over the caller's residual and the self-call's input row
+— before terminating that branch; the third obligation, stack-row identity between the
+back-edge and the header, falls out of the ordinary `if`-join discipline, since both the
+self-call arm and the base arm must present the same declared row. Lowering composes two
+already-shipped ingredients rather than adding a third: `times`'s mid-body `begin_loop` open
+and the whole-word transform's self-call-driven back-edge (`back_edges.push` + `Jmp`, not an
+`Instr::Call` and not a re-splice), including the `stage_aggregates` stable-slot path for a
+carried aggregate state, reused verbatim from the slice-3 aggregate-return aliasing fix. The
+Copy quotation parameter itself carries no `IrType` and is excluded from the loop-carried
+phis, since it is the same literal every iteration and is re-resolved statically at each
+splice. `while` inherits the R18 nested-loop limit in both directions — opening a self-tail
+combinator loop while a loop is already open, and a `times` reached while splicing one — by
+raising and restoring the same counter `times` does (renamed `loop_depth`, since it now
+counts two kinds of loop); the limit is not lifted here (6d lifts it for all five combinators
+at once). The REPL chokepoint needed no change: it already rejects any quotation-declaring
+word at the definition site, self-tail or not.
+
 **Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
 error). Multi-way branching is a **`cond` combinator** (a library word taking

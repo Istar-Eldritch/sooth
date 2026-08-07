@@ -386,6 +386,16 @@ impl Deriv {
 /// to and which region each aggregate value denotes. Threaded `&mut`
 /// through the walk rather than kept in `Scope`, which an `if` arm clones: ids
 /// stay unique across the arms, and a record outlives the arm that made it.
+/// R6: the self-tail combinator whose body is currently being spliced. `name`
+/// is the mangled combinator name (matched against a self-call inside the
+/// splice); `input_count` is its declared input arity, so the back-edge can
+/// find the carried state row (the non-quotation inputs) below the arguments.
+#[derive(Debug, Clone)]
+struct SelfTailMarker {
+    name: String,
+    input_count: usize,
+}
+
 #[derive(Debug, Default)]
 struct Provenance {
     derivs: Vec<Deriv>,
@@ -415,14 +425,23 @@ struct Provenance {
     /// through the walk, so a quotation pushed in one `if` arm and read in a
     /// merge outlives the arm's cloned `Scope`.
     quotations: Vec<QuotBody>,
-    /// R16/R18: how many `times` body splices are currently open around the
-    /// term being checked. Incremented across a `times` body splice and
-    /// **restored** after (not merely decremented), so two *sequential*
-    /// `times` in one word do not false-positive as nested. A non-zero value
-    /// at a `times` is the `times`-in-`times` case of R18's nested-loop
-    /// rejection; `scope.depth()` cannot substitute, since it counts every
-    /// block, not only a `times`.
-    times_depth: usize,
+    /// R16/R18/R14: how many constant-stack loops are currently open around
+    /// the term being checked -- a `times` body splice *or* a self-tail
+    /// combinator body splice (both lower to one `begin_loop`). Incremented
+    /// across each and **restored** after (not merely decremented), so two
+    /// *sequential* loops in one word do not false-positive as nested. A
+    /// non-zero value at a `times`, or at the opening of a self-tail
+    /// combinator loop, is the nested-loop case of R18/R14's rejection;
+    /// `scope.depth()` cannot substitute, since it counts every block, not
+    /// only a loop.
+    loop_depth: usize,
+    /// R6/R14: the self-tail combinator currently being spliced (its name and
+    /// its declared input arity), set for the duration of that body splice. A
+    /// tail-position call to that same name reached inside the spliced body is
+    /// the loop back-edge, not a re-splice: it discharges the two move/borrow
+    /// obligations and produces the combinator's carried state, terminating
+    /// the branch. Saved and restored around the splice so loops compose.
+    self_tail_combinator: Option<SelfTailMarker>,
     /// R18/R21: a monotonic counter minting a fresh suffix each time a
     /// combinator body is spliced, so the callee's `| ... |` locals are
     /// alpha-renamed to names no caller local (or outer combinator, under
@@ -5024,13 +5043,20 @@ fn poly_input_is_quotation(p: &PolyType) -> bool {
     )
 }
 
-/// R22 (D5): reject a cycle in the quotation-taking-word call subgraph. Edge
-/// `A -> B` iff combinator `A`'s body names combinator `B` (any position; a
-/// call to a quotation-taking word necessarily passes it a quotation). Since
-/// the inliner splices `B`'s body into `A`'s, a cycle would inline forever, so
-/// unlike `check_tail_call_cycles` a **self-edge is itself the error** (a
-/// self-recursive combinator is the minimal case). Reuses that pass's 3-colour
-/// DFS shape (recon 8).
+/// R22 (D5)/R4 (D5 relaxed): reject a cycle in the quotation-taking-word call
+/// subgraph. Edge `A -> B` iff combinator `A`'s body names combinator `B`
+/// (any position; a call to a quotation-taking word necessarily passes it a
+/// quotation). Since the inliner splices `B`'s body into `A`'s, a cycle would
+/// inline forever, so unlike `check_tail_call_cycles` a self-edge is normally
+/// the error.
+///
+/// R4 relaxes this for one shape only: a **self-tail** combinator, whose every
+/// self-occurrence is in tail position, gets no self-edge, because the loop
+/// transform lowers that self-call to a back-edge (a finite loop) rather than
+/// re-splicing forever. A self-name in *any* non-tail position (`all_calls`
+/// count exceeds `tail_position_calls` count) keeps its self-edge and stays a
+/// cycle error, and every cycle of length >= 2 (a mutual cycle) is untouched.
+/// Reuses `check_tail_call_cycles`'s 3-colour DFS shape (recon 8).
 fn check_combinator_cycles(combinators: &HashMap<String, Combinator>) -> Result<(), String> {
     let members: Vec<&Combinator> = combinators.values().collect();
     let idx: HashMap<&str, usize> = members
@@ -5040,8 +5066,23 @@ fn check_combinator_cycles(combinators: &HashMap<String, Combinator>) -> Result<
         .collect();
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
     for (i, c) in members.iter().enumerate() {
+        let self_name = c.word.name.as_str();
+        let self_all = all_calls(&c.word.body)
+            .iter()
+            .filter(|&&n| n == self_name)
+            .count();
+        let self_tail = tail_position_calls(&c.word.body)
+            .iter()
+            .filter(|&&n| n == self_name)
+            .count();
+        // R4: a tail-only self-edge (every self-occurrence in tail position,
+        // and at least one) is permitted -- the loop transform makes it finite.
+        let tail_only_self = self_all > 0 && self_all == self_tail;
         for callee in all_calls(&c.word.body) {
             if let Some(&j) = idx.get(callee) {
+                if i == j && tail_only_self {
+                    continue;
+                }
                 if !adj[i].contains(&j) {
                     adj[i].push(j);
                 }
@@ -5194,6 +5235,30 @@ fn inline_combinator(
             }
         }
     }
+    // R6/R14a: a self-tail combinator opens a splice-time loop. Its body is
+    // spliced with `tail = true` so its own tail-position self-call is
+    // recognized as the back-edge (above), and the loop-open state is raised
+    // for the duration so a `times` inside it, or a second self-tail
+    // combinator, is the nested-loop rejection (R14b). Opening it while a
+    // loop is already open (`loop_depth > 0`, or an *enclosing* whole-word
+    // self-tail word) is R14a's located rejection; the combinator's own
+    // standalone check does not trip this (its `Ctx` names the combinator
+    // itself, not an enclosing loop).
+    let self_tail = crate::check::is_combinator(comb.word) && has_self_tail_call(comb.word);
+    let splice_tail = if self_tail {
+        let enclosing_self_tail =
+            matches!(ctx, Ctx::Word { self_tail: true, mangled, .. } if *mangled != name);
+        if prov.loop_depth > 0 || enclosing_self_tail {
+            return Err(times_nested_in_loop_error(ctx, span));
+        }
+        true
+    } else {
+        false
+    };
+    let input_count = match comb.word.poly.as_ref() {
+        Some(sig) => sig.inputs.len(),
+        None => comb.word.effect.inputs.len(),
+    };
     // R18/R21: splice the callee body, alpha-renamed so its `| ... |` locals
     // cannot collide with a caller local or, under transitive inlining, an
     // outer combinator's locals already in scope. Lowering renames identically
@@ -5202,9 +5267,35 @@ fn inline_combinator(
     prov.inline_uid += 1;
     let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
     let depth = scope.depth();
-    stack = check_terms(
-        &renamed, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
-    )?;
+    let saved_marker = if self_tail {
+        let saved = prov.self_tail_combinator.take();
+        prov.self_tail_combinator = Some(SelfTailMarker {
+            name: name.to_string(),
+            input_count,
+        });
+        prov.loop_depth += 1;
+        Some(saved)
+    } else {
+        None
+    };
+    let result = check_terms(
+        &renamed,
+        stack,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        scope,
+        splice_tail,
+        poly,
+    );
+    if let Some(saved) = saved_marker {
+        prov.loop_depth -= 1;
+        prov.self_tail_combinator = saved;
+    }
+    stack = result?;
     leave_block(
         ctx,
         scope,
@@ -5875,10 +5966,14 @@ fn check_term(
                 if count.ty != Type::I64 {
                     return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
                 }
-                // R18: reject a `times` nested in a loop -- a self-tail word
-                // (whose whole-word `begin_loop` lowering would nest two loops)
-                // or another `times` body. Both are decided here, one stage
-                // before lowering's would-be `self.header.is_some()` test.
+                // R18/R14b: reject a `times` nested in a loop -- a self-tail
+                // word (whose whole-word `begin_loop` lowering would nest two
+                // loops), another `times` body, or a self-tail *combinator*
+                // body (whose splice-time `begin_loop` likewise nests). All
+                // are decided here, one stage before lowering's would-be
+                // `self.header.is_some()` test. `loop_depth` is raised across a
+                // self-tail combinator splice too (R14b), so a `times` sited
+                // in `while`'s body trips this.
                 let in_self_tail = matches!(
                     ctx,
                     Ctx::Word {
@@ -5886,7 +5981,7 @@ fn check_term(
                         ..
                     }
                 );
-                if in_self_tail || prov.times_depth > 0 {
+                if in_self_tail || prov.loop_depth > 0 {
                     return Err(times_nested_in_loop_error(ctx, span));
                 }
                 // R18: the row is the remaining stack; a quotation anywhere in
@@ -5905,18 +6000,18 @@ fn check_term(
                 let row = stack.clone();
                 // Splice the body against the row plus a synthesized index (the
                 // body's top input), bracketed like `call` (R6), `tail = false`.
-                // `times_depth` rides up across the splice so a `times` nested
+                // `loop_depth` rides up across the splice so a `times` nested
                 // in the body trips the rejection above, and is *restored* (not
                 // decremented), so two sequential `times` do not false-positive.
                 stack.push(Slot::computed(Type::I64));
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                let saved_times_depth = prov.times_depth;
-                prov.times_depth += 1;
+                let saved_loop_depth = prov.loop_depth;
+                prov.loop_depth += 1;
                 let result = check_terms(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
                 )?;
-                prov.times_depth = saved_times_depth;
+                prov.loop_depth = saved_loop_depth;
                 leave_block(
                     ctx,
                     scope,
@@ -6000,6 +6095,50 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
+                return Ok(stack);
+            }
+            // R6-R9: a tail-position call, inside a self-tail combinator
+            // body splice, to that same combinator is the loop back-edge, not
+            // a re-splice (which would recurse forever). Intercepted before
+            // the combinator dispatch below. It discharges the two
+            // move/borrow obligations at the self-call (the stack-row identity
+            // obligation is left to the ordinary stack-effect and `if`-join
+            // discipline, R7) and produces the combinator's carried state --
+            // its non-quotation inputs, which for a self-tail combinator are
+            // exactly its declared outputs -- then terminates this branch. A
+            // non-tail self-call never reaches here: R4 rejected it at
+            // `check_combinator_cycles` before any splice.
+            let back_edge = tail
+                && prov
+                    .self_tail_combinator
+                    .as_ref()
+                    .is_some_and(|m| m.name == *name);
+            if back_edge {
+                let n = prov
+                    .self_tail_combinator
+                    .as_ref()
+                    .expect("back-edge marker set")
+                    .input_count;
+                if stack.len() < n {
+                    return Err(underflow_error(ctx, span, name, n, stack.len()));
+                }
+                let base = stack.len() - n;
+                // R8: no linear value live across the edge (below the args, or
+                // an unconsumed frame local).
+                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
+                // R9: no reference into a frame local carried by the args.
+                check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
+                // The carried state is the non-quotation inputs (a concrete
+                // literal quotation carries `quot`, a def-site abstract one is
+                // `Type::Quotation`); both are dropped, exactly as the loop
+                // carries no quotation phantom in its phis (R10).
+                let outs: Vec<Slot> = stack[base..]
+                    .iter()
+                    .filter(|s| s.quot.is_none() && !matches!(s.ty, Type::Quotation(_)))
+                    .map(|s| Slot::computed(s.ty))
+                    .collect();
+                stack.truncate(base);
+                stack.extend(outs);
                 return Ok(stack);
             }
             // R18: a call to a monomorphic quotation-taking word is inlined
