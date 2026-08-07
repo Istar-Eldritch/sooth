@@ -183,6 +183,7 @@ enum Key {
     Backspace,
     Delete,
     Enter,
+    Tab,
     CtrlC,
     CtrlD,
     Unknown,
@@ -242,6 +243,7 @@ fn decode(b: &[u8]) -> Decoded {
             }
         }
         b'\r' | b'\n' => Decoded::Key(Key::Enter, 1),
+        b'\t' => Decoded::Key(Key::Tab, 1),
         0x7f | 0x08 => Decoded::Key(Key::Backspace, 1),
         0x03 => Decoded::Key(Key::CtrlC, 1),
         0x04 => Decoded::Key(Key::CtrlD, 1),
@@ -351,6 +353,10 @@ pub struct Editor {
     /// (per the growth-structure split): `true` iff the joined pending text
     /// is a complete logical line.
     is_complete: fn(&str) -> bool,
+    /// R23: the current `:words` name list, refreshed by the driver after
+    /// each dispatched line so a newly defined word is completable right
+    /// away. Tab-only; empty until the driver first sets it.
+    words: Vec<String>,
 }
 
 impl Editor {
@@ -371,7 +377,13 @@ impl Editor {
             stash: Vec::new(),
             pending_lines: Vec::new(),
             is_complete,
+            words: Vec::new(),
         }
+    }
+
+    /// R23: replace the word list Tab completes against.
+    pub fn set_words(&mut self, words: Vec<String>) {
+        self.words = words;
     }
 
     /// Feed one input byte; decode and apply as many complete keys as it
@@ -435,6 +447,9 @@ impl Editor {
                     self.redraw(out)?;
                 }
             }
+            Key::Tab => {
+                self.complete(out)?;
+            }
             Key::Up => {
                 self.history_prev();
                 self.redraw(out)?;
@@ -479,6 +494,35 @@ impl Editor {
             Key::Unknown => {}
         }
         Ok(None)
+    }
+
+    /// R23: complete the word ending at the cursor against `self.words`. The
+    /// word being typed is the byte-naive whitespace-delimited token
+    /// immediately before the cursor; the first name in the (sorted) list
+    /// that has it as a proper prefix is spliced in. A no-op if nothing
+    /// matches, or if the token already equals a full word.
+    fn complete(&mut self, out: &mut impl Write) -> io::Result<()> {
+        let typed = String::from_utf8_lossy(&self.buf[..self.cursor]).into_owned();
+        let start = typed
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &typed[start..];
+        if prefix.is_empty() {
+            return Ok(());
+        }
+        let Some(word) = self
+            .words
+            .iter()
+            .find(|w| w.starts_with(prefix) && w.as_str() != prefix)
+        else {
+            return Ok(());
+        };
+        for &b in &word.as_bytes()[prefix.len()..] {
+            self.buf.insert(self.cursor, b);
+            self.cursor += 1;
+        }
+        self.redraw(out)
     }
 
     fn reset_line(&mut self) {
@@ -709,6 +753,20 @@ mod tests {
         let none = feed(&mut ed, b"\x04");
         assert!(none.is_empty());
         assert_eq!(ed.buf, b"xy");
+    }
+
+    #[test]
+    fn editor_tab_completes_against_word_list() {
+        let mut ed = editor(empty_history());
+        ed.set_words(vec!["square".to_string(), "squash".to_string()]);
+        feed(&mut ed, b"sq");
+        feed(&mut ed, b"\t");
+        assert_eq!(ed.buf, b"square");
+        // No match: a no-op, buffer untouched.
+        feed(&mut ed, b" zz");
+        let before = ed.buf.clone();
+        feed(&mut ed, b"\t");
+        assert_eq!(ed.buf, before);
     }
 
     #[test]

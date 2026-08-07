@@ -50,3 +50,73 @@ fn piped_multiline_def_keeps_per_line_errors() {
         "piped path must not join lines into a successful definition: {out}"
     );
 }
+
+/// #22: `:help` lists the meta-commands.
+#[test]
+fn repl_help_lists_meta_commands() {
+    let out = run_session(&[":help"]);
+    for cmd in [":help", ":words", ":type", ":stack", ":clear", ":quit"] {
+        assert!(out.contains(cmd), "`:help` output missing `{cmd}`: {out}");
+    }
+}
+
+/// #23: `:words` lists defined words with their declared signatures.
+#[test]
+fn repl_words_lists_words_with_signatures() {
+    let out = run_session(&[": sq ( i64 -- i64 ) dup * ;", ":words"]);
+    assert!(
+        out.contains("sq ( i64 -- i64 )"),
+        "`:words` should list `sq` with its signature, got: {out}"
+    );
+}
+
+/// #24: `:type` prints the resulting stack effect and executes nothing.
+#[test]
+fn repl_type_prints_effect_without_executing() {
+    let out = run_session(&[":type 1 2 +", ":stack"]);
+    assert!(
+        out.contains("( -- i64 )"),
+        "`:type` should print the checked effect, got: {out}"
+    );
+    assert!(
+        out.contains("stack: (empty)"),
+        "`:type` must not mutate the residual stack, got: {out}"
+    );
+}
+
+/// #26: `:stack` prints the residual stack without pushing or consuming.
+#[test]
+fn repl_stack_prints_without_mutating() {
+    let out = run_session(&["1 2", ":stack", "+"]);
+    let stack_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("stack:")).collect();
+    assert_eq!(
+        stack_lines.len(),
+        3,
+        "expected three stack lines, got: {out}"
+    );
+    assert_eq!(stack_lines[0], "stack: 1 2");
+    assert_eq!(stack_lines[1], "stack: 1 2");
+    assert_eq!(stack_lines[2], "stack: 3");
+}
+
+/// #27: `:clear` disposes the residual stack (runs destructors) then resets
+/// the session -- a redefinition after `:clear` behaves like a fresh session.
+#[test]
+fn repl_clear_disposes_then_resets() {
+    let out = run_session(&[
+        "1 2",
+        ":clear",
+        ":stack",
+        ": sq ( i64 -- i64 ) dup * ;",
+        "3 sq",
+    ]);
+    assert!(
+        out.contains("stack: (empty)"),
+        "`:clear` should reset the stack, got: {out}"
+    );
+    assert!(out.contains("defined sq"), "got: {out}");
+    assert!(
+        out.contains("stack: 9"),
+        "session should work normally after `:clear`, got: {out}"
+    );
+}

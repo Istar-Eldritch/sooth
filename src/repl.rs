@@ -760,6 +760,137 @@ impl Session {
         self.rich_stack = true;
     }
 
+    /// R19/R23: every defined word's user-facing name, sorted, at its current
+    /// generation. `self.env` is already keyed by the user-facing spelling
+    /// (the mangled/epoch-tagged symbol lives in `WordEntry::symbol`), so no
+    /// remapping is needed. Shared between `:words` (D3) and the editor's tab
+    /// completion (R23), which is the point of pulling it out on its own.
+    pub fn word_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.env.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// R19: `:words` listing, one `name ( ins -- outs )` line per defined
+    /// word, sorted for deterministic golden output.
+    fn words_listing(&self) -> Vec<String> {
+        self.word_names()
+            .into_iter()
+            .map(|name| {
+                let sig = &self.env[&name].sig;
+                format!("{name} {}", sig_str(sig))
+            })
+            .collect()
+    }
+
+    /// R21: render the residual stack through whichever formatter the path
+    /// uses (D2), without pushing or consuming anything. Layout registries
+    /// are rebuilt (pure, no compilation) purely to size/skip aggregate slots.
+    fn render_stack(&self) -> String {
+        let (structs, enums, arrays, cells, _refs) = ir::build_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        );
+        let live_cells = self.top / 8;
+        if self.rich_stack {
+            format_stack_rich(
+                &self.buf[..live_cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts,
+                &cells.payload,
+            )
+        } else {
+            format_stack(
+                &self.buf[..live_cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts,
+            )
+        }
+    }
+
+    /// D4/R22: dispose the residual stack's linear values (the existing
+    /// `dispose_residual` path, as `end_session` runs) before resetting env,
+    /// stack, and every registry/generation counter to a fresh session --
+    /// reset is scope-end, not a silent forget of live linear values.
+    fn clear(&mut self, writer: &mut impl Write) -> Result<(), String> {
+        self.dispose_residual(writer)?;
+        let rich_stack = self.rich_stack;
+        *self = Session::new();
+        self.rich_stack = rich_stack;
+        Ok(())
+    }
+
+    /// R20: lex -> parse -> check the rest of a `:type` line against the
+    /// current stack types and print the resulting effect, executing and
+    /// mutating nothing (no lower/emit/dlopen, no env/stack change).
+    ///
+    /// *(hazard)* `parse_line_with_structs` interns array/owned-cell/ref types
+    /// into `self.arrays`/`owned_cells`/`refs` as a side effect of parsing; a
+    /// `:type` that mentions one of those types must not grow the session's
+    /// registries, so their lengths are snapshotted and restored regardless
+    /// of whether checking succeeds.
+    fn eval_type(&mut self, rest: &str, writer: &mut impl Write) -> Result<(), String> {
+        let arrays_len = self.arrays.len();
+        let cells_len = self.owned_cells.len();
+        let refs_len = self.refs.len();
+        let result = self.check_type_line(rest);
+        self.arrays.truncate(arrays_len);
+        self.owned_cells.truncate(cells_len);
+        self.refs.truncate(refs_len);
+        match result {
+            Ok(effect) => writeln!(writer, "{effect}").map_err(|e| format!("writing stdout: {e}")),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn check_type_line(&mut self, rest: &str) -> Result<String, String> {
+        let tokens = lexer::lex(rest)?;
+        let ctx = parser::ImportCtx {
+            imports: &self.import_qualifier_module,
+            selective: &self.import_selective_module,
+            exports: &self.import_exports,
+        };
+        let line = parser::parse_line_with_structs(
+            &tokens,
+            &self.structs,
+            &self.enums,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &mut self.refs,
+            ctx,
+        )?;
+        let terms = match line {
+            Line::Expr(terms) => terms,
+            Line::Def(_) => {
+                return Err(
+                    "error: `:type` checks an expression against the current stack, not a word/type definition"
+                        .to_string(),
+                );
+            }
+        };
+        let env = self.typed_env();
+        let poly_env = self.poly_env();
+        let (net_stack, _insts) = check::infer_line(
+            &terms,
+            &self.types,
+            &env,
+            &mut self.arrays,
+            &mut self.owned_cells,
+            &mut self.refs,
+            &self.structs,
+            &self.enums,
+            &poly_env,
+        )?;
+        Ok(type_effect_str(&self.types, &net_stack))
+    }
+
     /// The checker's typed env: builtins, the generated struct words, the
     /// variant-constructor words, plus every successfully-defined user word.
     fn typed_env(&self) -> HashMap<String, Sig> {
@@ -2153,6 +2284,82 @@ pub fn text_is_complete(text: &str) -> bool {
 /// is preserved by construction. Blank lines are skipped, `:quit` requests a
 /// clean exit, and any stage error prints the diagnostic without mutating
 /// session state.
+/// `name ( ins -- outs )` for a defined word's signature (R19), mirroring
+/// `check::effect_str`'s notation but over a resolved `Sig` rather than a
+/// declared `StackEffect`.
+fn sig_str(sig: &Sig) -> String {
+    let ins: Vec<String> = sig.inputs.iter().map(|t| t.to_string()).collect();
+    let outs: Vec<String> = sig.outputs.iter().map(|t| t.to_string()).collect();
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
+}
+
+/// `( before -- after )` for a `:type` line's checked effect (R20): the stack
+/// types on entry and the resulting types after the checked expression.
+fn type_effect_str(before: &[Type], after: &[Type]) -> String {
+    let ins: Vec<String> = before.iter().map(|t| t.to_string()).collect();
+    let outs: Vec<String> = after.iter().map(|t| t.to_string()).collect();
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
+}
+
+/// R18: `:help`'s listing, one line per meta-command.
+const HELP_LINES: [&str; 6] = [
+    ":help              list the meta-commands",
+    ":words             list defined words with their signatures",
+    ":type <line>       check <line> against the current stack, print its effect, run nothing",
+    ":stack             print the residual stack",
+    ":clear             dispose the residual stack, then reset the session",
+    ":quit              end the session",
+];
+
+/// D3/R17: recognize a meta-command in the shared dispatch helper, before
+/// `eval_line`, so `:help`/`:words`/`:type`/`:stack`/`:clear` work piped
+/// (golden-testable) and interactively alike. `None` if `line` is not a
+/// meta-command (an ordinary Sooth line, dispatched by the caller).
+fn dispatch_meta(
+    session: &mut Session,
+    line: &str,
+    writer: &mut impl Write,
+) -> Option<Result<(), String>> {
+    let (cmd, rest) = match line.split_once(char::is_whitespace) {
+        Some((cmd, rest)) => (cmd, rest.trim()),
+        None => (line, ""),
+    };
+    let result = match cmd {
+        ":help" => (|| {
+            for line in HELP_LINES {
+                writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))?;
+            }
+            Ok(())
+        })(),
+        ":words" => (|| {
+            for line in session.words_listing() {
+                writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))?;
+            }
+            Ok(())
+        })(),
+        ":type" => session.eval_type(rest, writer),
+        ":stack" => writeln!(writer, "{}", session.render_stack())
+            .map_err(|e| format!("writing stdout: {e}")),
+        ":clear" => session.clear(writer),
+        _ => return None,
+    };
+    Some(result)
+}
+
 fn dispatch_line(
     session: &mut Session,
     line: &str,
@@ -2164,6 +2371,12 @@ fn dispatch_line(
     }
     if trimmed == ":quit" {
         return Ok(Dispatch::Quit);
+    }
+    if let Some(result) = dispatch_meta(session, trimmed, writer) {
+        if let Err(e) = result {
+            writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
+        }
+        return Ok(Dispatch::Continue);
     }
     if let Err(e) = session.eval_line(trimmed, writer) {
         writeln!(writer, "{e}").map_err(|e| format!("writing stdout: {e}"))?;
@@ -2248,6 +2461,8 @@ fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String>
                     Dispatch::Quit => return end_session(session, writer),
                     Dispatch::Continue => {}
                 }
+                // R23: a defined word is completable right away.
+                ed.set_words(session.word_names());
                 w(ed.redraw(writer))?;
             }
             Some(editor::Action::Abort) => {
@@ -2319,6 +2534,37 @@ mod tests {
         let tokens = lexer::lex("1 2 +").unwrap();
         let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
         assert_eq!(input_is_complete(&toks), Completeness::Complete);
+    }
+
+    /// #24: `:type` prints the checked effect and touches no session state.
+    #[test]
+    fn repl_type_prints_effect_without_executing() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session.eval_type("1 2 +", &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "( -- i64 )\n");
+        assert!(session.types.is_empty());
+        assert_eq!(session.top, 0);
+    }
+
+    /// #25 (load-bearing, mutation-tested): `:type` mentioning an array/
+    /// owned-cell/ref type must not grow the session's interning registries,
+    /// even though `parse_line_with_structs` interns as a side effect of
+    /// parsing (the hazard R20 calls out).
+    #[test]
+    fn repl_type_does_not_grow_registries() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Pt x i64 y i64 ;", &mut out)
+            .unwrap();
+        let arrays_before = session.arrays.len();
+        let cells_before = session.owned_cells.len();
+        let refs_before = session.refs.len();
+        session.eval_type("0 4 fill 7 ^", &mut out).unwrap_or(());
+        assert_eq!(session.arrays.len(), arrays_before);
+        assert_eq!(session.owned_cells.len(), cells_before);
+        assert_eq!(session.refs.len(), refs_before);
     }
 
     #[test]
