@@ -353,16 +353,31 @@ a declared parameter is checked directionally against the declared effect, enfor
 `Copy`-only capture restriction (D3) at the literal. Every call to a quotation-taking word is
 inlined by term-splicing the callee's AST body against the caller's live stack — the
 compiler's only inliner, forced by there being no `IrFunc` for a quotation-taking word to
-call (D2) — transitively (`map` over `each` inlines twice) and totally: anything
-un-inlinable, starting with recursion among quotation-taking words, is a located error, never
-a silent real call (D5). `each`/`map`/`fold` are ordinary polymorphic Sooth words at
-`lib/combinators.sth` (D8), each driving a `times` loop directly over an array's elements and
-handing one to its quotation parameter per iteration, verified to lower to a tight loop with
-no per-element `Instr::Call`. Native only: the
-REPL is a located rejection at both the defining line and an imported closure exporting a
-quotation-taking word (D7), lifted by 6c. `examples/array_totals.sth` dogfoods it against its
+call (D2) — transitively and totally: anything un-inlinable, starting with recursion among
+quotation-taking words, is a located error, never a silent real call (D5). The transitive
+case is a combinator forwarding its own quotation *parameter* to a nested combinator, which
+splices through both frames. `each`/`map`/`fold` are ordinary polymorphic Sooth words at
+`lib/combinators.sth` (D8), each a **leaf** combinator driving a `times` loop directly over
+an array's elements and handing one to its quotation parameter per iteration, verified to
+lower to a tight loop with no per-element `Instr::Call`, and verified to match a
+hand-threaded `times` twin across a sweep of stack limits. `map`/`fold` are *not* built on
+`each`, and cannot be in this slice: `each` hands its quotation one element and neither the
+array nor the index, so `fold`'s accumulator would need a row variable in the quotation
+effect (out of scope this slice) and `map`'s write-back a captured mutable borrow
+(forbidden by D3). **Building them on `each` needs row-polymorphic quotation effects,
+whichever slice lifts that restriction.** Native only: the REPL is a located rejection at
+both the defining line and an imported closure exporting a quotation-taking word (D7),
+lifted by 6c. `examples/array_totals.sth` dogfoods it against its
 hand-threaded twin `examples/array_totals_hand.sth` (three manual `times` loops): three
 one-line combinator calls run to the same total and doubled elements the twin does.
+
+Two pre-existing defects 6a measured but deliberately did not fix, for a later slice to pick
+up: `fill`'s compile cost is superlinear in the array length (10k ~ 0.36s, 100k ~ 25s, 1M >
+300s, and a hand-threaded loop is equally slow, so it is the array machinery and not the
+inliner), which is why 6a's constant-stack criterion is an equivalence witness at 10k rather
+than the 1M run first specified; and every native `build` diagnostic prints a doubled `error:
+error:` prefix, because the ~165 error constructors embed `error: ` and `src/main.rs` prepends
+another.
 
 **Next action: Phase 4 Slice 6b** (the polymorphic-path gaps + `filter`/`while`): a
 polymorphic body's `if` and a polymorphic self-tail word's loop transform, the two gaps 6a's

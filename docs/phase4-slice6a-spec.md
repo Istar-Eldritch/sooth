@@ -154,20 +154,30 @@ Located diagnostics assert message text **and** named identifiers/positions.
 - **R20.** A quotation-taking word mints no symbol and no `IrFunc`; excluded from standalone
   monomorphization. `instantiation_symbol` never computed for it. Unit R20u asserts no
   `IrFunc`/`Instr::Call` for it, mono and poly.
-- **R21.** Transitive inlining, outermost-first: splicing `map`'s body encounters `each` and
-  splices it in turn. Termination rests on R22 (the subgraph is a DAG).
+- **R21.** Transitive inlining, outermost-first: a combinator that forwards its own
+  quotation *parameter* to a nested combinator splices through both frames (witnessed by
+  `abstract_quotation_forward_inlines_and_runs` and, at IR level,
+  `abstract_forward_inlines_transitively_with_no_call`). Termination rests on R22 (the
+  subgraph is a DAG). *(The original example, `map` splicing `each`, does not arise:
+  `map`/`fold` are not built on `each` — see §Accepted narrowings and gaps.)*
 - **R22** *(located)*. D5 recursion rejection: a pre-lowering pass builds the call graph over
   quotation-taking words and rejects any cycle, reusing the 3-colour DFS of
   `check_tail_call_cycles`. "Un-inlinable" = participates in a cycle in this subgraph.
 
-### REPL (`src/repl.rs`), D7
+### REPL (`src/repl.rs`), per D7 and against what 5b shipped
+
+The 5a/slice-2 hazard: an unpinned REPL gap was a *silent miscompile*, not a clean deferral,
+so every REPL chokepoint here is a located rejection, specified and tested.
 
 - **R23** *(located)*. A session line whose word signature names a `Type::Quotation`
   parameter is rejected at the definition chokepoint (a session discards word bodies; the
   inliner needs them — the 6c retention problem).
 - **R24** *(located)*. An imported closure *exporting* a quotation-taking word is rejected at
-  import time, naming file and word. A purely-internal one inlines fine during native
-  compilation.
+  import time, naming file and word. **Pinned against what 5b actually shipped**: a
+  quotation-taking word used purely *internally* to an imported closure inlines fine during
+  that closure's own native compilation; only *exporting* it to the session (where a later
+  line would call it, needing the discarded body) is the chokepoint. Verified by
+  `repl_import_exporting_quotation_word_is_rejected` (both halves).
 
 ### Stale diagnostics and dogfood/docs
 
@@ -199,23 +209,29 @@ using no quotation parameter lowers byte-for-byte as today.
 
 ## Delivery
 
-Landed in four phases, each green:
+Landed across four implementation phases plus a review-fix sequence; each commit green.
+The original phase commit hashes below predate the review-fix sequence and are indicative,
+not current. Where the as-shipped behaviour differs from the first landing, this section
+states the as-shipped reality:
 
 1. **(hard)** Quotation type + monomorphic inliner. Parse disambiguation (R1–R3);
    `Type`/`PolyType` variant with unification/`apply_subst` and guarded mangling/`IrType`
    arms (R4–R7); type-position audit (R7a); abstract `call`/`times` (R8/R9); argument sites
    with directional and D3 checks (R10–R13); interprocedural term-splice inliner (R18–R20);
    cycle rejection (R22); `reject_quotation_argument` change (part of R26).
-   Commits `4dde5bd8`, `58c67b0c` — src/ast.rs, src/check.rs, src/ir.rs, src/parser.rs,
-   tests/phase4_combinators.rs.
 2. **(hard)** Polymorphic path + library. Poly `quot` marker (R14); poly `call`/`times` and
    arguments (R15); standalone `times` obligations (R16); `each`/`map`/`fold` at
-   `lib/combinators.sth` (R17); transitive inlining (R21); constant-stack witness at 1M+.
-   Commits `75cbc21a`, `952f4833` — lib/combinators.sth, src/ast.rs, src/check.rs, src/ir.rs.
-3. **(standard)** REPL located rejections (R23/R24) and eight wording corrections (R26).
-   Commits `b56895d5`, `11556f90` — src/check.rs, src/repl.rs, docs, tests.
-4. **(standard)** Dogfood + docs (R27). Commits `e7f867a2`, `7fccdd12`, `f5a4a962` —
-   DESIGN.md, ROADMAP.md, examples/array_totals*.sth, tests.
+   `lib/combinators.sth` (R17); transitive inlining of an abstract quotation forward (R21).
+   **The constant-stack witness is not a 1M+ run** (infeasible — see criterion 14 and
+   §Accepted narrowings and gaps): it is `each_lowers_to_a_loop_not_a_per_element_call`
+   (structural: loop header + back-edge, no per-element user `Call`) plus
+   `combinator_and_hand_threaded_loops_agree_across_stack_limits`, a
+   combinator-vs-hand-threaded equivalence witness at N=10k.
+3. **(standard)** REPL located rejections and eight wording corrections (R26). R23 shipped
+   in this phase; **R24 shipped as a review fix** (the located rejection of an imported
+   closure exporting a quotation-taking word, with the mangled-name leak fixed alongside).
+4. **(standard)** Dogfood + docs (R27). `examples/array_totals*.sth`, DESIGN.md, ROADMAP.md,
+   tests.
 
 ## Exit criteria (goldens in `tests/phase4_combinators.rs`)
 
@@ -240,15 +256,15 @@ Landed in four phases, each green:
 | 8b | two-word cycle names both members | `quotation_taking_word_cycle_names_members` | golden | 1 |
 | U20 | no quotation-taking word mints a symbol | `quotation_taking_word_mints_no_symbol` | unit | 1 |
 | 9 | `each` checks standalone | `each_checks_standalone` | golden | 2 |
-| 9b | `map`/`fold` check compositionally against a signature | `map_and_fold_check_compositionally` | golden | 2 |
+| 9b | `map`/`fold` check standalone, each body checking `f call` against `f`'s *declared effect* (they are leaf combinators, not built on `each` — see Accepted narrowings) | `map_and_fold_check_compositionally` | golden | 2 |
 | 10 | `arr [ . ] each` over `[i64 4]` prints each element | `each_over_array_inlines_and_runs` | golden | 2 |
-| 10b | `map` over `each` inlines twice, no `Instr::Call` | `map_over_each_inlines_transitively` | unit | 2 |
+| 10b *(respecified)* | a combinator forwarding its own quotation *parameter* to a nested combinator splices through both frames, no surviving `Instr::Call` | `abstract_forward_inlines_transitively_with_no_call` (`src/ir.rs`), `abstract_quotation_forward_inlines_and_runs` | unit + golden | 2 |
 | 11 | `fold` sums `[i64 4]` to `28` | `fold_computes_sum` | golden | 2 |
 | 12 | poly times-body consuming an outer linear local located (def site) | `poly_combinator_consuming_local_is_error` | golden | 2 |
 | 12b | poly times-body borrow across back-edge located (def site) | `poly_combinator_borrow_across_loop_is_error` | golden | 2 |
-| 12c | caller literal borrow of captured `Copy` across loop located at splice site | `literal_created_borrow_across_loop_is_error_at_splice_site` | golden | 2 |
+| 12c | **GAP, unreachable as specified** — no test, see Accepted narrowings | — | — | 2 |
 | 13 | quotation at runtime-value position in poly body rejected, reworded | `quotation_at_runtime_position_in_poly_body_is_error` | golden | 2 |
-| 14 | `each` over 1M+ runs in constant stack (`Some(0)`) | `each_over_a_million_runs_in_constant_stack` | golden | 2 |
+| 14 *(respecified)* | the combinator loop and its hand-threaded `times` twin behave identically across a sweep of stack limits (N=10k) | `combinator_and_hand_threaded_loops_agree_across_stack_limits` | golden | 2 |
 | 14b | inlined `each` lowers to loop header/back-edge, no per-element `Call` | `each_lowers_to_a_loop_not_a_per_element_call` | unit | 2 |
 | 15 | session line defining a quotation-taking word is a located REPL rejection | `repl_quotation_taking_definition_is_rejected` | golden | 3 |
 | 16 | importing a closure exporting a quotation-taking word located; internal imports fine | `repl_import_exporting_quotation_word_is_rejected` | golden | 3 |
@@ -256,9 +272,58 @@ Landed in four phases, each green:
 | 18 | dogfood over `each`/`map`/`fold` matches hand-threaded result | `combinators_dogfood_matches_hand_threaded` | golden | 4 |
 
 Load-bearing units (mutation-test the guards): 2, 2b, 2c, 2d, 3b, 6b, U20, 10b, 14b.
-2b/2c/2d make R7's `unreachable!` arms sound. 14 is the primary constant-stack witness;
-3b/10b/14b guard against a silent fallback. 5/5b are the D3 pair; 12/12b/12c pin *where*
-obligation 2 is checked (def site vs splice site).
+2b/2c/2d make R7's `unreachable!` arms sound. 3b/10b/14b guard against a silent fallback.
+5/5b are the D3 pair. **14b, not 14, now carries the constant-stack guarantee**: it is the
+structural claim (loop header + back-edge, no per-element user `Call`), while 14 is an
+equivalence witness that the inliner adds no stack cost over hand-threading. 12/12b pin
+that obligations 1 and 2 are discharged at the combinator's own definition site; 12c, which
+would have pinned the splice-site half, is unreachable (below).
+
+## Accepted narrowings and gaps
+
+Four places where the as-shipped slice is narrower than this spec first claimed. Each was
+reviewed and accepted rather than silently absorbed.
+
+**1. `map`/`fold` are leaf combinators, not built on `each`.** R21's original example was
+`map` splicing `each`. It cannot be written in this slice: `each` hands its quotation one
+element (`[ 'T -- ]`) and neither the array nor the index, so `fold`'s accumulator would
+have to ride the stack row (needing a row variable in the quotation effect, out of scope by
+R28) and `map`'s write-back would need a captured mutable borrow of the array (forbidden by
+D3). Both exclusions are locked decisions, so this follows from the slice's own scope rather
+than from an implementation shortfall. R21 is nonetheless real and delivered: a combinator
+may forward its own quotation *parameter* to a nested combinator, which is the transitive
+case criterion 10b now names. **Building `map`/`fold` on `each` needs row-polymorphic
+quotation effects; that belongs to whichever slice lifts R28.**
+
+**2. Criterion 12c is unreachable, so it has no test.** It would have witnessed a caller's
+literal creating a borrow of a captured `Copy` local and leaving the reference on its output
+row to ride the back-edge. A combinator whose quotation parameter has a *reference* output
+row is already rejected at the combinator's own definition site, so no literal can reach the
+position 12c describes. The obligation-2 analysis above is therefore discharged entirely at
+the definition site in the shipped code, and the splice-site half it hedged for does not
+arise. Writing a test here would have meant inventing a scenario the type system forbids.
+
+**3. R12's borrow half is narrower than its prose.** It reads as "a `&`/`&!` borrow of an
+enclosing place is a located rejection"; the implementation rejects a borrow **left live on
+the literal's exit row**, and accepts a balanced borrow taken and released inside the
+literal. A reviewer failed to turn the narrowing into unsoundness: the ordinary borrow
+checker catches the dangerous shapes at the splice site (aliasing the array `each` itself
+borrows, and a `&!` inside the literal while the caller holds a `&` of the same place). The
+narrowing is the right call and the code, not this sentence, is the contract.
+
+**4. Criterion 14 no longer claims a 1M-element run.** A Sooth array is a stack value, so
+1M `i64` is 8 MB of stack before any loop frame exists, and the "constant stack under a
+reduced `ulimit`" framing cannot pass however good the inliner is. `fill`'s compile cost is
+also superlinear (10k ~ 0.36s, 100k ~ 25s, 1M > 300s) and **pre-existing**: a hand-threaded
+`times` twin is equally slow, so it is not an inliner regression. Recorded on ROADMAP as a
+future-slice item.
+
+One pre-existing defect noted here because this slice's diagnostics sit on top of it, and
+deliberately **not** fixed: every native `build` diagnostic prints a doubled prefix
+(`error: error: stack effect mismatch in `main``), because the error constructors embed
+`error: ` and `src/main.rs:34` prepends another. It is repo-wide (165 such constructors on
+`main`) and predates this slice; fixing it here would sprawl the diff and churn assertions
+across the suite.
 
 ## Sanctioned edits
 

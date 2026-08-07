@@ -786,7 +786,7 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> Option<i32> {
 }
 
 #[test]
-fn each_over_a_million_runs_in_constant_stack() {
+fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     // Criterion 14 (respecified, item 7). The original "1M+ elements under a
     // reduced `ulimit`" witness is infeasible and mis-specified: a Sooth array
     // is a *stack* value (1M i64 = 8 MB on the stack before any loop frame

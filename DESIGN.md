@@ -341,10 +341,14 @@ parameter is checked directionally against it, enforcing a `Copy`-only capture r
 what it may read from its defining scope. Combinators are now ordinary Sooth library words
 (`lib/combinators.sth`'s `each`/`map`/`fold`), and every call to one is inlined by
 term-splicing the callee's AST body against the caller's live stack — the compiler's only
-inliner, generalizing slice 4's `call`/`times` fusion across a `:` boundary — transitively
-(`map` over `each` inlines twice) and **totally**: with a quotation type but no runtime
-representation there is no fallback, so anything un-inlinable, starting with recursion among
-quotation-taking words, is a located error rather than a silent real call (D5). The REPL
+inliner, generalizing slice 4's `call`/`times` fusion across a `:` boundary — transitively (a
+combinator forwarding its own quotation parameter to a nested combinator splices through both
+frames) and **totally**: with a quotation type but no runtime representation there is no
+fallback, so anything un-inlinable, starting with recursion among quotation-taking words, is a
+located error rather than a silent real call (D5). `each`/`map`/`fold` are leaf combinators
+rather than `map` and `fold` being written over `each`: with quotation effects a fixed
+input/output list, `each`'s one-element `[ 'T -- ]` quotation can carry neither an accumulator
+nor a write-back, so composing them that way waits on row-polymorphic effects. The REPL
 stays a located rejection, both at a session line defining a quotation-taking word and at an
 imported closure exporting one (D7); 6c lifts it.
 
