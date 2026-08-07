@@ -383,6 +383,221 @@ pub fn format_stack(
     format!("stack: {}", vals.join(" "))
 }
 
+/// Reinterpret the carried-stack cells as bytes (R13/R14). Sound because `i64`
+/// has no padding and every bit pattern is valid; this is the same native
+/// memory `run_terms`'s wrapper already read/wrote through a raw pointer into
+/// this allocation, so no copy or conversion changes what is observed.
+fn as_bytes(buf: &[i64]) -> &[u8] {
+    // SAFETY: `buf` is a valid, initialized `&[i64]`; every `i64` bit pattern
+    // reads back as 8 valid bytes, and the resulting slice's lifetime is tied
+    // to `buf`'s.
+    unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, std::mem::size_of_val(buf)) }
+}
+
+/// Read up to 8 little-endian bytes of `region` into a `u64`, zero-padding any
+/// width narrower than 8 bytes. The building block both scalar rendering and
+/// enum-tag decoding read through.
+fn read_uint_le(region: &[u8], width: usize) -> u64 {
+    let mut tmp = [0u8; 8];
+    tmp[..width].copy_from_slice(&region[..width]);
+    u64::from_le_bytes(tmp)
+}
+
+/// The byte extent one `IrType`'s value occupies: a scalar's own width (not
+/// rounded to a cell, unlike `ir::carried_slot_bytes`), or an aggregate's
+/// `size` from its layout. Used to slice out exactly the bytes a nested field,
+/// array element, or owning-cell payload spans for recursive rendering.
+fn rich_value_size(
+    ty: ir::IrType,
+    layouts: &[StructLayout],
+    enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
+) -> usize {
+    match ty {
+        ir::IrType::Bool => 1,
+        ir::IrType::Int { bits, .. } => (bits / 8) as usize,
+        ir::IrType::Float { bits } => (bits / 8) as usize,
+        ir::IrType::Usize | ir::IrType::Isize => 8,
+        ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
+        ir::IrType::Struct(id) => layouts[id.index()].size as usize,
+        ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
+        ir::IrType::Array(id) => array_layouts[id.index()].size as usize,
+    }
+}
+
+/// R14/R15/R16 (Slice 3): render one value's bytes with its type recoverable
+/// from the rendering. A struct/enum/array descends into its fields/variant/
+/// elements via the same offset arithmetic `format_stack` uses only to *skip*
+/// an aggregate slot; an owning cell (R16) dereferences its live heap payload
+/// to render it, which is a read (no bookkeeping here ever marks a value
+/// consumed or runs a destructor, so linearity is untouched). An
+/// otherwise-ambiguous scalar carries a Rust-literal-style width/signedness
+/// suffix (`1u8` vs `1i64`, R15).
+fn render_rich_value(
+    ty: ir::IrType,
+    region: &[u8],
+    layouts: &[StructLayout],
+    enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
+    cell_payloads: &[ir::IrType],
+) -> String {
+    match ty {
+        ir::IrType::Bool => if region[0] != 0 { "true" } else { "false" }.to_string(),
+        ir::IrType::Int { bits, signed } => {
+            let raw = read_uint_le(region, (bits / 8) as usize);
+            let kind = if signed { 'i' } else { 'u' };
+            if signed {
+                let shift = 64 - bits as u32;
+                let v = ((raw << shift) as i64) >> shift;
+                format!("{v}{kind}{bits}")
+            } else {
+                format!("{raw}{kind}{bits}")
+            }
+        }
+        ir::IrType::Float { bits: 32 } => {
+            let bytes: [u8; 4] = region[..4].try_into().unwrap();
+            format!("{}f32", f32::from_le_bytes(bytes))
+        }
+        ir::IrType::Float { .. } => {
+            let bytes: [u8; 8] = region[..8].try_into().unwrap();
+            format!("{}f64", f64::from_le_bytes(bytes))
+        }
+        ir::IrType::Usize => format!("{}usize", read_uint_le(region, 8)),
+        ir::IrType::Isize => format!("{}isize", read_uint_le(region, 8) as i64),
+        ir::IrType::Ptr => "<ptr>".to_string(),
+        ir::IrType::Str => "<str>".to_string(),
+        ir::IrType::Cstr => "<cstr>".to_string(),
+        ir::IrType::Struct(id) => {
+            let layout = &layouts[id.index()];
+            let fields: Vec<String> = layout
+                .fields
+                .iter()
+                .map(|f| {
+                    let off = f.offset as usize;
+                    let span = rich_value_size(f.ty, layouts, enum_layouts, array_layouts);
+                    render_rich_value(
+                        f.ty,
+                        &region[off..off + span],
+                        layouts,
+                        enum_layouts,
+                        array_layouts,
+                        cell_payloads,
+                    )
+                })
+                .collect();
+            format!("<{} {}>", layout.name, fields.join(" "))
+        }
+        ir::IrType::Enum(id) => {
+            let layout = &enum_layouts[id.index()];
+            let tag_width = match layout.tag_ty {
+                ir::IrType::Int { bits, .. } => (bits / 8) as usize,
+                _ => unreachable!("an enum tag is always a fixed-width integer"),
+            };
+            let tag = read_uint_le(&region[layout.tag_offset as usize..], tag_width) as usize;
+            let variant = &layout.variants[tag];
+            let payload: Vec<String> = variant
+                .fields
+                .iter()
+                .map(|f| {
+                    let off = layout.payload_offset as usize + f.offset as usize;
+                    let span = rich_value_size(f.ty, layouts, enum_layouts, array_layouts);
+                    render_rich_value(
+                        f.ty,
+                        &region[off..off + span],
+                        layouts,
+                        enum_layouts,
+                        array_layouts,
+                        cell_payloads,
+                    )
+                })
+                .collect();
+            if payload.is_empty() {
+                format!("<{}#{}>", layout.name, tag)
+            } else {
+                format!("<{}#{} {}>", layout.name, tag, payload.join(" "))
+            }
+        }
+        ir::IrType::Array(id) => {
+            let layout = &array_layouts[id.index()];
+            let elem_size = rich_value_size(layout.elem, layouts, enum_layouts, array_layouts);
+            let elems: Vec<String> = (0..layout.count as usize)
+                .map(|i| {
+                    let off = i * layout.stride as usize;
+                    render_rich_value(
+                        layout.elem,
+                        &region[off..off + elem_size],
+                        layouts,
+                        enum_layouts,
+                        array_layouts,
+                        cell_payloads,
+                    )
+                })
+                .collect();
+            format!("<{} {}>", layout.name, elems.join(" "))
+        }
+        ir::IrType::OwnedCell(id) => {
+            let ptr = read_uint_le(region, 8) as usize as *const u8;
+            let payload_ty = cell_payloads[id.index()];
+            let payload_size = rich_value_size(payload_ty, layouts, enum_layouts, array_layouts);
+            // SAFETY (R16, load-bearing): a live owning cell on the residual
+            // stack always points at a `malloc`ed payload of exactly
+            // `payload_size` bytes (the shape `^`'s construction allocates,
+            // `Cells::payload[id]`); reading it here for display touches no
+            // linearity bookkeeping (that lives in `self.types`/the checker,
+            // never consulted by this function) and runs no destructor, so
+            // the value stays live and the carried stack is unchanged.
+            let payload_bytes = unsafe { std::slice::from_raw_parts(ptr, payload_size) };
+            format!(
+                "^{}",
+                render_rich_value(
+                    payload_ty,
+                    payload_bytes,
+                    layouts,
+                    enum_layouts,
+                    array_layouts,
+                    cell_payloads
+                )
+            )
+        }
+    }
+}
+
+/// D2/R13 (Slice 3): the tty-only rich stack formatter. Signature mirrors
+/// `format_stack`, plus the fourth layout table (`cell_payloads`, an owning
+/// cell's payload `IrType` per `OwnedCellId`) R16's read-through needs. The
+/// piped path never calls this (F2); `Session::rich_stack` gates the choice at
+/// the one shared call site (`eval_expr`).
+pub fn format_stack_rich(
+    buf: &[i64],
+    types: &[Type],
+    layouts: &[StructLayout],
+    enum_layouts: &[EnumLayout],
+    array_layouts: &[ArrayLayout],
+    cell_payloads: &[ir::IrType],
+) -> String {
+    if types.is_empty() {
+        return "stack: (empty)".to_string();
+    }
+    let bytes = as_bytes(buf);
+    let mut cell = 0usize;
+    let mut vals = Vec::with_capacity(types.len());
+    for ty in types {
+        let ir_ty = ir::ir_type_of(*ty);
+        let span = rich_value_size(ir_ty, layouts, enum_layouts, array_layouts);
+        let off = cell * 8;
+        vals.push(render_rich_value(
+            ir_ty,
+            &bytes[off..off + span],
+            layouts,
+            enum_layouts,
+            array_layouts,
+            cell_payloads,
+        ));
+        cell += span.div_ceil(8);
+    }
+    format!("stack: {}", vals.join(" "))
+}
+
 /// A REPL session: the accumulated word env, the persistent stack buffer, and
 /// every loaded shared object (kept resident for the session's lifetime).
 pub struct Session {
@@ -500,6 +715,12 @@ pub struct Session {
     /// the parser's `exports` slice for gating a `q::T` type reference. Index 0
     /// (session-local decls) stays empty; import ids fill in from 1.
     import_exports: Vec<Vec<(String, Span)>>,
+    /// D2 (Slice 3): whether the residual stack renders through the rich
+    /// aggregate-contents formatter (`format_stack_rich`) instead of the
+    /// plain placeholder one. `false` for every piped session (F2 keeps the
+    /// existing goldens byte-for-byte); `run_tty` sets this once, at entry,
+    /// for an interactive session.
+    rich_stack: bool,
 }
 
 impl Session {
@@ -528,7 +749,15 @@ impl Session {
             import_qualifier_module: HashMap::new(),
             import_selective_module: HashMap::new(),
             import_exports: Vec::new(),
+            rich_stack: false,
         }
+    }
+
+    /// D2 (Slice 3): switch this session's residual-stack rendering to the
+    /// rich, aggregate-contents formatter. Called once by `run_tty`; never by
+    /// the piped path.
+    pub fn enable_rich_stack_rendering(&mut self) {
+        self.rich_stack = true;
     }
 
     /// The checker's typed env: builtins, the generated struct words, the
@@ -1664,20 +1893,30 @@ impl Session {
     }
 
     fn eval_expr(&mut self, terms: &[Term], writer: &mut impl Write) -> Result<(), String> {
-        let (structs, enums, arrays) = self.run_terms(terms, writer)?;
-        let cells = self.top / 8;
-        writeln!(
-            writer,
-            "{}",
-            format_stack(
-                &self.buf[..cells],
+        let (structs, enums, arrays, cells) = self.run_terms(terms, writer)?;
+        let live_cells = self.top / 8;
+        // D2/R13: the rich formatter is a tty-only affordance (`rich_stack`,
+        // set once by `run_tty`); the piped path always renders through the
+        // plain `format_stack`, keeping every piped golden byte-for-byte (F2).
+        let line = if self.rich_stack {
+            format_stack_rich(
+                &self.buf[..live_cells],
                 &self.types,
                 &structs.layouts,
                 &enums.layouts,
-                &arrays.layouts
+                &arrays.layouts,
+                &cells.payload,
             )
-        )
-        .map_err(|e| format!("writing stdout: {e}"))
+        } else {
+            format_stack(
+                &self.buf[..live_cells],
+                &self.types,
+                &structs.layouts,
+                &enums.layouts,
+                &arrays.layouts,
+            )
+        };
+        writeln!(writer, "{line}").map_err(|e| format!("writing stdout: {e}"))
     }
 
     /// The end of the REPL-main scope: dispose every linear value still on the
@@ -1712,7 +1951,7 @@ impl Session {
         &mut self,
         terms: &[Term],
         writer: &mut impl Write,
-    ) -> Result<(ir::Structs, ir::Enums, ir::Arrays), String> {
+    ) -> Result<(ir::Structs, ir::Enums, ir::Arrays, ir::Cells), String> {
         let env = self.typed_env();
         let entry_depth = self.types.len();
         // R5 (Slice 2): thread the session poly-env so a bare line can call a
@@ -1837,7 +2076,7 @@ impl Session {
         self.types = net_stack;
         self.libs.push(lib);
 
-        Ok((structs, enums, arrays))
+        Ok((structs, enums, arrays, cells))
     }
 }
 
@@ -1981,6 +2220,7 @@ const CONTINUATION_PROMPT: &str = "  ... ";
 /// pending multi-line buffer, R11); Ctrl-D on an empty line and a closed
 /// stdin both end the session.
 fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
+    session.enable_rich_stack_rendering();
     let _guard = editor::raw_mode_stdin();
     let mut ed = editor::Editor::new(
         PROMPT,
@@ -2201,6 +2441,130 @@ mod tests {
             format_stack(&[-1], &[Type::Usize], &[], &[], &[]),
             "stack: 18446744073709551615"
         );
+    }
+
+    #[test]
+    fn format_rich_struct_shows_field_values() {
+        // D2/R14: unlike `format_stack`'s `<Vec2>` placeholder, the rich
+        // formatter walks the struct's fields and renders their values.
+        use crate::ast::StructId;
+        let layouts = vec![StructLayout {
+            name: "Vec2",
+            size: 16,
+            align: 8,
+            fields: vec![
+                ir::FieldLayout {
+                    offset: 0,
+                    ty: ir::IrType::I64,
+                    size: 8,
+                    align: 8,
+                },
+                ir::FieldLayout {
+                    offset: 8,
+                    ty: ir::IrType::I64,
+                    size: 8,
+                    align: 8,
+                },
+            ],
+            is_linear: false,
+            has_drop_overload: false,
+            bundle: false,
+            drop_generation: None,
+        }];
+        let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
+        assert_eq!(
+            format_stack_rich(&[5, 6], &[vec2], &layouts, &[], &[], &[]),
+            "stack: <Vec2 5i64 6i64>"
+        );
+    }
+
+    #[test]
+    fn format_rich_enum_shows_variant_and_payload() {
+        // D2/R14: the active variant (by discriminant) and its payload field
+        // values, not the `<TypeName>` placeholder.
+        use crate::ast::EnumId;
+        let enum_layouts = vec![EnumLayout {
+            name: "E",
+            tag_offset: 0,
+            tag_ty: ir::IrType::Int {
+                bits: 32,
+                signed: true,
+            },
+            payload_offset: 8,
+            size: 16,
+            align: 8,
+            variants: vec![
+                ir::VariantLayout { fields: vec![] },
+                ir::VariantLayout {
+                    fields: vec![ir::FieldLayout {
+                        offset: 0,
+                        ty: ir::IrType::I64,
+                        size: 8,
+                        align: 8,
+                    }],
+                },
+            ],
+            is_linear: false,
+            drop_generation: None,
+        }];
+        let e = Type::Enum(EnumId::from_index(0), "E");
+        // Tag 1 (second variant) in the low 32 bits of the first cell, the
+        // payload in the second.
+        assert_eq!(
+            format_stack_rich(&[1, 42], &[e], &[], &enum_layouts, &[], &[]),
+            "stack: <E#1 42i64>"
+        );
+    }
+
+    #[test]
+    fn format_rich_array_shows_elements() {
+        // D2/R14: every element, not the `<[T N]>` placeholder.
+        use crate::ast::ArrayId;
+        let array_layouts = vec![ArrayLayout {
+            name: "[i64 3]",
+            elem: ir::IrType::I64,
+            count: 3,
+            stride: 8,
+            size: 24,
+            align: 8,
+            is_linear: false,
+        }];
+        let arr = Type::Array(ArrayId::from_index(0), "[i64 3]");
+        assert_eq!(
+            format_stack_rich(&[10, 20, 30], &[arr], &[], &[], &array_layouts, &[]),
+            "stack: <[i64 3] 10i64 20i64 30i64>"
+        );
+    }
+
+    #[test]
+    fn format_rich_u8_distinguished_from_i64() {
+        // R15: a `u8` `1` and an `i64` `1` must not both render as bare `1`.
+        let u8_ty = Type::from_name("u8").unwrap();
+        assert_eq!(
+            format_stack_rich(&[1, 1], &[u8_ty, Type::I64], &[], &[], &[], &[]),
+            "stack: 1u8 1i64"
+        );
+    }
+
+    #[test]
+    fn format_rich_owned_cell_read_does_not_consume() {
+        // R16 (load-bearing): rendering an owning cell's payload is a read.
+        // The heap value must still be there, unchanged, afterward.
+        use crate::ast::OwnedCellId;
+        let payload = Box::into_raw(Box::new(99i64));
+        let cell_ty = Type::OwnedCell(OwnedCellId::from_index(0), "^i64");
+        let buf = [payload as i64];
+        let out = format_stack_rich(&buf, &[cell_ty], &[], &[], &[], &[ir::IrType::I64]);
+        assert_eq!(out, "stack: ^99i64");
+        // SAFETY: `payload` is still a live, exclusively-held allocation;
+        // rendering ran no destructor and freed nothing.
+        unsafe {
+            assert_eq!(
+                *payload, 99,
+                "rendering must not have freed or mutated the cell"
+            );
+            drop(Box::from_raw(payload));
+        }
     }
 
     fn entry(generation: u64) -> WordEntry {
