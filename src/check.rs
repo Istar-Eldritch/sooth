@@ -1166,7 +1166,50 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
             }
         }
     }
+    // A polymorphic word carries its signature in `w.poly`, not `w.effect`
+    // (which is empty), so the output-position and nested-in-effect audits
+    // above never see it. Run the same rejections over the poly signature.
+    if let Some(sig) = &w.poly {
+        for pt in &sig.outputs {
+            reject_poly_quotation_position(pt, sig, &format!("the output of `{}`", w.name))?;
+        }
+        for pt in &sig.inputs {
+            for t in poly_quotation_effect_rows(pt) {
+                reject_poly_quotation_position(t, sig, "nested inside a quotation effect")?;
+            }
+        }
+    }
     Ok(())
+}
+
+/// R7a (poly path): the rows of a quotation-typed input, so the nested-quotation
+/// audit can reject a quotation appearing inside another quotation's effect.
+/// A non-quotation input contributes no rows.
+fn poly_quotation_effect_rows(pt: &PolyType) -> Vec<&PolyType> {
+    if let PolyType::Quotation(ins, outs) = pt {
+        ins.iter().chain(outs).collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// R7a (poly path): reject `pt` if it is a quotation type, naming the position
+/// and slice 7, matching `reject_quotation_type_position`'s message shape. A
+/// fully-concrete quotation folds to `Concrete(Type::Quotation)`, so route that
+/// through the monomorphic rejection to share the rendering.
+fn reject_poly_quotation_position(
+    pt: &PolyType,
+    sig: &PolySig,
+    position: &str,
+) -> Result<(), String> {
+    match pt {
+        PolyType::Concrete(ty) => reject_quotation_type_position(*ty, position),
+        PolyType::Quotation(..) => Err(format!(
+            "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+            poly_type_str(pt, sig),
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// R18/R7a: a monomorphic quotation-taking word with a clause body cannot be

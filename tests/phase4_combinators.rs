@@ -154,6 +154,17 @@ fn quotation_type_is_rejected_at_every_audited_position() {
             src: ": nest ( [ [ i64 -- ] -- ] -- ) drop ;\n: main ( -- ) ;\n",
             position: "nested inside a quotation effect",
         },
+        // The polymorphic twins: a poly word carries its signature in
+        // `w.poly`, not `w.effect`, so the output-position and nested-in-effect
+        // audits must walk the poly path too or these slip through.
+        Row {
+            src: ": w ( ['T 'N] [ 'T -- ] -- ['T 'N] [ 'T -- ] ) ;\n: main ( -- ) ;\n",
+            position: "the output of `w`",
+        },
+        Row {
+            src: ": w ( ['T 'N] [ [ 'T -- ] -- ] -- ) drop drop ;\n: main ( -- ) ;\n",
+            position: "nested inside a quotation effect",
+        },
     ];
     for Row { src, position } in rows {
         let err = check_error(src);
