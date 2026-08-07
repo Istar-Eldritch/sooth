@@ -2685,6 +2685,12 @@ fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String>
         let action = ed
             .push_byte(byte, writer)
             .map_err(|e| format!("writing stdout: {e}"))?;
+        // Every byte redraws something (an inserted char, a moved cursor, a
+        // history recall) even when it doesn't complete an Action; stdout is
+        // line-buffered and `redraw` never writes a `\n`, so without an
+        // explicit flush here each keystroke sits invisible until the next
+        // `\r\n` (e.g. Enter) flushes the whole backlog at once.
+        w(writer.flush())?;
         let Some(action) = action else { continue };
         match loop_step(action) {
             LoopStep::Dispatch(cmd) => {
