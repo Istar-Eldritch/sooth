@@ -254,6 +254,60 @@ fn quotation_type_is_rejected_at_every_audited_position() {
             "the REPL session must survive the rejection (the following `1` still runs), got: {transcript}"
         );
     }
+
+    // Item 1: a `type:` line naming a quotation in an *interned* position
+    // (array element / cell payload / reference referent, struct or enum) used
+    // to brick the session: the failing line rolled back only `self.structs` /
+    // `self.enums`, leaving the poisoned interned array/cell/ref entry
+    // resident, so the per-line audit re-fired against it forever. Each row
+    // asserts the located rejection *and* that a following line still
+    // evaluates: `40 2 +` must leave `stack: 42`. A bricked session would
+    // re-fire the rejection with `stack: (empty)` instead. The residual-stack
+    // line, not the `.` output, is the witness -- `.` prints to process stdout,
+    // which `repl_error` does not capture. The `&` shapes reject earlier (a
+    // reference may not be stored in a field) but interned the referent all
+    // the same, so they brick identically without the registry rollback.
+    struct BrickRow {
+        src: &'static str,
+        msg: &'static str,
+    }
+    let item1_rows = [
+        BrickRow {
+            src: "type: P x [ [ i64 -- ] 3 ] ;\n40 2 +\n",
+            msg: "a quotation type",
+        },
+        BrickRow {
+            src: "type: P x ^[ i64 -- ] ;\n40 2 +\n",
+            msg: "a quotation type",
+        },
+        BrickRow {
+            src: "type: P x &[ i64 -- ] ;\n40 2 +\n",
+            msg: "a reference cannot be stored",
+        },
+        BrickRow {
+            src: "type: Q | Mk a [ [ i64 -- ] 3 ] ;\n40 2 +\n",
+            msg: "a quotation type",
+        },
+        BrickRow {
+            src: "type: X | Mk a ^[ i64 -- ] ;\n40 2 +\n",
+            msg: "a quotation type",
+        },
+        BrickRow {
+            src: "type: Y | Mk a &[ i64 -- ] ;\n40 2 +\n",
+            msg: "a reference cannot be stored",
+        },
+    ];
+    for BrickRow { src, msg } in item1_rows {
+        let transcript = repl_error(src);
+        assert!(
+            transcript.contains(msg),
+            "the `type:` line should be a located rejection (`{msg}`), got: {transcript}"
+        );
+        assert!(
+            transcript.contains("stack: 42"),
+            "the session must survive: the following `40 2 +` must leave `stack: 42`, got: {transcript}"
+        );
+    }
 }
 
 // -- criterion 2c: array-of-quotation is the array-element rejection ----------

@@ -810,10 +810,27 @@ impl Session {
         // R8e: a REPL-declared type name may not carry the `::` reserved for
         // qualified imported spellings.
         reject_double_colon_name("type", &name, span)?;
-        if parser::typedef_line_is_enum(tokens) {
-            self.eval_enum_typedef(tokens, name.clone(), span)?;
+        // Item 1: parsing a `type:` line interns any array/cell/ref shape its
+        // fields name (e.g. a quotation-nested `[ [ i64 -- ] 3 ]`) into the
+        // session registries *before* the R7a audit rejects it. The
+        // struct/enum helpers roll back only `self.structs` / `self.enums`, so
+        // a poisoned interned entry would survive the failed line and re-fire
+        // the per-line audit forever, bricking the session. Snapshot and
+        // truncate the interned registries here, mirroring `eval_line`'s
+        // guard on the non-`type:` path.
+        let arrays_len = self.arrays.len();
+        let cells_len = self.owned_cells.len();
+        let refs_len = self.refs.len();
+        let result = if parser::typedef_line_is_enum(tokens) {
+            self.eval_enum_typedef(tokens, name.clone(), span)
         } else {
-            self.eval_struct_typedef(tokens, name.clone(), span)?;
+            self.eval_struct_typedef(tokens, name.clone(), span)
+        };
+        if result.is_err() {
+            self.arrays.truncate(arrays_len);
+            self.owned_cells.truncate(cells_len);
+            self.refs.truncate(refs_len);
+            return result;
         }
         writeln!(writer, "defined type {name}").map_err(|e| format!("writing stdout: {e}"))?;
         Ok(())
