@@ -7418,6 +7418,45 @@ mod tests {
     }
 
     #[test]
+    fn abstract_forward_inlines_transitively_with_no_call() {
+        // Criterion 10b (R21): transitive inlining. `outer` forwards its own
+        // abstract quotation parameter to `inner`, so splicing `outer` into
+        // `main` must in turn splice `inner` -- two levels, outermost-first.
+        // The spec names this `map`-over-`each`, but `map`/`fold` cannot be
+        // built on `each` inside slice 6a (each's `[ 'T -- ]` element quotation
+        // hands neither the array nor the index, so a write-back/accumulator
+        // needs either a captured mutable borrow (D3-forbidden) or a row
+        // variable in the effect (R28, out of scope)). This two-combinator
+        // chain exercises the same load-bearing property the criterion guards:
+        // both combinators mint no `IrFunc` and `main` emits no `Instr::Call`.
+        // Breaking the transitive splice (the `lower_call` combinator branch,
+        // or the checker's abstract-forward accept) leaves an `Instr::Call`
+        // for `inner` behind.
+        let ir = lower_src(
+            ": inner ( i64 [ i64 -- ] -- ) call ;\n\
+             : outer ( i64 [ i64 -- ] -- ) inner ;\n\
+             : main ( -- ) 7 [ 1 + . ] outer ;\n",
+        );
+        assert!(
+            ir.funcs
+                .iter()
+                .all(|f| f.name != "inner" && f.name != "outer"),
+            "both combinators are inlined and mint no `IrFunc`, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("`main` is emitted");
+        assert!(
+            call_symbols(main).is_empty(),
+            "transitive inlining leaves no `Instr::Call` in `main`, got: {:?}",
+            call_symbols(main)
+        );
+    }
+
+    #[test]
     fn quotation_type_never_reaches_mangling_or_irtype() {
         // Criterion 2d: R7's `unreachable!` arms are only sound because R7a's
         // audit and R20's lowering filter keep a quotation type away from

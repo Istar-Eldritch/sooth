@@ -5090,14 +5090,33 @@ fn inline_combinator(
     for (i, want) in inputs.iter().enumerate() {
         let found = stack[base + i];
         if let Type::Quotation(eff) = want {
-            let Some(QuotRef::Known(id)) = found.quot else {
+            if let Some(QuotRef::Known(id)) = found.quot {
+                check_literal_against_declared_effect(
+                    id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+                )?;
+            } else if matches!(found.ty, Type::Quotation(_)) {
+                // R21: forwarding an abstract quotation parameter. `found` is
+                // itself a declared quotation parameter of the enclosing
+                // combinator (a `Type::Quotation` slot with no `Known` literal
+                // -- the only way such a slot arises), reached only while
+                // checking that enclosing combinator standalone. At a real call
+                // site the substitution has already bound it to the caller's
+                // literal, so it carries a `Known` marker and splices there;
+                // here, at the def site, accept it when its declared effect
+                // matches the callee parameter, so `outer` may pass its own `f`
+                // to `inner`. The spliced callee body's own `f call`/`f times`
+                // then check the forwarded parameter against its declared
+                // effect (R8/R9).
+                if found.ty != *want {
+                    return Err(quotation_argument_required_error(
+                        ctx, span, name, *want, found.ty,
+                    ));
+                }
+            } else {
                 return Err(quotation_argument_required_error(
                     ctx, span, name, *want, found.ty,
                 ));
-            };
-            check_literal_against_declared_effect(
-                id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
-            )?;
+            }
         } else if found.quot.is_some() {
             return Err(reject_quotation_argument(ctx, span, name));
         } else {
@@ -5220,9 +5239,12 @@ fn check_literal_against_declared_effect(
     Ok(())
 }
 
-/// R10: a quotation parameter position that did not receive a
-/// statically-known quotation literal (a computed value, or a quotation whose
-/// identity was lost). Names the word, the declared effect, and what was found.
+/// R10/R21: a quotation parameter position whose argument is not a quotation
+/// the callee can consume -- a non-quotation value, or (after R21 admits the
+/// abstract forward) a quotation whose *declared effect* disagrees with the
+/// callee parameter. Knownness is no longer the complaint: a forwarded abstract
+/// parameter is accepted, so `want` and `found` always differ here (a
+/// non-quotation type, or a mismatched effect), and the message names both.
 fn quotation_argument_required_error(
     ctx: &Ctx,
     span: Span,
@@ -5231,7 +5253,7 @@ fn quotation_argument_required_error(
     found: Type,
 ) -> String {
     format!(
-        "error: `{word}` expects a quotation literal `{want}` here, found `{found}`{} (line {})",
+        "error: `{word}` expects a quotation `{want}` here, found `{found}`{} (line {})",
         in_word(ctx),
         span.line,
     )

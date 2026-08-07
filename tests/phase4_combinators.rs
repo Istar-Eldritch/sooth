@@ -270,6 +270,23 @@ fn monomorphic_quotation_taking_word_inlines_and_runs() {
     assert_eq!(code, 0);
 }
 
+// -- R21: forwarding an abstract quotation parameter to a nested combinator ----
+
+#[test]
+fn abstract_quotation_forward_inlines_and_runs() {
+    // R21: `outer` passes its own quotation *parameter* `f` (an abstract
+    // `[ i64 -- ]`, not a literal) to `inner`. The def-site check of `outer`
+    // accepts the forward and splices `inner`, whose `call` checks `f` against
+    // its declared effect; at the real call site the literal `[ 1 + . ]` flows
+    // through both frames and prints `8`.
+    let src = ": inner ( i64 [ i64 -- ] -- ) call ;\n\
+               : outer ( i64 [ i64 -- ] -- ) inner ;\n\
+               : main ( -- ) 7 [ 1 + . ] outer ;\n";
+    let (stdout, code) = run_src("forward", src);
+    assert_eq!(stdout, "8\n");
+    assert_eq!(code, 0);
+}
+
 // -- criterion 4: a literal disagreeing with the parameter effect -------------
 
 #[test]
@@ -490,6 +507,59 @@ fn quotation_taking_word_cycle_names_members() {
         err.contains("`a`") && err.contains("`b`") && err.contains("recursive"),
         "a two-word combinator cycle should name both members, got: {err}"
     );
+}
+
+#[test]
+fn polymorphic_combinator_cycle_is_located_error() {
+    // R22 fires over the *polymorphic* combinator subgraph too: the cycle pass
+    // runs on the call graph before any body check, so admitting the abstract
+    // quotation forward (R21) does not let a poly combinator cycle slip past.
+    // A two-word poly cycle (and a mixed mono/poly one) both name their
+    // members.
+    let poly = check_error(
+        ": a ( ['T 'N] [ 'T -- ] -- ) [ drop ] b ;\n\
+         : b ( ['T 'N] [ 'T -- ] -- ) [ drop ] a ;\n\
+         : main ( -- ) 0 3 fill [ drop ] a ;\n",
+    );
+    assert!(
+        poly.contains("`a`") && poly.contains("`b`") && poly.contains("recursive"),
+        "a polymorphic combinator cycle should name both members, got: {poly}"
+    );
+    let mixed = check_error(
+        ": a ( ['T 'N] [ 'T -- ] -- ) [ drop ] b ;\n\
+         : b ( i64 [ i64 -- ] -- ) 0 3 fill [ drop ] a ;\n\
+         : main ( -- ) 0 3 fill [ drop ] a ;\n",
+    );
+    assert!(
+        mixed.contains("`a`") && mixed.contains("`b`") && mixed.contains("recursive"),
+        "a mixed mono/poly combinator cycle should name both members, got: {mixed}"
+    );
+}
+
+#[test]
+fn combinator_through_helper_recursion_is_not_a_splice_cycle() {
+    // R22 tracks only combinator -> combinator edges: a combinator (`comb`)
+    // that calls a *non-combinator* helper which calls the combinator back is
+    // ordinary runtime recursion, not a splice-forever cycle, so it must still
+    // compile. The back-calls are non-tail (`0 drop`) to stay clear of the
+    // unrelated mutual-tail-recursion rejection. Admitting the R21 abstract
+    // forward must not newly reject this.
+    let src = ": helper ( i64 -- )\n\
+                 | n |\n\
+                 n 0 > if\n\
+                   n 1 - [ . ] comb\n\
+                   0 drop\n\
+                 else\n\
+                 end ;\n\
+               : comb ( i64 [ i64 -- ] -- )\n\
+                 | f | | n |\n\
+                 n f call\n\
+                 n helper\n\
+                 0 drop ;\n\
+               : main ( -- ) 3 [ . ] comb ;\n";
+    let (stdout, code) = run_src("helper_recursion", src);
+    assert_eq!(stdout, "3\n2\n1\n0\n");
+    assert_eq!(code, 0);
 }
 
 // -- criterion 15 (phase 3): a session line defining a quotation-taking word -
