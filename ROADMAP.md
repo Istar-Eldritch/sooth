@@ -366,6 +366,7 @@ expressible (the accumulator rides a captured one-element array reached by balan
 borrows, which D3 accepts). Because inlining is total, library composition depth is code
 size at every call site, so building `map` on `each` would make every `map` call site depth
 2 plus an extra array copy and a counter cell, where a leaf keeps the library flat at depth
+
 1. **"When to inline" becomes a real question only at slice 7, when a runtime representation
 first makes a genuine choice possible; until then "always" is the only implementable answer,
 and a budget would be actively harmful, since exceeding it could only be a compile error.** Native only: the REPL is a located rejection at
@@ -380,7 +381,7 @@ up: `fill`'s compile cost is superlinear in the array length (10k ~ 0.36s, 100k 
 inliner), which is why 6a's constant-stack criterion is an equivalence-plus-correctness
 witness at 10k (equal exit code and stdout against the hand-threaded twin) rather than the
 1M run first specified; and every native `build` diagnostic prints a doubled `error: error:`
-prefix, because the ~165 error constructors embed `error: ` and `src/main.rs` prepends
+prefix, because the ~165 error constructors embed `error:` and `src/main.rs` prepends
 another. A separate repo-wide diagnostic defect *was* fixed during the review sequence:
 every diagnostic naming a word leaked the internal `__m0` monomorphization mangling whenever
 the module had an import (predating 6a, arriving with module support), and the now-unreachable
@@ -1280,6 +1281,31 @@ then find out what the compiler owes it.
    its order against 6b is free. **Exit:** a session defining a quotation-taking word,
    calling it, and redefining it, with the frozen-binding rule holding across the
    redefinition.
+   **6d — nested constant-stack loops (the hoist-target split).** Lifts R18, which today
+   rejects any `times` reached while a loop is already open. The limit is not hypothetical
+   and not confined to a future `while`: it bites every combinator 6a shipped, because each
+   one drives its own `times`. `2 [ | i | mk [ . ] c::each ] times` is a hard error today
+   ("a `times` cannot be nested in a loop yet"), so no combinator composes inside a loop,
+   and the rejection is a deferral rather than a design decision.
+   **The cause is one field doing two jobs.** `FuncBuilder::entry_block` (`src/ir.rs:2226`)
+   is simultaneously the alloca home and the loop preheader. It must be the function's true
+   entry block for allocation, since QBE's alloca bumps the frame pointer on every execution
+   and never reclaims within a function, so an `Alloc` reached per-iteration grows the frame
+   until the constant-stack guarantee is worthless. It must be the *loop's* preheader for a
+   carried aggregate's stable-slot seeding blit, which has to run once per entry to that
+   loop. Those two blocks coincide at exactly one loop level and diverge the moment loops
+   nest, which is the whole of the bug. The fix is to split the field: an invariant alloca
+   home, and a per-loop preheader. The rest of the loop state (`header`, `carried_slots`,
+   `back_edges`) already saves and restores around a nested region (`src/ir.rs:2609-2687`,
+   the `times` arm), so the phi bookkeeping is largely present already.
+   **Handle with care, and not as a rider on another slice.** This is the same loop-lowering
+   code where the aggregate-return aliasing bug landed (see the Phase 4 slice 3 note above),
+   whose fix, one entry-hoisted stable slot per carried aggregate plus an unconditional
+   read-before-write staged blit on the back-edge, is exactly the invariant that rearranging
+   hoist targets can silently break. Its guards want mutation-testing, not just a green run.
+   Depends on 6a for its consumers; independent of 6b and 6c, and orderable against either.
+   **Exit:** a combinator called inside a `times` body compiles and runs in constant stack,
+   with a nested-loop golden and the slice-3 aliasing guards still green.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an

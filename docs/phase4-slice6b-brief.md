@@ -241,21 +241,58 @@ exactly as they are.
 **D7. `filter` and `while` land in the existing `lib/combinators.sth`.** They are the same
 kind of leaf combinator as `each`/`map`/`fold` and change together with them; no new file.
 
+**D8. The self-tail loop is a splice-time back-edge, not a specialized `IrFunc`.** Resolved
+here rather than left to the spec, because the two candidates touch different code and only
+one of them keeps 6a's invariants. `times` is already a mid-body loop opened at an arbitrary
+live stack (`src/ir.rs:2630`): it takes the whole stack as loop-carried, saves and restores
+the enclosing loop state so loops compose, and builds its own exit block. Every 6a
+combinator drives that path today. The obligations a splice-time back-edge needs (stack-row
+identity between back-edge and header, move-state identity, borrow-state identity) are the
+same three `times` already enforces, and a back-edge from inside an `if` arm is likewise
+already lowered and tested (`both_if_arms_tail_produce_two_back_edges`, `src/ir.rs:6314`).
+So the mechanism is reuse, not invention.
+Specializing instead (mint one monomorphic `IrFunc` per (word, quotation literal) with the
+quotation baked in, so the existing whole-function self-tail transform fires) was weighed
+and rejected. It buys one real thing, compositional recursion checking against the declared
+signature instead of a loop-obligation rule in the splicer, and costs three: it reopens
+6a's "inlining is total" and "a quotation-taking word mints no `IrFunc` and no symbol",
+both of which survived three review rounds and are cited in DESIGN.md and 6a's merge commit;
+it needs a specialization key with dedup, which is the collision hazard 6a's brief already
+flagged against slice 2's `instantiation_symbol`; and it would make `while` compose inside a
+loop while its siblings `each`/`map`/`fold` still cannot (see D9), which is an inconsistent
+library surface. Note that both candidates reach the same `begin_loop`/`finalize_loop` pair,
+so "reuses the battle-tested transform" does not discriminate between them.
+
+**D9. `while` inherits the R18 nested-loop limit, and that is accepted, not fixed here.**
+A `while` call sited inside another loop is rejected, exactly as a `each`/`map`/`fold` call
+there is rejected today: `2 [ | i | mk [ . ] c::each ] times` already fails with "a `times`
+cannot be nested in a loop yet". So this is a pre-existing limit `while` joins, not a
+regression it introduces, and under D8 the library stays uniform (no combinator composes
+inside a loop). Lifting it is the hoist-target split, now recorded as slice 6d, which lifts
+it for all five combinators at once. The spec must state this limit plainly and pin it with
+a test, so the first person to write an interesting `while` meets a documented rejection
+rather than a surprise.
+
 ## Open questions the spec must answer
 
-- **The hardest one, and what a reviewer should attack first: the exact mechanism of the
-  self-tail combinator loop transform.** Two candidates, and the spec must pick one and
-  justify it, because they touch different code:
-  (a) a *splice-time back-edge* — when the inliner meets the self-tail call, close a loop to
-  the top of the already-spliced body, threading the loop-carried state, reusing the
-  `times`/self-tail lowering shape; or
-  (b) *specialize the combinator into a fresh monomorphic recursive `IrFunc`* with the
-  quotation baked in, so the self-call is a real `Call` to that symbol and `src/ir.rs`'s
-  existing `has_self_tail_call` loop transform fires unchanged. Option (b) is the only path
-  that makes the roadmap's `src/ir.rs:1218` `self_tail` hardcode *relevant* — a specialized
-  combinator would be a monomorphic recursive func, not a poly instantiation, so it would
-  not even go through that branch; if the spec picks (b), state precisely which lowering
-  path the specialized func takes and confirm it is not the `poly_words` instantiation loop.
+- **The hardest one, and what a reviewer should attack first: the exact loop obligations at
+  a splice-time back-edge (D8).** The mechanism is decided; what it must *prove* is not. The
+  spec must take each of the three in turn and say how it is discharged and where the
+  diagnostic lands: stack-row identity between the back-edge and the header, move-state
+  identity (no outer linear local consumed, or it is disposed once per iteration), and
+  borrow-state identity (no reference crossing the back-edge). `times` enforces all three
+  today by walking a body the checker can see, and the back-edge here carries the caller's
+  live stack exactly as `times` does, so the claim is that they transfer unchanged. That
+  claim is the load-bearing one in this slice: if any obligation turns out materially harder
+  because the carried row is the caller's stack rather than a synthesized index, the
+  specialization option rejected in D8 becomes attractive again and the decision should be
+  reopened rather than patched around.
+- **Whether the carried row's aggregate staging is exercised at all here.** `begin_loop`'s
+  `stage_aggregates` path (one entry-hoisted stable slot plus the staged back-edge blit) is
+  what fixed the slice-3 aggregate-return aliasing bug. `while` threads a state `'a` that may
+  be an aggregate, so the spec should say whether the self-tail back-edge reuses that path
+  verbatim (expected yes, since it is the same `begin_loop` call) and pin a carried-aggregate
+  `while` as a test, because this is the known-fragile invariant in this code.
 - **Where the tail-vs-non-tail distinction for D5 is computed.** `has_self_tail_call`
   (`src/check.rs:2714`) is AST-level and *would* structurally recognize `while`'s recursion
   (it descends into `if` arms and matches the name), but it is never consulted for a
@@ -294,9 +331,9 @@ kind of leaf combinator as `each`/`map`/`fold` and change together with them; no
 The polymorphic-body `if` (`src/check.rs:3664`) and polymorphic self-call resolution
 (`poly_call_term`, recon 4) — neither `filter` nor `while` needs them, and the roadmap's
 claim that this slice closes them is what recon falsifies; leave both rejections in place.
-The `src/ir.rs:1218` poly-instantiation `self_tail` hardcode — unreachable today (recon 4);
-do not touch it unless D-open-question (b) routes `while` through it, in which case scope it
-to exactly that path. Non-tail combinator recursion and mutual combinator cycles (they need
+The `src/ir.rs:1218` poly-instantiation `self_tail` hardcode: unreachable today (recon 4),
+and D8 routes `while` through a splice-time back-edge rather than a specialized `IrFunc`, so
+nothing in this slice reaches it. Leave it exactly as it is. Non-tail combinator recursion and mutual combinator cycles (they need
 runtime quotation values — slice 7). Runtime quotation values / closures, a calling
 convention, an `IrType` quotation variant (slice 7). REPL support for `filter`/`while`
 (slice 6c). Generic `type:` declarations (Phase 6). A resizable / dynamic array type —
@@ -304,3 +341,7 @@ convention, an `IrType` quotation variant (slice 7). REPL support for `filter`/`
 non-`Copy` elements (`fill` rejects them, recon 8) — a separate future capability, not this
 slice. Fixing the 6a bind-then-pass alias limitation (recon 10) and the fixed-array-codegen
 1M timeout (recon 2) — pre-existing, out of this slice's charter.
+Lifting the R18 nested-loop rejection, so that a combinator can be called inside a loop:
+that is the hoist-target split, now recorded as ROADMAP slice 6d, and it is deliberately not
+a rider on this slice (D9). `while` ships with the same limit `each`/`map`/`fold` already
+have, and 6d lifts it for all five at once.
