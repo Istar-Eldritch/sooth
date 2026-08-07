@@ -1235,3 +1235,77 @@ fn borrow_of_non_place_diagnostic_shows_unmangled_enclosing_word() {
         "the borrow diagnostic must not leak `__m0`: {err}"
     );
 }
+
+#[test]
+fn everyday_diagnostics_show_the_unmangled_enclosing_word() {
+    // The leak is not confined to this slice's own messages: with an import
+    // present, *every* diagnostic naming the enclosing word rendered `w__m0`.
+    // These are the ordinary ones a user meets first, so they are the ones a
+    // mangled name is most visible in. Each row is (label, body, expected
+    // fragment naming the clean `w`).
+    let rows: &[(&str, &str, &str)] = &[
+        (
+            "declared-outputs",
+            ": w ( -- i64 ) ;\n: main ( -- ) ;\n",
+            "stack effect mismatch in `w`",
+        ),
+        (
+            "locals-exceed-inputs",
+            ": w ( i64 -- ) | a b | drop drop ;\n: main ( -- ) ;\n",
+            "stack effect mismatch in `w`",
+        ),
+        (
+            "unknown-word",
+            ": w ( -- ) nosuchword ;\n: main ( -- ) ;\n",
+            "unknown word `nosuchword` in `w`",
+        ),
+        (
+            "type-mismatch",
+            ": w ( -- ) 1 2.0 + drop ;\n: main ( -- ) ;\n",
+            "type mismatch in `w`",
+        ),
+        (
+            "duplicate-local",
+            ": w ( i64 -- ) | x | | x | drop ;\n: main ( -- ) ;\n",
+            "`x` is already bound in `w`",
+        ),
+    ];
+    for (label, body, want) in rows {
+        let err = build_error_with_import(&format!("m0-{label}"), body);
+        assert!(
+            err.contains(want),
+            "{label}: expected {want:?} naming the unmangled `w`, got: {err}"
+        );
+        assert!(
+            !err.contains("__m"),
+            "{label}: leaked a mangled name: {err}"
+        );
+    }
+}
+
+#[test]
+fn self_tail_back_edge_check_still_fires_under_an_import() {
+    // `Ctx` carries the demangled name for rendering and the mangled one for
+    // self-tail recognition, which compares against mangled *call* names. Fuse
+    // the two and a self-recursive word in an imported module stops matching
+    // itself, so the back-edge checks are silently skipped.
+    //
+    // This must be a program the check *rejects*. A valid self-recursive word
+    // builds either way -- recognition only gates extra checks, so losing it
+    // costs a legal program nothing -- and would witness nothing at all.
+    let err = build_error_with_import(
+        "m0-backedge",
+        "type: V x i64 ;\n\
+         : spin ( &!V i64 -- )\n  | r n |\n  n 0 = if\n  else\n    \
+         0 V | x |\n    &!x n 1 - spin\n  end ;\n\
+         : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
+    );
+    assert!(
+        err.contains("a reference to a local cannot cross a loop"),
+        "the back-edge check must still fire under an import: {err}"
+    );
+    assert!(
+        err.contains("in `spin`") && !err.contains("__m"),
+        "and must name the unmangled `spin`: {err}"
+    );
+}
