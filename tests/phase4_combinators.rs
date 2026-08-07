@@ -1580,39 +1580,29 @@ fn temp_lib(name: &str, contents: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn repl_import_exporting_quotation_word_is_rejected() {
-    // R24/D7: importing a closure that *exports* a quotation-taking word is a
-    // located rejection at import time, naming the file and the word. The
-    // session retains no body to inline for it (a quotation-taking word mints
-    // no `IrFunc`, R20), so without this the import succeeds and the failure
-    // surfaces later as a misdirected `unknown word` or an internal mangled
-    // name leaking into the diagnostic.
+fn repl_import_exporting_combinator_retains_and_runs() {
+    // R12/R13 (slice 6c): the former R24 rejection is gone. Importing a closure
+    // that *exports* a quotation-taking word now retains the combinator (D5),
+    // and a *later* session line calls it, inlined at that site's own live env.
+    // `5 [ 3 + ] c::apply_each` leaves 8. The mono combinator `apply_each` is
+    // skipped by the exported-ordinary-word loop (it mints no symbol, R20) and
+    // retained by the combinator loop instead.
     let path = temp_lib(
-        "crit16-exports",
+        "crit8-exports",
         "export: apply_each ;\n: apply_each ( i64 [ i64 -- i64 ] -- i64 ) call ;\n",
     );
-    let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
+    let transcript = repl_error(&format!(
+        "import: c \"{}\" ;\n5 [ 3 + ] c::apply_each\n:quit\n",
+        path.display()
+    ));
     std::fs::remove_file(&path).ok();
-    assert!(
-        transcript.contains("apply_each")
-            && transcript.contains(&path.display().to_string())
-            && transcript.contains("quotation parameter"),
-        "located rejection naming the file and the word: {transcript}"
-    );
-    // A user-facing diagnostic must never leak a compiler-internal mangled
-    // name (`__import`, `__m0`, `quo__`).
-    assert!(
-        !transcript.contains("__import")
-            && !transcript.contains("__m0")
-            && !transcript.contains("quo__"),
-        "no mangled internal name in the diagnostic: {transcript}"
-    );
+    assert_eq!(transcript, "imported c\nstack: 8\n");
 
     // A quotation-taking word used purely *internally* to an imported closure
-    // (not exported) must still import and run fine: it inlines during the
+    // (not exported) still imports and runs fine: it inlines during the
     // closure's own native compilation.
     let internal = temp_lib(
-        "crit16-internal",
+        "crit8-internal",
         "export: bump ;\n: ap ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: bump ( i64 -- i64 ) [ 1 + ] ap ;\n",
     );
     // Leave the result on the stack (no `.`): a runtime `.` prints to the real
@@ -1627,6 +1617,62 @@ fn repl_import_exporting_quotation_word_is_rejected() {
     assert!(
         ok.contains("imported c") && ok.contains("stack: 6") && !ok.contains("error"),
         "internal-only quotation word imports and runs: {ok}"
+    );
+}
+
+#[test]
+fn repl_imported_while_runs_to_fixpoint() {
+    // Criterion 8 (mutation-pins R14's body self-call rewrite): import the real
+    // `lib/combinators.sth` and run `while` at a session line to a fixpoint.
+    // `while`'s body self-call `while` is rewritten to its internal spelling on
+    // import, so the self-tail recognizer fires and it lowers to a loop
+    // back-edge (constant stack), not an endless splice. If the rewrite were
+    // deleted, the self-call would miss the recognizer and the splice would
+    // recurse forever.
+    let transcript = repl_error(&format!(
+        "{}0 [ dup 5 < if 1 + true else false end ] c::while\n:quit\n",
+        combinators_import("c")
+    ));
+    assert_eq!(transcript, "imported c\nstack: 5\n");
+}
+
+#[test]
+fn repl_imported_filter_runs() {
+    // Criterion 9: import the real `lib/combinators.sth` and run `filter` over
+    // an array at a session line. `7 3 fill` is three 7s; `[ 5 > ]` keeps all
+    // three, so the residual is the compacted array then the kept-count `3`.
+    // The two-output poly combinator lands both outputs on the residual stack,
+    // exactly as the session-defined `filter` does.
+    let transcript = repl_error(&format!(
+        "{}7 3 fill [ 5 > ] c::filter\n:quit\n",
+        combinators_import("c")
+    ));
+    assert_eq!(transcript, "imported c\nstack: <[i64 3]> 3\n");
+}
+
+#[test]
+fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
+    // Criterion 10 (R15 confirm): an exported combinator whose *signature*
+    // names a closure-private type is rejected at the closure's own `check`
+    // (5a's export rule: a private type reachable through an exported
+    // signature), before any REPL-side retention. No REPL-side guard is added;
+    // this pins that the closure check already catches it. `run`'s effect names
+    // `Secret`, which the closure declares but does not export.
+    let path = temp_lib(
+        "crit10-private",
+        "type: Secret tag i64 ;\n\
+         export: run ;\n\
+         : run ( Secret [ i64 -- i64 ] -- ) | q | Secret>tag q call drop ;\n",
+    );
+    let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
+    std::fs::remove_file(&path).ok();
+    assert!(
+        transcript.contains("names private type `Secret`") && transcript.contains("`run`"),
+        "the exported combinator naming a private type is rejected at the closure check: {transcript}"
+    );
+    assert!(
+        !transcript.contains("imported c"),
+        "the import must not succeed: {transcript}"
     );
 }
 

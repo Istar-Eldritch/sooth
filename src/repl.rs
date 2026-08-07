@@ -15,8 +15,8 @@ use std::path::Path;
 use crate::ast::Module;
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, EnumDecl, EnumId, Import, Line, OwnedCellDecl, OwnedCellId,
-    PolySig, RefDecl, RefId, Span, StructDecl, StructId, Term, TermKind, Type, VariantDecl,
-    WordBody, WordDef,
+    PolySig, PolyType, RefDecl, RefId, Span, StackEffect, StructDecl, StructId, Term, TermKind,
+    Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::check::{self, word_span, Sig};
 use crate::driver;
@@ -197,6 +197,156 @@ fn remap_type(
     }
 }
 
+/// R14 (slice 6c): the `PolyType` analogue of `remap_type` -- shift the
+/// registry ids in a polymorphic signature into session space by the same
+/// bases. A type/length *variable* carries no id and passes through; a
+/// concrete or array-of type shifts its ids like every other imported decl.
+fn remap_poly_type(
+    p: &PolyType,
+    struct_base: usize,
+    enum_base: usize,
+    array_base: usize,
+    cell_base: usize,
+    ref_base: usize,
+) -> PolyType {
+    match p {
+        PolyType::Concrete(t) => PolyType::Concrete(remap_type(
+            *t,
+            struct_base,
+            enum_base,
+            array_base,
+            cell_base,
+            ref_base,
+        )),
+        PolyType::Var(id) => PolyType::Var(*id),
+        PolyType::Array(inner, len) => PolyType::Array(
+            Box::new(remap_poly_type(
+                inner,
+                struct_base,
+                enum_base,
+                array_base,
+                cell_base,
+                ref_base,
+            )),
+            len.clone(),
+        ),
+        PolyType::Quotation(ins, outs) => PolyType::Quotation(
+            ins.iter()
+                .map(|q| {
+                    remap_poly_type(q, struct_base, enum_base, array_base, cell_base, ref_base)
+                })
+                .collect(),
+            outs.iter()
+                .map(|q| {
+                    remap_poly_type(q, struct_base, enum_base, array_base, cell_base, ref_base)
+                })
+                .collect(),
+        ),
+    }
+}
+
+/// R14 (slice 6c): clone a combinator's body, rewriting every `Call` that
+/// names a module-0 export to its session-internal epoch-tagged spelling
+/// (`rename`'s keys are the post-resolve body spellings, its values the
+/// internal ones). This is the load-bearing part of import retention: an
+/// imported `while`'s self-call `while` must become `{q}::while__import{epoch}`
+/// or the self-tail recognizer (comparing against the combinator's `.name`)
+/// misses and the splice recurses forever. A `Call` that is not a module-0
+/// export (a builtin, the quotation parameter, a body local) is left alone.
+fn rewrite_combinator_body_calls(terms: &[Term], rename: &HashMap<String, String>) -> Vec<Term> {
+    terms
+        .iter()
+        .map(|term| {
+            let kind = match &term.kind {
+                TermKind::Call(name) => {
+                    TermKind::Call(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    else_span,
+                    end_span,
+                } => TermKind::If {
+                    then_branch: rewrite_combinator_body_calls(then_branch, rename),
+                    else_branch: rewrite_combinator_body_calls(else_branch, rename),
+                    else_span: *else_span,
+                    end_span: *end_span,
+                },
+                TermKind::Quotation(inner) => {
+                    TermKind::Quotation(rewrite_combinator_body_calls(inner, rename))
+                }
+                other => other.clone(),
+            };
+            Term {
+                kind,
+                span: term.span,
+            }
+        })
+        .collect()
+}
+
+/// R13/R14 (slice 6c): build the session-retained copy of an imported module-0
+/// combinator. Its signature ids are shifted into session space like every
+/// other imported decl; its body calls are rewritten to their internal
+/// spellings; and its `.name` is set to the internal epoch-tagged spelling the
+/// checker's/lowerer's inline paths dispatch on (so a self-tail recognizer
+/// comparing against `comb.word.name` still fires). No re-check: the closure is
+/// already internally self-consistent from its own `check` (recon 2/5/6).
+#[allow(clippy::too_many_arguments)]
+fn remap_imported_combinator(
+    w: &WordDef,
+    internal: &str,
+    body_rename: &HashMap<String, String>,
+    module_base: u32,
+    struct_base: usize,
+    enum_base: usize,
+    array_base: usize,
+    cell_base: usize,
+    ref_base: usize,
+) -> WordDef {
+    let remap_slot = |s: &TypedSlot| TypedSlot {
+        name: s.name.clone(),
+        ty: remap_type(
+            s.ty,
+            struct_base,
+            enum_base,
+            array_base,
+            cell_base,
+            ref_base,
+        ),
+    };
+    let effect = StackEffect {
+        inputs: w.effect.inputs.iter().map(remap_slot).collect(),
+        outputs: w.effect.outputs.iter().map(remap_slot).collect(),
+    };
+    let poly = w.poly.as_ref().map(|sig| {
+        let mut sig = (**sig).clone();
+        sig.inputs = sig
+            .inputs
+            .iter()
+            .map(|p| remap_poly_type(p, struct_base, enum_base, array_base, cell_base, ref_base))
+            .collect();
+        sig.outputs = sig
+            .outputs
+            .iter()
+            .map(|p| remap_poly_type(p, struct_base, enum_base, array_base, cell_base, ref_base))
+            .collect();
+        Box::new(sig)
+    });
+    let WordBody::Terms { terms } = &w.body else {
+        unreachable!("a combinator body is always WordBody::Terms (is_combinator requires it)")
+    };
+    WordDef {
+        name: internal.to_string(),
+        effect,
+        body: WordBody::Terms {
+            terms: rewrite_combinator_body_calls(terms, body_rename),
+        },
+        poly,
+        module: module_base + w.module,
+    }
+}
+
 /// R8e (slice 5b): a REPL-declared name may not contain `::`, the separator
 /// reserved for a qualified imported spelling; otherwise a user could forge an
 /// import's internal epoch-tagged name and hijack its accessor sigs. A new,
@@ -247,41 +397,6 @@ fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Resul
     Err(format!(
         "error: cannot import `{}`: it declares a word named `main` (line {}, col {}); a library file may not declare `main`",
         path.display(),
-        span.line,
-        span.col
-    ))
-}
-
-/// R24 (D7): an imported closure that *exports* a quotation-taking word is a
-/// located rejection at import time, naming the file and the word. The session
-/// has no body to inline for it (a quotation-taking word mints no `IrFunc`,
-/// R20) and no symbol to call, so without this the import silently succeeds
-/// and fails later with a misdirected "unknown word" or an internal mangled
-/// name leaking into the diagnostic. A quotation-taking word used only
-/// internally to the closure inlines fine during native compilation and is
-/// not exported, so this only fires on module 0's export list. Lifted by 6c.
-fn check_no_exported_quotation_word_in_closure(
-    module: &Module,
-    closure: &driver::Closure,
-) -> Result<(), String> {
-    let exports: HashSet<&str> = module.modules[0]
-        .exports
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .collect();
-    let Some(word) = module.words.iter().find(|w| {
-        w.module == 0
-            && exports.contains(w.name.as_str())
-            && check::word_declares_quotation_parameter(w)
-    }) else {
-        return Ok(());
-    };
-    let path = closure.path_of(word.module);
-    let span = word_span(word);
-    Err(format!(
-        "error: cannot import `{}`: it exports `{}` (line {}, col {}), which takes a quotation parameter; a quotation-taking word cannot be imported into a session (the inliner needs its body, which the session does not retain -- slice 6c)",
-        path.display(),
-        word.name,
         span.line,
         span.col
     ))
@@ -1471,9 +1586,8 @@ impl Session {
         // not only module 0) is rejected before any codegen, naming the file
         // and the word.
         check_no_main_in_closure(&module, &closure)?;
-        // R24 (D7): reject a closure exporting a quotation-taking word before
-        // any codegen, naming the file and the word.
-        check_no_exported_quotation_word_in_closure(&module, &closure)?;
+        // R12 (slice 6c): a closure exporting a quotation-taking word is no
+        // longer rejected -- `splice_import` retains the combinator (D5).
         // R11: each selectively-imported name must be exported by module 0,
         // the R16 visibility error, checked against a synthesized entry for
         // the REPL's own top-level selection (the closure-internal check,
@@ -1672,12 +1786,17 @@ impl Session {
         // `Sig` remapped.
         for (raw, _span) in &module.modules[0].exports {
             let mangled = mangled_of(raw);
-            let Some(w) = module
-                .words
-                .iter()
-                .find(|w| w.module == 0 && w.poly.is_none() && w.name == mangled)
-            else {
-                continue; // an exported type name, handled in the struct/enum loop
+            // R13 (slice 6c): skip an exported *combinator* here -- it mints no
+            // `IrFunc`/symbol (R20), so binding it into `self.env` under an
+            // import symbol would point at nothing. It is retained instead in
+            // the combinator loop below.
+            let Some(w) = module.words.iter().find(|w| {
+                w.module == 0
+                    && w.poly.is_none()
+                    && w.name == mangled
+                    && !check::word_declares_quotation_parameter(w)
+            }) else {
+                continue; // an exported type name or combinator, handled elsewhere
             };
             let sig = Sig {
                 inputs: w.effect.inputs.iter().map(|s| remap(s.ty)).collect(),
@@ -1697,6 +1816,62 @@ impl Session {
                 .insert(format!("{q}::{raw}"), internal.clone());
             // R11: a selectively-imported word is exposed unqualified too, a
             // second alias at the same internal spelling.
+            if selective_names.contains(raw.as_str()) {
+                self.import_aliases.insert(raw.clone(), internal);
+            }
+        }
+
+        // R13/R14 (slice 6c): retain each module-0 exported *combinator* (mono
+        // or poly) in the combinator store under its internal epoch-tagged
+        // spelling, so a *later* session line calling `q::name` inlines its
+        // body at that site's own live env (D1/D5), exactly as a session-
+        // defined combinator does. Symmetric to the exported-ordinary-word
+        // loop above, which filters on `poly.is_none()` and now also skips a
+        // combinator, so a poly combinator like `filter`/`while` is never seen
+        // there and needs this loop. Unlike an ordinary word this keeps no
+        // `self.env` row and no symbol, only the raw terms and the alias.
+        //
+        // `body_rename` maps every module-0 export's body spelling to its
+        // internal spelling, so a retained body's call to any module-0 export
+        // (itself included, R14) resolves at the session splice site; the
+        // self-call rewrite is what keeps an imported `while`'s self-tail edge
+        // recognizable.
+        let body_rename: HashMap<String, String> = module.modules[0]
+            .exports
+            .iter()
+            .filter_map(|(raw, _)| {
+                let mangled = mangled_of(raw);
+                module
+                    .words
+                    .iter()
+                    .any(|w| w.module == 0 && w.name == mangled)
+                    .then(|| (mangled, format!("{q}::{raw}__import{epoch}")))
+            })
+            .collect();
+        for (raw, _span) in &module.modules[0].exports {
+            let mangled = mangled_of(raw);
+            let Some(w) = module.words.iter().find(|w| {
+                w.module == 0 && w.name == mangled && check::word_declares_quotation_parameter(w)
+            }) else {
+                continue;
+            };
+            let internal = format!("{q}::{raw}__import{epoch}");
+            let stored = remap_imported_combinator(
+                w,
+                &internal,
+                &body_rename,
+                module_base,
+                struct_base,
+                enum_base,
+                array_base,
+                cell_base,
+                ref_base,
+            );
+            self.combinators.insert(internal.clone(), stored);
+            self.import_aliases
+                .insert(format!("{q}::{raw}"), internal.clone());
+            // R13: a selectively-imported combinator is exposed unqualified
+            // too, a second alias at the same internal spelling.
             if selective_names.contains(raw.as_str()) {
                 self.import_aliases.insert(raw.clone(), internal);
             }
