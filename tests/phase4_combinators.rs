@@ -759,6 +759,77 @@ fn fold_computes_sum() {
     assert_eq!(code, 0);
 }
 
+// -- criterion 1: `filter` checks standalone ---------------------------------
+
+#[test]
+fn filter_checks_standalone() {
+    // Criterion 1 (R1/R2): `filter`'s body -- an `if`/`else`/`end` inside a
+    // `times` body threading a write cursor below the index -- checks at its
+    // own def site with no call site and no compiler change. Combinators
+    // splice at the concrete call site (recon 1), so the polymorphic-`if`
+    // rejection never gates this.
+    let filter = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize )\n\
+                  | p | len >i64 | n | | arr |\n\
+                  0 n [ | i | &arr i >usize &> @ dup p call if\n\
+                          | v | &!arr over >usize &!> v ! 1 +\n\
+                        else drop end ] times\n\
+                  | wf | arr wf >usize ;\n";
+    check_ok(filter);
+}
+
+// -- criterion 2: `filter` over `[i64 4]` inlines, runs, and compacts --------
+
+#[test]
+fn filter_over_array_inlines_and_runs() {
+    // Criterion 2 (R1): `arr [ 4 > ] c::filter` over `[i64 8 3 9 1]` inlines
+    // through 6a's inliner, prints the kept count `2`, and the array is
+    // compacted in place, with `8` and `9` at the front.
+    let src = format!(
+        "{}: arr ( -- [i64 4] )\n\
+         0 4 fill | s |\n\
+         &!s 0 >usize &!> 8 !\n\
+         &!s 1 >usize &!> 3 !\n\
+         &!s 2 >usize &!> 9 !\n\
+         &!s 3 >usize &!> 1 !\n\
+         s ;\n\
+         : main ( -- )\n\
+           arr [ 4 > ] c::filter | n | | out |\n\
+           n .\n\
+           &out 0 >usize &> @ .\n\
+           &out 1 >usize &> @ .\n\
+           out drop ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("filter_over_array", &src);
+    assert_eq!(stdout, "2\n8\n9\n");
+    assert_eq!(code, 0);
+}
+
+// -- criterion 3: `filter` is element-polymorphic ----------------------------
+
+#[test]
+fn filter_is_element_polymorphic() {
+    // Criterion 3 (R1): the same `filter` inlines over an `[f64 3]` array with
+    // a float predicate, keeping the single element greater than `1.0`.
+    let src = format!(
+        "{}: arr ( -- [f64 3] )\n\
+         0.0 3 fill | s |\n\
+         &!s 0 >usize &!> 0.5 !\n\
+         &!s 1 >usize &!> 2.5 !\n\
+         &!s 2 >usize &!> 0.3 !\n\
+         s ;\n\
+         : main ( -- )\n\
+           arr [ 1.0 > ] c::filter | n | | out |\n\
+           n .\n\
+           &out 0 >usize &> @ .\n\
+           out drop ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("filter_f64", &src);
+    assert_eq!(stdout, "1\n2.5\n");
+    assert_eq!(code, 0);
+}
+
 // -- criterion 12 / 12b: obligations 1 and 2 discharged at the def site -------
 
 #[test]
