@@ -457,6 +457,9 @@ impl Editor {
                 }
                 // NeedMore: buffer the physical line and switch to the
                 // continuation prompt instead of compiling a partial line.
+                // The typed line must scroll up (like Commit/Abort/Eof do)
+                // before redrawing, or the continuation prompt overwrites it.
+                out.write_all(b"\r\n")?;
                 self.redraw(out)?;
             }
             Key::CtrlC => {
@@ -655,6 +658,25 @@ mod tests {
         assert_eq!(
             actions,
             vec![Action::Commit(": sq ( i64 -- i64 )\ndup * ;".to_string())]
+        );
+    }
+
+    #[test]
+    fn editor_continuation_redraw_scrolls_past_prior_line() {
+        // The first physical line must not be clobbered by the continuation
+        // prompt: NeedMore has to emit \r\n before redrawing, exactly like
+        // Commit/Abort/Eof do in the tty loop, so the line scrolls up.
+        let mut ed = Editor::new("> ", "... ", empty_history(), crate::repl::text_is_complete);
+        let mut sink = Vec::new();
+        for &b in b": sq ( i64 -- i64 )" {
+            ed.push_byte(b, &mut sink).unwrap();
+        }
+        sink.clear();
+        let action = ed.push_byte(b'\r', &mut sink).unwrap();
+        assert!(action.is_none(), "unclosed def must not commit yet");
+        assert!(
+            sink.starts_with(b"\r\n"),
+            "continuation redraw must scroll past the typed line, got {sink:?}"
         );
     }
 

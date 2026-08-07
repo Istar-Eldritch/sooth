@@ -39,9 +39,11 @@ fn run_session(lines: &[&str]) -> String {
 #[test]
 fn piped_multiline_def_keeps_per_line_errors() {
     let out = run_session(&[": sq ( i64 -- i64 )", "dup * ;"]);
-    assert!(
-        out.contains("parse error"),
-        "expected per-line parse errors, got: {out}"
+    let error_lines: Vec<&str> = out.lines().filter(|l| l.contains("parse error")).collect();
+    assert_eq!(
+        error_lines.len(),
+        2,
+        "expected one parse error per piped line (no cross-line joining), got: {out}"
     );
     assert!(
         !out.contains("defined sq"),
