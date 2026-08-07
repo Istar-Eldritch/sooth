@@ -53,6 +53,22 @@ pub(crate) fn demangle_word(name: &str) -> &str {
     &name[..idx]
 }
 
+/// `demangle_word` for a *call* name, which may carry an accessor suffix. A
+/// generated accessor mangles as `P__m0>x`, so the `__m0` sits mid-string and
+/// the trailing-suffix strip above cannot see it; the type prefix has to be
+/// demangled and the `>x` put back.
+pub(crate) fn demangle_call(name: &str) -> std::borrow::Cow<'_, str> {
+    let (head, accessor) = split_accessor(name);
+    if accessor.is_empty() {
+        return std::borrow::Cow::Borrowed(demangle_word(head));
+    }
+    let demangled = demangle_word(head);
+    if demangled.len() == head.len() {
+        return std::borrow::Cow::Borrowed(name);
+    }
+    std::borrow::Cow::Owned(format!("{demangled}{accessor}"))
+}
+
 /// Split a call name into its leading identifier and the accessor suffix a
 /// generated word carries: `Point>x` -> (`Point`, `>x`), `Point|>x` ->
 /// (`Point`, `|>x`), `Point` -> (`Point`, ``). The generated-word spellings are

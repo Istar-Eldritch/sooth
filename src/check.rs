@@ -2807,7 +2807,10 @@ fn find_tail_cycle(
 /// X1: a located mutual-tail-recursion error naming the cycle members in
 /// order, closing the loop back to the first (e.g. `` `a` -> `b` -> `a` ``).
 fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
-    let mut chain: Vec<&str> = cycle.iter().map(|&i| words[i].name.as_str()).collect();
+    let mut chain: Vec<&str> = cycle
+        .iter()
+        .map(|&i| crate::resolve::demangle_word(words[i].name.as_str()))
+        .collect();
     chain.push(chain[0]);
     let rendered = chain
         .iter()
@@ -4223,7 +4226,7 @@ fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> 
 }
 
 fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: cannot `{op}` the type variable `{var}` in `{where_}` (line {})\n  `{var}` has no `Copy` bound, and a linear value cannot be duplicated; declare `{var}: Copy` if every instantiation is `Copy`",
@@ -4232,7 +4235,7 @@ fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
 }
 
 fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{op}` on the type variable `{var}` in `{where_}` (line {}) requires an `Ord` bound\n  declare `{var}: Ord` so every instantiation is comparable",
@@ -4247,7 +4250,7 @@ fn poly_op_on_variable_error(
     pt: &PolyType,
     sig: &PolySig,
 ) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     let what = match pt {
         PolyType::Var(v) => format!("the type variable `{}`", sig.ty_var_names[*v as usize]),
@@ -4269,7 +4272,7 @@ fn poly_op_operand_mismatch_error(
     b: &PolyType,
     sig: &PolySig,
 ) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{op}` in `{where_}` (line {}) needs two operands of one type, found `{}` and `{}`",
@@ -4286,7 +4289,7 @@ fn poly_var_to_concrete_error(
     var: &str,
     expected: Type,
 ) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{callee}` in `{where_}` (line {}) expects `{expected}`, but the type variable `{var}` is not a concrete type",
@@ -4310,7 +4313,7 @@ fn poly_output_mismatch_error(word: &WordDef, sig: &PolySig, residual: &[PolyTyp
 }
 
 fn poly_copy_bound_error(ctx: &Ctx, span: Span, callee: &str, var: &str, ty: Type) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is linear and has no `Copy` instance, so a linear value cannot be duplicated; `{var}: Copy` is unsatisfied",
@@ -4323,7 +4326,7 @@ fn poly_copy_bound_error(ctx: &Ctx, span: Span, callee: &str, var: &str, ty: Typ
 }
 
 fn poly_ord_bound_error(ctx: &Ctx, span: Span, callee: &str, var: &str, ty: Type) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
@@ -4343,7 +4346,7 @@ fn poly_var_conflict_error(
     a: Type,
     b: Type,
 ) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     match ctx {
         Ctx::Word { name, .. } => format!(
@@ -4363,7 +4366,7 @@ fn poly_len_conflict_error(
     a: u32,
     b: u32,
 ) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     match ctx {
         Ctx::Word { name, .. } => format!(
@@ -4376,7 +4379,7 @@ fn poly_len_conflict_error(
 }
 
 fn poly_array_expected_error(ctx: &Ctx, span: Span, callee: &str, found: Type) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, .. } => format!(
             "error: type mismatch in `{name}` (line {})\n  `{callee}` expected an array operand, found `{found}`",
@@ -4389,7 +4392,7 @@ fn poly_array_expected_error(ctx: &Ctx, span: Span, callee: &str, found: Type) -
 }
 
 fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var: &str) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{callee}` in `{where_}` (line {}) has output variable `{var}` that no input binds",
@@ -4439,7 +4442,7 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
 }
 
 fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: stack effect mismatch in `{}` (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
@@ -4453,7 +4456,7 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
 /// `str` where a `cstr` is wanted names the fix rather than a plain
 /// mismatch, mirroring `size_conversion_needed_error`'s shape.
 fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` wants `cstr`, found `str`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
@@ -4466,7 +4469,7 @@ fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
 }
 
 fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
@@ -4482,7 +4485,7 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
 /// mixed int/float, mixed integer widths/signs, mixed float widths, or a
 /// `bool` operand, name both operand types (X1, X2).
 fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
@@ -4554,7 +4557,7 @@ fn max_total_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> St
 /// bitwise ops are homogeneous over the integer types and `bool`, same shape
 /// as `mod_requires_int_error`.
 fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or bool type, found `{}` and `{}`\n  note: declared {}",
@@ -4581,7 +4584,7 @@ fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String 
 
 /// `shl`/`shr` applied to a non-integer value operand.
 fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
@@ -4609,7 +4612,7 @@ fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
 /// A conversion word (`>iN`/`>uN`/`>f32`/`>f64`) applied to a non-numeric
 /// (`bool`) source (X5).
 fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
@@ -4662,7 +4665,7 @@ fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
 /// plainly copyable, and its own `: drop` declaration is the reason they may not
 /// be.
 fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     let defines_drop =
         matches!(found, Type::Struct(id, _) if ctx.structs()[id.index()].has_drop_overload);
     // A reference is neither `Copy` nor linear, so the ownership wording below
@@ -4784,7 +4787,7 @@ fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
 /// for disposing it. Deferred to a later Phase 3 slice, as a located error
 /// rather than silence. Copy loops are untouched.
 fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: linear values across a loop are not supported yet in `{}` (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
@@ -4807,7 +4810,7 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
 /// referent lives in an ancestor frame that outlives every iteration, which is
 /// what keeps `walk ( &!List -- ) ... walk ;` legal.
 fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
-    let callee = crate::resolve::demangle_word(callee);
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
@@ -5533,7 +5536,7 @@ fn leave_block(ctx: &Ctx, scope: &mut Scope, depth: usize, at: BlockEnd) -> Resu
 /// confirm it fits; names the missing `>usize`/`>isize` conversion
 /// explicitly, naming whichever size type `target` is.
 fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
@@ -6499,7 +6502,7 @@ fn check_operator(
 /// An array word (`fill`/`len`) applied to a non-array operand: names the
 /// array word and the offending operand type (X8).
 fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
@@ -6515,7 +6518,7 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
 /// the aggregate live, so it can't also transfer ownership of a linear
 /// field's value; the workaround is `S>` (destructure the whole aggregate).
 fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
@@ -6530,7 +6533,7 @@ fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> S
 /// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
 /// word and the offending operand type, mirroring `array_word_operand_error`.
 fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
@@ -6782,7 +6785,7 @@ fn reference_word_operand_error(
     expected: &str,
     found: Type,
 ) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{name}` (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
@@ -6798,7 +6801,7 @@ fn reference_word_operand_error(
 /// `!`/`+!` through a shared reference. Storing through a `&T` is
 /// meaningless, and the mutable spelling is right there.
 fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     format!(
         "error: `{op}` cannot store through the shared reference `{found}`{} (line {})\n  borrow it mutably with `&!` (and project with the `&!`-spelled accessors) to write through it",
         in_word(ctx),
@@ -6810,7 +6813,7 @@ fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: 
 /// value through a reference would manufacture a second owner; storing over
 /// one would silently leak the value being overwritten (nothing auto-drops).
 fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Type) -> String {
-    let op = crate::resolve::demangle_word(op);
+    let op = crate::resolve::demangle_call(op);
     let why = if op == "@" {
         "fetching one would make a second owner of a value that is used exactly once"
     } else {
