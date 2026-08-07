@@ -1087,10 +1087,9 @@ fn repl_import_exporting_quotation_word_is_rejected() {
         "located rejection naming the file and the word: {transcript}"
     );
     // A user-facing diagnostic must never leak a compiler-internal mangled
-    // name (`__import`, `__inl`, `__m0`, `quo__`).
+    // name (`__import`, `__m0`, `quo__`).
     assert!(
         !transcript.contains("__import")
-            && !transcript.contains("__inl")
             && !transcript.contains("__m0")
             && !transcript.contains("quo__"),
         "no mangled internal name in the diagnostic: {transcript}"

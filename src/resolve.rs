@@ -41,8 +41,7 @@ fn mangle(name: &str, module: u32) -> String {
 /// what the author wrote. Lookups keep using the mangled name, only the
 /// rendered string is stripped. `main`/`drop` are never mangled and pass
 /// through unchanged, as does any name `mangle` never touched. Kept beside
-/// `mangle` so the two stay in step (mirrors `ast::demangle_local` for
-/// `__inl`).
+/// `mangle` so the two stay in step.
 pub(crate) fn demangle_word(name: &str) -> &str {
     let Some(idx) = name.rfind("__m") else {
         return name;

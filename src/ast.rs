@@ -1009,30 +1009,12 @@ fn rename_local(name: &str, uid: u32) -> String {
 }
 
 /// The private separator `alpha_rename_locals` appends to an inlined local's
-/// source name. Kept in one place so `demangle_local` strips exactly what
-/// `rename_local` adds.
+/// source name. A renamed local never reaches a user diagnostic: a combinator
+/// body is checked standalone at its definition (R17), so any error about its
+/// own locals surfaces there with the source spelling and aborts compilation
+/// before any splice can rename them; the renamed spelling exists only for
+/// collision-free lookup during the splice and its lowering.
 const INLINE_SUFFIX: &str = "__inl";
-
-/// Recover an inlined local's source spelling for a *diagnostic*: strip every
-/// trailing `__inl{digits}` group `alpha_rename_locals` appended (transitive
-/// inlining appends more than one). A user diagnostic must never show the
-/// compiler-internal renamed spelling (`arr__inl0`); it shows what the
-/// combinator's author wrote (`arr`). Lookups keep using the renamed name;
-/// only the rendered string is stripped.
-pub(crate) fn demangle_local(name: &str) -> &str {
-    let mut base = name;
-    loop {
-        let Some(idx) = base.rfind(INLINE_SUFFIX) else {
-            return base;
-        };
-        let (head, tail) = base.split_at(idx);
-        let digits = &tail[INLINE_SUFFIX.len()..];
-        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-            return base;
-        }
-        base = head;
-    }
-}
 
 /// Rename a `Call` naming a body-bound local. A borrow reads its local through
 /// a `&`/`&!` sigil (`&arr`, `&!arr`), so the sigil is split off, the local
