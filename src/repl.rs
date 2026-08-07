@@ -227,6 +227,41 @@ fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Resul
     ))
 }
 
+/// R24 (D7): an imported closure that *exports* a quotation-taking word is a
+/// located rejection at import time, naming the file and the word. The session
+/// has no body to inline for it (a quotation-taking word mints no `IrFunc`,
+/// R20) and no symbol to call, so without this the import silently succeeds
+/// and fails later with a misdirected "unknown word" or an internal mangled
+/// name leaking into the diagnostic. A quotation-taking word used only
+/// internally to the closure inlines fine during native compilation and is
+/// not exported, so this only fires on module 0's export list. Lifted by 6c.
+fn check_no_exported_quotation_word_in_closure(
+    module: &Module,
+    closure: &driver::Closure,
+) -> Result<(), String> {
+    let exports: HashSet<&str> = module.modules[0]
+        .exports
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let Some(word) = module.words.iter().find(|w| {
+        w.module == 0
+            && exports.contains(w.name.as_str())
+            && check::word_declares_quotation_parameter(w)
+    }) else {
+        return Ok(());
+    };
+    let path = closure.path_of(word.module);
+    let span = word_span(word);
+    Err(format!(
+        "error: cannot import `{}`: it exports `{}` (line {}, col {}), which takes a quotation parameter; a quotation-taking word cannot be imported into a session (the inliner needs its body, which the session does not retain -- slice 6c)",
+        path.display(),
+        word.name,
+        span.line,
+        span.col
+    ))
+}
+
 /// R5/R6 (slice 5b): bulk-lower a whole checked import closure to one `.so`.
 /// Reuses `ir::lower` (the native single-module lowerer), then renames every
 /// user word's func and its intra-closure call sites to the word's import-epoch
@@ -678,13 +713,41 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
+        // A rejected line must leave the session's interned type registries
+        // untouched: `parse_line_with_structs` (and `check_def`) intern any
+        // array/cell/ref shape the line names *before* the line is accepted,
+        // so a rejected line -- e.g. one R7a rejects for a quotation-nested
+        // array/cell/ref -- would otherwise leave that entry resident and
+        // re-trigger the per-line audit on every later line (the audit scans
+        // the whole registry, and dedup means a re-parse of the same shape
+        // hits the resident entry). Snapshot the lengths and truncate on error.
+        let arrays_len = self.arrays.len();
+        let cells_len = self.owned_cells.len();
+        let refs_len = self.refs.len();
+        let result = self.eval_expr_or_def_line(&tokens, writer);
+        if result.is_err() {
+            self.arrays.truncate(arrays_len);
+            self.owned_cells.truncate(cells_len);
+            self.refs.truncate(refs_len);
+        }
+        result
+    }
+
+    /// The parse-and-dispatch tail of `eval_line` for an ordinary (non-`type:`,
+    /// non-`import:`) line. Split out so `eval_line` can snapshot and restore
+    /// the interned type registries around it (see the call site).
+    fn eval_expr_or_def_line(
+        &mut self,
+        tokens: &[(Token, Span)],
+        writer: &mut impl Write,
+    ) -> Result<(), String> {
         let ctx = parser::ImportCtx {
             imports: &self.import_qualifier_module,
             selective: &self.import_selective_module,
             exports: &self.import_exports,
         };
         let mut line = parser::parse_line_with_structs(
-            &tokens,
+            tokens,
             &self.structs,
             &self.enums,
             &mut self.arrays,
@@ -696,6 +759,20 @@ impl Session {
         // current internal (epoch-tagged) spelling before ordinary checking
         // runs; also raises R15's `not exported` for a private qualified name.
         self.rewrite_line_imports(&mut line)?;
+        // R7a (item 2): a quotation type is legal only as a direct word
+        // parameter this slice; reject it in any audited registry position
+        // (a struct/enum field, an array element, a cell payload, a reference
+        // referent -- all interned during the parse above) before lowering can
+        // reach `ir_type_of`'s `unreachable!` arm and brick the session. The
+        // native `check` runs this after `check_types`; the REPL's per-line
+        // `check_types` path skipped it (`type:` lines run their own copy).
+        check::audit_quotation_type_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        )?;
         match line {
             // R11: a `: drop` line never enters `self.env` or gets lowered
             // under its own name; it becomes the struct's destructor, the
@@ -733,10 +810,27 @@ impl Session {
         // R8e: a REPL-declared type name may not carry the `::` reserved for
         // qualified imported spellings.
         reject_double_colon_name("type", &name, span)?;
-        if parser::typedef_line_is_enum(tokens) {
-            self.eval_enum_typedef(tokens, name.clone(), span)?;
+        // Item 1: parsing a `type:` line interns any array/cell/ref shape its
+        // fields name (e.g. a quotation-nested `[ [ i64 -- ] 3 ]`) into the
+        // session registries *before* the R7a audit rejects it. The
+        // struct/enum helpers roll back only `self.structs` / `self.enums`, so
+        // a poisoned interned entry would survive the failed line and re-fire
+        // the per-line audit forever, bricking the session. Snapshot and
+        // truncate the interned registries here, mirroring `eval_line`'s
+        // guard on the non-`type:` path.
+        let arrays_len = self.arrays.len();
+        let cells_len = self.owned_cells.len();
+        let refs_len = self.refs.len();
+        let result = if parser::typedef_line_is_enum(tokens) {
+            self.eval_enum_typedef(tokens, name.clone(), span)
         } else {
-            self.eval_struct_typedef(tokens, name.clone(), span)?;
+            self.eval_struct_typedef(tokens, name.clone(), span)
+        };
+        if result.is_err() {
+            self.arrays.truncate(arrays_len);
+            self.owned_cells.truncate(cells_len);
+            self.refs.truncate(refs_len);
+            return result;
         }
         writeln!(writer, "defined type {name}").map_err(|e| format!("writing stdout: {e}"))?;
         Ok(())
@@ -774,7 +868,17 @@ impl Session {
         )
         .and_then(|fields| {
             self.structs[idx].fields = fields;
-            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)
+            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)?;
+            // R7a (item 2): a quotation-typed struct field never reaches the
+            // native `unreachable!` because the native `check` audits it; the
+            // REPL must run the same audit or the field bricks the session.
+            check::audit_quotation_type_registries(
+                &self.structs,
+                &self.enums,
+                &self.arrays,
+                &self.owned_cells,
+                &self.refs,
+            )
         });
         if let Err(e) = result {
             self.structs.pop();
@@ -833,7 +937,15 @@ impl Session {
             for (vidx, fields) in variant_fields.into_iter().enumerate() {
                 self.enums[idx].variants[vidx].fields = fields;
             }
-            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)
+            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)?;
+            // R7a (item 2): a quotation-typed enum-variant payload, same hazard.
+            check::audit_quotation_type_registries(
+                &self.structs,
+                &self.enums,
+                &self.arrays,
+                &self.owned_cells,
+                &self.refs,
+            )
         });
         if let Err(e) = result {
             self.enums.pop();
@@ -917,6 +1029,9 @@ impl Session {
         // not only module 0) is rejected before any codegen, naming the file
         // and the word.
         check_no_main_in_closure(&module, &closure)?;
+        // R24 (D7): reject a closure exporting a quotation-taking word before
+        // any codegen, naming the file and the word.
+        check_no_exported_quotation_word_in_closure(&module, &closure)?;
         // R11: each selectively-imported name must be exported by module 0,
         // the R16 visibility error, checked against a synthesized entry for
         // the REPL's own top-level selection (the closure-internal check,
@@ -1541,6 +1656,33 @@ impl Session {
     }
 
     fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
+        // R23 (D7): a session line defining a quotation-taking word is a
+        // located rejection, checked before either acceptance path below. The
+        // inliner splices a callee's AST body at every call site (R18), but a
+        // session discards a defining line's body once it compiles (only its
+        // `Sig`/`PolyWordEntry.word` for later instantiation is retained, and
+        // even the latter is never spliced into a *different* line's module);
+        // there is nothing to splice into a later line that calls it. 6c lifts
+        // this once the REPL retains what the inliner needs.
+        if check::word_declares_quotation_parameter(&word) {
+            let span = word_span(&word);
+            let locator = if span == Span::default() {
+                String::new()
+            } else {
+                format!(" (line {}, col {})", span.line, span.col)
+            };
+            return Err(format!(
+                "error: `{}`{locator} declares a quotation parameter, which is not yet supported at the REPL\n  the inliner needs the callee's body, which a session line does not retain past its own definition (quotation-taking words at the REPL are slice 6c)",
+                word.name
+            ));
+        }
+        // R7a (item 2): a quotation type in a word's *output* row (or a
+        // clause-bodied combinator) never reaches the native `unreachable!`
+        // because the native `check` audits it; the REPL must run the same
+        // per-word audit. A direct quotation *parameter* is handled by R23
+        // above; a poly word's effect is empty, so its output-position check
+        // runs on the poly path (`eval_poly_def`).
+        check::audit_word_quotation_positions(&word)?;
         // R3 (Slice 2): a polymorphic word's signature lives entirely in
         // `word.poly` (`word.effect` is empty), so it takes a wholly separate
         // acceptance path; the concrete path below would mis-check its body

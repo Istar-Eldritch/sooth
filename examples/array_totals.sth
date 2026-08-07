@@ -1,0 +1,23 @@
+\ Dogfood: Phase 4 slice 6a. The combinator half of a matched pair with
+\ `examples/array_totals_hand.sth`: both compute the same total and doubled
+\ elements over one array, one over `each`/`map`/`fold` from
+\ `lib/combinators.sth` and one hand-threaded, so the golden can pin them to the
+\ same output and show the combinators lower to the hand-threaded shape. Here
+\ the walk is three one-line combinator calls; the twin spells out three `times`
+\ loops with a synthesized `>usize` index, `&arr i &> @` reads and a
+\ `&!arr i &!> v !` write.
+
+import: c "../lib/combinators.sth" ;
+
+: scores ( -- [i64 5] )
+  0 5 fill | s |
+  &!s 0 >usize &!> 3 !
+  &!s 1 >usize &!> 7 !
+  &!s 2 >usize &!> 1 !
+  &!s 3 >usize &!> 9 !
+  &!s 4 >usize &!> 5 !
+  s ;
+
+: main ( -- )
+  scores 0 [ + ] c::fold .              \ 25, the total
+  scores [ 2 * ] c::map [ . ] c::each ; \ 6 14 2 18 10, each doubled

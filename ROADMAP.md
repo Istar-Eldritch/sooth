@@ -340,10 +340,55 @@ one piped-stdin session: a qualified word and accessor, a redefine-and-reimport 
 frozen caller beside a fresh resolution, the `main`-in-a-library rejection, and a
 selective import called unqualified.
 
-**Next action: Phase 4 item 6** (the combinator library in Sooth + inlining + closing
-the polymorphic-path gaps): `each`/`map`/`filter`/`fold`/`while` as ordinary library
-words over quotations, with the compiler's first inliner making them lower to tight
-loops instead of a `call` per element.
+**Phase 4 Slice 6a (quotation types in signatures + the inliner + `each`/`map`/`fold`) is
+complete**: `Type`/`PolyType` gain a `Quotation` variant carrying an interned declared
+effect (`[ 'T -- ]`), with unification and `apply_subst` following, so a word may declare a
+quotation parameter and be checked standalone against it — no `IrType` variant and no
+"statically known" bit (D6): knownness stays a predicate on the value (`Slot.quot`), and
+every other type position (a struct field, an array element, a cell payload, a reference
+referent, a word's output, an `extern:` boundary, `main`, nesting inside another effect) is
+a located rejection naming slice 7. `call`/`times` accept an *abstract* quotation typed only
+by a declared parameter, beside the literal they accept today; a quotation literal passed to
+a declared parameter is checked directionally against the declared effect, enforcing a
+`Copy`-only capture restriction (D3) at the literal. Every call to a quotation-taking word is
+inlined by term-splicing the callee's AST body against the caller's live stack — the
+compiler's only inliner, forced by there being no `IrFunc` for a quotation-taking word to
+call (D2) — transitively and totally: anything un-inlinable, starting with recursion among
+quotation-taking words, is a located error, never a silent real call (D5). The transitive
+case is a combinator forwarding its own quotation *parameter* to a nested combinator, which
+splices through both frames. `each`/`map`/`fold` are ordinary polymorphic Sooth words at
+`lib/combinators.sth` (D8), each a **leaf** combinator driving a `times` loop directly over
+an array's elements and handing one to its quotation parameter per iteration, verified to
+lower to a tight loop with no per-element `Instr::Call`, and verified to match a
+hand-threaded `times` twin across a sweep of stack limits. `map`/`fold` are *not* built on
+`each`, but on cost grounds, not impossibility: `fold` and `map` over `each` are both
+expressible (the accumulator rides a captured one-element array reached by balanced `&`/`&!`
+borrows, which D3 accepts). Because inlining is total, library composition depth is code
+size at every call site, so building `map` on `each` would make every `map` call site depth
+2 plus an extra array copy and a counter cell, where a leaf keeps the library flat at depth
+1. **"When to inline" becomes a real question only at slice 7, when a runtime representation
+first makes a genuine choice possible; until then "always" is the only implementable answer,
+and a budget would be actively harmful, since exceeding it could only be a compile error.** Native only: the REPL is a located rejection at
+both the defining line and an imported closure exporting a quotation-taking word (D7),
+lifted by 6c. `examples/array_totals.sth` dogfoods it against its
+hand-threaded twin `examples/array_totals_hand.sth` (three manual `times` loops): three
+one-line combinator calls run to the same total and doubled elements the twin does.
+
+Two pre-existing defects 6a measured but deliberately did not fix, for a later slice to pick
+up: `fill`'s compile cost is superlinear in the array length (10k ~ 0.36s, 100k ~ 25s, 1M >
+300s, and a hand-threaded loop is equally slow, so it is the array machinery and not the
+inliner), which is why 6a's constant-stack criterion is an equivalence-plus-correctness
+witness at 10k (equal exit code and stdout against the hand-threaded twin) rather than the
+1M run first specified; and every native `build` diagnostic prints a doubled `error: error:`
+prefix, because the ~165 error constructors embed `error: ` and `src/main.rs` prepends
+another. A separate repo-wide diagnostic defect *was* fixed during the review sequence:
+every diagnostic naming a word leaked the internal `__m0` monomorphization mangling whenever
+the module had an import (predating 6a, arriving with module support), and the now-unreachable
+`demangle_local` was deleted as dead code.
+
+**Next action: Phase 4 Slice 6b** (the polymorphic-path gaps + `filter`/`while`): a
+polymorphic body's `if` and a polymorphic self-tail word's loop transform, the two gaps 6a's
+combinators needed neither of, closed for `filter`/`while`'s first real use of them.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

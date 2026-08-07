@@ -631,6 +631,10 @@ enum RawTy {
     Concrete(Type),
     Var(u32),
     Array(Box<RawTy>, RawLen),
+    /// Slice 6a (R5): a quotation effect whose rows may mention the
+    /// signature's variables, folded to `PolyType::Quotation` (or
+    /// `Concrete(Type::Quotation)` when fully concrete) by `raw_to_poly_type`.
+    Quotation(Vec<RawTy>, Vec<RawTy>),
 }
 
 enum RawLen {
@@ -1202,6 +1206,9 @@ impl<'t> Parser<'t> {
     /// occurrence), or a plain concrete type expression.
     fn parse_poly_slot(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
         if matches!(self.peek(), Some((Token::LBracket, _))) {
+            if self.quotation_type_ahead() {
+                return self.parse_poly_quotation(builder);
+            }
             return self.parse_poly_array(builder);
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
@@ -1235,6 +1242,37 @@ impl<'t> Parser<'t> {
         }
         let ty = self.parse_type_expr()?;
         Ok(RawTy::Concrete(ty))
+    }
+
+    /// Slice 6a (R2/R5): a polymorphic quotation effect `[ <in> -- <out> ]`
+    /// whose rows recurse through `parse_poly_slot`, so a `'T` element variable
+    /// is interned into `builder` exactly as it is in an ordinary slot.
+    fn parse_poly_quotation(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+        self.expect(Token::LBracket)?;
+        let inputs = self.parse_poly_quot_list(builder, true)?;
+        self.expect_word("--")?;
+        let outputs = self.parse_poly_quot_list(builder, false)?;
+        self.expect(Token::RBracket)?;
+        Ok(RawTy::Quotation(inputs, outputs))
+    }
+
+    /// One side of a polymorphic quotation effect, stopping on the top-depth
+    /// `--` (inputs) or `]` (outputs).
+    fn parse_poly_quot_list(
+        &mut self,
+        builder: &mut PolyBuilder,
+        stop_on_arrow: bool,
+    ) -> Result<Vec<RawTy>, String> {
+        let mut out = Vec::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.eof_error(if stop_on_arrow { "`--`" } else { "`]`" })),
+                Some((Token::Word(w), _)) if stop_on_arrow && w == "--" => break,
+                Some((Token::RBracket, _)) if !stop_on_arrow => break,
+                _ => out.push(self.parse_poly_slot(builder)?),
+            }
+        }
+        Ok(out)
     }
 
     /// A polymorphic array `[ elem count ]`: `elem` recurses (so `['T 'N]`
@@ -1320,6 +1358,27 @@ impl<'t> Parser<'t> {
                     PolyType::Array(Box::new(elem), len)
                 }
             }
+            RawTy::Quotation(ins, outs) => {
+                let ins: Vec<PolyType> =
+                    ins.into_iter().map(|r| self.raw_to_poly_type(r)).collect();
+                let outs: Vec<PolyType> =
+                    outs.into_iter().map(|r| self.raw_to_poly_type(r)).collect();
+                // Fold a fully-concrete effect to `Concrete(Type::Quotation)`
+                // exactly as an array shape folds; only a variable-bearing
+                // effect stays `PolyType::Quotation` (R5).
+                let concrete = |row: &[PolyType]| {
+                    row.iter()
+                        .map(|p| match p {
+                            PolyType::Concrete(t) => Some(*t),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<Type>>>()
+                };
+                match (concrete(&ins), concrete(&outs)) {
+                    (Some(ci), Some(co)) => PolyType::Concrete(crate::ast::quotation_type(ci, co)),
+                    _ => PolyType::Quotation(ins, outs),
+                }
+            }
         }
     }
 
@@ -1340,7 +1399,11 @@ impl<'t> Parser<'t> {
         // on `[`, not a word), so an unnamed array slot is recognised before
         // the usual name-then-optional-`:type` read (R3, R7).
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            let ty = self.parse_array_type_expr()?;
+            let ty = if self.quotation_type_ahead() {
+                self.parse_quotation_type_expr()?
+            } else {
+                self.parse_array_type_expr()?
+            };
             return Ok(TypedSlot { name: None, ty });
         }
         // An owning-cell type is likewise nameless, so it too is recognised
@@ -1383,7 +1446,11 @@ impl<'t> Parser<'t> {
     /// `^`-led owning-cell type (nested cells recurse the same way).
     fn parse_type_expr(&mut self) -> Result<Type, String> {
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            self.parse_array_type_expr()
+            if self.quotation_type_ahead() {
+                self.parse_quotation_type_expr()
+            } else {
+                self.parse_array_type_expr()
+            }
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('&')) {
             self.parse_ref_type_expr()
         } else if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
@@ -1484,6 +1551,66 @@ impl<'t> Parser<'t> {
         Ok(crate::ast::intern_array_type(self.arrays, element, count))
     }
 
+    /// Slice 6a (R1): whether the `[` the parser is positioned on opens a
+    /// **quotation effect** rather than an array type, decided by scanning to
+    /// its matching `]` for a **top-depth `--`**. An array type can never
+    /// contain a `--` (arrays hold no quotations, slice 4), and a quotation
+    /// effect always contains exactly one at depth 1, so the scan is local and
+    /// unambiguous with no new token or sigil. A nested `[ [ i64 -- ] 3 ]` has
+    /// its inner `--` at depth 2, so the outer `[` reads as an array (R7a then
+    /// rejects the array-of-quotation at check time). Caller has already
+    /// confirmed `self.peek()` is `[`.
+    fn quotation_type_ahead(&self) -> bool {
+        let mut depth = 0i32;
+        let mut i = self.pos;
+        while let Some((tok, _)) = self.tokens.get(i) {
+            match tok {
+                Token::LBracket => depth += 1,
+                Token::RBracket => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                Token::Word(w) if w == "--" && depth == 1 => return true,
+                _ => {}
+            }
+            i += 1;
+        }
+        false
+    }
+
+    /// Slice 6a (R2): parse `[ <in-types> -- <out-types> ]` into a
+    /// `Type::Quotation`. Each side is a possibly-empty list of ordinary type
+    /// expressions (reusing `parse_type_expr`, so a nested array/ref/effect is
+    /// read the same way), so the nil effect `[ -- ]` is legal. Only called
+    /// once `quotation_type_ahead` has confirmed a top-depth `--` exists, so
+    /// the input-list scan always terminates on it.
+    fn parse_quotation_type_expr(&mut self) -> Result<Type, String> {
+        self.expect(Token::LBracket)?;
+        let inputs = self.parse_quot_type_list(true)?;
+        self.expect_word("--")?;
+        let outputs = self.parse_quot_type_list(false)?;
+        self.expect(Token::RBracket)?;
+        Ok(crate::ast::quotation_type(inputs, outputs))
+    }
+
+    /// One side of a quotation effect: type expressions until the delimiter
+    /// (`--` for the input side, `]` for the output side). A malformed type on
+    /// either side is a located parse error from `parse_type_expr` (R3).
+    fn parse_quot_type_list(&mut self, stop_on_arrow: bool) -> Result<Vec<Type>, String> {
+        let mut out = Vec::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.eof_error(if stop_on_arrow { "`--`" } else { "`]`" })),
+                Some((Token::Word(w), _)) if stop_on_arrow && w == "--" => break,
+                Some((Token::RBracket, _)) if !stop_on_arrow => break,
+                _ => out.push(self.parse_type_expr()?),
+            }
+        }
+        Ok(out)
+    }
+
     /// The array count token: a decimal literal `>= 1` and `<= u32::MAX`
     /// (M1: no const-expr eval, so a non-literal count is always a located
     /// error naming the offending token). A literal `< 1` or `> u32::MAX` is
@@ -1551,7 +1678,11 @@ impl<'t> Parser<'t> {
     /// `expect_field_type_token`).
     fn parse_field_type_expr(&mut self) -> Result<Type, String> {
         if matches!(self.peek(), Some((Token::LBracket, _))) {
-            return self.parse_array_type_expr();
+            return if self.quotation_type_ahead() {
+                self.parse_quotation_type_expr()
+            } else {
+                self.parse_array_type_expr()
+            };
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('^')) {
             return self.parse_owning_cell_type_expr();

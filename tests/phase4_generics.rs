@@ -7,6 +7,8 @@ use std::process::{Command, Stdio};
 
 use sooth::{check, lexer, parser};
 
+mod common;
+
 /// Run a scripted REPL session (one input line per element) against the built
 /// `sooth repl` binary and return the whole transcript (stdout + stderr), so a
 /// line-boundary diagnostic (R19) is observable. Mirrors `tests/phase1.rs`.
@@ -1036,8 +1038,7 @@ fn times_example_matches_hand_threaded_countdown() {
     // self-recursive sum 1..1e6, demonstrating parity between the internal loop
     // primitive and the slice 6 self-tail-call -> loop transform rather than a
     // value off by 1e6.
-    let binary = sooth::driver::build(std::path::Path::new("examples/times.sth"))
-        .expect("build should succeed");
+    let binary = common::build_example("examples/times.sth");
     let output = Command::new(&binary).output().expect("binary should run");
     std::fs::remove_file(&binary).ok();
     assert_eq!(

@@ -319,6 +319,34 @@ primitive. The quotation-literal fusion this slice owns (splicing a literal's bo
 `call` or `times`) never crosses a `:` word boundary (D5); the interprocedural user-word
 inliner that lowers the combinator library itself is Slice 5's.
 
+**Phase 4 Slice 6a made a quotation nameable and shipped the inliner.** `Type`/`PolyType`
+gain a `Quotation` variant carrying an interned declared effect (`[ 'T -- ]`), with
+unification and `apply_subst` following, so a word may declare a quotation parameter and be
+checked standalone against it — `IrType` gains no variant and there is still no "statically
+known" bit on the type (D6): knownness stays a predicate on the value (`Slot.quot`), which is
+what lets slice 7 later admit a genuine runtime closure without unpicking unification or the
+monomorphization walk. `call`/`times` accept an *abstract* quotation typed only by a declared
+parameter, beside the literal they already accepted; a literal passed to a declared
+parameter is checked directionally against it, enforcing a `Copy`-only capture restriction on
+what it may read from its defining scope. Combinators are now ordinary Sooth library words
+(`lib/combinators.sth`'s `each`/`map`/`fold`), and every call to one is inlined by
+term-splicing the callee's AST body against the caller's live stack — the compiler's only
+inliner, generalizing slice 4's `call`/`times` fusion across a `:` boundary — transitively (a
+combinator forwarding its own quotation parameter to a nested combinator splices through both
+frames) and **totally**: with a quotation type but no runtime representation there is no
+fallback, so anything un-inlinable, starting with recursion among quotation-taking words, is a
+located error rather than a silent real call (D5). `each`/`map`/`fold` are leaf combinators
+rather than `map` and `fold` being written over `each`, but that is a cost preference, not
+an impossibility: `fold` and `map` over `each` are both expressible (the accumulator rides a
+captured one-element array reached by balanced borrows, which D3 accepts). Because inlining
+is total, library composition depth is code size at every call site, so building `map` on
+`each` would make every `map` call site depth 2 plus an extra array copy and a counter cell,
+where a leaf keeps the library flat at depth 1. "When to inline" becomes a real question
+only at slice 7, when a runtime representation first makes a genuine choice possible; until
+then "always" is the only implementable answer. The REPL
+stays a located rejection, both at a session line defining a quotation-taking word and at an
+imported closure exporting one (D7); 6c lifts it.
+
 **Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
 error). Multi-way branching is a **`cond` combinator** (a library word taking

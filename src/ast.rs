@@ -516,6 +516,12 @@ pub enum PolyType {
     /// A type variable (index into `PolySig::ty_var_names`).
     Var(u32),
     Array(Box<PolyType>, Len),
+    /// Slice 6a (R5): a declared quotation effect whose rows may mention the
+    /// signature's type/length variables (`[ 'T -- ]` where `'T` is the
+    /// element variable). Folds to `Concrete(Type::Quotation(..))` when fully
+    /// concrete (`raw_to_poly_type`); only a variable-bearing effect stays
+    /// here.
+    Quotation(Vec<PolyType>, Vec<PolyType>),
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature
@@ -721,6 +727,64 @@ pub enum Type {
     /// R5): what a C `char*` parameter wants and what one hands back. `Copy`
     /// like `Str`, for the same reason.
     Cstr,
+    /// Slice 6a (R4): a quotation effect type `[ <inputs> -- <outputs> ]`, the
+    /// type a word declares for a quotation parameter. Holds a `&'static`
+    /// `QuotEffect` carrying the declared input/output rows and the leaked
+    /// `[ ... -- ... ]` spelling, so `Type` stays `Copy` and self-renders like
+    /// every other variant. Structural `PartialEq` through the reference gives
+    /// value equality (what unification needs) with no interning table to
+    /// thread. **No "statically known" bit** (D6): the type says only "a
+    /// quotation of this effect", never that a literal is known here; knownness
+    /// stays on the checker's `Slot.quot`. Never lowered to an `IrType` this
+    /// slice: a quotation-taking word mints no standalone `IrFunc` (R20), so
+    /// this type never reaches the backend (the runtime representation is
+    /// slice 7).
+    Quotation(&'static QuotEffect),
+}
+
+/// Slice 6a (R4): a declared quotation effect, the payload behind
+/// `Type::Quotation`. Leaked as a `&'static` (like `ArrayDecl::name_static`)
+/// rather than threaded through a per-module registry, since it needs no dedup
+/// key beyond its own structural equality. Derived `PartialEq`/`Eq` give the
+/// value equality unification relies on; `name_static` is a pure function of
+/// the rows, so comparing it too is harmless.
+#[derive(Debug, PartialEq, Eq)]
+pub struct QuotEffect {
+    pub inputs: Vec<Type>,
+    pub outputs: Vec<Type>,
+    pub name_static: &'static str,
+}
+
+/// Build a `Type::Quotation` for a declared effect, leaking its rows and its
+/// rendered `[ ... -- ... ]` spelling. Two quotation types with equal rows
+/// compare equal through the `&'static` reference, so a repeated spelling is
+/// harmless duplication, never a correctness hazard.
+pub fn quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
+    let name = render_quotation_effect(&inputs, &outputs);
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let eff: &'static QuotEffect = Box::leak(Box::new(QuotEffect {
+        inputs,
+        outputs,
+        name_static,
+    }));
+    Type::Quotation(eff)
+}
+
+/// Render a quotation effect's spelling `[ <in>... -- <out>... ]`. The nil
+/// effect renders `[ -- ]`.
+fn render_quotation_effect(inputs: &[Type], outputs: &[Type]) -> String {
+    let mut s = String::from("[ ");
+    for t in inputs {
+        s.push_str(t.name());
+        s.push(' ');
+    }
+    s.push_str("--");
+    for t in outputs {
+        s.push(' ');
+        s.push_str(t.name());
+    }
+    s.push_str(" ]");
+    s
 }
 
 /// The `(bits, signed)` pair for an integer type. Fields are private so a
@@ -866,6 +930,7 @@ impl Type {
             Type::Isize => "isize",
             Type::Str => "str",
             Type::Cstr => "cstr",
+            Type::Quotation(eff) => eff.name_static,
         }
     }
 }
@@ -922,6 +987,99 @@ pub enum TermKind {
     /// construction since the element list is parsed with `parse_terms`.
     /// Compile-time-only marker in this slice (D1): never a runtime value.
     Quotation(Vec<Term>),
+}
+
+/// R18/R21: clone a combinator body, appending a unique per-inline suffix to
+/// every name a `| ... |` binds and to every later reference to such a name,
+/// so the spliced body's locals are fresh in the caller's scope and a
+/// passed-down quotation literal keeps capturing its *definition*-scope
+/// binding under transitive inlining. A `Call` that is not a body-bound local
+/// (a word, a builtin, another combinator, a cast) is left untouched. Scoping
+/// follows the language's: a bind's extent is the rest of its block, and a
+/// nested quotation or `if` arm inherits the outer binds by value. Both the
+/// checker's and lowering's inliners call this with the same `uid` discipline,
+/// so a body they both splice is renamed identically.
+pub fn alpha_rename_locals(terms: &[Term], uid: u32) -> Vec<Term> {
+    let mut bound: Vec<String> = Vec::new();
+    rename_terms(terms, uid, &mut bound)
+}
+
+fn rename_local(name: &str, uid: u32) -> String {
+    format!("{name}{INLINE_SUFFIX}{uid}")
+}
+
+/// The private separator `alpha_rename_locals` appends to an inlined local's
+/// source name. A renamed local never reaches a user diagnostic: a combinator
+/// body is checked standalone at its definition (R17), so any error about its
+/// own locals surfaces there with the source spelling and aborts compilation
+/// before any splice can rename them; the renamed spelling exists only for
+/// collision-free lookup during the splice and its lowering.
+const INLINE_SUFFIX: &str = "__inl";
+
+/// Rename a `Call` naming a body-bound local. A borrow reads its local through
+/// a `&`/`&!` sigil (`&arr`, `&!arr`), so the sigil is split off, the local
+/// part renamed if bound, and the sigil re-attached; a `Call` that is not a
+/// bound local (a word, `&>`, a cast) is returned unchanged.
+fn rename_call(name: &str, uid: u32, bound: &[String]) -> String {
+    let is_bound = |n: &str| bound.iter().any(|b| b == n);
+    if let Some(inner) = name.strip_prefix("&!") {
+        if is_bound(inner) {
+            return format!("&!{}", rename_local(inner, uid));
+        }
+    } else if let Some(inner) = name.strip_prefix('&') {
+        if is_bound(inner) {
+            return format!("&{}", rename_local(inner, uid));
+        }
+    } else if is_bound(name) {
+        return rename_local(name, uid);
+    }
+    name.to_string()
+}
+
+fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> {
+    let start = bound.len();
+    let mut out = Vec::with_capacity(terms.len());
+    for term in terms {
+        let kind = match &term.kind {
+            TermKind::Bind(names) => {
+                let renamed = names
+                    .iter()
+                    .map(|n| {
+                        bound.push(n.clone());
+                        rename_local(n, uid)
+                    })
+                    .collect();
+                TermKind::Bind(renamed)
+            }
+            TermKind::Call(name) => TermKind::Call(rename_call(name, uid, bound)),
+            TermKind::Quotation(inner) => {
+                let mut inner_bound = bound.clone();
+                TermKind::Quotation(rename_terms(inner, uid, &mut inner_bound))
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                else_span,
+                end_span,
+            } => {
+                let mut tb = bound.clone();
+                let mut eb = bound.clone();
+                TermKind::If {
+                    then_branch: rename_terms(then_branch, uid, &mut tb),
+                    else_branch: rename_terms(else_branch, uid, &mut eb),
+                    else_span: *else_span,
+                    end_span: *end_span,
+                }
+            }
+            other => other.clone(),
+        };
+        out.push(Term {
+            kind,
+            span: term.span,
+        });
+    }
+    bound.truncate(start);
+    out
 }
 
 #[cfg(test)]

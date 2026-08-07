@@ -10,6 +10,8 @@ use std::process::{Command, Stdio};
 use sooth::ir::{lower, Instr};
 use sooth::{check, lexer, parser};
 
+mod common;
+
 /// Run a scripted REPL session (one input line per element of `lines`) and
 /// return the whole captured stdout, mirroring `tests/phase1.rs`'s harness.
 fn run_session(lines: &[&str]) -> String {
@@ -280,8 +282,7 @@ fn slice8a_dogfood_compiles_and_runs() {
     // `strlen` and `puts` against a literal and runs to the documented
     // output; the two `12`s agreeing is criterion 7 again, this time via the
     // committed example rather than an inline golden.
-    let binary = sooth::driver::build(std::path::Path::new("examples/strings.sth"))
-        .expect("build should succeed");
+    let binary = common::build_example("examples/strings.sth");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");

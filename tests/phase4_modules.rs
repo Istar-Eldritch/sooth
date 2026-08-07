@@ -8,6 +8,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// A scratch closure of source files, removed on drop.
 struct Closure(PathBuf);
 
@@ -516,8 +518,7 @@ fn modules_example_builds_and_runs() {
     // Criterion 22: the committed dogfood, `examples/modules.sth` importing a
     // type from `examples/modules_point.sth` and words from
     // `examples/modules_ops.sth`, builds, links, and runs.
-    let binary = sooth::driver::build(std::path::Path::new("examples/modules.sth"))
-        .expect("the dogfood closure should build");
+    let binary = common::build_example("examples/modules.sth");
     let output = std::process::Command::new(&binary)
         .output()
         .expect("binary should run");
