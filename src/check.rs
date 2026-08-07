@@ -5094,55 +5094,68 @@ fn inline_combinator(
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
     let name = comb.word.name.as_str();
-    let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
-    let n = inputs.len();
-    if stack.len() < n {
-        return Err(underflow_error(ctx, span, name, n, stack.len()));
-    }
-    let base = stack.len() - n;
-    for (i, want) in inputs.iter().enumerate() {
-        let found = stack[base + i];
-        if let Type::Quotation(eff) = want {
-            if let Some(QuotRef::Known(id)) = found.quot {
-                check_literal_against_declared_effect(
-                    id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
-                )?;
-            } else if matches!(found.ty, Type::Quotation(_)) {
-                // R21: forwarding an abstract quotation parameter. `found` is
-                // itself a declared quotation parameter of the enclosing
-                // combinator (a `Type::Quotation` slot with no `Known` literal
-                // -- the only way such a slot arises), reached only while
-                // checking that enclosing combinator standalone. At a real call
-                // site the substitution has already bound it to the caller's
-                // literal, so it carries a `Known` marker and splices there;
-                // here, at the def site, accept it when its declared effect
-                // matches the callee parameter, so `outer` may pass its own `f`
-                // to `inner`. The spliced callee body's own `f call`/`f times`
-                // then check the forwarded parameter against its declared
-                // effect (R8/R9).
-                if found.ty != *want {
+    // A polymorphic combinator (`each`/`map`/`fold`, or any `'T`-carrying
+    // quotation-taking word) keeps its signature in `word.poly`, not
+    // `word.effect` (which is empty), so the monomorphic argument loop below
+    // would run zero checks and skip R11/R12 entirely (item 3). Route it
+    // through the poly-argument check, which resolves the parameter's declared
+    // effect against the live stack and runs the *same* directional + D3
+    // check, so the two paths agree.
+    if let Some(sig) = comb.word.poly.as_ref() {
+        check_poly_combinator_args(
+            sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly,
+        )?;
+    } else {
+        let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
+        let n = inputs.len();
+        if stack.len() < n {
+            return Err(underflow_error(ctx, span, name, n, stack.len()));
+        }
+        let base = stack.len() - n;
+        for (i, want) in inputs.iter().enumerate() {
+            let found = stack[base + i];
+            if let Type::Quotation(eff) = want {
+                if let Some(QuotRef::Known(id)) = found.quot {
+                    check_literal_against_declared_effect(
+                        id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    )?;
+                } else if matches!(found.ty, Type::Quotation(_)) {
+                    // R21: forwarding an abstract quotation parameter. `found`
+                    // is itself a declared quotation parameter of the enclosing
+                    // combinator (a `Type::Quotation` slot with no `Known`
+                    // literal -- the only way such a slot arises), reached only
+                    // while checking that enclosing combinator standalone. At a
+                    // real call site the substitution has already bound it to
+                    // the caller's literal, so it carries a `Known` marker and
+                    // splices there; here, at the def site, accept it when its
+                    // declared effect matches the callee parameter, so `outer`
+                    // may pass its own `f` to `inner`. The spliced callee
+                    // body's own `f call`/`f times` then check the forwarded
+                    // parameter against its declared effect (R8/R9).
+                    if found.ty != *want {
+                        return Err(quotation_argument_required_error(
+                            ctx, span, name, *want, found.ty,
+                        ));
+                    }
+                } else {
                     return Err(quotation_argument_required_error(
                         ctx, span, name, *want, found.ty,
                     ));
                 }
+            } else if found.quot.is_some() {
+                return Err(reject_quotation_argument(ctx, span, name));
             } else {
-                return Err(quotation_argument_required_error(
-                    ctx, span, name, *want, found.ty,
-                ));
-            }
-        } else if found.quot.is_some() {
-            return Err(reject_quotation_argument(ctx, span, name));
-        } else {
-            match match_slot(found, *want) {
-                SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
-                SlotMatch::NeedsSizeConversion => {
-                    return Err(size_conversion_needed_error(ctx, span, name, *want));
-                }
-                SlotMatch::NeedsStrToCstrConversion => {
-                    return Err(str_needs_cstr_conversion_error(ctx, span, name));
-                }
-                SlotMatch::Mismatch => {
-                    return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
+                match match_slot(found, *want) {
+                    SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                    SlotMatch::NeedsSizeConversion => {
+                        return Err(size_conversion_needed_error(ctx, span, name, *want));
+                    }
+                    SlotMatch::NeedsStrToCstrConversion => {
+                        return Err(str_needs_cstr_conversion_error(ctx, span, name));
+                    }
+                    SlotMatch::Mismatch => {
+                        return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
+                    }
                 }
             }
         }
@@ -5168,6 +5181,84 @@ fn inline_combinator(
         },
     )?;
     Ok(stack)
+}
+
+/// R11/R12 (poly, item 3): the polymorphic twin of `inline_combinator`'s
+/// monomorphic argument loop. A poly combinator's declared inputs live in
+/// `sig.inputs`, not `word.effect`, so without this the directional (R11) and
+/// D3 capture (R12) checks never ran on the poly argument path -- a caller
+/// literal borrowing an enclosing place was silently accepted, a mono/poly
+/// divergence in the premise D3 rests on. Resolve the parameter's declared
+/// effect against the live stack (`unify_poly_input` binds any variable a
+/// non-quotation input carries, e.g. `'T` in `['T ...] [ 'T -- &i64 ]`), then
+/// ground the quotation effect and run the *same* `check_literal_against_
+/// declared_effect` the monomorphic path uses, so the two agree.
+#[allow(clippy::too_many_arguments)]
+fn check_poly_combinator_args(
+    sig: &PolySig,
+    span: Span,
+    stack: &[Slot],
+    name: &str,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    let n = sig.inputs.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, name, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    // Pass 1: unify the non-quotation inputs to resolve theta first, so a
+    // variable a quotation effect mentions (`'T` in `[ 'T -- &i64 ]`) is
+    // already bound when the effect is grounded in pass 2, whatever the
+    // parameter order.
+    let mut subst = Subst::default();
+    for (i, pin) in sig.inputs.iter().enumerate() {
+        if poly_input_is_quotation(pin) {
+            continue;
+        }
+        let found = stack[base + i];
+        if found.quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        unify_poly_input(sig, pin, found.ty, name, span, ctx, arrays, &mut subst)?;
+    }
+    // Pass 2: ground each quotation parameter and run the directional + D3
+    // check on its caller literal.
+    for (i, pin) in sig.inputs.iter().enumerate() {
+        if !poly_input_is_quotation(pin) {
+            continue;
+        }
+        let found = stack[base + i];
+        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays)?;
+        let Type::Quotation(eff) = concrete else {
+            unreachable!("a quotation input grounds to Type::Quotation (apply_subst)")
+        };
+        if let Some(QuotRef::Known(id)) = found.quot {
+            check_literal_against_declared_effect(
+                id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+            )?;
+        } else if matches!(found.ty, Type::Quotation(_)) {
+            // R21 (poly): a forwarded abstract quotation parameter, accepted
+            // when its declared effect matches (the spliced body's own
+            // `call`/`times` re-checks it, R8/R9).
+            if found.ty != concrete {
+                return Err(quotation_argument_required_error(
+                    ctx, span, name, concrete, found.ty,
+                ));
+            }
+        } else {
+            return Err(quotation_argument_required_error(
+                ctx, span, name, concrete, found.ty,
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// R11/R12: check a quotation *literal* against a declared quotation parameter

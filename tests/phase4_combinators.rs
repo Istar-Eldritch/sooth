@@ -799,6 +799,78 @@ fn poly_combinator_borrow_across_loop_is_error() {
     );
 }
 
+#[test]
+fn poly_combinator_literal_borrowing_enclosing_place_is_error() {
+    // Item 3: R12's D3 borrow check must run on the *polymorphic* argument
+    // path, not just the monomorphic one. Minimal pair: identical body,
+    // identical caller literal, only `applyr`'s quotation-parameter type
+    // differs (`[ i64 -- &i64 ]` vs `[ 'T -- &i64 ]`). Before the fix the poly
+    // twin's inline path read `word.effect.inputs` (empty for a poly word),
+    // ran zero argument checks, and accepted a literal that borrows the
+    // enclosing place `b` -- a silent mono/poly divergence in the premise D3
+    // rests on. Both must now be the same located R12 rejection.
+    let mono = "type: Box v i64 ;\n\
+                : applyr ( i64 [ i64 -- &i64 ] -- )\n\
+                  | f | | v | v f call drop ;\n\
+                : main ( -- )\n\
+                  7 Box | b |\n\
+                  0 [ | x | x drop &b &Box>v ] applyr\n\
+                  b drop ;\n";
+    let poly = "type: Box v i64 ;\n\
+                : applyr ( 'T [ 'T -- &i64 ] -- )\n\
+                  | f | | v | v f call drop ;\n\
+                : main ( -- )\n\
+                  7 Box | b |\n\
+                  0 [ | x | x drop &b &Box>v ] applyr\n\
+                  b drop ;\n";
+    for (label, src) in [("mono", mono), ("poly", poly)] {
+        let err = check_error(src);
+        assert!(
+            err.contains("`applyr`")
+                && err.contains("borrows the enclosing place `b`")
+                && err.contains("(D3)"),
+            "the {label} path must reject the borrowing literal with R12's D3 message naming `applyr` and `b`, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn literal_created_borrow_across_loop_is_error_at_splice_site() {
+    // Criterion 12c (item 4): the spec's "Accepted narrowings" claimed 12c was
+    // unreachable because a combinator whose quotation parameter has a
+    // reference *output* row is rejected at its own def site. Both halves are
+    // false. `refout` (a `[ 'T -- &i64 ]` parameter, a reference output row)
+    // compiles clean standalone, and before item 3 a caller literal that
+    // creates a borrow of a captured enclosing local and leaves the `&i64` on
+    // its output row -- exactly 12c's scenario, inside a `times` loop -- was
+    // accepted and ran, printing `7 7 7 7`.
+    //
+    // After item 3 runs R12 on the poly argument path it is a located
+    // rejection, and the diagnostic that fires is R12's borrow-left-on-row
+    // check (`quotation_borrows_place_error`) at the splice site (main's
+    // call), *not* the `times` back-edge check: the literal's declared effect
+    // `[ i64 -- &i64 ]` leaves an `&i64` borrowing the enclosing `b` on its
+    // exit row, which R12 rejects before the body is ever spliced into the
+    // loop. So obligation 2's literal-created-borrow half is discharged at the
+    // argument site, naming `refout` and `b`.
+    let src = "type: Box v i64 ;\n\
+               : refout ( ['T 4] [ 'T -- &i64 ] -- )\n\
+               | f | | arr |\n\
+               4 [ | i | &arr i >usize &> @ f call drop ] times\n\
+               arr drop ;\n\
+               : main ( -- )\n\
+               7 Box | b |\n\
+               0 4 fill [ | x | &b &Box>v ] refout\n\
+               b drop ;\n";
+    let err = check_error(src);
+    assert!(
+        err.contains("`refout`")
+            && err.contains("borrows the enclosing place `b`")
+            && err.contains("(D3)"),
+        "12c is reachable: the borrow-creating literal must be a located R12 rejection naming `refout` and `b`, got: {err}"
+    );
+}
+
 // -- criterion 13: a quotation at a runtime-value position in a poly body -----
 
 #[test]
