@@ -1117,3 +1117,122 @@ fn repl_import_exporting_quotation_word_is_rejected() {
         "internal-only quotation word imports and runs: {ok}"
     );
 }
+
+// -- the `__m0` monomorphization mangling must not leak into a diagnostic -----
+
+/// Build a two-module program through the native driver and return its check
+/// diagnostic. `entry` is the failing entry file's body; a trivial imported
+/// library is prepended by `import:`, which is the whole point: with a second
+/// module present, `resolve::resolve_modules` mangles module 0's decls to
+/// `{name}__m0`, so the returned string is exactly where a mangled word name
+/// would leak into user-facing text. The single-file twin of each `entry`
+/// prints the clean name, so the import is the only variable.
+fn build_error_with_import(name: &str, entry: &str) -> String {
+    let lib = temp_lib(
+        &format!("{name}-lib"),
+        "export: helper ;\n: helper ( i64 -- i64 ) | x | x 1 + ;\n",
+    );
+    let entry_src = format!("import: lib \"{}\" ;\n{entry}", lib.display());
+    let path = temp_lib(&format!("{name}-entry"), &entry_src);
+    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    std::fs::remove_file(&lib).ok();
+    std::fs::remove_file(&path).ok();
+    err
+}
+
+#[test]
+fn r10_quotation_argument_diagnostic_shows_unmangled_word() {
+    // A quotation against a non-quotation parameter `w`. With an import in the
+    // module the callee's mangled name is `w__m0`; the diagnostic must name
+    // `w`. The clean `` `w` `` cannot be a substring of `` `w__m0` `` (the
+    // char after `w` is `_`, not a backtick), so the positive assertion is
+    // not satisfied by the leak; the negative assertion pins the leak itself.
+    let err = build_error_with_import(
+        "m0-r10",
+        ": w ( i64 -- i64 ) ;\n: main ( -- ) [ 1 + ] w . ;\n",
+    );
+    assert!(
+        err.contains("a quotation cannot be passed to `w`"),
+        "R10 should name the unmangled `w`: {err}"
+    );
+    assert!(!err.contains("__m0"), "R10 must not leak `__m0`: {err}");
+}
+
+#[test]
+fn r22_combinator_cycle_diagnostic_shows_unmangled_words() {
+    // A self-recursive combinator `self`; the cycle renders `` `self` ->
+    // `self` `` and must not carry `self__m0`.
+    let err = build_error_with_import(
+        "m0-r22",
+        ": self ( i64 [ i64 -- i64 ] -- i64 ) self ;\n: main ( -- ) 3 [ 1 + ] self . ;\n",
+    );
+    assert!(
+        err.contains("`self` -> `self`"),
+        "R22 should render the unmangled cycle: {err}"
+    );
+    assert!(!err.contains("__m0"), "R22 must not leak `__m0`: {err}");
+}
+
+#[test]
+fn r12_capture_diagnostic_shows_unmangled_word() {
+    // A literal consuming a linear enclosing local, passed to combinator `c`.
+    let err = build_error_with_import(
+        "m0-r12",
+        &format!(
+            "{SPY_DEF}: c ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+             : main ( -- ) 7 Spy | s | 3 [ s Spy>tag + ] c . ;\n"
+        ),
+    );
+    assert!(
+        err.contains("the quotation passed to `c`") && err.contains("consumes the enclosing local"),
+        "R12 should name the unmangled `c`: {err}"
+    );
+    assert!(!err.contains("__m0"), "R12 must not leak `__m0`: {err}");
+}
+
+#[test]
+fn r7a_quotation_output_diagnostic_shows_unmangled_word() {
+    // A word `c` with a quotation in its *output* row (R7a audit).
+    let err = build_error_with_import(
+        "m0-r7a",
+        ": c ( i64 -- [ i64 -- i64 ] ) [ 1 + ] ;\n: main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot appear as the output of `c`"),
+        "R7a should name the unmangled `c`: {err}"
+    );
+    assert!(!err.contains("__m0"), "R7a must not leak `__m0`: {err}");
+}
+
+#[test]
+fn r11_effect_mismatch_diagnostic_shows_unmangled_word() {
+    // A literal whose effect disagrees with combinator `show`'s parameter.
+    let err = build_error_with_import(
+        "m0-r11",
+        ": show ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: main ( -- ) 3 [ 1 + . ] show . ;\n",
+    );
+    assert!(
+        err.contains("the quotation passed to `show` was declared"),
+        "R11 should name the unmangled `show`: {err}"
+    );
+    assert!(!err.contains("__m0"), "R11 must not leak `__m0`: {err}");
+}
+
+#[test]
+fn borrow_of_non_place_diagnostic_shows_unmangled_enclosing_word() {
+    // The enclosing word `mymap` reaches the diagnostic through `in_word`; a
+    // borrow of a non-place inside it must place itself in `mymap`, not
+    // `mymap__m0`.
+    let err = build_error_with_import(
+        "m0-borrow",
+        ": dst ( -- i64 ) 5 ;\n: mymap ( -- ) &!dst drop ;\n: main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("does not borrow a place in `mymap`"),
+        "the borrow diagnostic should name the unmangled `mymap`: {err}"
+    );
+    assert!(
+        !err.contains("__m0"),
+        "the borrow diagnostic must not leak `__m0`: {err}"
+    );
+}

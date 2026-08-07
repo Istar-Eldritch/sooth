@@ -1132,8 +1132,9 @@ pub(crate) fn audit_quotation_type_registries(
 /// (the one legal position) is accepted here and rejected separately at the
 /// REPL (R23), which discards word bodies the inliner needs.
 pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> {
+    let word = crate::resolve::demangle_word(&w.name);
     for slot in &w.effect.outputs {
-        reject_quotation_type_position(slot.ty, &format!("the output of `{}`", w.name))?;
+        reject_quotation_type_position(slot.ty, &format!("the output of `{word}`"))?;
     }
     // R18/R7a: a monomorphic word taking a quotation is a combinator,
     // which the inliner supports only with a *term* body (it splices the
@@ -1149,7 +1150,7 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
             .iter()
             .any(|s| matches!(s.ty, Type::Quotation(_)))
     {
-        return Err(clause_bodied_quotation_word_error(&w.name));
+        return Err(clause_bodied_quotation_word_error(word));
     }
     for slot in &w.effect.inputs {
         if let Type::Quotation(eff) = slot.ty {
@@ -1174,7 +1175,7 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
     // audit never descended into.
     if let Some(sig) = &w.poly {
         for pt in &sig.outputs {
-            reject_poly_quotation_anywhere(pt, sig, &format!("the output of `{}`", w.name))?;
+            reject_poly_quotation_anywhere(pt, sig, &format!("the output of `{word}`"))?;
         }
         for pt in &sig.inputs {
             audit_poly_input_quotation(pt, sig)?;
@@ -5057,7 +5058,7 @@ fn find_combinator_cycle(
 fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
     let mut chain: Vec<&str> = cycle
         .iter()
-        .map(|&i| members[i].word.name.as_str())
+        .map(|&i| crate::resolve::demangle_word(members[i].word.name.as_str()))
         .collect();
     chain.push(chain[0]);
     let rendered = chain
@@ -5356,6 +5357,7 @@ fn quotation_argument_required_error(
     want: Type,
     found: Type,
 ) -> String {
+    let word = crate::resolve::demangle_word(word);
     format!(
         "error: `{word}` expects a quotation `{want}` here, found `{found}`{} (line {})",
         in_word(ctx),
@@ -5373,6 +5375,7 @@ fn literal_effect_mismatch_error(
     declared: Type,
     actual: Type,
 ) -> String {
+    let word = crate::resolve::demangle_word(word);
     format!(
         "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
         in_word(ctx),
@@ -5383,6 +5386,7 @@ fn literal_effect_mismatch_error(
 /// R12: a quotation literal that consumes a linear enclosing local (D3 forbids
 /// a linear capture). Names the local and the enclosing word.
 fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str) -> String {
+    let word = crate::resolve::demangle_word(word);
     format!(
         "error: the quotation passed to `{word}` consumes the enclosing local `{local}`, which is linear; a quotation may only read a `Copy` enclosing local by value (D3){} (line {})",
         in_word(ctx),
@@ -5393,6 +5397,7 @@ fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str
 /// R12: a quotation literal that borrows an enclosing place and leaves the
 /// reference on its row (D3 forbids capturing an enclosing borrow).
 fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str) -> String {
+    let word = crate::resolve::demangle_word(word);
     format!(
         "error: the quotation passed to `{word}` borrows the enclosing place `{place}`; a quotation may not capture a borrow of an enclosing local (D3){} (line {})",
         in_word(ctx),
@@ -6640,7 +6645,7 @@ fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) 
 /// located error here does.
 fn in_word(ctx: &Ctx) -> String {
     match ctx {
-        Ctx::Word { name, .. } => format!(" in `{name}`"),
+        Ctx::Word { name, .. } => format!(" in `{}`", crate::resolve::demangle_word(name)),
         Ctx::Line { .. } => String::new(),
     }
 }
@@ -6679,6 +6684,7 @@ fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
 /// slot, an `extern` argument). Only the stale "Phase 6" parenthetical is
 /// reworded to point a runtime quotation value at slice 7 (R26).
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
+    let word = crate::resolve::demangle_word(word);
     format!(
         "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (a runtime quotation value is slice 7){} (line {})",
         in_word(ctx),

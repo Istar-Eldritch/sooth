@@ -35,6 +35,25 @@ fn mangle(name: &str, module: u32) -> String {
     format!("{name}__m{module}")
 }
 
+/// Recover a word's source spelling for a *diagnostic*: strip the single
+/// trailing `__m{digits}` group `mangle` appended (`w__m0` -> `w`). A user
+/// diagnostic must never show the compiler-internal mangled spelling; it shows
+/// what the author wrote. Lookups keep using the mangled name, only the
+/// rendered string is stripped. `main`/`drop` are never mangled and pass
+/// through unchanged, as does any name `mangle` never touched. Kept beside
+/// `mangle` so the two stay in step (mirrors `ast::demangle_local` for
+/// `__inl`).
+pub(crate) fn demangle_word(name: &str) -> &str {
+    let Some(idx) = name.rfind("__m") else {
+        return name;
+    };
+    let digits = &name[idx + "__m".len()..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return name;
+    }
+    &name[..idx]
+}
+
 /// Split a call name into its leading identifier and the accessor suffix a
 /// generated word carries: `Point>x` -> (`Point`, `>x`), `Point|>x` ->
 /// (`Point`, `|>x`), `Point` -> (`Point`, ``). The generated-word spellings are
