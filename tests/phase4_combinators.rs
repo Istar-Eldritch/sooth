@@ -1345,8 +1345,8 @@ fn repl_self_tail_combinator_definition_is_rejected() {
         ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n:quit\n",
     );
     assert!(
-        transcript.contains("`while`") && transcript.contains("not yet supported at the REPL"),
-        "located rejection naming the word: {transcript}"
+        transcript.contains("`while`") && transcript.contains("declares a quotation parameter"),
+        "located rejection naming the word and reason: {transcript}"
     );
 }
 
