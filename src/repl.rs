@@ -227,6 +227,41 @@ fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Resul
     ))
 }
 
+/// R24 (D7): an imported closure that *exports* a quotation-taking word is a
+/// located rejection at import time, naming the file and the word. The session
+/// has no body to inline for it (a quotation-taking word mints no `IrFunc`,
+/// R20) and no symbol to call, so without this the import silently succeeds
+/// and fails later with a misdirected "unknown word" or an internal mangled
+/// name leaking into the diagnostic. A quotation-taking word used only
+/// internally to the closure inlines fine during native compilation and is
+/// not exported, so this only fires on module 0's export list. Lifted by 6c.
+fn check_no_exported_quotation_word_in_closure(
+    module: &Module,
+    closure: &driver::Closure,
+) -> Result<(), String> {
+    let exports: HashSet<&str> = module.modules[0]
+        .exports
+        .iter()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    let Some(word) = module.words.iter().find(|w| {
+        w.module == 0
+            && exports.contains(w.name.as_str())
+            && check::word_declares_quotation_parameter(w)
+    }) else {
+        return Ok(());
+    };
+    let path = closure.path_of(word.module);
+    let span = word_span(word);
+    Err(format!(
+        "error: cannot import `{}`: it exports `{}` (line {}, col {}), which takes a quotation parameter; a quotation-taking word cannot be imported into a session (the inliner needs its body, which the session does not retain -- slice 6c)",
+        path.display(),
+        word.name,
+        span.line,
+        span.col
+    ))
+}
+
 /// R5/R6 (slice 5b): bulk-lower a whole checked import closure to one `.so`.
 /// Reuses `ir::lower` (the native single-module lowerer), then renames every
 /// user word's func and its intra-closure call sites to the word's import-epoch
@@ -917,6 +952,9 @@ impl Session {
         // not only module 0) is rejected before any codegen, naming the file
         // and the word.
         check_no_main_in_closure(&module, &closure)?;
+        // R24 (D7): reject a closure exporting a quotation-taking word before
+        // any codegen, naming the file and the word.
+        check_no_exported_quotation_word_in_closure(&module, &closure)?;
         // R11: each selectively-imported name must be exported by module 0,
         // the R16 visibility error, checked against a synthesized entry for
         // the REPL's own top-level selection (the closure-internal check,

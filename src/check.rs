@@ -4109,6 +4109,7 @@ fn poly_local_unconsumed_error(
 /// non-`Copy` local read again after its first read (which consumed it),
 /// citing the earlier read site.
 fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> String {
+    let local = crate::ast::demangle_local(local);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: use after move in `{where_}` (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
@@ -4569,6 +4570,7 @@ fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
 /// R3 (D2): a linear local mentioned again after its value was moved out, the
 /// diagnostic naming the earlier move site.
 fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span) -> String {
+    let local = crate::ast::demangle_local(local);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: use after move in `{}` (line {})\n  local `{}` of type `{}` was moved at line {}, col {}; `{}` is linear, so it is used exactly once\n  note: declared {}",
@@ -4585,6 +4587,7 @@ fn use_after_move_error(ctx: &Ctx, span: Span, local: &str, ty: Type, site: Span
 /// either never mentioned or consumed on one branch only. Nothing is
 /// auto-dropped, so this is an error rather than a compiler-inserted disposal.
 fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
+    let local = crate::ast::demangle_local(local);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: linear value `{}` is never consumed in `{}` (line {})\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared {}",
@@ -4601,6 +4604,7 @@ fn linear_local_unconsumed_error(ctx: &Ctx, local: &str, ty: Type, line: u32) ->
 /// disposed on one path; the bug is the other arm forgetting it, so the
 /// message points at the divergence rather than implying nothing happened.
 fn linear_local_maybe_moved_error(ctx: &Ctx, local: &str, ty: Type, line: u32) -> String {
+    let local = crate::ast::demangle_local(local);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: linear value `{}` is not consumed on every path in `{}` (line {})\n  `{}` has type `{}`, which is linear: it is consumed on one `if` arm but not the other, so drop it (or return it) on every path\n  note: declared {}",
@@ -4681,6 +4685,7 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
 /// referent lives in an ancestor frame that outlives every iteration, which is
 /// what keeps `walk ( &!List -- ) ... walk ;` legal.
 fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
+    let place = crate::ast::demangle_local(place);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
@@ -5222,6 +5227,7 @@ fn times_nested_in_loop_error(ctx: &Ctx, span: Span) -> String {
 /// consumes would be disposed of more than once. The single most important
 /// `times` checker rule.
 fn times_body_consumes_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let name = crate::ast::demangle_local(name);
     format!(
         "error: a `times` body cannot consume `{name}`{} (line {}): the body runs more than once, so the value would be disposed of more than once",
         in_word(ctx),
@@ -6503,6 +6509,7 @@ fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
 /// SSA temporary with no address, and giving it one is work no criterion
 /// needs.
 fn borrow_of_scalar_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
+    let local = crate::ast::demangle_local(local);
     format!(
         "error: cannot borrow the scalar local `{local}` of type `{ty}`{} (line {}, col {})\n  a scalar has no address; borrow a field or an aggregate instead",
         in_word(ctx),
@@ -6515,6 +6522,7 @@ fn borrow_of_scalar_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) ->
 /// is only ever taken of a plain aggregate local, and the remedy is to drop
 /// the sigil: naming a reference local reborrows it.
 fn borrow_of_reference_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
+    let local = crate::ast::demangle_local(local);
     format!(
         "error: cannot borrow `{local}`{}: it is already the reference `{ty}` (line {}, col {})\n  write `{local}`, not `{spelled}{local}`; naming a reference local reborrows it",
         in_word(ctx),
@@ -6604,6 +6612,7 @@ fn conflicting_borrow_error(
 /// while anything derived from the previous one is still live — the two would be
 /// two simultaneous mutable references into the same place.
 fn suspended_place_error(ctx: &Ctx, span: Span, place: &str, live: &Deriv) -> String {
+    let place = crate::ast::demangle_local(place);
     format!(
         "error: cannot reborrow `{place}`{} while a reference derived from it is live (line {}, col {})\n  the derivation taken at line {}, col {} is still live\n  a mutable borrow suspends its place until every reference derived from it is consumed",
         in_word(ctx),
@@ -6624,6 +6633,7 @@ fn consume_of_borrowed_place_error(
     ty: Type,
     live: &Deriv,
 ) -> String {
+    let place = crate::ast::demangle_local(place);
     let held = if live.mutable { "mutable" } else { "shared" };
     format!(
         "error: cannot consume the borrowed local `{place}` of type `{ty}`{} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed",
@@ -6646,12 +6656,16 @@ fn aliased_place_borrow_error(
     place: &str,
     origin: &AliasOrigin<'_>,
 ) -> String {
+    let place = crate::ast::demangle_local(place);
     let (alias, other, remedy) = match origin {
-        AliasOrigin::Name(name) => (
-            format!("`{name}`"),
-            format!("`{name}`"),
-            "use `dup` for an independent copy",
-        ),
+        AliasOrigin::Name(name) => {
+            let name = crate::ast::demangle_local(name);
+            (
+                format!("`{name}`"),
+                format!("`{name}`"),
+                "use `dup` for an independent copy",
+            )
+        }
         AliasOrigin::Stack(pushed) => (
             format!(
                 "a value on the stack (pushed at line {}, col {})",
@@ -6675,6 +6689,7 @@ fn aliased_place_borrow_error(
 /// catches `v ... &!v` and misses `&!v ... v`, which is the same hazard with the
 /// two terms swapped.
 fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: &Deriv) -> String {
+    let name = crate::ast::demangle_local(name);
     format!(
         "error: cannot name `{name}`{} (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy",
         in_word(ctx),

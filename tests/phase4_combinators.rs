@@ -490,3 +490,65 @@ fn combinators_dogfood_matches_hand_threaded() {
     assert_eq!(combinator_stdout, hand_stdout);
     assert_eq!(combinator_code, Some(0));
 }
+
+// -- criterion 16 (phase 3): importing a quotation-exporting closure ----------
+
+/// Write `contents` to a uniquely-named temp `.sth` file and return its path.
+/// Each test names its file distinctly so the goldens can run in parallel.
+fn temp_lib(name: &str, contents: &str) -> std::path::PathBuf {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, contents).expect("writing temp library should succeed");
+    path
+}
+
+#[test]
+fn repl_import_exporting_quotation_word_is_rejected() {
+    // R24/D7: importing a closure that *exports* a quotation-taking word is a
+    // located rejection at import time, naming the file and the word. The
+    // session retains no body to inline for it (a quotation-taking word mints
+    // no `IrFunc`, R20), so without this the import succeeds and the failure
+    // surfaces later as a misdirected `unknown word` or an internal mangled
+    // name leaking into the diagnostic.
+    let path = temp_lib(
+        "crit16-exports",
+        "export: apply_each ;\n: apply_each ( i64 [ i64 -- i64 ] -- i64 ) call ;\n",
+    );
+    let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
+    std::fs::remove_file(&path).ok();
+    assert!(
+        transcript.contains("apply_each")
+            && transcript.contains(&path.display().to_string())
+            && transcript.contains("quotation parameter"),
+        "located rejection naming the file and the word: {transcript}"
+    );
+    // A user-facing diagnostic must never leak a compiler-internal mangled
+    // name (`__import`, `__inl`, `__m0`, `quo__`).
+    assert!(
+        !transcript.contains("__import")
+            && !transcript.contains("__inl")
+            && !transcript.contains("__m0")
+            && !transcript.contains("quo__"),
+        "no mangled internal name in the diagnostic: {transcript}"
+    );
+
+    // A quotation-taking word used purely *internally* to an imported closure
+    // (not exported) must still import and run fine: it inlines during the
+    // closure's own native compilation.
+    let internal = temp_lib(
+        "crit16-internal",
+        "export: bump ;\n: ap ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: bump ( i64 -- i64 ) [ 1 + ] ap ;\n",
+    );
+    // Leave the result on the stack (no `.`): a runtime `.` prints to the real
+    // process stdout, not this captured writer, but the REPL's own residual
+    // stack render goes to the writer, so `stack: 6` witnesses that `bump`
+    // imported, inlined `ap`, and ran.
+    let ok = repl_error(&format!(
+        "import: c \"{}\" ;\n5 c::bump\n:quit\n",
+        internal.display()
+    ));
+    std::fs::remove_file(&internal).ok();
+    assert!(
+        ok.contains("imported c") && ok.contains("stack: 6") && !ok.contains("error"),
+        "internal-only quotation word imports and runs: {ok}"
+    );
+}
