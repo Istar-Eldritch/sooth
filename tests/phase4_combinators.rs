@@ -1145,6 +1145,37 @@ fn nested_times_large_outer_holds_constant_stack() {
     );
 }
 
+#[test]
+fn destructor_call_inside_a_times_body_holds_constant_stack() {
+    // 6d criterion 10 (Q4, phase 3): a recursive-enum value is constructed and
+    // dropped inside a `times` body, 200_000 times, each round building and
+    // freeing a 5-node list (1,000,000 nodes total, the same total work as
+    // `tests/phase0.rs`'s `deep_list_disposes_in_constant_stack`, split across
+    // rounds). The destructor's fused loop opens at its own `IrFunc`'s true
+    // entry, so its preheader and alloca home already coincide exactly as the
+    // top-level case does (Q4: it inherits D2 for free) -- a destructor
+    // *called* from inside a user loop runs in a fresh per-call frame freed on
+    // return, never the nesting case R1-R3 fix. This pins that inheritance
+    // rather than re-testing R3 itself (criteria 3 and 9c already do that).
+    let src = "type: List | Nil | Cons v i64 next ^List ;\n\
+         : build ( i64 List -- List )\n  \
+           | n acc |\n  \
+           n 0 = if\n    \
+             acc\n  \
+           else\n    \
+             n 1 - n acc ^ Cons build\n  \
+           end ;\n\
+         : main ( -- ) 200000 [ drop 5 Nil build drop ] times ;\n";
+    let binary = build_binary("destructor_in_times", src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), ""),
+        "a recursive-enum value built and dropped inside a `times` body runs in constant stack"
+    );
+}
+
 // -- criterion 13: `while` is constant-stack, agreeing with a hand twin -------
 
 #[test]
@@ -1534,6 +1565,40 @@ fn filter_while_dogfood_matches_hand_threaded() {
     assert_eq!(hand_stdout, "3\n5\n");
 
     let (combinator_stdout, combinator_code) = build_and_run("examples/filter_while.sth");
+    assert_eq!(combinator_stdout, hand_stdout);
+    assert_eq!(combinator_code, Some(0));
+}
+
+// -- criterion 9 (phase 3): the combinator-in-`times` dogfood ----------------
+
+#[test]
+fn combinator_in_times_dogfood_matches_hand_threaded() {
+    // R9: `examples/combinator_in_times.sth` runs `each` from
+    // `lib/combinators.sth` inside an outer `times` body, ROADMAP's own
+    // motivating shape for 6d (`2 [ | i | mk [ . ] c::each ] times`), which
+    // R18 rejected before this slice lifted the limit. This asserts it
+    // builds and runs to the same output as its hand-threaded twin,
+    // `examples/combinator_in_times_hand.sth`: an outer `times` over 3 rounds,
+    // each building a 3-element array and printing its elements through a
+    // manual inner `times` loop with the same `&arr i &> @` read, the exact
+    // shape `each`'s internal loop takes once spliced.
+    fn build_and_run(path: &str) -> (String, Option<i32>) {
+        let binary = common::build_example(path);
+        let output = std::process::Command::new(&binary)
+            .output()
+            .expect("binary should run");
+        std::fs::remove_file(&binary).ok();
+        (
+            String::from_utf8(output.stdout).expect("stdout should be utf8"),
+            output.status.code(),
+        )
+    }
+
+    let (hand_stdout, hand_code) = build_and_run("examples/combinator_in_times_hand.sth");
+    assert_eq!(hand_code, Some(0));
+    assert_eq!(hand_stdout, "0\n1\n2\n1\n2\n3\n2\n3\n4\n");
+
+    let (combinator_stdout, combinator_code) = build_and_run("examples/combinator_in_times.sth");
     assert_eq!(combinator_stdout, hand_stdout);
     assert_eq!(combinator_code, Some(0));
 }

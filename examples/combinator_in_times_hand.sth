@@ -1,0 +1,20 @@
+\ The hand-threaded baseline for Phase 4 slice 6d's dogfood. Its combinator
+\ twin `examples/combinator_in_times.sth` expresses the same nested walk over
+\ `each` from `lib/combinators.sth`; the golden pins both to the same output.
+\ The inner element loop spells out `each`'s own body by hand (a manual
+\ `times` loop with the same `&arr i &> @` read), nested directly inside the
+\ outer round `times`, the same shape `each`'s internal loop takes once
+\ spliced.
+
+: mk ( i64 -- [i64 3] )
+  | base | 0 3 fill | s |
+  &!s 0 >usize &!> base !
+  &!s 1 >usize &!> base 1 + !
+  &!s 2 >usize &!> base 2 + !
+  s ;
+
+: main ( -- )
+  3 [ | i | i mk | arr |
+      3 [ | j | &arr j >usize &> @ . ] times
+      arr drop
+    ] times ;

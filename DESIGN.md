@@ -771,7 +771,14 @@ rows, no borrow analysis needed to write the compiler in it.
   legal but not the idiom. Self-tail-recursion is a guaranteed constant-stack transform
   (tail self-call → jump), implemented in Phase 2; mutual TCO is deferred (SCC
   contraction, not a trampoline). A loop-carried aggregate gets an entry-hoisted stable
-  slot with a read-before-write staged move-blit on the back-edge, no header phi.
+  slot with a read-before-write staged move-blit on the back-edge, no header phi. Lowering
+  tracks two distinct blocks per function, not one doing double duty: an invariant alloca
+  home (where every hoisted allocation lands, reached exactly once per call, so QBE's
+  frame-bumping `alloc*` never grows the frame per iteration) and a per-loop preheader
+  (where a carried aggregate's seeding blit lands, re-run once per entry to *that* loop).
+  They coincide for a top-level loop but diverge once loops nest, which is what lets
+  `times`/`while` and the library combinators built on them compose inside each other and
+  inside a `times` body at any depth, in constant stack.
 - Type system: small. Concrete types + ADTs + minimal row polymorphism + a `Copy`
   marker. No full HM inference, no refinement/SMT, no effect rows, no dependent
   types.

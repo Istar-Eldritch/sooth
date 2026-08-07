@@ -416,11 +416,32 @@ against a hand-threaded twin, with the array passed straight from its producer w
 `filter` rather than bound to a local first, so it does not trip 6a's bind-then-pass alias
 limitation.
 
-**Next action: Phase 4 Slice 6c, 6d, or 6e.** None depends on the others; 6c (quotation-taking
-words at the REPL), 6d (nested constant-stack loops, lifting the limit 6b inherited), and 6e
-(`if` in a polymorphic body) may land in any order. 6e was added after 6b shipped, once it
-became clear that no slice owned the polymorphic-`if` gap even though slice 7 depends on it
-and the core library's intrinsic-vs-library split is gated on it.
+**Phase 4 Slice 6d (nested constant-stack loops: the hoist-target split) is complete**: the
+cause was one field doing two jobs, `FuncBuilder::entry_block`, simultaneously the alloca
+home (where a hoisted `Alloc` must land, since QBE's frame-bumping `alloc*` never reclaims
+within a function) and the loop preheader (where a carried aggregate's seeding `Blit` must
+land, so it re-runs once per entry to that loop). Those two blocks coincide at exactly one
+loop level and diverge the moment loops nest, which was the whole of the bug. The fix keeps
+`entry_block`'s meaning as the per-loop preheader (it was already correct at any depth) and
+adds a separate, invariant `alloca_home` field that `push_alloc` routes into instead;
+`begin_loop` sets it once, on the outermost loop only, to the block current when that loop
+opens. This is narrower than this entry originally prescribed below ("split the field into an
+invariant alloca home and a per-loop preheader", implying both roles move) and inverts which
+half moves: only the alloca role does. The four-field loop-state save/restore duplicated at
+the two mid-body call sites collapsed into one shared helper first, as an inert de-risking
+step, before `alloca_home` joined it as a fifth field. With the split landed, the R18
+nested-loop rejection retired outright (both checker call sites, the dead
+`times_nested_in_loop_error` function, and the now-unread `loop_depth` bookkeeping), so all
+five 6a/6b combinators compose inside a `times` body and inside each other, at any depth,
+in constant stack; `examples/combinator_in_times.sth` dogfoods `each` inside a `times` against
+a hand-threaded twin, and a recursive-enum value's destructor call inside a `times` body
+inherits the fix for free, since a destructor's fused loop already opens at its own
+`IrFunc`'s true entry.
+
+**Next action: Phase 4 Slice 6c or 6e.** Neither depends on the other; 6c (quotation-taking
+words at the REPL) and 6e (`if` in a polymorphic body) may land in any order. 6e was added
+after 6b shipped, once it became clear that no slice owned the polymorphic-`if` gap even
+though slice 7 depends on it and the core library's intrinsic-vs-library split is gated on it.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1332,31 +1353,41 @@ then find out what the compiler owes it.
    its order against 6b is free. **Exit:** a session defining a quotation-taking word,
    calling it, and redefining it, with the frozen-binding rule holding across the
    redefinition.
-   **6d — nested constant-stack loops (the hoist-target split).** Lifts R18, which today
-   rejects any `times` reached while a loop is already open. The limit is not hypothetical
-   and not confined to a future `while`: it bites every combinator 6a shipped, because each
-   one drives its own `times`. `2 [ | i | mk [ . ] c::each ] times` is a hard error today
-   ("a `times` cannot be nested in a loop yet"), so no combinator composes inside a loop,
-   and the rejection is a deferral rather than a design decision.
-   **The cause is one field doing two jobs.** `FuncBuilder::entry_block` (`src/ir.rs:2226`)
-   is simultaneously the alloca home and the loop preheader. It must be the function's true
+   **6d — nested constant-stack loops (the hoist-target split) is implemented.** Lifted R18,
+   which rejected any `times` reached while a loop was already open. The limit was not
+   hypothetical and not confined to `while`: it bit every combinator 6a shipped, because each
+   one drives its own `times`. `2 [ | i | mk [ . ] c::each ] times` was a hard error ("a
+   `times` cannot be nested in a loop yet"), so no combinator composed inside a loop, and the
+   rejection was a deferral rather than a design decision.
+   **The cause was one field doing two jobs.** `FuncBuilder::entry_block` (`src/ir.rs:2226`)
+   was simultaneously the alloca home and the loop preheader. It must be the function's true
    entry block for allocation, since QBE's alloca bumps the frame pointer on every execution
    and never reclaims within a function, so an `Alloc` reached per-iteration grows the frame
    until the constant-stack guarantee is worthless. It must be the *loop's* preheader for a
    carried aggregate's stable-slot seeding blit, which has to run once per entry to that
    loop. Those two blocks coincide at exactly one loop level and diverge the moment loops
-   nest, which is the whole of the bug. The fix is to split the field: an invariant alloca
-   home, and a per-loop preheader. The rest of the loop state (`header`, `carried_slots`,
-   `back_edges`) already saves and restores around a nested region (`src/ir.rs:2609-2687`,
-   the `times` arm), so the phi bookkeeping is largely present already.
-   **Handle with care, and not as a rider on another slice.** This is the same loop-lowering
+   nest, which was the whole of the bug. **The fix inverts, rather than matches, this entry's
+   original framing of "split the field into an invariant alloca home and a per-loop
+   preheader": only the alloca role moves.** `entry_block` keeps its meaning as the per-loop
+   preheader — it was already correct at any depth — and a new, invariant `alloca_home` field
+   takes over the allocation role; `push_alloc` routes into it, and `begin_loop` sets it once,
+   on the outermost loop only. The rest of the loop state (`header`, `carried_slots`,
+   `back_edges`) already saved and restored around a nested region (`src/ir.rs:2609-2687`,
+   the `times` arm), so the phi bookkeeping was largely present already; `alloca_home` joined
+   that same save/restore as a fifth field, behind one shared helper collapsing what had been
+   duplicated at two call sites.
+   **Handled with care, not as a rider on another slice.** This is the same loop-lowering
    code where the aggregate-return aliasing bug landed (see the Phase 4 slice 3 note above),
    whose fix, one entry-hoisted stable slot per carried aggregate plus an unconditional
    read-before-write staged blit on the back-edge, is exactly the invariant that rearranging
-   hoist targets can silently break. Its guards want mutation-testing, not just a green run.
-   Depends on 6a for its consumers; independent of 6b and 6c, and orderable against either.
-   **Exit:** a combinator called inside a `times` body compiles and runs in constant stack,
-   with a nested-loop golden and the slice-3 aliasing guards still green.
+   hoist targets could silently break. Its guards (the seeding-blit reseed probe and the
+   large-outer constant-stack witness) are mutation-tested, not merely run green: each is
+   shown to fail (wrong value, or SIGSEGV) against the fix reversed.
+   **Exit:** a combinator called inside a `times` body compiles and runs in constant stack —
+   `examples/combinator_in_times.sth` dogfoods `each`-in-`times` against a hand-threaded twin
+   — with the nested-loop goldens (all five combinators, any pairing, depth 3) and the slice-3
+   aliasing guards green, and a destructor call inside a `times` body inheriting the fix for
+   free (its fused loop already opens at its own `IrFunc`'s true entry).
    **6e — `if` in a polymorphic body.** Lifts the rejection at `src/check.rs:3690` (`` `if`
    in the polymorphic body of `{word}` is not yet supported ``), which has stood since slice
    1 deferred it and which no later slice picked up. **A 6-family letter for ordering and
