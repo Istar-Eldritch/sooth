@@ -195,6 +195,21 @@ fn quotation_type_is_rejected_at_every_audited_position() {
             src: ": w ( ['T 'N] [ [ 'T -- ] -- ] -- ) drop drop ;\n: main ( -- ) ;\n",
             position: "nested inside a quotation effect",
         },
+        // Item 2: a quotation hiding in a poly *array element* -- the shallow
+        // poly audit walked outputs and effect rows but never descended into
+        // an array element, so `[ [ 'T -- ] 3 ]` and its variable-length twin
+        // `[ [ 'T -- ] 'N ]` were both accepted, defeating R7's default-deny
+        // `unreachable!` arms on the poly path. Their monomorphic twin
+        // `[ [ i64 -- ] 3 ]` (an earlier row) was already caught via the
+        // interned array registry.
+        Row {
+            src: ": w ( [ [ 'T -- ] 3 ] -- ) drop ;\n: main ( -- ) ;\n",
+            position: "an array element",
+        },
+        Row {
+            src: ": w ( [ [ 'T -- ] 'N ] -- ) drop ;\n: main ( -- ) ;\n",
+            position: "an array element",
+        },
     ];
     for Row { src, position } in rows {
         let err = check_error(src);

@@ -1168,47 +1168,60 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
     }
     // A polymorphic word carries its signature in `w.poly`, not `w.effect`
     // (which is empty), so the output-position and nested-in-effect audits
-    // above never see it. Run the same rejections over the poly signature.
+    // above never see it. Run the same rejections over the poly signature,
+    // driven by one recursive enumeration (item 2): a quotation may hide in a
+    // poly *array element* (`[ [ 'T -- ] 3 ]`), which the earlier shallow
+    // audit never descended into.
     if let Some(sig) = &w.poly {
         for pt in &sig.outputs {
-            reject_poly_quotation_position(pt, sig, &format!("the output of `{}`", w.name))?;
+            reject_poly_quotation_anywhere(pt, sig, &format!("the output of `{}`", w.name))?;
         }
         for pt in &sig.inputs {
-            for t in poly_quotation_effect_rows(pt) {
-                reject_poly_quotation_position(t, sig, "nested inside a quotation effect")?;
-            }
+            audit_poly_input_quotation(pt, sig)?;
         }
     }
     Ok(())
 }
 
-/// R7a (poly path): the rows of a quotation-typed input, so the nested-quotation
-/// audit can reject a quotation appearing inside another quotation's effect.
-/// A non-quotation input contributes no rows.
-fn poly_quotation_effect_rows(pt: &PolyType) -> Vec<&PolyType> {
-    if let PolyType::Quotation(ins, outs) = pt {
-        ins.iter().chain(outs).collect()
-    } else {
-        Vec::new()
+/// R7a (poly path, item 2): audit a poly word *input*, where a direct
+/// quotation is the one legal position (the combinator's parameter). The
+/// parameter itself is accepted, but a quotation buried inside it -- an array
+/// element (`[ [ 'T -- ] 3 ]`), or nested in the parameter's own effect rows
+/// -- is rejected.
+fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String> {
+    match pt {
+        PolyType::Quotation(ins, outs) => {
+            for t in ins.iter().chain(outs) {
+                reject_poly_quotation_anywhere(t, sig, "nested inside a quotation effect")?;
+            }
+            Ok(())
+        }
+        PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
+        PolyType::Concrete(_) | PolyType::Var(_) => Ok(()),
     }
 }
 
-/// R7a (poly path): reject `pt` if it is a quotation type, naming the position
-/// and slice 7, matching `reject_quotation_type_position`'s message shape. A
-/// fully-concrete quotation folds to `Concrete(Type::Quotation)`, so route that
-/// through the monomorphic rejection to share the rendering.
-fn reject_poly_quotation_position(
+/// R7a (poly path, item 2): reject a quotation type appearing *anywhere*
+/// inside `pt` -- as the whole position, as an array element, or nested in a
+/// quotation effect -- naming the innermost position. Driving every poly
+/// non-parameter position from one recursive enumeration is what keeps R7's
+/// default-deny `unreachable!` arms sound: a quotation buried in a poly array
+/// element must not slip past the audit and reach `ir_type_of`. A
+/// fully-concrete quotation folds to `Concrete(Type::Quotation)`, so route
+/// that through the monomorphic rejection to share the rendering.
+fn reject_poly_quotation_anywhere(
     pt: &PolyType,
     sig: &PolySig,
     position: &str,
 ) -> Result<(), String> {
     match pt {
         PolyType::Concrete(ty) => reject_quotation_type_position(*ty, position),
+        PolyType::Var(_) => Ok(()),
+        PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
         PolyType::Quotation(..) => Err(format!(
             "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
             poly_type_str(pt, sig),
         )),
-        _ => Ok(()),
     }
 }
 
