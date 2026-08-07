@@ -11,6 +11,8 @@ use std::io::BufReader;
 use sooth::ast::Type;
 use sooth::{check, lexer, parser};
 
+mod common;
+
 /// Compile and run `src`, returning stdout and the exit code. `name`
 /// distinguishes the temp source per test (the goldens run in parallel).
 fn run_src(name: &str, src: &str) -> (String, i32) {
@@ -1036,8 +1038,7 @@ fn combinators_dogfood_matches_hand_threaded() {
     // (recon 2). Both are real committed files, not a string invented inside
     // this test, so the equivalence is pinned against an actual baseline.
     fn build_and_run(path: &str) -> (String, Option<i32>) {
-        let binary =
-            sooth::driver::build(std::path::Path::new(path)).expect("example should build");
+        let binary = common::build_example(path);
         let output = std::process::Command::new(&binary)
             .output()
             .expect("binary should run");
