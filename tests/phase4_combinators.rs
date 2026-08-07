@@ -87,12 +87,26 @@ fn array_type_without_arrow_stays_array_diagnostic() {
 
 #[test]
 fn malformed_quotation_type_is_located_parse_error() {
-    // A `--` (so the quotation branch is taken) with an unterminated bracket
-    // is a located parse error, not a silent array fall-through or a panic.
-    let err = parse_error(": main ( [ i64 -- i64 -- ) drop ;\n");
+    // A top-depth `--` routes `[ i64 -- @ ]` through the quotation branch, so a
+    // malformed type on the output side (`@`) is a located parse error naming
+    // the offending token, not a silent array fall-through. Asserting only
+    // `line 1` is a placebo: with the R1 top-depth-`--` disambiguation
+    // disabled the array branch fires instead and still contains `line 1`, on
+    // the unrelated `array count must be a decimal literal`. Name the
+    // quotation-branch message and token, and assert the array diagnostic is
+    // *not* what fired.
+    let err = parse_error(": main ( [ i64 -- @ ] -- ) drop ;\n");
     assert!(
-        err.contains("line 1"),
-        "a malformed quotation effect should be a located parse error, got: {err}"
+        err.contains("unknown type") && err.contains("`@`"),
+        "a malformed quotation output type should name the offending token, got: {err}"
+    );
+    assert!(
+        err.contains("line 1") && err.contains("col 19"),
+        "the parse error should be located at the offending token, got: {err}"
+    );
+    assert!(
+        !err.contains("array count"),
+        "the quotation branch must fire, not the array-count fall-through, got: {err}"
     );
 }
 

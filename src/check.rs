@@ -11070,11 +11070,13 @@ mod tests {
     #[test]
     fn quotation_parameter_is_copy_no_move_obligation() {
         // Criterion 6b: a quotation parameter is `Copy` (it registers no move
-        // obligation), so a body that names its quotation param but never
-        // `drop`s it still checks -- forgetting is only an error for a linear
-        // value. Contrast a linear parameter, whose un-consumed exit is an
-        // error.
-        check_src(": ignore ( i64 [ i64 -- i64 ] -- i64 ) drop ;\n")
+        // obligation), so a body that *binds* its quotation param and never
+        // consumes it still checks -- forgetting is only an error for a linear
+        // value. The body must bind and drop-on-the-floor (`| f |`, not an
+        // explicit `drop`), or the `drop` discharges the obligation and the
+        // test cannot detect the property it names: making quotation types
+        // linear would leave a `drop`-bodied version green.
+        check_src(": ignore ( i64 [ i64 -- i64 ] -- i64 ) | f | ;\n")
             .expect("an unused quotation parameter is not a linear-forgetting error");
     }
 
