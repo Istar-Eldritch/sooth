@@ -1768,7 +1768,7 @@ fn local_decl_names(module: &Module, m: u32) -> HashSet<&str> {
 /// R20: a selectively imported name absent from its source module's `export:`
 /// list is the R16 visibility error, same wording as a qualified private
 /// reference.
-fn selective_not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
+pub(crate) fn selective_not_exported_error(name: &str, qualifier: &str, span: Span) -> String {
     format!(
         "error: `{name}` is not exported from module `{qualifier}` at line {}, col {}",
         span.line, span.col

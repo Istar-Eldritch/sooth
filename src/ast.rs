@@ -163,16 +163,23 @@ fn find_type_in_module(
     name: &str,
     module: u32,
 ) -> Option<Type> {
+    // R8d (slice 5b): match `name_static`, not `name`. A REPL-spliced imported
+    // type tags its `.name` with an import epoch so the accessor/constructor
+    // recognizers agree on one row per internal spelling, but its `.name_static`
+    // stays the pretty user-typed base spelling; a type-position reference must
+    // resolve against that. Behavior-preserving for every native call: this
+    // resolver only ever runs pre-`resolve_modules`, where `.name == .name_static`
+    // for every decl, so the switched field compares identically there.
     structs
         .iter()
         .enumerate()
-        .find(|(_, s)| s.name == name && s.module == module)
+        .find(|(_, s)| s.name_static == name && s.module == module)
         .map(|(idx, s)| Type::Struct(StructId(idx), s.name_static))
         .or_else(|| {
             enums
                 .iter()
                 .enumerate()
-                .find(|(_, e)| e.name == name && e.module == module)
+                .find(|(_, e)| e.name_static == name && e.module == module)
                 .map(|(idx, e)| Type::Enum(EnumId(idx), e.name_static))
         })
 }
@@ -1070,6 +1077,46 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// U8 (slice 5b, R8d): `find_type_in_module` matches on `name_static` with
+    /// module gating. A single-module lookup is unaffected, and two decls that
+    /// share a `name_static` but sit in different modules disambiguate by their
+    /// module id (the REPL splice's epoch-tagged `.name` plays no part in
+    /// type-position resolution).
+    #[test]
+    fn find_type_in_module_matches_name_static_module_gated() {
+        let mk = |name: &'static str, name_static: &'static str, module: u32| StructDecl {
+            name: name.to_string(),
+            name_static,
+            fields: Vec::new(),
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        // Two structs share `name_static` "Point" but sit in modules 0 and 1,
+        // and their `.name` fields are tagged apart the way the REPL splice
+        // tags an epoch onto an imported type.
+        let structs = vec![mk("Point", "Point", 0), mk("q::Point__import3", "Point", 1)];
+        let enums: Vec<EnumDecl> = Vec::new();
+
+        // Module 0's lookup finds index 0 (a single-module lookup is exactly
+        // this, and is unaffected: `name_static` equals `name` there).
+        match find_type_in_module(&structs, &enums, "Point", 0) {
+            Some(Type::Struct(id, _)) => assert_eq!(id.index(), 0),
+            other => panic!("expected module 0's Point at index 0, got {other:?}"),
+        }
+        // Module 1's lookup finds index 1, disambiguated purely by module id
+        // even though the tagged `.name` ("q::Point__import3") never matches
+        // the queried "Point".
+        match find_type_in_module(&structs, &enums, "Point", 1) {
+            Some(Type::Struct(id, _)) => assert_eq!(id.index(), 1),
+            other => panic!("expected module 1's Point at index 1, got {other:?}"),
+        }
+        // A name absent from the queried module is `None`, not a stray hit on
+        // the other module's same-named decl.
+        assert!(find_type_in_module(&structs, &enums, "Point", 2).is_none());
+    }
 
     #[test]
     fn type_from_name_each_width_expected() {
