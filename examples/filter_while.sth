@@ -1,0 +1,24 @@
+\ Dogfood: Phase 4 slice 6b. The combinator half of a matched pair with
+\ `examples/filter_while_hand.sth`: both keep the elements of `scores` greater
+\ than 4 and count them, then run a fixpoint loop from 0 up to 5, one over
+\ `filter`/`while` from `lib/combinators.sth` and one hand-threaded, so the
+\ golden can pin them to the same output. `scores`' result is passed straight
+\ from the producer word into `filter`, never bound to a local first, so this
+\ does not trip 6a's bind-then-pass alias limitation.
+
+import: c "../lib/combinators.sth" ;
+
+: scores ( -- [i64 5] )
+  0 5 fill | s |
+  &!s 0 >usize &!> 3 !
+  &!s 1 >usize &!> 7 !
+  &!s 2 >usize &!> 1 !
+  &!s 3 >usize &!> 9 !
+  &!s 4 >usize &!> 5 !
+  s ;
+
+: main ( -- )
+  scores [ 4 > ] c::filter | n | | out | \ kept: 7 9 5, n = 3
+  n .
+  out drop
+  0 [ dup 5 < if 1 + true else false end ] c::while . ; \ fixpoint: 5
