@@ -986,42 +986,162 @@ fn while_body_reference_across_back_edge_is_error() {
     );
 }
 
-// -- criteria 14 / 14b: `while` is under the nested-loop limit ----------------
+// -- 6d criteria 5 / 6: `while` and `times` nest, the limit lifted -----------
 
 #[test]
-fn while_nested_in_a_loop_is_rejected() {
-    // Criterion 14 (R14a, load-bearing): a `while` opened inside a `times`
-    // body would nest two constant-stack loops, which lowering cannot hoist
-    // yet, so it is the located R18 nested-loop rejection -- decided one stage
-    // before lowering. Without R14a's guard this compiles (and miscompiles)
-    // instead of being rejected.
+fn while_inside_a_times_body_runs_to_fixpoint() {
+    // 6d criterion 5: a `while` opened inside a `times` body used to be the
+    // R14a nested-loop rejection; the hoist-target split lifts it, so the two
+    // constant-stack loops now share one frame. Each of the 3 outer iterations
+    // counts `0` up to `5` with the inner `while` and prints it.
     let src = format!(
         "{}: main ( -- )\n\
            3 [ | i | 0 [ dup 5 < if 1 + true else false end ] c::while . ] times ;\n",
         combinators_import("c")
     );
-    let err = build_check_error("while_in_times", &src);
-    assert!(
-        err.contains("nested in a loop"),
-        "a `while` inside a `times` body is the located nested-loop rejection, got: {err}"
+    let binary = build_binary("while_in_times", &src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out),
+        (Some(0), "5\n5\n5".to_string()),
+        "a `while` inside a `times` body runs to fixpoint each outer iteration"
     );
 }
 
 #[test]
-fn times_inside_a_self_tail_combinator_is_rejected() {
-    // Criterion 14b (R14b, load-bearing): a `times` sited inside `while`'s
-    // body (a self-tail combinator splice, which raises `loop_depth`) is the
-    // same located nested-loop rejection. Without R14b raising `loop_depth`
-    // across the self-tail splice this compiles instead of being rejected.
+fn times_inside_a_self_tail_combinator_body_runs() {
+    // 6d criterion 6: a `times` sited inside `while`'s body (a self-tail
+    // combinator splice) used to be the R14b nested-loop rejection; the split
+    // lifts it. The inner `times` runs twice per `while` step (its `[ | i | ]`
+    // body drops the index and leaves the row unchanged), and the `while`
+    // counts `0` up to `5`.
     let src = format!(
         "{}: main ( -- )\n\
            0 [ 2 [ | i | ] times dup 5 < if 1 + true else false end ] c::while . ;\n",
         combinators_import("c")
     );
-    let err = build_check_error("times_in_while", &src);
-    assert!(
-        err.contains("nested in a loop"),
-        "a `times` inside a self-tail combinator body is the located nested-loop rejection, got: {err}"
+    let binary = build_binary("times_in_while", &src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out),
+        (Some(0), "5".to_string()),
+        "a `times` inside a self-tail combinator body runs and the `while` reaches its fixpoint"
+    );
+}
+
+#[test]
+fn while_inside_a_while_body_runs() {
+    // 6d criterion 7 (and the recon-10 defect, criterion 8): a `while` nested
+    // in a `while` used to be R14b's rejection -- and, worse, reported the
+    // *bogus* "a `times` cannot be nested in a loop yet" for a program
+    // containing no `times` at all. The rejection is retired, so this now
+    // compiles and runs: the outer `while` counts `0` up to `3`, the inner
+    // `while` runs to its own fixpoint each step but drops its result.
+    let src = format!(
+        "{}: main ( -- )\n\
+           0 [ dup 3 < if 0 [ dup 2 < if 1 + true else false end ] c::while drop\n\
+                        1 + true else false end ] c::while . ;\n",
+        combinators_import("c")
+    );
+    let binary = build_binary("while_in_while", &src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out),
+        (Some(0), "3".to_string()),
+        "a `while` nested in a `while` compiles and runs, no longer the bogus `times` rejection"
+    );
+}
+
+// -- 6d criteria 1-4 / 9c: `times` nests, and the hoist-target split holds ---
+
+#[test]
+fn times_nested_in_a_times_runs_with_correct_output() {
+    // 6d criterion 1: a `times` nested in a `times` used to be the R18
+    // rejection; the split lifts it. The outer counts 3, the inner counts 2
+    // and adds 1 each inner iteration, so the accumulator is 3*2 = 6.
+    let (out, code) = run_src(
+        "times_in_times",
+        ": main ( -- ) 0 3 [ | i | 2 [ | j | 1 + ] times ] times . ;\n",
+    );
+    assert_eq!((out.as_str(), code), ("6\n", 0));
+}
+
+#[test]
+fn times_in_times_with_inner_allocation_runs() {
+    // 6d criterion 2: the inner body allocates (`0 4 fill`) every inner
+    // iteration. The split routes that `Alloc` to the invariant alloca home
+    // (reached once per call), so the value is still 3*2 = 6 and the frame
+    // does not grow; the constant-stack side is pinned by criterion 9c below.
+    let (out, code) = run_src(
+        "times_in_times_alloc",
+        ": main ( -- ) 0 3 [ | i | 2 [ | j | 0 4 fill | a | a drop 1 + ] times ] times . ;\n",
+    );
+    assert_eq!((out.as_str(), code), ("6\n", 0));
+}
+
+#[test]
+fn reentered_inner_accumulator_reseeds_per_outer_iteration() {
+    // 6d criterion 3 (load-bearing, mutation-test-required): recon 5's probe.
+    // The inner loop carries an aggregate accumulator seeded from a fresh
+    // `0 4 fill` each outer iteration, incremented 3 times, then read back.
+    // Because the seeding `Blit` stays in *this* loop's preheader (R3), not
+    // the alloca home, it re-seeds per outer entry: both outer iterations
+    // print `3`, giving `3\n3`. Hoisting the blit into the alloca home (R3
+    // reversed) seeds once per call, so the second outer iteration reads a
+    // stale `6` (or garbage) -- either way not `3\n3`. This is the slice-3
+    // aliasing class of bug and the single highest-risk regression.
+    let (out, code) = run_src(
+        "reseed_probe",
+        ": main ( -- )\n\
+           2 [ drop 0 4 fill 3 [ drop | a | &!a 0 >usize &!> 1 +! a ] times\n\
+               | b | &b 0 >usize &> @ . b drop ] times ;\n",
+    );
+    assert_eq!((out.as_str(), code), ("3\n3\n", 0));
+}
+
+#[test]
+fn three_deep_times_nesting_runs_in_constant_stack() {
+    // 6d criterion 4 (Q3): a three-deep `times`-in-`times`-in-`times`, the
+    // innermost body allocating each iteration, with a large outermost count.
+    // It computes 50_000 * 2 * 2 = 200_000 and runs to completion under a
+    // constrained `ulimit -s`, so arbitrary depth falls out of the
+    // per-function alloca home plus the recursively-nesting preheader
+    // save/restore.
+    let src = ": main ( -- )\n\
+         0 50000 [ | i | 2 [ | j | 2 [ | k | 0 8 fill | a | a drop 1 + ] times ] times ] times . ;\n";
+    let binary = build_binary("three_deep", src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out),
+        (Some(0), "200000".to_string()),
+        "a three-deep nesting runs to completion with correct output in constant stack"
+    );
+}
+
+#[test]
+fn nested_times_large_outer_holds_constant_stack() {
+    // 6d criterion 9c (load-bearing, mutation-test-required, D5): the frame
+    // grows as `outer_iterations * hoisted_bytes`, so the witness needs a
+    // *large outer* count and a small inner one, allocating per inner
+    // iteration. 200_000 outer * (2 inner * `0 32 fill`) segfaults on the
+    // default 8 MB stack with the alloca home reverted to `entry_block`
+    // (the hoist lands in the per-outer-iteration preheader); with the split
+    // it runs to completion (exit 0, prints 99) even at `ulimit -s 1024`. A
+    // large-inner / small-outer shape is explicitly NOT the witness: it
+    // passes while the bug is live (recon 4).
+    let src =
+        ": main ( -- ) 200000 [ drop 2 [ drop 0 32 fill | a | a drop ] times ] times 99 . ;\n";
+    let binary = build_binary("nested_big_outer", src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out),
+        (Some(0), "99".to_string()),
+        "a large-outer nested loop allocating per inner iteration runs in constant stack (would SIGSEGV, exit None, with the alloca home reverted to entry_block)"
     );
 }
 
