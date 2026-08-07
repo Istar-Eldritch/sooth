@@ -340,10 +340,59 @@ one piped-stdin session: a qualified word and accessor, a redefine-and-reimport 
 frozen caller beside a fresh resolution, the `main`-in-a-library rejection, and a
 selective import called unqualified.
 
-**Next action: Phase 4 item 6** (the combinator library in Sooth + inlining + closing
-the polymorphic-path gaps): `each`/`map`/`filter`/`fold`/`while` as ordinary library
-words over quotations, with the compiler's first inliner making them lower to tight
-loops instead of a `call` per element.
+**Phase 4 Slice 6a (quotation types in signatures + the inliner + `each`/`map`/`fold`) is
+complete**: `Type`/`PolyType` gain a `Quotation` variant carrying an interned declared
+effect (`[ 'T -- ]`), with unification and `apply_subst` following, so a word may declare a
+quotation parameter and be checked standalone against it — no `IrType` variant and no
+"statically known" bit (D6): knownness stays a predicate on the value (`Slot.quot`), and
+every other type position (a struct field, an array element, a cell payload, a reference
+referent, a word's output, an `extern:` boundary, `main`, nesting inside another effect) is
+a located rejection naming slice 7. `call`/`times` accept an *abstract* quotation typed only
+by a declared parameter, beside the literal they accept today; a quotation literal passed to
+a declared parameter is checked directionally against the declared effect, enforcing a
+`Copy`-only capture restriction (D3) at the literal. Every call to a quotation-taking word is
+inlined by term-splicing the callee's AST body against the caller's live stack — the
+compiler's only inliner, forced by there being no `IrFunc` for a quotation-taking word to
+call (D2) — transitively and totally: anything un-inlinable, starting with recursion among
+quotation-taking words, is a located error, never a silent real call (D5). The transitive
+case is a combinator forwarding its own quotation *parameter* to a nested combinator, which
+splices through both frames. `each`/`map`/`fold` are ordinary polymorphic Sooth words at
+`lib/combinators.sth` (D8), each a **leaf** combinator driving a `times` loop directly over
+an array's elements and handing one to its quotation parameter per iteration, verified to
+lower to a tight loop with no per-element `Instr::Call`, and verified to match a
+hand-threaded `times` twin across a sweep of stack limits. `map`/`fold` are *not* built on
+`each`, but on cost grounds, not impossibility: `fold` and `map` over `each` are both
+expressible (the accumulator rides a captured one-element array reached by balanced `&`/`&!`
+borrows, which D3 accepts). Because inlining is total, library composition depth is code
+size at every call site, so building `map` on `each` would make every `map` call site depth
+2 plus an extra array copy and a counter cell, where a leaf keeps the library flat at depth
+
+1. **"When to inline" becomes a real question only at slice 7, when a runtime representation
+first makes a genuine choice possible; until then "always" is the only implementable answer,
+and a budget would be actively harmful, since exceeding it could only be a compile error.** Native only: the REPL is a located rejection at
+both the defining line and an imported closure exporting a quotation-taking word (D7),
+lifted by 6c. `examples/array_totals.sth` dogfoods it against its
+hand-threaded twin `examples/array_totals_hand.sth` (three manual `times` loops): three
+one-line combinator calls run to the same total and doubled elements the twin does.
+
+Two pre-existing defects 6a measured but deliberately did not fix, for a later slice to pick
+up: `fill`'s compile cost is superlinear in the array length (10k ~ 0.36s, 100k ~ 25s, 1M >
+300s, and a hand-threaded loop is equally slow, so it is the array machinery and not the
+inliner), which is why 6a's constant-stack criterion is an equivalence-plus-correctness
+witness at 10k (equal exit code and stdout against the hand-threaded twin) rather than the
+1M run first specified; and every native `build` diagnostic prints a doubled `error: error:`
+prefix, because the ~165 error constructors embed `error:` and `src/main.rs` prepends
+another. A separate repo-wide diagnostic defect *was* fixed during the review sequence:
+every diagnostic naming a word leaked the internal `__m0` monomorphization mangling whenever
+the module had an import (predating 6a, arriving with module support), and the now-unreachable
+`demangle_local` was deleted as dead code.
+
+**Next action: Phase 4 Slice 6b** (`filter`/`while`, and the self-tail combinator loop). Its
+paper pre-check (`docs/phase4-slice6b-brief.md`) falsified this slice's original charter by
+building the programs: `filter` needs no compiler change at all, and `while`'s blocker is
+6a's own combinator-cycle rejection rather than either "polymorphic-path gap", both of which
+stay in place. The work is relaxing that rejection for a self-*tail* combinator edge and
+lowering it to a splice-time loop back-edge.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1210,19 +1259,32 @@ then find out what the compiler owes it.
    with a quotation-taking word at the REPL a located rejection.
    Dogfood: rewrite an earlier program to use `each`/`map`/`fold`.
 
-   **6b — the polymorphic-path gaps + `filter`/`while`.** Closes the two polymorphic-path
-   gaps slice 4's brief measured, because this is where their first real consumers appear.
-   A polymorphic body rejects `if` (`src/check.rs:2997`: the monomorphic arm machinery,
-   condition-pop, per-arm unconsumed-linear check, and move-join, is not lifted to
-   `PolyType`), and a polymorphic self-tail word does not get the loop transform
-   (`src/ir.rs:1176`, `self_tail` hardcoded `false`). They are siblings: both are machinery
-   the monomorphic path has and the polymorphic path lacks. Neither blocked slice 4 or 6a's
-   phase-exit words. They block exactly two library words: `filter` needs the `if` fix to
-   branch on its predicate, and `while` needs **both**, being unbounded (so `times` cannot
-   express it) and naturally written as a self-recursive polymorphic word. Depends on 6a for
-   the inliner and the library's file/shape; decide at its brief whether a fixed-up poly
-   body needs any inliner change of its own or whether 6a's pass already covers it unchanged.
-   **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are.
+   **6b — `filter`/`while`, and the self-tail combinator loop.** *This entry previously said
+   the slice closes the two "polymorphic-path gaps" slice 4's brief measured. Its own paper
+   pre-check falsified that, by building the programs (see
+   `docs/phase4-slice6b-brief.md`); the charter below is the corrected one.*
+   Neither named gap is what `filter`/`while` need, and both are left in place. A combinator
+   is checked by term-splicing at the *concrete* call site, never through `poly_term`, so the
+   polymorphic-`if` rejection never gates one: `filter` compiles and runs today with **no
+   compiler change at all**, `if`/`else` and all. And a polymorphic body cannot call any
+   polymorphic word, self or other (`unknown word` in `poly_call_term`, long before
+   lowering), which makes the `src/ir.rs` poly-instantiation `self_tail` hardcode currently
+   *unreachable*: no poly word can self-call to reach it.
+   `while`'s actual blocker is 6a's own D5 combinator-cycle rejection ("a quotation-taking
+   word cannot be recursive"), which fires identically for a *monomorphic* self-recursive
+   combinator, so it is not a polymorphism question at all. The work is therefore: relax D5
+   for a self-*tail* combinator edge only (non-tail self-calls and mutual cycles stay hard
+   errors, they need slice 7's runtime quotation), and lower that edge to a loop back-edge at
+   splice time, reusing the mid-body loop `times` already opens (brief D8; specializing the
+   combinator into a monomorphic `IrFunc` was weighed and rejected, since it reopens 6a's
+   "inlining is total" and "a combinator mints no symbol"). The tail-vs-non-tail distinction
+   is a *checker* change, not just IR work: `check_combinator_cycles` builds its edges from
+   `all_calls`, which erases it.
+   Ships `while` inheriting the R18 nested-loop limit that `each`/`map`/`fold` already have
+   (brief D9); 6d lifts it for all of them at once. Depends on 6a for the inliner and the
+   library's file/shape.
+   **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are,
+   with `while` running in constant stack and a non-tail combinator self-call still rejected.
 
    **6c — quotation-taking words at the REPL.** Lifts 6a's located rejection: what it means
    to define and call a combinator in a live session. The problem is retention, the same
@@ -1235,6 +1297,31 @@ then find out what the compiler owes it.
    its order against 6b is free. **Exit:** a session defining a quotation-taking word,
    calling it, and redefining it, with the frozen-binding rule holding across the
    redefinition.
+   **6d — nested constant-stack loops (the hoist-target split).** Lifts R18, which today
+   rejects any `times` reached while a loop is already open. The limit is not hypothetical
+   and not confined to a future `while`: it bites every combinator 6a shipped, because each
+   one drives its own `times`. `2 [ | i | mk [ . ] c::each ] times` is a hard error today
+   ("a `times` cannot be nested in a loop yet"), so no combinator composes inside a loop,
+   and the rejection is a deferral rather than a design decision.
+   **The cause is one field doing two jobs.** `FuncBuilder::entry_block` (`src/ir.rs:2226`)
+   is simultaneously the alloca home and the loop preheader. It must be the function's true
+   entry block for allocation, since QBE's alloca bumps the frame pointer on every execution
+   and never reclaims within a function, so an `Alloc` reached per-iteration grows the frame
+   until the constant-stack guarantee is worthless. It must be the *loop's* preheader for a
+   carried aggregate's stable-slot seeding blit, which has to run once per entry to that
+   loop. Those two blocks coincide at exactly one loop level and diverge the moment loops
+   nest, which is the whole of the bug. The fix is to split the field: an invariant alloca
+   home, and a per-loop preheader. The rest of the loop state (`header`, `carried_slots`,
+   `back_edges`) already saves and restores around a nested region (`src/ir.rs:2609-2687`,
+   the `times` arm), so the phi bookkeeping is largely present already.
+   **Handle with care, and not as a rider on another slice.** This is the same loop-lowering
+   code where the aggregate-return aliasing bug landed (see the Phase 4 slice 3 note above),
+   whose fix, one entry-hoisted stable slot per carried aggregate plus an unconditional
+   read-before-write staged blit on the back-edge, is exactly the invariant that rearranging
+   hoist targets can silently break. Its guards want mutation-testing, not just a green run.
+   Depends on 6a for its consumers; independent of 6b and 6c, and orderable against either.
+   **Exit:** a combinator called inside a `times` body compiles and runs in constant stack,
+   with a nested-loop golden and the slice-3 aliasing guards still green.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an

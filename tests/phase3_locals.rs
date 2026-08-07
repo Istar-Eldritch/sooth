@@ -2,10 +2,11 @@
 //! body, with its extent running to the end of the enclosing block.
 
 use std::io::Write;
-use std::path::Path;
 use std::process::{Command, Stdio};
 
 use sooth::{check, lexer, parser};
+
+mod common;
 
 /// Run a scripted REPL session (one input line per element of `lines`) and
 /// return the whole captured stdout, mirroring `tests/phase1.rs`'s helper.
@@ -471,7 +472,7 @@ fn vm_with_mid_body_binding_matches_previous_output() {
         code.contains("| v x |"),
         "the Store clause should still bind both operands"
     );
-    let binary = sooth::driver::build(Path::new("examples/vm.sth")).expect("build should succeed");
+    let binary = common::build_example("examples/vm.sth");
     let output = std::process::Command::new(&binary)
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
         .output()

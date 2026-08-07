@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{
     instantiation_symbol, intern_array_type, intern_bundle_struct, intern_owned_cell_type,
     intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId, ExternDecl, Len, Module,
-    OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, StructId, Subst,
-    Term, TermKind, Type, VariantDecl, WordBody, WordDef,
+    OwnedCellDecl, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
+    Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -47,6 +47,22 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 struct PolyCtx<'a> {
     env: &'a HashMap<String, (PolySig, Option<u64>)>,
     insts: &'a mut HashMap<Span, CallInst>,
+    /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
+    /// so a call to one is intercepted and its body spliced against the live
+    /// stack (the compiler's only inliner) rather than lowered to an
+    /// `Instr::Call` to a word that mints no `IrFunc` (R20). Empty on the REPL
+    /// paths, where defining such a word is rejected up front (R23).
+    combinators: &'a HashMap<String, Combinator<'a>>,
+}
+
+/// Slice 6a (R18): one monomorphic quotation-taking word available to inline.
+/// Both fields are shared references into the module, so a `Combinator` is a
+/// pair of pointers (`Copy`), which lets a call site copy it out of the
+/// borrowed map and then reborrow `PolyCtx` mutably for the splice.
+#[derive(Clone, Copy)]
+struct Combinator<'a> {
+    word: &'a WordDef,
+    terms: &'a [Term],
 }
 
 /// One simulated stack slot: its concrete `Type`, plus whether it is a bare,
@@ -407,6 +423,13 @@ struct Provenance {
     /// rejection; `scope.depth()` cannot substitute, since it counts every
     /// block, not only a `times`.
     times_depth: usize,
+    /// R18/R21: a monotonic counter minting a fresh suffix each time a
+    /// combinator body is spliced, so the callee's `| ... |` locals are
+    /// alpha-renamed to names no caller local (or outer combinator, under
+    /// transitive inlining) can collide with. Term-splice binds names in the
+    /// caller's scope (R18: binding, not string rewriting), so without this a
+    /// nested `each` inside a `map` would re-bind the outer `arr`/`f`.
+    inline_uid: u32,
 }
 
 impl Provenance {
@@ -863,7 +886,13 @@ enum BlockEnd {
 /// works identically whether the caller is a compiled word or a REPL line.
 enum Ctx<'a> {
     Word {
+        /// Demangled, so every diagnostic that interpolates it is correct by
+        /// default: `resolve` rewrites module 0's decls to `{name}__m{module}`
+        /// as soon as a file has an import, and `check` runs on those names.
+        /// Self-tail recognition compares against mangled *call* names, so it
+        /// reads `mangled` instead.
         name: &'a str,
+        mangled: &'a str,
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
@@ -884,7 +913,8 @@ enum Ctx<'a> {
 /// binding-name rejections so all of them cite the same declared effect.
 fn word_ctx<'a>(word: &'a WordDef, structs: &'a [StructDecl], enums: &'a [EnumDecl]) -> Ctx<'a> {
     Ctx::Word {
-        name: &word.name,
+        name: crate::resolve::demangle_word(&word.name),
+        mangled: &word.name,
         effect: &word.effect,
         structs,
         enums,
@@ -910,6 +940,13 @@ impl Ctx<'_> {
     fn word_name(&self) -> Option<&str> {
         match self {
             Ctx::Word { name, .. } => Some(name),
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    fn mangled_name(&self) -> Option<&str> {
+        match self {
+            Ctx::Word { mangled, .. } => Some(mangled),
             Ctx::Line { .. } => None,
         }
     }
@@ -1025,6 +1062,205 @@ fn duplicate_drop_overload_error(word: &WordDef, target: &StructDecl) -> String 
 /// registry `ir::lower` then reads, so the checker and the layout builder
 /// share one `ArrayId` numbering. `check` runs before `lower`, so the
 /// interned shapes are present when codegen consults them.
+/// R7a: the type-position audit. A quotation type reaches every type position
+/// the parser accepts (R2 routes it through `parse_type_expr`), but this slice
+/// gives it a runtime representation at none of them: the one legal position
+/// is a **direct input in a word's declared effect** (the quotation parameter
+/// this slice adds). Every other position is a located rejection naming the
+/// position and the offending type, pointing at slice 7 as the lift. This is
+/// what makes R7's `unreachable!` arms sound rather than hopeful (the slice-4
+/// audit-sweep shape, now for quotation *types*).
+fn audit_quotation_type_positions(module: &Module) -> Result<(), String> {
+    audit_quotation_type_registries(
+        &module.structs,
+        &module.enums,
+        &module.arrays,
+        &module.owned_cells,
+        &module.refs,
+    )?;
+    for w in &module.words {
+        audit_word_quotation_positions(w)?;
+    }
+    for decl in &module.externs {
+        for slot in decl.effect.inputs.iter().chain(&decl.effect.outputs) {
+            reject_quotation_type_position(
+                slot.ty,
+                &format!("an `extern:` boundary type of `{}`", decl.name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// R7a (REPL, item 2): the registry half of the audit, over exactly the shared
+/// type registries. A quotation type never legally enters any of these (its
+/// one legal home is a direct word parameter, stored in the word's `Sig`, and
+/// a declared effect is interned separately), so re-scanning them per REPL
+/// line is a safe, idempotent invariant. Split out so the REPL's `type:` and
+/// `:` chokepoints run the same rejections as the native `check`, which the
+/// REPL's `check_types`-only path skipped (a quotation in an audited position
+/// then reached `ir_type_of`'s `unreachable!`, bricking the session).
+pub(crate) fn audit_quotation_type_registries(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+) -> Result<(), String> {
+    for s in structs {
+        for (fname, fty) in &s.fields {
+            reject_quotation_type_position(
+                *fty,
+                &format!("the field `{fname}` of struct `{}`", s.name),
+            )?;
+        }
+    }
+    for e in enums {
+        for v in &e.variants {
+            for (fname, fty) in &v.fields {
+                reject_quotation_type_position(
+                    *fty,
+                    &format!(
+                        "the field `{fname}` of enum variant `{}::{}`",
+                        e.name, v.name
+                    ),
+                )?;
+            }
+        }
+    }
+    for a in arrays {
+        reject_quotation_type_position(a.element, "an array element")?;
+    }
+    for c in cells {
+        reject_quotation_type_position(c.payload, "an owned-cell payload")?;
+    }
+    for r in refs {
+        reject_quotation_type_position(r.referent, "a reference referent")?;
+    }
+    Ok(())
+}
+
+/// R7a (REPL, item 2): the per-word half of the audit -- a quotation in a
+/// word's *output* row, a clause-bodied combinator, `main` taking one, or a
+/// quotation nested inside a declared effect. A direct quotation *parameter*
+/// (the one legal position) is accepted here and rejected separately at the
+/// REPL (R23), which discards word bodies the inliner needs.
+pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> {
+    let word = crate::resolve::demangle_word(&w.name);
+    for slot in &w.effect.outputs {
+        reject_quotation_type_position(slot.ty, &format!("the output of `{word}`"))?;
+    }
+    // R18/R7a: a monomorphic word taking a quotation is a combinator,
+    // which the inliner supports only with a *term* body (it splices the
+    // body against the live stack); a clause body cannot be spliced, so
+    // such a word would mint an `IrFunc` with a quotation parameter and
+    // reach `ir_type_of`'s `unreachable!` arm (R7). Reject it here, with
+    // the type positions, so that arm stays unreached. (A poly word's
+    // effect is empty and is checked on the poly path, phase 2.)
+    if w.poly.is_none()
+        && matches!(w.body, WordBody::Clauses(_))
+        && w.effect
+            .inputs
+            .iter()
+            .any(|s| matches!(s.ty, Type::Quotation(_)))
+    {
+        return Err(clause_bodied_quotation_word_error(word));
+    }
+    for slot in &w.effect.inputs {
+        if let Type::Quotation(eff) = slot.ty {
+            // `main` takes no quotation: it is an entry point, not a
+            // combinator (D6/R28).
+            if w.name == "main" {
+                reject_quotation_type_position(slot.ty, "an input of `main`")?;
+            }
+            // A quotation nested inside a quotation effect (a quotation
+            // taking a quotation) is deferred to slice 7, rejected rather
+            // than half-supported.
+            for t in eff.inputs.iter().chain(&eff.outputs) {
+                reject_quotation_type_position(*t, "nested inside a quotation effect")?;
+            }
+        }
+    }
+    // A polymorphic word carries its signature in `w.poly`, not `w.effect`
+    // (which is empty), so the output-position and nested-in-effect audits
+    // above never see it. Run the same rejections over the poly signature,
+    // driven by one recursive enumeration (item 2): a quotation may hide in a
+    // poly *array element* (`[ [ 'T -- ] 3 ]`), which the earlier shallow
+    // audit never descended into.
+    if let Some(sig) = &w.poly {
+        for pt in &sig.outputs {
+            reject_poly_quotation_anywhere(pt, sig, &format!("the output of `{word}`"))?;
+        }
+        for pt in &sig.inputs {
+            audit_poly_input_quotation(pt, sig)?;
+        }
+    }
+    Ok(())
+}
+
+/// R7a (poly path, item 2): audit a poly word *input*, where a direct
+/// quotation is the one legal position (the combinator's parameter). The
+/// parameter itself is accepted, but a quotation buried inside it -- an array
+/// element (`[ [ 'T -- ] 3 ]`), or nested in the parameter's own effect rows
+/// -- is rejected.
+fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String> {
+    match pt {
+        PolyType::Quotation(ins, outs) => {
+            for t in ins.iter().chain(outs) {
+                reject_poly_quotation_anywhere(t, sig, "nested inside a quotation effect")?;
+            }
+            Ok(())
+        }
+        PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
+        PolyType::Concrete(_) | PolyType::Var(_) => Ok(()),
+    }
+}
+
+/// R7a (poly path, item 2): reject a quotation type appearing *anywhere*
+/// inside `pt` -- as the whole position, as an array element, or nested in a
+/// quotation effect -- naming the innermost position. Driving every poly
+/// non-parameter position from one recursive enumeration is what keeps R7's
+/// default-deny `unreachable!` arms sound: a quotation buried in a poly array
+/// element must not slip past the audit and reach `ir_type_of`. A
+/// fully-concrete quotation folds to `Concrete(Type::Quotation)`, so route
+/// that through the monomorphic rejection to share the rendering.
+fn reject_poly_quotation_anywhere(
+    pt: &PolyType,
+    sig: &PolySig,
+    position: &str,
+) -> Result<(), String> {
+    match pt {
+        PolyType::Concrete(ty) => reject_quotation_type_position(*ty, position),
+        PolyType::Var(_) => Ok(()),
+        PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
+        PolyType::Quotation(..) => Err(format!(
+            "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+            poly_type_str(pt, sig),
+        )),
+    }
+}
+
+/// R18/R7a: a monomorphic quotation-taking word with a clause body cannot be
+/// inlined (a clause body is not a splice-able term list), so it is rejected
+/// rather than left to panic at lowering. Slice 7's runtime quotation value
+/// lifts it (the word would then `call` a real value, no inlining needed).
+fn clause_bodied_quotation_word_error(word: &str) -> String {
+    format!(
+        "error: the quotation-taking word `{word}` has a clause body; a quotation parameter is only supported on a word with a term body this slice (its body is inlined at each call site, and a clause body cannot be spliced), and a runtime quotation value is slice 7",
+    )
+}
+
+/// R7a: reject `ty` if it is a quotation type, naming the position and slice 7.
+fn reject_quotation_type_position(ty: Type, position: &str) -> Result<(), String> {
+    if let Type::Quotation(eff) = ty {
+        return Err(format!(
+            "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+            eff.name_static,
+        ));
+    }
+    Ok(())
+}
+
 pub fn check(module: &mut Module) -> Result<(), String> {
     // R1: recognized ahead of `check_types` so the ordering hazard against
     // `check_recursion` (run inside `check_types`) never arises.
@@ -1044,6 +1280,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         &module.arrays,
         &module.owned_cells,
     )?;
+
+    // R7a: a quotation type is legal only as a direct word parameter this
+    // slice; reject it at every other position before layout or lowering can
+    // see it, so R7's `unreachable!` mangling/`IrType` arms stay unreached.
+    audit_quotation_type_positions(module)?;
 
     let mut env = builtin_table();
     for (name, sig) in struct_generated_sigs(&module.structs) {
@@ -1091,10 +1332,6 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         }
     }
 
-    // Reject mutual tail-recursion cycles (D3, X1) on the whole-module
-    // tail-call graph, after signature registration and before body checking.
-    check_tail_call_cycles(&module.words, &drop_overload_indices)?;
-
     check_main_effect(
         &module.words,
         &module.structs,
@@ -1119,6 +1356,23 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // type by the walk that checks it. Collected per word so the graph below
     // knows which body each site sits in.
     let mut dropped: Vec<Vec<Type>> = Vec::with_capacity(words.len());
+    // R18: the monomorphic quotation-taking words, gathered once so a call to
+    // one is intercepted and inlined (term-splice) rather than lowered to a
+    // call. A polymorphic combinator's body is checked by the poly pass, so it
+    // is not registered here; only a `WordBody::Terms` monomorphic word with a
+    // `Type::Quotation` input qualifies.
+    let combinators = collect_combinators(words);
+    // R22 (D5): reject a cycle in the quotation-taking-word call subgraph
+    // before any body is checked, so the splice below may assume acyclicity.
+    // Ordered *before* `check_tail_call_cycles`: a combinator's call to
+    // another combinator is inlined (spliced), never lowered as a tail call,
+    // so a combinator cycle is a splice-forever error (this pass), not mutual
+    // tail recursion -- running the tail-cycle pass first would misreport a
+    // combinator cycle whose edges happen to sit in tail position.
+    check_combinator_cycles(&combinators)?;
+    // Reject mutual tail-recursion cycles (D3, X1) on the whole-module
+    // tail-call graph, after signature registration and before body checking.
+    check_tail_call_cycles(words, &drop_overload_indices)?;
     // R14: the per-call-site instantiation table, filled as each monomorphic
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
@@ -1126,13 +1380,43 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
-            // R7: a polymorphic body is checked over a `PolyType` stack by a
-            // dedicated pass, deliberately separate from the concrete walk.
-            check_poly_body(word, sig, &env, structs, enums, arrays)?;
+            if is_combinator(word) {
+                // R14-R17: a polymorphic combinator (`each`/`map`/`fold`) is
+                // checked standalone by instantiating its signature at
+                // concrete stand-in types and running the ordinary checker on
+                // the body, which already handles the abstract quotation
+                // `call`/`times` (R8/R9) and the three `times` obligations
+                // (R16). It mints no `IrFunc` (R20): a call to it is inlined
+                // by term-splice at its concrete call sites, so the
+                // instantiation records it produces here are scratch.
+                let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+                let mut poly = PolyCtx {
+                    env: &poly_env,
+                    insts: &mut scratch,
+                    combinators: &combinators,
+                };
+                check_poly_combinator_standalone(
+                    word,
+                    sig,
+                    enums,
+                    &env,
+                    arrays,
+                    owned_cells,
+                    refs,
+                    structs,
+                    &mut poly,
+                )?;
+            } else {
+                // R7: a polymorphic body is checked over a `PolyType` stack by
+                // a dedicated pass, deliberately separate from the concrete
+                // walk.
+                check_poly_body(word, sig, &env, structs, enums, arrays)?;
+            }
         } else {
             let mut poly = PolyCtx {
                 env: &poly_env,
                 insts: &mut insts,
+                combinators: &combinators,
             };
             check_word(
                 word,
@@ -1459,6 +1743,14 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         PolyType::Concrete(ty) => out.push(*ty),
         PolyType::Var(_) => {}
         PolyType::Array(elem, _) => collect_poly_concrete(elem, out),
+        // Slice 6a (R5): a declared quotation effect's rows may name concrete
+        // types (`[ i64 -- ]`); collect them so export-privacy still sees a
+        // private type mentioned inside an effect.
+        PolyType::Quotation(ins, outs) => {
+            for t in ins.iter().chain(outs) {
+                collect_poly_concrete(t, out);
+            }
+        }
     }
 }
 
@@ -1868,7 +2160,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         | Type::Usize
         | Type::Isize
         | Type::Str
-        | Type::Cstr => None,
+        | Type::Cstr
+        // Slice 6a: a quotation type has no runtime layout (D6), so it is not
+        // a value-containment node; like a reference it closes no size cycle.
+        | Type::Quotation(_) => None,
     }
 }
 
@@ -2083,9 +2378,13 @@ pub fn check_def_collecting_drop_sites(
     // collector passes the empty map (a `drop` overload is never polymorphic),
     // keeping the reachability walk byte-identical on the concrete path (D2).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // R23: a quotation-taking word cannot be defined at the REPL, so the
+    // session has no combinators to inline; the map is empty here.
+    let no_combinators: HashMap<String, Combinator> = HashMap::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
+        combinators: &no_combinators,
     };
     check_word(
         word, enums, &env, arrays, cells, refs, structs, &mut sites, &mut poly,
@@ -2145,9 +2444,12 @@ pub fn infer_line(
     // relayed to the caller for lowering. A `build`-path caller passes the
     // empty map (Slice 1's D2 behaviour).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // R23: no session-defined combinators to inline (see `infer_line`'s twin).
+    let no_combinators: HashMap<String, Combinator> = HashMap::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
+        combinators: &no_combinators,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, false, &mut poly,
@@ -2160,7 +2462,7 @@ pub fn infer_line(
     // phantom the spill would marshal. Reject a quotation left here.
     if final_stack.iter().any(|s| s.quot.is_some()) {
         return Err(
-            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (higher-order values are Phase 6)".to_string(),
+            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (a runtime quotation value is slice 7)".to_string(),
         );
     }
     // The sixth position of the no-stored-reference rule: the session's
@@ -2324,7 +2626,7 @@ fn check_outputs(
         }
         return Err(format!(
             "error: stack effect mismatch in `{}` (line {})\n  body leaves {} values, but ( … ) declares {} outputs\n  note: declared {}",
-            word.name, line, final_stack.len(), declared.len(), effect_str(&word.effect),
+            crate::resolve::demangle_word(&word.name), line, final_stack.len(), declared.len(), effect_str(&word.effect),
         ));
     }
     for (found, want) in final_stack.iter().zip(declared) {
@@ -2505,7 +2807,10 @@ fn find_tail_cycle(
 /// X1: a located mutual-tail-recursion error naming the cycle members in
 /// order, closing the loop back to the first (e.g. `` `a` -> `b` -> `a` ``).
 fn mutual_tail_recursion_error(words: &[WordDef], cycle: &[usize]) -> String {
-    let mut chain: Vec<&str> = cycle.iter().map(|&i| words[i].name.as_str()).collect();
+    let mut chain: Vec<&str> = cycle
+        .iter()
+        .map(|&i| crate::resolve::demangle_word(words[i].name.as_str()))
+        .collect();
     chain.push(chain[0]);
     let rendered = chain
         .iter()
@@ -2881,7 +3186,7 @@ fn check_terms_word(
         if names.len() > inputs {
             return Err(format!(
                 "error: stack effect mismatch in `{}`\n  locals bind {} value(s), but only {} input(s) are declared\n  note: declared {}",
-                word.name,
+                crate::resolve::demangle_word(&word.name),
                 names.len(),
                 inputs,
                 effect_str(&word.effect),
@@ -2940,7 +3245,7 @@ fn check_clause_word(
             _ => {
                 return Err(format!(
                     "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
-                    word.name,
+                    crate::resolve::demangle_word(&word.name),
                     effect_str(&word.effect),
                 ));
             }
@@ -2948,7 +3253,7 @@ fn check_clause_word(
         _ => {
             return Err(format!(
                 "error: clause-style body on `{}` whose top input is not an enum\n  note: declared {}",
-                word.name,
+                crate::resolve::demangle_word(&word.name),
                 effect_str(&word.effect),
             ));
         }
@@ -2981,7 +3286,7 @@ fn check_clause_word(
                 "error: unknown variant `{}` of enum `{}` in clause-style `{}` (line {}){}",
                 clause.variant,
                 enum_name,
-                word.name,
+                crate::resolve::demangle_word(&word.name),
                 clause.span.line,
                 clause_variant_ambiguity_note(&clause.variant),
             ));
@@ -2991,7 +3296,7 @@ fn check_clause_word(
                 "error: duplicate clause for variant `{}` of enum `{}` in `{}` (line {}){}",
                 clause.variant,
                 enum_name,
-                word.name,
+                crate::resolve::demangle_word(&word.name),
                 clause.span.line,
                 clause_variant_ambiguity_note(&clause.variant),
             ));
@@ -3135,6 +3440,9 @@ fn poly_is_copy(
         PolyType::Concrete(t) => is_copy(*t, structs, enums, arrays),
         PolyType::Var(v) => sig.has_bound(*v, Bound::Copy),
         PolyType::Array(elem, _) => poly_is_copy(elem, sig, structs, enums, arrays),
+        // Slice 6a (D3): a quotation parameter is always `Copy`, so it may be
+        // called repeatedly and carries no move obligation.
+        PolyType::Quotation(..) => true,
     }
 }
 
@@ -3165,6 +3473,83 @@ impl PolyScope {
     }
 }
 
+/// R14-R17: check a polymorphic combinator standalone by instantiating its
+/// signature at concrete stand-in types and running the ordinary concrete
+/// checker on the body. `i64` is Copy/Ord/numeric, so a body that only moves,
+/// reads, and hands an element to its quotation parameter checks exactly as it
+/// will at every Copy instantiation; the abstract `call`/`times` paths (R8/R9)
+/// type `f call`/`f times` against the declared effect, and the three `times`
+/// obligations (R16) fall out of the ordinary `times` check at the def site.
+/// Instantiating every type variable at the same `i64` cannot mask a real
+/// error the library relies on: the combinators never combine two distinct
+/// element/accumulator variables directly (that arithmetic lives in the
+/// caller's literal), and a type-specific misuse in some other combinator's
+/// body is caught at its concrete splice site, the same place obligation 2's
+/// borrow re-check lands (D4/R21). The array length is irrelevant to type
+/// checking (`times` supplies a runtime index), so any value serves.
+#[allow(clippy::too_many_arguments)]
+fn check_poly_combinator_standalone(
+    word: &WordDef,
+    sig: &PolySig,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    structs: &[StructDecl],
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    const STANDALONE_LEN: u32 = 4;
+    let ctx = word_ctx(word, structs, enums);
+    let span = word_span(word);
+    let mut subst = Subst::default();
+    for v in 0..sig.ty_var_names.len() as u32 {
+        subst.ty.push((v, Type::I64));
+    }
+    for ln in 0..sig.len_var_names.len() as u32 {
+        subst.len.push((ln, STANDALONE_LEN));
+    }
+    let mut inputs = Vec::with_capacity(sig.inputs.len());
+    for pty in &sig.inputs {
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        inputs.push(TypedSlot { name: None, ty });
+    }
+    let mut outputs = Vec::with_capacity(sig.outputs.len());
+    for pty in &sig.outputs {
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        outputs.push(TypedSlot { name: None, ty });
+    }
+    let terms = match &word.body {
+        WordBody::Terms { terms } => terms.clone(),
+        WordBody::Clauses(_) => {
+            return Err(format!(
+                "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
+                crate::resolve::demangle_word(&word.name)
+            ));
+        }
+    };
+    // A concrete stand-in for the combinator, checked by the ordinary path.
+    let concrete = WordDef {
+        name: word.name.clone(),
+        effect: StackEffect { inputs, outputs },
+        body: WordBody::Terms { terms },
+        poly: None,
+        module: word.module,
+    };
+    let mut dropped = Vec::new();
+    check_word(
+        &concrete,
+        enums,
+        env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &mut dropped,
+        poly,
+    )
+}
+
 /// R7: check a polymorphic word's body once, over a virtual stack of
 /// `PolyType` (never the concrete `Slot` stack, S1/R4). Seeded from the
 /// declared fixed inputs; the input row variable is an opaque below-stack
@@ -3189,7 +3574,7 @@ pub fn check_poly_body(
         WordBody::Clauses(_) => {
             return Err(format!(
                 "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
-                word.name
+                crate::resolve::demangle_word(&word.name)
             ));
         }
     };
@@ -3507,6 +3892,11 @@ fn poly_copy_gate(
         PolyType::Array(elem, _) => {
             poly_copy_gate(elem, op, sig, ctx, span, structs, enums, arrays)
         }
+        // Unreachable: `poly_is_copy` returns `true` for a quotation effect
+        // (D3), so this gate returns above before reaching the error arm.
+        PolyType::Quotation(..) => {
+            unreachable!("a quotation effect is always Copy (D3); the gate returns above")
+        }
     }
 }
 
@@ -3709,8 +4099,56 @@ fn unify_poly_input(
                 }
             }
         }
+        // Slice 6a (R6): a declared quotation parameter unifies against a
+        // concrete quotation slot by matching rows pointwise, binding any
+        // variable a row mentions (`[ 'T -- ]` against `[ i64 -- ]` binds
+        // `'T = i64`). Equal arity is required on both sides; else it is a
+        // located mismatch, never a silent bind.
+        PolyType::Quotation(ins, outs) => {
+            let Type::Quotation(eff) = slot_ty else {
+                return Err(type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    crate::ast::quotation_type(Vec::new(), Vec::new()),
+                    slot_ty,
+                ));
+            };
+            if ins.len() != eff.inputs.len() || outs.len() != eff.outputs.len() {
+                return Err(type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    poly_quotation_concrete_hint(ins, outs, subst),
+                    slot_ty,
+                ));
+            }
+            for (p, c) in ins.iter().zip(&eff.inputs) {
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, subst)?;
+            }
+            for (p, c) in outs.iter().zip(&eff.outputs) {
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, subst)?;
+            }
+        }
     }
     Ok(())
+}
+
+/// A best-effort concrete rendering of a declared quotation effect for an
+/// arity-mismatch diagnostic: any already-bound variable is shown resolved,
+/// an unbound one falls back to a nil-row placeholder so the message names a
+/// real `Type`.
+fn poly_quotation_concrete_hint(ins: &[PolyType], outs: &[PolyType], subst: &Subst) -> Type {
+    let ground = |row: &[PolyType]| -> Vec<Type> {
+        row.iter()
+            .map(|p| match p {
+                PolyType::Concrete(t) => *t,
+                PolyType::Var(v) => subst.ty_of(*v).unwrap_or(Type::I64),
+                _ => Type::I64,
+            })
+            .collect()
+    };
+    crate::ast::quotation_type(ground(ins), ground(outs))
 }
 
 /// R5: apply the ground `θ` to a declared output `PolyType`, yielding a
@@ -3741,6 +4179,19 @@ fn apply_subst(
             };
             Ok(intern_array_type(arrays, elem_ty, count))
         }
+        // Slice 6a (R6): substitute both rows of a declared quotation effect,
+        // yielding a concrete `Type::Quotation`.
+        PolyType::Quotation(ins, outs) => {
+            let mut cins = Vec::with_capacity(ins.len());
+            for p in ins {
+                cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+            }
+            let mut couts = Vec::with_capacity(outs.len());
+            for p in outs {
+                couts.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+            }
+            Ok(crate::ast::quotation_type(cins, couts))
+        }
     }
 }
 
@@ -3757,7 +4208,7 @@ fn poly_local_unconsumed_error(
     format!(
         "error: linear value `{}` is never consumed in `{}`\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)",
         local,
-        word.name,
+        crate::resolve::demangle_word(&word.name),
         local,
         poly_type_str(pt, sig),
     )
@@ -3775,6 +4226,7 @@ fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> 
 }
 
 fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: cannot `{op}` the type variable `{var}` in `{where_}` (line {})\n  `{var}` has no `Copy` bound, and a linear value cannot be duplicated; declare `{var}: Copy` if every instantiation is `Copy`",
@@ -3783,6 +4235,7 @@ fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
 }
 
 fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{op}` on the type variable `{var}` in `{where_}` (line {}) requires an `Ord` bound\n  declare `{var}: Ord` so every instantiation is comparable",
@@ -3797,11 +4250,13 @@ fn poly_op_on_variable_error(
     pt: &PolyType,
     sig: &PolySig,
 ) -> String {
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     let what = match pt {
         PolyType::Var(v) => format!("the type variable `{}`", sig.ty_var_names[*v as usize]),
         PolyType::Array(..) => "an array with a variable".to_string(),
         PolyType::Concrete(t) => format!("`{t}`"),
+        PolyType::Quotation(..) => "a quotation".to_string(),
     };
     format!(
         "error: `{op}` is not permitted on {what} in `{where_}` (line {})",
@@ -3817,6 +4272,7 @@ fn poly_op_operand_mismatch_error(
     b: &PolyType,
     sig: &PolySig,
 ) -> String {
+    let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{op}` in `{where_}` (line {}) needs two operands of one type, found `{}` and `{}`",
@@ -3833,6 +4289,7 @@ fn poly_var_to_concrete_error(
     var: &str,
     expected: Type,
 ) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{callee}` in `{where_}` (line {}) expects `{expected}`, but the type variable `{var}` is not a concrete type",
@@ -3849,13 +4306,14 @@ fn poly_output_mismatch_error(word: &WordDef, sig: &PolySig, residual: &[PolyTyp
         .collect();
     format!(
         "error: stack effect mismatch in `{}`\n  body leaves `{}`, but the declared outputs are `{}`",
-        word.name,
+        crate::resolve::demangle_word(&word.name),
         got.join(" "),
         want.join(" "),
     )
 }
 
 fn poly_copy_bound_error(ctx: &Ctx, span: Span, callee: &str, var: &str, ty: Type) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is linear and has no `Copy` instance, so a linear value cannot be duplicated; `{var}: Copy` is unsatisfied",
@@ -3868,6 +4326,7 @@ fn poly_copy_bound_error(ctx: &Ctx, span: Span, callee: &str, var: &str, ty: Typ
 }
 
 fn poly_ord_bound_error(ctx: &Ctx, span: Span, callee: &str, var: &str, ty: Type) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, .. } => format!(
             "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
@@ -3887,6 +4346,7 @@ fn poly_var_conflict_error(
     a: Type,
     b: Type,
 ) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     match ctx {
         Ctx::Word { name, .. } => format!(
@@ -3906,6 +4366,7 @@ fn poly_len_conflict_error(
     a: u32,
     b: u32,
 ) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     let line = span.line;
     match ctx {
         Ctx::Word { name, .. } => format!(
@@ -3918,6 +4379,7 @@ fn poly_len_conflict_error(
 }
 
 fn poly_array_expected_error(ctx: &Ctx, span: Span, callee: &str, found: Type) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, .. } => format!(
             "error: type mismatch in `{name}` (line {})\n  `{callee}` expected an array operand, found `{found}`",
@@ -3930,6 +4392,7 @@ fn poly_array_expected_error(ctx: &Ctx, span: Span, callee: &str, found: Type) -
 }
 
 fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var: &str) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: `{callee}` in `{where_}` (line {}) has output variable `{var}` that no input binds",
@@ -3950,6 +4413,21 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             };
             format!("[{} {}]", poly_type_str(elem, sig), l)
         }
+        PolyType::Quotation(ins, outs) => {
+            let row = |r: &[PolyType]| {
+                r.iter()
+                    .map(|p| poly_type_str(p, sig))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            let (i, o) = (row(ins), row(outs));
+            match (i.is_empty(), o.is_empty()) {
+                (true, true) => "[ -- ]".to_string(),
+                (true, false) => format!("[ -- {o} ]"),
+                (false, true) => format!("[ {i} -- ]"),
+                (false, false) => format!("[ {i} -- {o} ]"),
+            }
+        }
     }
 }
 
@@ -3964,6 +4442,7 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
 }
 
 fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: stack effect mismatch in `{}` (line {})\n  `{}` needs {} values, but the stack holds {}\n  note: declared {}",
@@ -3977,6 +4456,7 @@ fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) 
 /// `str` where a `cstr` is wanted names the fix rather than a plain
 /// mismatch, mirroring `size_conversion_needed_error`'s shape.
 fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` wants `cstr`, found `str`: convert it explicitly with `cstr` first (there is no implicit `str` -> `cstr` conversion)\n  note: declared {}",
@@ -3989,6 +4469,7 @@ fn str_needs_cstr_conversion_error(ctx: &Ctx, span: Span, op: &str) -> String {
 }
 
 fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
@@ -4004,6 +4485,7 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
 /// mixed int/float, mixed integer widths/signs, mixed float widths, or a
 /// `bool` operand, name both operand types (X1, X2).
 fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same numeric type, found `{}` and `{}`\n  note: declared {}",
@@ -4075,6 +4557,7 @@ fn max_total_requires_float_error(ctx: &Ctx, span: Span, a: Type, b: Type) -> St
 /// bitwise ops are homogeneous over the integer types and `bool`, same shape
 /// as `mod_requires_int_error`.
 fn bitwise_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires two operands of the same integer or bool type, found `{}` and `{}`\n  note: declared {}",
@@ -4101,6 +4584,7 @@ fn bitwise_not_requires_int_error(ctx: &Ctx, span: Span, found: Type) -> String 
 
 /// `shl`/`shr` applied to a non-integer value operand.
 fn shift_value_requires_int_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires an integer value operand, found `{}`\n  note: declared {}",
@@ -4128,6 +4612,7 @@ fn shift_count_requires_i64_error(ctx: &Ctx, span: Span, op: &str, found: Type) 
 /// A conversion word (`>iN`/`>uN`/`>f32`/`>f64`) applied to a non-numeric
 /// (`bool`) source (X5).
 fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires a numeric source, found `{}`\n  note: declared {}",
@@ -4180,6 +4665,7 @@ fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
 /// plainly copyable, and its own `: drop` declaration is the reason they may not
 /// be.
 fn cannot_copy_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     let defines_drop =
         matches!(found, Type::Struct(id, _) if ctx.structs()[id.index()].has_drop_overload);
     // A reference is neither `Copy` nor linear, so the ownership wording below
@@ -4288,7 +4774,7 @@ fn linear_local_out_of_scope_error(
 fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
     format!(
         "error: linear value left on the stack in `{}` (line {})\n  body leaves a `{}` beyond the {} declared output(s): a linear value must be consumed exactly once, so `drop` it or return it\n  note: declared {}",
-        word.name,
+        crate::resolve::demangle_word(&word.name),
         line,
         ty,
         word.effect.outputs.len(),
@@ -4301,6 +4787,7 @@ fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
 /// for disposing it. Deferred to a later Phase 3 slice, as a located error
 /// rather than silence. Copy loops are untouched.
 fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: linear values across a loop are not supported yet in `{}` (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
@@ -4323,6 +4810,7 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
 /// referent lives in an ancestor frame that outlives every iteration, which is
 /// what keeps `walk ( &!List -- ) ... walk ;` legal.
 fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
+    let callee = crate::resolve::demangle_call(callee);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
@@ -4392,14 +4880,562 @@ fn check_linear_across_back_edge(
 fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
     match ctx {
         Ctx::Word { name, .. } => format!(
-            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             name, span.line
         ),
         Ctx::Line { .. } => format!(
-            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             span.line
         ),
     }
+}
+
+/// R8: check a call of an *abstract* quotation (one typed only by a declared
+/// `Type::Quotation` parameter, with no known literal body) against its
+/// declared effect: consume `eff.inputs` deepest-first, then push
+/// `eff.outputs`. No splice happens; the declared effect *is* the contract.
+/// This is how a quotation-taking word's own body type-checks at its
+/// definition site (D4), independent of any call site's literal.
+fn check_abstract_quotation_call(
+    eff: &QuotEffect,
+    span: Span,
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+    op: &str,
+) -> Result<Vec<Slot>, String> {
+    let n = eff.inputs.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, op, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    for (i, want) in eff.inputs.iter().enumerate() {
+        let found = stack[base + i];
+        match match_slot(found, *want) {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            _ => return Err(type_mismatch_error(ctx, span, op, *want, found.ty)),
+        }
+    }
+    stack.truncate(base);
+    for out in &eff.outputs {
+        stack.push(Slot::computed(*out));
+    }
+    Ok(stack)
+}
+
+/// R9: check `f times` for an *abstract* quotation `f`. The count is already
+/// verified as an `i64` by the caller path's guard below; here the declared
+/// effect must be row-preserving with a trailing `i64` index
+/// (`inputs == outputs ++ [i64]`), and the row on the stack is left unchanged.
+fn check_abstract_quotation_times(
+    eff: &QuotEffect,
+    span: Span,
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+) -> Result<Vec<Slot>, String> {
+    let Some(count) = stack.pop() else {
+        return Err(underflow_error(ctx, span, "times", 2, 1));
+    };
+    if count.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, "times"));
+    }
+    if count.ty != Type::I64 {
+        return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
+    }
+    let row_preserving = eff.inputs.last() == Some(&Type::I64)
+        && eff.inputs.len() == eff.outputs.len() + 1
+        && eff.inputs[..eff.outputs.len()] == eff.outputs[..];
+    if !row_preserving {
+        return Err(times_body_row_effect_error(ctx, span));
+    }
+    let row_len = eff.outputs.len();
+    if stack.len() < row_len {
+        return Err(underflow_error(ctx, span, "times", row_len, stack.len()));
+    }
+    let base = stack.len() - row_len;
+    for (i, want) in eff.outputs.iter().enumerate() {
+        let found = stack[base + i];
+        match match_slot(found, *want) {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            _ => return Err(type_mismatch_error(ctx, span, "times", *want, found.ty)),
+        }
+    }
+    Ok(stack)
+}
+
+/// R18: gather the monomorphic quotation-taking words (a `WordBody::Terms`
+/// word with a `Type::Quotation` input), keyed by name, so a call to one is
+/// intercepted and its body spliced (the inliner) rather than lowered to a
+/// call to a word that mints no `IrFunc` (R20). A polymorphic combinator is
+/// checked and inlined on the poly path (slice 6a phase 2), so it is excluded
+/// here.
+fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
+    let mut map = HashMap::new();
+    for word in words {
+        if !is_combinator(word) {
+            continue;
+        }
+        if let WordBody::Terms { terms } = &word.body {
+            map.insert(word.name.clone(), Combinator { word, terms });
+        }
+    }
+    map
+}
+
+/// R18/R20: a combinator is a **monomorphic** `WordBody::Terms` word with a
+/// `Type::Quotation` input. The checker inlines a call to one (splicing its
+/// body) and lowering mints no `IrFunc` for it, so `check` and `ir::lower`
+/// must agree on the predicate exactly; it lives here as the single source.
+/// Slice 6a phase 2: a **polymorphic** quotation-taking word (`each`/`map`/
+/// `fold`) is a combinator too. It never monomorphizes to a standalone
+/// `IrFunc` (R20); its body is spliced concretely at each call site, where the
+/// element/length variables become the caller's concrete types, so the same
+/// splice mechanism serves both the mono and poly cases (the poly signature
+/// only drives the standalone def-site check, R17). The quotation parameter
+/// sits in `sig.inputs` as either a variable-bearing `PolyType::Quotation` or,
+/// when its effect is fully concrete, a `Concrete(Type::Quotation)`.
+pub(crate) fn is_combinator(word: &WordDef) -> bool {
+    matches!(word.body, WordBody::Terms { .. }) && word_declares_quotation_parameter(word)
+}
+
+/// R23 (D7): whether a word's declared effect names a quotation parameter,
+/// regardless of body kind (a clause body is rejected separately by
+/// `clause_bodied_quotation_word_error`, and a session never reaches a clause
+/// body via `eval_def`/`eval_poly_def` at all -- this is the coarser gate the
+/// REPL uses, since it cannot retain *any* quotation-taking word's body past
+/// the defining line, term-body or not).
+pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
+    match &word.poly {
+        None => word
+            .effect
+            .inputs
+            .iter()
+            .any(|s| matches!(s.ty, Type::Quotation(_))),
+        Some(sig) => sig.inputs.iter().any(poly_input_is_quotation),
+    }
+}
+
+/// A polymorphic input slot that declares a quotation parameter: either a
+/// variable-bearing effect (`[ 'T -- ]`) or a fully-concrete one that folded
+/// to `Concrete(Type::Quotation)`.
+fn poly_input_is_quotation(p: &PolyType) -> bool {
+    matches!(
+        p,
+        PolyType::Quotation(..) | PolyType::Concrete(Type::Quotation(_))
+    )
+}
+
+/// R22 (D5): reject a cycle in the quotation-taking-word call subgraph. Edge
+/// `A -> B` iff combinator `A`'s body names combinator `B` (any position; a
+/// call to a quotation-taking word necessarily passes it a quotation). Since
+/// the inliner splices `B`'s body into `A`'s, a cycle would inline forever, so
+/// unlike `check_tail_call_cycles` a **self-edge is itself the error** (a
+/// self-recursive combinator is the minimal case). Reuses that pass's 3-colour
+/// DFS shape (recon 8).
+fn check_combinator_cycles(combinators: &HashMap<String, Combinator>) -> Result<(), String> {
+    let members: Vec<&Combinator> = combinators.values().collect();
+    let idx: HashMap<&str, usize> = members
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.word.name.as_str(), i))
+        .collect();
+    let mut adj: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
+    for (i, c) in members.iter().enumerate() {
+        for callee in all_calls(&c.word.body) {
+            if let Some(&j) = idx.get(callee) {
+                if !adj[i].contains(&j) {
+                    adj[i].push(j);
+                }
+            }
+        }
+    }
+    let mut color = vec![0u8; members.len()];
+    let mut path: Vec<usize> = Vec::new();
+    for start in 0..members.len() {
+        if color[start] == 0 {
+            if let Some(cycle) = find_combinator_cycle(start, &adj, &mut color, &mut path) {
+                return Err(combinator_cycle_error(&members, &cycle));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 3-colour DFS returning the members of the first cycle reached. Unlike
+/// `find_tail_cycle`, a self-edge (`v == u`) is a cycle, not skipped.
+fn find_combinator_cycle(
+    u: usize,
+    adj: &[Vec<usize>],
+    color: &mut [u8],
+    path: &mut Vec<usize>,
+) -> Option<Vec<usize>> {
+    color[u] = 1;
+    path.push(u);
+    for &v in &adj[u] {
+        if color[v] == 1 {
+            let start = path.iter().position(|&x| x == v).unwrap();
+            return Some(path[start..].to_vec());
+        }
+        if color[v] == 0 {
+            if let Some(cycle) = find_combinator_cycle(v, adj, color, path) {
+                return Some(cycle);
+            }
+        }
+    }
+    path.pop();
+    color[u] = 2;
+    None
+}
+
+/// R22: a located cycle rejection naming the members in order and closing the
+/// loop back to the first (`` `rec` -> `rec` `` for the self-recursive case).
+fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
+    let mut chain: Vec<&str> = cycle
+        .iter()
+        .map(|&i| crate::resolve::demangle_word(members[i].word.name.as_str()))
+        .collect();
+    chain.push(chain[0]);
+    let rendered = chain
+        .iter()
+        .map(|n| format!("`{n}`"))
+        .collect::<Vec<_>>()
+        .join(" -> ");
+    let span = word_span(members[cycle[0]].word);
+    format!(
+        "error: a quotation-taking word cannot be recursive (the inliner would splice it forever): {} (line {}, col {})",
+        rendered, span.line, span.col
+    )
+}
+
+/// R18: inline a call to a monomorphic quotation-taking word. Validate each
+/// declared input against the caller's live slot (a quotation parameter takes
+/// a `Known` literal, checked directionally with the D3 capture check, R11/R12;
+/// every other parameter is matched as usual), then splice the callee body
+/// against the live stack (bracketed like a `call`, `tail = false`), so the
+/// callee's own `call`/`times` fuse against the caller's literals. R22
+/// guarantees termination.
+#[allow(clippy::too_many_arguments)]
+fn inline_combinator(
+    comb: &Combinator,
+    span: Span,
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<Vec<Slot>, String> {
+    let name = comb.word.name.as_str();
+    // A polymorphic combinator (`each`/`map`/`fold`, or any `'T`-carrying
+    // quotation-taking word) keeps its signature in `word.poly`, not
+    // `word.effect` (which is empty), so the monomorphic argument loop below
+    // would run zero checks and skip R11/R12 entirely (item 3). Route it
+    // through the poly-argument check, which resolves the parameter's declared
+    // effect against the live stack and runs the *same* directional + D3
+    // check, so the two paths agree.
+    if let Some(sig) = comb.word.poly.as_ref() {
+        check_poly_combinator_args(
+            sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly,
+        )?;
+    } else {
+        let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
+        let n = inputs.len();
+        if stack.len() < n {
+            return Err(underflow_error(ctx, span, name, n, stack.len()));
+        }
+        let base = stack.len() - n;
+        for (i, want) in inputs.iter().enumerate() {
+            let found = stack[base + i];
+            if let Type::Quotation(eff) = want {
+                if let Some(QuotRef::Known(id)) = found.quot {
+                    check_literal_against_declared_effect(
+                        id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    )?;
+                } else if matches!(found.ty, Type::Quotation(_)) {
+                    // R21: forwarding an abstract quotation parameter. `found`
+                    // is itself a declared quotation parameter of the enclosing
+                    // combinator (a `Type::Quotation` slot with no `Known`
+                    // literal -- the only way such a slot arises), reached only
+                    // while checking that enclosing combinator standalone. At a
+                    // real call site the substitution has already bound it to
+                    // the caller's literal, so it carries a `Known` marker and
+                    // splices there; here, at the def site, accept it when its
+                    // declared effect matches the callee parameter, so `outer`
+                    // may pass its own `f` to `inner`. The spliced callee
+                    // body's own `f call`/`f times` then check the forwarded
+                    // parameter against its declared effect (R8/R9).
+                    if found.ty != *want {
+                        return Err(quotation_argument_required_error(
+                            ctx, span, name, *want, found.ty,
+                        ));
+                    }
+                } else {
+                    return Err(quotation_argument_required_error(
+                        ctx, span, name, *want, found.ty,
+                    ));
+                }
+            } else if found.quot.is_some() {
+                return Err(reject_quotation_argument(ctx, span, name));
+            } else {
+                match match_slot(found, *want) {
+                    SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                    SlotMatch::NeedsSizeConversion => {
+                        return Err(size_conversion_needed_error(ctx, span, name, *want));
+                    }
+                    SlotMatch::NeedsStrToCstrConversion => {
+                        return Err(str_needs_cstr_conversion_error(ctx, span, name));
+                    }
+                    SlotMatch::Mismatch => {
+                        return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
+                    }
+                }
+            }
+        }
+    }
+    // R18/R21: splice the callee body, alpha-renamed so its `| ... |` locals
+    // cannot collide with a caller local or, under transitive inlining, an
+    // outer combinator's locals already in scope. Lowering renames identically
+    // (`ir`), so a passed-down literal's captured name stays lexical.
+    let uid = prov.inline_uid;
+    prov.inline_uid += 1;
+    let renamed = crate::ast::alpha_rename_locals(comb.terms, uid);
+    let depth = scope.depth();
+    stack = check_terms(
+        &renamed, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+    )?;
+    leave_block(
+        ctx,
+        scope,
+        depth,
+        BlockEnd::Arm {
+            token: "inline",
+            span,
+        },
+    )?;
+    Ok(stack)
+}
+
+/// R11/R12 (poly, item 3): the polymorphic twin of `inline_combinator`'s
+/// monomorphic argument loop. A poly combinator's declared inputs live in
+/// `sig.inputs`, not `word.effect`, so without this the directional (R11) and
+/// D3 capture (R12) checks never ran on the poly argument path -- a caller
+/// literal borrowing an enclosing place was silently accepted, a mono/poly
+/// divergence in the premise D3 rests on. Resolve the parameter's declared
+/// effect against the live stack (`unify_poly_input` binds any variable a
+/// non-quotation input carries, e.g. `'T` in `['T ...] [ 'T -- &i64 ]`), then
+/// ground the quotation effect and run the *same* `check_literal_against_
+/// declared_effect` the monomorphic path uses, so the two agree.
+#[allow(clippy::too_many_arguments)]
+fn check_poly_combinator_args(
+    sig: &PolySig,
+    span: Span,
+    stack: &[Slot],
+    name: &str,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    let n = sig.inputs.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, name, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    // Pass 1: unify the non-quotation inputs to resolve theta first, so a
+    // variable a quotation effect mentions (`'T` in `[ 'T -- &i64 ]`) is
+    // already bound when the effect is grounded in pass 2, whatever the
+    // parameter order.
+    let mut subst = Subst::default();
+    for (i, pin) in sig.inputs.iter().enumerate() {
+        if poly_input_is_quotation(pin) {
+            continue;
+        }
+        let found = stack[base + i];
+        if found.quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        unify_poly_input(sig, pin, found.ty, name, span, ctx, arrays, &mut subst)?;
+    }
+    // Pass 2: ground each quotation parameter and run the directional + D3
+    // check on its caller literal.
+    for (i, pin) in sig.inputs.iter().enumerate() {
+        if !poly_input_is_quotation(pin) {
+            continue;
+        }
+        let found = stack[base + i];
+        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays)?;
+        let Type::Quotation(eff) = concrete else {
+            unreachable!("a quotation input grounds to Type::Quotation (apply_subst)")
+        };
+        if let Some(QuotRef::Known(id)) = found.quot {
+            check_literal_against_declared_effect(
+                id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+            )?;
+        } else if matches!(found.ty, Type::Quotation(_)) {
+            // R21 (poly): a forwarded abstract quotation parameter, accepted
+            // when its declared effect matches (the spliced body's own
+            // `call`/`times` re-checks it, R8/R9).
+            if found.ty != concrete {
+                return Err(quotation_argument_required_error(
+                    ctx, span, name, concrete, found.ty,
+                ));
+            }
+        } else {
+            return Err(quotation_argument_required_error(
+                ctx, span, name, concrete, found.ty,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// R11/R12: check a quotation *literal* against a declared quotation parameter
+/// directionally (slice 4 D3): seed a fresh sub-stack with the declared input
+/// row, run the literal's body against it, and require the exit row to equal
+/// the declared output row (no standalone effect is inferred). Enforce the D3
+/// capture restriction here (R12): a read that consumes a non-`Copy` enclosing
+/// local, or a borrow of an enclosing place left on the row, is rejected; a
+/// `Copy` local read by value is allowed.
+#[allow(clippy::too_many_arguments)]
+fn check_literal_against_declared_effect(
+    id: QuotId,
+    eff: &QuotEffect,
+    word: &str,
+    span: Span,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    let body = prov.quotations[id.0].body.clone();
+    let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
+    let moves_before = scope.moves.states.clone();
+    let fresh: Vec<Slot> = eff.inputs.iter().map(|t| Slot::computed(*t)).collect();
+    let depth = scope.depth();
+    let result = check_terms(
+        &body, fresh, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+    )?;
+    // R12: a linear enclosing local the literal consumed (move-state changed
+    // from `Live`).
+    if let Some(local) =
+        moves_before
+            .iter()
+            .find_map(|(n, before)| match (before, scope.moves.states.get(n)) {
+                (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
+                    Some(n.clone())
+                }
+                _ => None,
+            })
+    {
+        return Err(quotation_captures_local_error(ctx, span, word, &local));
+    }
+    // R12: a borrow of an enclosing place left live on the literal's exit row.
+    for slot in &result {
+        if let Some(did) = slot.deriv {
+            if let Some(place) = &prov.deriv(did).owned_root {
+                if outer_locals.contains(place) {
+                    return Err(quotation_borrows_place_error(ctx, span, word, place));
+                }
+            }
+        }
+    }
+    leave_block(
+        ctx,
+        scope,
+        depth,
+        BlockEnd::Arm {
+            token: "quotation",
+            span,
+        },
+    )?;
+    // R11: the literal's exit row must equal the declared output row.
+    let matches_out = result.len() == eff.outputs.len()
+        && result.iter().zip(&eff.outputs).all(|(f, w)| {
+            matches!(
+                match_slot(*f, *w),
+                SlotMatch::Exact | SlotMatch::LiteralSizeType
+            )
+        });
+    if !matches_out {
+        let declared = crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone());
+        let actual =
+            crate::ast::quotation_type(eff.inputs.clone(), result.iter().map(|s| s.ty).collect());
+        return Err(literal_effect_mismatch_error(
+            ctx, span, word, declared, actual,
+        ));
+    }
+    Ok(())
+}
+
+/// R10/R21: a quotation parameter position whose argument is not a quotation
+/// the callee can consume -- a non-quotation value, or (after R21 admits the
+/// abstract forward) a quotation whose *declared effect* disagrees with the
+/// callee parameter. Knownness is no longer the complaint: a forwarded abstract
+/// parameter is accepted, so `want` and `found` always differ here (a
+/// non-quotation type, or a mismatched effect), and the message names both.
+fn quotation_argument_required_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    want: Type,
+    found: Type,
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: `{word}` expects a quotation `{want}` here, found `{found}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R11: a quotation literal whose effect disagrees with the declared
+/// parameter. Names the word, the declared effect, and the literal's actual
+/// effect.
+fn literal_effect_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    declared: Type,
+    actual: Type,
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R12: a quotation literal that consumes a linear enclosing local (D3 forbids
+/// a linear capture). Names the local and the enclosing word.
+fn quotation_captures_local_error(ctx: &Ctx, span: Span, word: &str, local: &str) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: the quotation passed to `{word}` consumes the enclosing local `{local}`, which is linear; a quotation may only read a `Copy` enclosing local by value (D3){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R12: a quotation literal that borrows an enclosing place and leaves the
+/// reference on its row (D3 forbids capturing an enclosing borrow).
+fn quotation_borrows_place_error(ctx: &Ctx, span: Span, word: &str, place: &str) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: the quotation passed to `{word}` borrows the enclosing place `{place}`; a quotation may not capture a borrow of an enclosing local (D3){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
 }
 
 /// R18: `times` reached without a statically-known quotation literal on top
@@ -4407,11 +5443,11 @@ fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
 fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
     match ctx {
         Ctx::Word { name, .. } => format!(
-            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             name, span.line
         ),
         Ctx::Line { .. } => format!(
-            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
             span.line
         ),
     }
@@ -4500,6 +5536,7 @@ fn leave_block(ctx: &Ctx, scope: &mut Scope, depth: usize, at: BlockEnd) -> Resu
 /// confirm it fits; names the missing `>usize`/`>isize` conversion
 /// explicitly, naming whichever size type `target` is.
 fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` mixes `{}` with a computed `i64`: convert it explicitly with `>{}` first (a bare integer literal coerces automatically, a computed value does not)\n  note: declared {}",
@@ -4764,6 +5801,19 @@ fn check_term(
                 let Some(top) = stack.pop() else {
                     return Err(underflow_error(ctx, span, "call", 1, 0));
                 };
+                // R8: an *abstract* quotation (typed by a declared parameter,
+                // `Slot.ty == Type::Quotation`, no `Known` literal) checks
+                // against its declared effect directly: pop `eff.inputs`
+                // deepest-first, push `eff.outputs`. This is the standalone
+                // (def-site) check of a quotation-taking word (D4): `f call`
+                // checks against `f`'s declared effect exactly as an ordinary
+                // word call checks against its `Sig`, with no splice.
+                if top.quot.is_none() {
+                    if let Type::Quotation(eff) = top.ty {
+                        return check_abstract_quotation_call(eff, span, stack, ctx, "call");
+                    }
+                    return Err(call_needs_quotation_error(ctx, span));
+                }
                 let Some(QuotRef::Known(id)) = top.quot else {
                     return Err(call_needs_quotation_error(ctx, span));
                 };
@@ -4798,6 +5848,19 @@ fn check_term(
                 let Some(top) = stack.pop() else {
                     return Err(underflow_error(ctx, span, "times", 2, 0));
                 };
+                // R9: an *abstract* quotation (a declared parameter, no known
+                // literal) checks against its declared effect: pop the count,
+                // require the effect be row-preserving with a trailing `i64`
+                // index (`[ ..row i64 -- ..row ]`), and leave the row
+                // unchanged. The three `times` obligations reduce to checks on
+                // the declared rows (a declared effect names no local and
+                // captures no borrow, so move/borrow identity hold trivially).
+                if top.quot.is_none() {
+                    if let Type::Quotation(eff) = top.ty {
+                        return check_abstract_quotation_times(eff, span, stack, ctx);
+                    }
+                    return Err(times_needs_quotation_error(ctx, span));
+                }
                 let Some(QuotRef::Known(id)) = top.quot else {
                     return Err(times_needs_quotation_error(ctx, span));
                 };
@@ -4939,6 +6002,16 @@ fn check_term(
             if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
                 return Ok(stack);
             }
+            // R18: a call to a monomorphic quotation-taking word is inlined
+            // (term-splice) rather than looked up in `env` and lowered to a
+            // call: it mints no `IrFunc` (R20). Copy the `Combinator` out of
+            // the borrowed map first (it is two pointers) so `poly` can be
+            // reborrowed mutably for the splice.
+            if let Some(comb) = poly.combinators.get(name).copied() {
+                return inline_combinator(
+                    &comb, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                );
+            }
             // R5/R14: a call to a polymorphic word is intercepted before the
             // concrete `env` lookup and unified against the concrete stack;
             // its `Sig` is per-instantiation, not name-keyed.
@@ -4975,7 +6048,7 @@ fn check_term(
                     }
                 }
             }
-            if tail && ctx.word_name() == Some(name.as_str()) {
+            if tail && ctx.mangled_name() == Some(name.as_str()) {
                 check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
             }
@@ -5429,6 +6502,7 @@ fn check_operator(
 /// An array word (`fill`/`len`) applied to a non-array operand: names the
 /// array word and the offending operand type (X8).
 fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires an array operand, found `{}`\n  note: declared {}",
@@ -5444,6 +6518,7 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
 /// the aggregate live, so it can't also transfer ownership of a linear
 /// field's value; the workaround is `S>` (destructure the whole aggregate).
 fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
@@ -5458,6 +6533,7 @@ fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> S
 /// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
 /// word and the offending operand type, mirroring `array_word_operand_error`.
 fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
@@ -5618,7 +6694,7 @@ fn in_word(ctx: &Ctx) -> String {
 /// consume a quotation; the shuffles forward it and `drop` discards it.
 fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
     format!(
-        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (higher-order values are Phase 6)",
+        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (a runtime quotation value is slice 7)",
         in_word(ctx),
         span.line,
     )
@@ -5631,20 +6707,22 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 /// two of the three store paths have none. Shared by all of them (D4).
 fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation cannot be stored (escaping quotations are Phase 6){} (line {})",
+        "error: a quotation cannot be stored (escaping quotations are slice 7){} (line {})",
         in_word(ctx),
         span.line,
     )
 }
 
-/// R9: a quotation passed as an argument to a user `:` word (or a polymorphic
-/// `'T`/row slot) rejects: only `call`/`times` accept a quotation this slice.
-/// The wording says "word", not "user `:` word", because the same guard covers
-/// generated struct constructors/setters and `extern` arguments (all `env`
-/// words too).
+/// R10/R26: a quotation passed to a parameter position that is *not* a
+/// declared `Type::Quotation`. A quotation argument to a declared quotation
+/// parameter is now accepted and inlined (R18); this fires only for the other
+/// positions (a non-quotation user parameter, a generated constructor/setter
+/// slot, an `extern` argument). Only the stale "Phase 6" parenthetical is
+/// reworded to point a runtime quotation value at slice 7 (R26).
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
+    let word = crate::resolve::demangle_word(word);
     format!(
-        "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (higher-order user words are Phase 6){} (line {})",
+        "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (a runtime quotation value is slice 7){} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -5656,7 +6734,7 @@ fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
 /// not at consumption (R12's containment rests on it).
 fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; higher-order values are Phase 6)",
+        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
         span.line,
         in_word(ctx),
     )
@@ -5667,7 +6745,7 @@ fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
 /// mismatch never catches this; the join guard does.
 fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (higher-order values are Phase 6)",
+        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (a runtime quotation value is slice 7)",
         span.line,
         in_word(ctx),
     )
@@ -5707,6 +6785,7 @@ fn reference_word_operand_error(
     expected: &str,
     found: Type,
 ) -> String {
+    let op = crate::resolve::demangle_call(op);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: type mismatch in `{name}` (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
@@ -5722,6 +6801,7 @@ fn reference_word_operand_error(
 /// `!`/`+!` through a shared reference. Storing through a `&T` is
 /// meaningless, and the mutable spelling is right there.
 fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     format!(
         "error: `{op}` cannot store through the shared reference `{found}`{} (line {})\n  borrow it mutably with `&!` (and project with the `&!`-spelled accessors) to write through it",
         in_word(ctx),
@@ -5733,6 +6813,7 @@ fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: 
 /// value through a reference would manufacture a second owner; storing over
 /// one would silently leak the value being overwritten (nothing auto-drops).
 fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
     let why = if op == "@" {
         "fetching one would make a second owner of a value that is used exactly once"
     } else {
@@ -7059,7 +8140,7 @@ mod tests {
             w(
                 ": main ( -- ) [ + ] 8 fill drop ;\n",
                 "a quotation cannot be stored",
-                "escaping quotations are Phase 6",
+                "escaping quotations are slice 7",
             ),
             // check_array_index, reached through the `&>` reference word.
             op(
@@ -7081,7 +8162,7 @@ mod tests {
             w(
                 "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
                 "a quotation cannot be stored",
-                "escaping quotations are Phase 6",
+                "escaping quotations are slice 7",
             ),
             op(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
             // the env argument loop and check_poly_call's input loop (R9/R9p).
@@ -10085,5 +11166,97 @@ mod tests {
             &module.enums,
             &module.arrays
         ));
+    }
+
+    #[test]
+    fn quotation_effect_unifies_and_binds_variable() {
+        // Criterion 2 (R6): a declared `[ 'T -- ]` unified against a concrete
+        // `[ i64 -- ]` binds `'T = i64`; an arity mismatch is a located type
+        // mismatch, never a silent bind. Exercises `unify_poly_input`'s
+        // `PolyType::Quotation` arm directly (the concrete poly path is Phase
+        // 2), so deleting the pointwise-row unify makes this fail.
+        use crate::ast::quotation_type;
+        let sig = PolySig {
+            row_in: None,
+            inputs: vec![PolyType::Quotation(vec![PolyType::Var(0)], Vec::new())],
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let structs: [StructDecl; 0] = [];
+        let enums: [EnumDecl; 0] = [];
+        let arrays: [ArrayDecl; 0] = [];
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let mut subst = Subst::default();
+        unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            quotation_type(vec![Type::I64], Vec::new()),
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst,
+        )
+        .expect("`[ 'T -- ]` should unify against `[ i64 -- ]`");
+        assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
+
+        let mut subst2 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            quotation_type(vec![Type::I64, Type::I64], Vec::new()),
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst2,
+        )
+        .expect_err("an arity mismatch must be a located type mismatch");
+        assert!(
+            err.contains("`f`"),
+            "the arity mismatch should name the word, got: {err}"
+        );
+        assert!(
+            subst2.ty_of(0).is_none(),
+            "an arity mismatch must not silently bind `'T`"
+        );
+    }
+
+    #[test]
+    fn quotation_parameter_is_copy_no_move_obligation() {
+        // Criterion 6b: a quotation parameter is `Copy` (it registers no move
+        // obligation), so a body that *binds* its quotation param and never
+        // consumes it still checks -- forgetting is only an error for a linear
+        // value. The body must bind and drop-on-the-floor (`| f |`, not an
+        // explicit `drop`), or the `drop` discharges the obligation and the
+        // test cannot detect the property it names: making quotation types
+        // linear would leave a `drop`-bodied version green.
+        check_src(": ignore ( i64 [ i64 -- i64 ] -- i64 ) | f | ;\n")
+            .expect("an unused quotation parameter is not a linear-forgetting error");
+    }
+
+    #[test]
+    fn quotation_taking_word_mints_no_symbol() {
+        // U20: a monomorphic quotation-taking word is a combinator, so it is
+        // inlined and mints no `IrFunc`; `is_combinator` (the single predicate
+        // `check` and `ir::lower` share) recognizes it and excludes an
+        // ordinary word. Deleting the `Type::Quotation` clause makes `apply`
+        // stop being a combinator and mint a symbol (a link error, since its
+        // body is a bare `call` over a phantom).
+        let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+                   : plain ( i64 -- i64 ) 1 + ;\n";
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        let apply = module.words.iter().find(|w| w.name == "apply").unwrap();
+        let plain = module.words.iter().find(|w| w.name == "plain").unwrap();
+        assert!(is_combinator(apply), "`apply` is a combinator (no symbol)");
+        assert!(!is_combinator(plain), "`plain` is an ordinary word");
     }
 }
