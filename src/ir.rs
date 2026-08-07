@@ -2153,6 +2153,23 @@ fn is_aggregate(ty: IrType) -> bool {
     matches!(ty, IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_))
 }
 
+/// R10: whether a combinator body has a tail-position call to itself, the
+/// lowering twin of the checker's `tail_position_calls`/`has_self_tail_call`
+/// (which take a `&WordBody` this splice site does not hold). The syntactic
+/// tail rule is identical: the final term of the body, or the final term of
+/// either arm of a terminal `if`, recursively.
+fn body_tail_calls_self(body: &[Term], name: &str) -> bool {
+    match body.last().map(|t| &t.kind) {
+        Some(TermKind::Call(n)) => n == name,
+        Some(TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        }) => body_tail_calls_self(then_branch, name) || body_tail_calls_self(else_branch, name),
+        _ => false,
+    }
+}
+
 /// Per-carried-slot loop metadata (R2), in full carried-slot order. A scalar
 /// keeps its header phi; an aggregate carries no header phi but a stable
 /// entry-hoisted slot (the pointer the body reads every iteration) plus a
@@ -2198,6 +2215,14 @@ struct FuncBuilder<'a> {
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
+    /// R10: the self-tail combinator whose body is currently being spliced
+    /// (its mangled name and the length of the loop-carried state row). A
+    /// tail-position call to that same name inside the splice is the loop
+    /// back-edge, not a re-splice: it pops its loop-invariant quotation
+    /// argument(s) (everything above the carried row, resolved statically via
+    /// the local binding, not carried in a phi) and jumps to the header.
+    /// Saved and restored around the splice so loops compose.
+    cur_combinator: Option<(String, usize)>,
     /// The loop header block (R6), `Some` iff this word is self-tail-recursive
     /// and is being lowered as a loop. Tail self-calls back-edge to it (R7).
     header: Option<BlockId>,
@@ -2294,6 +2319,7 @@ impl<'a> FuncBuilder<'a> {
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,
+            cur_combinator: None,
             header: None,
             carried_slots: Vec::new(),
             back_edges: Vec::new(),
@@ -2554,11 +2580,95 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
+    /// R10: lower a self-tail combinator (`while`) as a splice-time loop,
+    /// composing the `times` arm's mid-body loop opening with the whole-word
+    /// transform's self-call-driven back-edge. The body's leading quotation
+    /// binding(s) are lowered *before* `begin_loop`, so the loop-invariant
+    /// `Copy` quotation phantom is bound to a local (resolved statically each
+    /// iteration) and excluded from the loop-carried phis; only the state row
+    /// is carried. `stage_aggregates = true` reuses the slice-3 aggregate
+    /// staging verbatim for a carried-aggregate state. The enclosing loop
+    /// state is saved and restored so loops compose, exactly as the `times`
+    /// arm does. A tail-position self-call inside the body is emitted as a
+    /// back-edge (`lower_call`, keyed on `cur_combinator`), never a re-splice.
+    fn lower_self_tail_combinator(&mut self, name: &str, body: &[Term]) {
+        let saved_header = self.header;
+        let saved_entry = self.entry_block;
+        let saved_carried = mem::take(&mut self.carried_slots);
+        let saved_back_edges = mem::take(&mut self.back_edges);
+        let saved_combinator = self.cur_combinator.take();
+        let locals_depth = self.locals.len();
+
+        // Lower the leading quotation binding(s) before opening the loop: a
+        // `Bind` term that pops any quotation phantom becomes a local, so the
+        // phantom is not carried in a phi (R10). Everything after is the loop
+        // body.
+        let mut split = 0;
+        while split < body.len() {
+            if let TermKind::Bind(names) = &body[split].kind {
+                let base = self.stack.len() - names.len();
+                let binds_quot = self.stack[base..]
+                    .iter()
+                    .any(|v| self.quot_bodies.contains_key(v));
+                if binds_quot {
+                    self.lower_term(&body[split], false);
+                    split += 1;
+                    continue;
+                }
+            }
+            break;
+        }
+
+        // The carried row is whatever remains: the caller's residual plus the
+        // threaded state. `begin_loop` seals the entry block, opens the
+        // header, and returns one value per carried slot (a scalar phi output
+        // or an aggregate stable slot).
+        let row_len = self.stack.len();
+        let params = mem::take(&mut self.stack);
+        let outs = self.begin_loop(&params, true);
+        self.stack = outs;
+        self.cur_combinator = Some((name.to_string(), row_len));
+
+        // Lower the loop body with `tail = true`, so its tail-position
+        // self-call is recognized as the back-edge. The base-case arm falls
+        // through, leaving the state on the stack as the loop's result.
+        self.lower_terms(&body[split..], true);
+        self.finalize_loop();
+
+        self.locals.truncate(locals_depth);
+        self.cur_combinator = saved_combinator;
+        self.header = saved_header;
+        self.entry_block = saved_entry;
+        self.carried_slots = saved_carried;
+        self.back_edges = saved_back_edges;
+    }
+
     fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
         let line = span.line;
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
+        }
+        // R10: a tail-position self-call inside a self-tail combinator splice
+        // is the loop back-edge. The loop carries only the state row (length
+        // recorded when the loop opened); the quotation argument(s) above it
+        // are loop-invariant, resolved statically through the local binding,
+        // so they are dropped here and not fed to a phi. Intercepted before
+        // the combinator dispatch below (which would re-splice) and distinct
+        // from the whole-word self-tail back-edge (keyed on `cur_word_name`).
+        if tail && self.header.is_some() {
+            if let Some((cname, row_len)) = self.cur_combinator.clone() {
+                if cname == name {
+                    let drop_n = self.stack.len() - row_len;
+                    self.stack.truncate(self.stack.len() - drop_n);
+                    let args = mem::take(&mut self.stack);
+                    self.back_edges.push((self.cur_id, args));
+                    let header = self.header.expect("combinator loop header");
+                    self.seal_block(Terminator::Jmp(header));
+                    self.terminated = true;
+                    return;
+                }
+            }
         }
         // R14/R11: a call to a polymorphic word resolves entirely through the
         // instantiation table keyed by this call site's span, never the
@@ -2866,6 +2976,10 @@ impl<'a> FuncBuilder<'a> {
                 // splice above. Checked before the `&`/conversion/struct
                 // dispatch since a combinator name is an ordinary word name.
                 if let Some(body) = self.combinators.get(name) {
+                    // R10: a self-tail combinator lowers to a splice-time loop
+                    // (back-edge, not re-splice); every other combinator is a
+                    // straight term-splice.
+                    let self_tail = body_tail_calls_self(body, name);
                     // R18/R21: alpha-rename the callee body identically to the
                     // checker, so its `| ... |` locals are fresh and a
                     // passed-down literal keeps its lexical capture under
@@ -2873,9 +2987,13 @@ impl<'a> FuncBuilder<'a> {
                     let uid = self.inline_uid;
                     self.inline_uid += 1;
                     let body = crate::ast::alpha_rename_locals(body, uid);
-                    let locals_depth = self.locals.len();
-                    self.lower_terms(&body, false);
-                    self.locals.truncate(locals_depth);
+                    if self_tail {
+                        self.lower_self_tail_combinator(name, &body);
+                    } else {
+                        let locals_depth = self.locals.len();
+                        self.lower_terms(&body, false);
+                        self.locals.truncate(locals_depth);
+                    }
                     return;
                 }
                 // Every `&`-led word: the two prefix borrow operators and the
@@ -7510,6 +7628,45 @@ mod tests {
         assert!(
             user_calls.is_empty(),
             "the inlined `each` body is spliced, not called; unexpected calls: {user_calls:?}"
+        );
+    }
+
+    #[test]
+    fn while_lowers_to_a_back_edge_not_an_infinite_splice() {
+        // U12 (R10, load-bearing): a self-tail combinator `while` lowers to a
+        // real mid-body loop -- an entry `Jmp` to a header carrying the state
+        // `Phi`, reached by a back-edge `Jmp` -- with no `Instr::Call` to
+        // `while` and no re-splice. Deleting the back-edge branch in
+        // `lower_call` would leave an `Instr::Call` to `while` (or splice the
+        // body forever), not silently pass. `while` is defined inline so the
+        // unit needs no import closure.
+        let ir = lower_src(
+            ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n\
+             : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "while"),
+            "the inlined `while` mints no IrFunc, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = func(&ir, "main");
+        let header = loop_header(main);
+        let hblock = header_block(main, header);
+        assert!(
+            !header_phis(hblock).is_empty(),
+            "the header carries the state phi"
+        );
+        let entry_id = main.blocks[0].id;
+        assert!(
+            main.blocks
+                .iter()
+                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
+            "a non-entry body block back-edges to the header"
+        );
+        assert!(
+            call_symbols(main).is_empty(),
+            "the `while` body is spliced with a back-edge, not called; unexpected calls: {:?}",
+            call_symbols(main)
         );
     }
 

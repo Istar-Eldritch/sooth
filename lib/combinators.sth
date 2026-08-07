@@ -15,7 +15,7 @@
 \ counter cell; a leaf keeps the library flat at depth 1. They share the loop
 \ shape, not a call.
 
-export: each map fold filter ;
+export: each map fold filter while ;
 
 : each ( ['T 'N] [ 'T -- ] -- )
   | f | len >i64 | count | | arr |
@@ -46,3 +46,12 @@ export: each map fold filter ;
           | v | &!arr over >usize &!> v ! 1 +
         else drop end ] times
   | wf | arr wf >usize ;
+
+\ `while` threads a state `'a` through its predicate until the predicate
+\ returns false, then leaves the state. It is a self-*tail* combinator: the
+\ recursive `p while` in tail position lowers to a loop back-edge (D8), not an
+\ endless splice, so `while` runs in constant stack. The self-edge is the only
+\ recursion 6b's relaxed cycle check (D5) admits; the quotation `p` is `Copy`
+\ and re-resolved statically each iteration, carried in no loop phi.
+: while ( 'a [ 'a -- 'a bool ] -- 'a )
+  | p | p call if p while else end ;

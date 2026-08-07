@@ -40,6 +40,18 @@ fn check_error(src: &str) -> String {
     check::check(&mut module).expect_err("check should fail")
 }
 
+/// The check diagnostic for a program that `import:`s the real combinator
+/// library: the bare `check_error` above resolves no imports, so a program
+/// naming `c::while` needs the full driver (which resolves modules) to fail
+/// its check.
+fn build_check_error(name: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    std::fs::remove_file(&path).ok();
+    err
+}
+
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     parser::parse(&tokens).expect_err("parsing should fail")
@@ -548,15 +560,17 @@ fn stale_phase6_diagnostics_are_reworded() {
 
 #[test]
 fn recursive_quotation_taking_word_is_located_error() {
-    // A self-recursive combinator would splice forever; a self-edge is itself
-    // the error (unlike a self-tail-recursive ordinary word, which loops).
+    // A combinator with a *non-tail* self-call would splice forever; the
+    // self-edge is the error. (Slice 6b's D5 relaxation permits a *tail-only*
+    // self-edge, which the loop transform makes finite -- see
+    // `self_tail_combinator_edge_is_allowed`.)
     let err = check_error(
-        ": loopy ( i64 [ i64 -- i64 ] -- i64 ) loopy ;\n\
+        ": loopy ( i64 [ i64 -- i64 ] -- i64 ) loopy drop ;\n\
          : main ( -- ) 3 [ 1 + ] loopy . ;\n",
     );
     assert!(
         err.contains("`loopy`") && err.contains("recursive"),
-        "a self-recursive combinator should be a located cycle rejection naming it, got: {err}"
+        "a non-tail self-recursive combinator should be a located cycle rejection naming it, got: {err}"
     );
 }
 
@@ -828,6 +842,230 @@ fn filter_is_element_polymorphic() {
     let (stdout, code) = run_src("filter_f64", &src);
     assert_eq!(stdout, "1\n2.5\n");
     assert_eq!(code, 0);
+}
+
+// -- criteria 4-6: the D5 cycle relaxation admits only a self-tail edge -------
+
+#[test]
+fn self_tail_combinator_edge_is_allowed() {
+    // Criterion 4 (R4/R5): `while`'s body names itself in tail position only,
+    // so the D5-relaxed cycle check adds no self-edge and it checks standalone
+    // (the loop transform makes the recursion finite). This is the shape 6a
+    // rejected outright; a placebo would be a program that also passes with the
+    // tail-only condition deleted, so the twin below
+    // (`non_tail_combinator_self_call_is_still_a_cycle_error`) pins that
+    // deleting it flips a *non-tail* program from reject to accept.
+    check_ok(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n");
+}
+
+#[test]
+fn non_tail_combinator_self_call_is_still_a_cycle_error() {
+    // Criterion 5 (R4, load-bearing): a self-name in a *non-tail* position
+    // keeps its self-edge and stays the cycle rejection, naming the word.
+    // Deleting R4's tail-only condition would (wrongly) accept this, so the
+    // pair 4/5 is the mutation-test guard on the relaxation's width.
+    let err = check_error(": c ( i64 [ i64 -- i64 ] -- i64 ) c drop ;\n: main ( -- ) ;\n");
+    assert!(
+        err.contains("`c`") && err.contains("recursive"),
+        "a non-tail self-recursive combinator is still a located cycle rejection naming it, got: {err}"
+    );
+}
+
+#[test]
+fn mutual_combinator_cycle_is_still_an_error() {
+    // Criterion 6 (R4, load-bearing): a two-combinator mutual cycle is
+    // untouched by the relaxation (which skips only a *self*-edge, i==j), so
+    // even though both calls are in tail position the cycle stands, naming
+    // both members.
+    let err = check_error(
+        ": a ( i64 [ i64 -- i64 ] -- i64 ) b ;\n\
+         : b ( i64 [ i64 -- i64 ] -- i64 ) a ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("`a`") && err.contains("`b`") && err.contains("recursive"),
+        "a mutual combinator cycle is still a located rejection naming both members, got: {err}"
+    );
+}
+
+// -- criteria 7-9: `while` runs, carries an aggregate, and falls through ------
+
+#[test]
+fn while_runs_to_a_fixpoint() {
+    // Criterion 7 (R10/R13): the canonical fixpoint. `while` threads the
+    // counter through the predicate until it reaches 5, then leaves it.
+    let src = format!(
+        "{}: main ( -- ) 0 [ dup 5 < if 1 + true else false end ] c::while . ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("while_fixpoint", &src);
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn while_carrying_an_aggregate_state_runs() {
+    // Criterion 8 (R11): the carried state is a `Box` (an aggregate struct),
+    // so the back-edge rides the `stage_aggregates` stable-slot path (the
+    // slice-3 aggregate-return aliasing fix). The counter reaches 5.
+    let src = format!(
+        "{}type: Box n i64 ;\n\
+         : main ( -- )\n\
+           0 Box [ | b | b Box>n dup 5 < if 1 + Box true else Box false end ] c::while\n\
+           | r | r Box>n . ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("while_aggregate", &src);
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn while_empty_false_arm_falls_through() {
+    // Criterion 9 (R12): `while`'s `else end` arm is empty and must fall
+    // through leaving the state. A predicate that is false on the first call
+    // exits immediately with the initial state (7) untouched, exercising the
+    // fall-through arm directly.
+    let src = format!(
+        "{}: main ( -- ) 7 [ dup 5 < if 1 + true else false end ] c::while . ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("while_falls_through", &src);
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+}
+
+// -- criteria 10-11: the two back-edge obligations, located at the self-call --
+
+#[test]
+fn while_body_linear_local_across_back_edge_is_error() {
+    // Criterion 10 (R8, load-bearing): an outer linear local (`sp`, a `Spy`)
+    // is unconsumed when `while`'s back-edge is reached, so it would ride into
+    // the next iteration with nobody to dispose it. Located at the self-call,
+    // naming the live linear type and `while`. Removing the
+    // `check_linear_across_back_edge` call from the self-tail splice path
+    // would let this through.
+    let src = format!(
+        "{SPY_DEF}{}: main ( -- )\n\
+           7 Spy | sp |\n\
+           0 [ dup 5 < if 1 + true else false end ] c::while .\n\
+           sp drop ;\n",
+        combinators_import("c")
+    );
+    let err = build_check_error("while_linear_back_edge", &src);
+    assert!(
+        err.contains("`Spy`")
+            && err.contains("`while`")
+            && err.contains("live across the self-tail-call back-edge"),
+        "a linear local live across `while`'s back-edge is located, naming `Spy` and `while`, got: {err}"
+    );
+}
+
+#[test]
+fn while_body_reference_across_back_edge_is_error() {
+    // Criterion 11 (R9, load-bearing): the carried state is a reference `&v`
+    // to a frame local `v`, whose storage does not survive to the next
+    // iteration. Located at the self-call, naming the borrowed place and
+    // `while`. Removing the `check_reference_across_back_edge` call from the
+    // self-tail splice path would let this through.
+    let src = format!(
+        "{}type: V x i64 ;\n\
+         : main ( -- )\n\
+           0 V | v |\n\
+           &v [ | r | r true ] c::while\n\
+           drop\n\
+           v drop ;\n",
+        combinators_import("c")
+    );
+    let err = build_check_error("while_ref_back_edge", &src);
+    assert!(
+        err.contains("`v`")
+            && err.contains("`while`")
+            && err.contains("a reference to a local cannot cross a loop"),
+        "a reference to a frame local carried across `while`'s back-edge is located, naming `v` and `while`, got: {err}"
+    );
+}
+
+// -- criteria 14 / 14b: `while` is under the nested-loop limit ----------------
+
+#[test]
+fn while_nested_in_a_loop_is_rejected() {
+    // Criterion 14 (R14a, load-bearing): a `while` opened inside a `times`
+    // body would nest two constant-stack loops, which lowering cannot hoist
+    // yet, so it is the located R18 nested-loop rejection -- decided one stage
+    // before lowering. Without R14a's guard this compiles (and miscompiles)
+    // instead of being rejected.
+    let src = format!(
+        "{}: main ( -- )\n\
+           3 [ | i | 0 [ dup 5 < if 1 + true else false end ] c::while . ] times ;\n",
+        combinators_import("c")
+    );
+    let err = build_check_error("while_in_times", &src);
+    assert!(
+        err.contains("nested in a loop"),
+        "a `while` inside a `times` body is the located nested-loop rejection, got: {err}"
+    );
+}
+
+#[test]
+fn times_inside_a_self_tail_combinator_is_rejected() {
+    // Criterion 14b (R14b, load-bearing): a `times` sited inside `while`'s
+    // body (a self-tail combinator splice, which raises `loop_depth`) is the
+    // same located nested-loop rejection. Without R14b raising `loop_depth`
+    // across the self-tail splice this compiles instead of being rejected.
+    let src = format!(
+        "{}: main ( -- )\n\
+           0 [ 2 [ | i | ] times dup 5 < if 1 + true else false end ] c::while . ;\n",
+        combinators_import("c")
+    );
+    let err = build_check_error("times_in_while", &src);
+    assert!(
+        err.contains("nested in a loop"),
+        "a `times` inside a self-tail combinator body is the located nested-loop rejection, got: {err}"
+    );
+}
+
+// -- criterion 13: `while` is constant-stack, agreeing with a hand twin -------
+
+#[test]
+fn while_and_hand_threaded_loop_agree_across_stack_limits() {
+    // Criterion 13 (R15): `while` lowers to a constant-stack loop, so it and
+    // its hand-threaded whole-word self-tail twin (`countup`) behave
+    // identically across a `ulimit -s` sweep -- neither grows the stack per
+    // iteration, so both complete at every limit with the same output. N is
+    // 10_000 to keep the build fast; the *structural* guarantee (loop header +
+    // back-edge, no per-iteration `Call`) is carried by the
+    // `while_lowers_to_a_back_edge_not_an_infinite_splice` unit.
+    const N: usize = 10_000;
+    let comb = format!(
+        "{}: main ( -- ) 0 [ dup {N} < if 1 + true else false end ] c::while . ;\n",
+        combinators_import("c")
+    );
+    let hand = format!(
+        ": countup ( i64 -- i64 ) dup {N} < if 1 + countup else end ;\n\
+         : main ( -- ) 0 countup . ;\n"
+    );
+    let comb_bin = build_binary("wq-comb", &comb);
+    let hand_bin = build_binary("wq-hand", &hand);
+
+    for limit in [64u32, 256, 1024] {
+        assert_eq!(
+            run_at_stack_limit(&comb_bin, limit),
+            run_at_stack_limit(&hand_bin, limit),
+            "`while` and its hand-threaded twin must behave identically at ulimit -s {limit}"
+        );
+    }
+    // At a generous limit the combinator version runs to completion and counts
+    // to N, so the equivalence above cannot pass by both sides being equally
+    // wrong.
+    assert_eq!(
+        run_at_stack_limit(&comb_bin, 1024),
+        (Some(0), N.to_string()),
+        "at a generous stack limit `while` runs to completion and counts to N"
+    );
+
+    std::fs::remove_file(&comb_bin).ok();
+    std::fs::remove_file(&hand_bin).ok();
 }
 
 // -- criterion 12 / 12b: obligations 1 and 2 discharged at the def site -------
@@ -1232,11 +1470,13 @@ fn r10_quotation_argument_diagnostic_shows_unmangled_word() {
 
 #[test]
 fn r22_combinator_cycle_diagnostic_shows_unmangled_words() {
-    // A self-recursive combinator `self`; the cycle renders `` `self` ->
-    // `self` `` and must not carry `self__m0`.
+    // A combinator `self` with a non-tail self-call; the cycle renders
+    // `` `self` -> `self` `` and must not carry `self__m0`. (A tail-only
+    // self-edge is now permitted, D5, so the recursion must be non-tail to
+    // stay a cycle error.)
     let err = build_error_with_import(
         "m0-r22",
-        ": self ( i64 [ i64 -- i64 ] -- i64 ) self ;\n: main ( -- ) 3 [ 1 + ] self . ;\n",
+        ": self ( i64 [ i64 -- i64 ] -- i64 ) self drop ;\n: main ( -- ) 3 [ 1 + ] self . ;\n",
     );
     assert!(
         err.contains("`self` -> `self`"),
