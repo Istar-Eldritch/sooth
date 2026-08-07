@@ -32,20 +32,10 @@ Recorded so the scope decision isn't re-litigated by accident.
   would compete on is already held: memory-safe no-GC systems work by Rust,
   proven-real-time by Ada/SPARK, refinement+SMT by F*/Dafny/Liquid Haskell,
   effects by Koka, data-race-free actors by Pony. A new general-purpose language
-  faces a brutal adoption bar against incumbents that improve for free every model
-  generation.
-- **"For agents, not humans" does not land on this language.** A language
-  optimised for LLM authoring wants maximal familiarity (transferable corpus),
-  explicit named intermediates, and cheap human/agent review. Concatenative is
-  near-pessimal on all three: near-zero corpus, implicit global stack state (the
-  exact thing models track worst), and point-free density that makes review
-  expensive. The honest derivation of "best language for agent-authored safe code"
-  lands on "a familiar C/Python-shaped surface with a strong effect/contract layer
-  and a great structured-diagnostic protocol," which is a tooling project on top
-  of a mainstream language, not Sooth.
+  faces a brutal adoption bar against incumbents that keep improving.
 - **Therefore, for production, use a mainstream language** (Rust when its
-  guarantees are needed, Go/typed-Python when they aren't) and invest in the
-  agent-loop tooling around it. Sooth is the hobby, kept honestly separate.
+  guarantees are needed, Go/typed-Python when they aren't). Sooth is the hobby,
+  kept honestly separate.
 
 Nothing below is justified by market need. It's justified by being interesting to
 build and to write in.
@@ -191,8 +181,8 @@ The value is in a few sharp, cheap features, not in a research-grade type theory
 **Out, and why:**
 
 - **Full HM inference**: not required for a craft language. Annotate stack effects
-  explicitly (they double as documentation and as the LLM-nothing-to-do-here
-  legibility win). Keeping each stack slot as `(value, type)` from day one leaves
+  explicitly (they double as documentation and as a legibility win: nothing
+  left implicit for a reader to infer). Keeping each stack slot as `(value, type)` from day one leaves
   the door open to add inference later without a data-structure rewrite, but it is
   not a goal.
 - **Refinement types + SMT (Z3)**: dropped. Great for a safety product, far too
