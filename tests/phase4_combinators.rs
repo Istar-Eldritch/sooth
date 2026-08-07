@@ -913,17 +913,23 @@ fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
 
 /// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code, or
 /// `None` if it died by signal (a `SIGSEGV` from an overflowed stack).
-fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> Option<i32> {
-    let status = std::process::Command::new("sh")
+// `exec` replaces the `sh`, so a signal death is reported as the *binary's*
+// signal and `code()` is `None`; without the `exec` the shell would survive and
+// report 128+signo instead.
+fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
+    let out = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!(
             "ulimit -s {limit_kb} && exec \"{}\"",
             binary.display()
         ))
         .env_remove(sooth::ir::TRACE_ALLOC_ENV)
-        .status()
+        .output()
         .expect("binary should run");
-    status.code()
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
 }
 
 #[test]
@@ -940,13 +946,17 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     // `cargo test` fast (~0.36 s to compile each); the *structural* constant-
     // stack guarantee (loop header + back-edge, no per-element `Call`) is
     // carried by the `each_lowers_to_a_loop_not_a_per_element_call` unit.
+    // The array is 1-filled, not 0-filled: the fold's correct answer is then N,
+    // so a combinator that computes the wrong sum is caught. A 0-filled array
+    // makes the expected value 0, which any broken fold returning garbage-free
+    // zero would also produce.
     const N: usize = 10_000;
     let comb = format!(
-        "{}: main ( -- ) 0 {N} fill 0 [ + ] c::fold . ;\n",
+        "{}: main ( -- ) 1 {N} fill 0 [ + ] c::fold . ;\n",
         combinators_import("c")
     );
     let hand = format!(
-        ": main ( -- ) 0 {N} fill | arr | 0 {N} [ | i | &arr i >usize &> @ + ] times . arr drop ;\n"
+        ": main ( -- ) 1 {N} fill | arr | 0 {N} [ | i | &arr i >usize &> @ + ] times . arr drop ;\n"
     );
     let comb_bin = build_binary("eq-comb", &comb);
     let hand_bin = build_binary("eq-hand", &hand);
@@ -962,11 +972,13 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
             "combinator and hand-threaded twin must behave identically at ulimit -s {limit}"
         );
     }
-    // And at a generous limit the combinator version actually runs to 0.
+    // And at a generous limit the combinator version runs to completion *and
+    // computes the right sum*, so the equivalence above cannot pass by both
+    // sides being equally wrong.
     assert_eq!(
         run_at_stack_limit(&comb_bin, 1024),
-        Some(0),
-        "at a generous stack limit the combinator version runs to completion"
+        (Some(0), N.to_string()),
+        "at a generous stack limit the combinator version runs to completion and sums to N"
     );
 
     std::fs::remove_file(&comb_bin).ok();
