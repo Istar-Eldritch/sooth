@@ -387,9 +387,12 @@ every diagnostic naming a word leaked the internal `__m0` monomorphization mangl
 the module had an import (predating 6a, arriving with module support), and the now-unreachable
 `demangle_local` was deleted as dead code.
 
-**Next action: Phase 4 Slice 6b** (the polymorphic-path gaps + `filter`/`while`): a
-polymorphic body's `if` and a polymorphic self-tail word's loop transform, the two gaps 6a's
-combinators needed neither of, closed for `filter`/`while`'s first real use of them.
+**Next action: Phase 4 Slice 6b** (`filter`/`while`, and the self-tail combinator loop). Its
+paper pre-check (`docs/phase4-slice6b-brief.md`) falsified this slice's original charter by
+building the programs: `filter` needs no compiler change at all, and `while`'s blocker is
+6a's own combinator-cycle rejection rather than either "polymorphic-path gap", both of which
+stay in place. The work is relaxing that rejection for a self-*tail* combinator edge and
+lowering it to a splice-time loop back-edge.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1256,19 +1259,32 @@ then find out what the compiler owes it.
    with a quotation-taking word at the REPL a located rejection.
    Dogfood: rewrite an earlier program to use `each`/`map`/`fold`.
 
-   **6b — the polymorphic-path gaps + `filter`/`while`.** Closes the two polymorphic-path
-   gaps slice 4's brief measured, because this is where their first real consumers appear.
-   A polymorphic body rejects `if` (`src/check.rs:2997`: the monomorphic arm machinery,
-   condition-pop, per-arm unconsumed-linear check, and move-join, is not lifted to
-   `PolyType`), and a polymorphic self-tail word does not get the loop transform
-   (`src/ir.rs:1176`, `self_tail` hardcoded `false`). They are siblings: both are machinery
-   the monomorphic path has and the polymorphic path lacks. Neither blocked slice 4 or 6a's
-   phase-exit words. They block exactly two library words: `filter` needs the `if` fix to
-   branch on its predicate, and `while` needs **both**, being unbounded (so `times` cannot
-   express it) and naturally written as a self-recursive polymorphic word. Depends on 6a for
-   the inliner and the library's file/shape; decide at its brief whether a fixed-up poly
-   body needs any inliner change of its own or whether 6a's pass already covers it unchanged.
-   **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are.
+   **6b — `filter`/`while`, and the self-tail combinator loop.** *This entry previously said
+   the slice closes the two "polymorphic-path gaps" slice 4's brief measured. Its own paper
+   pre-check falsified that, by building the programs (see
+   `docs/phase4-slice6b-brief.md`); the charter below is the corrected one.*
+   Neither named gap is what `filter`/`while` need, and both are left in place. A combinator
+   is checked by term-splicing at the *concrete* call site, never through `poly_term`, so the
+   polymorphic-`if` rejection never gates one: `filter` compiles and runs today with **no
+   compiler change at all**, `if`/`else` and all. And a polymorphic body cannot call any
+   polymorphic word, self or other (`unknown word` in `poly_call_term`, long before
+   lowering), which makes the `src/ir.rs` poly-instantiation `self_tail` hardcode currently
+   *unreachable*: no poly word can self-call to reach it.
+   `while`'s actual blocker is 6a's own D5 combinator-cycle rejection ("a quotation-taking
+   word cannot be recursive"), which fires identically for a *monomorphic* self-recursive
+   combinator, so it is not a polymorphism question at all. The work is therefore: relax D5
+   for a self-*tail* combinator edge only (non-tail self-calls and mutual cycles stay hard
+   errors, they need slice 7's runtime quotation), and lower that edge to a loop back-edge at
+   splice time, reusing the mid-body loop `times` already opens (brief D8; specializing the
+   combinator into a monomorphic `IrFunc` was weighed and rejected, since it reopens 6a's
+   "inlining is total" and "a combinator mints no symbol"). The tail-vs-non-tail distinction
+   is a *checker* change, not just IR work: `check_combinator_cycles` builds its edges from
+   `all_calls`, which erases it.
+   Ships `while` inheriting the R18 nested-loop limit that `each`/`map`/`fold` already have
+   (brief D9); 6d lifts it for all of them at once. Depends on 6a for the inliner and the
+   library's file/shape.
+   **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are,
+   with `while` running in constant stack and a non-tail combinator self-call still rejected.
 
    **6c — quotation-taking words at the REPL.** Lifts 6a's located rejection: what it means
    to define and call a combinator in a live session. The problem is retention, the same
