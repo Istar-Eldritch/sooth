@@ -70,6 +70,56 @@ fn repl_words_lists_words_with_signatures() {
     );
 }
 
+/// R19: redefining a word must not leave a stale generation visible in
+/// `:words` -- there is exactly one entry, at the new signature.
+#[test]
+fn repl_words_shows_redefined_word_at_new_generation() {
+    let out = run_session(&[
+        ": sq ( i64 -- i64 ) dup * ;",
+        ": sq ( i64 i64 -- i64 ) * ;",
+        ":words",
+    ]);
+    let sq_lines: Vec<&str> = out.lines().filter(|l| l.starts_with("sq ")).collect();
+    assert_eq!(
+        sq_lines,
+        vec!["sq ( i64 i64 -- i64 )"],
+        "expected exactly one, current-generation `sq` entry, got: {out}"
+    );
+}
+
+/// R19: an imported word must list under the spelling the user typed
+/// (`m::inc`), not the internal import-epoch-mangled symbol (`m::inc__import0`).
+#[test]
+fn repl_words_shows_user_facing_name_for_imported_word() {
+    let dir = std::env::temp_dir().join(format!("sooth-replux-import-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("m.sth");
+    std::fs::write(&lib, ": inc ( i64 -- i64 ) 1 + ;\nexport: inc ;\n").unwrap();
+
+    let out = run_session(&[&format!("import: m \"{}\" ;", lib.display()), ":words"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.contains("m::inc ( i64 -- i64 )"),
+        "`:words` should list the user-facing spelling `m::inc`, got: {out}"
+    );
+    assert!(
+        !out.contains("__import"),
+        "`:words` must not leak the internal import-epoch-mangled spelling, got: {out}"
+    );
+}
+
+/// R19/R23: a polymorphic word (kept out of `self.env`, R3) is not invisible
+/// to `:words` just because it has no concrete instantiation yet.
+#[test]
+fn repl_words_lists_polymorphic_word() {
+    let out = run_session(&[": alen ( ['T 'N] -- ) drop ;", ":words"]);
+    assert!(
+        out.contains("alen ( ['T 'N] -- )"),
+        "`:words` should list the polymorphic word `alen` with its poly signature, got: {out}"
+    );
+}
+
 /// #24: `:type` prints the resulting stack effect and executes nothing.
 #[test]
 fn repl_type_prints_effect_without_executing() {
@@ -101,22 +151,37 @@ fn repl_stack_prints_without_mutating() {
 
 /// #27: `:clear` disposes the residual stack (runs destructors) then resets
 /// the session -- a redefinition after `:clear` behaves like a fresh session.
+///
+/// Deliberately uses a *linear* type with a printing `drop` override
+/// (mirroring `repl_drop_overload_still_runs_on_a_later_line` in
+/// `tests/phase3_resources.rs`), not a plain `i64`: `dispose_residual`
+/// early-returns doing nothing when nothing on the stack is linear, so a
+/// non-linear probe would still pass this test even if the dispose call were
+/// deleted from `Session::clear` entirely, proving only the reset half of
+/// D4/R22 and none of the dispose half.
 #[test]
 fn repl_clear_disposes_then_resets() {
     let out = run_session(&[
-        "1 2",
+        "type: Res n i64 ;",
+        ": drop ( Res -- ) | r | r Res>n . ;",
+        "7 Res",
         ":clear",
         ":stack",
         ": sq ( i64 -- i64 ) dup * ;",
         "3 sq",
     ]);
-    assert!(
-        out.contains("stack: (empty)"),
-        "`:clear` should reset the stack, got: {out}"
-    );
-    assert!(out.contains("defined sq"), "got: {out}");
-    assert!(
-        out.contains("stack: 9"),
-        "session should work normally after `:clear`, got: {out}"
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Res",
+            "defined drop for Res",
+            "stack: <Res>",
+            "7",
+            "stack: (empty)",
+            "defined sq",
+            "stack: 9",
+        ],
+        "expected the `Res` destructor's `7` to print during `:clear`, then a clean reset, got: {out}"
     );
 }

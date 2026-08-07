@@ -760,26 +760,64 @@ impl Session {
         self.rich_stack = true;
     }
 
+    /// R19: the user-facing spelling for an `self.env` key. A session-local
+    /// word's key already *is* its user-facing name, but an imported word's
+    /// key is its internal, import-epoch-mangled spelling (`splice_import`
+    /// inserts `q::raw__importN` as the env key and `q::raw` -> that spelling
+    /// into `import_aliases`, R9); this reverses that map back to what the
+    /// user actually typed. A selective import adds a second, unqualified
+    /// alias at the same internal spelling, so ties prefer the qualified one
+    /// (deterministic regardless of `HashMap` iteration order, not chosen by
+    /// which alias happened to be inserted last).
+    fn display_name(&self, internal: &str) -> String {
+        let mut best: Option<&str> = None;
+        for (alias, target) in &self.import_aliases {
+            if target == internal && (best.is_none() || alias.contains("::")) {
+                best = Some(alias);
+            }
+        }
+        best.map(str::to_string)
+            .unwrap_or_else(|| internal.to_string())
+    }
+
     /// R19/R23: every defined word's user-facing name, sorted, at its current
-    /// generation. `self.env` is already keyed by the user-facing spelling
-    /// (the mangled/epoch-tagged symbol lives in `WordEntry::symbol`), so no
-    /// remapping is needed. Shared between `:words` (D3) and the editor's tab
-    /// completion (R23), which is the point of pulling it out on its own.
+    /// generation, including polymorphic words (`self.poly_words`, kept out
+    /// of `self.env` per R3 so it needs folding in separately -- imports
+    /// never splice a polymorphic word, so `poly_words` keys are always
+    /// already user-facing and need no `display_name` reversal). Shared
+    /// between `:words` (D3) and the editor's tab completion (R23), which is
+    /// the point of pulling it out on its own.
     pub fn word_names(&self) -> Vec<String> {
-        let mut names: Vec<String> = self.env.keys().cloned().collect();
+        let mut names: Vec<String> = self.env.keys().map(|k| self.display_name(k)).collect();
+        names.extend(self.poly_words.keys().cloned());
         names.sort();
         names
     }
 
     /// R19: `:words` listing, one `name ( ins -- outs )` line per defined
-    /// word, sorted for deterministic golden output.
+    /// word (concrete and polymorphic), sorted for deterministic golden
+    /// output. Built directly from `self.env`/`self.poly_words` rather than
+    /// through `word_names()` so each display name stays paired with the
+    /// right signature lookup (an env key, not the possibly-aliased display
+    /// name).
     fn words_listing(&self) -> Vec<String> {
-        self.word_names()
+        let mut entries: Vec<(String, String)> = self
+            .env
+            .iter()
+            .map(|(internal, entry)| (self.display_name(internal), sig_str(&entry.sig)))
+            .collect();
+        entries.extend(self.poly_words.iter().map(|(name, entry)| {
+            let sig = entry
+                .word
+                .poly
+                .as_deref()
+                .expect("a poly_words entry always has a polymorphic signature");
+            (name.clone(), poly_sig_str(sig))
+        }));
+        entries.sort();
+        entries
             .into_iter()
-            .map(|name| {
-                let sig = &self.env[&name].sig;
-                format!("{name} {}", sig_str(sig))
-            })
+            .map(|(name, sig)| format!("{name} {sig}"))
             .collect()
     }
 
@@ -2300,6 +2338,33 @@ fn sig_str(sig: &Sig) -> String {
     format!("( {} )", parts.join(" "))
 }
 
+/// R19: `sig_str`'s polymorphic analogue for `:words`, reusing `check`'s own
+/// `PolyType` renderer (`poly_type_str`) so a type variable prints its
+/// declared surface spelling (`'T`) rather than a bare index. A row variable
+/// prints as `..name`; the REPL only ever retains a poly word with `row_out`
+/// `None` (`eval_poly_def`'s multi-output gate), but `row_in` alone is a
+/// legal signature, so both are handled.
+fn poly_sig_str(sig: &PolySig) -> String {
+    let mut ins: Vec<String> = Vec::new();
+    if let Some(r) = sig.row_in {
+        ins.push(format!("..{}", sig.row_var_names[r as usize]));
+    }
+    ins.extend(sig.inputs.iter().map(|t| check::poly_type_str(t, sig)));
+    let mut outs: Vec<String> = Vec::new();
+    if let Some(r) = sig.row_out {
+        outs.push(format!("..{}", sig.row_var_names[r as usize]));
+    }
+    outs.extend(sig.outputs.iter().map(|t| check::poly_type_str(t, sig)));
+    let mut parts = vec!["--".to_string()];
+    if !outs.is_empty() {
+        parts.push(outs.join(" "));
+    }
+    if !ins.is_empty() {
+        parts.insert(0, ins.join(" "));
+    }
+    format!("( {} )", parts.join(" "))
+}
+
 /// `( before -- after )` for a `:type` line's checked effect (R20): the stack
 /// types on entry and the resulting types after the checked expression.
 fn type_effect_str(before: &[Type], after: &[Type]) -> String {
@@ -2427,6 +2492,28 @@ const PROMPT: &str = "sooth> ";
 /// or bracket is still open (R10).
 const CONTINUATION_PROMPT: &str = "  ... ";
 
+/// The pure action-to-outcome mapping `run_tty`'s loop acts on: `Commit`
+/// dispatches the line, `Abort` (Ctrl-C) just continues the loop without
+/// dispatching or quitting, and `Eof` (Ctrl-D on an empty line, or a closed
+/// stdin) quits. Pulled out of `run_tty` -- which also does real termios/fd
+/// I/O and so cannot run under `cargo test` -- so the one decision that
+/// distinguishes "Ctrl-C aborts the line" from "Ctrl-C ends the session" is
+/// unit-testable on its own, independent of a real terminal.
+#[derive(Debug, PartialEq)]
+enum LoopStep {
+    Continue,
+    Dispatch(String),
+    Quit,
+}
+
+fn loop_step(action: editor::Action) -> LoopStep {
+    match action {
+        editor::Action::Commit(line) => LoopStep::Dispatch(line),
+        editor::Action::Abort => LoopStep::Continue,
+        editor::Action::Eof => LoopStep::Quit,
+    }
+}
+
 /// The tty path: put stdin in raw mode (restored on any exit by the guard's
 /// `Drop`, D5), then read bytes into the line editor, dispatching each
 /// committed line through `dispatch_line`. Ctrl-C abandons the line (and any
@@ -2434,7 +2521,10 @@ const CONTINUATION_PROMPT: &str = "  ... ";
 /// stdin both end the session.
 fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String> {
     session.enable_rich_stack_rendering();
-    let _guard = editor::raw_mode_stdin();
+    // A failed `tcgetattr`/`tcsetattr` here means there is no sound cooked
+    // state to restore later; propagate rather than proceed into raw mode on
+    // a guard that would write back garbage termios on `Drop`.
+    let _guard = editor::raw_mode_stdin().map_err(|e| format!("entering raw mode: {e}"))?;
     let mut ed = editor::Editor::new(
         PROMPT,
         CONTINUATION_PROMPT,
@@ -2453,9 +2543,9 @@ fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String>
         let action = ed
             .push_byte(byte, writer)
             .map_err(|e| format!("writing stdout: {e}"))?;
-        match action {
-            None => {}
-            Some(editor::Action::Commit(cmd)) => {
+        let Some(action) = action else { continue };
+        match loop_step(action) {
+            LoopStep::Dispatch(cmd) => {
                 w(writer.write_all(b"\r\n"))?;
                 match dispatch_line(session, &cmd, writer)? {
                     Dispatch::Quit => return end_session(session, writer),
@@ -2465,11 +2555,11 @@ fn run_tty(session: &mut Session, writer: &mut impl Write) -> Result<(), String>
                 ed.set_words(session.word_names());
                 w(ed.redraw(writer))?;
             }
-            Some(editor::Action::Abort) => {
+            LoopStep::Continue => {
                 w(writer.write_all(b"\r\n"))?;
                 w(ed.redraw(writer))?;
             }
-            Some(editor::Action::Eof) => {
+            LoopStep::Quit => {
                 w(writer.write_all(b"\r\n"))?;
                 return end_session(session, writer);
             }
@@ -2502,6 +2592,21 @@ mod tests {
         // C-ABI `l`-taking, `l`-returning function on this 64-bit target.
         let sq: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(sym) };
         assert_eq!(sq(5), 25);
+    }
+
+    /// The Ctrl-C-doesn't-exit-the-process decision, guarded directly rather
+    /// than only through the editor's `Action::Abort` (which has no way to
+    /// exit a process at all): `run_tty`'s match on `loop_step` is the one
+    /// place that decision lives, so this asserts all three arms rather than
+    /// letting a swapped `Abort`/`Eof` mapping ship undetected.
+    #[test]
+    fn loop_step_maps_commit_abort_eof_expected() {
+        assert_eq!(
+            loop_step(editor::Action::Commit("1 2 +".to_string())),
+            LoopStep::Dispatch("1 2 +".to_string())
+        );
+        assert_eq!(loop_step(editor::Action::Abort), LoopStep::Continue);
+        assert_eq!(loop_step(editor::Action::Eof), LoopStep::Quit);
     }
 
     #[test]
@@ -2550,18 +2655,23 @@ mod tests {
     /// #25 (load-bearing, mutation-tested): `:type` mentioning an array/
     /// owned-cell/ref type must not grow the session's interning registries,
     /// even though `parse_line_with_structs` interns as a side effect of
-    /// parsing (the hazard R20 calls out).
+    /// parsing (the hazard R20 calls out). The probe line mentions all three:
+    /// `0 4 fill` interns an array, `7 ^` an owned cell, and `&a 0 &> @` a ref
+    /// (borrowing an element of the freshly-bound array `a`) -- each registry
+    /// assertion below is load-bearing on its own probe term, not decorative.
+    /// `.unwrap()`, not `.unwrap_or(())`: a future `eval_type` regression that
+    /// makes this line stop checking must fail loudly here, not silently
+    /// degrade all three assertions to a vacuous pass.
     #[test]
     fn repl_type_does_not_grow_registries() {
         let mut session = Session::new();
         let mut out = Vec::new();
-        session
-            .eval_line("type: Pt x i64 y i64 ;", &mut out)
-            .unwrap();
         let arrays_before = session.arrays.len();
         let cells_before = session.owned_cells.len();
         let refs_before = session.refs.len();
-        session.eval_type("0 4 fill 7 ^", &mut out).unwrap_or(());
+        session
+            .eval_type("0 4 fill | a | &a 0 &> @ 7 ^", &mut out)
+            .unwrap();
         assert_eq!(session.arrays.len(), arrays_before);
         assert_eq!(session.owned_cells.len(), cells_before);
         assert_eq!(session.refs.len(), refs_before);
@@ -2811,6 +2921,35 @@ mod tests {
             );
             drop(Box::from_raw(payload));
         }
+    }
+
+    /// F1/F2: everything above (`format_rich_*`) exercises `format_stack_rich`
+    /// directly with hand-built layout structs; `enable_rich_stack_rendering`,
+    /// `render_stack`'s rich branch, and `eval_expr`'s rich branch
+    /// (the actual live wiring `run_tty` uses) are otherwise never exercised
+    /// by any test, since a real tty is required to reach `run_tty` itself. A
+    /// wrong cell index or an off-by-one there would ship green without this.
+    #[test]
+    fn session_rich_rendering_shows_struct_contents_through_real_session() {
+        let mut session = Session::new();
+        session.enable_rich_stack_rendering();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Vec2 x i64 y i64 ;", &mut out)
+            .unwrap();
+        session.eval_line("5 6 Vec2", &mut out).unwrap();
+        assert_eq!(session.render_stack(), "stack: <Vec2 5i64 6i64>");
+
+        // R16's session-level half: after rendering an owning cell through
+        // the real session (not just the isolated formatter, per
+        // `format_rich_owned_cell_read_does_not_consume` above), it must
+        // still be genuinely live and droppable, not merely "not freed in
+        // isolation".
+        session.eval_line("drop", &mut out).unwrap(); // dispose the Vec2 first
+        session.eval_line("99 ^", &mut out).unwrap();
+        assert_eq!(session.render_stack(), "stack: ^99i64");
+        session.eval_line("drop", &mut out).unwrap();
+        assert_eq!(session.render_stack(), "stack: (empty)");
     }
 
     fn entry(generation: u64) -> WordEntry {

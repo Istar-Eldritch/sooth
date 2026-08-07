@@ -98,29 +98,36 @@ fn raw_termios(cooked: &Termios) -> Termios {
 /// syscalls directly, so a test can supply a fake and assert the *saved* state
 /// is what gets re-applied.
 pub trait TermiosPort {
-    fn get(&self) -> Termios;
-    fn set(&self, t: &Termios);
+    fn get(&self) -> io::Result<Termios>;
+    fn set(&self, t: &Termios) -> io::Result<()>;
 }
 
 /// The production port: `tcgetattr`/`tcsetattr` on a real fd.
 pub struct FdTermios(c_int);
 
 impl TermiosPort for FdTermios {
-    fn get(&self) -> Termios {
+    fn get(&self) -> io::Result<Termios> {
         let mut t = Termios::zeroed();
-        // SAFETY: `&mut t` points to a valid `Termios`; a failed call leaves it
-        // zeroed, which `raw_termios` still transforms into a usable value.
-        unsafe {
-            tcgetattr(self.0, &mut t);
+        // SAFETY: `&mut t` points to a valid `Termios` for the call's
+        // duration. The return value is checked below rather than assumed: a
+        // failed call leaves `t` all-zero, which is not "still a usable
+        // value" -- an all-zero termios written back to the real terminal on
+        // `Drop` would wreck it, so a failure here must not be treated as a
+        // saved cooked state at all.
+        let rc = unsafe { tcgetattr(self.0, &mut t) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
         }
-        t
+        Ok(t)
     }
 
-    fn set(&self, t: &Termios) {
+    fn set(&self, t: &Termios) -> io::Result<()> {
         // SAFETY: `t` is a valid `Termios`; the fd is the one we were built with.
-        unsafe {
-            tcsetattr(self.0, TCSAFLUSH, t);
+        let rc = unsafe { tcsetattr(self.0, TCSAFLUSH, t) };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
         }
+        Ok(())
     }
 }
 
@@ -133,21 +140,27 @@ pub struct RawModeGuard<P: TermiosPort> {
 }
 
 impl<P: TermiosPort> RawModeGuard<P> {
-    pub fn new(port: P) -> RawModeGuard<P> {
-        let saved = port.get();
-        port.set(&raw_termios(&saved));
-        RawModeGuard { port, saved }
+    /// Fails rather than entering raw mode on a garbage/unreadable termios: a
+    /// failed `tcgetattr` or `tcsetattr` here means there is nothing sound to
+    /// restore later, so the caller gets an error instead of a guard that
+    /// would write back zeroed state on `Drop`.
+    pub fn new(port: P) -> io::Result<RawModeGuard<P>> {
+        let saved = port.get()?;
+        port.set(&raw_termios(&saved))?;
+        Ok(RawModeGuard { port, saved })
     }
 }
 
 impl<P: TermiosPort> Drop for RawModeGuard<P> {
     fn drop(&mut self) {
-        self.port.set(&self.saved);
+        // Best-effort: there is no fallback if the restore itself fails, and
+        // `Drop` cannot propagate an error.
+        let _ = self.port.set(&self.saved);
     }
 }
 
 /// Put stdin (fd 0) into raw mode for the interactive session.
-pub fn raw_mode_stdin() -> RawModeGuard<FdTermios> {
+pub fn raw_mode_stdin() -> io::Result<RawModeGuard<FdTermios>> {
     RawModeGuard::new(FdTermios(0))
 }
 
@@ -208,39 +221,66 @@ fn decode(b: &[u8]) -> Decoded {
             if b.len() < 2 {
                 return Decoded::NeedMore;
             }
-            if b[1] == b'[' || b[1] == b'O' {
+            if b[1] == b'O' {
+                // SS3: exactly one final byte, no parameters (some
+                // terminals' F1-F4). Never one of the keys this editor
+                // recognizes; still consumed whole so it cannot leak.
                 if b.len() < 3 {
                     return Decoded::NeedMore;
                 }
-                match b[2] {
-                    b'A' => Decoded::Key(Key::Up, 3),
-                    b'B' => Decoded::Key(Key::Down, 3),
-                    b'C' => Decoded::Key(Key::Right, 3),
-                    b'D' => Decoded::Key(Key::Left, 3),
-                    b'H' => Decoded::Key(Key::Home, 3),
-                    b'F' => Decoded::Key(Key::End, 3),
-                    d @ b'0'..=b'9' => {
-                        // A `CSI n ~` sequence (e.g. `\x1b[3~` = Delete).
-                        if b.len() < 4 {
-                            return Decoded::NeedMore;
-                        }
-                        if b[3] == b'~' {
-                            let key = match d {
-                                b'1' | b'7' => Key::Home,
-                                b'4' | b'8' => Key::End,
-                                b'3' => Key::Delete,
-                                _ => Key::Unknown,
-                            };
-                            Decoded::Key(key, 4)
-                        } else {
-                            Decoded::Key(Key::Unknown, 4)
-                        }
-                    }
-                    _ => Decoded::Key(Key::Unknown, 3),
-                }
-            } else {
-                Decoded::Key(Key::Unknown, 2)
+                return Decoded::Key(Key::Unknown, 3);
             }
+            if b[1] == b'[' {
+                if b.len() < 3 {
+                    return Decoded::NeedMore;
+                }
+                // CSI: `ESC [`, then any number of parameter bytes
+                // (0x30..=0x3F: digits, `;`, `:`, ...), then any number of
+                // intermediate bytes (0x20..=0x2F), then exactly one final
+                // byte (0x40..=0x7E). Scanned to the final byte before
+                // deciding a `Key` so a modified arrow (`ESC[1;5C`,
+                // Ctrl-Right), a multi-digit function key (`ESC[15~`, F5), or
+                // a bracketed-paste marker (`ESC[200~`) is consumed as one
+                // unit -- never partially, which is what let an escape tail
+                // (e.g. `5C`) leak into the buffer and reach `lexer::lex`,
+                // the exact thing R6 forbids.
+                let mut i = 2;
+                while i < b.len() && (0x30..=0x3f).contains(&b[i]) {
+                    i += 1;
+                }
+                while i < b.len() && (0x20..=0x2f).contains(&b[i]) {
+                    i += 1;
+                }
+                if i >= b.len() {
+                    return Decoded::NeedMore;
+                }
+                if !(0x40..=0x7e).contains(&b[i]) {
+                    // A byte outside every CSI byte range with no final byte
+                    // seen yet: give up on this sequence rather than waiting
+                    // forever, consuming through the offending byte.
+                    return Decoded::Key(Key::Unknown, i + 1);
+                }
+                let final_byte = b[i];
+                let consumed = i + 1;
+                let params = &b[2..i];
+                let key = match final_byte {
+                    b'A' if params.is_empty() => Key::Up,
+                    b'B' if params.is_empty() => Key::Down,
+                    b'C' if params.is_empty() => Key::Right,
+                    b'D' if params.is_empty() => Key::Left,
+                    b'H' if params.is_empty() => Key::Home,
+                    b'F' if params.is_empty() => Key::End,
+                    b'~' => match params {
+                        b"1" | b"7" => Key::Home,
+                        b"4" | b"8" => Key::End,
+                        b"3" => Key::Delete,
+                        _ => Key::Unknown,
+                    },
+                    _ => Key::Unknown,
+                };
+                return Decoded::Key(key, consumed);
+            }
+            Decoded::Key(Key::Unknown, 2)
         }
         b'\r' | b'\n' => Decoded::Key(Key::Enter, 1),
         b'\t' => Decoded::Key(Key::Tab, 1),
@@ -460,7 +500,16 @@ impl Editor {
             }
             Key::Enter => {
                 let line = String::from_utf8_lossy(&self.buf).into_owned();
-                self.history.record(&line)?;
+                // A history-file write failure (a read-only `$HOME`, a
+                // `SOOTH_HISTORY` pointing at a directory, a full disk) is a
+                // best-effort convenience, not part of the eval contract: it
+                // must never end the session or skip the scope-end linear
+                // disposal further up the call stack (`run_tty` -> `end_session`),
+                // which an `Err` propagated out of here would do by bypassing
+                // that whole path.
+                if let Err(e) = self.history.record(&line) {
+                    out.write_all(format!("\r\n(history not saved: {e})\r\n").as_bytes())?;
+                }
                 self.reset_line();
                 self.pending_lines.push(line);
                 let joined = self.pending_lines.join("\n");
@@ -658,6 +707,17 @@ mod tests {
         assert_eq!(ed.buf, b"foo");
         feed(&mut ed, b"\x1b[B"); // down
         assert_eq!(ed.buf, b"bar");
+
+        // R5: editing a recalled entry must not mutate the stored one -- the
+        // recall clones into the buffer, so this makes that clone
+        // load-bearing rather than incidental.
+        feed(&mut ed, b"\x7f"); // backspace: buf becomes "ba"
+        assert_eq!(ed.buf, b"ba");
+        assert_eq!(
+            ed.history.entries,
+            vec!["foo".to_string(), "bar".to_string()],
+            "editing a recalled entry must not mutate the stored history"
+        );
     }
 
     #[test]
@@ -679,6 +739,31 @@ mod tests {
             "escape byte reached lexer"
         );
         crate::lexer::lex(&line).expect("committed line lexes cleanly");
+    }
+
+    #[test]
+    fn editor_parameterized_csi_sequences_leave_no_tail_bytes() {
+        // R6: a modified arrow (Ctrl-Right), a multi-digit function key
+        // (F5), and a bracketed-paste marker must each be consumed as one
+        // unit, with zero leaked bytes reaching the buffer -- the bug this
+        // guards against left a literal `5C` (or a bare `~`) typed into the
+        // line, because the old decoder assumed every CSI sequence was
+        // exactly 4 bytes.
+        for seq in [
+            &b"\x1b[1;5C"[..], // Ctrl-Right
+            &b"\x1b[15~"[..],  // F5
+            &b"\x1b[200~"[..], // bracketed-paste start marker
+        ] {
+            let mut ed = editor(empty_history());
+            feed(&mut ed, b"ab");
+            feed(&mut ed, seq);
+            feed(&mut ed, b"cd");
+            assert_eq!(
+                ed.buf, b"abcd",
+                "sequence {seq:?} leaked bytes into the buffer: {:?}",
+                ed.buf
+            );
+        }
     }
 
     #[test]
@@ -770,6 +855,31 @@ mod tests {
     }
 
     #[test]
+    fn editor_unwritable_history_path_does_not_abort_commit() {
+        // A `SOOTH_HISTORY` pointing at a directory (or any other unwritable
+        // path) must not turn a history-write failure into a fatal error:
+        // Enter still commits the line -- the process (and the eventual
+        // `end_session` disposal) survives, just without persisting it.
+        let dir =
+            std::env::temp_dir().join(format!("sooth-hist-unwritable-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap(); // a directory: `fs::write` on it fails
+        let history = History::load_from(Some(dir.clone()), HISTORY_CAP);
+        let mut ed = Editor::new("> ", "... ", history, |_| true);
+        let mut out = Vec::new();
+        for &b in b"1 2 +" {
+            ed.push_byte(b, &mut out).unwrap();
+        }
+        let action = ed.push_byte(b'\r', &mut out).unwrap();
+        assert_eq!(action, Some(Action::Commit("1 2 +".to_string())));
+        let rendered = String::from_utf8_lossy(&out);
+        assert!(
+            rendered.contains("history not saved"),
+            "expected a non-fatal warning, got: {rendered}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn editor_history_file_roundtrips_capped() {
         let dir = std::env::temp_dir().join(format!("sooth-hist-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
@@ -797,11 +907,12 @@ mod tests {
     struct FakePort(Rc<RefCell<Termios>>);
 
     impl TermiosPort for FakePort {
-        fn get(&self) -> Termios {
-            *self.0.borrow()
+        fn get(&self) -> io::Result<Termios> {
+            Ok(*self.0.borrow())
         }
-        fn set(&self, t: &Termios) {
+        fn set(&self, t: &Termios) -> io::Result<()> {
             *self.0.borrow_mut() = *t;
+            Ok(())
         }
     }
 
@@ -812,7 +923,7 @@ mod tests {
         let shared = Rc::new(RefCell::new(cooked));
 
         {
-            let _guard = RawModeGuard::new(FakePort(shared.clone()));
+            let _guard = RawModeGuard::new(FakePort(shared.clone())).unwrap();
             // While the guard lives, the terminal is raw: echo/canonical off.
             assert_eq!(shared.borrow().c_lflag & flags::ECHO, 0);
             assert_eq!(shared.borrow().c_lflag & flags::ICANON, 0);
@@ -820,5 +931,47 @@ mod tests {
 
         // On drop, the saved cooked state is re-applied verbatim.
         assert_eq!(*shared.borrow(), cooked);
+    }
+
+    /// A `TermiosPort` whose `get`/`set` always fail, so `RawModeGuard::new`
+    /// has something real to propagate instead of assuming success.
+    struct FailingPort;
+
+    impl TermiosPort for FailingPort {
+        fn get(&self) -> io::Result<Termios> {
+            Err(io::Error::other("tcgetattr failed"))
+        }
+        fn set(&self, _t: &Termios) -> io::Result<()> {
+            Err(io::Error::other("tcsetattr failed"))
+        }
+    }
+
+    #[test]
+    fn raw_mode_guard_new_propagates_a_failed_tcgetattr() {
+        // A false `SAFETY` comment used to claim a failed `tcgetattr` "still
+        // transforms into a usable value"; it does not, and this asserts the
+        // failure surfaces as an `Err` rather than a `RawModeGuard` built on
+        // a zeroed termios that would later be written back to a real
+        // terminal on `Drop`.
+        assert!(RawModeGuard::new(FailingPort).is_err());
+    }
+
+    /// A `TermiosPort` whose `get` succeeds but `set` always fails, isolating
+    /// the `tcsetattr`-failure half of `RawModeGuard::new` from the
+    /// `tcgetattr`-failure half above.
+    struct GetOkSetFailsPort;
+
+    impl TermiosPort for GetOkSetFailsPort {
+        fn get(&self) -> io::Result<Termios> {
+            Ok(Termios::zeroed())
+        }
+        fn set(&self, _t: &Termios) -> io::Result<()> {
+            Err(io::Error::other("tcsetattr failed"))
+        }
+    }
+
+    #[test]
+    fn raw_mode_guard_new_propagates_a_failed_tcsetattr() {
+        assert!(RawModeGuard::new(GetOkSetFailsPort).is_err());
     }
 }
