@@ -2185,6 +2185,16 @@ enum CarriedSlot {
     },
 }
 
+/// R15/D4: the four fields `save_loop_state`/`restore_loop_state` snapshot
+/// around a spliced nested loop-opening construct. See `save_loop_state`'s
+/// doc for why this must be all four.
+struct LoopStateSnapshot {
+    header: Option<BlockId>,
+    entry_block: Option<BlockId>,
+    carried_slots: Vec<CarriedSlot>,
+    back_edges: Vec<(BlockId, Vec<Value>)>,
+}
+
 struct FuncBuilder<'a> {
     env: &'a HashMap<String, Arity>,
     resolve: Resolver<'a>,
@@ -2379,6 +2389,33 @@ impl<'a> FuncBuilder<'a> {
             }
             None => self.push_instr(instr),
         }
+    }
+
+    /// R15/D4: save the four fields that together mean "a loop is open"
+    /// (`header`, `entry_block`, `carried_slots`, `back_edges`) before splicing
+    /// a nested loop-opening construct (a `times` term or a self-tail
+    /// combinator), pairing with `restore_loop_state` after. `finalize_loop`
+    /// clears only `carried_slots`/`back_edges`, never `header`/`entry_block`,
+    /// so without this save/restore a later `Alloc` (or a second sequential
+    /// loop) would wrongly hoist into the spliced loop's now-dead entry block.
+    /// One shared helper for both mid-body call sites means the saved set
+    /// cannot drift between them.
+    fn save_loop_state(&mut self) -> LoopStateSnapshot {
+        LoopStateSnapshot {
+            header: self.header,
+            entry_block: self.entry_block,
+            carried_slots: mem::take(&mut self.carried_slots),
+            back_edges: mem::take(&mut self.back_edges),
+        }
+    }
+
+    /// The inverse of `save_loop_state`: restore the caller's pre-splice loop
+    /// state from its snapshot.
+    fn restore_loop_state(&mut self, snapshot: LoopStateSnapshot) {
+        self.header = snapshot.header;
+        self.entry_block = snapshot.entry_block;
+        self.carried_slots = snapshot.carried_slots;
+        self.back_edges = snapshot.back_edges;
     }
 
     /// Seal the current block with `term` and append it to the function.
@@ -2592,10 +2629,7 @@ impl<'a> FuncBuilder<'a> {
     /// arm does. A tail-position self-call inside the body is emitted as a
     /// back-edge (`lower_call`, keyed on `cur_combinator`), never a re-splice.
     fn lower_self_tail_combinator(&mut self, name: &str, body: &[Term]) {
-        let saved_header = self.header;
-        let saved_entry = self.entry_block;
-        let saved_carried = mem::take(&mut self.carried_slots);
-        let saved_back_edges = mem::take(&mut self.back_edges);
+        let saved_loop_state = self.save_loop_state();
         let saved_combinator = self.cur_combinator.take();
         let locals_depth = self.locals.len();
 
@@ -2637,10 +2671,7 @@ impl<'a> FuncBuilder<'a> {
 
         self.locals.truncate(locals_depth);
         self.cur_combinator = saved_combinator;
-        self.header = saved_header;
-        self.entry_block = saved_entry;
-        self.carried_slots = saved_carried;
-        self.back_edges = saved_back_edges;
+        self.restore_loop_state(saved_loop_state);
     }
 
     fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
@@ -2711,14 +2742,10 @@ impl<'a> FuncBuilder<'a> {
                     self.header.is_none(),
                     "checker (R18) rejects a `times` nested in a loop"
                 );
-                // R15: `finalize_loop` clears only `carried_slots`/`back_edges`,
-                // never `header`/`entry_block`, so save all four and restore
-                // them after the loop, or a later `Alloc` in the same word
-                // would wrongly hoist into this dead `times` entry block.
-                let saved_header = self.header;
-                let saved_entry = self.entry_block;
-                let saved_carried = mem::take(&mut self.carried_slots);
-                let saved_back_edges = mem::take(&mut self.back_edges);
+                // R15: save the loop state (see `save_loop_state`'s doc) and
+                // restore it after the loop, or a later `Alloc` in the same
+                // word would wrongly hoist into this dead `times` entry block.
+                let saved_loop_state = self.save_loop_state();
 
                 let qv = self.stack.pop().expect("times: quotation on stack");
                 let id = self.quot_bodies[&qv];
@@ -2791,10 +2818,7 @@ impl<'a> FuncBuilder<'a> {
 
                 // R15: restore the pre-`times` loop state so the `times`
                 // composes with a later `Alloc` or a second sequential `times`.
-                self.header = saved_header;
-                self.entry_block = saved_entry;
-                self.carried_slots = saved_carried;
-                self.back_edges = saved_back_edges;
+                self.restore_loop_state(saved_loop_state);
             }
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
@@ -4721,6 +4745,34 @@ mod tests {
         assert_eq!(b.entry_block, saved_entry, "entry_block restored");
         assert!(b.carried_slots.is_empty(), "carried_slots restored");
         assert!(b.back_edges.is_empty(), "back_edges restored");
+
+        // D4: the combinator mid-body site shares the same save/restore
+        // helper as the `times` arm above. `lower_self_tail_combinator` is
+        // called directly (bypassing the `self_tail` dispatch gate) with a
+        // body that is itself the self-call (`foo`), so it back-edges to the
+        // header exactly as a real `while` body would, and this exercises the
+        // same four-field save/restore.
+        let state = b.fresh_value(IrType::I64);
+        b.push_instr(Instr::Const(state, 7));
+        b.const_vals.insert(state, 7);
+        b.stack.push(state);
+        let saved_header = b.header;
+        let saved_entry = b.entry_block;
+        b.lower_self_tail_combinator("foo", &line_terms("foo"));
+
+        assert_eq!(b.header, saved_header, "header restored (combinator site)");
+        assert_eq!(
+            b.entry_block, saved_entry,
+            "entry_block restored (combinator site)"
+        );
+        assert!(
+            b.carried_slots.is_empty(),
+            "carried_slots restored (combinator site)"
+        );
+        assert!(
+            b.back_edges.is_empty(),
+            "back_edges restored (combinator site)"
+        );
     }
 
     #[test]
