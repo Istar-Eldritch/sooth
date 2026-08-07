@@ -675,12 +675,13 @@ fn each_checks_standalone() {
 
 #[test]
 fn map_and_fold_check_compositionally() {
-    // Criterion 9b (respecified, item 4): `map`/`fold` are NOT built on `each`
-    // (the library header explains why: `each`'s `[ 'T -- ]` element quotation
-    // hands neither the array nor the index, so a write-back or an accumulator
-    // needs either a captured mutable borrow (D3-forbidden) or a row variable
-    // in the effect (R28, out of scope)). Each is a leaf combinator driving its
-    // own `times`. "Compositional" (D4) therefore means each body checks
+    // Criterion 9b: `map`/`fold` are leaf combinators, each driving its own
+    // `times`, rather than being built on `each`. That is a cost choice, not a
+    // scope limit: building them on `each` *is* expressible (the accumulator
+    // rides a captured one-element array through balanced `&`/`&!` borrows,
+    // which D3 as shipped accepts), but inlining is total, so composition
+    // depth is code size at every call site, and it costs an extra array copy
+    // and a counter cell. "Compositional" (D4) therefore means each body checks
     // `f call` against `f`'s *declared quotation effect*, not a concrete
     // literal body. Both check standalone:
     let map = ": map ( ['T 'N] [ 'T -- 'T ] -- ['T 'N] )\n\

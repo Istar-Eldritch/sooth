@@ -7422,12 +7422,12 @@ mod tests {
         // Criterion 10b (R21): transitive inlining. `outer` forwards its own
         // abstract quotation parameter to `inner`, so splicing `outer` into
         // `main` must in turn splice `inner` -- two levels, outermost-first.
-        // The spec names this `map`-over-`each`, but `map`/`fold` cannot be
-        // built on `each` inside slice 6a (each's `[ 'T -- ]` element quotation
-        // hands neither the array nor the index, so a write-back/accumulator
-        // needs either a captured mutable borrow (D3-forbidden) or a row
-        // variable in the effect (R28, out of scope)). This two-combinator
-        // chain exercises the same load-bearing property the criterion guards:
+        // The spec names this `map`-over-`each`. The shipped library keeps
+        // `map`/`fold` as leaf combinators on cost grounds rather than scope
+        // ones (building them on `each` is expressible, but inlining is total,
+        // so composition depth is code size at every call site), so this
+        // two-combinator chain stands in for that shape. It exercises the same
+        // load-bearing property the criterion guards:
         // both combinators mint no `IrFunc` and `main` emits no `Instr::Call`.
         // Breaking the transitive splice (the `lower_call` combinator branch,
         // or the checker's abstract-forward accept) leaves an `Instr::Call`
