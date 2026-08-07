@@ -202,12 +202,40 @@ enum Key {
     Unknown,
 }
 
+#[derive(Debug)]
 enum Decoded {
     Key(Key, usize),
     /// The pending bytes are a proper prefix of an escape sequence; wait for
     /// more before deciding (never forward a partial sequence to the lexer).
     NeedMore,
 }
+
+/// A simple (parameter-less) CSI/SS3 final byte's nav key, shared between the
+/// `ESC [ <final>` (no-params arm) and `ESC O <final>` (SS3) paths: in
+/// DECCKM/application-cursor-key mode (tmux/screen and some terminal configs
+/// enable this) a terminal sends arrows/Home/End via SS3 instead of CSI, and
+/// they mean the same key either way.
+fn simple_nav_key(final_byte: u8) -> Option<Key> {
+    match final_byte {
+        b'A' => Some(Key::Up),
+        b'B' => Some(Key::Down),
+        b'C' => Some(Key::Right),
+        b'D' => Some(Key::Left),
+        b'H' => Some(Key::Home),
+        b'F' => Some(Key::End),
+        _ => None,
+    }
+}
+
+/// A real CSI sequence (arrow keys, modified arrows, function keys,
+/// bracketed-paste markers) is well under 32 bytes; capping the scan here
+/// bounds both CPU and `pending`'s growth against an unterminated `ESC [`
+/// followed by an unbounded run of parameter bytes (garbled input, a pasted
+/// binary blob, or hostile input) -- without a cap, every incoming byte
+/// re-scans the whole accumulated prefix from scratch (`decode` has no state
+/// of its own across calls), which is O(N^2) total and, empirically, over a
+/// hundred CPU-seconds for a million garbage bytes fed one at a time.
+const CSI_MAX_LEN: usize = 64;
 
 /// Decode the next key from the front of `b`. An arrow/nav escape sequence is
 /// consumed here in full (R6): its bytes are turned into a `Key` and never
@@ -223,12 +251,12 @@ fn decode(b: &[u8]) -> Decoded {
             }
             if b[1] == b'O' {
                 // SS3: exactly one final byte, no parameters (some
-                // terminals' F1-F4). Never one of the keys this editor
-                // recognizes; still consumed whole so it cannot leak.
+                // terminals' F1-F4, and DECCKM-mode arrows/Home/End).
                 if b.len() < 3 {
                     return Decoded::NeedMore;
                 }
-                return Decoded::Key(Key::Unknown, 3);
+                let key = simple_nav_key(b[2]).unwrap_or(Key::Unknown);
+                return Decoded::Key(key, 3);
             }
             if b[1] == b'[' {
                 if b.len() < 3 {
@@ -243,13 +271,20 @@ fn decode(b: &[u8]) -> Decoded {
                 // a bracketed-paste marker (`ESC[200~`) is consumed as one
                 // unit -- never partially, which is what let an escape tail
                 // (e.g. `5C`) leak into the buffer and reach `lexer::lex`,
-                // the exact thing R6 forbids.
+                // the exact thing R6 forbids. Bounded by `CSI_MAX_LEN`.
                 let mut i = 2;
-                while i < b.len() && (0x30..=0x3f).contains(&b[i]) {
+                while i < b.len() && i < CSI_MAX_LEN && (0x30..=0x3f).contains(&b[i]) {
                     i += 1;
                 }
-                while i < b.len() && (0x20..=0x2f).contains(&b[i]) {
+                while i < b.len() && i < CSI_MAX_LEN && (0x20..=0x2f).contains(&b[i]) {
                     i += 1;
+                }
+                if i >= CSI_MAX_LEN {
+                    // No final byte within a plausible sequence length: give
+                    // up and discard everything scanned so far rather than
+                    // waiting (possibly forever) for more, or rescanning an
+                    // ever-growing `pending` on every subsequent byte.
+                    return Decoded::Key(Key::Unknown, i);
                 }
                 if i >= b.len() {
                     return Decoded::NeedMore;
@@ -264,18 +299,13 @@ fn decode(b: &[u8]) -> Decoded {
                 let consumed = i + 1;
                 let params = &b[2..i];
                 let key = match final_byte {
-                    b'A' if params.is_empty() => Key::Up,
-                    b'B' if params.is_empty() => Key::Down,
-                    b'C' if params.is_empty() => Key::Right,
-                    b'D' if params.is_empty() => Key::Left,
-                    b'H' if params.is_empty() => Key::Home,
-                    b'F' if params.is_empty() => Key::End,
                     b'~' => match params {
                         b"1" | b"7" => Key::Home,
                         b"4" | b"8" => Key::End,
                         b"3" => Key::Delete,
                         _ => Key::Unknown,
                     },
+                    f if params.is_empty() => simple_nav_key(f).unwrap_or(Key::Unknown),
                     _ => Key::Unknown,
                 };
                 return Decoded::Key(key, consumed);
@@ -764,6 +794,70 @@ mod tests {
                 ed.buf
             );
         }
+    }
+
+    #[test]
+    fn editor_unterminated_csi_sequence_is_capped_not_unbounded() {
+        // Without CSI_MAX_LEN, an unterminated `ESC [` followed by a run of
+        // parameter bytes and no final byte rescans the whole accumulated
+        // prefix from scratch on every incoming byte (empirically, 100+ CPU
+        // seconds for 1,000,000 garbage bytes fed one at a time). Called
+        // directly on `decode` for a precise, deterministic bound: it must
+        // give up at `CSI_MAX_LEN`, not scan the full (much longer) input.
+        let mut seq = vec![0x1b, b'['];
+        seq.extend(std::iter::repeat_n(b'9', 300));
+        match decode(&seq) {
+            Decoded::Key(Key::Unknown, consumed) => {
+                assert_eq!(
+                    consumed, CSI_MAX_LEN,
+                    "an unterminated CSI sequence must be abandoned at the cap, not scan indefinitely"
+                );
+            }
+            other => panic!("expected Key::Unknown capped at {CSI_MAX_LEN}, got {other:?}"),
+        }
+
+        // End to end through the real byte-at-a-time driver: this must
+        // complete promptly (no O(N^2) rescan) and never let `pending` grow
+        // past the cap.
+        let mut ed = editor(empty_history());
+        feed(&mut ed, &[0x1b, b'[']);
+        for _ in 0..300 {
+            feed(&mut ed, b"9");
+            assert!(
+                ed.pending.len() <= CSI_MAX_LEN,
+                "pending grew past the cap: {}",
+                ed.pending.len()
+            );
+        }
+    }
+
+    #[test]
+    fn editor_ss3_arrow_keys_decode_same_as_csi() {
+        // DECCKM/application-cursor-key mode (tmux/screen and some terminal
+        // configs) sends arrows/Home/End via SS3 (`ESC O <letter>`) rather
+        // than CSI; they must decode to the same key as their CSI form.
+        let mut ed_ss3 = editor(empty_history());
+        feed(&mut ed_ss3, b"abc");
+        feed(&mut ed_ss3, b"\x1bOD"); // SS3 left
+        assert_eq!(ed_ss3.cursor, 2, "SS3 left did not move the cursor");
+
+        let mut ed_csi = editor(empty_history());
+        feed(&mut ed_csi, b"abc");
+        feed(&mut ed_csi, b"\x1b[D"); // CSI left
+        assert_eq!(
+            ed_ss3.cursor, ed_csi.cursor,
+            "SS3 and CSI left must land the cursor identically"
+        );
+
+        let mut ed_right = editor(empty_history());
+        feed(&mut ed_right, b"abc");
+        feed(&mut ed_right, b"\x1b[D\x1b[D"); // move left twice
+        feed(&mut ed_right, b"\x1bOC"); // SS3 right
+        assert_eq!(ed_right.cursor, 2, "SS3 right did not move the cursor");
+
+        // An SS3 sequence still never leaks into the buffer (R6).
+        assert_eq!(ed_ss3.buf, b"abc");
+        assert_eq!(ed_right.buf, b"abc");
     }
 
     #[test]

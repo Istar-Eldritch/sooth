@@ -417,7 +417,7 @@ fn rich_value_size(
         ir::IrType::Bool => 1,
         ir::IrType::Int { bits, .. } => (bits / 8) as usize,
         ir::IrType::Float { bits } => (bits / 8) as usize,
-        ir::IrType::Usize | ir::IrType::Isize => 8,
+        ir::IrType::Usize | ir::IrType::Isize => ir::WORD_WIDTH as usize,
         ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
         ir::IrType::Struct(id) => layouts[id.index()].size as usize,
         ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
@@ -3217,6 +3217,39 @@ mod tests {
         assert!(
             session.env.contains_key("q::w__import1"),
             "the second event's row is the fresh one"
+        );
+    }
+
+    #[test]
+    fn word_names_includes_display_name_import_and_poly_word() {
+        // R23: `word_names()` is completion's actual feed (`:words`' own
+        // listing is a separate, parallel implementation and does not prove
+        // this function does the right thing on its own). Reverting either
+        // the `display_name` reversal or the `poly_words` fold inside
+        // `word_names()` must fail this test, not just `:words`' listing.
+        let d = LibDir::new("word_names");
+        let lib = d.write("lib.sth", ": inc ( i64 -- i64 ) 1 + ;\nexport: inc ;\n");
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line(&import_line("m", &lib), &mut out)
+            .unwrap();
+        session
+            .eval_line(": alen ( ['T 'N] -- ) drop ;", &mut out)
+            .unwrap();
+
+        let names = session.word_names();
+        assert!(
+            names.contains(&"m::inc".to_string()),
+            "an imported word is completable under its user-facing spelling, not the import-epoch-mangled env key: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("__import")),
+            "no mangled spelling leaks into completion: {names:?}"
+        );
+        assert!(
+            names.contains(&"alen".to_string()),
+            "a polymorphic word is completable, not just concrete ones: {names:?}"
         );
     }
 
