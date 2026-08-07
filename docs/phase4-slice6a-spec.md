@@ -56,17 +56,19 @@ effect `[ 'T -- ]` like an ordinary word call.
    local, so walking `f call` records no move. Sound for every inline site because D3 limits
    the substituted literal to `Copy`-only captures (no linear local consumed; disposing a
    `Copy` N times is a no-op).
-2. **Borrow-state identity** — discharged in two places. Def-site check covers captured
+2. **Borrow-state identity** discharged in two places. Def-site check covers captured
    state (D3 forbids capturing an enclosing borrow). A literal that *creates* a borrow of a
-   captured `Copy` local and leaves the reference on its output row (riding the back-edge) is
-   caught by the **splice-site re-check** (R18), where `check_reference_across_back_edge` and
-   `times`' `live_derivs` comparison run against the concrete body. The diagnostic lands on
-   the caller's own literal, never on a call `each`'s author never wrote.
+   captured `Copy` local and leaves the reference on its output row is caught at the
+   **splice site** by R12's borrow-left-on-row check (`quotation_borrows_place_error`),
+   which `check_poly_combinator_args` runs on the poly argument path exactly as the
+   monomorphic path does, before the body is ever spliced into the loop. The diagnostic
+   lands on the caller's own literal, naming the word and the borrowed place, never on a call
+   `each`'s author never wrote. Criterion 12c witnesses exactly this.
 3. **Row-effect equality** — discharged at the def site by composing visible ops with `f`'s
    declared effect.
 
 Obligations 1 and 3 are discharged entirely at the def site; obligation 2 is discharged at
-the def site for captured state and at the splice-site re-check for literal-created borrows.
+the def site for captured state and at the splice-site R12 check for literal-created borrows.
 No obligation is *deferred* to the inline site in the sense the brief warned about.
 
 ## Requirements by stage
@@ -158,8 +160,9 @@ Located diagnostics assert message text **and** named identifiers/positions.
   quotation *parameter* to a nested combinator splices through both frames (witnessed by
   `abstract_quotation_forward_inlines_and_runs` and, at IR level,
   `abstract_forward_inlines_transitively_with_no_call`). Termination rests on R22 (the
-  subgraph is a DAG). *(The original example, `map` splicing `each`, does not arise:
-  `map`/`fold` are not built on `each` — see §Accepted narrowings and gaps.)*
+  subgraph is a DAG). *(The original example, `map` splicing `each`, is a cost choice
+  rather than a necessity: `map`/`fold` are leaf combinators, not built on `each`, though
+  they could be; see §Accepted narrowings and gaps.)*
 - **R22** *(located)*. D5 recursion rejection: a pre-lowering pass builds the call graph over
   quotation-taking words and rejects any cycle, reusing the 3-colour DFS of
   `check_tail_call_cycles`. "Un-inlinable" = participates in a cycle in this subgraph.
@@ -226,7 +229,8 @@ states the as-shipped reality:
    §Accepted narrowings and gaps): it is `each_lowers_to_a_loop_not_a_per_element_call`
    (structural: loop header + back-edge, no per-element user `Call`) plus
    `combinator_and_hand_threaded_loops_agree_across_stack_limits`, a
-   combinator-vs-hand-threaded equivalence witness at N=10k.
+   combinator-vs-hand-threaded equivalence-plus-correctness witness at N=10k (equal exit
+   code *and* stdout over a 1-filled array whose correct fold is N).
 3. **(standard)** REPL located rejections and eight wording corrections (R26). R23 shipped
    in this phase; **R24 shipped as a review fix** (the located rejection of an imported
    closure exporting a quotation-taking word, with the mangled-name leak fixed alongside).
@@ -262,9 +266,9 @@ states the as-shipped reality:
 | 11 | `fold` sums `[i64 4]` to `28` | `fold_computes_sum` | golden | 2 |
 | 12 | poly times-body consuming an outer linear local located (def site) | `poly_combinator_consuming_local_is_error` | golden | 2 |
 | 12b | poly times-body borrow across back-edge located (def site) | `poly_combinator_borrow_across_loop_is_error` | golden | 2 |
-| 12c | **GAP, unreachable as specified** — no test, see Accepted narrowings | — | — | 2 |
+| 12c | a caller literal creating a borrow of a captured `Copy` local and leaving it live on its output row is a located R12 borrow-left-on-row rejection at the splice site | `literal_created_borrow_across_loop_is_error_at_splice_site` | golden | 2 |
 | 13 | quotation at runtime-value position in poly body rejected, reworded | `quotation_at_runtime_position_in_poly_body_is_error` | golden | 2 |
-| 14 *(respecified)* | the combinator loop and its hand-threaded `times` twin behave identically across a sweep of stack limits (N=10k) | `combinator_and_hand_threaded_loops_agree_across_stack_limits` | golden | 2 |
+| 14 *(respecified)* | the combinator loop and its hand-threaded `times` twin agree in exit code *and* stdout across a sweep of stack limits, over a 1-filled array whose correct fold is N (N=10k) | `combinator_and_hand_threaded_loops_agree_across_stack_limits` | golden | 2 |
 | 14b | inlined `each` lowers to loop header/back-edge, no per-element `Call` | `each_lowers_to_a_loop_not_a_per_element_call` | unit | 2 |
 | 15 | session line defining a quotation-taking word is a located REPL rejection | `repl_quotation_taking_definition_is_rejected` | golden | 3 |
 | 16 | importing a closure exporting a quotation-taking word located; internal imports fine | `repl_import_exporting_quotation_word_is_rejected` | golden | 3 |
@@ -273,43 +277,75 @@ states the as-shipped reality:
 
 Load-bearing units (mutation-test the guards): 2, 2b, 2c, 2d, 3b, 6b, U20, 10b, 14b.
 2b/2c/2d make R7's `unreachable!` arms sound. 3b/10b/14b guard against a silent fallback.
-5/5b are the D3 pair. **14b, not 14, now carries the constant-stack guarantee**: it is the
-structural claim (loop header + back-edge, no per-element user `Call`), while 14 is an
-equivalence witness that the inliner adds no stack cost over hand-threading. 12/12b pin
-that obligations 1 and 2 are discharged at the combinator's own definition site; 12c, which
-would have pinned the splice-site half, is unreachable (below).
+5/5b are the D3 pair. **14b, not 14, carries the constant-stack guarantee**: it is the
+structural claim (loop header + back-edge, no per-element user `Call`). 14 is an
+equivalence-plus-correctness witness at N=10k (equal exit code and stdout against the
+hand-threaded twin, over a 1-filled array whose correct fold is N); it does not by itself
+witness stack cost, since equal exit codes are compatible with both programs sitting on the
+same side of every sampled limit, and nothing in the suite measures stack frame size. 12/12b
+pin obligation 1 and obligation 2's captured-state half at the combinator's own definition
+site; 12c pins obligation 2's literal-created-borrow half, a located R12 rejection at the
+splice site (below).
 
 ## Accepted narrowings and gaps
 
-Four places where the as-shipped slice is narrower than this spec first claimed. Each was
-reviewed and accepted rather than silently absorbed.
+Two genuine narrowings where the as-shipped slice is narrower than this spec first claimed,
+and two claims this spec first made that a reviewer falsified by writing the programs the
+spec said could not exist; both false claims were then fixed. Each is recorded rather than
+silently absorbed.
 
-**1. `map`/`fold` are leaf combinators, not built on `each`.** R21's original example was
-`map` splicing `each`. It cannot be written in this slice: `each` hands its quotation one
-element (`[ 'T -- ]`) and neither the array nor the index, so `fold`'s accumulator would
-have to ride the stack row (needing a row variable in the quotation effect, out of scope by
-R28) and `map`'s write-back would need a captured mutable borrow of the array (forbidden by
-D3). Both exclusions are locked decisions, so this follows from the slice's own scope rather
-than from an implementation shortfall. R21 is nonetheless real and delivered: a combinator
-may forward its own quotation *parameter* to a nested combinator, which is the transitive
-case criterion 10b now names. **Building `map`/`fold` on `each` needs row-polymorphic
-quotation effects; that belongs to whichever slice lifts R28.**
+**1. `map`/`fold` are leaf combinators, and that is a cost choice, not an impossibility.**
+R21's original example was `map` splicing `each`. This spec first claimed it could not be
+written in this slice, on the grounds that `fold`'s accumulator would need a row variable
+(R28) and `map`'s write-back a captured mutable borrow (D3). That claim is false, and a
+reviewer falsified it by writing the programs. `fold` over `each` compiles and runs: the
+accumulator rides a captured one-element array reached by **balanced** `&`/`&!` borrows
+inside the literal, which D3 as shipped accepts (this is narrowing #3, four paragraphs
+down, so the original document contradicted itself). `map` is likewise expressible with a
+second captured counter cell for the index. The `each`-based versions are expressible; no
+row variable is required. The real reason to keep `each`/`map`/`fold` as leaves is cost.
+Inlining in this slice is *total*, not heuristic: a quotation-taking word mints no `IrFunc`
+and no symbol, because a quotation has no runtime representation, so there is nothing to
+call and splicing is the only lowering that exists. The decision is one predicate
+(`is_combinator`: does the word declare a quotation parameter). Termination is structural
+rather than budgeted: R22 rejects cycles among quotation-taking words, so the subgraph is a
+DAG and transitive splicing bottoms out on its own; there is no depth limit or size budget
+anywhere in the splice path. The consequence is that **library composition depth is code
+size at every call site**. Leaf combinators keep the library flat at depth 1; building
+`map` on `each` would make every `map` call site depth 2, and cost an extra array copy and a
+counter cell. R21 is nonetheless real and delivered by a different route: a combinator may
+forward its own quotation *parameter* to a nested combinator, the transitive case criterion
+10b names. "When to inline" becomes a real question only at slice 7, when a runtime
+representation first makes a genuine choice possible; until then "always" is the only
+implementable answer, and a budget would be actively harmful, since exceeding it could only
+be a compile error.
 
-**2. Criterion 12c is unreachable, so it has no test.** It would have witnessed a caller's
-literal creating a borrow of a captured `Copy` local and leaving the reference on its output
-row to ride the back-edge. A combinator whose quotation parameter has a *reference* output
-row is already rejected at the combinator's own definition site, so no literal can reach the
-position 12c describes. The obligation-2 analysis above is therefore discharged entirely at
-the definition site in the shipped code, and the splice-site half it hedged for does not
-arise. Writing a test here would have meant inventing a scenario the type system forbids.
+**2. Criterion 12c is reachable, and now implemented and rejected.** This spec first claimed
+12c was unreachable because a combinator whose quotation parameter has a *reference* output
+row is rejected at its own definition site, so no literal could reach the position 12c
+describes. Both halves were false. Such a combinator (`refout`, a `[ 'T -- &i64 ]`
+parameter) compiles clean standalone, and before the fix its caller's borrow-creating
+literal ran with no diagnostic, printing `7 7 7 7`. The cause: a polymorphic combinator
+keeps its signature in `word.poly`, not `word.effect` (which is empty), so
+`inline_combinator`'s monomorphic argument loop ran **zero** checks on the polymorphic path,
+skipping both the directional R11 effect check and the D3 capture check (R12). Commit
+`c0b0bb2` routes polymorphic calls through `check_poly_combinator_args`, and 12c is now a
+located R12 borrow-left-on-row rejection **at the splice site**, covered by
+`literal_created_borrow_across_loop_is_error_at_splice_site`. The same fix closes an
+undeclared mono/poly divergence a reviewer found: `: applyr ( 'T [ 'T -- &i64 ] -- )`
+accepted a caller literal its monomorphic twin `( i64 [ i64 -- &i64 ] -- )` correctly
+rejected. This vindicates obligation 2's original two-places shape: definition site for
+captured state, splice site for literal-created borrows.
 
 **3. R12's borrow half is narrower than its prose.** It reads as "a `&`/`&!` borrow of an
 enclosing place is a located rejection"; the implementation rejects a borrow **left live on
 the literal's exit row**, and accepts a balanced borrow taken and released inside the
 literal. A reviewer failed to turn the narrowing into unsoundness: the ordinary borrow
 checker catches the dangerous shapes at the splice site (aliasing the array `each` itself
-borrows, and a `&!` inside the literal while the caller holds a `&` of the same place). The
-narrowing is the right call and the code, not this sentence, is the contract.
+borrows, and a `&!` inside the literal while the caller holds a `&` of the same place). This
+balanced-borrow acceptance is exactly what makes narrowing #1's `each`-based `fold` and
+`map` expressible. The narrowing is the right call and the code, not this sentence, is the
+contract.
 
 **4. Criterion 14 no longer claims a 1M-element run.** A Sooth array is a stack value, so
 1M `i64` is 8 MB of stack before any loop frame exists, and the "constant stack under a
@@ -324,6 +360,31 @@ deliberately **not** fixed: every native `build` diagnostic prints a doubled pre
 `error: ` and `src/main.rs:34` prepends another. It is repo-wide (165 such constructors on
 `main`) and predates this slice; fixing it here would sprawl the diff and churn assertions
 across the suite.
+
+## Review fixes
+
+After the initial landing an independent reviewer falsified two impossibility claims by
+writing the programs (narrowings #1 and #2). These commits followed, each green:
+
+- `c0b0bb2`: run R11 and R12 on the *polymorphic* combinator argument path
+  (`check_poly_combinator_args`), which the monomorphic argument loop skipped entirely
+  because a poly combinator's signature lives in `word.poly`, not `word.effect`. Makes 12c
+  reachable and rejected, and closes the `applyr` mono/poly divergence (narrowing #2).
+- `2ece6bb`: criterion 14 now compares stdout as well as exit codes, over a 1-filled array
+  whose correct fold is N (the old 0-filled fixture made the expected value `0`, the least
+  discriminating possible, so a fold computing the wrong answer still passed).
+- `a8ab1f9`: the R7a audit now descends into a *polymorphic* array element. `[ [ 'T -- ] 3 ]`
+  was accepted while the monomorphic `[ [ i64 -- ] 3 ]` twin was rejected, an unaudited
+  position that defeated the default-deny contract R7's `unreachable!` arms rest on. Driven
+  from one recursive enumeration over both the monomorphic and polymorphic type paths.
+- `f84866b`: a `type:` line naming a quotation in an interned array/cell/ref position used to
+  leave a poisoned registry entry that re-fired the R7a audit on every later line,
+  permanently bricking the REPL session. The `type:` path now restores the interned
+  registries on failure, mirroring the non-`type:` guard.
+- `4eb7f57`, `c568687`, `38f44e0`: diagnostics no longer leak the internal `__m0`
+  monomorphization mangling when a module has an import (a repo-wide defect predating this
+  slice, arriving with module support), and the now-unreachable `demangle_local` was deleted
+  as dead code.
 
 ## Sanctioned edits
 

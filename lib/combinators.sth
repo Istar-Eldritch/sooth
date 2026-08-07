@@ -4,11 +4,16 @@
 \
 \ Each is a leaf combinator: it drives a `times` loop directly and hands one
 \ element to its quotation parameter per iteration. `map`/`fold` are NOT built
-\ on `each`: `fold` must thread an accumulator and `map` must write each result
-\ back, and this slice's quotation effects are a fixed input/output list with no
-\ row variable (R28) and no captured borrow (D3), so neither can be expressed
-\ through `each`'s `[ 'T -- ]` element quotation. They share the loop shape, not
-\ a call.
+\ on `each`, but this is a cost choice, not an impossibility: `fold` over `each`
+\ is expressible by riding the accumulator in a captured one-element array
+\ reached by balanced `&`/`&!` borrows inside the literal (D3 accepts balanced
+\ borrows), and `map` likewise with a second captured counter cell for the
+\ index. The reason to keep them leaves is that inlining is total: a quotation
+\ has no runtime representation, so splicing is the only lowering, and library
+\ composition depth is code size at every call site. Building `map` on `each`
+\ would make every `map` call site depth 2 and cost an extra array copy and a
+\ counter cell; a leaf keeps the library flat at depth 1. They share the loop
+\ shape, not a call.
 
 export: each map fold ;
 

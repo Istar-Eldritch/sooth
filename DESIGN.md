@@ -346,9 +346,14 @@ combinator forwarding its own quotation parameter to a nested combinator splices
 frames) and **totally**: with a quotation type but no runtime representation there is no
 fallback, so anything un-inlinable, starting with recursion among quotation-taking words, is a
 located error rather than a silent real call (D5). `each`/`map`/`fold` are leaf combinators
-rather than `map` and `fold` being written over `each`: with quotation effects a fixed
-input/output list, `each`'s one-element `[ 'T -- ]` quotation can carry neither an accumulator
-nor a write-back, so composing them that way waits on row-polymorphic effects. The REPL
+rather than `map` and `fold` being written over `each`, but that is a cost preference, not
+an impossibility: `fold` and `map` over `each` are both expressible (the accumulator rides a
+captured one-element array reached by balanced borrows, which D3 accepts). Because inlining
+is total, library composition depth is code size at every call site, so building `map` on
+`each` would make every `map` call site depth 2 plus an extra array copy and a counter cell,
+where a leaf keeps the library flat at depth 1. "When to inline" becomes a real question
+only at slice 7, when a runtime representation first makes a genuine choice possible; until
+then "always" is the only implementable answer. The REPL
 stays a located rejection, both at a session line defining a quotation-taking word and at an
 imported closure exporting one (D7); 6c lifts it.
 

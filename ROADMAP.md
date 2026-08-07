@@ -361,11 +361,14 @@ splices through both frames. `each`/`map`/`fold` are ordinary polymorphic Sooth 
 an array's elements and handing one to its quotation parameter per iteration, verified to
 lower to a tight loop with no per-element `Instr::Call`, and verified to match a
 hand-threaded `times` twin across a sweep of stack limits. `map`/`fold` are *not* built on
-`each`, and cannot be in this slice: `each` hands its quotation one element and neither the
-array nor the index, so `fold`'s accumulator would need a row variable in the quotation
-effect (out of scope this slice) and `map`'s write-back a captured mutable borrow
-(forbidden by D3). **Building them on `each` needs row-polymorphic quotation effects,
-whichever slice lifts that restriction.** Native only: the REPL is a located rejection at
+`each`, but on cost grounds, not impossibility: `fold` and `map` over `each` are both
+expressible (the accumulator rides a captured one-element array reached by balanced `&`/`&!`
+borrows, which D3 accepts). Because inlining is total, library composition depth is code
+size at every call site, so building `map` on `each` would make every `map` call site depth
+2 plus an extra array copy and a counter cell, where a leaf keeps the library flat at depth
+1. **"When to inline" becomes a real question only at slice 7, when a runtime representation
+first makes a genuine choice possible; until then "always" is the only implementable answer,
+and a budget would be actively harmful, since exceeding it could only be a compile error.** Native only: the REPL is a located rejection at
 both the defining line and an imported closure exporting a quotation-taking word (D7),
 lifted by 6c. `examples/array_totals.sth` dogfoods it against its
 hand-threaded twin `examples/array_totals_hand.sth` (three manual `times` loops): three
@@ -374,10 +377,14 @@ one-line combinator calls run to the same total and doubled elements the twin do
 Two pre-existing defects 6a measured but deliberately did not fix, for a later slice to pick
 up: `fill`'s compile cost is superlinear in the array length (10k ~ 0.36s, 100k ~ 25s, 1M >
 300s, and a hand-threaded loop is equally slow, so it is the array machinery and not the
-inliner), which is why 6a's constant-stack criterion is an equivalence witness at 10k rather
-than the 1M run first specified; and every native `build` diagnostic prints a doubled `error:
-error:` prefix, because the ~165 error constructors embed `error: ` and `src/main.rs` prepends
-another.
+inliner), which is why 6a's constant-stack criterion is an equivalence-plus-correctness
+witness at 10k (equal exit code and stdout against the hand-threaded twin) rather than the
+1M run first specified; and every native `build` diagnostic prints a doubled `error: error:`
+prefix, because the ~165 error constructors embed `error: ` and `src/main.rs` prepends
+another. A separate repo-wide diagnostic defect *was* fixed during the review sequence:
+every diagnostic naming a word leaked the internal `__m0` monomorphization mangling whenever
+the module had an import (predating 6a, arriving with module support), and the now-unreachable
+`demangle_local` was deleted as dead code.
 
 **Next action: Phase 4 Slice 6b** (the polymorphic-path gaps + `filter`/`while`): a
 polymorphic body's `if` and a polymorphic self-tail word's loop transform, the two gaps 6a's
