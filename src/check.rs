@@ -5026,12 +5026,11 @@ fn check_abstract_quotation_times(
     Ok(stack)
 }
 
-/// R18: gather the monomorphic quotation-taking words (a `WordBody::Terms`
-/// word with a `Type::Quotation` input), keyed by name, so a call to one is
-/// intercepted and its body spliced (the inliner) rather than lowered to a
-/// call to a word that mints no `IrFunc` (R20). A polymorphic combinator is
-/// checked and inlined on the poly path (slice 6a phase 2), so it is excluded
-/// here.
+/// R18: gather the quotation-taking `WordBody::Terms` words, mono and poly
+/// alike (`is_combinator` does not filter on `word.poly`), keyed by name, so a
+/// call to one is intercepted and its body spliced (the inliner) rather than
+/// lowered to a call to a word that mints no `IrFunc` (R20). `inline_combinator`
+/// branches on `word.poly` internally to pick the mono or poly splice path.
 fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
     let mut map = HashMap::new();
     for word in words {

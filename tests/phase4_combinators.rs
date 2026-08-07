@@ -1676,6 +1676,32 @@ fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
     );
 }
 
+#[test]
+fn repl_combinators_dogfood_matches_native() {
+    // Criterion 12: a session transcript importing `lib/combinators.sth` and
+    // using `filter`/`while` matches the native example's output. This is the
+    // REPL twin of `examples/filter_while.sth` (R18's dogfood): the same
+    // `scores` array, the same `[ 4 > ] filter` keeping 3 elements, the same
+    // fixpoint `while` loop landing on 5. The native example prints both via
+    // runtime `.` to real stdout ("3\n5\n"); a REPL bare line's `.` also goes
+    // to real stdout rather than this capture writer (see `repl_error`), so
+    // this leaves both results on the residual stack instead of printing them,
+    // and pins the same two values in the same order.
+    let transcript = repl_error(&format!(
+        "{}{}\n{}\n{}\n:quit\n",
+        combinators_import("c"),
+        ": scores ( -- [i64 5] ) 0 5 fill | s | \
+         &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
+         &!s 3 >usize &!> 9 ! &!s 4 >usize &!> 5 ! s ;",
+        "scores [ 4 > ] c::filter | n | | out | out drop n",
+        "0 [ dup 5 < if 1 + true else false end ] c::while"
+    ));
+    assert_eq!(
+        transcript,
+        "imported c\ndefined scores\nstack: 3\nstack: 3 5\n"
+    );
+}
+
 // -- the `__m0` monomorphization mangling must not leak into a diagnostic -----
 
 /// Build a two-module program through the native driver and return its check

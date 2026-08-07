@@ -377,6 +377,38 @@ counts two kinds of loop); the limit is not lifted here (6d lifts it for all fiv
 at once). The REPL chokepoint needed no change: it already rejects any quotation-declaring
 word at the definition site, self-tail or not.
 
+**Phase 4 Slice 6c lifted the REPL's two combinator rejections by retention, not by
+inventing a frozen resolver.** A combinator has no compile event of its own to freeze
+against: it mints no `IrFunc` and no symbol (D2 above), and it is inlined by term-splice,
+fresh, at every call site, re-checked and re-lowered against that site's own live env each
+time. Slice 2's precedent — a polymorphic word's frozen defining-line resolver, read once
+per instantiation at lowering — does not transfer, because a poly body is checked once and
+never re-checked, while a combinator body is re-checked and re-lowered at every splice site.
+So the fix is a session-level store, not a generation-tracking mechanism: `Session` gains
+`combinators: HashMap<String, WordDef>`, holding mono and poly combinators in one store
+(mirroring the checker's `is_combinator`/`collect_combinators`, which already treat both
+uniformly), replaced wholesale on redefinition and carrying no generation, epoch, or symbol.
+It is projected on demand into the two shapes the inline paths already read — a
+`HashMap<String, Combinator>` for the checker, a `HashMap<String, Vec<Term>>` for
+lowering — threaded into every REPL entry point that previously hardcoded an empty map:
+`check_def`, `check_def_collecting_drop_sites`, and `infer_line` on the checker side;
+`lower_word`, `lower_instantiation`, and `lower_line` on the lowering side. Defining a
+combinator at the REPL skips lowering entirely — check, then store, no `.so`, no symbol, no
+`dlopen` — against a view that already includes the definee itself, so a self-reference
+dispatches through the inline path rather than unknown-word, with `check_combinator_cycles`
+run over that view so a cycle formed across separate session lines is still the located
+error; a polymorphic combinator bypasses the ordinary poly-definition path's ≥2-outputs
+deferral, since a combinator is spliced inline and never lowered to a bundle-returning
+`IrFunc`, so that limitation cannot arise for it. The three now-mutually-exclusive
+name-shape stores (an ordinary word's `env`, a polymorphic word's `poly_words`, and the new
+combinators store) evict each other symmetrically on redefinition, since combinator dispatch
+is checked before both other stores and a stale entry in the wrong one would otherwise win
+silently. Importing a closure that exports a combinator retains it the same way: a module-0
+exported combinator is copied into the session store under its import-internal name, with
+its body's calls — including a self-tail call — rewritten to internal spellings, so an
+imported `while`'s self-call still resolves to itself and the self-tail recognizer still
+fires rather than recursing forever through an unrecognized name.
+
 **Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
 error). Multi-way branching is a **`cond` combinator** (a library word taking
