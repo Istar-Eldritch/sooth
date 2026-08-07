@@ -713,13 +713,41 @@ impl Session {
         if matches!(tokens.first(), Some((Token::Word(w), _)) if w == "type:") {
             return self.eval_typedef(&tokens, writer);
         }
+        // A rejected line must leave the session's interned type registries
+        // untouched: `parse_line_with_structs` (and `check_def`) intern any
+        // array/cell/ref shape the line names *before* the line is accepted,
+        // so a rejected line -- e.g. one R7a rejects for a quotation-nested
+        // array/cell/ref -- would otherwise leave that entry resident and
+        // re-trigger the per-line audit on every later line (the audit scans
+        // the whole registry, and dedup means a re-parse of the same shape
+        // hits the resident entry). Snapshot the lengths and truncate on error.
+        let arrays_len = self.arrays.len();
+        let cells_len = self.owned_cells.len();
+        let refs_len = self.refs.len();
+        let result = self.eval_expr_or_def_line(&tokens, writer);
+        if result.is_err() {
+            self.arrays.truncate(arrays_len);
+            self.owned_cells.truncate(cells_len);
+            self.refs.truncate(refs_len);
+        }
+        result
+    }
+
+    /// The parse-and-dispatch tail of `eval_line` for an ordinary (non-`type:`,
+    /// non-`import:`) line. Split out so `eval_line` can snapshot and restore
+    /// the interned type registries around it (see the call site).
+    fn eval_expr_or_def_line(
+        &mut self,
+        tokens: &[(Token, Span)],
+        writer: &mut impl Write,
+    ) -> Result<(), String> {
         let ctx = parser::ImportCtx {
             imports: &self.import_qualifier_module,
             selective: &self.import_selective_module,
             exports: &self.import_exports,
         };
         let mut line = parser::parse_line_with_structs(
-            &tokens,
+            tokens,
             &self.structs,
             &self.enums,
             &mut self.arrays,
@@ -731,6 +759,20 @@ impl Session {
         // current internal (epoch-tagged) spelling before ordinary checking
         // runs; also raises R15's `not exported` for a private qualified name.
         self.rewrite_line_imports(&mut line)?;
+        // R7a (item 2): a quotation type is legal only as a direct word
+        // parameter this slice; reject it in any audited registry position
+        // (a struct/enum field, an array element, a cell payload, a reference
+        // referent -- all interned during the parse above) before lowering can
+        // reach `ir_type_of`'s `unreachable!` arm and brick the session. The
+        // native `check` runs this after `check_types`; the REPL's per-line
+        // `check_types` path skipped it (`type:` lines run their own copy).
+        check::audit_quotation_type_registries(
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &self.owned_cells,
+            &self.refs,
+        )?;
         match line {
             // R11: a `: drop` line never enters `self.env` or gets lowered
             // under its own name; it becomes the struct's destructor, the
@@ -809,7 +851,17 @@ impl Session {
         )
         .and_then(|fields| {
             self.structs[idx].fields = fields;
-            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)
+            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)?;
+            // R7a (item 2): a quotation-typed struct field never reaches the
+            // native `unreachable!` because the native `check` audits it; the
+            // REPL must run the same audit or the field bricks the session.
+            check::audit_quotation_type_registries(
+                &self.structs,
+                &self.enums,
+                &self.arrays,
+                &self.owned_cells,
+                &self.refs,
+            )
         });
         if let Err(e) = result {
             self.structs.pop();
@@ -868,7 +920,15 @@ impl Session {
             for (vidx, fields) in variant_fields.into_iter().enumerate() {
                 self.enums[idx].variants[vidx].fields = fields;
             }
-            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)
+            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)?;
+            // R7a (item 2): a quotation-typed enum-variant payload, same hazard.
+            check::audit_quotation_type_registries(
+                &self.structs,
+                &self.enums,
+                &self.arrays,
+                &self.owned_cells,
+                &self.refs,
+            )
         });
         if let Err(e) = result {
             self.enums.pop();
@@ -1599,6 +1659,13 @@ impl Session {
                 word.name
             ));
         }
+        // R7a (item 2): a quotation type in a word's *output* row (or a
+        // clause-bodied combinator) never reaches the native `unreachable!`
+        // because the native `check` audits it; the REPL must run the same
+        // per-word audit. A direct quotation *parameter* is handled by R23
+        // above; a poly word's effect is empty, so its output-position check
+        // runs on the poly path (`eval_poly_def`).
+        check::audit_word_quotation_positions(&word)?;
         // R3 (Slice 2): a polymorphic word's signature lives entirely in
         // `word.poly` (`word.effect` is empty), so it takes a wholly separate
         // acceptance path; the concrete path below would mis-check its body

@@ -1057,7 +1057,43 @@ fn duplicate_drop_overload_error(word: &WordDef, target: &StructDecl) -> String 
 /// what makes R7's `unreachable!` arms sound rather than hopeful (the slice-4
 /// audit-sweep shape, now for quotation *types*).
 fn audit_quotation_type_positions(module: &Module) -> Result<(), String> {
-    for s in &module.structs {
+    audit_quotation_type_registries(
+        &module.structs,
+        &module.enums,
+        &module.arrays,
+        &module.owned_cells,
+        &module.refs,
+    )?;
+    for w in &module.words {
+        audit_word_quotation_positions(w)?;
+    }
+    for decl in &module.externs {
+        for slot in decl.effect.inputs.iter().chain(&decl.effect.outputs) {
+            reject_quotation_type_position(
+                slot.ty,
+                &format!("an `extern:` boundary type of `{}`", decl.name),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// R7a (REPL, item 2): the registry half of the audit, over exactly the shared
+/// type registries. A quotation type never legally enters any of these (its
+/// one legal home is a direct word parameter, stored in the word's `Sig`, and
+/// a declared effect is interned separately), so re-scanning them per REPL
+/// line is a safe, idempotent invariant. Split out so the REPL's `type:` and
+/// `:` chokepoints run the same rejections as the native `check`, which the
+/// REPL's `check_types`-only path skipped (a quotation in an audited position
+/// then reached `ir_type_of`'s `unreachable!`, bricking the session).
+pub(crate) fn audit_quotation_type_registries(
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    cells: &[OwnedCellDecl],
+    refs: &[RefDecl],
+) -> Result<(), String> {
+    for s in structs {
         for (fname, fty) in &s.fields {
             reject_quotation_type_position(
                 *fty,
@@ -1065,7 +1101,7 @@ fn audit_quotation_type_positions(module: &Module) -> Result<(), String> {
             )?;
         }
     }
-    for e in &module.enums {
+    for e in enums {
         for v in &e.variants {
             for (fname, fty) in &v.fields {
                 reject_quotation_type_position(
@@ -1078,57 +1114,56 @@ fn audit_quotation_type_positions(module: &Module) -> Result<(), String> {
             }
         }
     }
-    for a in &module.arrays {
+    for a in arrays {
         reject_quotation_type_position(a.element, "an array element")?;
     }
-    for c in &module.owned_cells {
+    for c in cells {
         reject_quotation_type_position(c.payload, "an owned-cell payload")?;
     }
-    for r in &module.refs {
+    for r in refs {
         reject_quotation_type_position(r.referent, "a reference referent")?;
     }
-    for w in &module.words {
-        for slot in &w.effect.outputs {
-            reject_quotation_type_position(slot.ty, &format!("the output of `{}`", w.name))?;
-        }
-        // R18/R7a: a monomorphic word taking a quotation is a combinator,
-        // which the inliner supports only with a *term* body (it splices the
-        // body against the live stack); a clause body cannot be spliced, so
-        // such a word would mint an `IrFunc` with a quotation parameter and
-        // reach `ir_type_of`'s `unreachable!` arm (R7). Reject it here, with
-        // the type positions, so that arm stays unreached. (A poly word's
-        // effect is empty and is checked on the poly path, phase 2.)
-        if w.poly.is_none()
-            && matches!(w.body, WordBody::Clauses(_))
-            && w.effect
-                .inputs
-                .iter()
-                .any(|s| matches!(s.ty, Type::Quotation(_)))
-        {
-            return Err(clause_bodied_quotation_word_error(&w.name));
-        }
-        for slot in &w.effect.inputs {
-            if let Type::Quotation(eff) = slot.ty {
-                // `main` takes no quotation: it is an entry point, not a
-                // combinator (D6/R28).
-                if w.name == "main" {
-                    reject_quotation_type_position(slot.ty, "an input of `main`")?;
-                }
-                // A quotation nested inside a quotation effect (a quotation
-                // taking a quotation) is deferred to slice 7, rejected rather
-                // than half-supported.
-                for t in eff.inputs.iter().chain(&eff.outputs) {
-                    reject_quotation_type_position(*t, "nested inside a quotation effect")?;
-                }
-            }
-        }
+    Ok(())
+}
+
+/// R7a (REPL, item 2): the per-word half of the audit -- a quotation in a
+/// word's *output* row, a clause-bodied combinator, `main` taking one, or a
+/// quotation nested inside a declared effect. A direct quotation *parameter*
+/// (the one legal position) is accepted here and rejected separately at the
+/// REPL (R23), which discards word bodies the inliner needs.
+pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> {
+    for slot in &w.effect.outputs {
+        reject_quotation_type_position(slot.ty, &format!("the output of `{}`", w.name))?;
     }
-    for decl in &module.externs {
-        for slot in decl.effect.inputs.iter().chain(&decl.effect.outputs) {
-            reject_quotation_type_position(
-                slot.ty,
-                &format!("an `extern:` boundary type of `{}`", decl.name),
-            )?;
+    // R18/R7a: a monomorphic word taking a quotation is a combinator,
+    // which the inliner supports only with a *term* body (it splices the
+    // body against the live stack); a clause body cannot be spliced, so
+    // such a word would mint an `IrFunc` with a quotation parameter and
+    // reach `ir_type_of`'s `unreachable!` arm (R7). Reject it here, with
+    // the type positions, so that arm stays unreached. (A poly word's
+    // effect is empty and is checked on the poly path, phase 2.)
+    if w.poly.is_none()
+        && matches!(w.body, WordBody::Clauses(_))
+        && w.effect
+            .inputs
+            .iter()
+            .any(|s| matches!(s.ty, Type::Quotation(_)))
+    {
+        return Err(clause_bodied_quotation_word_error(&w.name));
+    }
+    for slot in &w.effect.inputs {
+        if let Type::Quotation(eff) = slot.ty {
+            // `main` takes no quotation: it is an entry point, not a
+            // combinator (D6/R28).
+            if w.name == "main" {
+                reject_quotation_type_position(slot.ty, "an input of `main`")?;
+            }
+            // A quotation nested inside a quotation effect (a quotation
+            // taking a quotation) is deferred to slice 7, rejected rather
+            // than half-supported.
+            for t in eff.inputs.iter().chain(&eff.outputs) {
+                reject_quotation_type_position(*t, "nested inside a quotation effect")?;
+            }
         }
     }
     Ok(())

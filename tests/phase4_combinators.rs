@@ -166,6 +166,53 @@ fn quotation_type_is_rejected_at_every_audited_position() {
             "audited position `{position}` should name slice 7 as the lift, got: {err}"
         );
     }
+
+    // Item 2: the same rejections must fire on the REPL's chokepoints, which
+    // ran `check_types` alone and skipped the R7a audit, so a quotation in any
+    // audited position reached `ir.rs`'s `unreachable!` and bricked the
+    // session. These rows cover the audit-reachable REPL positions (a direct
+    // quotation *parameter* is instead R23's rejection, and `extern:`/`main`
+    // are not REPL forms). Each asserts the located rejection *and* that the
+    // session is not bricked: the following `1` line still evaluates.
+    let repl_rows = [
+        Row {
+            src: "type: S f [ i64 -- ] ;\n1\n",
+            position: "the field `f` of struct `S`",
+        },
+        Row {
+            src: "type: E | v p [ i64 -- ] ;\n1\n",
+            position: "the field `p` of enum variant `E::v`",
+        },
+        Row {
+            src: ": w ( [ [ i64 -- ] 3 ] -- ) drop ;\n1\n",
+            position: "an array element",
+        },
+        Row {
+            src: ": w ( ^[ i64 -- ] -- ) drop ;\n1\n",
+            position: "an owned-cell payload",
+        },
+        Row {
+            src: ": w ( &[ i64 -- ] -- ) drop ;\n1\n",
+            position: "a reference referent",
+        },
+        Row {
+            src: ": w ( -- [ i64 -- ] ) [ drop ] ;\n1\n",
+            position: "the output of `w`",
+        },
+    ];
+    for Row { src, position } in repl_rows {
+        let transcript = repl_error(src);
+        assert!(
+            transcript.contains("a quotation type")
+                && transcript.contains(position)
+                && transcript.contains("slice 7"),
+            "REPL audited position `{position}` should be a located quotation-type rejection naming slice 7, got: {transcript}"
+        );
+        assert!(
+            transcript.contains("stack: 1"),
+            "the REPL session must survive the rejection (the following `1` still runs), got: {transcript}"
+        );
+    }
 }
 
 // -- criterion 2c: array-of-quotation is the array-element rejection ----------
