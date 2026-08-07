@@ -1606,6 +1606,7 @@ fn synthesize_struct_destructor_override(
             regs,
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         )
     }
 }
@@ -1743,6 +1744,7 @@ pub fn lower_line(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
@@ -1751,6 +1753,10 @@ pub fn lower_line(
     // instantiation table keyed by its call-site span, not the name-keyed env.
     b.instantiations = instantiations;
     b.poly_arities = poly_arities;
+    // R5 (Slice 6c): a bare line's call to a retained combinator is spliced in
+    // place (the fifth threading site), rather than lowered to an `Instr::Call`
+    // to a symbol never minted.
+    b.combinators = combinators;
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -1972,6 +1978,7 @@ fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl]) -> Type {
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
 /// so a definition compiles against previously-loaded words. A REPL line has
 /// no polymorphic words (D2), so its calls carry no instantiation table.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
@@ -1979,6 +1986,7 @@ pub(crate) fn lower_word(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     let self_tail = crate::check::has_self_tail_call(word);
     lower_word_parts(
@@ -1991,7 +1999,7 @@ pub(crate) fn lower_word(
         regs,
         instantiations,
         poly_arities,
-        empty_combinators(),
+        combinators,
     )
 }
 
@@ -2012,6 +2020,7 @@ pub(crate) fn lower_instantiation(
     resolve: Resolver,
     regs: Registries,
     arrays: &[ArrayDecl],
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     let effect = concrete_effect(sig, subst, arrays);
     lower_word_parts(
@@ -2024,7 +2033,7 @@ pub(crate) fn lower_instantiation(
         regs,
         empty_instantiations(),
         empty_poly_arities(),
-        empty_combinators(),
+        combinators,
     )
 }
 
@@ -5059,6 +5068,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -5086,6 +5096,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -5426,6 +5437,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
@@ -5460,6 +5472,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -5497,6 +5510,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -5540,6 +5554,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -5578,6 +5593,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -5665,6 +5681,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         let loaded = func
             .blocks
@@ -6262,6 +6279,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);

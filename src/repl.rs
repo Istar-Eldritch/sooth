@@ -137,6 +137,30 @@ fn ir_arity_env(env: &HashMap<String, Sig>) -> HashMap<String, ir::Arity> {
         .collect()
 }
 
+/// R2 (Slice 6c): project the session's combinator store into the checker's
+/// inline view (`collect_combinators`'s shape), each value borrowing a stored
+/// `WordDef`. A free function over the one field rather than a `&self` method,
+/// so a caller can still borrow `self.arrays`/`self.owned_cells`/`self.refs`
+/// mutably alongside it (disjoint fields).
+fn checker_combinators(store: &HashMap<String, WordDef>) -> HashMap<String, check::Combinator<'_>> {
+    store
+        .iter()
+        .filter_map(|(name, word)| check::combinator_of(word).map(|c| (name.clone(), c)))
+        .collect()
+}
+
+/// R2 (Slice 6c): project the store into lowering's `combinator_bodies` view
+/// (`ir::lower`'s shape), name -> body terms.
+fn combinator_bodies(store: &HashMap<String, WordDef>) -> HashMap<String, Vec<Term>> {
+    store
+        .iter()
+        .filter_map(|(name, word)| match &word.body {
+            WordBody::Terms { terms } => Some((name.clone(), terms.clone())),
+            WordBody::Clauses(_) => None,
+        })
+        .collect()
+}
+
 /// The mangled export symbol for `name` at `generation`.
 fn mangled_symbol(name: &str, generation: u64) -> String {
     format!("{name}__gen{generation}")
@@ -687,6 +711,15 @@ pub struct Session {
     /// line resolver snapshot, and the generation each was retained at, so a
     /// later line can instantiate it (R5/R7).
     poly_words: HashMap<String, PolyWordEntry>,
+    /// R1 (Slice 6c): every quotation-taking word (combinator) the session has
+    /// retained, mono and poly in one store (D2). The key is the name the
+    /// checker dispatches on (a plain word name for a session-defined
+    /// combinator; the import-internal spelling for an imported one, R13). A
+    /// combinator mints no `IrFunc` and no symbol (R20/D1): its body is
+    /// re-spliced, fresh, at every later call site under that site's own live
+    /// env, so this holds the raw `WordDef` alone -- no generation, epoch, or
+    /// symbol -- and a redefinition replaces the entry wholesale.
+    combinators: HashMap<String, WordDef>,
     /// R7 (Slice 2, D2): the mangled symbols of every polymorphic instantiation
     /// already lowered with external linkage into some line's module. The
     /// symbol encodes `(name, generation, subst)`, so it *is* the dedup key:
@@ -770,6 +803,7 @@ impl Session {
             drop_overloads: HashMap::new(),
             drop_dropped_sites: HashMap::new(),
             poly_words: HashMap::new(),
+            combinators: HashMap::new(),
             exported_insts: HashSet::new(),
             override_epoch: None,
             buf: Vec::new(),
@@ -950,6 +984,9 @@ impl Session {
         };
         let env = self.typed_env();
         let poly_env = self.poly_env();
+        // R4 (Slice 6c): a `:type` line may name a retained combinator, so its
+        // inference sees the session's inline view like any bare line.
+        let combinators = checker_combinators(&self.combinators);
         let (net_stack, _insts) = check::infer_line(
             &terms,
             &self.types,
@@ -960,6 +997,7 @@ impl Session {
             &self.structs,
             &self.enums,
             &poly_env,
+            &combinators,
         )?;
         Ok(type_effect_str(&self.types, &net_stack))
     }
@@ -1048,6 +1086,10 @@ impl Session {
             .filter(|inst| !self.exported_insts.contains(&inst.symbol))
             .collect();
         pending.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+        // R5 (Slice 6c): an instantiation body may call a retained combinator,
+        // so it lowers against the session's combinator-bodies view like any
+        // other REPL lowering entry point.
+        let bodies = combinator_bodies(&self.combinators);
         let mut funcs = Vec::new();
         let mut newly: Vec<String> = Vec::new();
         for inst in pending {
@@ -1078,6 +1120,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.arrays,
+                &bodies,
             ));
             newly.push(inst.symbol.clone());
         }
@@ -1909,6 +1952,10 @@ impl Session {
         // native path (a `drop` overload is never polymorphic, and the
         // native-shared reachability code must not diverge). The relayed
         // instantiation table is empty and discarded.
+        // R4 (Slice 6c): a `drop` override body may call a retained combinator,
+        // so its site collection sees the session's inline view. The poly-env
+        // stays empty above (a `drop` overload is never polymorphic).
+        let combinators = checker_combinators(&self.combinators);
         let (sites, _insts) = check::check_def_collecting_drop_sites(
             &self.drop_overloads[&id].1,
             &self.enums,
@@ -1918,6 +1965,7 @@ impl Session {
             &mut self.refs,
             &self.structs,
             &HashMap::new(),
+            &combinators,
         )?;
         self.drop_dropped_sites.insert(id, sites);
 
@@ -2037,10 +2085,12 @@ impl Session {
         // so a callee redefined at a different arity in between cannot make
         // the frozen-resolved call emit under the wrong ABI.
         let ir_lower_env = ir_arity_env(&env);
-        // R8: the two stores stay mutually exclusive per name (a polymorphic
-        // word never enters the concrete env, R3), so defining `name` as poly
-        // evicts any prior ordinary entry for it.
+        // R8/R11: the name-shape stores stay mutually exclusive (D4), so
+        // defining `name` as poly evicts any prior ordinary *and* combinator
+        // entry for it (combinator dispatch runs first, so a stale combinator
+        // entry would otherwise win).
         self.env.remove(&name);
+        self.combinators.remove(&name);
         self.poly_words.insert(
             name.clone(),
             PolyWordEntry {
@@ -2054,34 +2104,107 @@ impl Session {
         Ok(())
     }
 
-    fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
-        // R23 (D7): a session line defining a quotation-taking word is a
-        // located rejection, checked before either acceptance path below. The
-        // inliner splices a callee's AST body at every call site (R18), but a
-        // session discards a defining line's body once it compiles (only its
-        // `Sig`/`PolyWordEntry.word` for later instantiation is retained, and
-        // even the latter is never spliced into a *different* line's module);
-        // there is nothing to splice into a later line that calls it. 6c lifts
-        // this once the REPL retains what the inliner needs.
-        if check::word_declares_quotation_parameter(&word) {
-            let span = word_span(&word);
-            let locator = if span == Span::default() {
-                String::new()
-            } else {
-                format!(" (line {}, col {})", span.line, span.col)
-            };
-            return Err(format!(
-                "error: `{}`{locator} declares a quotation parameter, which is not yet supported at the REPL\n  the inliner needs the callee's body, which a session line does not retain past its own definition (quotation-taking words at the REPL are slice 6c)",
-                word.name
-            ));
+    /// R6-R10 (Slice 6c): accept a quotation-taking word (a combinator, mono or
+    /// poly) at a session line and retain it as raw terms, minting no `.so`, no
+    /// symbol, and no generation (D1/D3). A combinator has no compile event of
+    /// its own to freeze against: it is spliced, fresh, at every later call
+    /// site under that site's own live env, so retention is plumbing (the
+    /// session store), not a freezing mechanism (contrast the slice-2 poly
+    /// resolver snapshot).
+    fn eval_combinator_def(
+        &mut self,
+        word: WordDef,
+        writer: &mut impl Write,
+    ) -> Result<(), String> {
+        let name = word.name.clone();
+        // R7: build the checker view *including the definee itself* (any prior
+        // same-name entry replaced), mirroring native's `collect_combinators`,
+        // which contains the word being checked -- so a self-reference or
+        // self-tail call in the body dispatches through the inline path, not an
+        // unknown word. Built from references (no clone: `WordDef` is not
+        // `Clone`): the view borrows every stored combinator plus the local
+        // definee, which outlives the check calls below.
+        let mut combinators = checker_combinators(&self.combinators);
+        if let Some(c) = check::combinator_of(&word) {
+            combinators.insert(name.clone(), c);
         }
+        // R8: reject a cycle formed *across lines* (define `a`; define `b`
+        // calling `a`; redefine `a` calling `b`) as the same located
+        // `combinator_cycle_error`, while a self-*tail* edge stays permitted
+        // (6b D5). Run before storing, so a rejected def leaves the store
+        // untouched.
+        check::check_combinator_cycles(&combinators)?;
+        // The definee's own name is dropped from the concrete/poly envs so its
+        // body's calls resolve through the combinator view (dispatched first),
+        // not a stale prior entry the redefinition is about to evict.
+        let mut env = self.typed_env();
+        env.remove(&name);
+        let mut poly_env = self.poly_env();
+        poly_env.remove(&name);
+        // R9: body check, branching on shape but storing into the one store.
+        if let Some(sig) = word.poly.as_deref() {
+            // A polymorphic combinator (`filter`/`while` shape) is checked
+            // standalone, *not* via `eval_poly_def`: it is spliced inline and
+            // never lowered to a bundle-returning `IrFunc`, so `eval_poly_def`'s
+            // `>= 2`-outputs deferral (which `filter`'s two outputs would trip)
+            // must not fire.
+            check::check_poly_combinator_repl(
+                &word,
+                sig,
+                &self.enums,
+                &env,
+                &mut self.arrays,
+                &mut self.owned_cells,
+                &mut self.refs,
+                &self.structs,
+                &poly_env,
+                &combinators,
+            )?;
+        } else {
+            // A monomorphic combinator: `check_def` already handles it
+            // identically to any word (the instantiation records it returns are
+            // scratch -- the combinator mints no `IrFunc`, R20).
+            check::check_def(
+                &word,
+                &self.enums,
+                &env,
+                &mut self.arrays,
+                &mut self.owned_cells,
+                &mut self.refs,
+                &self.structs,
+                &poly_env,
+                &combinators,
+            )?;
+        }
+        // R10/R11: commit. No lowering, `.so`, symbol, or generation (D3). The
+        // two rival name-shape stores are evicted so combinator dispatch (which
+        // runs first, `check.rs`) can never be shadowed by a stale entry (D4).
+        // No `arrays`/`owned_cells`/`refs` rows are purged: those rows are
+        // positionally stable and never revisited, so a stale row is inert,
+        // exactly as for an ordinary redefinition.
+        self.env.remove(&name);
+        self.poly_words.remove(&name);
+        self.combinators.insert(name.clone(), word);
+        writeln!(writer, "defined {name}").map_err(|e| format!("writing stdout: {e}"))?;
+        Ok(())
+    }
+
+    fn eval_def(&mut self, word: WordDef, writer: &mut impl Write) -> Result<(), String> {
         // R7a (item 2): a quotation type in a word's *output* row (or a
         // clause-bodied combinator) never reaches the native `unreachable!`
         // because the native `check` audits it; the REPL must run the same
-        // per-word audit. A direct quotation *parameter* is handled by R23
-        // above; a poly word's effect is empty, so its output-position check
-        // runs on the poly path (`eval_poly_def`).
+        // per-word audit, before the R6 combinator route below (so a quotation
+        // in a non-input position is still rejected). A poly word's effect is
+        // empty, so its output-position check runs on the poly path.
         check::audit_word_quotation_positions(&word)?;
+        // R6 (Slice 6c): a quotation-taking word is now *retained* rather than
+        // R23-rejected. It routes here (both mono and poly, D2), skipping
+        // lowering entirely (D3): the session keeps its body as raw terms and
+        // re-splices it, fresh, at every later call site under that site's own
+        // live env, which is what the inliner needs (R20).
+        if check::word_declares_quotation_parameter(&word) {
+            return self.eval_combinator_def(word, writer);
+        }
         // R3 (Slice 2): a polymorphic word's signature lives entirely in
         // `word.poly` (`word.effect` is empty), so it takes a wholly separate
         // acceptance path; the concrete path below would mis-check its body
@@ -2103,6 +2226,10 @@ impl Session {
         // mutually exclusive per name).
         let mut poly_env = self.poly_env();
         poly_env.remove(&name);
+        // R4 (Slice 6c): this ordinary word's body may call a retained
+        // combinator; thread the session's inline view so it inlines exactly as
+        // native inlines one drawn from `module.words`.
+        let combinators = checker_combinators(&self.combinators);
         let insts = check::check_def(
             &word,
             &self.enums,
@@ -2112,6 +2239,7 @@ impl Session {
             &mut self.refs,
             &self.structs,
             &poly_env,
+            &combinators,
         )?;
         let poly_arities = self.poly_arities();
 
@@ -2148,8 +2276,15 @@ impl Session {
             // R7 (Slice 2): thread the instantiation table + poly-arity map so
             // a call to a retained polymorphic word inside this body lowers to
             // its per-site symbol via `lower_poly_call`.
-            let mut func =
-                ir::lower_word(&word, &ir_lower_env, &resolve, regs, &insts, &poly_arities);
+            let mut func = ir::lower_word(
+                &word,
+                &ir_lower_env,
+                &resolve,
+                regs,
+                &insts,
+                &poly_arities,
+                &combinator_bodies(&self.combinators),
+            );
             func.name = symbol.clone();
             let mut funcs = vec![func];
             // R12: this module must carry its own struct/enum destructors
@@ -2186,11 +2321,13 @@ impl Session {
 
         // Only commit on success: env stays untouched on any earlier failure.
         self.libs.push(lib);
-        // R8: an ordinary (re)definition evicts any prior poly entry for the
-        // name, so a name lives in exactly one of the two stores at a time and
-        // a later call never has to arbitrate between a poly and a concrete
-        // entry for it.
+        // R8/R11: an ordinary (re)definition evicts any prior poly *and*
+        // combinator entry for the name (D4), so a name lives in exactly one of
+        // the three stores at a time and a later call never has to arbitrate
+        // between them. Combinator dispatch runs first (`check.rs`), so a stale
+        // combinator entry would otherwise silently win.
         self.poly_words.remove(&name);
+        self.combinators.remove(&name);
         self.env.insert(
             name.clone(),
             WordEntry {
@@ -2269,6 +2406,9 @@ impl Session {
         // retained polymorphic word; the relayed instantiation table drives
         // the per-site lowering below (R7).
         let poly_env = self.poly_env();
+        // R4 (Slice 6c): a bare line may call a retained combinator; thread the
+        // session's inline view so it inlines like native's `module.words` one.
+        let combinators = checker_combinators(&self.combinators);
         let (net_stack, insts) = check::infer_line(
             terms,
             &self.types,
@@ -2279,11 +2419,16 @@ impl Session {
             &self.structs,
             &self.enums,
             &poly_env,
+            &combinators,
         )?;
         let net_depth = net_stack.len();
 
         let ir_lower_env = ir_arity_env(&env);
         let poly_arities = self.poly_arities();
+        // R5 (Slice 6c): the combinator-bodies view for this line's lowering,
+        // so a call to a retained combinator splices in place rather than
+        // lowering to an `Instr::Call` to a never-minted symbol.
+        let bodies = combinator_bodies(&self.combinators);
 
         self.seq += 1;
         let seq = self.seq;
@@ -2314,6 +2459,7 @@ impl Session {
                 regs,
                 &insts,
                 &poly_arities,
+                &bodies,
             );
             // R12: this line's module must carry its own struct/enum
             // destructors, or `drop` on a linear struct/enum dies at `dlopen`

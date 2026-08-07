@@ -1297,8 +1297,13 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     std::fs::remove_file(&hand_bin).ok();
 }
 
-// -- criterion 15 (phase 3): a session line defining a quotation-taking word -
+// -- slice 6c (phase 1): quotation-taking words retained at a session line ---
 
+/// Run a scripted REPL session in-process, returning the whole stdout
+/// transcript (`defined …`, printed values, each residual `stack:` line, and
+/// any error line). Goldens pin the *exact* transcript rather than a
+/// `contains`, since the REPL echoes the whole residual stack after every line
+/// and a `contains` would let a placebo pass (the whole-stack echo hazard).
 fn repl_error(input: &str) -> String {
     let reader = BufReader::new(input.as_bytes());
     let mut out: Vec<u8> = Vec::new();
@@ -1306,47 +1311,193 @@ fn repl_error(input: &str) -> String {
     String::from_utf8(out).expect("REPL output should be utf8")
 }
 
+// A polymorphic self-tail `while` and a two-output `filter`, reused across the
+// 6c REPL goldens. Their bodies name only builtins and their quotation
+// parameter, so a session define exercises the splice, not a library import.
+const WHILE_DEF: &str =
+    ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n";
+const FILTER_DEF: &str = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n [ | i | &arr i >usize &> @ dup p call if | v | &!arr over >usize &!> v ! 1 + else drop end ] times | wf | arr wf >usize ;\n";
+
+// A REPL expr line's residual stack is what the in-process driver writes to the
+// capture buffer; the runtime `.` word prints to the real process stdout, which
+// this buffer does not see. So every 6c golden leaves its result *on the stack*
+// (no `.`) and pins the exact `stack:` line. The persistent stack accumulates
+// across lines, so a second call's `stack:` line shows both results.
+
 #[test]
 fn repl_quotation_taking_definition_is_rejected() {
-    // R23/D7: the inliner needs a callee's AST body threaded into every call
-    // site, but a session discards a defining line's body once it compiles (the
-    // 6c retention problem), so a quotation-taking word is a located REPL
-    // rejection naming the word, not a silent miscompile.
-    let transcript = repl_error(": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n:quit\n");
+    // R19: the former R23 rejection is now acceptance. A monomorphic
+    // quotation-taking word defines at a session line and a *later* bare line
+    // calls it, inlined against that line's live env (D1): `5 [ 3 + ] apply`
+    // leaves 8. The guarded behavior flips (define-and-call), not vanishes.
+    let transcript =
+        repl_error(": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n5 [ 3 + ] apply\n:quit\n");
+    assert_eq!(transcript, "defined apply\nstack: 8\n");
     assert!(
-        transcript.contains("`apply`") && transcript.contains("not yet supported at the REPL"),
-        "located rejection naming the word: {transcript}"
+        !transcript.contains("not yet supported at the REPL"),
+        "the former R23 rejection must be gone: {transcript}"
     );
 }
 
 #[test]
 fn repl_poly_quotation_taking_definition_is_rejected() {
-    // The same rejection reached through the polymorphic definition path
-    // (`eval_poly_def`), since a poly word's declared effect lives in
-    // `word.poly`, not `word.effect`.
-    let transcript = repl_error(
-        ": each ( ['T 'N] [ 'T -- ] -- ) | f | len >i64 | count | | arr | count [ | i | &arr i >usize &> @ f call ] times arr drop ;\n:quit\n",
-    );
+    // R19: the former poly rejection (the `eval_poly_def` path) is now
+    // acceptance. A *polymorphic* combinator (`apply1 ( 'a [ 'a -- 'a ] -- 'a )`)
+    // defines and a later line calls it, leaving 6 -- a value witness, unlike an
+    // `each`-shaped combinator that would leave the stack empty.
+    let transcript =
+        repl_error(": apply1 ( 'a [ 'a -- 'a ] -- 'a ) call ;\n5 [ 1 + ] apply1\n:quit\n");
+    assert_eq!(transcript, "defined apply1\nstack: 6\n");
     assert!(
-        transcript.contains("`each`") && transcript.contains("not yet supported at the REPL"),
-        "located rejection naming the word: {transcript}"
+        !transcript.contains("not yet supported at the REPL"),
+        "the former poly rejection must be gone: {transcript}"
     );
 }
 
 #[test]
 fn repl_self_tail_combinator_definition_is_rejected() {
-    // Criterion 15 (R17): the self-tail splice path (R6-R9) is new, but the
-    // REPL chokepoint (`eval_def`, keyed on `word_declares_quotation_parameter`)
-    // fires on the declared quotation parameter alone, before any splice or
-    // cycle analysis runs, so a self-tail combinator defined at a session line
-    // is still the located slice-6c rejection, not a new unpinned case (the
-    // slice-1 lesson).
-    let transcript = repl_error(
-        ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n:quit\n",
-    );
+    // R19: the former self-tail rejection is now acceptance. `while` defines at
+    // a session line (the self-tail edge is permitted, 6b D5) rather than being
+    // rejected on its declared quotation parameter.
+    let transcript = repl_error(&format!("{WHILE_DEF}:quit\n"));
+    assert_eq!(transcript, "defined while\n");
     assert!(
-        transcript.contains("`while`") && transcript.contains("declares a quotation parameter"),
-        "located rejection naming the word and reason: {transcript}"
+        !transcript.contains("declares a quotation parameter"),
+        "the former self-tail rejection must be gone: {transcript}"
+    );
+}
+
+#[test]
+fn repl_mono_combinator_define_and_call() {
+    // Criterion 1: a monomorphic combinator defined at one session line, called
+    // from a *later* bare line, inlines and runs. `on_double` applies the
+    // quotation then doubles: `(5+1)*2 = 12`.
+    let transcript = repl_error(
+        ": on_double ( i64 [ i64 -- i64 ] -- i64 ) call 2 * ;\n5 [ 1 + ] on_double\n:quit\n",
+    );
+    assert_eq!(transcript, "defined on_double\nstack: 12\n");
+}
+
+#[test]
+fn repl_while_define_runs_to_fixpoint() {
+    // Criterion 2 (mutation-pins R5's `lower_line` combinator threading): `while`
+    // defined at a session line, then `0 [ dup 5 < if 1 + true else false end ]
+    // while` runs to a fixpoint of 5, lowering to a loop back-edge (constant
+    // stack), not an infinite splice or a link failure to a never-minted symbol.
+    let transcript = repl_error(&format!(
+        "{WHILE_DEF}0 [ dup 5 < if 1 + true else false end ] while\n:quit\n"
+    ));
+    assert_eq!(transcript, "defined while\nstack: 5\n");
+}
+
+#[test]
+fn repl_two_output_combinator_define_and_call() {
+    // Criterion 3 (mutation-pins R9's poly-combinator routing): a two-output
+    // poly combinator (`filter` shape) defines and runs; both outputs land on
+    // the residual stack (the compacted array and the kept-count). `7 3 fill`
+    // is three 7s; `[ 5 > ]` keeps all three, so the residual is the array then
+    // `3`. If R9 routed `filter` through `eval_poly_def`, its two outputs would
+    // be wrongly deferred as "resolves to 2 outputs".
+    let transcript = repl_error(&format!("{FILTER_DEF}7 3 fill [ 5 > ] filter\n:quit\n"));
+    assert_eq!(transcript, "defined filter\nstack: <[i64 3]> 3\n");
+}
+
+#[test]
+fn repl_combinator_splice_sees_current_helper() {
+    // Criterion 4 (D1 falsifiable): a combinator whose body calls an ordinary
+    // helper is called (106 = 5+1+100), the helper is redefined (+200), and the
+    // combinator is called again from a *new* line: the new line's splice sees
+    // the *new* helper (206 = 5+1+200). This fails if any frozen-resolver/env
+    // capture is added for a combinator -- the new line would still see +100.
+    let transcript = repl_error(
+        ": helper ( i64 -- i64 ) 100 + ;\n\
+         : useh ( i64 [ i64 -- i64 ] -- i64 ) call helper ;\n\
+         5 [ 1 + ] useh\n\
+         : helper ( i64 -- i64 ) 200 + ;\n\
+         5 [ 1 + ] useh\n:quit\n",
+    );
+    // The stack accumulates: the first call leaves 106, the redefinition of
+    // `helper` follows, the second call leaves 206 on top. A frozen capture
+    // would make the top 106 again (`stack: 106 106`); the `206` is the pin.
+    assert_eq!(
+        transcript,
+        "defined helper\ndefined useh\nstack: 106\ndefined helper\nstack: 106 206\n"
+    );
+}
+
+#[test]
+fn repl_ordinary_caller_frozen_across_combinator_redefinition() {
+    // Criterion 5 (R20 frozen `.so`): an ordinary word `w` compiled with the
+    // combinator `c` spliced into it keeps its baked result (51 = 5*10+1) across
+    // a later redefinition of `c` (+1000 instead of +1). `w`'s `.so` is frozen;
+    // only a *new* splice site would see the new `c`.
+    let transcript = repl_error(
+        ": c ( i64 [ i64 -- i64 ] -- i64 ) call 1 + ;\n\
+         : w ( i64 -- i64 ) [ 10 * ] c ;\n\
+         5 w\n\
+         : c ( i64 [ i64 -- i64 ] -- i64 ) call 1000 + ;\n\
+         5 w\n:quit\n",
+    );
+    // Both calls leave 51: `w`'s `.so` is frozen with the original `c` spliced,
+    // so redefining `c` (+1000) changes nothing (`stack: 51 51`, not `51 1051`).
+    assert_eq!(
+        transcript,
+        "defined c\ndefined w\nstack: 51\ndefined c\nstack: 51 51\n"
+    );
+}
+
+#[test]
+fn repl_redefining_combinator_shape_evicts_other_stores() {
+    // Criterion 6 (mutation-pins R11's `self.combinators.remove`/`self.env`
+    // eviction): redefining `foo` from combinator to ordinary word and back
+    // rebinds dispatch to the new shape each time (D4). Combinator dispatch
+    // runs first, so a stale entry in the wrong store would silently keep
+    // winning: `6 = 5+1` (combinator), then `104 = 5+99` (ordinary, the
+    // combinator entry evicted), then `11 = 5*2+1` (combinator again, the
+    // ordinary entry evicted).
+    let transcript = repl_error(
+        ": foo ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+         5 [ 1 + ] foo\n\
+         : foo ( i64 -- i64 ) 99 + ;\n\
+         5 foo\n\
+         : foo ( i64 [ i64 -- i64 ] -- i64 ) call 2 * ;\n\
+         5 [ 1 + ] foo\n:quit\n",
+    );
+    // The stack accumulates across the three shapes: `6` (combinator, 5+1),
+    // then `104` (ordinary, 5+99 -- proving the combinator entry was evicted,
+    // else `5 foo` with no quotation would type-error), then `12`
+    // (combinator again, (5+1)*2 -- proving the ordinary entry was evicted,
+    // else `5 [ 1 + ] foo` would be "a quotation cannot be passed to foo").
+    assert_eq!(
+        transcript,
+        "defined foo\nstack: 6\ndefined foo\nstack: 6 104\ndefined foo\nstack: 6 104 12\n"
+    );
+}
+
+#[test]
+fn repl_cross_line_combinator_cycle_is_error() {
+    // Criterion 7 (mutation-pins R8's `check_combinator_cycles` at the REPL): a
+    // cycle formed *across* session lines (define `a`; define `b` calling `a`;
+    // redefine `a` calling `b`) is the same located `combinator_cycle_error`.
+    // Without the check the cycle type-checks and then splices forever.
+    let transcript = repl_error(
+        ": a ( [ -- ] -- ) call ;\n\
+         : b ( [ -- ] -- ) call [ ] a ;\n\
+         : a ( [ -- ] -- ) call [ ] b ;\n:quit\n",
+    );
+    // The cycle chain names both words; its starting node depends on hash-map
+    // iteration order, so the direction is not pinned.
+    assert!(
+        transcript.contains("a quotation-taking word cannot be recursive")
+            && (transcript.contains("`a` -> `b` -> `a`")
+                || transcript.contains("`b` -> `a` -> `b`")),
+        "the cross-line cycle is the located cycle error: {transcript}"
+    );
+    // The first two defines succeeded; only the cycle-closing redefinition is
+    // rejected, leaving the earlier lines intact.
+    assert!(
+        transcript.starts_with("defined a\ndefined b\n"),
+        "the non-cyclic prefix defines cleanly: {transcript}"
     );
 }
 

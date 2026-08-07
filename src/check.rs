@@ -60,7 +60,7 @@ struct PolyCtx<'a> {
 /// pair of pointers (`Copy`), which lets a call site copy it out of the
 /// borrowed map and then reborrow `PolyCtx` mutably for the splice.
 #[derive(Clone, Copy)]
-struct Combinator<'a> {
+pub(crate) struct Combinator<'a> {
     word: &'a WordDef,
     terms: &'a [Term],
 }
@@ -2354,7 +2354,7 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
 /// registry the clause-style checks (coverage, scrutinee type, variant-name
 /// collision) consult.
 #[allow(clippy::too_many_arguments)]
-pub fn check_def(
+pub(crate) fn check_def(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
@@ -2363,9 +2363,19 @@ pub fn check_def(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+    combinators: &HashMap<String, Combinator>,
 ) -> Result<HashMap<Span, CallInst>, String> {
-    let (_sites, insts) =
-        check_def_collecting_drop_sites(word, enums, env, arrays, cells, refs, structs, poly_env)?;
+    let (_sites, insts) = check_def_collecting_drop_sites(
+        word,
+        enums,
+        env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        poly_env,
+        combinators,
+    )?;
     Ok(insts)
 }
 
@@ -2379,7 +2389,7 @@ pub fn check_def(
 /// only whether that type is *currently* overridden can, and that question
 /// is answered fresh, from `structs`, every time the graph is built.
 #[allow(clippy::too_many_arguments)]
-pub fn check_def_collecting_drop_sites(
+pub(crate) fn check_def_collecting_drop_sites(
     word: &WordDef,
     enums: &[EnumDecl],
     env: &HashMap<String, Sig>,
@@ -2388,6 +2398,7 @@ pub fn check_def_collecting_drop_sites(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+    combinators: &HashMap<String, Combinator>,
 ) -> Result<(Vec<Type>, HashMap<Span, CallInst>), String> {
     let mut env = env.clone();
     env.insert(word.name.clone(), sig_of(&word.effect));
@@ -2397,13 +2408,14 @@ pub fn check_def_collecting_drop_sites(
     // collector passes the empty map (a `drop` overload is never polymorphic),
     // keeping the reachability walk byte-identical on the concrete path (D2).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
-    // R23: a quotation-taking word cannot be defined at the REPL, so the
-    // session has no combinators to inline; the map is empty here.
-    let no_combinators: HashMap<String, Combinator> = HashMap::new();
+    // R3 (Slice 6c): the session's retained combinators thread through so a
+    // defined word's body can call one and have it inlined, exactly as native
+    // inlines one drawn from `module.words`. The build path and unit tests
+    // pass the empty map, keeping the concrete path byte-identical.
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
-        combinators: &no_combinators,
+        combinators,
     };
     check_word(
         word, enums, &env, arrays, cells, refs, structs, &mut sites, &mut poly,
@@ -2440,7 +2452,7 @@ pub fn check_drop_overload_reachability(
 /// `entry_stack` (the carried slot types) and return the resulting typed stack.
 /// A type mismatch or underflow against the carried stack is a reported error.
 #[allow(clippy::too_many_arguments)]
-pub fn infer_line(
+pub(crate) fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
     env: &HashMap<String, Sig>,
@@ -2450,6 +2462,7 @@ pub fn infer_line(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+    combinators: &HashMap<String, Combinator>,
 ) -> Result<(Vec<Type>, HashMap<Span, CallInst>), String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
     // A line is one block: names it binds die with it, so its end is a scope
@@ -2463,12 +2476,13 @@ pub fn infer_line(
     // relayed to the caller for lowering. A `build`-path caller passes the
     // empty map (Slice 1's D2 behaviour).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
-    // R23: no session-defined combinators to inline (see `infer_line`'s twin).
-    let no_combinators: HashMap<String, Combinator> = HashMap::new();
+    // R3 (Slice 6c): the session's retained combinators thread through so a
+    // bare line can call one and have it inlined, exactly as native inlines one
+    // drawn from `module.words`. The build path and unit tests pass empty.
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
-        combinators: &no_combinators,
+        combinators,
     };
     let final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, false, &mut poly,
@@ -3566,6 +3580,37 @@ fn check_poly_combinator_standalone(
         structs,
         &mut dropped,
         poly,
+    )
+}
+
+/// R9 (Slice 6c): the REPL's entry to the standalone poly-combinator check.
+/// Builds a scratch `PolyCtx` (the instantiation records a spliced combinator
+/// produces are never lowered, R20) around the session's poly-env and combinator
+/// view, so `eval_combinator_def` need not name the private `PolyCtx`. Mirrors
+/// native's `is_combinator` branch in `check`, deliberately bypassing
+/// `eval_poly_def`'s `>= 2`-output deferral: a combinator is spliced inline and
+/// never lowered to a bundle-returning `IrFunc`, so that gate cannot fire.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_poly_combinator_repl(
+    word: &WordDef,
+    sig: &PolySig,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    structs: &[StructDecl],
+    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
+    combinators: &HashMap<String, Combinator>,
+) -> Result<(), String> {
+    let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+    let mut poly = PolyCtx {
+        env: poly_env,
+        insts: &mut scratch,
+        combinators,
+    };
+    check_poly_combinator_standalone(
+        word, sig, enums, env, arrays, cells, refs, structs, &mut poly,
     )
 }
 
@@ -5000,6 +5045,19 @@ fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
     map
 }
 
+/// R2 (Slice 6c): the checker's inline view for one retained combinator, the
+/// per-`WordDef` analogue of `collect_combinators`, so the REPL can project its
+/// session store into the `HashMap<String, Combinator>` the inline path reads
+/// without reaching into `Combinator`'s private fields. `None` for a
+/// clause-bodied word (never a combinator: `is_combinator` requires
+/// `WordBody::Terms`).
+pub(crate) fn combinator_of(word: &WordDef) -> Option<Combinator<'_>> {
+    match &word.body {
+        WordBody::Terms { terms } => Some(Combinator { word, terms }),
+        WordBody::Clauses(_) => None,
+    }
+}
+
 /// R18/R20: a combinator is a **monomorphic** `WordBody::Terms` word with a
 /// `Type::Quotation` input. The checker inlines a call to one (splicing its
 /// body) and lowering mints no `IrFunc` for it, so `check` and `ir::lower`
@@ -5057,7 +5115,9 @@ fn poly_input_is_quotation(p: &PolyType) -> bool {
 /// count exceeds `tail_position_calls` count) keeps its self-edge and stays a
 /// cycle error, and every cycle of length >= 2 (a mutual cycle) is untouched.
 /// Reuses `check_tail_call_cycles`'s 3-colour DFS shape (recon 8).
-fn check_combinator_cycles(combinators: &HashMap<String, Combinator>) -> Result<(), String> {
+pub(crate) fn check_combinator_cycles(
+    combinators: &HashMap<String, Combinator>,
+) -> Result<(), String> {
     let members: Vec<&Combinator> = combinators.values().collect();
     let idx: HashMap<&str, usize> = members
         .iter()
@@ -8923,6 +8983,7 @@ mod tests {
             &module.structs,
             &module.enums,
             &HashMap::new(),
+            &HashMap::new(),
         )
         .unwrap_err();
         assert!(
@@ -10065,6 +10126,7 @@ mod tests {
             &mut Vec::new(),
             &[],
             &[],
+            &HashMap::new(),
             &HashMap::new(),
         )
         .map(|(stack, _insts)| stack)
