@@ -472,10 +472,25 @@ a hand-threaded twin, and a recursive-enum value's destructor call inside a `tim
 inherits the fix for free, since a destructor's fused loop already opens at its own
 `IrFunc`'s true entry.
 
-**Next action: Phase 4 Slice 6e (`if` in a polymorphic body).** Its brief
-(`docs/phase4-slice6e-brief.md`) is written; 6c and 6d are both complete, so 6e is the only
-remaining slice in the 6-family. It has to read before slice 7, which needs it, and before the
-core library's intrinsic-vs-library split, which is gated on it.
+**Phase 4 Slice 6e (`if` in a polymorphic body) is complete**: the unconditional rejection at
+`poly_term`'s `TermKind::If` arm is replaced by a full arm mirroring the monomorphic one
+(condition pop, `Bool` check, per-arm walk, move-state join) with no quotation handling
+(a `PolyType` is never a quotation) and no lowering path (checker-acceptance-only; the
+concrete instantiation already lowers correctly through `check_word`). `PolyScope`'s move
+tracking is upgraded from a two-state `Option<Span>` map to the monomorphic `Moves`
+three-state lattice (`Live`/`Moved`/`MaybeMoved`), joined at the `if` the same way branch
+joins already are, and a keys-snapshot `leave_arm` rejects an arm-local linear value never
+consumed inside its own arm before dropping it from scope. `choose` (arms `drop` different
+operands) and `mymax` (the `Ord`-bounded polymorphic `max` the intrinsic could not
+previously give up) both compile and run at two instantiations (`i64`, `f64`); a nested-`if`
+`mymax3` dogfoods that recursion needs no special case. Slice 7's dependency on a
+branching polymorphic body is now satisfied; the core library's intrinsic-vs-library split
+for `max` is unblocked.
+
+**Next action: Phase 4 Slice 6f (liveness ends at last use).** 6c, 6d, and 6e are all
+complete; 6f's brief and spec (`docs/phase4-slice6f-brief.md`, `docs/phase4-slice6f-spec.md`)
+are already written. It has to read before slice 7, which points Phase 3 Slice 6's escape
+checking at a new carrier (closure captures) once closures start capturing borrows.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1432,9 +1447,10 @@ then find out what the compiler owes it.
    — with the nested-loop goldens (all five combinators, any pairing, depth 3) and the slice-3
    aliasing guards green, and a destructor call inside a `times` body inheriting the fix for
    free (its fused loop already opens at its own `IrFunc`'s true entry).
-   **6e — `if` in a polymorphic body.** Lifts the rejection at `src/check.rs:3690` (`` `if`
-   in the polymorphic body of `{word}` is not yet supported ``), which has stood since slice
-   1 deferred it and which no later slice picked up. **A 6-family letter for ordering and
+   **6e — `if` in a polymorphic body. Complete.** Lifted the rejection in `poly_term`'s
+   `TermKind::If` arm (`src/check.rs:3715`, formerly `` `if` in the polymorphic body of
+   `{word}` is not yet supported ``), which had stood since slice 1 deferred it and which no
+   later slice picked up. **A 6-family letter for ordering and
    discovery, not subject matter:** 6b's pre-check is what measured this gap (while ruling it
    out of 6b's scope), and it has to read before slice 7, which needs it. Unlike 6d, whose
    consumers are the 6a combinators themselves, this one's consumers sit outside the family
@@ -1457,13 +1473,16 @@ then find out what the compiler owes it.
    arm reaching `ir.rs`'s `drop: non-empty stack`). `max`'s own body is a fair test rather
    than a trivial one: its arms `drop` different operands, so it exercises exactly the
    move-state join that is missing.
-   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3708`).
+   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3798`).
    It is a sibling wall, not this one, and it belongs to slice 7, which is where a quotation
    acquires the runtime representation that would let a polymorphic body carry one.
-   Depends on slice 1 only; independent of 6a-6d and orderable against all of them.
-   **Exit:** a polymorphic word that branches, including one whose arms consume different
-   operands, compiles and runs at two instantiations, with the linear checks that motivated
-   the original deferral proven by tests that fail without them.
+   Depended on slice 1 only; independent of 6a-6d and landed after 6d.
+   **Exit, met:** a polymorphic word that branches, including one whose arms consume
+   different operands, compiles and runs at two instantiations (`choose` and the newly
+   library-writable `mymax` at `i64` and `f64`), with the linear checks that motivated the
+   original deferral proven by tests (T2-T8, `src/check.rs`) that fail without them and by
+   mutation-tested guards on the three-state move join. Slice 7's stated dependency on a
+   branching polymorphic body is satisfied.
 
    **6f — liveness ends at last use.** Today it does not: `live_derivs`
    (`src/check.rs:759`) chains the stack slots with the scope's bindings, so a reference left
@@ -1533,7 +1552,7 @@ then find out what the compiler owes it.
    keeps citing). *This entry used to add "and after slice 6b because it lifts the polymorphic
    `if`"; 6b did not, and never claimed to once its pre-check corrected the charter. The
    polymorphic `if` any interesting closure-taking word needs is 6e, which is therefore a real
-   prerequisite here.*
+   prerequisite here -- now met.*
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The environment of a downward closure (passed in, never returned or stored beyond the
    frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
