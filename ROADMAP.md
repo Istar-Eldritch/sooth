@@ -1555,73 +1555,72 @@ then find out what the compiler owes it.
    polymorphic `if` any interesting closure-taking word needs is 6e, which is therefore a real
    prerequisite here -- now met.*
    **Split 7a/7b, the same reason 6d/6e/6f split off 6a-6c: one dependency the rest of the
-   slice does not share.** Capturing a `Copy` or linear local never touches the escape
-   checker at all — a `Copy` capture is just a value copied into the env struct, and a
-   linear one disposes through the existing destructor mechanism when the closure drops —
-   so the representation, the calling convention, and both closure kinds have nothing to wait
-   for. Capturing a *reference* is the one exception: it needs Phase 3 Slice 6's escape
-   checking pointed at the env struct as a new carrier, and that checking is exactly what 6f
-   is mid-flight on changing (when a bound reference's borrow ends). Building the
-   reference-capture rule against today's whole-block liveness only to redo it once 6f lands
-   is the same failure this plan keeps citing elsewhere, so it is split off rather than risked.
+   slice does not share. The line is no-captures / captures.** *This paragraph first drew it
+   at "non-reference captures / reference captures"; 7a's brief falsified that by probing the
+   built compiler before any code changed.* Splicing is textual, so a captured aggregate is
+   re-read at the *call* site, while a materialized env would snapshot it at the *literal*:
+   measured, a body capturing an array prints `99` today where a snapshot env would print `7`.
+   That is a silent wrong value, and it is not academic — `map` in `lib/combinators.sth`
+   writes its captured `arr` through `&!` each iteration and reads it back the next, so
+   snapshot semantics would break a shipped library word. Preserving today's meaning under
+   materialization therefore needs the env to hold a *reference*, which is Phase 3 Slice 6's
+   escape checking pointed at a new carrier — exactly the machinery 6f is mid-flight on
+   changing. So *every* capture waits for 6f, not just an explicitly reference-typed one, and
+   what is left for 7a is the representation itself: a quotation that captures nothing has no
+   env to disagree about.
 
-   **7a — quotations as values: representation, calling convention, downward and upward
-   closures, `Copy`/linear captures.**
+   **7a — quotations as values: representation, calling convention, and non-capturing
+   quotations.**
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
-   The environment of a downward closure (passed in, never returned or stored beyond the
-   frame) is an ordinary frame-local aggregate, so it needs no allocator. The
-   `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
-   question is how the call takes the closure, and Sooth already spells all three, `call`
-   through `&q`, through `&!q`, and by value. A closure capturing a linear value is itself
-   linear, so dropping it disposes the captures through the existing destructor mechanism.
-   **Upward closures are not blocked on Phase 6.** `^T` is already an owning heap pointer
-   backed by a real allocator (`src/backend/qbe.rs:672-685`, `malloc` plus an OOM trap) with
-   Phase 3's full disposal story, so an escaping closure is `(code pointer, ^Env)`: the
-   environment lives in a cell instead of a frame slot and drops through machinery that
-   exists. DESIGN.md:512's "a non-escaping quotation is core but an escaping one is `alloc`"
-   is a statement about which stdlib layer the feature belongs to, not about missing
-   machinery. What is genuinely new is the environment's *type*: each capturing quotation has
-   its own capture set, so the compiler synthesizes an env struct per quotation literal, the
-   way slice 1 already synthesizes and interns bundle structs for multi-output returns.
-   Known limit to take in with open eyes: `^` is single-owner, so a `^`-closure is linear and
-   two owners of one callback needs Rc, which stays deferred.
-   This also pays the real type cost slice 4 deferred: a quotation must become nameable, so
+   The seam is already cut: `Type::Quotation`/`PolyType::Quotation` exist with unification and
+   `apply_subst` following (6a), and what is missing is strictly downstream — `ir_type_of`'s
+   arm is an `unreachable!` whose comment already names this slice as the lift, so the change
+   is additive at a known point rather than a refactor.
+   This pays the real type cost slice 4 deferred: a quotation must become nameable, so
    `Type`/`PolyType`/`IrType` gain a variant and unification, `apply_subst`, `Subst`,
    `instantiation_symbol` mangling, the monomorphization walk, layout, and the backend all
    follow. That is a slice-1-sized representation change and the second-largest item in the
    phase; slice 4's brief sized it deliberately before deferring it here. Representation:
-   one uniform `(code, env)` pair, with a non-capturing quotation carrying an unused env,
-   revisited only if the RT subset demands a distinct bare-pointer type (DESIGN.md:480 names
-   dynamic dispatch through escaping quotations as a hot-path enemy). Decide at its brief
-   whether downward and upward land together; probably yes, since splitting means designing
-   the environment layout twice.
-   **No new liveness rule needed for this half.** An env struct is an ordinary struct type,
-   so the existing "a reference cannot be stored" structural check (unconditional, unlike
-   `live_derivs`'s timing-based one) already rejects a reference-typed capture with no
-   special-casing — which is exactly why this half has nothing to wait for.
+   one uniform `(code, env)` pair, with 7a's non-capturing quotation carrying an unused env,
+   so 7b fills the env in rather than changing the representation (DESIGN.md:480 names
+   dynamic dispatch through escaping quotations as a hot-path enemy, so a distinct
+   bare-pointer type is the one thing worth pricing at the spec).
+   **Which half force-inlining lands in: neither, it stays.** 6a's D2 survives — `each` still
+   mints no `IrFunc` and every call site splices it — which is what makes an erased quotation
+   compose for free: `table @ each` splices the loop skeleton as always, the abstract
+   parameter binds a runtime value, and the `call` inside the spliced body goes indirect.
+   Provenance decides (`Slot.quot`, already the right bit and already a one-variant enum),
+   never a size budget, which this plan called actively harmful before a fallback existed and
+   which nothing about having one improves.
+   **Upward closures and `^Env` ride with 7b, not here**: with no captures there is nothing to
+   escape *with*, so a 7a quotation is a bare code pointer with no lifetime story at all.
    Depends on 6a (the calling convention's real consumer) and 6e (a closure-taking word that
-   branches, now met). Independent of 6f.
+   branches, now met). Independent of 6f. Brief written
+   (`docs/phase4-slice7a-brief.md`).
    Dogfood: rewrite `examples/vm.sth`'s dispatch around a table of quotations and compare it
    against the enum-plus-clause version it replaces.
-   **Exit:** a quotation stored in a struct field, returned from a word, and passed to a
-   higher-order word the compiler does not inline, invoked through `call` at a path fixed
-   only at runtime; a closure capturing a `Copy` or linear local, both downward (frame-local)
-   and, separately, escaping via `^Env`; dropping a linear-capturing closure disposes its
-   captures.
+   **Exit:** a quotation stored in a struct field and in an array, returned from a word, and
+   left by two differing branches of an `if`, all compile; `call` on each emits an indirect
+   call and runs; `times` driving an erased quotation runs in constant stack; every 6a-6f
+   golden still lowers to the same spliced tight loop with no per-element `Instr::Call`; and a
+   *capturing* literal reaching a materialization boundary is a located error naming 7b.
 
-   **7b — capturing a reference.**
+   **7b — capturing closures.**
    Points Phase 3 Slice 6's escape checking at the env-struct carrier 7a introduces, using
    6f's settled last-use rule rather than duplicating the whole-block one it would otherwise
-   have to invent standalone: a closure may capture a `&T`/`&!T` local exactly when the
-   closure itself is fully used (called, or for an upward closure, dropped) before that
-   reference's last use would otherwise have ended it. The motivating shape is read-only
-   ambient context a non-inlined higher-order word wants by reference rather than copied in —
-   undecided until this slice's own brief, since nothing has been probed against a working
-   compiler yet (quotations are not runtime values before 7a lands).
+   have to invent standalone. The env holds a reference to a captured aggregate rather than a
+   snapshot of it, which is what makes a materialized closure mean what the spliced one means
+   (see the split rationale above); that is also what makes this, and not 7a, the slice that
+   needs 6f. Carries the capture-set analysis (7a needs only a *predicate* — does this body
+   read any enclosing name — and none exists today either way; the D3 check only rejects,
+   never computes), upward closures on `^Env` with their single-owner linearity, and the
+   `Fn`/`FnMut`/`FnOnce`-equivalent split that falls out of `call` through `&q`, `&!q`, and by
+   value.
    Depends on 6f (the exact rule this points at) and 7a (the carrier it points the rule at).
-   **Exit:** a closure capturing a reference to a local, called while that reference is still
-   live, compiles and runs; one captured past its last use (or, for an upward closure, past
-   its owning frame) is rejected with a located error naming the capture.
+   **Exit:** a closure capturing an aggregate, called while that capture is still live,
+   compiles and observes the same values the spliced form does; one captured past its last use
+   (or, for an upward closure, past its owning frame) is rejected with a located error naming
+   the capture; dropping a linear-capturing closure disposes its captures.
 
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
