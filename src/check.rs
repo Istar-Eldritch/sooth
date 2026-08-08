@@ -6582,7 +6582,7 @@ fn check_term(
                 // a `Type::Quotation`, rejected at declaration).
                 if let Type::Quotation(eff) = *want {
                     if let Some(QuotRef::Known(id)) = found.quot {
-                        materialize_quotation_at_boundary(
+                        stack[base + i] = materialize_quotation_at_boundary(
                             id,
                             eff,
                             "be stored",

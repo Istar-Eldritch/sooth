@@ -447,8 +447,16 @@ enum-plus-clause `examples/vm.sth` byte-for-byte.
 - `examples/vm_table.sth` — the dogfood (new); `examples/vm.sth` retained unchanged as the parity
   oracle.
 - `ROADMAP.md` — mark 7a implemented.
+- `src/repl.rs` — **added on Phase 2 review, not originally sanctioned.** The REPL is `ir::lower_line`/
+  `ir::lower_word`/`ir::lower_instantiation`'s only other caller, and each now returns
+  `Vec<IrFunc>` (R9); the REPL's three `IrModule` build sites also hard-coded `quot_sigs:
+  Vec::new()`, which was a live gap independent of this finding once a REPL-typed session could
+  materialize a quotation and lower an indirect call against an empty signature table. Both are
+  mechanical: extend the `Vec<IrFunc>` returns into the existing `funcs` vectors, and call the
+  sanctioned `ir::collect_quot_sigs` (already exists for `ir.rs`'s own build path) at each site.
+  No new logic; adapting the one other caller to a sanctioned signature change is not optional.
 
-No other files. No staged changes outside these.
+No other files beyond the above. No staged changes outside these.
 
 ## Exit criteria (golden tests)
 
