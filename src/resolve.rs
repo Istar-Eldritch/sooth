@@ -82,6 +82,21 @@ pub(crate) fn split_accessor(name: &str) -> (&str, &str) {
     }
 }
 
+/// Split a leading reference sigil (`&!`/`&`) off a call name, so `rewrite`
+/// resolves the same core spelling a same-module word or accessor does
+/// (`&!Acc>arr` and `Acc>arr` name the same type). The sigil is reattached
+/// verbatim to whatever `rewrite` returns for the core name; a name with no
+/// such prefix is untouched.
+fn strip_ref_sigil(name: &str) -> (&str, &str) {
+    if let Some(rest) = name.strip_prefix("&!") {
+        ("&!", rest)
+    } else if let Some(rest) = name.strip_prefix('&') {
+        ("&", rest)
+    } else {
+        ("", name)
+    }
+}
+
 /// The per-module name tables the rewrite consults: which bare names are this
 /// module's types (so a constructor/accessor call rewrites) and which are its
 /// words/externs (so a plain call rewrites). Builtins and genuinely unknown
@@ -133,50 +148,77 @@ impl NameTables {
         exports: &[Vec<(String, Span)>],
         span: Span,
     ) -> Result<Option<String>, String> {
-        if scope.contains(name) {
+        // A `&`/`&!` borrow prefix and a qualifier/accessor compose on one
+        // token (`&!q::Point>x`), so the sigil is peeled off first and the
+        // rest resolved against the same tables an unprefixed name would use.
+        // But a sigil is only ever meaningful ahead of the one accessor form
+        // `check.rs`'s struct-projection branch parses back out itself
+        // (`rest.split_once('>')`, i.e. a suffix starting with `>`): a bare
+        // word or a bare/other-accessor type name can never be borrowed, so
+        // under a sigil those must stay un-mangled and fall through to
+        // `Ok(None)`, or a downstream "not a local" diagnostic would name a
+        // mangled decl the surface program never wrote.
+        let (sigil, core) = strip_ref_sigil(name);
+        if scope.contains(core) {
             return Ok(None);
         }
-        if let Some((qualifier, rest)) = name.split_once("::") {
+        let type_ok = |suffix: &str| sigil.is_empty() || suffix.starts_with('>');
+        let word_ok = sigil.is_empty();
+        if let Some((qualifier, rest)) = core.split_once("::") {
             let target = match imports.get(qualifier) {
                 Some(&t) => t,
                 None => return Ok(None),
             };
             let (type_part, suffix) = split_accessor(rest);
-            if self.types[target as usize].contains(type_part) {
+            if type_ok(suffix) && self.types[target as usize].contains(type_part) {
                 if !is_exported(&exports[target as usize], type_part) {
                     return Err(not_exported_error(type_part, qualifier, span));
                 }
-                return Ok(Some(format!("{}{}", mangle(type_part, target), suffix)));
+                return Ok(Some(format!(
+                    "{sigil}{}{}",
+                    mangle(type_part, target),
+                    suffix
+                )));
             }
-            if suffix.is_empty() && self.words[target as usize].contains(rest) {
+            if word_ok && suffix.is_empty() && self.words[target as usize].contains(rest) {
                 if !is_exported(&exports[target as usize], rest) {
                     return Err(not_exported_error(rest, qualifier, span));
                 }
-                return Ok(Some(mangle(rest, target)));
+                return Ok(Some(format!("{sigil}{}", mangle(rest, target))));
             }
             return Ok(None);
         }
-        let (type_part, suffix) = split_accessor(name);
-        if self.types[module as usize].contains(type_part) {
-            return Ok(Some(format!("{}{}", mangle(type_part, module), suffix)));
+        let (type_part, suffix) = split_accessor(core);
+        if type_ok(suffix) && self.types[module as usize].contains(type_part) {
+            return Ok(Some(format!(
+                "{sigil}{}{}",
+                mangle(type_part, module),
+                suffix
+            )));
         }
-        if suffix.is_empty() && self.words[module as usize].contains(name) {
-            return Ok(Some(mangle(name, module)));
+        if word_ok && suffix.is_empty() && self.words[module as usize].contains(core) {
+            return Ok(Some(format!("{sigil}{}", mangle(core, module))));
         }
         // R20/R15c: own module first, then a selectively imported name. The
         // map (validated by `check::check_selective_imports`) exposes a bare
         // `Type` together with its generated words as one unit, so a
         // `Type>field` call whose `type_part` is selectively imported rewrites
         // against the target module just like a plain word does.
-        if let Some(&target) = selective.get(type_part) {
-            if self.types[target as usize].contains(type_part) {
-                return Ok(Some(format!("{}{}", mangle(type_part, target), suffix)));
+        if type_ok(suffix) {
+            if let Some(&target) = selective.get(type_part) {
+                if self.types[target as usize].contains(type_part) {
+                    return Ok(Some(format!(
+                        "{sigil}{}{}",
+                        mangle(type_part, target),
+                        suffix
+                    )));
+                }
             }
         }
-        if suffix.is_empty() {
-            if let Some(&target) = selective.get(name) {
-                if self.words[target as usize].contains(name) {
-                    return Ok(Some(mangle(name, target)));
+        if word_ok && suffix.is_empty() {
+            if let Some(&target) = selective.get(core) {
+                if self.words[target as usize].contains(core) {
+                    return Ok(Some(format!("{sigil}{}", mangle(core, target))));
                 }
             }
         }
@@ -503,6 +545,59 @@ mod tests {
         assert!(
             calls.contains(&"p__m0".to_string()),
             "unqualified: {calls:?}"
+        );
+    }
+
+    /// A `&`/`&!` borrow prefix and a struct field accessor compose on one
+    /// token (`&!Acc>arr`), so the mangling rewrite must see past the sigil
+    /// to the type name underneath it: with only a *second*, unrelated module
+    /// present, an unqualified `&!Acc>arr` in module 0 must still mangle to
+    /// `Acc`'s module-0 name, exactly as the unprefixed `Acc>arr` already
+    /// does.
+    #[test]
+    fn sigiled_struct_field_accessor_mangles_past_the_borrow_prefix() {
+        let mut module = assemble_two_modules(
+            "type: Acc arr [i64 4] ;\n\
+             : main ( -- )\n\
+             0 4 fill Acc | acc |\n\
+             &!acc &!Acc>arr | a |\n\
+             a Acc>arr drop\n\
+             acc drop ;",
+            ": noop ( -- ) ;",
+        );
+        resolve_modules(&mut module).unwrap();
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        let calls = call_names(&main.body);
+        assert!(
+            calls.contains(&"&!Acc__m0>arr".to_string()),
+            "sigiled accessor mangled: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"Acc__m0>arr".to_string()),
+            "unprefixed accessor mangled the same way: {calls:?}"
+        );
+    }
+
+    /// The converse: a sigil is only ever meaningful ahead of a `Type>field`
+    /// accessor (the one form `check.rs`'s struct-projection branch parses
+    /// back out), never ahead of a plain word or a bare type name. Those must
+    /// stay unmangled so a "not a local" diagnostic downstream names the
+    /// spelling the author wrote, not a decl the sigil was never resolved
+    /// against.
+    #[test]
+    fn sigiled_plain_word_or_bare_type_is_left_unmangled() {
+        let mut module = assemble_two_modules(
+            "type: Acc arr [i64 4] ;\n\
+             : dst ( -- i64 ) 5 ;\n\
+             : main ( -- ) &!dst drop ;",
+            ": noop ( -- ) ;",
+        );
+        resolve_modules(&mut module).unwrap();
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        let calls = call_names(&main.body);
+        assert!(
+            calls.contains(&"&!dst".to_string()),
+            "a sigiled word call is never a borrow and stays raw: {calls:?}"
         );
     }
 

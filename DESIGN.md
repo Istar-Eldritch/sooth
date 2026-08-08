@@ -222,6 +222,17 @@ surplus value. Exclusivity is also keyed per place rather than per path, so two
 references into disjoint fields of one local conflict while both are live; sequencing
 them is the workaround.
 
+Borrow *liveness* is asymmetric, and only by accident deliberately so: a reference on the
+stack is live from the term that creates it until the term that consumes its slot, while a
+reference bound to a local is live for the whole block (`live_derivs` chains the stack
+slots with the scope's bindings). Chaining a borrow therefore compiles where naming it does
+not, and the rejection lands on the natural shape — borrow a place, write through the
+borrow, then consume the place. Ending a reference local's borrow at its *last use* would
+make the two consistent. That is not a lifetime system by the definition above (no lifetime
+variables, no regions, nothing binding a reference's validity to a named scope), only a
+rule about when a borrow ends inside one block, and the anonymous case already works that
+way. Deferred; see ROADMAP Phase 4 Slice 6f.
+
 The rule that specifying references actually forced into the open is not about references
 at all: **naming an aggregate does not copy it**, so two names can denote one region of
 memory. That was invisible while nothing could mutate in place, and `!`/`+!` make it
@@ -241,6 +252,24 @@ refusal of a linear field, and by the standing ban on linear array elements. So 
 was a wrong *value*, never a double free or a use-after-free, and the linear spine was never
 at risk. It is still exactly the class of silent failure this language exists to turn into a
 compile error, which is why it is closed rather than documented.
+
+That same `Copy`-only construction has a payoff that only surfaced under Phase 4's
+combinators. A **linear** aggregate threaded through a loop as an accumulator needs no copy
+at all: passing it *moves* it, so the outer name is dead, the aliasing rule has nothing to
+fire on, and a body that borrows it mutably, writes through the borrow, and hands the same
+value back lowers to stores straight into the loop's carried slot. A `Copy` aggregate in
+the same position must copy, because another live name could observe the old value — the
+`dup` the aliasing rule demands, plus the loop's own back-edge staging. So linearity is not
+the awkward case for in-place iteration, it is the *enabling* one, and the awkward case is
+an aggregate that is `Copy` by inference. Two things follow. Linearity cannot be
+**declared**: `is_copy` derives it structurally, and the only way to opt a type out is to
+give it a `drop` overload, which spells "thread this in place" as "give this a destructor".
+And the `Copy` case is awkward only because the aliasing rule is keyed on names that are
+merely in lexical scope: measured, a `Copy` aggregate accumulator threads with the same zero
+copies once a name that is never used again stops counting as a second denoting name. Paying
+for a *performance* property with a *semantic* one (a destructor obligation, no free `dup`,
+move-on-every-use) is the wrong trade, so that relaxation rides with the borrow one; see
+ROADMAP Phase 4 Slice 6f.
 
 Because a branch merge can denote either arm's place, a value carries a *set* of regions
 rather than one. The merge unions both arms, so no aliasing rejection ever happens at a
@@ -376,6 +405,38 @@ raising and restoring the same counter `times` does (renamed `loop_depth`, since
 counts two kinds of loop); the limit is not lifted here (6d lifts it for all five combinators
 at once). The REPL chokepoint needed no change: it already rejects any quotation-declaring
 word at the definition site, self-tail or not.
+
+**Phase 4 Slice 6c lifted the REPL's two combinator rejections by retention, not by
+inventing a frozen resolver.** A combinator has no compile event of its own to freeze
+against: it mints no `IrFunc` and no symbol (D2 above), and it is inlined by term-splice,
+fresh, at every call site, re-checked and re-lowered against that site's own live env each
+time. Slice 2's precedent — a polymorphic word's frozen defining-line resolver, read once
+per instantiation at lowering — does not transfer, because a poly body is checked once and
+never re-checked, while a combinator body is re-checked and re-lowered at every splice site.
+So the fix is a session-level store, not a generation-tracking mechanism: `Session` gains
+`combinators: HashMap<String, WordDef>`, holding mono and poly combinators in one store
+(mirroring the checker's `is_combinator`/`collect_combinators`, which already treat both
+uniformly), replaced wholesale on redefinition and carrying no generation, epoch, or symbol.
+It is projected on demand into the two shapes the inline paths already read — a
+`HashMap<String, Combinator>` for the checker, a `HashMap<String, Vec<Term>>` for
+lowering — threaded into every REPL entry point that previously hardcoded an empty map:
+`check_def`, `check_def_collecting_drop_sites`, and `infer_line` on the checker side;
+`lower_word`, `lower_instantiation`, and `lower_line` on the lowering side. Defining a
+combinator at the REPL skips lowering entirely — check, then store, no `.so`, no symbol, no
+`dlopen` — against a view that already includes the definee itself, so a self-reference
+dispatches through the inline path rather than unknown-word, with `check_combinator_cycles`
+run over that view so a cycle formed across separate session lines is still the located
+error; a polymorphic combinator bypasses the ordinary poly-definition path's ≥2-outputs
+deferral, since a combinator is spliced inline and never lowered to a bundle-returning
+`IrFunc`, so that limitation cannot arise for it. The three now-mutually-exclusive
+name-shape stores (an ordinary word's `env`, a polymorphic word's `poly_words`, and the new
+combinators store) evict each other symmetrically on redefinition, since combinator dispatch
+is checked before both other stores and a stale entry in the wrong one would otherwise win
+silently. Importing a closure that exports a combinator retains it the same way: a module-0
+exported combinator is copied into the session store under its import-internal name, with
+its body's calls — including a self-tail call — rewritten to internal spellings, so an
+imported `while`'s self-call still resolves to itself and the self-tail recognizer still
+fires rather than recursing forever through an unrecognized name.
 
 **Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
 dispatch on ADTs is `match`, exhaustiveness-checked (a missing case is a compile
@@ -824,6 +885,35 @@ rows, no borrow analysis needed to write the compiler in it.
   core; seams fixed day one.
 - Bootstrap: host-language compiler then self-host a small subset, fixpoint-verify.
   Host language now free choice; Rust the sensible default.
+
+## Tie-breakers
+
+How to choose when two designs both work. `Decided` records what was chosen and `Declined`
+what was chosen against; these are the rules that settle the next call, extracted from ones
+that were argued out rather than assumed.
+
+- **Never charge a semantic price for a performance property.** If a program needs an
+  in-place update, the answer is not "make your type linear". Linearity is a semantic
+  commitment — a destructor obligation, no free `dup`, move-on-every-use — and spending it to
+  buy codegen is a bad trade that also lies about the type. Phase 4 Slice 6f is the worked
+  example: a `Copy` aggregate accumulator could only be copied, at a full memcpy per loop
+  iteration, because an aliasing rule was keyed on names merely in lexical scope, and the
+  workaround on offer was to change the type's linearity. Fix the rule; do not bill the
+  programmer. This is the same instinct as the Memory model's "a compiler-inserted copy is
+  the same category of invisible behaviour as an auto-drop", pointed the other way: an
+  invisible cost is a defect whether the compiler inserts it or the language extracts it.
+- **One diagnostic severity.** Everything the compiler says is an error. "Unused" is an
+  error exactly when a *linear obligation* is unmet, which the leak check already enforces;
+  hygiene with no obligation behind it (a reference bound and never named, a dead local) is a
+  linter's job. A warning tier would be a second, weaker answer to a question the linear
+  spine already answers, and every diagnostic that is merely advisory is one the reader
+  learns to skip.
+- **A named thing behaves like the anonymous one.** Locals are the only readability tool a
+  concatenative language has, so a rule that holds for a value on the stack must hold for the
+  same value under a name. Where the two diverge, treat the named case as the bug: 6f exists
+  because a borrow left on the stack ended at its last use while the identical borrow bound
+  to a local lived to the end of its block, which made the legible spelling the rejected one
+  and taught the workaround "don't name things".
 
 ## Open / deferred
 

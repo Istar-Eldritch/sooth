@@ -1249,7 +1249,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
     funcs.extend(synthesize_aggregate_destructors(
-        &env, &resolve, regs, &overrides,
+        &env,
+        &resolve,
+        regs,
+        &overrides,
+        &combinator_bodies,
     ));
 
     Ok(IrModule {
@@ -1295,6 +1299,7 @@ pub fn synthesize_aggregate_destructors(
     resolve: Resolver,
     regs: Registries,
     overrides: &DropOverrides,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
     let Registries {
         structs,
@@ -1314,7 +1319,12 @@ pub fn synthesize_aggregate_destructors(
             let id = StructId::from_index(idx);
             match overrides.get(&id) {
                 Some(DropOverride::Body(word)) => Some(synthesize_struct_destructor_override(
-                    id, word, env, resolve, regs,
+                    id,
+                    word,
+                    env,
+                    resolve,
+                    regs,
+                    combinators,
                 )),
                 Some(DropOverride::AlreadyLoaded) => None,
                 None => Some(synthesize_struct_destructor(id, env, resolve, regs)),
@@ -1590,22 +1600,35 @@ fn synthesize_struct_destructor(
 /// destructor symbol every existing call site already calls — the override
 /// replaces `synthesize_struct_destructor`'s field glue rather than running
 /// before or alongside it (R5), so there is no glue left to compose with.
+///
+/// Calls `lower_word_parts` directly rather than the `lower_word` convenience
+/// wrapper: `lower_word` hardcodes `empty_combinators()`, which is correct for
+/// its one remaining caller (the REPL's `eval_def`, which cannot yet retain
+/// any combinator to call) but was silently wrong here — a drop override's
+/// body can call a combinator like any other word body, and a native build's
+/// `combinator_bodies` map already exists by the time this runs.
+#[allow(clippy::too_many_arguments)]
 fn synthesize_struct_destructor_override(
     id: StructId,
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     IrFunc {
         name: struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation),
-        ..lower_word(
-            word,
+        ..lower_word_parts(
+            &word.name,
+            &word.effect,
+            &word.body,
+            crate::check::has_self_tail_call(word),
             env,
             resolve,
             regs,
             empty_instantiations(),
             empty_poly_arities(),
+            combinators,
         )
     }
 }
@@ -1743,6 +1766,7 @@ pub fn lower_line(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> (IrFunc, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
@@ -1751,6 +1775,10 @@ pub fn lower_line(
     // instantiation table keyed by its call-site span, not the name-keyed env.
     b.instantiations = instantiations;
     b.poly_arities = poly_arities;
+    // R5 (Slice 6c): a bare line's call to a retained combinator is spliced in
+    // place (the fifth threading site), rather than lowered to an `Instr::Call`
+    // to a symbol never minted.
+    b.combinators = combinators;
 
     // Params occupy the first value ids: %v0 = stack base (Ptr), %v1 = top (Int).
     let base = b.fresh_value(IrType::Ptr);
@@ -1972,6 +2000,7 @@ fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl]) -> Type {
 /// this directly (renaming the returned `IrFunc.name` to a mangled symbol)
 /// so a definition compiles against previously-loaded words. A REPL line has
 /// no polymorphic words (D2), so its calls carry no instantiation table.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn lower_word(
     word: &WordDef,
     env: &HashMap<String, Arity>,
@@ -1979,6 +2008,7 @@ pub(crate) fn lower_word(
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     let self_tail = crate::check::has_self_tail_call(word);
     lower_word_parts(
@@ -1991,7 +2021,7 @@ pub(crate) fn lower_word(
         regs,
         instantiations,
         poly_arities,
-        empty_combinators(),
+        combinators,
     )
 }
 
@@ -2012,6 +2042,7 @@ pub(crate) fn lower_instantiation(
     resolve: Resolver,
     regs: Registries,
     arrays: &[ArrayDecl],
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     let effect = concrete_effect(sig, subst, arrays);
     lower_word_parts(
@@ -2024,7 +2055,7 @@ pub(crate) fn lower_instantiation(
         regs,
         empty_instantiations(),
         empty_poly_arities(),
-        empty_combinators(),
+        combinators,
     )
 }
 
@@ -5167,6 +5198,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(count(&func, |i| matches!(i, Instr::Load(..))), 2);
@@ -5194,6 +5226,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         let last = func.blocks.last().unwrap();
@@ -5534,6 +5567,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 16);
@@ -5568,6 +5602,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -5605,6 +5640,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 8);
@@ -5648,6 +5684,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         let conv_dst = instrs(&func)
             .iter()
@@ -5686,6 +5723,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         let calls: Vec<&str> = instrs(&func)
             .iter()
@@ -5773,6 +5811,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         let loaded = func
             .blocks
@@ -6370,6 +6409,7 @@ mod tests {
             },
             empty_instantiations(),
             empty_poly_arities(),
+            empty_combinators(),
         );
         assert_eq!(m, 1);
         assert_eq!(out_bytes, 24);

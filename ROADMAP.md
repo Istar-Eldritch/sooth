@@ -416,6 +416,40 @@ against a hand-threaded twin, with the array passed straight from its producer w
 `filter` rather than bound to a local first, so it does not trip 6a's bind-then-pass alias
 limitation.
 
+**Phase 4 Slice 6c (quotation-taking words at the REPL) is complete**: its brief
+(`docs/phase4-slice6c-brief.md`) falsified the roadmap's own frozen-resolver framing before
+any code changed — a combinator mints no `IrFunc` and no symbol, so it has no compile event
+of its own to freeze against, and it is re-checked and re-lowered at every splice site
+against that site's own live env, unlike a polymorphic word's body, which is checked once.
+The fix is a session-level store (`Session.combinators: HashMap<String, WordDef>`, mono and
+poly alike in one store, D2, replaced wholesale on redefinition, D1), projected on demand
+into the two shapes the checker's `collect_combinators` and the lowerer's `combinator_bodies`
+already read, threaded into every REPL entry point that hardcoded an empty map: `check_def`,
+`check_def_collecting_drop_sites`, and `infer_line` on the checker side; `lower_word`,
+`lower_instantiation`, and `lower_line` (a fifth, under-counted site) on the lowering side.
+Defining a combinator (`eval_combinator_def`) skips lowering entirely — check, then store, no
+`.so`, no symbol, no `dlopen` (D3) — checks the definee against a view that already includes
+itself (so a self-reference dispatches through the inline path, not unknown-word), runs
+`check_combinator_cycles` over that view so a cycle formed across session lines is still the
+located error, and routes a polymorphic combinator through a new standalone check bypassing
+`eval_poly_def`'s `>= 2`-outputs deferral (a combinator is spliced inline and never lowered to
+a bundle-returning `IrFunc`, so that gate cannot apply). The three now-mutually-exclusive
+name-shape stores (`self.env`, `self.poly_words`, `self.combinators`) evict each other
+symmetrically on redefinition (D4), generalizing the existing env/poly-words rule, since
+combinator dispatch runs before both and a stale entry in the wrong store would silently win.
+Import reuses the same store (D5): the R24 rejection of a closure exporting a
+quotation-taking word is dropped, and a module-0 exported combinator is retained under its
+import-internal spelling with its body's calls — including a self-tail call — rewritten to
+internal spellings, so the self-tail recognizer still fires on an imported `while` rather than
+splicing forever. A review pass then closed a hygiene gap the brief's recon missed: a
+retained combinator's body call to a module-0 *private* word was left unrewritten and fell
+through to whatever the session's own env held under that bare name, a silent-wrong-answer
+risk on a name collision, plus a forgeable variant (a REPL-declared name matching a
+multi-file closure's internal mangled spelling). Both are closed: the body-call rewrite now
+covers every module-0 word, not only exports, and a REPL-declared name may no longer end in a
+resolver-mangled or import-epoch-tagged spelling. `examples/filter_while.sth`'s scenario is
+dogfooded again as a REPL session transcript, pinned to the same computed values.
+
 **Phase 4 Slice 6d (nested constant-stack loops: the hoist-target split) is complete**: the
 cause was one field doing two jobs, `FuncBuilder::entry_block`, simultaneously the alloca
 home (where a hoisted `Alloc` must land, since QBE's frame-bumping `alloc*` never reclaims
@@ -453,7 +487,10 @@ previously give up) both compile and run at two instantiations (`i64`, `f64`); a
 branching polymorphic body is now satisfied; the core library's intrinsic-vs-library split
 for `max` is unblocked.
 
-**Next action: Phase 4 Slice 6c.** Quotation-taking words at the REPL; independent of 6e.
+**Next action: Phase 4 Slice 6f (liveness ends at last use).** 6c, 6d, and 6e are all
+complete; 6f's brief and spec (`docs/phase4-slice6f-brief.md`, `docs/phase4-slice6f-spec.md`)
+are already written. It has to read before slice 7, which points Phase 3 Slice 6's escape
+checking at a new carrier (closure captures) once closures start capturing borrows.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1246,7 +1283,7 @@ then find out what the compiler owes it.
 6. **The combinator library in Sooth + inlining, and the machinery that work measured (the
    phase's headline exit).** *This heading used to end "+ closing the polymorphic-path gaps".
    It did not close them and no longer claims to: 6b's pre-check established that neither gap
-   gates a combinator. 6a-6c are the library itself; 6d and 6e are gaps the library work
+   gates a combinator. 6a-6c are the library itself; 6d, 6e and 6f are gaps the library work
    surfaced but does not itself need, grouped here for ordering rather than subject matter.*
    `each`/`map`/`filter`/`fold`/`while` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
@@ -1354,17 +1391,27 @@ then find out what the compiler owes it.
    **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are,
    with `while` running in constant stack and a non-tail combinator self-call still rejected.
 
-   **6c — quotation-taking words at the REPL.** Lifts 6a's located rejection: what it means
-   to define and call a combinator in a live session. The problem is retention, the same
-   shape slice 2 solved for polymorphic words and 8b for drop overrides — a session discards
-   ordinary word bodies once a line compiles to its `.so`, and an inliner needs the body —
-   plus the frozen-binding question of which generation of a callee an inlined body binds to,
-   which slice 2 already answered for instantiations (the *defining* line's resolver
-   snapshot, not the instantiating line's) and this should follow rather than reopen. Last
-   of the three because the phase exit is a native criterion and nothing else builds on it;
-   its order against 6b is free. **Exit:** a session defining a quotation-taking word,
-   calling it, and redefining it, with the frozen-binding rule holding across the
-   redefinition.
+   **6c — quotation-taking words at the REPL is implemented.** *This entry previously said
+   the frozen-binding question of which generation of a callee an inlined body binds to
+   should follow slice 2's answer for instantiations (the defining line's resolver snapshot).
+   `docs/phase4-slice6c-brief.md`'s recon falsified that framing before any code changed: a
+   combinator mints no `IrFunc` and no symbol, so it has no compile event of its own to freeze
+   against, and it is re-checked and re-lowered at every splice site against that site's own
+   live env, unlike a poly body which is checked once. There was no frozen resolver to
+   design; the charter below is the corrected one.* Lifted 6a's located rejection: what it
+   means to define and call a combinator in a live session. The problem was retention, the
+   same shape slice 2 solved for polymorphic words and 8b for drop overrides — a session
+   discards ordinary word bodies once a line compiles to its `.so`, and an inliner needs the
+   body. The fix was a plain session store (`HashMap<String, WordDef>`, mono and poly
+   combinators alike, replaced wholesale on redefinition, D1) projected on demand into the two
+   shapes the checker's and lowerer's inline paths already read, threaded into the REPL entry
+   points that hardcoded an empty combinators map. A review pass then closed a hygiene gap the
+   brief's recon missed: an imported combinator's body call to a module-0 private word (and
+   the forgeable variant, a REPL-declared name matching a multi-file closure's internal
+   mangled spelling) resolved against the session's own env instead of the closure's,
+   a silent-wrong-answer risk on a name collision. **Exit:** a session defining a
+   quotation-taking word, calling it from a later line, and redefining it, with every splice
+   at every call site reading that site's own live env (no frozen resolver, D1).
    **6d — nested constant-stack loops (the hoist-target split) is implemented.** Lifted R18,
    which rejected any `times` reached while a loop was already open. The limit was not
    hypothetical and not confined to `while`: it bit every combinator 6a shipped, because each
@@ -1436,6 +1483,66 @@ then find out what the compiler owes it.
    original deferral proven by tests (T2-T8, `src/check.rs`) that fail without them and by
    mutation-tested guards on the three-state move join. Slice 7's stated dependency on a
    branching polymorphic body is satisfied.
+
+   **6f — liveness ends at last use.** Today it does not: `live_derivs`
+   (`src/check.rs:759`) chains the stack slots with the scope's bindings, so a reference left
+   on the stack dies when a term consumes its slot, while a reference bound to a local stays
+   live for the whole block. Chaining a borrow therefore compiles where naming it does not,
+   and the rejection lands on the natural shape: borrow a place, write through the borrow,
+   then consume the place, which fails with `cannot consume the borrowed local` pointing at
+   the consume. Verified by compiling, in a straight-line word body with no loop and no
+   quotation involved — so this is not about iteration scoping, which already expires a
+   body's bindings per cycle (`leave_block` after the `times` body).
+   **Not a lifetime system**, by DESIGN.md's own definition: no lifetime variables, no
+   regions, nothing binding a reference's validity to a named scope. It is a rule about when
+   a borrow ends inside one block, and the anonymous case already works that way, so this
+   makes named references behave like the stack values the language is otherwise built
+   around rather than adding a concept.
+   **Why a slice and not a workaround.** Locals are the only readability tool a concatenative
+   language has, and this makes them poison exactly where they help most; the workaround is
+   to spell the whole projection as one chain, which is the opposite of the legibility the
+   language trades on.
+   **Before slice 7**, which points Phase 3 Slice 6's escape checking at a new carrier
+   (closure captures, which inherit their captures' restrictions). Settling when a borrow
+   *ends* after closures start capturing them means answering one question twice, the failure
+   this plan keeps citing.
+   Implementation shape the brief should start from: word bodies are flat term lists, so a
+   backward scan gives a last-use index per reference local, and `live_derivs` filters the
+   bindings whose last use has passed, given a current-term index threaded into the query.
+   Two wrinkles: branches (last use is the max across arms) and loop bodies (any use means
+   live for the whole body, which the identity-on-borrow-state check at `src/check.rs:6041`
+   already wants).
+   **Two tables, one rule.** The same lexical-vs-last-use question applies to
+   `aliasing_origin` (`src/check.rs:854`), which rejects a mutable borrow of a place a second
+   live *name* denotes. Both scan a scope table for names that are merely in lexical scope,
+   and both leave their stack halves alone; taking only the borrow half would answer one
+   question twice. **Measured, not assumed:** stubbing `aliasing_origin` out makes a `Copy`
+   aggregate accumulator thread through `fold` with **zero** per-iteration blits, printing the
+   right answer and matching the linear case's shape, against four blits per iteration for the
+   `dup` form it forces today. That gap is an expensive implicit memcpy standing where a
+   reader expects a move, and it is reachable now only by making the type linear — paying a
+   semantic price (a destructor obligation, no free `dup`, move-on-every-use) for a
+   performance property. Seventeen tests guard the rule; the three sampled all use the
+   aliasing name *after* the borrow, so they stay live and keep failing for the reason they
+   state, with the risk concentrated in the six branch/merge cases where region unioning meets
+   per-arm liveness. **The two halves differ in failure mode** and the slice must treat them
+   differently: the borrow half wrongly accepts or rejects a program, while the alias half can
+   silently produce a wrong *value* — the class DESIGN.md names as the one this language
+   exists to turn into a compile error — so every alias-half test is mutation-tested, not just
+   asserted.
+   **A sibling gap, measured in the same investigation: linearity cannot be declared.**
+   `is_copy` (`src/check.rs:239`) derives it structurally, and the only way to opt a struct
+   out of `Copy` is to give it a `drop` overload. That matters because a linear aggregate
+   accumulator *already* threads through `fold` with zero copies — verified: no `blit` in the
+   loop body and stores straight into the carried slot, against four blits per iteration for
+   the `Copy`-plus-`dup` form — so the zero-copy path exists and is reachable only by
+   spelling "thread this in place" as "give this a destructor". Its answer is entangled with
+   slice 1's parked question of whether `Copy` is a privileged constraint and with slice 8's
+   polymorphic `drop`: do not settle it here, do not foreclose it either.
+   Depends on nothing in 6a-6e; orderable against all of them, required before 7.
+   **Exit:** a reference bound to a local, used and then finished with, no longer blocks
+   consuming the place it borrowed; the in-place accumulator body compiles as written; and a
+   test proves the borrow is still rejected when the reference is used *after* the consume.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
