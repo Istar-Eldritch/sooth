@@ -1668,7 +1668,8 @@ then find out what the compiler owes it.
 
    Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
    structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot
-   simply inherit these three rules.
+   simply inherit these three rules, and which ends with `drop` no longer being the universal
+   disposal verb at all.
 
    **The brief's first job is the table's entry shape, which is not `Sig`.** Three measured
    constraints rule that out, all in `src/check.rs`: (a) `builtin_table` is
@@ -1722,30 +1723,78 @@ then find out what the compiler owes it.
    supplies it — rather than inferring it from the single resource case and reopening it in
    Phase 6, whose *Generic struct declarations* item and Slice 2 allocator rework are the
    consumers waiting on the answer.
-   **The disposal-scope invariant: structural disposal must never silently substitute for an
-   out-of-scope override.** 8a rule 3 makes overloads imported rather than carried by the
+
+   **The disposal-scope invariant: structural disposal must never silently substitute for a
+   type's real disposal word.** 8a rule 3 makes overloads imported rather than carried by the
    type, and `drop` cannot inherit that rule as written. For `+`, a missing import is a
    resolution error: no candidate matches, compile fails, you import it. For `drop` a
    structural fallback always exists and always type-checks, so a module importing `File`
-   without its disposal word would pop the `i32` and never `close` — the same leak the
+   without its disposal word would pop the `i64` and never `close` — the same leak the
    structural-totality constraint above exists to prevent, arriving by scope rather than by
    derivation. Optional overloads can be import-scoped; a non-optional obligation cannot,
-   unless its absence is made an error. **Resolution: `drop` stays import-scoped like
-   everything else, and importing a type whose `has_drop_overload` bit is set without
-   importing its disposal word makes any *linear* use of that type a located error** (naming
-   the word to import). Reading it through `&File` stays legal, so this doubles as a real
-   capability boundary: a module can inspect a resource without being able to own one. Three
-   parts carry it, none redundant — `StructDecl::has_drop_overload` (`src/ast.rs`, already set
-   by `check::check` and already load-bearing, since it is what makes such a struct non-`Copy`)
-   tells the checker the obligation exists while the word is out of scope; the import
-   requirement makes taking on disposal explicit; and `find_drop_overloads`' existing
-   *program-wide* uniqueness stays program-wide even though callability becomes scope-local,
-   because scope-local uniqueness alone would let two modules define `drop` for one `File`,
-   never collide, and dispose the same value two different ways. **Open sub-question:**
-   nothing today requires an override to live in the module declaring the type
-   (`drop_overload_struct_id` derives the id from the input type, no same-module check), so
-   orphan overrides are legal and made safe only by that uniqueness check. Restricting
-   disposal to the declaring module is optional; the uniqueness rule is the load-bearing part.
+   unless its absence is made an error.
+
+   **Resolution: the type declares its disposal word, and `drop` stops being the universal
+   disposal verb.** Making `drop` the tracked slot and trusting an override to do the right
+   thing is the weak part: nothing checks that a `drop` override actually calls `close`,
+   nothing gives `close`/`free` any status, and generated traversal only knows to call `drop`
+   — the operation that matters is invisible while a wrapper around it is what is enforced.
+   So `File` declares `close ( File -- )`, `Vec['T 'A]` declares `free ( &!'A Vec['T 'A] -- )`,
+   a plain struct declares nothing and is disposed structurally, and today's
+   `: drop ( File -- )` is the special case where the declared word happens to be named
+   `drop`. This is 8b's own "declared-consumer types … disposed by their named word" option
+   promoted from a coin flip to the design, the other option (a structurally-total generic
+   `drop`) having already been ruled out above.
+   Three things fall out of one mechanism, which is the argument for it: the checker gets a
+   *named* word to require rather than a boolean (`has_drop_overload` cannot distinguish a
+   plain struct from a resource whose disposal word is not called `drop` — both leave the bit
+   `false`, and the second must reject structural disposal); Phase 6's allocator case stops
+   being separate, since `free`'s extra `&!'A` input is just a declared disposal word with a
+   richer signature; and it answers 8b's own general question (what a disposal word may
+   require, how the constraint records it, how generated traversal supplies it) once instead
+   of per-resource-kind. It is additive to linearity rather than a change to it: `close`
+   already satisfies use-exactly-once as an ordinary consuming word today. The declaration
+   only supplies what inference cannot reach — generated disposal, and the import rule.
+
+   **The error fires at the disposal site, not at import.** Importing `File` without `close`
+   is legal, as is holding one, storing one, passing one onward, or reading it through
+   `&File`; a module that only forwards a resource never needs its disposal word in scope, and
+   an import-time rule would break that legitimate shape for no safety gain. What is an error
+   is *disposing* it by any path that would fall back to structural disposal — calling `drop`
+   on it, destructuring it (the sibling hole below, same error family), or disposing a
+   container that holds it — located at that site and naming the word to import. The container
+   case is where this composes and where the container-boundary question above bites: disposing
+   a `Vec[File]` requires `File`'s declared word in scope, reported at the `Vec`'s disposal
+   site.
+   `find_drop_overloads`' existing *program-wide* uniqueness stays program-wide even though
+   callability becomes scope-local, because scope-local uniqueness alone would let two modules
+   declare disposal for one `File`, never collide, and dispose the same value two different
+   ways. **Open sub-question:** nothing today requires an override to live in the module
+   declaring the type (`drop_overload_struct_id` derives the id from the input type, no
+   same-module check), so orphan overrides are legal and made safe only by that uniqueness
+   check. Restricting disposal to the declaring module is optional; uniqueness is the
+   load-bearing part.
+
+   **What this costs, so the brief does not discover it.** It needs a way to declare the word
+   on the type, which is new surface on `type:` — the brief's question, and the only genuinely
+   new syntax in 8a/8b. It also *reinterprets* shipped machinery rather than extending it:
+   Phase 3 slice 8b's overrides, REPL retention, epoch-suffixed destructor symbols, and
+   `examples/resources.sth` as the Phase 3 exit dogfood all assume `drop` is the slot. Reading
+   a `drop` override as "declared disposal word, named `drop`" keeps every one of those working
+   unchanged, but that reading is load-bearing and should be stated, not discovered.
+   Two further notes for the allocator case, which the "disposal may require inputs beyond the
+   value" paragraph above does not capture. First, the set of affected types is **not** the heap
+   types but everything *transitively owning* heap storage: a `Record` holding a `String['A]`
+   is a stack value whose disposal frees heap, so the property propagates structurally exactly
+   as linearity already does (`ir.rs`: `has_drop_overload || any field is linear`), and it is
+   viral in the type parameter — such a `Record` either becomes generic over `'A` or pins one,
+   which is the tax `'A = Global` exists to blunt. Second, a type parameter names the allocator
+   *statically* while `free` needs the allocator *instance* at runtime, allocators being
+   stateful; so either the value carries a reference to its allocator (a word per allocation,
+   which Rust deliberately refuses) or the disposal site must have it in scope and pass it.
+   None of this is visible today because `src/backend/qbe.rs` has exactly one global allocator
+   behind `allocate(n)`/`free(ptr, n)`; Phase 6 making allocators plural is what creates the
+   input, and Slice 2's shim-to-FFI rework is the logged consumer.
 
    **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
    override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
@@ -1759,12 +1808,14 @@ then find out what the compiler owes it.
    opaque-by-default draft would have papered over it, and only for types whose author chose
    opacity), which is an argument for fixing it properly here rather than with a visibility
    rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
-   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`;
-   a declared-consumer type (`File`) rejects the generic path at the call site, naming its
-   named consumer; destructuring a type with a `drop` override is a located error; importing
-   such a type without its disposal word makes a linear use of it a located error while
-   `&`-reads still compile; and the container-boundary decision is recorded and, if implicit,
-   exercised by a generated traversal that calls a non-`drop` disposal word.
+   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`; a
+   type declaring a disposal word (`File`/`close`) rejects the generic path at the call site,
+   naming that word; destructuring such a type is a located error; disposing one without its
+   declared word in scope is a located error *at the disposal site* naming the word to import,
+   while importing the type, forwarding it, and `&`-reading it all still compile; disposing a
+   `Vec[File]` reports the same error at the container's disposal site; and the
+   container-boundary decision is recorded and, if implicit, exercised by a generated traversal
+   that calls a non-`drop` disposal word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
