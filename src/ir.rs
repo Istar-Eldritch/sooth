@@ -12,8 +12,8 @@ use std::mem;
 
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module, OwnedCellDecl,
-    OwnedCellId, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term,
-    TermKind, Type, TypedSlot, WordBody, WordDef,
+    OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
+    Subst, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
 };
 
 /// The single target word-width parameter (R15, M2): the byte width of a
@@ -60,6 +60,12 @@ pub struct IrModule {
     /// opaque byte-blob `type :A = align N { b S }` per entry (R20) and reads
     /// element stride from it; empty for an array-free module.
     pub arrays: Vec<ArrayLayout>,
+    /// Slice 7a (R1/Q2): the module's distinct quotation signatures, interned
+    /// by structural effect equality. The backend emits a `type :Q{n} = { l,
+    /// l }` per entry and spells `:Q{n}` for each `IrType::Quotation` naming
+    /// that effect; empty for a quotation-value-free module (every module
+    /// until a materialization boundary produces one).
+    pub quot_sigs: Vec<QuotSigLayout>,
 }
 
 #[derive(Debug)]
@@ -136,6 +142,68 @@ pub enum IrType {
     /// `cstr` (R5): a bare NUL-terminated byte pointer. Identical at runtime
     /// to `Ptr`, distinct in the IR for the same dispatch reason as `Str`.
     Cstr,
+    /// Slice 7a (R1/Q2): a code handle, the identity of a function symbol,
+    /// distinct from a data `Ptr`. Produced only by `Instr::FuncAddr` and
+    /// consumed only by `Instr::CallIndirect` (as the callee) or by an
+    /// ordinary aggregate store/load of a quotation's `code` slot: no
+    /// arithmetic, no dereference, no cast to/from `Ptr` or an integer. On QBE
+    /// it classifies identically to `Ptr` (`l` in a register, `l` in an ABI
+    /// position), so a future table-based backend (WASM) is free to realize it
+    /// as a table index instead of an address, exactly the opacity `Ptr`
+    /// already keeps for data pointers.
+    Code,
+    /// Slice 7a (R1/Q2): a quotation value, a pointer to a fixed two-slot
+    /// aggregate `{ code: Code@0, env: Ptr@WORD_WIDTH }` (`quotation_layout`).
+    /// `QuotSigId` carries the declared effect directly, so `IrType` stays
+    /// `Copy` and two structurally different effects are distinct `IrType`s,
+    /// with no interning table threaded through `ir_type_of` (the
+    /// `Type::Quotation` side made the same deliberate choice, ast.rs).
+    /// Spelled `:Q{id}` in ABI positions and `l` in a register, like
+    /// `Struct`/`Enum`/`Array`.
+    Quotation(QuotSigId),
+}
+
+/// Slice 7a (R1/Q2): the identity of a quotation's declared effect. A `Copy`
+/// handle carrying the leaked `&'static QuotEffect`, so two structurally-equal
+/// effects compare equal through the reference (the value equality unification
+/// already relies on for `Type::Quotation`). It is not an index into a table:
+/// carrying the effect keeps `ir_type_of` pure and threads no mutable
+/// interning table, matching the no-table choice on the `Type` side. The
+/// backend assigns each distinct effect a `:Q{n}` aggregate symbol from
+/// `IrModule::quot_sigs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotSigId(pub &'static QuotEffect);
+
+/// Slice 7a (R1/Q2): one entry of the module-level quotation signature table
+/// (`IrModule::quot_sigs`), interned by structural effect equality. The
+/// backend emits a `type :Q{n} = { l, l }` per entry and spells `:Q{n}` for
+/// each `IrType::Quotation` naming this effect; the effect is what a
+/// materialization boundary reads to mint the callee `IrFunc`'s signature.
+#[derive(Debug, Clone)]
+pub struct QuotSigLayout {
+    pub effect: &'static QuotEffect,
+}
+
+/// Slice 7a (R2/D5): the fixed two-slot layout every quotation value shares,
+/// every figure word-width-derived (backend-neutral invariant): `code` at
+/// offset 0, `env` at offset `word_width`, size `2 * word_width`, align
+/// `word_width`. The `env` slot is always the null pointer in 7a (7b fills
+/// it); it is not elided, so widening to a capturing closure stays additive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuotLayout {
+    pub code_offset: u32,
+    pub env_offset: u32,
+    pub size: u32,
+    pub align: u32,
+}
+
+pub fn quotation_layout(word_width: u32) -> QuotLayout {
+    QuotLayout {
+        code_offset: 0,
+        env_offset: word_width,
+        size: 2 * word_width,
+        align: word_width,
+    }
 }
 
 impl IrType {
@@ -179,15 +247,12 @@ pub fn ir_type_of(ty: Type) -> IrType {
         Type::Isize => IrType::Isize,
         Type::Str => IrType::Str,
         Type::Cstr => IrType::Cstr,
-        // Slice 6a (R7): a quotation type has no runtime representation this
-        // slice (D6). A quotation-taking word mints no standalone `IrFunc`
-        // (R20) and is inlined at every call site, so its declared effect
-        // never reaches the backend; the audit (R7a) rejects a quotation type
-        // at every position that would layout or lower one before this is
-        // reached. Slice 7 lifts this with a `(code, env)` runtime value.
-        Type::Quotation(_) => {
-            unreachable!("a quotation type has no IrType this slice (R7/R7a/R20; slice 7)")
-        }
+        // Slice 7a (R3): a quotation now has a runtime `(code, env)` value.
+        // `QuotSigId` carries the effect directly, so this arm stays pure --
+        // no interning table threaded (the `Type::Quotation` side chose the
+        // same, ast.rs). The backend assigns each distinct effect a `:Q{n}`
+        // symbol from `IrModule::quot_sigs`.
+        Type::Quotation(eff) => IrType::Quotation(QuotSigId(eff)),
     }
 }
 
@@ -474,11 +539,15 @@ fn scalar_size_align_ww(ty: IrType, word_width: u32) -> (u32, u32) {
         IrType::Float { bits } => (bits / 8) as u32,
         IrType::Usize => word_width,
         IrType::Isize => word_width,
-        // A cell is a pointer, so its width defers to `Ptr`'s convention.
-        IrType::Ptr | IrType::OwnedCell(_) | IrType::Str | IrType::Cstr => 8,
+        // A cell is a pointer, so its width defers to `Ptr`'s convention; a
+        // `Code` handle is one word too (a code pointer / table index).
+        IrType::Ptr | IrType::OwnedCell(_) | IrType::Str | IrType::Cstr | IrType::Code => 8,
         IrType::Struct(_) => unreachable!("a struct field resolves via the layout registry"),
         IrType::Enum(_) => unreachable!("an enum field resolves via the layout registry"),
         IrType::Array(_) => unreachable!("an array field resolves via the layout registry"),
+        IrType::Quotation(_) => {
+            unreachable!("a quotation value resolves via `quotation_layout`, not a scalar")
+        }
     };
     (bytes, bytes)
 }
@@ -493,6 +562,9 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         IrType::Struct(id) => round_up(structs.layouts[id.index()].size, 8),
         IrType::Enum(id) => round_up(enums.layouts[id.index()].size, 8),
         IrType::Array(id) => round_up(arrays.layouts[id.index()].size, 8),
+        // A quotation value is a two-slot aggregate; it marshals like any
+        // aggregate, its size rounded up so the next slot stays 8-aligned.
+        IrType::Quotation(_) => round_up(quotation_layout(WORD_WIDTH).size, 8),
         IrType::Int { .. }
         | IrType::Float { .. }
         | IrType::Bool
@@ -501,7 +573,8 @@ pub fn carried_slot_bytes(ty: IrType, structs: &Structs, enums: &Enums, arrays: 
         | IrType::Ptr
         | IrType::OwnedCell(_)
         | IrType::Str
-        | IrType::Cstr => 8,
+        | IrType::Cstr
+        | IrType::Code => 8,
     }
 }
 
@@ -920,6 +993,17 @@ pub enum Instr {
     Bin(Value, BinOp, Value, Value),
     Cmp(Value, CmpOp, Value, Value),
     Call(Option<Value>, String, Vec<Value>),
+    /// Slice 7a (R4/Q3): the address of a (materialized) function symbol as an
+    /// `IrType::Code` value (a distinct opaque handle, not `Ptr`). Emitted at
+    /// a materialization boundary to fill a quotation's `code` slot; realized
+    /// on QBE as `%dst =l copy $sym`.
+    FuncAddr(Value, String),
+    /// Slice 7a (R4/Q3): an indirect call through a code-handle `Value` (the
+    /// quotation's `code` slot, already `Load`ed, `IrType::Code`). Mirrors
+    /// `Call` but the callee is a value, not a symbol. `env` is not passed in
+    /// 7a (a non-capturing callee has no env parameter); 7b adds the env
+    /// argument here.
+    CallIndirect(Option<Value>, Value, Vec<Value>),
     /// `.`: print one value followed by a newline. Type-directed at the
     /// backend (not here, IR stays neutral): the value's own `IrType` (looked
     /// up via `value_types`) picks signed/unsigned decimal, `%g` float, or
@@ -1261,6 +1345,9 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         structs: structs.layouts,
         enums: enums.layouts,
         arrays: arrays.layouts,
+        // Slice 7a: no materialization boundary produces a quotation value
+        // yet, so the table stays empty on this path (a later slice fills it).
+        quot_sigs: Vec::new(),
     })
 }
 
@@ -1859,7 +1946,12 @@ pub fn lower_line(
             // reference on the stack (check.rs's "a reference cannot be stored:
             // the line leaves `&P` on the stack" diagnostic, tests/phase3_refs.rs),
             // so a `Type::Ref` can never reach the carried-slot buffer at all.
+            // A bare quotation on a REPL residual is likewise rejected (7a
+            // keeps that rejection), and a `Code` handle is never a slot type.
             IrType::Ptr => unreachable!("a reference can never be a carried slot"),
+            IrType::Code | IrType::Quotation(_) => {
+                unreachable!("a bare quotation/code is never a REPL carried slot")
+            }
         }
         in_bytes += carried_slot_bytes(slot_ty, b.structs, b.enums, b.arrays);
     }
@@ -2181,7 +2273,10 @@ fn empty_combinators() -> &'static HashMap<String, Vec<Term>> {
 }
 
 fn is_aggregate(ty: IrType) -> bool {
-    matches!(ty, IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_))
+    matches!(
+        ty,
+        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_)
+    )
 }
 
 /// R10: whether a combinator body has a tail-position call to itself, the
@@ -4345,9 +4440,23 @@ mod tests {
             .iter()
             .filter_map(|i| match i {
                 Instr::Call(_, sym, _) => Some(sym.as_str()),
+                // Slice 7a (R13a): an indirect call carries no symbol, so it
+                // is reported with a sentinel. Widened *before* any lowering
+                // can emit `CallIndirect`, so the combinator-splice units
+                // (`each`/`while`) catch a splice that regresses into an
+                // indirect call, not just a direct one.
+                Instr::CallIndirect(..) => Some("<indirect>"),
                 _ => None,
             })
             .collect()
+    }
+
+    /// Slice 7a (R13a): the shared "is this instruction a call" predicate,
+    /// seeing both the direct `Call` and the indirect `CallIndirect`. Replaces
+    /// the inline `matches!(i, Instr::Call(..))` closures so a lowering that
+    /// regresses a splice into an indirect call is still counted as a call.
+    fn is_call_instr(i: &Instr) -> bool {
+        matches!(i, Instr::Call(..) | Instr::CallIndirect(..))
     }
 
     fn func<'a>(module: &'a IrModule, name: &str) -> &'a IrFunc {
@@ -4712,7 +4821,7 @@ mod tests {
         // runtime code value.
         let module = lower_src(": main ( -- ) 1 2 [ + ] call . ;");
         let main = func(&module, "main");
-        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(main, is_call_instr), 0);
         assert_eq!(
             count(main, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
             1
@@ -4747,7 +4856,7 @@ mod tests {
             "a non-entry body block back-edges to the header"
         );
         assert_eq!(
-            count(main, |i| matches!(i, Instr::Call(..))),
+            count(main, is_call_instr),
             0,
             "no per-iteration Instr::Call"
         );
@@ -4873,7 +4982,7 @@ mod tests {
             1
         );
         assert_eq!(count(main, |i| matches!(i, Instr::Phi(..))), 1);
-        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(main, is_call_instr), 0);
     }
 
     #[test]
@@ -4893,7 +5002,7 @@ mod tests {
             })
             .count();
         assert_eq!(float_cmps, 0);
-        assert_eq!(count(main, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(main, is_call_instr), 0);
     }
 
     #[test]
@@ -5493,7 +5602,7 @@ mod tests {
         let ir = lower_src(": w ( -- usize ) \"hi\" len ;");
         let w = &ir.funcs[0];
         assert_eq!(count(w, |i| matches!(i, Instr::StrLen(..))), 1);
-        assert_eq!(count(w, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(w, is_call_instr), 0);
     }
 
     #[test]
@@ -6504,7 +6613,7 @@ mod tests {
         // Entry + one back-edge both target the header.
         assert_eq!(jmps_to(f, header), 2);
         assert_eq!(
-            count(f, |i| matches!(i, Instr::Call(..))),
+            count(f, is_call_instr),
             0,
             "tail self-call is a back-edge, not a Call"
         );
@@ -6555,7 +6664,7 @@ mod tests {
         let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = if drop 1 else dup 1 - fact * end ;");
         let f = &ir.funcs[0];
         assert_eq!(
-            count(f, |i| matches!(i, Instr::Call(..))),
+            count(f, is_call_instr),
             1,
             "non-tail self-call stays a real Call"
         );
@@ -6572,7 +6681,7 @@ mod tests {
         // position; the self-call stays a real `Instr::Call`.
         let ir = lower_src(": w ( i64 -- i64 ) dup 0 > if w else drop 0 end drop 5 ;");
         let f = &ir.funcs[0];
-        assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 1);
+        assert_eq!(count(f, is_call_instr), 1);
         assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
     }
 
@@ -6588,7 +6697,7 @@ mod tests {
         assert_eq!(phis.len(), 1);
         assert_eq!(phis[0].len(), 3, "entry arm + two back-edge arms");
         assert_eq!(jmps_to(f, header), 3);
-        assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(f, is_call_instr), 0);
     }
 
     #[test]
@@ -6609,7 +6718,7 @@ mod tests {
         assert_eq!(phis.len(), 1, "only the i64 scalar slot keeps a header phi");
         assert!(phis.iter().all(|arms| arms.len() == 3));
         assert_eq!(jmps_to(f, header), 3, "entry + two clause back-edges");
-        assert_eq!(count(f, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(f, is_call_instr), 0);
     }
 
     #[test]
@@ -6921,7 +7030,7 @@ mod tests {
         // R2: `drop` on a Copy value keeps its no-runtime-effect discard.
         let ir = lower_src(": w ( -- ) 7 drop ;");
         let w = &ir.funcs[0];
-        assert_eq!(count(w, |i| matches!(i, Instr::Call(..))), 0);
+        assert_eq!(count(w, is_call_instr), 0);
     }
 
     // Phase 3 Slice 1, Phase 2: struct linearity + the synthesized destructor
@@ -7819,24 +7928,54 @@ mod tests {
     }
 
     #[test]
-    fn quotation_type_never_reaches_mangling_or_irtype() {
-        // Criterion 2d: R7's `unreachable!` arms are only sound because R7a's
-        // audit and R20's lowering filter keep a quotation type away from
-        // `ir_type_of` (layout) and `subst_polytype` (mangling). This asserts
-        // the arms *are* the guard: each panics on a quotation, so replacing
-        // an `unreachable!` with a real mapping (a silent accept) flips the
-        // corresponding half of this test from panic to value and fails it.
-        use crate::ast::{quotation_type, PolyType};
-        let quot = quotation_type(vec![Type::I64], vec![Type::I64]);
-        assert!(
-            std::panic::catch_unwind(|| ir_type_of(quot)).is_err(),
-            "`ir_type_of` on a quotation must hit the R7 `unreachable!` arm"
-        );
+    fn quotation_type_never_reaches_mangling() {
+        // R7's `subst_polytype` `unreachable!` arm is only sound because R20's
+        // lowering filter keeps a quotation type away from mangling. This
+        // asserts the arm *is* the guard: it panics on a quotation, so
+        // replacing the `unreachable!` with a real mapping (a silent accept)
+        // flips this test from panic to value and fails it. (Slice 7a lifts
+        // the sibling `ir_type_of` guard, which now maps a quotation to a
+        // runtime value; see `ir_type_of_quotation_is_two_slot_aggregate`.)
+        use crate::ast::PolyType;
         let poly_quot = PolyType::Quotation(vec![PolyType::Concrete(Type::I64)], Vec::new());
         let subst = Subst::default();
         assert!(
             std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[])).is_err(),
             "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
         );
+    }
+
+    #[test]
+    fn ir_type_of_quotation_is_two_slot_aggregate() {
+        // T-irtype (R2/R3): a quotation type maps to a runtime value ---
+        // `IrType::Quotation` naming its effect --- with a fixed two-slot
+        // `{ code@0, env@WORD_WIDTH }` layout: size `2*WORD_WIDTH`, align
+        // `WORD_WIDTH`, every figure word-width-derived, not a hardcoded
+        // 16/8. The carried effect gives value equality, so two structurally
+        // equal effects share one `IrType`.
+        use crate::ast::quotation_type;
+        let ir = ir_type_of(quotation_type(vec![Type::I64], vec![Type::I64]));
+        assert!(
+            matches!(ir, IrType::Quotation(_)),
+            "a quotation type maps to `IrType::Quotation`, got {ir:?}"
+        );
+        assert_eq!(
+            ir,
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::I64])),
+            "structurally equal effects are one `IrType`"
+        );
+        assert_ne!(
+            ir,
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::Bool])),
+            "structurally different effects are distinct `IrType`s"
+        );
+        let layout = quotation_layout(WORD_WIDTH);
+        assert_eq!(layout.code_offset, 0, "code slot at offset 0");
+        assert_eq!(
+            layout.env_offset, WORD_WIDTH,
+            "env slot at offset WORD_WIDTH"
+        );
+        assert_eq!(layout.size, 2 * WORD_WIDTH, "two word-width slots");
+        assert_eq!(layout.align, WORD_WIDTH);
     }
 }

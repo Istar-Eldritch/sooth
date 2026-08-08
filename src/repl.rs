@@ -602,6 +602,10 @@ fn rich_value_size(
         ir::IrType::Float { bits } => (bits / 8) as usize,
         ir::IrType::Usize | ir::IrType::Isize => ir::WORD_WIDTH as usize,
         ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
+        // Slice 7a: a code handle is one word; a quotation value spans its
+        // fixed two-slot layout (only reached as a struct/enum/array field).
+        ir::IrType::Code => ir::WORD_WIDTH as usize,
+        ir::IrType::Quotation(_) => ir::quotation_layout(ir::WORD_WIDTH).size as usize,
         ir::IrType::Struct(id) => layouts[id.index()].size as usize,
         ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
         ir::IrType::Array(id) => array_layouts[id.index()].size as usize,
@@ -650,6 +654,11 @@ fn render_rich_value(
         ir::IrType::Ptr => "<ptr>".to_string(),
         ir::IrType::Str => "<str>".to_string(),
         ir::IrType::Cstr => "<cstr>".to_string(),
+        // Slice 7a: a code handle / quotation value carries no printable
+        // payload; reached only as a struct/enum/array field (a bare
+        // quotation on the residual is rejected before rendering).
+        ir::IrType::Code => "<code>".to_string(),
+        ir::IrType::Quotation(_) => "<quotation>".to_string(),
         ir::IrType::Struct(id) => {
             let layout = &layouts[id.index()];
             let fields: Vec<String> = layout
@@ -2255,6 +2264,7 @@ impl Session {
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
+            quot_sigs: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("drop_{}_epoch{epoch}.so", id.index()));
@@ -2548,6 +2558,7 @@ impl Session {
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
+            quot_sigs: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
@@ -2730,6 +2741,7 @@ impl Session {
             structs: structs.layouts.clone(),
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),
+            quot_sigs: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
