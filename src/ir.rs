@@ -1249,7 +1249,11 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // (the drop-glue home decided in Phase 4, used starting here): `drop`
     // calls it as a plain `Call` (R16).
     funcs.extend(synthesize_aggregate_destructors(
-        &env, &resolve, regs, &overrides,
+        &env,
+        &resolve,
+        regs,
+        &overrides,
+        &combinator_bodies,
     ));
 
     Ok(IrModule {
@@ -1295,6 +1299,7 @@ pub fn synthesize_aggregate_destructors(
     resolve: Resolver,
     regs: Registries,
     overrides: &DropOverrides,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
     let Registries {
         structs,
@@ -1314,7 +1319,12 @@ pub fn synthesize_aggregate_destructors(
             let id = StructId::from_index(idx);
             match overrides.get(&id) {
                 Some(DropOverride::Body(word)) => Some(synthesize_struct_destructor_override(
-                    id, word, env, resolve, regs,
+                    id,
+                    word,
+                    env,
+                    resolve,
+                    regs,
+                    combinators,
                 )),
                 Some(DropOverride::AlreadyLoaded) => None,
                 None => Some(synthesize_struct_destructor(id, env, resolve, regs)),
@@ -1590,23 +1600,35 @@ fn synthesize_struct_destructor(
 /// destructor symbol every existing call site already calls — the override
 /// replaces `synthesize_struct_destructor`'s field glue rather than running
 /// before or alongside it (R5), so there is no glue left to compose with.
+///
+/// Calls `lower_word_parts` directly rather than the `lower_word` convenience
+/// wrapper: `lower_word` hardcodes `empty_combinators()`, which is correct for
+/// its one remaining caller (the REPL's `eval_def`, which cannot yet retain
+/// any combinator to call) but was silently wrong here — a drop override's
+/// body can call a combinator like any other word body, and a native build's
+/// `combinator_bodies` map already exists by the time this runs.
+#[allow(clippy::too_many_arguments)]
 fn synthesize_struct_destructor_override(
     id: StructId,
     word: &WordDef,
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
+    combinators: &HashMap<String, Vec<Term>>,
 ) -> IrFunc {
     IrFunc {
         name: struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation),
-        ..lower_word(
-            word,
+        ..lower_word_parts(
+            &word.name,
+            &word.effect,
+            &word.body,
+            crate::check::has_self_tail_call(word),
             env,
             resolve,
             regs,
             empty_instantiations(),
             empty_poly_arities(),
-            empty_combinators(),
+            combinators,
         )
     }
 }

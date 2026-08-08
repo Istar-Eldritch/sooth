@@ -2231,3 +2231,23 @@ fn self_tail_back_edge_check_still_fires_under_an_import() {
         "and must name the unmangled `spin`: {err}"
     );
 }
+
+#[test]
+fn combinator_called_from_drop_override_body_lowers_correctly() {
+    // Regression (pre-6c bug, still present natively when this landed):
+    // `synthesize_struct_destructor_override` lowered a drop override's body
+    // through the `lower_word` convenience wrapper, which hardcodes an
+    // *empty* combinators map. A native build's own module-level combinators
+    // exist by this point, so calling one (`twice`) from a `drop` override's
+    // body panicked at lowering ("checked user word exists") instead of
+    // splicing the call, exactly like any other word body.
+    let (stdout, code) = run_src(
+        "drop-override-combinator",
+        ": twice ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;\n\
+         type: Bx v i64 ;\n\
+         : drop ( Bx -- ) Bx>v [ 1 + ] twice . ;\n\
+         : main ( -- ) 1 Bx drop ;\n",
+    );
+    assert_eq!(code, 0, "stdout was: {stdout}");
+    assert_eq!(stdout, "3\n");
+}

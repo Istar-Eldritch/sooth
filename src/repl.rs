@@ -2264,6 +2264,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(Some(id)),
+                &combinator_bodies(&self.combinators),
             )
         };
 
@@ -2552,6 +2553,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(None),
+                &combinator_bodies(&self.combinators),
             ));
             funcs
         };
@@ -2720,6 +2722,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(None),
+                &bodies,
             );
             (func, m, out_bytes, aggregate_destructors)
         };
@@ -3552,6 +3555,7 @@ mod tests {
             &resolve,
             regs,
             &session.drop_override_bodies(declaring),
+            &combinator_bodies(&session.combinators),
         )
         .into_iter()
         .map(|f| f.name)
