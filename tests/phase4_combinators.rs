@@ -1448,8 +1448,13 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
     std::fs::remove_file(&hand_bin).ok();
 }
 
-// -- criterion 15 (phase 3): a session line defining a quotation-taking word -
+// -- slice 6c (phase 1): quotation-taking words retained at a session line ---
 
+/// Run a scripted REPL session in-process, returning the whole stdout
+/// transcript (`defined …`, printed values, each residual `stack:` line, and
+/// any error line). Goldens pin the *exact* transcript rather than a
+/// `contains`, since the REPL echoes the whole residual stack after every line
+/// and a `contains` would let a placebo pass (the whole-stack echo hazard).
 fn repl_error(input: &str) -> String {
     let reader = BufReader::new(input.as_bytes());
     let mut out: Vec<u8> = Vec::new();
@@ -1457,47 +1462,193 @@ fn repl_error(input: &str) -> String {
     String::from_utf8(out).expect("REPL output should be utf8")
 }
 
+// A polymorphic self-tail `while` and a two-output `filter`, reused across the
+// 6c REPL goldens. Their bodies name only builtins and their quotation
+// parameter, so a session define exercises the splice, not a library import.
+const WHILE_DEF: &str =
+    ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n";
+const FILTER_DEF: &str = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n [ | i | &arr i >usize &> @ dup p call if | v | &!arr over >usize &!> v ! 1 + else drop end ] times | wf | arr wf >usize ;\n";
+
+// A REPL expr line's residual stack is what the in-process driver writes to the
+// capture buffer; the runtime `.` word prints to the real process stdout, which
+// this buffer does not see. So every 6c golden leaves its result *on the stack*
+// (no `.`) and pins the exact `stack:` line. The persistent stack accumulates
+// across lines, so a second call's `stack:` line shows both results.
+
 #[test]
-fn repl_quotation_taking_definition_is_rejected() {
-    // R23/D7: the inliner needs a callee's AST body threaded into every call
-    // site, but a session discards a defining line's body once it compiles (the
-    // 6c retention problem), so a quotation-taking word is a located REPL
-    // rejection naming the word, not a silent miscompile.
-    let transcript = repl_error(": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n:quit\n");
+fn repl_quotation_taking_definition_is_accepted() {
+    // R19: the former R23 rejection is now acceptance. A monomorphic
+    // quotation-taking word defines at a session line and a *later* bare line
+    // calls it, inlined against that line's live env (D1): `5 [ 3 + ] apply`
+    // leaves 8. The guarded behavior flips (define-and-call), not vanishes.
+    let transcript =
+        repl_error(": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n5 [ 3 + ] apply\n:quit\n");
+    assert_eq!(transcript, "defined apply\nstack: 8\n");
     assert!(
-        transcript.contains("`apply`") && transcript.contains("not yet supported at the REPL"),
-        "located rejection naming the word: {transcript}"
+        !transcript.contains("not yet supported at the REPL"),
+        "the former R23 rejection must be gone: {transcript}"
     );
 }
 
 #[test]
-fn repl_poly_quotation_taking_definition_is_rejected() {
-    // The same rejection reached through the polymorphic definition path
-    // (`eval_poly_def`), since a poly word's declared effect lives in
-    // `word.poly`, not `word.effect`.
-    let transcript = repl_error(
-        ": each ( ['T 'N] [ 'T -- ] -- ) | f | len >i64 | count | | arr | count [ | i | &arr i >usize &> @ f call ] times arr drop ;\n:quit\n",
-    );
+fn repl_poly_quotation_taking_definition_is_accepted() {
+    // R19: the former poly rejection (the `eval_poly_def` path) is now
+    // acceptance. A *polymorphic* combinator (`apply1 ( 'a [ 'a -- 'a ] -- 'a )`)
+    // defines and a later line calls it, leaving 6 -- a value witness, unlike an
+    // `each`-shaped combinator that would leave the stack empty.
+    let transcript =
+        repl_error(": apply1 ( 'a [ 'a -- 'a ] -- 'a ) call ;\n5 [ 1 + ] apply1\n:quit\n");
+    assert_eq!(transcript, "defined apply1\nstack: 6\n");
     assert!(
-        transcript.contains("`each`") && transcript.contains("not yet supported at the REPL"),
-        "located rejection naming the word: {transcript}"
+        !transcript.contains("not yet supported at the REPL"),
+        "the former poly rejection must be gone: {transcript}"
     );
 }
 
 #[test]
-fn repl_self_tail_combinator_definition_is_rejected() {
-    // Criterion 15 (R17): the self-tail splice path (R6-R9) is new, but the
-    // REPL chokepoint (`eval_def`, keyed on `word_declares_quotation_parameter`)
-    // fires on the declared quotation parameter alone, before any splice or
-    // cycle analysis runs, so a self-tail combinator defined at a session line
-    // is still the located slice-6c rejection, not a new unpinned case (the
-    // slice-1 lesson).
-    let transcript = repl_error(
-        ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n:quit\n",
-    );
+fn repl_self_tail_combinator_definition_is_accepted() {
+    // R19: the former self-tail rejection is now acceptance. `while` defines at
+    // a session line (the self-tail edge is permitted, 6b D5) rather than being
+    // rejected on its declared quotation parameter.
+    let transcript = repl_error(&format!("{WHILE_DEF}:quit\n"));
+    assert_eq!(transcript, "defined while\n");
     assert!(
-        transcript.contains("`while`") && transcript.contains("declares a quotation parameter"),
-        "located rejection naming the word and reason: {transcript}"
+        !transcript.contains("declares a quotation parameter"),
+        "the former self-tail rejection must be gone: {transcript}"
+    );
+}
+
+#[test]
+fn repl_mono_combinator_define_and_call() {
+    // Criterion 1: a monomorphic combinator defined at one session line, called
+    // from a *later* bare line, inlines and runs. `on_double` applies the
+    // quotation then doubles: `(5+1)*2 = 12`.
+    let transcript = repl_error(
+        ": on_double ( i64 [ i64 -- i64 ] -- i64 ) call 2 * ;\n5 [ 1 + ] on_double\n:quit\n",
+    );
+    assert_eq!(transcript, "defined on_double\nstack: 12\n");
+}
+
+#[test]
+fn repl_while_define_runs_to_fixpoint() {
+    // Criterion 2 (mutation-pins R5's `lower_line` combinator threading): `while`
+    // defined at a session line, then `0 [ dup 5 < if 1 + true else false end ]
+    // while` runs to a fixpoint of 5, lowering to a loop back-edge (constant
+    // stack), not an infinite splice or a link failure to a never-minted symbol.
+    let transcript = repl_error(&format!(
+        "{WHILE_DEF}0 [ dup 5 < if 1 + true else false end ] while\n:quit\n"
+    ));
+    assert_eq!(transcript, "defined while\nstack: 5\n");
+}
+
+#[test]
+fn repl_two_output_combinator_define_and_call() {
+    // Criterion 3 (mutation-pins R9's poly-combinator routing): a two-output
+    // poly combinator (`filter` shape) defines and runs; both outputs land on
+    // the residual stack (the compacted array and the kept-count). `7 3 fill`
+    // is three 7s; `[ 5 > ]` keeps all three, so the residual is the array then
+    // `3`. If R9 routed `filter` through `eval_poly_def`, its two outputs would
+    // be wrongly deferred as "resolves to 2 outputs".
+    let transcript = repl_error(&format!("{FILTER_DEF}7 3 fill [ 5 > ] filter\n:quit\n"));
+    assert_eq!(transcript, "defined filter\nstack: <[i64 3]> 3\n");
+}
+
+#[test]
+fn repl_combinator_splice_sees_current_helper() {
+    // Criterion 4 (D1 falsifiable): a combinator whose body calls an ordinary
+    // helper is called (106 = 5+1+100), the helper is redefined (+200), and the
+    // combinator is called again from a *new* line: the new line's splice sees
+    // the *new* helper (206 = 5+1+200). This fails if any frozen-resolver/env
+    // capture is added for a combinator -- the new line would still see +100.
+    let transcript = repl_error(
+        ": helper ( i64 -- i64 ) 100 + ;\n\
+         : useh ( i64 [ i64 -- i64 ] -- i64 ) call helper ;\n\
+         5 [ 1 + ] useh\n\
+         : helper ( i64 -- i64 ) 200 + ;\n\
+         5 [ 1 + ] useh\n:quit\n",
+    );
+    // The stack accumulates: the first call leaves 106, the redefinition of
+    // `helper` follows, the second call leaves 206 on top. A frozen capture
+    // would make the top 106 again (`stack: 106 106`); the `206` is the pin.
+    assert_eq!(
+        transcript,
+        "defined helper\ndefined useh\nstack: 106\ndefined helper\nstack: 106 206\n"
+    );
+}
+
+#[test]
+fn repl_ordinary_caller_frozen_across_combinator_redefinition() {
+    // Criterion 5 (R20 frozen `.so`): an ordinary word `w` compiled with the
+    // combinator `c` spliced into it keeps its baked result (51 = 5*10+1) across
+    // a later redefinition of `c` (+1000 instead of +1). `w`'s `.so` is frozen;
+    // only a *new* splice site would see the new `c`.
+    let transcript = repl_error(
+        ": c ( i64 [ i64 -- i64 ] -- i64 ) call 1 + ;\n\
+         : w ( i64 -- i64 ) [ 10 * ] c ;\n\
+         5 w\n\
+         : c ( i64 [ i64 -- i64 ] -- i64 ) call 1000 + ;\n\
+         5 w\n:quit\n",
+    );
+    // Both calls leave 51: `w`'s `.so` is frozen with the original `c` spliced,
+    // so redefining `c` (+1000) changes nothing (`stack: 51 51`, not `51 1051`).
+    assert_eq!(
+        transcript,
+        "defined c\ndefined w\nstack: 51\ndefined c\nstack: 51 51\n"
+    );
+}
+
+#[test]
+fn repl_redefining_combinator_shape_evicts_other_stores() {
+    // Criterion 6 (mutation-pins R11's `self.combinators.remove`/`self.env`
+    // eviction): redefining `foo` from combinator to ordinary word and back
+    // rebinds dispatch to the new shape each time (D4). Combinator dispatch
+    // runs first, so a stale entry in the wrong store would silently keep
+    // winning: `6 = 5+1` (combinator), then `104 = 5+99` (ordinary, the
+    // combinator entry evicted), then `11 = 5*2+1` (combinator again, the
+    // ordinary entry evicted).
+    let transcript = repl_error(
+        ": foo ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+         5 [ 1 + ] foo\n\
+         : foo ( i64 -- i64 ) 99 + ;\n\
+         5 foo\n\
+         : foo ( i64 [ i64 -- i64 ] -- i64 ) call 2 * ;\n\
+         5 [ 1 + ] foo\n:quit\n",
+    );
+    // The stack accumulates across the three shapes: `6` (combinator, 5+1),
+    // then `104` (ordinary, 5+99 -- proving the combinator entry was evicted,
+    // else `5 foo` with no quotation would type-error), then `12`
+    // (combinator again, (5+1)*2 -- proving the ordinary entry was evicted,
+    // else `5 [ 1 + ] foo` would be "a quotation cannot be passed to foo").
+    assert_eq!(
+        transcript,
+        "defined foo\nstack: 6\ndefined foo\nstack: 6 104\ndefined foo\nstack: 6 104 12\n"
+    );
+}
+
+#[test]
+fn repl_cross_line_combinator_cycle_is_error() {
+    // Criterion 7 (mutation-pins R8's `check_combinator_cycles` at the REPL): a
+    // cycle formed *across* session lines (define `a`; define `b` calling `a`;
+    // redefine `a` calling `b`) is the same located `combinator_cycle_error`.
+    // Without the check the cycle type-checks and then splices forever.
+    let transcript = repl_error(
+        ": a ( [ -- ] -- ) call ;\n\
+         : b ( [ -- ] -- ) call [ ] a ;\n\
+         : a ( [ -- ] -- ) call [ ] b ;\n:quit\n",
+    );
+    // The cycle chain names both words; its starting node depends on hash-map
+    // iteration order, so the direction is not pinned.
+    assert!(
+        transcript.contains("a quotation-taking word cannot be recursive")
+            && (transcript.contains("`a` -> `b` -> `a`")
+                || transcript.contains("`b` -> `a` -> `b`")),
+        "the cross-line cycle is the located cycle error: {transcript}"
+    );
+    // The first two defines succeeded; only the cycle-closing redefinition is
+    // rejected, leaving the earlier lines intact.
+    assert!(
+        transcript.starts_with("defined a\ndefined b\n"),
+        "the non-cyclic prefix defines cleanly: {transcript}"
     );
 }
 
@@ -1614,39 +1765,29 @@ fn temp_lib(name: &str, contents: &str) -> std::path::PathBuf {
 }
 
 #[test]
-fn repl_import_exporting_quotation_word_is_rejected() {
-    // R24/D7: importing a closure that *exports* a quotation-taking word is a
-    // located rejection at import time, naming the file and the word. The
-    // session retains no body to inline for it (a quotation-taking word mints
-    // no `IrFunc`, R20), so without this the import succeeds and the failure
-    // surfaces later as a misdirected `unknown word` or an internal mangled
-    // name leaking into the diagnostic.
+fn repl_import_exporting_combinator_retains_and_runs() {
+    // R12/R13 (slice 6c): the former R24 rejection is gone. Importing a closure
+    // that *exports* a quotation-taking word now retains the combinator (D5),
+    // and a *later* session line calls it, inlined at that site's own live env.
+    // `5 [ 3 + ] c::apply_each` leaves 8. The mono combinator `apply_each` is
+    // skipped by the exported-ordinary-word loop (it mints no symbol, R20) and
+    // retained by the combinator loop instead.
     let path = temp_lib(
-        "crit16-exports",
+        "crit8-exports",
         "export: apply_each ;\n: apply_each ( i64 [ i64 -- i64 ] -- i64 ) call ;\n",
     );
-    let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
+    let transcript = repl_error(&format!(
+        "import: c \"{}\" ;\n5 [ 3 + ] c::apply_each\n:quit\n",
+        path.display()
+    ));
     std::fs::remove_file(&path).ok();
-    assert!(
-        transcript.contains("apply_each")
-            && transcript.contains(&path.display().to_string())
-            && transcript.contains("quotation parameter"),
-        "located rejection naming the file and the word: {transcript}"
-    );
-    // A user-facing diagnostic must never leak a compiler-internal mangled
-    // name (`__import`, `__m0`, `quo__`).
-    assert!(
-        !transcript.contains("__import")
-            && !transcript.contains("__m0")
-            && !transcript.contains("quo__"),
-        "no mangled internal name in the diagnostic: {transcript}"
-    );
+    assert_eq!(transcript, "imported c\nstack: 8\n");
 
     // A quotation-taking word used purely *internally* to an imported closure
-    // (not exported) must still import and run fine: it inlines during the
+    // (not exported) still imports and runs fine: it inlines during the
     // closure's own native compilation.
     let internal = temp_lib(
-        "crit16-internal",
+        "crit8-internal",
         "export: bump ;\n: ap ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: bump ( i64 -- i64 ) [ 1 + ] ap ;\n",
     );
     // Leave the result on the stack (no `.`): a runtime `.` prints to the real
@@ -1661,6 +1802,205 @@ fn repl_import_exporting_quotation_word_is_rejected() {
     assert!(
         ok.contains("imported c") && ok.contains("stack: 6") && !ok.contains("error"),
         "internal-only quotation word imports and runs: {ok}"
+    );
+}
+
+#[test]
+fn repl_imported_combinator_body_call_to_private_word_uses_closure_env() {
+    // Review fix (slice 6c): an exported combinator's body call to a
+    // closure-*private* word must resolve against the closure's own private
+    // definition, never against a same-named word the session happens to
+    // define. The session defines `priv_calc6c` (+1000) *before* importing a
+    // closure whose private `priv_calc6c` is +1 and whose exported `apply2`
+    // calls it: `5 [ 10 * ] c::apply2` is `(5 * 10) + 1 = 51` if the
+    // closure's own `priv_calc6c` wins, or `1050` if the retained body was
+    // left unrewritten and fell through to the session's `priv_calc6c` -- the
+    // hygiene break this test pins shut. (Named distinctly from the plainer
+    // `helper` other goldens in this file use for their own session-defined
+    // word, so this test's generation-0 `.so` symbol can't collide with
+    // theirs when `cargo test` runs this file's tests concurrently under one
+    // process's shared `dlopen(RTLD_GLOBAL)` namespace.)
+    let path = temp_lib(
+        "private-body-call",
+        ": priv_calc6c ( i64 -- i64 ) 1 + ;\n\
+         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call priv_calc6c ;\n\
+         export: apply2 ;\n",
+    );
+    let transcript = repl_error(&format!(
+        ": priv_calc6c ( i64 -- i64 ) 1000 + ;\nimport: c \"{}\" ;\n5 [ 10 * ] c::apply2\n:quit\n",
+        path.display()
+    ));
+    std::fs::remove_file(&path).ok();
+    assert_eq!(transcript, "defined priv_calc6c\nimported c\nstack: 51\n");
+}
+
+#[test]
+fn repl_imported_combinator_body_call_to_private_word_without_collision_resolves() {
+    // FIX D (slice 6c, second review pass): the no-collision sibling of
+    // `repl_imported_combinator_body_call_to_private_word_uses_closure_env`
+    // above -- same shape, but the session never defines `priv_calc6c_nc`
+    // itself, so there is nothing to fall through to even if the rewrite
+    // silently failed. `5 [ 10 * ] c::apply2` must still land on `51`
+    // ((5 * 10) + 1), and the import must not error.
+    let path = temp_lib(
+        "private-body-call-no-collision",
+        ": priv_calc6c_nc ( i64 -- i64 ) 1 + ;\n\
+         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call priv_calc6c_nc ;\n\
+         export: apply2 ;\n",
+    );
+    let transcript = repl_error(&format!(
+        "import: c \"{}\" ;\n5 [ 10 * ] c::apply2\n:quit\n",
+        path.display()
+    ));
+    std::fs::remove_file(&path).ok();
+    assert_eq!(transcript, "imported c\nstack: 51\n");
+}
+
+#[test]
+fn repl_imported_private_word_still_rejected_by_qualified_name() {
+    // FIX D / R15 (slice 6c, second review pass): R14's broadened body-call
+    // rewrite binds a module-0 private word into `self.env` under its
+    // internal spelling so a retained combinator's body can reach it (the
+    // two tests above), but adds no `import_aliases` entry -- R15 privacy
+    // still holds, so a session line naming it directly by its qualified
+    // name still errors `not exported`, exactly as an ordinary private word
+    // does.
+    let path = temp_lib(
+        "private-body-call-qualified",
+        ": privword6c ( i64 -- i64 ) 1 + ;\n\
+         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call privword6c ;\n\
+         export: apply2 ;\n",
+    );
+    let transcript = repl_error(&format!(
+        "import: c \"{}\" ;\n5 c::privword6c\n:quit\n",
+        path.display()
+    ));
+    std::fs::remove_file(&path).ok();
+    assert!(
+        transcript.contains("imported c"),
+        "the import itself must still succeed: {transcript}"
+    );
+    assert!(
+        transcript.contains("not exported") && transcript.contains("privword6c"),
+        "the qualified call to the private word is still rejected: {transcript}"
+    );
+}
+
+#[test]
+fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
+    // FIX A (slice 6c, second review pass): a REPL-declared name ending in
+    // the resolver's cross-module mangle (`__m{digits}`, `resolve::mangle`)
+    // or the import-epoch tag (`__import{digits}`, `import_symbol`) is
+    // rejected at definition time. Closes a forgeable-collision hole: a
+    // multi-file closure's non-module-0 words are called, from a retained
+    // combinator's body, by exactly this mangled spelling
+    // (`{raw}__m{module_index}`), which is never rewritten to an internal
+    // `{q}::...__import{epoch}` alias (the existing body-call rewrite only
+    // covers module-0 words) -- so a same-named session word defined first
+    // would otherwise silently win that body call instead of erroring. The
+    // guard fires on the name alone, no import needed to reproduce.
+    let transcript = repl_error(": dhelp__m1 ( i64 -- i64 ) 1000 + ;\n:quit\n");
+    assert_eq!(
+        transcript,
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 28)\n",
+        "the mangled-suffix name is rejected outright, never defined: {transcript}"
+    );
+    assert!(
+        !transcript.contains("defined dhelp__m1"),
+        "must not have been accepted as an ordinary definition: {transcript}"
+    );
+
+    let transcript = repl_error(": foo__import7 ( -- i64 ) 1 ;\n:quit\n");
+    assert_eq!(
+        transcript,
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`foo__import7` at line 1, col 27)\n",
+        "the import-epoch-suffix name is rejected outright, never defined: {transcript}"
+    );
+    assert!(
+        !transcript.contains("defined foo__import7"),
+        "must not have been accepted as an ordinary definition: {transcript}"
+    );
+}
+
+#[test]
+fn repl_imported_while_runs_to_fixpoint() {
+    // Criterion 8 (mutation-pins R14's body self-call rewrite): import the real
+    // `lib/combinators.sth` and run `while` at a session line to a fixpoint.
+    // `while`'s body self-call `while` is rewritten to its internal spelling on
+    // import, so the self-tail recognizer fires and it lowers to a loop
+    // back-edge (constant stack), not an endless splice. If the rewrite were
+    // deleted, the self-call would miss the recognizer and the splice would
+    // recurse forever.
+    let transcript = repl_error(&format!(
+        "{}0 [ dup 5 < if 1 + true else false end ] c::while\n:quit\n",
+        combinators_import("c")
+    ));
+    assert_eq!(transcript, "imported c\nstack: 5\n");
+}
+
+#[test]
+fn repl_imported_filter_runs() {
+    // Criterion 9: import the real `lib/combinators.sth` and run `filter` over
+    // an array at a session line. `7 3 fill` is three 7s; `[ 5 > ]` keeps all
+    // three, so the residual is the compacted array then the kept-count `3`.
+    // The two-output poly combinator lands both outputs on the residual stack,
+    // exactly as the session-defined `filter` does.
+    let transcript = repl_error(&format!(
+        "{}7 3 fill [ 5 > ] c::filter\n:quit\n",
+        combinators_import("c")
+    ));
+    assert_eq!(transcript, "imported c\nstack: <[i64 3]> 3\n");
+}
+
+#[test]
+fn repl_import_combinator_with_private_type_in_signature_is_rejected() {
+    // Criterion 10 (R15 confirm): an exported combinator whose *signature*
+    // names a closure-private type is rejected at the closure's own `check`
+    // (5a's export rule: a private type reachable through an exported
+    // signature), before any REPL-side retention. No REPL-side guard is added;
+    // this pins that the closure check already catches it. `run`'s effect names
+    // `Secret`, which the closure declares but does not export.
+    let path = temp_lib(
+        "crit10-private",
+        "type: Secret tag i64 ;\n\
+         export: run ;\n\
+         : run ( Secret [ i64 -- i64 ] -- ) | q | Secret>tag q call drop ;\n",
+    );
+    let transcript = repl_error(&format!("import: c \"{}\" ;\n:quit\n", path.display()));
+    std::fs::remove_file(&path).ok();
+    assert!(
+        transcript.contains("names private type `Secret`") && transcript.contains("`run`"),
+        "the exported combinator naming a private type is rejected at the closure check: {transcript}"
+    );
+    assert!(
+        !transcript.contains("imported c"),
+        "the import must not succeed: {transcript}"
+    );
+}
+
+#[test]
+fn repl_combinators_dogfood_matches_native() {
+    // Criterion 12: a session transcript importing `lib/combinators.sth` and
+    // using `filter`/`while` matches the native example's output. This is the
+    // REPL twin of `examples/filter_while.sth` (R18's dogfood): the same
+    // `scores` array, the same `[ 4 > ] filter` keeping 3 elements, the same
+    // fixpoint `while` loop landing on 5. The native example prints both via
+    // runtime `.` to real stdout ("3\n5\n"); a REPL bare line's `.` also goes
+    // to real stdout rather than this capture writer (see `repl_error`), so
+    // this leaves both results on the residual stack instead of printing them,
+    // and pins the same two values in the same order.
+    let transcript = repl_error(&format!(
+        "{}{}\n{}\n{}\n:quit\n",
+        combinators_import("c"),
+        ": scores ( -- [i64 5] ) 0 5 fill | s | \
+         &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
+         &!s 3 >usize &!> 9 ! &!s 4 >usize &!> 5 ! s ;",
+        "scores [ 4 > ] c::filter | n | | out | out drop n",
+        "0 [ dup 5 < if 1 + true else false end ] c::while"
+    ));
+    assert_eq!(
+        transcript,
+        "imported c\ndefined scores\nstack: 3\nstack: 3 5\n"
     );
 }
 
@@ -1894,14 +2234,13 @@ fn self_tail_back_edge_check_still_fires_under_an_import() {
 
 #[test]
 fn combinator_called_from_drop_override_body_lowers_correctly() {
-    // Regression: `synthesize_struct_destructor_override` lowered a drop
-    // override's body through the `lower_word` convenience wrapper, which
-    // hardcodes an *empty* combinators map (correct for its only other
-    // caller, the REPL's `eval_def`, which cannot yet retain any combinator
-    // to call). A native build's own module-level combinators exist by this
-    // point, so calling one (`twice`) from a `drop` override's body panicked
-    // at lowering ("checked user word exists") instead of splicing the call,
-    // exactly like any other word body.
+    // Regression (pre-6c bug, still present natively when this landed):
+    // `synthesize_struct_destructor_override` lowered a drop override's body
+    // through the `lower_word` convenience wrapper, which hardcodes an
+    // *empty* combinators map. A native build's own module-level combinators
+    // exist by this point, so calling one (`twice`) from a `drop` override's
+    // body panicked at lowering ("checked user word exists") instead of
+    // splicing the call, exactly like any other word body.
     let (stdout, code) = run_src(
         "drop-override-combinator",
         ": twice ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;\n\

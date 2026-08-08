@@ -416,6 +416,40 @@ against a hand-threaded twin, with the array passed straight from its producer w
 `filter` rather than bound to a local first, so it does not trip 6a's bind-then-pass alias
 limitation.
 
+**Phase 4 Slice 6c (quotation-taking words at the REPL) is complete**: its brief
+(`docs/phase4-slice6c-brief.md`) falsified the roadmap's own frozen-resolver framing before
+any code changed — a combinator mints no `IrFunc` and no symbol, so it has no compile event
+of its own to freeze against, and it is re-checked and re-lowered at every splice site
+against that site's own live env, unlike a polymorphic word's body, which is checked once.
+The fix is a session-level store (`Session.combinators: HashMap<String, WordDef>`, mono and
+poly alike in one store, D2, replaced wholesale on redefinition, D1), projected on demand
+into the two shapes the checker's `collect_combinators` and the lowerer's `combinator_bodies`
+already read, threaded into every REPL entry point that hardcoded an empty map: `check_def`,
+`check_def_collecting_drop_sites`, and `infer_line` on the checker side; `lower_word`,
+`lower_instantiation`, and `lower_line` (a fifth, under-counted site) on the lowering side.
+Defining a combinator (`eval_combinator_def`) skips lowering entirely — check, then store, no
+`.so`, no symbol, no `dlopen` (D3) — checks the definee against a view that already includes
+itself (so a self-reference dispatches through the inline path, not unknown-word), runs
+`check_combinator_cycles` over that view so a cycle formed across session lines is still the
+located error, and routes a polymorphic combinator through a new standalone check bypassing
+`eval_poly_def`'s `>= 2`-outputs deferral (a combinator is spliced inline and never lowered to
+a bundle-returning `IrFunc`, so that gate cannot apply). The three now-mutually-exclusive
+name-shape stores (`self.env`, `self.poly_words`, `self.combinators`) evict each other
+symmetrically on redefinition (D4), generalizing the existing env/poly-words rule, since
+combinator dispatch runs before both and a stale entry in the wrong store would silently win.
+Import reuses the same store (D5): the R24 rejection of a closure exporting a
+quotation-taking word is dropped, and a module-0 exported combinator is retained under its
+import-internal spelling with its body's calls — including a self-tail call — rewritten to
+internal spellings, so the self-tail recognizer still fires on an imported `while` rather than
+splicing forever. A review pass then closed a hygiene gap the brief's recon missed: a
+retained combinator's body call to a module-0 *private* word was left unrewritten and fell
+through to whatever the session's own env held under that bare name, a silent-wrong-answer
+risk on a name collision, plus a forgeable variant (a REPL-declared name matching a
+multi-file closure's internal mangled spelling). Both are closed: the body-call rewrite now
+covers every module-0 word, not only exports, and a REPL-declared name may no longer end in a
+resolver-mangled or import-epoch-tagged spelling. `examples/filter_while.sth`'s scenario is
+dogfooded again as a REPL session transcript, pinned to the same computed values.
+
 **Phase 4 Slice 6d (nested constant-stack loops: the hoist-target split) is complete**: the
 cause was one field doing two jobs, `FuncBuilder::entry_block`, simultaneously the alloca
 home (where a hoisted `Alloc` must land, since QBE's frame-bumping `alloc*` never reclaims
@@ -438,10 +472,10 @@ a hand-threaded twin, and a recursive-enum value's destructor call inside a `tim
 inherits the fix for free, since a destructor's fused loop already opens at its own
 `IrFunc`'s true entry.
 
-**Next action: Phase 4 Slice 6c or 6e.** Neither depends on the other; 6c (quotation-taking
-words at the REPL) and 6e (`if` in a polymorphic body) may land in any order. 6e was added
-after 6b shipped, once it became clear that no slice owned the polymorphic-`if` gap even
-though slice 7 depends on it and the core library's intrinsic-vs-library split is gated on it.
+**Next action: Phase 4 Slice 6e (`if` in a polymorphic body).** Its brief
+(`docs/phase4-slice6e-brief.md`) is written; 6c and 6d are both complete, so 6e is the only
+remaining slice in the 6-family. It has to read before slice 7, which needs it, and before the
+core library's intrinsic-vs-library split, which is gated on it.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1342,17 +1376,27 @@ then find out what the compiler owes it.
    **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are,
    with `while` running in constant stack and a non-tail combinator self-call still rejected.
 
-   **6c — quotation-taking words at the REPL.** Lifts 6a's located rejection: what it means
-   to define and call a combinator in a live session. The problem is retention, the same
-   shape slice 2 solved for polymorphic words and 8b for drop overrides — a session discards
-   ordinary word bodies once a line compiles to its `.so`, and an inliner needs the body —
-   plus the frozen-binding question of which generation of a callee an inlined body binds to,
-   which slice 2 already answered for instantiations (the *defining* line's resolver
-   snapshot, not the instantiating line's) and this should follow rather than reopen. Last
-   of the three because the phase exit is a native criterion and nothing else builds on it;
-   its order against 6b is free. **Exit:** a session defining a quotation-taking word,
-   calling it, and redefining it, with the frozen-binding rule holding across the
-   redefinition.
+   **6c — quotation-taking words at the REPL is implemented.** *This entry previously said
+   the frozen-binding question of which generation of a callee an inlined body binds to
+   should follow slice 2's answer for instantiations (the defining line's resolver snapshot).
+   `docs/phase4-slice6c-brief.md`'s recon falsified that framing before any code changed: a
+   combinator mints no `IrFunc` and no symbol, so it has no compile event of its own to freeze
+   against, and it is re-checked and re-lowered at every splice site against that site's own
+   live env, unlike a poly body which is checked once. There was no frozen resolver to
+   design; the charter below is the corrected one.* Lifted 6a's located rejection: what it
+   means to define and call a combinator in a live session. The problem was retention, the
+   same shape slice 2 solved for polymorphic words and 8b for drop overrides — a session
+   discards ordinary word bodies once a line compiles to its `.so`, and an inliner needs the
+   body. The fix was a plain session store (`HashMap<String, WordDef>`, mono and poly
+   combinators alike, replaced wholesale on redefinition, D1) projected on demand into the two
+   shapes the checker's and lowerer's inline paths already read, threaded into the REPL entry
+   points that hardcoded an empty combinators map. A review pass then closed a hygiene gap the
+   brief's recon missed: an imported combinator's body call to a module-0 private word (and
+   the forgeable variant, a REPL-declared name matching a multi-file closure's internal
+   mangled spelling) resolved against the session's own env instead of the closure's,
+   a silent-wrong-answer risk on a name collision. **Exit:** a session defining a
+   quotation-taking word, calling it from a later line, and redefining it, with every splice
+   at every call site reading that site's own live env (no frozen resolver, D1).
    **6d — nested constant-stack loops (the hoist-target split) is implemented.** Lifted R18,
    which rejected any `times` reached while a loop was already open. The limit was not
    hypothetical and not confined to `while`: it bit every combinator 6a shipped, because each

@@ -1,283 +1,203 @@
----
-
 # Phase 4 Slice 6c: quotation-taking words at the REPL
 
-**Status: spec.** Base `main` @ `7032670`. Depends on 6a (the inliner, `is_combinator`/
-`collect_combinators`/`inline_combinator`) and 6b (`filter`/`while`, the self-tail splice).
-Decisions D1–D5 locked (from `docs/phase4-slice6c-brief.md`). This slice lifts the two
-REPL rejections that stand today: R23 (defining a quotation-taking word at a session line,
-`src/repl.rs:~2072`) and R24 (importing a closure that exports one,
-`check_no_exported_quotation_word_in_closure`, `src/repl.rs:239`).
+**Status: implemented** (phases 1–3: `bff48cd`, `14f0645`, `be61e72`). Base `main` @ `7032670`.
+Depends on 6a (inliner: `is_combinator`/`collect_combinators`/`inline_combinator`) and 6b
+(`filter`/`while`, self-tail splice). Decisions D1–D5 locked (`docs/phase4-slice6c-brief.md`).
+Lifted the two REPL rejections that stood: R23 (defining a quotation-taking word at a session
+line) and R24 (importing a closure that exports one).
 
-The brief's load-bearing finding (recon 3–7): a combinator has **no compile event of its
-own to freeze against**. It mints no `IrFunc` and no symbol (R20); it is inlined by
-term-splice, fresh, at every call site. Slice 2's precedent (a polymorphic word's frozen
-defining-line resolver, read once per instantiation at *lowering*) does not transfer,
-because a poly body is checked once and never re-checked, whereas a combinator body is
-re-checked and re-lowered at every splice site against **that site's own live env**
-(`inline_combinator`, `src/check.rs:5136`; the IR splice arm, `src/ir.rs:2978`). So the
-work is not "invent a freezing mechanism," it is **plumbing**: a session-level store the
-checker's and lowerer's inline paths read, threaded into the call sites that hardcode an
-empty combinators map today, plus one cross-cutting decision (three now-mutually-exclusive
-name-shape stores need symmetric eviction).
+**Load-bearing finding:** a combinator has no compile event of its own to freeze against. It
+mints no `IrFunc` and no symbol; it is inlined by term-splice, fresh, at every call site. The
+slice-2 frozen-resolver precedent does not transfer (a poly body is checked once, a combinator
+body is re-checked/re-lowered at every splice site against that site's live env). So the work is
+**plumbing**: a session-level store the checker's and lowerer's inline paths read, threaded into
+call sites that hardcoded an empty combinators map, plus symmetric eviction across three
+name-shape stores.
 
-## Locked decisions (from the brief)
+## Locked decisions
 
-- **D1.** No frozen resolver / env / generation / symbol for combinator retention. The
-  store is a plain `HashMap<String, WordDef>`, replaced wholesale on redefinition. Every
-  splice at every later call site uses that site's own live env/resolver, as native does.
-- **D2.** One store, shared by monomorphic and polymorphic combinators
-  (`collect_combinators`/`inline_combinator` already treat both uniformly).
-- **D3.** Defining a combinator skips lowering entirely: check, then store, no `.so`, no
-  symbol, no `dlopen`.
-- **D4.** The three name-shape stores (`self.env`, `self.poly_words`, the new combinators
-  store) are made mutually exclusive on redefinition, generalizing R8.
-- **D5.** Import reuses the same store, populated from the closure's module-0 exports, not
-  a separate mechanism.
+- **D1.** No frozen resolver/env/generation/symbol. Store is `HashMap<String, WordDef>`,
+  replaced wholesale on redefinition; every later splice uses that site's own live env, as native.
+- **D2.** One store, shared by mono and poly combinators.
+- **D3.** Defining a combinator skips lowering entirely: check, store, no `.so`, no symbol, no `dlopen`.
+- **D4.** The three name-shape stores (`self.env`, `self.poly_words`, new combinators store) are
+  mutually exclusive on redefinition (generalizing R8).
+- **D5.** Import reuses the same store, populated from the closure's module-0 exports.
 
 ## Mechanism
 
-Reuse, not invention. The checker already routes a call to `poly.combinators.get(name)`
-**before** the poly and ordinary env lookups (`src/check.rs:6147`) and inlines it
-(`inline_combinator`, including the 6b self-tail branch). Lowering already splices a
-combinator body in `lower_call`'s `_ =>` arm (`src/ir.rs:2978`), self-tail lowered to a
-back-edge (`lower_self_tail_combinator`). Native derives the maps these paths read once,
-from `module.words`: the checker's `collect_combinators` (`src/check.rs:5018`, returning
-`HashMap<String, Combinator>`) and the lowerer's `combinator_bodies`
-(`HashMap<String, Vec<Term>>`, built in `ir::lower`, `src/ir.rs:~1101`). Both are handed
-empty at every REPL entry point today.
+Reuse, not invention. The checker routes a call to `poly.combinators.get(name)` before poly/env
+lookups (`src/check.rs:6147`) and inlines it (`inline_combinator`, with the 6b self-tail branch).
+Lowering splices the body in `lower_call`'s `_ =>` arm (`src/ir.rs:2978`), self-tail as a
+back-edge. Native derives the maps these paths read from `module.words`
+(`collect_combinators` → `HashMap<String, Combinator>`; `combinator_bodies` →
+`HashMap<String, Vec<Term>>`). 6c gives the REPL a session-level store and threads a **view** into
+those entry points; the session accumulates across lines/imports, native rebuilds per module. The
+inline mechanism itself is unchanged.
 
-6c gives the REPL a session-level store and threads a **view** of it into those entry
-points, so a REPL line's inline paths see exactly what a native module's do, per splice
-occurrence. The session accumulates the store across lines and imports; native rebuilds it
-per module. Nothing about the inline mechanism itself changes.
+## Requirements (all implemented)
 
-## Requirements by stage
+### Session store (`src/repl.rs`)
 
-### The session store (`src/repl.rs`)
-
-- **R1.** `Session` gains `combinators: HashMap<String, WordDef>` (initialized empty in
-  `Session::new`). It owns the retained combinator definitions, mono and poly, in one store
-  (D2). The key is the name the checker dispatches on: the plain word name for a
-  session-defined combinator; the import-internal spelling `{q}::{raw}__import{epoch}` for
-  an imported one (R13). It carries no generation, epoch, or symbol (D1); a redefinition
-  replaces the entry wholesale.
-- **R2.** The store is projected on demand into the two shapes the inline paths already
-  speak, inventing **no new type** (open-question answer): a `HashMap<String, Combinator>`
-  for the checker (each value borrowing a stored `WordDef`, matching `collect_combinators`'s
-  return shape) and a `HashMap<String, Vec<Term>>` for lowering (matching `ir::lower`'s
-  `combinator_bodies`). This requires `check::Combinator` and its construction (or a
-  `pub(crate)` helper returning one for a `&WordDef`) to be visible to `repl.rs`.
+- **R1.** `Session.combinators: HashMap<String, WordDef>` (empty in `new`), mono+poly in one
+  store. Key = the name the checker dispatches on: plain word name for session-defined;
+  `{q}::{raw}__import{epoch}` for imported (R13). No generation/epoch/symbol; redefinition
+  replaces wholesale.
+- **R2.** Projected on demand into the two shapes the inline paths speak (no new type): a
+  `HashMap<String, Combinator>` for the checker, a `HashMap<String, Vec<Term>>` for lowering.
+  Required `check::Combinator` / its construction visible to `repl.rs`.
 
 ### Threading, checker side (`src/check.rs`, `src/repl.rs`)
 
-- **R3.** `check_def`, `check_def_collecting_drop_sites`, and `infer_line` grow a
-  `combinators: &HashMap<String, Combinator>` parameter, threaded into their `PolyCtx`,
-  replacing the locally-built `no_combinators` empty maps (recon 8, `src/check.rs:~2400`,
-  `~2466`). Non-REPL / build-path callers and unit tests pass an empty map, keeping the
-  concrete path byte-identical.
-- **R4.** Every REPL checker call site passes the session combinators view (R2): the
-  ordinary-word define (`eval_def` mono path → `check_def`), the drop-overload collector
-  (`compile_drop_overload` → `check_def_collecting_drop_sites`), and every bare line
-  (`run_terms` and `check_type_line` → `infer_line`). An ordinary word body or a bare line
-  may then call a retained combinator and have it inlined, exactly as native inlines one
-  drawn from `module.words`.
+- **R3.** `check_def`, `check_def_collecting_drop_sites`, `infer_line` grow a
+  `combinators: &HashMap<String, Combinator>` param, threaded into `PolyCtx`, replacing local
+  `no_combinators`. Non-REPL/build callers and unit tests pass an empty map (concrete path
+  byte-identical).
+- **R4.** Every REPL checker call site passes the session view: mono define
+  (`eval_def`→`check_def`), drop-overload collector
+  (`compile_drop_overload`→`check_def_collecting_drop_sites`), bare lines
+  (`run_terms`/`check_type_line`→`infer_line`).
 
 ### Threading, IR side (`src/ir.rs`, `src/repl.rs`)
 
-- **R5.** `ir::lower_word`, `ir::lower_instantiation`, and `ir::lower_line` grow a
-  `combinators: &HashMap<String, Vec<Term>>` parameter, set onto the constructed
-  `FuncBuilder`. Recon 8 names four hardcoded sites; **`ir::lower_line` (`src/ir.rs:1736`)
-  is a fifth**, currently defaulting to `empty_combinators()` via `FuncBuilder::new`
-  (`src/ir.rs:2320`). A bare REPL line that calls a combinator lowers through `lower_line`;
-  without threading, `lower_call`'s combinator dispatch misses and falls through to an
-  `Instr::Call` to a symbol that was never minted (a link failure). All REPL lowering
-  entry points pass the session combinator-bodies view: `eval_def` → `lower_word`,
-  `emit_instantiations` → `lower_instantiation`, `run_terms` → `lower_line`. Native
-  `ir::lower` is untouched (it keeps building `combinator_bodies` from `module.words`).
+- **R5.** `lower_word`, `lower_instantiation`, `lower_line` grow a
+  `combinators: &HashMap<String, Vec<Term>>` param set onto `FuncBuilder`. **`lower_line`
+  (`src/ir.rs:1736`) was the under-counted fifth site**; without it a bare line calling a
+  combinator misses dispatch and link-fails on an unminted symbol. REPL entry points pass the
+  view: `eval_def`→`lower_word`, `emit_instantiations`→`lower_instantiation`,
+  `run_terms`→`lower_line`. Native `ir::lower` untouched.
 
 ### Defining a combinator at the REPL (D3)
 
-- **R6.** Replace R23. In `eval_def`, after `audit_word_quotation_positions` (so a
-  quotation type in a non-input position is still R7a-rejected), a word for which
-  `word_declares_quotation_parameter` holds routes to a new `eval_combinator_def` instead
-  of returning the "not yet supported at the REPL" error.
-- **R7.** `eval_combinator_def` builds the checker combinators view **including the definee
-  itself** (its new `WordDef`, with any prior same-name entry replaced), mirroring native's
-  `collect_combinators(words)`, which contains the word being checked. A self-reference or
-  self-tail call in the body then dispatches through the same inline path (6b R4/R6), not an
-  unknown word.
-- **R8.** Before storing, `eval_combinator_def` runs `check_combinator_cycles` over that
-  view, so a cycle formed **across lines** (define `a`; define `b` calling `a`; redefine
-  `a` calling `b`) is the same located `combinator_cycle_error`, while a self-*tail* edge
-  stays permitted (6b D5). Requires `check_combinator_cycles` `pub(crate)`.
-- **R9.** Body check, branching on shape but storing into the one store (D2):
-  - a **monomorphic** combinator is checked by `check_def` (recon 9: `check_word` already
-    handles a combinator identically to any word);
-  - a **polymorphic** combinator is checked by `check_poly_combinator_standalone` (recon 9,
-    mirroring native's `is_combinator` branch in `check`), **not** by `eval_poly_def`.
-  The poly path must **bypass `eval_poly_def`'s `>= 2`-outputs deferral**: `filter`'s
-  `( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize )` resolves to two outputs, but a
-  combinator is spliced inline and never lowered to a bundle-returning `IrFunc`, so the
-  return-bundle limitation that gate guards cannot arise. Requires
-  `check_poly_combinator_standalone` `pub(crate)`.
-- **R10.** On a successful check, `eval_combinator_def` inserts the `WordDef` into
-  `self.combinators` and performs **no lowering** (`ir::lower_word`), no
-  `backend::qbe::emit`, no `driver::compile_so`, no `dlopen`, and mints no symbol or
-  generation (D3). It prints the same `defined {name}` line an ordinary def prints. A
-  rejected combinator def leaves the session untouched: `eval_line`'s existing
-  snapshot-and-truncate of `arrays`/`owned_cells`/`refs` around `eval_expr_or_def_line`
-  (`src/repl.rs:~1123`) already covers the interned-registry rollback (open-question 1),
-  and no other session state is mutated before the fallible check completes.
+- **R6.** Replaced R23. In `eval_def`, after `audit_word_quotation_positions`, a word for which
+  `word_declares_quotation_parameter` holds routes to `eval_combinator_def`.
+- **R7.** `eval_combinator_def` builds the checker view **including the definee itself** (prior
+  same-name entry replaced), mirroring native's `collect_combinators`; a self/self-tail call
+  dispatches through the inline path.
+- **R8.** Before storing, runs `check_combinator_cycles` over that view, so a cross-line cycle is
+  the located `combinator_cycle_error` while a self-*tail* edge stays permitted. `pub(crate)`.
+- **R9.** Body check branches on shape, stores into the one store: mono via `check_def`; poly via
+  `check_poly_combinator_repl` (**not** `eval_poly_def`), **bypassing the `>= 2`-outputs
+  deferral** (a combinator is spliced inline, never lowered to a bundle-returning `IrFunc`, so
+  the return-bundle limit cannot arise). `pub(crate)`.
+- **R10.** On success, insert `WordDef` into `self.combinators`; **no** lowering/emit/`compile_so`/
+  `dlopen`/symbol/generation. Prints the same `defined {name}`. A rejected def leaves the session
+  untouched via `eval_line`'s existing snapshot-and-truncate rollback.
 
 ### Mutual exclusion on redefinition (D4)
 
-- **R11.** Generalize R8 to three stores. Combinator dispatch runs first
-  (`poly.combinators.get(name)` precedes `poly.env`/`env`, `src/check.rs:6147`), so a stale
-  entry in the wrong store would silently win. Redefining `name`:
-  - `eval_combinator_def` evicts `self.env` and `self.poly_words`;
-  - `eval_def`'s mono commit adds `self.combinators.remove(&name)` beside its existing
-    `self.poly_words.remove(&name)`;
-  - `eval_poly_def`'s commit adds `self.combinators.remove(&name)` beside its existing
-    `self.env.remove(&name)`.
-  No `arrays`/`owned_cells`/`refs` rows are purged on a combinator redefinition
-  (open-question 2): those rows are positionally stable and never revisited (R9 elsewhere),
-  so a stale row is inert, exactly as for an ordinary redefinition. State this in the
-  eviction comment so a reviewer need not wonder.
+- **R11.** Combinator dispatch runs first, so a stale wrong-store entry would silently win.
+  Redefining `name`: `eval_combinator_def` evicts `self.env` and `self.poly_words`; `eval_def`
+  mono commit adds `self.combinators.remove(&name)`; `eval_poly_def` commit adds
+  `self.combinators.remove(&name)`. No `arrays`/`owned_cells`/`refs` purge (rows positionally
+  stable, inert); eviction comment states this.
 
 ### Import (D5)
 
-- **R12.** Delete `check_no_exported_quotation_word_in_closure` and its call in
-  `eval_import` (`src/repl.rs:1433`). An imported closure exporting a quotation-taking word
-  is no longer rejected; `splice_import` retains it instead. Recon 2 already narrows the
-  gap: a combinator used only *internally* to an imported closure inlines and compiles with
-  the closure and needs nothing here; only a **module-0 exported** combinator, callable from
-  a *later* session line, needs retention.
-- **R13.** In `splice_import` (the infallible commit phase), for each module-0 export `W`
-  with `word_declares_quotation_parameter(W)`: insert a remapped, name-rewritten copy of
-  `W`'s `WordDef` into `self.combinators` under the internal spelling
-  `{q}::{raw}__import{epoch}`, and add `import_aliases[{q}::{raw}] = internal` (plus the
-  bare alias for a selectively-imported name). This is symmetric to the exported-ordinary-
-  word loop, which today filters on `w.poly.is_none()` (`src/repl.rs:~1633`) and so never
-  sees a poly combinator like `filter`/`while`; without the new alias, `rewrite_line_imports`
-  would leave a session call to `{q}::filter` untranslated and it would fall to unknown-word.
-  Recon 2/5/6: the closure is already internally self-consistent (checked under one shared
-  env, `check::check` does not mutate bodies), so **no re-check** of the imported combinator
-  is performed.
-- **R14.** The stored copy is remapped exactly like every other imported declaration (R9's
-  positional-id shift): type ids in its signature and body are shifted by the same
-  `struct_base`/`array_base`/… `splice_import` already computes (reuse its `remap`). Its
-  `.name` is set to the internal spelling, and its body's calls to any module-0 combinator
-  (**itself included**) or exported ordinary word are rewritten to their internal
-  spellings, so combinator dispatch and env lookup resolve at the session splice site. This
-  body call-name rewrite is the load-bearing part (open-question answer: storing the raw
-  post-check `WordDef` is **not** sufficient): `while`'s self-call `while` must become
-  `{q}::while__import{epoch}`, or the self-tail recognizer (`body_tail_calls_self`, comparing
-  against `comb.word.name`) misses and the splice recurses forever. For `filter`/`while` the
-  type-id remap is a no-op (their bodies name only builtins), so the realistic import case
-  exercises the call-name rewrite, not the id shift.
-- **R15.** Two import sub-questions resolved by confirmation, not new machinery:
-  - An exported combinator whose **signature** names a closure-private type is already
-    rejected at the closure's own `check` (5a's export rule: a private type reachable
-    through an exported signature). Confirm with a golden; add no REPL-side guard.
-  - An exported combinator whose **body** calls a closure-*private* word is out of scope
-    this slice. The library combinators (`filter`/`while`) call only builtins, their
-    quotation parameter, and (for `while`) themselves; this shape is not manufactured here
-    and needs no new machinery. Do not add a stopgap guard for it (phase-scope discipline).
+- **R12.** Deleted `check_no_exported_quotation_word_in_closure` and its call in `eval_import`.
+  Only a **module-0 exported** combinator needs retention (internal-only ones inline with the
+  closure).
+- **R13.** In `splice_import` (infallible commit), for each module-0 export `W` with
+  `word_declares_quotation_parameter(W)`: insert a remapped, name-rewritten copy into
+  `self.combinators` under `{q}::{raw}__import{epoch}`, add `import_aliases[{q}::{raw}] = internal`
+  (plus bare alias for selective import). Symmetric to the exported-ordinary-word loop (which
+  filters `w.poly.is_none()` and so never sees `filter`/`while`). No re-check.
+- **R14.** Stored copy remapped like every imported declaration (positional-id shift via reused
+  `remap`); `.name` set to internal spelling; body calls to **any module-0 word** (combinator,
+  ordinary export, or ordinary private word) are **rewritten** to internal spellings. That
+  rewrite scope is broader than the **binding** scope, though: only module-0 **exports** and
+  module-0 **private mono ordinary** words are actually bound into `self.env` (the exported-word
+  loop plus the review-fix private-word loop, below). A module-0 **private combinator or
+  polymorphic word**, called directly from a retained combinator's body, is renamed to a spelling
+  nothing binds -- a clean `unknown word` error, an accurate limitation of this slice, not a bug
+  (no golden in `lib/combinators.sth` exercises one private combinator calling another). The
+  **body self-call rewrite is load-bearing**: `while`'s self-call must become
+  `{q}::while__import{epoch}` or `body_tail_calls_self` misses and the splice recurses forever.
+  For `filter`/`while` the id remap is a no-op, so the realistic case exercises the call-name
+  rewrite. Review fix: an exported combinator's body call to a module-0 *private mono ordinary*
+  word is rewritten to an internal spelling now bound into `self.env` (no `import_aliases` entry,
+  so R15 privacy holds); this closes a hygiene hole where the call would otherwise fall through
+  to whatever the *session's own* env held under the bare name.
+- **R15.** Two sub-questions: an exported combinator whose signature names a private type is
+  already rejected at the closure's own `check` (golden, no REPL guard). A **direct** body call
+  from a retained/spliced combinator to **any non-module-0 word** -- private or exported alike;
+  privacy is not the relevant axis here -- is rewritten (R14) to a spelling nothing binds (the
+  binding side only covers module-0), producing a clean `unknown word` error, not silent wrong
+  data. A **transitive** call reaching a non-module-0 word *through* a module-0 ordinary word
+  resolves correctly: that ordinary word's own body lives in the closure's own `.so` and is
+  called by symbol rather than spliced, so it never goes through the body-rename mechanism at
+  all -- only a spliced combinator body's *direct* calls do. Second-review fix: a REPL-declared
+  name may no longer end in a resolver-mangled `__m{digits}` or import-epoch `__import{digits}`
+  spelling, so the *forged-collision* variant of this gap (a session word chosen to match a
+  non-module-0 word's mangled spelling) is now closed unconditionally; the residual gap is purely
+  "clean error, not silent," full stop.
 
-### Out of scope and invariants preserved
+### Invariants preserved
 
-- **R16.** No frozen resolver, frozen env, generation, epoch, or symbol for a combinator
-  (D1). Every splice uses the call site's own live env/resolver. A falsifiable pin is
-  required (criterion 4): the test that would fail if a future change silently added a
-  frozen-resolver capture.
-- **R17.** Backend stays QBE; `Ptr[T]` opaque; no LLVM, native backend, JIT, or comptime.
-  `IrType` gains no quotation variant. A combinator keeps its compile-time-only nature: no
-  runtime quotation value, no calling convention, no runtime identity (slice 7 untouched).
-  `core` stays `no_std`. A program using no REPL combinator lowers byte-for-byte as today
-  (the empty-map default preserves every non-REPL path).
-- **R18.** Drive-by (D2): fix the stale doc comment on `collect_combinators`
-  (`src/check.rs:5011`) claiming a polymorphic combinator "is excluded here" — `is_combinator`
-  does not exclude poly combinators (`inline_combinator` branches on `word.poly` internally).
-  Comment only, no behavior change.
-- **R19.** The three 6b REPL rejection goldens
-  (`repl_quotation_taking_definition_is_rejected`,
-  `repl_poly_quotation_taking_definition_is_rejected`,
-  `repl_self_tail_combinator_definition_is_rejected`, in `tests/phase4_combinators.rs`)
-  assert exactly the rejection this slice removes. 6c converts them to acceptance / behavior
-  pins (define + call), rather than deleting them, so the guarded behavior flips rather than
-  vanishes.
-- **R20.** ROADMAP 6c marked implemented; DESIGN.md's REPL section records that a combinator
-  is retained as raw terms (no symbol) and re-spliced per session call site under that
-  site's own live env (D1, and why the slice-2 frozen-resolver precedent does not apply).
+- **R16.** No frozen resolver/env/generation/epoch/symbol (D1). Falsifiable pin required
+  (criterion 4).
+- **R17.** QBE only; `Ptr[T]` opaque; no LLVM/native/JIT/comptime; `IrType` gains no quotation
+  variant; no runtime quotation value/convention/identity; `core` stays `no_std`. A program using
+  no REPL combinator lowers byte-for-byte as today (empty-map default).
+- **R18.** Drive-by: fixed the stale `collect_combinators` doc comment (`src/check.rs:5011`)
+  claiming poly combinators are "excluded here". Comment only.
+- **R19.** The three 6b rejection goldens converted to acceptance/behavior pins (define + call),
+  not deleted, so the guarded behavior flips rather than vanishes.
+- **R20.** ROADMAP 6c marked implemented; DESIGN.md REPL section records that a combinator is
+  retained as raw terms (no symbol) and re-spliced per session call site under that site's own
+  live env, and why the slice-2 frozen-resolver precedent does not apply.
 
-## Exit criteria (goldens in `tests/phase4_combinators.rs` unless noted)
+## Exit criteria (goldens in `tests/phase4_combinators.rs`)
 
-| # | criterion | test | kind | phase |
-|---|-----------|------|------|-------|
-| 1 | define a monomorphic combinator at a session line, call it from a *later bare line*; it inlines and runs | `repl_mono_combinator_define_and_call` | golden | 1 |
-| 2 | define `while` at a session line; `0 [ dup 5 < if 1 + true else false end ] while .` prints `5`, lowering to a loop back-edge (constant stack), not an infinite splice | `repl_while_define_runs_to_fixpoint` | golden | 1 |
-| 3 | define a two-output poly combinator (`filter` shape) and call it; both outputs land on the residual stack (the `>= 2`-outputs gate is bypassed for a combinator, R9) | `repl_two_output_combinator_define_and_call` | golden | 1 |
-| 4 | **D1 falsifiable:** define a combinator whose body calls an ordinary helper; call it; redefine the helper; call the combinator from a *new* line; the new line's splice sees the *new* helper | `repl_combinator_splice_sees_current_helper` | golden | 1 |
-| 5 | an ordinary word compiled with a combinator spliced into it keeps its baked result across a later redefinition of that combinator (R20 frozen-`.so`) | `repl_ordinary_caller_frozen_across_combinator_redefinition` | golden | 1 |
-| 6 | redefining `foo` from combinator to ordinary word (and the reverse) rebinds dispatch to the new shape — the other store is evicted (D4) | `repl_redefining_combinator_shape_evicts_other_stores` | golden | 1 |
-| 7 | a combinator cycle formed across session lines is the located `combinator_cycle_error` (R8) | `repl_cross_line_combinator_cycle_is_error` | golden | 1 |
-| 8 | import `lib/combinators.sth`, run `while` at a session line to a fixpoint — the self-call rewrite (R14) holds and it runs in constant stack | `repl_imported_while_runs_to_fixpoint` | golden | 2 |
-| 9 | import `lib/combinators.sth`, run `filter` over an array at a session line; it compacts and leaves both outputs | `repl_imported_filter_runs` | golden | 2 |
-| 10 | import a closure exporting a combinator whose signature names a private type is rejected at the closure's own check (R15 confirm) | `repl_import_combinator_with_private_type_in_signature_is_rejected` | golden | 2 |
-| 11 | R19: the three former-rejection goldens now assert define-and-call acceptance | `repl_quotation_taking_definition_is_rejected` (renamed/rewritten) et al. | golden | 1 |
-| 12 | dogfood: a session transcript importing `lib/combinators.sth` and using `filter`/`while` matches the native example's output | `repl_combinators_dogfood_matches_native` | golden | 3 |
+| # | criterion | test | phase |
+|---|-----------|------|-------|
+| 1 | mono combinator defined, called from a later bare line; inlines and runs | `repl_mono_combinator_define_and_call` | 1 |
+| 2 | define `while`; `0 [ dup 5 < if 1 + true else false end ] while .` prints `5` via loop back-edge (constant stack) | `repl_while_define_runs_to_fixpoint` | 1 |
+| 3 | two-output poly combinator (`filter` shape) defined and called; both outputs land (>=2-output gate bypassed) | `repl_two_output_combinator_define_and_call` | 1 |
+| 4 | **D1 falsifiable:** body calls a helper; redefine helper; new-line splice sees the *new* helper | `repl_combinator_splice_sees_current_helper` | 1 |
+| 5 | ordinary word with a spliced combinator keeps its baked result across a later combinator redefinition | `repl_ordinary_caller_frozen_across_combinator_redefinition` | 1 |
+| 6 | redefining `foo` combinator↔ordinary rebinds dispatch; other store evicted (D4) | `repl_redefining_combinator_shape_evicts_other_stores` | 1 |
+| 7 | cross-line combinator cycle is the located `combinator_cycle_error` | `repl_cross_line_combinator_cycle_is_error` | 1 |
+| 8 | import `lib/combinators.sth`, run `while` to fixpoint; self-call rewrite holds, constant stack | `repl_imported_while_runs_to_fixpoint` | 2 |
+| 9 | import `lib/combinators.sth`, run `filter` over an array; compacts, leaves both outputs | `repl_imported_filter_runs` | 2 |
+| 10 | import a combinator whose signature names a private type is rejected at the closure's check | `repl_import_combinator_with_private_type_in_signature_is_rejected` | 2 |
+| 11 | R19: the three former-rejection goldens now assert define-and-call acceptance | `repl_quotation_taking_definition_is_accepted` et al. | 1 |
+| 12 | dogfood: import + `filter`/`while` session transcript matches native example output | `repl_combinators_dogfood_matches_native` | 3 |
+| 13 | R14 review fix: an exported combinator's body call to a closure-*private* word resolves against the closure's own definition, not a same-named session word defined first (hygiene) | `repl_imported_combinator_body_call_to_private_word_uses_closure_env` | 2 (review fix) |
 
-**Load-bearing guards (mutation-test each — the test must fail when the guarded behavior is
-deleted, per the project's coverage convention):**
+**Load-bearing guards (mutation-tested):**
 
-- **Criterion 2** fails if R5's `lower_line` combinator threading is reverted (a bare/`while`
-  line link-fails or splices forever).
-- **Criterion 3** fails if R9 routes a poly combinator through `eval_poly_def` (the two-output
-  `filter` is wrongly deferred as "resolves to 2 outputs").
-- **Criterion 4** fails if any frozen-resolver/env capture is added for a combinator (D1) — the
-  new line would see the *old* helper.
-- **Criterion 6** fails if R11's `self.combinators.remove` is dropped from a redefinition path
-  (the stale combinator entry keeps winning dispatch).
-- **Criterion 7** fails if `check_combinator_cycles` is not run at the REPL (R8) — the cycle
-  type-checks then splices forever.
-- **Criterion 8** fails if R14's body self-call rewrite is deleted — the imported `while`'s
-  self-call misses the self-tail recognizer and the splice recurses forever.
+- Crit 2 fails if R5's `lower_line` threading is reverted (link-fail or infinite splice).
+- Crit 3 fails if R9 routes a poly combinator through `eval_poly_def`.
+- Crit 4 fails if any frozen-resolver/env capture is added (D1).
+- Crit 6 fails if R11's `self.combinators.remove` is dropped from a redefinition path.
+- Crit 7 fails if `check_combinator_cycles` is not run at the REPL.
+- Crit 8 fails if R14's body self-call rewrite is deleted.
+- Crit 13 fails if R14's broadened `body_rename` (module-0 private words, not only exports) is
+  reverted: the session's pre-import `priv_calc6c` (+1000) would silently win over the closure's
+  own (+1), landing `1050` instead of `51`.
 
-## Sanctioned edits
+## Sanctioned edits (as implemented)
 
-`src/repl.rs`: new `Session.combinators` field, `eval_combinator_def`, the R6 route in
-`eval_def`, R11 eviction in all three define paths, R12 deletion + R13/R14 retention in
-`eval_import`/`splice_import`, and the new checker/IR view builders. `src/check.rs`:
-`pub(crate)` on `Combinator`, `check_combinator_cycles`, `check_poly_combinator_standalone`;
-the R3 parameter on `check_def`/`check_def_collecting_drop_sites`/`infer_line`; the R18
-doc-comment fix. `src/ir.rs`: the R5 parameter on `lower_word`/`lower_instantiation`/
-`lower_line`. `tests/phase4_combinators.rs` (goldens + the R19 conversions), any import
-fixtures, an `examples/`/session dogfood. `ROADMAP.md` 6c marked implemented; DESIGN.md REPL
-section (R20). No change to the inline mechanism itself (`inline_combinator`, the splice arm,
-the self-tail back-edge); no `Instr`/`Terminator`/`qbe.rs` change; no behavior a non-REPL
-program relies on.
+`src/repl.rs`: `Session.combinators`, `eval_combinator_def`, R6 route, R11 three-path eviction,
+R12 deletion + R13/R14 retention, checker/IR view builders. `src/check.rs`: `pub(crate)` on
+`Combinator`/`check_combinator_cycles`/`check_poly_combinator_repl`; R3 params; R18
+doc-comment fix. `src/ir.rs`: R5 params on `lower_word`/`lower_instantiation`/`lower_line`.
+`tests/phase4_combinators.rs`: goldens + R19 conversions. `ROADMAP.md`/`DESIGN.md` (R20). No
+change to the inline mechanism or any non-REPL behavior, beyond a benign arity fixup at two
+`mod tests` call sites in `src/backend/qbe.rs` (an added `&HashMap::new()` arg apiece, both call
+sites using `lower_line`), mechanically forced by R5's new `combinators` param on `lower_line`.
+No `Instr`/`Terminator` change.
 
-## Phases (JSON)
+## Implementation notes
 
-```json
-{
-  "phases": [
-    {
-      "phase": 1,
-      "focus": "Session combinator store; thread a combinators view into check_def/check_def_collecting_drop_sites/infer_line and lower_word/lower_instantiation/lower_line (the fifth, under-counted site); define-at-REPL for mono and poly combinators (eval_combinator_def, bypassing the >=2-output gate); D4 three-way eviction; and the define/call/redefine/cycle/D1-falsifiable goldens including the R19 rejection-to-acceptance conversions",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 2,
-      "focus": "Import retention (D5): drop the R24 rejection, store id-remapped and body-call-name-rewritten module-0 exported combinators in the same store with their aliases, and the import goldens including the imported-while self-call-rewrite witness and the private-type-in-signature confirmation",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 3,
-      "focus": "Out-of-scope guards, the stale collect_combinators doc-comment drive-by, the import/session dogfood parity golden, and ROADMAP/DESIGN documentation",
-      "difficulty": "standard"
-    }
-  ]
-}
-```
+- **Phase 1** (`bff48cd`): session store + view threading through check and IR (incl. the fifth
+  `lower_line` site), `eval_combinator_def` for mono and poly (>=2-output gate bypassed), D4
+  three-way eviction, and the define/call/redefine/cycle/D1 goldens incl. R19 conversions.
+  Touched `src/backend/qbe.rs`, `src/check.rs`, `src/ir.rs`, `src/repl.rs`,
+  `tests/phase4_combinators.rs`.
+- **Phase 2** (`14f0645`): import retention (D5) — dropped R24, stored id-remapped and
+  body-call-name-rewritten module-0 exported combinators with aliases; import goldens incl. the
+  imported-`while` self-call-rewrite witness and the private-type-in-signature confirmation.
+- **Phase 3** (`be61e72`): out-of-scope guards, the `collect_combinators` doc-comment drive-by,
+  the import/session dogfood parity golden, and ROADMAP/DESIGN docs.

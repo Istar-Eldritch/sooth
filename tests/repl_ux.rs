@@ -185,3 +185,40 @@ fn repl_clear_disposes_then_resets() {
         "expected the `Res` destructor's `7` to print during `:clear`, then a clean reset, got: {out}"
     );
 }
+
+/// Regression (slice 6c): once a session can retain a combinator
+/// (`self.combinators`), a struct's `drop` override calling one reopens the
+/// same gap the native build fixed separately -- `synthesize_aggregate_
+/// destructors`' four REPL call sites (`compile_drop_overload`, `eval_def`,
+/// `run_terms`) must each be handed `combinator_bodies(&self.combinators)`,
+/// not an empty map, or lowering panics ("checked user word exists") instead
+/// of splicing the call. `.`'s printed `3` only reaches the real process
+/// stdout this subprocess-spawning `run_session` captures, not the in-process
+/// `repl_error` helper elsewhere in this suite, so this golden must live
+/// here. Exercises three of the four call sites in one session: defining the
+/// override (`compile_drop_overload`), defining an unrelated later word
+/// (`eval_def`, which also re-synthesizes every session destructor), and the
+/// bare line that triggers the drop (`run_terms`).
+#[test]
+fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
+    let out = run_session(&[
+        ": twice ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
+        "type: Bx v i64 ;",
+        ": drop ( Bx -- ) Bx>v [ 1 + ] twice . ;",
+        ": helper ( i64 -- i64 ) 1 + ;",
+        "1 Bx drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined twice",
+            "defined type Bx",
+            "defined drop for Bx",
+            "defined helper",
+            "3",
+            "stack: (empty)",
+        ],
+        "expected the drop override's `twice`-doubled `3` to print, not a panic: {out}"
+    );
+}
