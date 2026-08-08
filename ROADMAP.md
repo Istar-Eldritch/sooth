@@ -1629,9 +1629,9 @@ then find out what the compiler owes it.
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
    concrete types is a rule that gets rewritten once type variables exist.
-   **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is mechanical with no design
-   risk, the other is the open question.** 8a proves the table on cases that already work
-   today, so nothing in it can regress observable behaviour. 8b is where `drop` picks up a
+   **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is bounded, the other is the
+   open question.** 8a's table is mechanical, but it is not behaviour-preserving: it is what
+   makes user overloads reachable at all (see 8a's rules below). 8b is where `drop` picks up a
    bound it did not have before, exactly the kind of decision Phase 3's own Slice 8 took
    three review rounds to settle when it split into 8a/8b/8c mid-flight for the same reason.
    Landing 8a first also unblocks slice 9's dependency on dispatch early: slice 9 needs `.`'s
@@ -1643,10 +1643,52 @@ then find out what the compiler owes it.
    dispatch on the concrete operand type inside `check_operator`/`check_term` match arms
    rather than through any table — which is why `builtin_table` is empty. `len`'s
    length-polymorphism (slice 1) is the other such site. Retire the hardcoded match arms into
-   a real overload table, keyed the same way the hand-written arms already resolve, with a
-   golden asserting every existing operator/`.`/`len` call site lowers identically.
+   a real overload table, with a golden asserting every existing operator/`.`/`len` call site
+   lowers identically.
+
+   **Operators are just words, so a user overload needs no new syntax: `: + ( Vec2 Vec2 --
+   Vec2 ) ;` is already the definition form, and it already parses and checks.** What blocks
+   it is that `check_term` probes builtins by name (`BUILTIN_WORDS`, `check.rs`) *before* the
+   word env is consulted at all, so that definition compiles, links, and can never be called:
+   a call site with two `Vec2` operands dies in `check_operator`'s `is_numeric` gate before
+   any lookup. Sooth today silently accepts a word it will never dispatch to, which is the
+   exact class of Forth silent failure this language exists to reject. `drop` is the one
+   existing counterexample, resolved by a bespoke registry (`find_drop_overloads`); 8a
+   generalises that rather than inventing it. **Three rules, settled:**
+   1. **No shadowing.** A user overload whose input types exactly match an existing candidate
+      (builtin or imported) is a located error, not a silent override — the same shape as the
+      duplicate-word check.
+   2. **Exact match beats coercion.** `unify_pair`'s literal/size-type coercion (`check.rs`)
+      ranks below an exact-type candidate, so adding an overload cannot silently steal a call
+      site that previously coerced.
+   3. **Overloads are imported, not carried by the type.** An importer of `Vec2` does not get
+      `+` for it without importing `+`. Absence is a resolution error naming the missing
+      overload, never a silent fallback. Two candidates with identical input types in one
+      scope is rule 1's error regardless of whether they arrived locally or by import.
+
+   Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
+   structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot
+   simply inherit these three rules.
+
+   **The brief's first job is the table's entry shape, which is not `Sig`.** Three measured
+   constraints rule that out, all in `src/check.rs`: (a) `builtin_table` is
+   `HashMap<String, Sig>`, one concrete effect per *name*, which cannot hold several
+   candidates per name at all; (b) `len` is non-consuming over an array of *any* length and
+   element type, which is a `PolySig`-shaped entry, not a finite set of concrete rows — so
+   either the table carries generic entries from day one or `len` is carved out, and the
+   roadmap's claim that `len` is simply absorbed is the thing to check first; (c) `.`
+   dispatches on a *category* (`is_numeric() || is_bool() || Str | Cstr`), a predicate that
+   exists only as Rust code, so table-ifying it means either enumerating every concrete
+   numeric type by hand or giving entries a category/bound key. Related: `unify_pair`'s
+   coercion is one cross-cutting rule shared by a dozen binary operators, so the brief must
+   say whether it runs before lookup (leaving the table to answer only "is this operator
+   defined for these types") or becomes table rows (which would multiply entries and lose
+   X10's "needs an explicit conversion to `usize`" specificity).
    **Exit:** `check_operator`/`check_term`'s type-directed arms are gone, `builtin_table` is
-   populated, and the full existing corpus (goldens, examples) is unchanged byte-for-byte.
+   populated, the full existing corpus (goldens, examples) is unchanged byte-for-byte, and a
+   user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches* — with rule 1's
+   collision and rule 3's missing-import both located errors, and no definition left silently
+   unreachable.
 
    **8b — polymorphic `drop`, and the constraint it forces.** `drop` overloads ride the 8a
    table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
@@ -1680,6 +1722,31 @@ then find out what the compiler owes it.
    supplies it — rather than inferring it from the single resource case and reopening it in
    Phase 6, whose *Generic struct declarations* item and Slice 2 allocator rework are the
    consumers waiting on the answer.
+   **The disposal-scope invariant: structural disposal must never silently substitute for an
+   out-of-scope override.** 8a rule 3 makes overloads imported rather than carried by the
+   type, and `drop` cannot inherit that rule as written. For `+`, a missing import is a
+   resolution error: no candidate matches, compile fails, you import it. For `drop` a
+   structural fallback always exists and always type-checks, so a module importing `File`
+   without its disposal word would pop the `i32` and never `close` — the same leak the
+   structural-totality constraint above exists to prevent, arriving by scope rather than by
+   derivation. Optional overloads can be import-scoped; a non-optional obligation cannot,
+   unless its absence is made an error. **Resolution: `drop` stays import-scoped like
+   everything else, and importing a type whose `has_drop_overload` bit is set without
+   importing its disposal word makes any *linear* use of that type a located error** (naming
+   the word to import). Reading it through `&File` stays legal, so this doubles as a real
+   capability boundary: a module can inspect a resource without being able to own one. Three
+   parts carry it, none redundant — `StructDecl::has_drop_overload` (`src/ast.rs`, already set
+   by `check::check` and already load-bearing, since it is what makes such a struct non-`Copy`)
+   tells the checker the obligation exists while the word is out of scope; the import
+   requirement makes taking on disposal explicit; and `find_drop_overloads`' existing
+   *program-wide* uniqueness stays program-wide even though callability becomes scope-local,
+   because scope-local uniqueness alone would let two modules define `drop` for one `File`,
+   never collide, and dispose the same value two different ways. **Open sub-question:**
+   nothing today requires an override to live in the module declaring the type
+   (`drop_overload_struct_id` derives the id from the input type, no same-module check), so
+   orphan overrides are legal and made safe only by that uniqueness check. Restricting
+   disposal to the declaring module is optional; the uniqueness rule is the load-bearing part.
+
    **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
    override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
    the field and never runs the destructor. So today a `File` can have its fd extracted and the
@@ -1694,9 +1761,10 @@ then find out what the compiler owes it.
    rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
    **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`;
    a declared-consumer type (`File`) rejects the generic path at the call site, naming its
-   named consumer; destructuring a type with a `drop` override is a located error; the
-   container-boundary decision is recorded and, if implicit, exercised by a generated
-   traversal that calls a non-`drop` disposal word.
+   named consumer; destructuring a type with a `drop` override is a located error; importing
+   such a type without its disposal word makes a linear use of it a located error while
+   `&`-reads still compile; and the container-boundary decision is recorded and, if implicit,
+   exercised by a generated traversal that calls a non-`drop` disposal word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
