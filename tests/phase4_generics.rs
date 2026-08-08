@@ -1030,3 +1030,49 @@ fn times_example_matches_hand_threaded_countdown() {
     );
     assert_eq!(output.status.code(), Some(0));
 }
+
+// --- Phase 4 Slice 6e, phase 2: end-to-end goldens for `if` in a polymorphic
+// body, plus the nested-`if` dogfood example.
+
+#[test]
+fn poly_mymax_runs_at_i64_and_f64() {
+    // T9: `mymax`'s `'T: Copy Ord` body branches on `>`, instantiated at `i64`
+    // and `f64` in one program.
+    let (stdout, code) = run_src(
+        "poly-mymax",
+        ": mymax ( 'T: Copy Ord 'T -- 'T ) over over > if drop else swap drop end ;\n\
+         : main ( -- ) 3 7 mymax . 3.0 7.0 mymax . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "7\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn poly_choose_runs_at_i64_and_f64() {
+    // T10: `choose`'s unbounded `'T` body (the acceptance witness rewritten
+    // from T1) instantiated at `i64` and `f64`, each printing the kept
+    // operand.
+    let (stdout, code) = run_src(
+        "poly-choose",
+        ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n\
+         : main ( -- ) 1 2 true choose . 1.0 2.0 false choose . ;\n",
+        false,
+    );
+    assert_eq!(stdout, "1\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn poly_nested_if_dogfood_runs() {
+    // T11: `examples/poly_if.sth`'s `mymax3` nests an `if` inside an `if`
+    // arm (D4's proof), instantiated at `i64` and `f64`.
+    let binary = common::build_example("examples/poly_if.sth");
+    let output = Command::new(&binary).output().expect("binary should run");
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        "9\n9\n"
+    );
+    assert_eq!(output.status.code(), Some(0));
+}
