@@ -1425,7 +1425,7 @@ then find out what the compiler owes it.
    arm reaching `ir.rs`'s `drop: non-empty stack`). `max`'s own body is a fair test rather
    than a trivial one: its arms `drop` different operands, so it exercises exactly the
    move-state join that is missing.
-   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3708`).
+   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3798`).
    It is a sibling wall, not this one, and it belongs to slice 7, which is where a quotation
    acquires the runtime representation that would let a polymorphic body carry one.
    Depended on slice 1 only; independent of 6a-6d and landed after 6d.
@@ -1444,7 +1444,7 @@ then find out what the compiler owes it.
    keeps citing). *This entry used to add "and after slice 6b because it lifts the polymorphic
    `if`"; 6b did not, and never claimed to once its pre-check corrected the charter. The
    polymorphic `if` any interesting closure-taking word needs is 6e, which is therefore a real
-   prerequisite here.*
+   prerequisite here -- now met.*
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The environment of a downward closure (passed in, never returned or stored beyond the
    frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
