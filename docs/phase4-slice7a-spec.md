@@ -308,16 +308,31 @@ enum-plus-clause `examples/vm.sth` byte-for-byte.
      `[ 1 + ] Holder` actually reaches — it is *not* reached by the type-position guards above,
      which only gate whether `Holder` may be *declared* with a quotation field. The carve-out is
      gated strictly on `want`'s type, not on the callee being a constructor, so it also covers a
-     generated setter and an ordinary user word declaring a quotation parameter the same way; an
-     `extern` word's argument (also routed through this loop, per its own comment) is **not**
-     carved out — a quotation still cannot cross an FFI boundary. `reject_quotation_argument`'s
-     other three call sites (`:4130`, `:5441`, `:5558`) are unaffected unless they too check a
-     declared quotation parameter, in which case the same `want`-typed gate applies uniformly.
+     generated setter and an ordinary user word declaring a quotation parameter the same way.
+     **An `extern` word's argument cannot reach this carve-out at all, structurally, not by an
+     added condition here** (verified on review, where the first draft only asserted the exclusion
+     without checking how it holds): `audit_quotation_type_positions` (`check.rs:1075`) runs three
+     disjoint sub-audits, and its `module.externs` loop (`:1084`–`:1090`) rejects a `Type::Quotation`
+     at *any* position of *any* extern's declared effect, unconditionally — it is a separate loop
+     from `audit_word_quotation_positions` (over `module.words`, a disjoint `Module` field) and is
+     **not** touched by point 1's carve-out. An extern therefore can never be *declared* with a
+     `Type::Quotation` parameter, so `:6352`'s `want` can never be `Type::Quotation` for an extern
+     callee; the carve-out cannot admit one because the case cannot arise. No extra condition is
+     needed at `:6352` itself. `reject_quotation_argument`'s other three call sites (`:4130`,
+     `:5441`, `:5558`) are unaffected unless they too check a declared quotation parameter, in
+     which case the same `want`-typed gate applies uniformly; per the same structural argument, a
+     type variable can never resolve to `Type::Quotation` in `want`'s position on the poly path, so
+     nothing there needs the gate either.
   3. **Mutation legality** — the storage rejection `reject_quotation_stored` (`check.rs:7024`,
      `fill`'s element and `!`/`+!`'s value) gains the same non-capturing-literal carve-out for the
      array-element and struct-field-via-reference paths.
 
-  The **clause-body** rejection `:1251` is **not** lifted (out of scope).
+  The **clause-body** rejection `:1251` is **not** lifted (out of scope). **A generic container's
+  constructor** (e.g. a poly struct with a field of type variable `'T`, monomorphized with
+  `'T = [i64 -- i64]`) is a materialization boundary this carve-out does not reach — the poly
+  constructor path is disjoint from `:6352`'s monomorphic loop. Deferred alongside the existing
+  "polymorphic quotation values" non-goal below; every exit-criteria use in this slice is
+  monomorphic, so this is a conscious deferral, not a silent gap.
 - **R9.** Lowering a materialization (`src/ir.rs`): mint **one** `IrFunc` per distinct `QuotId`
   (dedup by id; multiple boundaries referencing one literal share it), signature = the quotation
   effect (inputs→outputs, no env param in 7a); its symbol is a stable mangle
