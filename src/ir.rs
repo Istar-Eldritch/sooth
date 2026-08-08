@@ -794,6 +794,13 @@ impl LayoutBuilder<'_> {
                 let l = self.array_memo[id.index()].as_ref().expect("inner layout");
                 (l.size, l.align)
             }
+            // Slice 7a: a quotation field/element is the fixed two-slot value
+            // aggregate, word-width-derived (`quotation_layout`), not a scalar
+            // -- `scalar_size_align_ww` deliberately panics on it.
+            Type::Quotation(_) => {
+                let l = quotation_layout(self.word_width);
+                (l.size, l.align)
+            }
             _ => scalar_size_align_ww(ir_type_of(ty), self.word_width),
         }
     }
@@ -1246,8 +1253,10 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
         })
-        .map(|(_, w)| {
+        .flat_map(|(_, w)| {
             let self_tail = crate::check::has_self_tail_call(w);
+            // R9: a word plus every quotation literal it materialized (element
+            // 0 is the word itself).
             lower_word_parts(
                 &w.name,
                 &w.effect,
@@ -1307,7 +1316,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         // `Call`, never a `CallInst` lookup), so such a body still lowers
         // correctly as an ordinary recursive call, just without the
         // loop/back-edge transform a monomorphic self-tail word gets.
-        funcs.push(lower_word_parts(
+        funcs.extend(lower_word_parts(
             &symbol,
             &effect,
             &word.body,
@@ -1340,15 +1349,69 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         &combinator_bodies,
     ));
 
+    // Slice 7a (R1/Q2): the module's distinct quotation signatures, scanned
+    // out of every function and every aggregate layout once all funcs (words,
+    // instantiations, materialized quotations, destructors) exist. Decoupled
+    // from the materialization worklist: any `IrType::Quotation` the backend
+    // could spell -- a param, a return, a value, or an aggregate field -- must
+    // name an interned effect, so the scan is the single source of truth.
+    let quot_sigs = collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
+
     Ok(IrModule {
         funcs,
         structs: structs.layouts,
         enums: enums.layouts,
         arrays: arrays.layouts,
-        // Slice 7a: no materialization boundary produces a quotation value
-        // yet, so the table stays empty on this path (a later slice fills it).
-        quot_sigs: Vec::new(),
+        quot_sigs,
     })
+}
+
+/// Slice 7a (R1/Q2): every distinct quotation effect the backend could need a
+/// `:Q{n}` symbol for, deduped by structural equality (two equal effects share
+/// one entry, matching `qbe::quot_index`'s lookup). Scans each function's
+/// params/return/value types and each aggregate layout's field/element types.
+/// A quotation-value-free module yields an empty table, unchanged from before.
+pub(crate) fn collect_quot_sigs(
+    funcs: &[IrFunc],
+    structs: &[StructLayout],
+    enums: &[EnumLayout],
+    arrays: &[ArrayLayout],
+) -> Vec<QuotSigLayout> {
+    let mut out: Vec<QuotSigLayout> = Vec::new();
+    let add = |ty: IrType, out: &mut Vec<QuotSigLayout>| {
+        if let IrType::Quotation(sig) = ty {
+            if !out.iter().any(|q| q.effect == sig.0) {
+                out.push(QuotSigLayout { effect: sig.0 });
+            }
+        }
+    };
+    for f in funcs {
+        for &ty in &f.params {
+            add(ty, &mut out);
+        }
+        if let Some(ty) = f.ret {
+            add(ty, &mut out);
+        }
+        for &ty in &f.value_types {
+            add(ty, &mut out);
+        }
+    }
+    for s in structs {
+        for field in &s.fields {
+            add(field.ty, &mut out);
+        }
+    }
+    for e in enums {
+        for v in &e.variants {
+            for field in &v.fields {
+                add(field.ty, &mut out);
+            }
+        }
+    }
+    for a in arrays {
+        add(a.elem, &mut out);
+    }
+    out
 }
 
 /// Every linear struct's and enum's synthesized destructor, one `IrFunc` per
@@ -1394,7 +1457,10 @@ pub fn synthesize_aggregate_destructors(
         cells,
         ..
     } = regs;
-    let struct_destructors = structs
+    // R9: an override's body is lowered by `lower_word_parts`, so it can carry
+    // materialized quotations of its own (element 0 is the destructor itself);
+    // the glue-only cases stay single-func, wrapped so the `flatten` is uniform.
+    let struct_destructors: Vec<IrFunc> = structs
         .layouts
         .iter()
         .enumerate()
@@ -1414,9 +1480,11 @@ pub fn synthesize_aggregate_destructors(
                     combinators,
                 )),
                 Some(DropOverride::AlreadyLoaded) => None,
-                None => Some(synthesize_struct_destructor(id, env, resolve, regs)),
+                None => Some(vec![synthesize_struct_destructor(id, env, resolve, regs)]),
             }
-        });
+        })
+        .flatten()
+        .collect();
     let enum_destructors = enums
         .layouts
         .iter()
@@ -1429,6 +1497,7 @@ pub fn synthesize_aggregate_destructors(
         synthesize_cell_destructor(OwnedCellId::from_index(idx), env, resolve, regs)
     });
     struct_destructors
+        .into_iter()
         .chain(enum_destructors)
         .chain(cell_destructors)
         .collect()
@@ -1702,22 +1771,24 @@ fn synthesize_struct_destructor_override(
     resolve: Resolver,
     regs: Registries,
     combinators: &HashMap<String, Vec<Term>>,
-) -> IrFunc {
-    IrFunc {
-        name: struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation),
-        ..lower_word_parts(
-            &word.name,
-            &word.effect,
-            &word.body,
-            crate::check::has_self_tail_call(word),
-            env,
-            resolve,
-            regs,
-            empty_instantiations(),
-            empty_poly_arities(),
-            combinators,
-        )
-    }
+) -> Vec<IrFunc> {
+    // R9: element 0 is the override body itself, renamed to the destructor
+    // symbol every call site already targets; any materialized quotations it
+    // produced follow, lowered under their own symbols.
+    let mut funcs = lower_word_parts(
+        &word.name,
+        &word.effect,
+        &word.body,
+        crate::check::has_self_tail_call(word),
+        env,
+        resolve,
+        regs,
+        empty_instantiations(),
+        empty_poly_arities(),
+        combinators,
+    );
+    funcs[0].name = struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation);
+    funcs
 }
 
 /// R12 (Phase 4): synthesize enum `id`'s destructor, called by `drop` on any
@@ -1854,7 +1925,7 @@ pub fn lower_line(
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
-) -> (IrFunc, usize, usize) {
+) -> (IrFunc, Vec<IrFunc>, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
@@ -2005,6 +2076,10 @@ pub fn lower_line(
     b.push_instr(Instr::Bin(new_top, BinOp::Add, top, delta_val));
     b.seal_block(Terminator::Ret(Some(new_top)));
 
+    // R9: a bare line can materialize a quotation too (e.g. constructing a
+    // struct that holds one), so its callee funcs are surfaced alongside the
+    // line function, which stays element separate for its distinguished name.
+    let mats = std::mem::take(&mut b.materialized);
     let func = IrFunc {
         name: format!("sooth_line_{seq}"),
         params: vec![IrType::Ptr, IrType::I64],
@@ -2012,7 +2087,16 @@ pub fn lower_line(
         blocks: b.blocks,
         value_types: b.value_types,
     };
-    (func, m, out_bytes as usize)
+    let extra = lower_materialized(
+        mats,
+        env,
+        resolve,
+        regs,
+        instantiations,
+        poly_arities,
+        combinators,
+    );
+    (func, extra, m, out_bytes as usize)
 }
 
 /// R10: the `IrType` a word returns — its one output, or the synthesized
@@ -2101,7 +2185,7 @@ pub(crate) fn lower_word(
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
-) -> IrFunc {
+) -> Vec<IrFunc> {
     let self_tail = crate::check::has_self_tail_call(word);
     lower_word_parts(
         &word.name,
@@ -2135,7 +2219,7 @@ pub(crate) fn lower_instantiation(
     regs: Registries,
     arrays: &[ArrayDecl],
     combinators: &HashMap<String, Vec<Term>>,
-) -> IrFunc {
+) -> Vec<IrFunc> {
     let effect = concrete_effect(sig, subst, arrays);
     lower_word_parts(
         symbol,
@@ -2168,7 +2252,7 @@ fn lower_word_parts(
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
-) -> IrFunc {
+) -> Vec<IrFunc> {
     let params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
     let bundle = bundle_of(&effect.outputs, regs.structs);
     let ret = word_ret_ty(&effect.outputs, regs.structs);
@@ -2234,19 +2318,92 @@ fn lower_word_parts(
         // (or nothing) it always was.
         let result = match bundle {
             Some(id) => Some(b.pack_bundle(id)),
-            None if ret.is_some() => b.stack.pop(),
+            // R7/R9: a word declaring a `Type::Quotation` output is a
+            // materialization boundary; a phantom the body leaves there becomes
+            // a real `(code, env)` value before it is returned.
+            None if ret.is_some() => {
+                let v = b
+                    .stack
+                    .pop()
+                    .expect("a word with a declared output leaves one");
+                Some(b.materialize_if_phantom(v, ret.expect("ret.is_some()")))
+            }
             None => None,
         };
         b.seal_block(Terminator::Ret(result));
     }
 
-    IrFunc {
+    // R9: this word is done; any quotation literal a materialization boundary
+    // turned into a value is lowered into its own `IrFunc` here (recursively:
+    // a materialized body may itself materialize a nested quotation). The main
+    // func is element 0; every caller flattens the returned vec into the
+    // module's function list.
+    let mats = std::mem::take(&mut b.materialized);
+    let mut out = vec![IrFunc {
         name: name.to_string(),
         params,
         ret,
         blocks: b.blocks,
         value_types: b.value_types,
+    }];
+    out.extend(lower_materialized(
+        mats,
+        env,
+        resolve,
+        regs,
+        instantiations,
+        poly_arities,
+        combinators,
+    ));
+    out
+}
+
+/// Slice 7a (R9): lower a batch of materialized quotations into standalone
+/// `IrFunc`s. Each is an ordinary term-bodied word under its minted symbol and
+/// declared effect; `lower_word_parts` handles it (and any nested quotation it
+/// materializes) exactly like a user word. Shared by `lower_word_parts` and
+/// `lower_line`, the two lowering entry points that own a `FuncBuilder`.
+#[allow(clippy::too_many_arguments)]
+fn lower_materialized(
+    mats: Vec<MaterializedQuot>,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
+) -> Vec<IrFunc> {
+    let mut out = Vec::new();
+    for m in mats {
+        let effect = StackEffect {
+            inputs: m
+                .effect
+                .inputs
+                .iter()
+                .map(|&ty| TypedSlot { name: None, ty })
+                .collect(),
+            outputs: m
+                .effect
+                .outputs
+                .iter()
+                .map(|&ty| TypedSlot { name: None, ty })
+                .collect(),
+        };
+        let body = WordBody::Terms { terms: m.body };
+        out.extend(lower_word_parts(
+            &m.symbol,
+            &effect,
+            &body,
+            false,
+            env,
+            resolve,
+            regs,
+            instantiations,
+            poly_arities,
+            combinators,
+        ));
     }
+    out
 }
 
 /// A shared empty instantiation table for lowering paths with no polymorphic
@@ -2320,6 +2477,19 @@ struct LoopStateSnapshot {
     alloca_home: Option<BlockId>,
     carried_slots: Vec<CarriedSlot>,
     back_edges: Vec<(BlockId, Vec<Value>)>,
+}
+
+/// Slice 7a (R9): a quotation literal a materialization boundary turned into a
+/// runtime `(code, env)` value. Each one mints exactly one standalone `IrFunc`
+/// (named `symbol`, its declared `effect` its signature, `body` its terms), the
+/// callee an `Instr::FuncAddr` in the value's `code` slot names. Collected per
+/// `FuncBuilder`, drained by the lowering driver's worklist so a materialized
+/// body that itself materializes a nested quotation is lowered too.
+#[derive(Clone)]
+struct MaterializedQuot {
+    symbol: String,
+    effect: &'static QuotEffect,
+    body: Vec<Term>,
 }
 
 struct FuncBuilder<'a> {
@@ -2445,6 +2615,11 @@ struct FuncBuilder<'a> {
     /// would rebind to an inner combinator's same-named local (dynamic, not
     /// lexical, capture).
     inline_uid: u32,
+    /// Slice 7a (R9): the quotation literals this func materialized, in mint
+    /// order. Drained by the lowering driver, which lowers each into its own
+    /// `IrFunc`. Deduped by `symbol` at mint (one literal materialized twice in
+    /// one func shares one callee).
+    materialized: Vec<MaterializedQuot>,
 }
 
 impl<'a> FuncBuilder<'a> {
@@ -2493,6 +2668,7 @@ impl<'a> FuncBuilder<'a> {
             quot_defs: Vec::new(),
             quot_bodies: HashMap::new(),
             inline_uid: 0,
+            materialized: Vec::new(),
         }
     }
 
@@ -2892,15 +3068,23 @@ impl<'a> FuncBuilder<'a> {
             // self-tail call (R6/R13), so lowering must not back-edge here.
             "call" => {
                 let v = self.stack.pop().expect("call: quotation on stack");
-                let id = self.quot_bodies[&v];
-                let body = self.quot_defs[id.0].clone();
-                // The body is a block: a name it binds is out of scope after
-                // the splice, and the front-first local resolver would else
-                // read a stale entry on a later same-named bind. Mirror the
-                // `if` arm's save-and-truncate.
-                let locals_depth = self.locals.len();
-                self.lower_terms(&body, false);
-                self.locals.truncate(locals_depth);
+                // R10/D1: provenance decides. A phantom the checker resolved to
+                // a literal splices its body (D5, no `Instr::Call`); a
+                // materialized value whose identity was erased loads its `code`
+                // slot and calls indirectly.
+                match self.quot_bodies.get(&v).copied() {
+                    Some(id) => {
+                        let body = self.quot_defs[id.0].clone();
+                        // The body is a block: a name it binds is out of scope
+                        // after the splice, and the front-first local resolver
+                        // would else read a stale entry on a later same-named
+                        // bind. Mirror the `if` arm's save-and-truncate.
+                        let locals_depth = self.locals.len();
+                        self.lower_terms(&body, false);
+                        self.locals.truncate(locals_depth);
+                    }
+                    None => self.lower_indirect_call(v),
+                }
             }
             // R14: `times` lowers into a constant-stack loop, reusing
             // `begin_loop`/`finalize_loop` (D6). A synthesized index drives a
@@ -3377,7 +3561,10 @@ impl<'a> FuncBuilder<'a> {
                 let ptr = self.stack.pop().expect("@: reference");
                 let referent = self.referent_of(ptr);
                 match referent {
-                    IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                    IrType::Struct(_)
+                    | IrType::Enum(_)
+                    | IrType::Array(_)
+                    | IrType::Quotation(_) => {
                         let dst = self.alloc_aggregate(referent);
                         let size = self.value_size(referent);
                         if size > 0 {
@@ -3396,8 +3583,15 @@ impl<'a> FuncBuilder<'a> {
                 let val = self.stack.pop().expect("!: value");
                 let ptr = self.stack.pop().expect("!: reference");
                 let referent = self.referent_of(ptr);
+                // R7/R9: a `&!Type::Quotation` store is a materialization
+                // boundary (an array element or struct field via reference); a
+                // phantom `val` becomes a real `(code, env)` aggregate first.
+                let val = self.materialize_if_phantom(val, referent);
                 match referent {
-                    IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+                    IrType::Struct(_)
+                    | IrType::Enum(_)
+                    | IrType::Array(_)
+                    | IrType::Quotation(_) => {
                         let size = self.value_size(referent);
                         if size > 0 {
                             self.push_instr(Instr::Blit(val, ptr, size));
@@ -3485,6 +3679,7 @@ impl<'a> FuncBuilder<'a> {
             IrType::Struct(id) => self.structs.layouts[id.index()].size,
             IrType::Enum(id) => self.enums.layouts[id.index()].size,
             IrType::Array(id) => self.arrays.layouts[id.index()].size,
+            IrType::Quotation(_) => quotation_layout(WORD_WIDTH).size,
             other => scalar_size_align(other).0,
         }
     }
@@ -3503,7 +3698,7 @@ impl<'a> FuncBuilder<'a> {
     /// element. `fill`'s unrolled stores are the only caller.
     fn store_elem(&mut self, fptr: Value, val: Value, elem: IrType) {
         match elem {
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
                 let size = self.value_size(elem);
                 if size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, size));
@@ -3571,6 +3766,12 @@ impl<'a> FuncBuilder<'a> {
             IrType::Struct(id) => self.alloc_struct(id),
             IrType::Enum(id) => self.alloc_enum(id),
             IrType::Array(id) => self.alloc_array(id),
+            IrType::Quotation(sig) => {
+                let layout = quotation_layout(WORD_WIDTH);
+                let v = self.fresh_value(IrType::Quotation(sig));
+                self.push_alloc(Instr::Alloc(v, layout.size, layout.align));
+                v
+            }
             _ => unreachable!("alloc_aggregate: not an aggregate IrType"),
         }
     }
@@ -3854,10 +4055,13 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Store `val` into field `field` at `fptr`: a width-exact scalar store, or
-    /// an aggregate blit for a nested struct/enum field.
+    /// an aggregate blit for a nested struct/enum/quotation field. A quotation
+    /// field is the constructor/setter materialization boundary (R7/R9): a
+    /// phantom `val` becomes a real `(code, env)` aggregate before the blit.
     fn store_field(&mut self, fptr: Value, val: Value, field: FieldLayout) {
+        let val = self.materialize_if_phantom(val, field.ty);
         match field.ty {
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
                 if field.size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, field.size));
                 }
@@ -3867,10 +4071,11 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// Field `field` of aggregate `base` as a value: a width-exact scalar load,
-    /// or the interior pointer as a nested struct/enum value.
+    /// or the interior pointer as a nested struct/enum/quotation value (the
+    /// getter reads a stored quotation back out as a runtime value).
     fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
         match field.ty {
-            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+            IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
                 self.field_aggregate_value(base, field.offset, field.ty)
             }
             _ => {
@@ -3885,6 +4090,90 @@ impl<'a> FuncBuilder<'a> {
     fn load_field_onto_stack(&mut self, base: Value, field: FieldLayout) {
         let v = self.field_value(base, field);
         self.stack.push(v);
+    }
+
+    /// Slice 7a (R9/D5): at a materialization boundary, turn a phantom
+    /// quotation `Value` (a `call`/`times`-splice marker that defines no
+    /// runtime bytes) into a real `(code, env)` aggregate of signature `sig`.
+    /// A `Value` already carrying an aggregate (a getter/`@`/word-return
+    /// result, or another boundary's output) is returned untouched -- only a
+    /// phantom recorded in `quot_bodies` is built here, so a boundary can call
+    /// this unconditionally on whatever it is about to store/return.
+    fn materialize_if_phantom(&mut self, val: Value, ty: IrType) -> Value {
+        match ty {
+            IrType::Quotation(sig) if self.quot_bodies.contains_key(&val) => {
+                self.materialize_quot_value(val, sig)
+            }
+            _ => val,
+        }
+    }
+
+    /// Slice 7a (R9): build the runtime `(code, env)` aggregate for phantom
+    /// quotation `phantom`, recording the callee `IrFunc` to mint (deduped by
+    /// symbol). `code` gets the callee's address (`FuncAddr`); `env` is the
+    /// null pointer (7a captures nothing, so there is no environment to
+    /// snapshot -- 7b fills this slot). The symbol is `{enclosing}__quot{id}`,
+    /// unique because word names are unique and `QuotId` is per-function.
+    fn materialize_quot_value(&mut self, phantom: Value, sig: QuotSigId) -> Value {
+        let id = self.quot_bodies[&phantom];
+        let symbol = format!("{}__quot{}", self.cur_word_name, id.0);
+        if !self.materialized.iter().any(|m| m.symbol == symbol) {
+            self.materialized.push(MaterializedQuot {
+                symbol: symbol.clone(),
+                effect: sig.0,
+                body: self.quot_defs[id.0].clone(),
+            });
+        }
+        let layout = quotation_layout(WORD_WIDTH);
+        let dst = self.fresh_value(IrType::Quotation(sig));
+        self.push_alloc(Instr::Alloc(dst, layout.size, layout.align));
+        let code = self.fresh_value(IrType::Code);
+        self.push_instr(Instr::FuncAddr(code, symbol));
+        let code_ptr = self.field_ptr(dst, layout.code_offset);
+        self.push_instr(Instr::FieldStore(code_ptr, code));
+        let env = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::Const(env, 0));
+        let env_ptr = self.field_ptr(dst, layout.env_offset);
+        self.push_instr(Instr::FieldStore(env_ptr, env));
+        dst
+    }
+
+    /// Slice 7a (R10): lower `call` on a materialized quotation value whose
+    /// identity the checker could not resolve to a literal. Load the value's
+    /// `code` slot and call it indirectly -- its inputs the stack below the
+    /// value, its outputs pushed back (a multi-output quotation returns a
+    /// bundle, unpacked, exactly as an ordinary word call). The runtime-
+    /// dispatch counterpart to `call`-of-literal fusion (D5); no splice.
+    fn lower_indirect_call(&mut self, v: Value) {
+        let IrType::Quotation(sig) = self.value_type(v) else {
+            unreachable!("a non-literal `call` operand is a materialized quotation value")
+        };
+        let eff = sig.0;
+        let split = self.stack.len() - eff.inputs.len();
+        let args = self.stack.split_off(split);
+        let layout = quotation_layout(WORD_WIDTH);
+        let code_ptr = self.field_ptr(v, layout.code_offset);
+        let code = self.fresh_value(IrType::Code);
+        self.push_instr(Instr::FieldLoad(code, code_ptr));
+        let outs: Vec<TypedSlot> = eff
+            .outputs
+            .iter()
+            .map(|&ty| TypedSlot { name: None, ty })
+            .collect();
+        let bundle = bundle_of(&outs, self.structs);
+        let ret_ty = word_ret_ty(&outs, self.structs);
+        let ret = if eff.outputs.len() == 1 || bundle.is_some() {
+            Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+        } else {
+            None
+        };
+        self.push_instr(Instr::CallIndirect(ret, code, args));
+        if let Some(r) = ret {
+            self.stack.push(r);
+        }
+        if let Some(id) = bundle {
+            self.unpack_bundle(id);
+        }
     }
 
     /// Dispatch on `scrutinee`'s runtime tag (enum `id`): seal a compare chain
@@ -5291,7 +5580,7 @@ mod tests {
         // result: D=2 loads, M=1 store.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m, _) = lower_line(
+        let (func, _q, m, _) = lower_line(
             0,
             &line_terms("+"),
             2,
@@ -5319,7 +5608,7 @@ mod tests {
         // `2 3 +` from D=0 nets +1, so new_top = top + 8.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m, _) = lower_line(
+        let (func, _q, m, _) = lower_line(
             0,
             &line_terms("2 3 +"),
             0,
@@ -5660,7 +5949,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let vec2 = Type::Struct(StructId::from_index(0), "Vec2");
-        let (func, m, out_bytes) = lower_line(
+        let (func, _q, m, out_bytes) = lower_line(
             0,
             &line_terms(""),
             1,
@@ -5695,7 +5984,7 @@ mod tests {
         // through: the loaded value must keep `IrType::Str`.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m, out_bytes) = lower_line(
+        let (func, _q, m, out_bytes) = lower_line(
             0,
             &line_terms(""),
             1,
@@ -5733,7 +6022,7 @@ mod tests {
         // single result at 0.
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let (func, m, out_bytes) = lower_line(
+        let (func, _q, m, out_bytes) = lower_line(
             0,
             &line_terms("+"),
             2,
@@ -5777,7 +6066,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let u8_ty = Type::from_name("u8").unwrap();
-        let (func, _m, _) = lower_line(
+        let (func, _q, _m, _) = lower_line(
             0,
             &line_terms("1 >u8 +"),
             1,
@@ -5816,7 +6105,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("sq".to_string(), (1usize, 1usize, None));
         let resolve = |name: &str| format!("{name}__gen2");
-        let (func, _m, _) = lower_line(
+        let (func, _q, _m, _) = lower_line(
             0,
             &line_terms("5 sq"),
             0,
@@ -5904,7 +6193,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m, _) = lower_line(
+        let (func, _q, _m, _) = lower_line(
             0,
             &terms,
             1,
@@ -6502,7 +6791,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let shape = Type::Enum(EnumId::from_index(0), "Shape");
-        let (func, m, out_bytes) = lower_line(
+        let (func, _q, m, out_bytes) = lower_line(
             0,
             &line_terms(""),
             1,

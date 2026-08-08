@@ -1111,6 +1111,13 @@ pub(crate) fn audit_quotation_type_registries(
 ) -> Result<(), String> {
     for s in structs {
         for (fname, fty) in &s.fields {
+            // R8 (D4): a quotation type is legal as a struct field this slice
+            // (a materialization boundary); the store of a literal into it is
+            // checked at the constructor/setter call site (R7). Every other
+            // registry position below stays rejected.
+            if matches!(fty, Type::Quotation(_)) {
+                continue;
+            }
             reject_quotation_type_position(
                 *fty,
                 &format!("the field `{fname}` of struct `{}`", s.name),
@@ -1131,6 +1138,12 @@ pub(crate) fn audit_quotation_type_registries(
         }
     }
     for a in arrays {
+        // R8 (D4): a quotation is legal as an array element this slice (a
+        // materialization boundary, checked at `fill`/`!`); a cell payload and
+        // a reference referent below are not D4 boundaries and stay rejected.
+        if matches!(a.element, Type::Quotation(_)) {
+            continue;
+        }
         reject_quotation_type_position(a.element, "an array element")?;
     }
     for c in cells {
@@ -1150,6 +1163,13 @@ pub(crate) fn audit_quotation_type_registries(
 pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> {
     let word = crate::resolve::demangle_word(&w.name);
     for slot in &w.effect.outputs {
+        // R8 (D4): a monomorphic word may declare a `Type::Quotation` output (a
+        // materialization boundary, checked at the exit row by `check_outputs`).
+        // The poly path below still rejects a quotation output: polymorphic
+        // quotation *values* are out of scope this slice.
+        if matches!(slot.ty, Type::Quotation(_)) {
+            continue;
+        }
         reject_quotation_type_position(slot.ty, &format!("the output of `{word}`"))?;
     }
     // R18/R7a: a monomorphic word taking a quotation is a combinator,
@@ -3269,13 +3289,40 @@ fn check_terms_word(
     let ctx = word_ctx(word, structs, enums);
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
-    let final_stack = check_terms(
+    let mut final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, true, poly,
     )?;
-    dropped.append(&mut prov.dropped);
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
+    // R7/D4: a declared `Type::Quotation` output is a materialization boundary.
+    // Materialize each non-capturing `Known` literal the body leaves there
+    // (reject a capturing one naming 7b, R12) before `check_outputs`, whose
+    // bare-quotation guard would otherwise reject it outright.
+    for (i, want) in declared.iter().enumerate() {
+        if let Type::Quotation(eff) = *want {
+            if let Some(QuotRef::Known(id)) = final_stack.get(i).and_then(|s| s.quot) {
+                let span = prov.quotations[id.0].span;
+                final_stack[i] = materialize_quotation_at_boundary(
+                    id,
+                    eff,
+                    "be returned",
+                    &word.name,
+                    span,
+                    &ctx,
+                    env,
+                    arrays,
+                    cells,
+                    refs,
+                    &mut prov,
+                    &mut scope,
+                    poly,
+                )?;
+            }
+        }
+    }
+    dropped.append(&mut prov.dropped);
+
     check_outputs(word, &final_stack, &declared, line, structs, enums, arrays)?;
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
@@ -5721,6 +5768,109 @@ fn check_literal_against_declared_effect(
     Ok(())
 }
 
+/// R6 (Q1): does the quotation `body` read any name in `enclosing` that the
+/// body does not itself bind? The cheap boolean the D3 materialization line
+/// needs (no captures / captures), strictly less work than 7b's capture *set*.
+/// Mirrors `alpha_rename_locals`'s walk (ast.rs): a `Call` strips a leading
+/// `&!`/`&` exactly as `rename_call`, and a nested `TermKind::Quotation` / `if`
+/// arm is walked carrying the body-bound names *by value*, so a read of an
+/// outer name from inside a nested quotation still counts (D4's
+/// capture-into-another-quotation case). Pure over the term tree: it inspects
+/// no `Slot`/`Deriv` state, so it is testable in isolation.
+fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>) -> bool {
+    fn walk(terms: &[Term], enclosing: &HashSet<String>, bound: &mut Vec<String>) -> bool {
+        for term in terms {
+            match &term.kind {
+                TermKind::Bind(names) => {
+                    for n in names {
+                        bound.push(n.clone());
+                    }
+                }
+                TermKind::Call(name) => {
+                    let stripped = name
+                        .strip_prefix("&!")
+                        .or_else(|| name.strip_prefix('&'))
+                        .unwrap_or(name);
+                    if enclosing.contains(stripped) && !bound.iter().any(|b| b == stripped) {
+                        return true;
+                    }
+                }
+                TermKind::Quotation(inner) => {
+                    let mut inner_bound = bound.clone();
+                    if walk(inner, enclosing, &mut inner_bound) {
+                        return true;
+                    }
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    let mut tb = bound.clone();
+                    let mut eb = bound.clone();
+                    if walk(then_branch, enclosing, &mut tb) {
+                        return true;
+                    }
+                    if walk(else_branch, enclosing, &mut eb) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    walk(body, enclosing, &mut Vec::new())
+}
+
+/// R12/D4: a capturing quotation reaching a materialization boundary. 7a
+/// materializes only non-capturing literals; a capturing one is a located
+/// rejection naming 7b, reusing the escaping-quotation vocabulary shape.
+/// `boundary` is one of the four D4 sites: `be stored`, `be an array element`,
+/// `be returned`, `be left on a branch`.
+fn capturing_quotation_error(ctx: &Ctx, span: Span, boundary: &str) -> String {
+    let _ = ctx;
+    format!(
+        "error: a capturing quotation cannot {boundary} (capturing closures are slice 7b) (line {})",
+        span.line,
+    )
+}
+
+/// R7/D4: a materialization boundary. Materialize a non-capturing `Known`
+/// literal into a runtime quotation value, or reject a capturing one naming 7b
+/// (R12). (i) run the boolean capture predicate (R6); (ii) if it captures,
+/// raise R12 with `boundary`'s wording; (iii) else confirm the literal against
+/// the boundary's expected `Type::Quotation(eff)` via
+/// `check_literal_against_declared_effect`, and return the slot *erased*
+/// (`quot: None`, a real `Type::Quotation`) -- the signal `call`/`times` read
+/// to emit an indirect call rather than a splice.
+#[allow(clippy::too_many_arguments)]
+fn materialize_quotation_at_boundary(
+    id: QuotId,
+    eff: &'static QuotEffect,
+    boundary: &str,
+    word: &str,
+    span: Span,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<Slot, String> {
+    let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
+    let body = prov.quotations[id.0].body.clone();
+    if body_captures_enclosing(&body, &enclosing) {
+        return Err(capturing_quotation_error(ctx, span, boundary));
+    }
+    check_literal_against_declared_effect(
+        id, eff, word, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+    )?;
+    Ok(Slot::computed(Type::Quotation(eff)))
+}
+
 /// R10/R21: a quotation parameter position whose argument is not a quotation
 /// the callee can consume -- a non-quotation value, or (after R21 admits the
 /// abstract forward) a quotation whose *declared effect* disagrees with the
@@ -6295,6 +6445,35 @@ fn check_term(
             )? {
                 return Ok(stack);
             }
+            // R8 (D4): `!`/`+!` into a `&!Type::Quotation` referent is a
+            // materialization boundary (an array element or a struct field via
+            // reference). Materialize a non-capturing `Known` literal in place
+            // before `check_access_word` (whose bare-quotation store guard would
+            // else reject it), reject a capturing one naming 7b (R12). The
+            // referent's declared effect is the boundary's expected effect.
+            if matches!(name.as_str(), "!" | "+!") && stack.len() >= 2 {
+                let vi = stack.len() - 1;
+                if let Some(QuotRef::Known(id)) = stack[vi].quot {
+                    if let Some((Type::Quotation(eff), _)) = ref_parts(stack[vi - 1].ty, refs) {
+                        let qspan = prov.quotations[id.0].span;
+                        stack[vi] = materialize_quotation_at_boundary(
+                            id,
+                            eff,
+                            "be stored",
+                            name,
+                            qspan,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                        )?;
+                    }
+                }
+            }
             if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
                 return Ok(stack);
             }
@@ -6391,6 +6570,38 @@ fn check_term(
             let base = stack.len() - n;
             for (i, want) in sig.inputs.iter().enumerate() {
                 let found = stack[base + i];
+                // R8 (D4): a declared `Type::Quotation` parameter is a
+                // materialization boundary. This is the site a struct
+                // *constructor* call (`[ 1 + ] Holder`) and a generated setter
+                // reach; a non-capturing `Known` literal is materialized
+                // (validated here, lowered to a `(code, env)` value), a
+                // capturing one rejected naming 7b (R12). Gated strictly on
+                // `want`'s type, so it covers a constructor, a setter, and an
+                // ordinary user word declaring a quotation parameter alike; an
+                // `extern` never reaches here (its declared effect cannot name
+                // a `Type::Quotation`, rejected at declaration).
+                if let Type::Quotation(eff) = *want {
+                    if let Some(QuotRef::Known(id)) = found.quot {
+                        materialize_quotation_at_boundary(
+                            id,
+                            eff,
+                            "be stored",
+                            name,
+                            span,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                        )?;
+                        continue;
+                    }
+                    // An already-erased runtime quotation value falls through
+                    // to the ordinary `match_slot` (Exact) below.
+                }
                 // R9: a quotation argument rejects before ordinary unification,
                 // so the message names the word rather than mismatching the
                 // `Cstr` placeholder. Also covers generated struct
