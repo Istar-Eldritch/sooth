@@ -489,8 +489,9 @@ for `max` is unblocked.
 
 **Next action: Phase 4 Slice 6f (liveness ends at last use).** 6c, 6d, and 6e are all
 complete; 6f's brief and spec (`docs/phase4-slice6f-brief.md`, `docs/phase4-slice6f-spec.md`)
-are already written. It has to read before slice 7, which points Phase 3 Slice 6's escape
-checking at a new carrier (closure captures) once closures start capturing borrows.
+are already written. It has to read before slice 7b specifically (7a, quotations as values, does not depend on
+it), which points Phase 3 Slice 6's escape checking at a new carrier (closure captures) once
+closures start capturing borrows.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1553,11 +1554,22 @@ then find out what the compiler owes it.
    `if`"; 6b did not, and never claimed to once its pre-check corrected the charter. The
    polymorphic `if` any interesting closure-taking word needs is 6e, which is therefore a real
    prerequisite here -- now met.*
+   **Split 7a/7b, the same reason 6d/6e/6f split off 6a-6c: one dependency the rest of the
+   slice does not share.** Capturing a `Copy` or linear local never touches the escape
+   checker at all — a `Copy` capture is just a value copied into the env struct, and a
+   linear one disposes through the existing destructor mechanism when the closure drops —
+   so the representation, the calling convention, and both closure kinds have nothing to wait
+   for. Capturing a *reference* is the one exception: it needs Phase 3 Slice 6's escape
+   checking pointed at the env struct as a new carrier, and that checking is exactly what 6f
+   is mid-flight on changing (when a bound reference's borrow ends). Building the
+   reference-capture rule against today's whole-block liveness only to redo it once 6f lands
+   is the same failure this plan keeps citing elsewhere, so it is split off rather than risked.
+
+   **7a — quotations as values: representation, calling convention, downward and upward
+   closures, `Copy`/linear captures.**
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The environment of a downward closure (passed in, never returned or stored beyond the
-   frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
-   discipline that keeps it sound is Phase 3 Slice 6's structural escape checking, pointed at
-   a new carrier, since a closure simply inherits its captures' restrictions. The
+   frame) is an ordinary frame-local aggregate, so it needs no allocator. The
    `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
    question is how the call takes the closure, and Sooth already spells all three, `call`
    through `&q`, through `&!q`, and by value. A closure capturing a linear value is itself
@@ -1583,8 +1595,33 @@ then find out what the compiler owes it.
    dynamic dispatch through escaping quotations as a hot-path enemy). Decide at its brief
    whether downward and upward land together; probably yes, since splitting means designing
    the environment layout twice.
+   **No new liveness rule needed for this half.** An env struct is an ordinary struct type,
+   so the existing "a reference cannot be stored" structural check (unconditional, unlike
+   `live_derivs`'s timing-based one) already rejects a reference-typed capture with no
+   special-casing — which is exactly why this half has nothing to wait for.
+   Depends on 6a (the calling convention's real consumer) and 6e (a closure-taking word that
+   branches, now met). Independent of 6f.
    Dogfood: rewrite `examples/vm.sth`'s dispatch around a table of quotations and compare it
    against the enum-plus-clause version it replaces.
+   **Exit:** a quotation stored in a struct field, returned from a word, and passed to a
+   higher-order word the compiler does not inline, invoked through `call` at a path fixed
+   only at runtime; a closure capturing a `Copy` or linear local, both downward (frame-local)
+   and, separately, escaping via `^Env`; dropping a linear-capturing closure disposes its
+   captures.
+
+   **7b — capturing a reference.**
+   Points Phase 3 Slice 6's escape checking at the env-struct carrier 7a introduces, using
+   6f's settled last-use rule rather than duplicating the whole-block one it would otherwise
+   have to invent standalone: a closure may capture a `&T`/`&!T` local exactly when the
+   closure itself is fully used (called, or for an upward closure, dropped) before that
+   reference's last use would otherwise have ended it. The motivating shape is read-only
+   ambient context a non-inlined higher-order word wants by reference rather than copied in —
+   undecided until this slice's own brief, since nothing has been probed against a working
+   compiler yet (quotations are not runtime values before 7a lands).
+   Depends on 6f (the exact rule this points at) and 7a (the carrier it points the rule at).
+   **Exit:** a closure capturing a reference to a local, called while that reference is still
+   live, compiles and runs; one captured past its last use (or, for an upward closure, past
+   its owning frame) is rejected with a located error naming the capture.
 
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
