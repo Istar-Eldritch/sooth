@@ -1312,6 +1312,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         env.insert(decl.name.clone(), sig_of(&decl.effect));
     }
 
+    // A duplicate word name in one module is rejected here, before the
+    // population loop below would otherwise silently keep only the last one
+    // seen and let both bodies reach codegen.
+    check_duplicate_word_names(&module.words)?;
+
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
     // either dead (`check_shuffle`'s `"drop"` arm intercepts every call site
@@ -2066,6 +2071,48 @@ fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Res
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
                 decl.name_static, decl.span.line, decl.span.col
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// A duplicate word name within one module leaks past every existing check
+/// straight to the linker's bare `symbol already defined` error: nothing
+/// before this rejects a repeat `word.name` the way `check_duplicate_type_names`
+/// already does for structs/enums, so the word-environment population loop in
+/// `check` silently keeps only the last one seen and both bodies still lower
+/// to codegen. Keyed by `(module, name)`, mirroring that check exactly, so two
+/// modules each declaring `push` is not a duplicate (`resolve::mangle` already
+/// disambiguates that pair's symbols; by the time this runs post-`resolve`,
+/// their `name`s already differ) while two `push`es in one module still
+/// mangle identically and collide here.
+///
+/// `drop`-named words are skipped entirely, not treated as exempt from the
+/// rule: `find_drop_overloads` (run earlier, unconditionally, as the first
+/// step of `check`) already owns every `drop` word's multiplicity, keyed by
+/// the struct id it overrides rather than by the shared literal name `"drop"`
+/// -- two overloads for two distinct structs are not a duplicate and must
+/// coexist, while a second overload for the *same* struct already failed
+/// there, before this ever runs. Re-checking `drop` here by name alone would
+/// reject that legitimate multi-type overloading (Phase 3 slice 8b) as a
+/// false positive. `main` gets no such carve-out: nothing else validates a
+/// repeat `main` within one module, so it is an ordinary word for this check.
+fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
+    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
+    for word in words {
+        if word.name == "drop" {
+            continue;
+        }
+        let span = word_span(word);
+        if let Some(first) = seen.insert((word.module, word.name.as_str()), span) {
+            return Err(format!(
+                "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
+                crate::resolve::demangle_word(&word.name),
+                span.line,
+                span.col,
+                first.line,
+                first.col
             ));
         }
     }
@@ -8225,6 +8272,55 @@ mod tests {
         assert!(err.contains("duplicate type `Point`"), "raw name: {err}");
     }
 
+    /// Two words of the same name in one module are rejected; the same pair
+    /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).
+    #[test]
+    fn duplicate_word_name_is_rejected_only_within_one_module() {
+        fn word_at(name: &str, module: u32, line: u32) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect::default(),
+                body: WordBody::Terms {
+                    terms: vec![Term {
+                        kind: TermKind::IntLit(0),
+                        span: Span { line, col: 1 },
+                    }],
+                },
+                poly: None,
+                module,
+            }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            word_at(name, module, 0)
+        }
+
+        // Two modules, one `push` each: not a duplicate.
+        assert!(check_duplicate_word_names(&[word("push", 0), word("push", 1)]).is_ok());
+
+        // Same module, two `push`: a duplicate, naming both locations.
+        let err = check_duplicate_word_names(&[word_at("push", 0, 1), word_at("push", 0, 2)])
+            .unwrap_err();
+        assert!(
+            err.contains("duplicate word `push`") && err.contains("line 2"),
+            "names the repeat's location: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "also names the first definition's location: {err}"
+        );
+
+        // A repeat `main` in one module is caught too: nothing else validates
+        // `main`'s multiplicity within a module.
+        let err = check_duplicate_word_names(&[word("main", 0), word("main", 0)]).unwrap_err();
+        assert!(err.contains("duplicate word `main`"), "names main: {err}");
+
+        // Two `drop`s sharing a module are *not* rejected here: distinct-struct
+        // overloading is `find_drop_overloads`'s job, keyed by struct id, not
+        // this check's; re-flagging by name alone would reject Phase 3 slice
+        // 8b's legitimate multi-type overloading.
+        assert!(check_duplicate_word_names(&[word("drop", 0), word("drop", 0)]).is_ok());
+    }
+
     // A one-field struct with a `drop` overload: linear for the same reason any
     // resource is, used to force the `Copy`-bound failure (X5).
     const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
@@ -9595,6 +9691,25 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_duplicate_word_in_one_file_is_error() {
+        // Two `push` words in one file used to reach codegen silently (the
+        // env-population loop kept only the last), surfacing only as a bare
+        // linker `symbol already defined` error at the very end of the
+        // pipeline. Now it is a located compiler diagnostic.
+        let err =
+            check_src(": push ( -- i64 ) 1 ;\n: push ( -- i64 ) 2 ;\n: main ( -- ) push drop ;")
+                .unwrap_err();
+        assert!(
+            err.contains("duplicate word `push`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "names the first definition's location too: {err}"
+        );
     }
 
     #[test]
