@@ -286,7 +286,7 @@ pub(crate) fn check_no_main_in_closure(
     let path = closure.path_of(main.module);
     let span = check::word_span(main);
     Err(format!(
-        "error: cannot import `{}`: it declares a word named `main` (line {}, col {}); a library file may not declare `main`",
+        "error: `{}` declares a word named `main` (line {}, col {}); a library file may not declare `main`",
         path.display(),
         span.line,
         span.col
