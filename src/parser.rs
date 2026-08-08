@@ -928,6 +928,7 @@ impl<'t> Parser<'t> {
             body,
             poly,
             module: self.module,
+            span: name_span,
         })
     }
 

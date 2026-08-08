@@ -344,6 +344,7 @@ fn remap_imported_combinator(
         },
         poly,
         module: module_base + w.module,
+        span: w.span,
     }
 }
 

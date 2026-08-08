@@ -1899,10 +1899,13 @@ fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
     // covers module-0 words) -- so a same-named session word defined first
     // would otherwise silently win that body call instead of erroring. The
     // guard fires on the name alone, no import needed to reproduce.
+    // (Column 3 is the name token itself, not the body's first term: `WordDef`
+    // carries its own declaration span now, so `word_span` no longer derives
+    // a word's location from its body -- see the `word_span` fix.)
     let transcript = repl_error(": dhelp__m1 ( i64 -- i64 ) 1000 + ;\n:quit\n");
     assert_eq!(
         transcript,
-        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 28)\n",
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 3)\n",
         "the mangled-suffix name is rejected outright, never defined: {transcript}"
     );
     assert!(
@@ -1913,7 +1916,7 @@ fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
     let transcript = repl_error(": foo__import7 ( -- i64 ) 1 ;\n:quit\n");
     assert_eq!(
         transcript,
-        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`foo__import7` at line 1, col 27)\n",
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`foo__import7` at line 1, col 3)\n",
         "the import-epoch-suffix name is rejected outright, never defined: {transcript}"
     );
     assert!(
