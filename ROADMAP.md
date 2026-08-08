@@ -1400,9 +1400,10 @@ then find out what the compiler owes it.
    — with the nested-loop goldens (all five combinators, any pairing, depth 3) and the slice-3
    aliasing guards green, and a destructor call inside a `times` body inheriting the fix for
    free (its fused loop already opens at its own `IrFunc`'s true entry).
-   **6e — `if` in a polymorphic body. Complete.** Lifted the rejection at
-   `src/check.rs:3690` (`` `if` in the polymorphic body of `{word}` is not yet supported ``),
-   which had stood since slice 1 deferred it and which no later slice picked up. **A 6-family letter for ordering and
+   **6e — `if` in a polymorphic body. Complete.** Lifted the rejection in `poly_term`'s
+   `TermKind::If` arm (`src/check.rs:3715`, formerly `` `if` in the polymorphic body of
+   `{word}` is not yet supported ``), which had stood since slice 1 deferred it and which no
+   later slice picked up. **A 6-family letter for ordering and
    discovery, not subject matter:** 6b's pre-check is what measured this gap (while ruling it
    out of 6b's scope), and it has to read before slice 7, which needs it. Unlike 6d, whose
    consumers are the 6a combinators themselves, this one's consumers sit outside the family
