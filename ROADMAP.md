@@ -1628,14 +1628,30 @@ then find out what the compiler owes it.
 
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
-   concrete types is a rule that gets rewritten once type variables exist. **The compiler
-   already does this by hand and this slice is where it stops**: the numeric-tower operators
-   and `.` (type-directed over any printable scalar) dispatch on the concrete operand type
-   inside `check_operator`/`check_term` match arms rather than through any table — which is
-   why `builtin_table` is empty. `len`'s length-polymorphism (slice 1) and 8b's `drop`
-   overloads are the other such sites; the latter are explicitly parked for here ("`drop`
-   becoming fully polymorphic is still Phase 4"), and absorbing them means retiring the
-   hardcoded interception arms in `check.rs`/`ir.rs` that currently run before any env lookup.
+   concrete types is a rule that gets rewritten once type variables exist.
+   **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is mechanical with no design
+   risk, the other is the open question.** 8a proves the table on cases that already work
+   today, so nothing in it can regress observable behaviour. 8b is where `drop` picks up a
+   bound it did not have before, exactly the kind of decision Phase 3's own Slice 8 took
+   three review rounds to settle when it split into 8a/8b/8c mid-flight for the same reason.
+   Landing 8a first also unblocks slice 9's dependency on dispatch early: slice 9 needs `.`'s
+   overload (an 8a case) for `Bool`'s type-directed printing, not `drop`'s, so it does not
+   have to wait on 8b's argument to be settled.
+
+   **8a — the mechanism.** The compiler already does this by hand and this slice is where it
+   stops: the numeric-tower operators and `.` (type-directed over any printable scalar)
+   dispatch on the concrete operand type inside `check_operator`/`check_term` match arms
+   rather than through any table — which is why `builtin_table` is empty. `len`'s
+   length-polymorphism (slice 1) is the other such site. Retire the hardcoded match arms into
+   a real overload table, keyed the same way the hand-written arms already resolve, with a
+   golden asserting every existing operator/`.`/`len` call site lowers identically.
+   **Exit:** `check_operator`/`check_term`'s type-directed arms are gone, `builtin_table` is
+   populated, and the full existing corpus (goldens, examples) is unchanged byte-for-byte.
+
+   **8b — polymorphic `drop`, and the constraint it forces.** `drop` overloads ride the 8a
+   table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
+   that currently run before any env lookup (explicitly parked here since Phase 3 slice 8b,
+   "`drop` becoming fully polymorphic is still Phase 4").
    **One constraint from the destructor side, which the polymorphic `drop` must not
    violate: it cannot be structurally total.** A generic `drop ( 'T -- )` that accepts a
    resource type discharges the linear obligation while leaking the resource, turning
@@ -1676,35 +1692,43 @@ then find out what the compiler owes it.
    opaque-by-default draft would have papered over it, and only for types whose author chose
    opacity), which is an argument for fixing it properly here rather than with a visibility
    rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
-   **A second, unrelated sibling hole, measured while scoping slice 5b: two modules can each
-   declare `main` and nothing rejects it.** `mangle` (`src/resolve.rs`) exempts `main`/`drop`
-   from module-disambiguating suffixes, and `check_main_effect` (`src/check.rs`) finds the
-   *first* word literally named `main` in the whole checked module with no uniqueness check.
-   Slice 5a shipped with this latent (a library file has no reason to declare `main`); slice 5b
-   closes it on the REPL path it's building (a located rejection of an imported file declaring
-   `main`) but leaves the native path unfixed. Whoever picks this up: reject it the same way
-   slice 5a already rejects an exported word naming a private type, at the declaration, naming
-   both the file and the word.
-   **A third sibling hole, measured while designing slice 5b's import-symbol scheme: two
-   words of the same name in one file are not rejected by any check and leak a bare
-   assembler `symbol already defined` error, native build included.** `check_duplicate_type_names`
-   (`src/check.rs`) covers structs/enums only; the word env (`HashMap<String, Sig>` built by
-   plain `insert`) silently overwrites on a repeat name, so both `WordDef`s still lower to
-   codegen and only the linker notices. Slice 5b's REPL-side import-symbol design inherits
-   this pre-existing gap unfixed (an imported closure with a duplicate word name gets the
-   same leaky error) rather than patching it as a drive-by. Whoever picks this up: a located
-   duplicate-word-name check, parallel to `check_duplicate_type_names`, naming both
-   definitions' locations.
+   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`;
+   a declared-consumer type (`File`) rejects the generic path at the call site, naming its
+   named consumer; destructuring a type with a `drop` override is a located error; the
+   container-boundary decision is recorded and, if implicit, exercised by a generated
+   traversal that calls a non-`drop` disposal word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
    the other eight enable: it needs quotations (slice 4) for `if` to be a word at all, and
-   dispatch (slice 8) so `Bool`'s type-directed printing becomes an ordinary overload instead
-   of a re-added special case — which is the whole point of waiting, per the bundle note
-   above. Mechanically it is a large migration rather than a design problem: `bool` has been
-   in the test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special
-   cases, let the exhaustiveness checker find the arms, migrate the call sites) and should
-   run 8c's lightweight process.
+   dispatch (slice 8a specifically — see above) so `Bool`'s type-directed printing becomes an
+   ordinary overload instead of a re-added special case — which is the whole point of
+   waiting, per the bundle note above. Mechanically it is a large migration rather than a
+   design problem: `bool` has been in the test suite since Phase 2 Slice 1, so this is
+   8c-shaped work (delete the special cases, let the exhaustiveness checker find the arms,
+   migrate the call sites) and should run 8c's lightweight process.
+
+**Two pre-existing bugs, unrelated to this slice plan, fixable any time.** Both were measured
+while scoping slice 5a/5b and gated on nothing here — neither needs type variables, dispatch,
+or any other Phase 4 machinery, only the module system slice 5 already shipped. Do not let
+them drift onto slice 8's dependency chain just because they were noticed nearby.
+
+- **Two modules can each declare `main` and nothing rejects it.** `mangle` (`src/resolve.rs`)
+  exempts `main`/`drop` from module-disambiguating suffixes, and `check_main_effect`
+  (`src/check.rs`) finds the *first* word literally named `main` in the whole checked module
+  with no uniqueness check. Slice 5a shipped with this latent (a library file has no reason
+  to declare `main`); slice 5b closes it on the REPL path it's building (a located rejection
+  of an imported file declaring `main`) but leaves the native path unfixed. Fix: reject it
+  the same way slice 5a already rejects an exported word naming a private type, at the
+  declaration, naming both the file and the word.
+- **Two words of the same name in one file are not rejected by any check** and leak a bare
+  assembler `symbol already defined` error, native build included. `check_duplicate_type_names`
+  (`src/check.rs`) covers structs/enums only; the word env (`HashMap<String, Sig>` built by
+  plain `insert`) silently overwrites on a repeat name, so both `WordDef`s still lower to
+  codegen and only the linker notices. Slice 5b's REPL-side import-symbol design inherits this
+  pre-existing gap unfixed (an imported closure with a duplicate word name gets the same leaky
+  error). Fix: a located duplicate-word-name check, parallel to `check_duplicate_type_names`,
+  naming both definitions' locations.
 
 ### Phase 5 — Errors as values  `[S]`
 
