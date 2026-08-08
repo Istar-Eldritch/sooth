@@ -1644,7 +1644,13 @@ then find out what the compiler owes it.
    rather than through any table — which is why `builtin_table` is empty. `len`'s
    length-polymorphism (slice 1) is the other such site. Retire the hardcoded match arms into
    a real overload table, with a golden asserting every existing operator/`.`/`len` call site
-   lowers identically.
+   lowers identically. Brief written (`docs/phase4-slice8a-brief.md`), which adds a third
+   measured collision to the two fixed above: `qbe_name` (`src/backend/qbe.rs`) maps every
+   character outside `[A-Za-z0-9_.]` to `_`, so `+` and `-` defined in one file both emit the
+   bare symbol `_` and already fail at the assembler as already-defined, despite that
+   function's doc comment claiming a collision is impossible. Invisible today only because
+   operator definitions are unreachable; in scope here, because this slice is what makes
+   them reachable.
 
    **Operators are just words, so a user overload needs no new syntax: `: + ( Vec2 Vec2 --
    Vec2 ) ;` is already the definition form, and it already parses and checks.** What blocks
@@ -1654,7 +1660,7 @@ then find out what the compiler owes it.
    any lookup. Sooth today silently accepts a word it will never dispatch to, which is the
    exact class of Forth silent failure this language exists to reject. `drop` is the one
    existing counterexample, resolved by a bespoke registry (`find_drop_overloads`); 8a
-   generalises that rather than inventing it. **Three rules, settled:**
+   generalises that rather than inventing it. **Four rules, settled:**
    1. **No shadowing.** A user overload whose input types exactly match an existing candidate
       (builtin or imported) is a located error, not a silent override — the same shape as the
       duplicate-word check.
@@ -1665,11 +1671,33 @@ then find out what the compiler owes it.
       `+` for it without importing `+`. Absence is a resolution error naming the missing
       overload, never a silent fallback. Two candidates with identical input types in one
       scope is rule 1's error regardless of whether they arrived locally or by import.
+   4. **One arity per name in scope.** Candidates for a name must agree on how many inputs
+      they take, because the resolver has to know how deep to read the stack before it can
+      match any candidate. `: + ( Vec2 -- Vec2 ) ;` alongside `: + ( Vec2 Vec2 -- Vec2 ) ;`
+      leaves `a b +` matching both, one consuming both operands and one leaving `a`, and both
+      check locally. Disagreement is a located error where the second candidate *enters
+      scope*: the definition site when one is local, the import site when both are imported.
+      It is not a call-site ambiguity to be resolved by ranking; the clash is rejected before
+      any call site is looked at.
 
    Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
    structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot
-   simply inherit these three rules, and which ends with `drop` no longer being the universal
+   simply inherit these four rules, and which ends with `drop` no longer being the universal
    disposal verb at all.
+
+   **These rules widen a check that shipped after this plan was written.**
+   `check_duplicate_word_names` (`check.rs`) keys on `(module, name)` and exempts only
+   `drop`, so two `+` definitions in one file are rejected as duplicates before any overload
+   resolution runs. 8a widens that key to `(module, name, input types)` rather than exempting
+   overloadable names: an exemption class would reproduce the bespoke registry
+   (`find_drop_overloads`) that 8a exists to retire, and two collision checks that have to
+   agree with each other is a worse failure mode than one check with a wider key. Deleting it
+   and letting table registration own collisions is also wrong: it hands back the bare linker
+   `symbol already defined` error that check was added to replace. Enforcement stays at the
+   two sites that already exist — that check for definitions, and `check_selective_imports`'
+   `selective_collision_error`/`selective_collides_with_local_error` for imports, which are
+   already the two halves rule 4 needs. `drop`'s exemption survives 8a and dies in 8b, when
+   `drop` moves onto the table; do not delete it early as tidying.
 
    **The brief's first job is the table's entry shape, which is not `Sig`.** Three measured
    constraints rule that out, all in `src/check.rs`: (a) `builtin_table` is
@@ -1691,7 +1719,12 @@ then find out what the compiler owes it.
    coercion is one cross-cutting rule shared by a dozen binary operators, so the brief must
    say whether it runs before lookup (leaving the table to answer only "is this operator
    defined for these types") or becomes table rows (which would multiply entries and lose
-   X10's "needs an explicit conversion to `usize`" specificity).
+   X10's "needs an explicit conversion to `usize`" specificity); and (d) the key cannot be a
+   plain list of concrete types once polymorphic words are candidates, because a poly word's
+   `effect` is empty by construction (its signature lives in `PolySig`, slice 1). So
+   `: + ( 'T 'T -- 'T )` against `: + ( i64 i64 -- i64 )` is *overlap*, not identity: rule 1
+   forbids identity and rule 2 ranks exact above coercion, and neither covers a concrete
+   candidate sitting inside a generic candidate's domain.
    **Exit:** `check_operator`/`check_term`'s type-directed arms are gone, `builtin_table` is
    populated, the full existing corpus (goldens, examples) is unchanged byte-for-byte, and a
    user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches* — with rule 1's
