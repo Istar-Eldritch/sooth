@@ -757,7 +757,11 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    the special-casing has become the mechanism and Phase 4's generics should subsume all of
    them. Allocation is a single global allocator, deliberately not parameterized per value,
    since a swappable global is cheap to retrofit later while per-value allocators change every
-   value's representation. See [the brief](./docs/phase3-slice2-brief.md) and
+   value's representation. **Half that rationale is wrong, corrected rather than rewritten**:
+   under the type-parameter design Phase 6 will use (an allocator type parameter defaulted to
+   the global one, carrying a zero-size handle in that case), a per-value allocator does *not*
+   change representation. The deferral holds on the other half — it needs generics, which did
+   not exist here. See [the brief](./docs/phase3-slice2-brief.md) and
    [the spec](./docs/phase3-slice2-spec.md) for the full decision record.
    **Known limitation, and where it will first hurt**: because a cell is linear and slice 1
    rejects linear array elements, there is **no collection of resources** in this slice, and
@@ -1649,6 +1653,17 @@ then find out what the compiler owes it.
    compiler-generated traversal nobody reads while direct code keeps `close` visible, but
    decide it rather than inherit it. Slice 5's export rule depends on the answer: whatever
    `drop` cannot dispose, a module must export a disposal word for.
+   **Answer that generally: disposal may require inputs beyond the value.** A resource needs
+   a named consumer (`close`); a heap value under Phase 6's explicit allocators needs the
+   allocator that owns it (`free ( &!'A ^T -- )`). Both break the assumption that
+   `drop ( 'T -- )` is the whole disposal interface, and the container boundary above is one
+   question, not two: whether generated traversal of a `Vec[Box['A]]` may thread the
+   allocator down is the same decision as whether traversal of a `List[File]` may call
+   `close`. Settle the general form here, where the constraint system is being designed —
+   what a disposal word may require, how the constraint records it, how generated traversal
+   supplies it — rather than inferring it from the single resource case and reopening it in
+   Phase 6, whose *Generic struct declarations* item and Slice 2 allocator rework are the
+   consumers waiting on the answer.
    **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
    override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
    the field and never runs the destructor. So today a `File` can have its fd extracted and the
@@ -1772,6 +1787,18 @@ out of (a bundle is an ABI detail, not a nameable type). `Vec['T]` and `Map['K '
 real consumers and they live here, which is what makes this the right phase: specifying it
 in Phase 4 would have designed it against a consumer that does not exist, the same test
 that sends open multimethods' former slot to Phase 6.
+**Explicit allocators ride on this item and belong in its brief, not after it.** A defaulted
+type parameter (`Vec['T 'A = Global]`, a zero-size handle in the default case) is what makes
+an allocator explicit without the parameter appearing at every use site, and the `core` /
+`fixed` / `alloc` split bounds where it can appear at all. Retrofitting it onto collections
+specified without it is the mistake Rust's `allocator_api` is still paying for, and this is
+the only moment it is cheap. Two prerequisites, both already logged: Phase 4 Slice 8's
+general answer to what a disposal word may require beyond the value, and Slice 2's parked
+rework of the compiler-emitted `malloc`/`free` shim into ordinary bound foreign words, since
+a user-supplied allocator cannot be a backend special case. Ambient context (Odin/Jai-style)
+is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
+rather than the allocation site, which converts a compile error into a runtime one in the
+language whose point is the opposite.
 
 **Worklist-based disposal for branching structures (moved from Phase 3 Slice 4).** A
 multi-child recursive type's synthesized destructor loops only its *last* recursive field
