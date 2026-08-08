@@ -2099,18 +2099,20 @@ fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Res
 /// false positive. `main` gets no such carve-out: nothing else validates a
 /// repeat `main` within one module, so it is an ordinary word for this check.
 fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
-    let mut seen: HashMap<(u32, &str), ()> = HashMap::new();
+    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
     for word in words {
         if word.name == "drop" {
             continue;
         }
-        if seen.insert((word.module, word.name.as_str()), ()).is_some() {
-            let span = word_span(word);
+        let span = word_span(word);
+        if let Some(first) = seen.insert((word.module, word.name.as_str()), span) {
             return Err(format!(
-                "error: duplicate word `{}` (line {}, col {})",
+                "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
                 crate::resolve::demangle_word(&word.name),
                 span.line,
-                span.col
+                span.col,
+                first.line,
+                first.col
             ));
         }
     }
@@ -8274,24 +8276,37 @@ mod tests {
     /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).
     #[test]
     fn duplicate_word_name_is_rejected_only_within_one_module() {
-        fn word(name: &str, module: u32) -> WordDef {
+        fn word_at(name: &str, module: u32, line: u32) -> WordDef {
             WordDef {
                 name: name.to_string(),
                 effect: StackEffect::default(),
-                body: WordBody::Terms { terms: Vec::new() },
+                body: WordBody::Terms {
+                    terms: vec![Term {
+                        kind: TermKind::IntLit(0),
+                        span: Span { line, col: 1 },
+                    }],
+                },
                 poly: None,
                 module,
             }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            word_at(name, module, 0)
         }
 
         // Two modules, one `push` each: not a duplicate.
         assert!(check_duplicate_word_names(&[word("push", 0), word("push", 1)]).is_ok());
 
-        // Same module, two `push`: a duplicate, named by the word.
-        let err = check_duplicate_word_names(&[word("push", 0), word("push", 0)]).unwrap_err();
+        // Same module, two `push`: a duplicate, naming both locations.
+        let err = check_duplicate_word_names(&[word_at("push", 0, 1), word_at("push", 0, 2)])
+            .unwrap_err();
         assert!(
-            err.contains("duplicate word `push`"),
-            "names the word: {err}"
+            err.contains("duplicate word `push`") && err.contains("line 2"),
+            "names the repeat's location: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "also names the first definition's location: {err}"
         );
 
         // A repeat `main` in one module is caught too: nothing else validates
@@ -9690,6 +9705,10 @@ mod tests {
         assert!(
             err.contains("duplicate word `push`"),
             "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "names the first definition's location too: {err}"
         );
     }
 
