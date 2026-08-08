@@ -1677,8 +1677,15 @@ then find out what the compiler owes it.
    candidates per name at all; (b) `len` is non-consuming over an array of *any* length and
    element type, which is a `PolySig`-shaped entry, not a finite set of concrete rows — so
    either the table carries generic entries from day one or `len` is carved out, and the
-   roadmap's claim that `len` is simply absorbed is the thing to check first; (c) `.`
-   dispatches on a *category* (`is_numeric() || is_bool() || Str | Cstr`), a predicate that
+   roadmap's claim that `len` is simply absorbed is the thing to check first. `len` is also the
+   case proving an entry cannot be a signature alone: its two *shipped* candidates differ in
+   lowering and in consumption, not merely in operand type. The array case folds to the constant
+   `N` off the type and leaves the array on the stack; `str` consumes its operand and emits a
+   runtime `Instr::StrLen` load (`ir.rs`, R8: the length is carried at runtime, not derivable
+   from the type). So an entry carries a lowering, not just an effect. A third candidate of the
+   runtime kind appears if the deferred view type ever lands (DESIGN.md, *Slicing a buffer into
+   a view*, which now records 8a as its ordering gate); the entry shape should not preclude it;
+   (c) `.` dispatches on a *category* (`is_numeric() || is_bool() || Str | Cstr`), a predicate that
    exists only as Rust code, so table-ifying it means either enumerating every concrete
    numeric type by hand or giving entries a category/bound key. Related: `unify_pair`'s
    coercion is one cross-cutting rule shared by a dozen binary operators, so the brief must

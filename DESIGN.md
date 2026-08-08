@@ -964,9 +964,24 @@ that were argued out rather than assumed.
   answer, alongside `contains_reference` and `is_copy`. What stays true is that a borrowed view
   **cannot be returned**: the no-declared-output-reference rule is precisely what keeps a
   two-point lattice from having to grow into lifetime variables, so a word handing a region back
-  returns indices instead. Still deferred until a real client pushes on it. The likely client is
-  Phase 9's self-hosted lexer, which wants byte offsets for diagnostics anyway, and is also where
-  the evidence would exist to justify whatever it costs.
+  returns indices instead.
+  **Storage versus view, and why the length stays in the array type.** The length lives in the
+  *storage* type (`[T N]`: statically sized, so it can be a struct field and needs no allocator,
+  which is what makes the `fixed` layer possible at all) and is erased in the *view* type. Those
+  stay two types with two costs, permanently: `len` on storage folds to a compile-time constant
+  read off the type, `len` on a view is a runtime load. Phase 4 Slice 1's length polymorphism
+  (`'N`) is the partial substitute standing in for the missing view, which is why it
+  monomorphizes per length rather than erasing it.
+  Ordering, whenever it lands: after Phase 4 Slice 8a, since one `len` or `&>` accepting both
+  storage and a view *is* static overloading, and building it earlier only adds hardcoded
+  dispatch arms that slice exists to retire.
+  Still deferred until a real client pushes on it. What makes deferring cheap here, unlike
+  explicit allocators (viral through every collection's type parameter, so they land with the
+  collections or not at all), is that a view type is additive: a collection specified without one
+  gains view-returning words later without changing existing signatures. The first plausible
+  client is Phase 6's collections wanting to hand out a view over their storage, earlier than the
+  self-hosted lexer this entry used to name, which wants byte offsets for diagnostics anyway and
+  remains where the evidence to justify whatever it costs would exist.
 - **`.` appending no separator, for every type (decided, not yet implemented).** Today `.` appends
   a trailing newline for every type except `str`/`cstr` (slice 8a's R9). The decision is to make it
   uniform the other way: `.` writes exactly the value and nothing else, a newline spelled
