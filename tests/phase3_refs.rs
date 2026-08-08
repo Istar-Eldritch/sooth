@@ -911,6 +911,24 @@ fn mutable_borrow_of_name_aliased_place_is_error() {
 }
 
 #[test]
+fn mutable_borrow_of_name_aliased_place_dead_is_accepted() {
+    // T9/Q6/D8: the alias analogue of the borrow-half probe pair. `p` and `q`
+    // are two names for one Copy frame slot, but `q`'s last use is *before* the
+    // mutable borrow of `p`, so `q` is dead there and is no longer a second
+    // live name for the region — the borrow is accepted. `V` is Copy, so `q V>`
+    // reads without consuming; only the last-use filter (not the move check)
+    // can retire `q` here, which is what makes this the mutation pair for M1.
+    let (stdout, code) = run_src(
+        "name-aliased-place-dead-accepted",
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  v v | p q |\n  q V> . .\n  \
+         &!p &!V>x 1 +!\n  p V> . . ;\n",
+    );
+    assert_eq!(stdout, "2\n1\n2\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn mutable_borrow_of_peek_aliased_place_is_error() {
     // The second route: a non-consuming peek pushes the field's interior
     // address, so two peeks of one field alias with no naming involved.
@@ -1186,6 +1204,25 @@ fn mutable_borrow_of_a_place_a_merged_peek_may_denote_is_error() {
     assert!(
         err.contains("cannot borrow `t` mutably") && err.contains("it is aliased by `inner`"),
         "a peek out of a merge must keep every arm's field region: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_aliased_by_name_used_only_in_a_later_arm_is_error() {
+    // Q3/M2: `p` and `v` name one Copy slot; `v`'s only use after the borrow is
+    // inside a trailing `if` arm. The conservative-max scan must attribute that
+    // nested use to the `if` term (which follows the borrow), keeping `v` live
+    // so the borrow is still rejected. Dropping the if-arm recursion would see
+    // `v` as dead at the borrow and miss the hazard — so this guard is what
+    // proves Q3's max is implemented, not assumed.
+    let err = check_error(
+        "type: V x i64 y i64 ;\n\
+         : main ( -- )\n  1 2 V | v |\n  v | p |\n  \
+         &!p &!V>x 99 !\n  1 0 > if v V> . . else 5 5 . . end ;\n",
+    );
+    assert!(
+        err.contains("cannot borrow `p` mutably") && err.contains("it is aliased by `v`"),
+        "a nested-arm use after the borrow must keep the alias live: {err}"
     );
 }
 

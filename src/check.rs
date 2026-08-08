@@ -967,11 +967,16 @@ enum AliasOrigin<'a> {
 /// of it. A bound name is preferred over a stack slot when both alias, being the
 /// more actionable end to report, and names are sorted so a place aliased twice
 /// always reports the same one. A consumed local is not a name for anything, so
-/// it never aliases.
+/// it never aliases; nor is a name whose last use has passed (Q6/D8): filtering
+/// each candidate by its *own* last use preserves overlap — a dead name A is
+/// dropped while any still-live name B overlapping `place` keeps rejecting, so
+/// the borrow is accepted only when no live name can observe the mutation.
 fn aliasing_origin<'a>(
     stack: &[Slot],
     scope: &'a Scope,
     prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     place: &str,
 ) -> Option<AliasOrigin<'a>> {
     let set = scope.local(place)?.aliases?;
@@ -983,6 +988,7 @@ fn aliasing_origin<'a>(
             b.name != place
                 && b.aliases.is_some_and(&overlaps)
                 && scope.moves.moved_site(&b.name).is_none()
+                && !live.dead(&b.name, at)
         })
         .map(|b| b.name.as_str())
         .collect();
@@ -7419,7 +7425,7 @@ fn check_reference_word(
             // caught here, one that comes later is caught there. Naming an
             // aggregate with no `&!` anywhere near it stays free either way.
             if mutable {
-                if let Some(origin) = aliasing_origin(stack, scope, prov, rest) {
+                if let Some(origin) = aliasing_origin(stack, scope, prov, live, at, rest) {
                     return Err(aliased_place_borrow_error(ctx, span, rest, &origin));
                 }
             }
