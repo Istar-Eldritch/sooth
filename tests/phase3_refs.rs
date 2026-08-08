@@ -746,30 +746,102 @@ fn move_of_place_borrowed_on_stack_is_error() {
     );
 }
 
+/// A linear struct with an array field, its `drop` overload printing the
+/// zeroth element so a run golden can observe an in-place store. Linear (has a
+/// `drop`), so naming it consumes it and the consume-while-borrowed check
+/// applies (T3/T4).
+const ACC_PRELUDE: &str = "\
+type: Acc arr [i64 4] ;
+: drop ( Acc -- ) | a | &a &Acc>arr 0 &> @ . a Acc> drop ;
+";
+
 #[test]
 fn move_of_place_borrowed_in_locals_is_error() {
-    // The conflicting borrow sits in the locals map rather than on the virtual
-    // stack: a reference local is live for the whole block.
+    // D5/T1: the borrow is bound to a local *and used after* the consume, so
+    // it is genuinely live at the consume under last-use liveness. Left
+    // unused it would end at its bind and the consume would be legal; the
+    // trailing use of `r` is what makes the rejection real, not the binding.
     let err = check_error(&format!(
-        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &b | r |\n  b sink ;\n"
+        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &b | r |\n  b sink\n  \
+         r &Box>c &^ @ . ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `b` of type `Box`")
             && err.contains("still live"),
-        "a borrow held in a local must count as live: {err}"
+        "a borrow held in a local and used after the consume must count as live: {err}"
     );
-    assert!(err.contains("line 8"), "the error should locate it: {err}");
 }
 
 #[test]
 fn dispose_of_borrowed_place_is_error() {
+    // D5/T2: the mutable-borrow twin of T1, used after the dispose.
     let err = check_error(&format!(
-        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &!b | r |\n  b drop ;\n"
+        "{BOX_PRELUDE}\n: main ( -- )\n  7 ^ Box | b |\n  &!b | r |\n  b drop\n  \
+         r &!Box>c &^ @ . ;\n"
     ));
     assert!(
         err.contains("cannot consume the borrowed local `b` of type `Box`")
             && err.contains("the mutable borrow taken at"),
         "disposing a borrowed place is a consumption like any other: {err}"
+    );
+}
+
+#[test]
+fn borrow_via_local_dead_before_consume_is_accepted() {
+    // T3/probe B: the mutable borrow is bound to `f`, used, and *then* the
+    // place is consumed. `f`'s last use precedes the consume, so the borrow
+    // is dead there and the consume is legal (the borrow half's whole point).
+    let (stdout, code) = run_src(
+        "borrow-via-local-dead-before-consume",
+        &format!(
+            "{ACC_PRELUDE}\n: main ( -- )\n  0 4 fill Acc | acc |\n  \
+             &!acc &!Acc>arr | f |\n  f 0 >usize &!> 5 !\n  acc drop ;\n"
+        ),
+    );
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn use_of_borrow_local_after_consume_is_error() {
+    // T4/probe A: the same terms as T3 reordered so the borrow via `f` is used
+    // *after* the consume, so it is live at the consume and the consume is
+    // rejected. T3/T4 are a mutation pair: same terms, reordered.
+    let err = check_error(&format!(
+        "{ACC_PRELUDE}\n: main ( -- )\n  0 4 fill Acc | acc |\n  \
+         &!acc &!Acc>arr | f |\n  acc drop\n  f 0 >usize &!> 5 ! ;\n"
+    ));
+    assert!(
+        err.contains("cannot consume the borrowed local `acc`"),
+        "using the borrow after the consume must reject the consume: {err}"
+    );
+}
+
+#[test]
+fn two_sequential_mutable_borrows_first_unused_is_accepted() {
+    // D10/T7: two sequential `&!` of one place where the first is bound to a
+    // local never used again. `| f |` pops the reference into the binding
+    // table and a binding read through by nothing is dead, so the second
+    // borrow does not conflict — a deliberate relaxation of per-place
+    // exclusivity.
+    let (stdout, code) = run_src(
+        "two-sequential-mutable-borrows-first-unused",
+        "type: V x i64 ;\n\
+         : main ( -- )\n  1 V | v |\n  &!v | f |\n  &!v &!V>x 1 +!\n  \
+         &v &V>x @ . ;\n",
+    );
+    assert_eq!(stdout, "2\n");
+    assert_eq!(code, 0);
+    // The variant that *does* use `f` after the second borrow keeps the
+    // conflict: `f` is then live when the second `&!v` is taken.
+    let err = check_error(
+        "type: V x i64 ;\n\
+         : main ( -- )\n  1 V | v |\n  &!v | f |\n  &!v &!V>x 1 +!\n  \
+         f &!V>x 2 +! ;\n",
+    );
+    assert!(
+        err.contains("conflicts with a live borrow of `v`"),
+        "a first borrow used after the second must still conflict: {err}"
     );
 }
 
@@ -1310,24 +1382,42 @@ fn reference_to_local_across_back_edge_is_error() {
 #[test]
 fn borrowed_local_carried_across_back_edge_is_error() {
     // The other half of the loop justification: an owned local that is still
-    // borrowed cannot be loop-carried either. This is the existing
-    // naming-side rule (`naming_a_place_while_mutably_borrowed_is_error`),
-    // which fires here just as it would anywhere else — the hazard a
-    // self-tail-recursive loop would otherwise let through is exactly the
-    // one that rule already closes.
-    // The borrow is bound so both arms leave the same depth: the program is
-    // well-formed apart from the borrow, so the rejection cannot be coming
-    // from a stack-effect mismatch instead.
+    // borrowed cannot be loop-carried either. D6/D5: the borrow is bound
+    // *outside* the loop's `if`, so it is inherited into the else-arm
+    // invocation and never relaxed there (last-use only expires bindings
+    // created within the current invocation), staying live across the
+    // back-edge. Naming `acc` to carry it is then still rejected. Bound
+    // *inside* the arm and left unused, the borrow would end at its bind and
+    // the carry would be legal, which is why it is hoisted out here.
     let err = check_error(
         "type: V x i64 ;\n\
-         : spin ( V i64 -- V )\n  | acc n |\n  n 0 = if\n    acc\n  else\n    \
-         &!acc | r |\n    acc n 1 - spin\n  end ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = if\n    0 V\n  else\n    \
+         acc n 1 - spin\n  end ;\n\
          : main ( -- ) ;\n",
     );
     assert!(
         err.contains("cannot name `acc`")
-            && err.contains("a mutable borrow of it is still live (line 7, col 5)"),
+            && err.contains("a mutable borrow of it is still live (line 4, col 3)"),
         "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn reference_carried_into_loop_body_stays_live() {
+    // D6/M4: a reference bound *outside* a loop and used *inside* its body is
+    // live for the whole body — iteration N's use follows iteration N-1
+    // reaching the body end while it is still live. The last-use relaxation
+    // only expires bindings created *within* the current `check_terms`
+    // invocation, so `r`, inherited into the `times` body, is never relaxed
+    // there and a second `&!v` inside the body conflicts with it.
+    let err = check_error(
+        "type: V x i64 ;\n\
+         : main ( -- )\n  1 V | v |\n  &!v | r |\n  \
+         3 [ r &!V>x @ drop  &!v &!V>x 1 +! ] times\n  v drop ;\n",
+    );
+    assert!(
+        err.contains("conflicts with a live borrow of `v`"),
+        "a reference inherited into a loop body must stay live across it: {err}"
     );
 }
 
