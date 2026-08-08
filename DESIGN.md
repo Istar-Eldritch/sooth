@@ -222,6 +222,17 @@ surplus value. Exclusivity is also keyed per place rather than per path, so two
 references into disjoint fields of one local conflict while both are live; sequencing
 them is the workaround.
 
+Borrow *liveness* is asymmetric, and only by accident deliberately so: a reference on the
+stack is live from the term that creates it until the term that consumes its slot, while a
+reference bound to a local is live for the whole block (`live_derivs` chains the stack
+slots with the scope's bindings). Chaining a borrow therefore compiles where naming it does
+not, and the rejection lands on the natural shape — borrow a place, write through the
+borrow, then consume the place. Ending a reference local's borrow at its *last use* would
+make the two consistent. That is not a lifetime system by the definition above (no lifetime
+variables, no regions, nothing binding a reference's validity to a named scope), only a
+rule about when a borrow ends inside one block, and the anonymous case already works that
+way. Deferred; see ROADMAP Phase 4 Slice 6f.
+
 The rule that specifying references actually forced into the open is not about references
 at all: **naming an aggregate does not copy it**, so two names can denote one region of
 memory. That was invisible while nothing could mutate in place, and `!`/`+!` make it
@@ -241,6 +252,24 @@ refusal of a linear field, and by the standing ban on linear array elements. So 
 was a wrong *value*, never a double free or a use-after-free, and the linear spine was never
 at risk. It is still exactly the class of silent failure this language exists to turn into a
 compile error, which is why it is closed rather than documented.
+
+That same `Copy`-only construction has a payoff that only surfaced under Phase 4's
+combinators. A **linear** aggregate threaded through a loop as an accumulator needs no copy
+at all: passing it *moves* it, so the outer name is dead, the aliasing rule has nothing to
+fire on, and a body that borrows it mutably, writes through the borrow, and hands the same
+value back lowers to stores straight into the loop's carried slot. A `Copy` aggregate in
+the same position must copy, because another live name could observe the old value — the
+`dup` the aliasing rule demands, plus the loop's own back-edge staging. So linearity is not
+the awkward case for in-place iteration, it is the *enabling* one, and the awkward case is
+an aggregate that is `Copy` by inference. Two things follow. Linearity cannot be
+**declared**: `is_copy` derives it structurally, and the only way to opt a type out is to
+give it a `drop` overload, which spells "thread this in place" as "give this a destructor".
+And the `Copy` case is awkward only because the aliasing rule is keyed on names that are
+merely in lexical scope: measured, a `Copy` aggregate accumulator threads with the same zero
+copies once a name that is never used again stops counting as a second denoting name. Paying
+for a *performance* property with a *semantic* one (a destructor obligation, no free `dup`,
+move-on-every-use) is the wrong trade, so that relaxation rides with the borrow one; see
+ROADMAP Phase 4 Slice 6f.
 
 Because a branch merge can denote either arm's place, a value carries a *set* of regions
 rather than one. The merge unions both arms, so no aliasing rejection ever happens at a
@@ -856,6 +885,35 @@ rows, no borrow analysis needed to write the compiler in it.
   core; seams fixed day one.
 - Bootstrap: host-language compiler then self-host a small subset, fixpoint-verify.
   Host language now free choice; Rust the sensible default.
+
+## Tie-breakers
+
+How to choose when two designs both work. `Decided` records what was chosen and `Declined`
+what was chosen against; these are the rules that settle the next call, extracted from ones
+that were argued out rather than assumed.
+
+- **Never charge a semantic price for a performance property.** If a program needs an
+  in-place update, the answer is not "make your type linear". Linearity is a semantic
+  commitment — a destructor obligation, no free `dup`, move-on-every-use — and spending it to
+  buy codegen is a bad trade that also lies about the type. Phase 4 Slice 6f is the worked
+  example: a `Copy` aggregate accumulator could only be copied, at a full memcpy per loop
+  iteration, because an aliasing rule was keyed on names merely in lexical scope, and the
+  workaround on offer was to change the type's linearity. Fix the rule; do not bill the
+  programmer. This is the same instinct as the Memory model's "a compiler-inserted copy is
+  the same category of invisible behaviour as an auto-drop", pointed the other way: an
+  invisible cost is a defect whether the compiler inserts it or the language extracts it.
+- **One diagnostic severity.** Everything the compiler says is an error. "Unused" is an
+  error exactly when a *linear obligation* is unmet, which the leak check already enforces;
+  hygiene with no obligation behind it (a reference bound and never named, a dead local) is a
+  linter's job. A warning tier would be a second, weaker answer to a question the linear
+  spine already answers, and every diagnostic that is merely advisory is one the reader
+  learns to skip.
+- **A named thing behaves like the anonymous one.** Locals are the only readability tool a
+  concatenative language has, so a rule that holds for a value on the stack must hold for the
+  same value under a name. Where the two diverge, treat the named case as the bug: 6f exists
+  because a borrow left on the stack ended at its last use while the identical borrow bound
+  to a local lived to the end of its block, which made the legible spelling the rejected one
+  and taught the workaround "don't name things".
 
 ## Open / deferred
 

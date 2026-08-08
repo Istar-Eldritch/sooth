@@ -1268,7 +1268,7 @@ then find out what the compiler owes it.
 6. **The combinator library in Sooth + inlining, and the machinery that work measured (the
    phase's headline exit).** *This heading used to end "+ closing the polymorphic-path gaps".
    It did not close them and no longer claims to: 6b's pre-check established that neither gap
-   gates a combinator. 6a-6c are the library itself; 6d and 6e are gaps the library work
+   gates a combinator. 6a-6c are the library itself; 6d, 6e and 6f are gaps the library work
    surfaced but does not itself need, grouped here for ordering rather than subject matter.*
    `each`/`map`/`filter`/`fold`/`while` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
@@ -1464,6 +1464,66 @@ then find out what the compiler owes it.
    **Exit:** a polymorphic word that branches, including one whose arms consume different
    operands, compiles and runs at two instantiations, with the linear checks that motivated
    the original deferral proven by tests that fail without them.
+
+   **6f — liveness ends at last use.** Today it does not: `live_derivs`
+   (`src/check.rs:759`) chains the stack slots with the scope's bindings, so a reference left
+   on the stack dies when a term consumes its slot, while a reference bound to a local stays
+   live for the whole block. Chaining a borrow therefore compiles where naming it does not,
+   and the rejection lands on the natural shape: borrow a place, write through the borrow,
+   then consume the place, which fails with `cannot consume the borrowed local` pointing at
+   the consume. Verified by compiling, in a straight-line word body with no loop and no
+   quotation involved — so this is not about iteration scoping, which already expires a
+   body's bindings per cycle (`leave_block` after the `times` body).
+   **Not a lifetime system**, by DESIGN.md's own definition: no lifetime variables, no
+   regions, nothing binding a reference's validity to a named scope. It is a rule about when
+   a borrow ends inside one block, and the anonymous case already works that way, so this
+   makes named references behave like the stack values the language is otherwise built
+   around rather than adding a concept.
+   **Why a slice and not a workaround.** Locals are the only readability tool a concatenative
+   language has, and this makes them poison exactly where they help most; the workaround is
+   to spell the whole projection as one chain, which is the opposite of the legibility the
+   language trades on.
+   **Before slice 7**, which points Phase 3 Slice 6's escape checking at a new carrier
+   (closure captures, which inherit their captures' restrictions). Settling when a borrow
+   *ends* after closures start capturing them means answering one question twice, the failure
+   this plan keeps citing.
+   Implementation shape the brief should start from: word bodies are flat term lists, so a
+   backward scan gives a last-use index per reference local, and `live_derivs` filters the
+   bindings whose last use has passed, given a current-term index threaded into the query.
+   Two wrinkles: branches (last use is the max across arms) and loop bodies (any use means
+   live for the whole body, which the identity-on-borrow-state check at `src/check.rs:6041`
+   already wants).
+   **Two tables, one rule.** The same lexical-vs-last-use question applies to
+   `aliasing_origin` (`src/check.rs:854`), which rejects a mutable borrow of a place a second
+   live *name* denotes. Both scan a scope table for names that are merely in lexical scope,
+   and both leave their stack halves alone; taking only the borrow half would answer one
+   question twice. **Measured, not assumed:** stubbing `aliasing_origin` out makes a `Copy`
+   aggregate accumulator thread through `fold` with **zero** per-iteration blits, printing the
+   right answer and matching the linear case's shape, against four blits per iteration for the
+   `dup` form it forces today. That gap is an expensive implicit memcpy standing where a
+   reader expects a move, and it is reachable now only by making the type linear — paying a
+   semantic price (a destructor obligation, no free `dup`, move-on-every-use) for a
+   performance property. Seventeen tests guard the rule; the three sampled all use the
+   aliasing name *after* the borrow, so they stay live and keep failing for the reason they
+   state, with the risk concentrated in the six branch/merge cases where region unioning meets
+   per-arm liveness. **The two halves differ in failure mode** and the slice must treat them
+   differently: the borrow half wrongly accepts or rejects a program, while the alias half can
+   silently produce a wrong *value* — the class DESIGN.md names as the one this language
+   exists to turn into a compile error — so every alias-half test is mutation-tested, not just
+   asserted.
+   **A sibling gap, measured in the same investigation: linearity cannot be declared.**
+   `is_copy` (`src/check.rs:239`) derives it structurally, and the only way to opt a struct
+   out of `Copy` is to give it a `drop` overload. That matters because a linear aggregate
+   accumulator *already* threads through `fold` with zero copies — verified: no `blit` in the
+   loop body and stores straight into the carried slot, against four blits per iteration for
+   the `Copy`-plus-`dup` form — so the zero-copy path exists and is reachable only by
+   spelling "thread this in place" as "give this a destructor". Its answer is entangled with
+   slice 1's parked question of whether `Copy` is a privileged constraint and with slice 8's
+   polymorphic `drop`: do not settle it here, do not foreclose it either.
+   Depends on nothing in 6a-6e; orderable against all of them, required before 7.
+   **Exit:** a reference bound to a local, used and then finished with, no longer blocks
+   consuming the place it borrowed; the in-place accumulator body compiles as written; and a
+   test proves the borrow is still rejected when the reference is used *after* the consume.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
