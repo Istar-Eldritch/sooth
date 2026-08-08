@@ -411,26 +411,6 @@ fn session_selective_collision_error(name: &str, first: &str, second: &str, span
     )
 }
 
-/// R14/D4 (slice 5b): reject an imported closure that declares a word named
-/// `main`, naming the declaring file and the word, before any codegen.
-/// `mangle` (`src/resolve.rs`) never renames `main` regardless of module, so
-/// a plain name scan over every file in the closure finds it, whichever file
-/// it came from (recon #4's native collision turned into a diagnostic here;
-/// the native path's own exposure stays unfixed, per D4).
-fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Result<(), String> {
-    let Some(main) = module.words.iter().find(|w| w.name == "main") else {
-        return Ok(());
-    };
-    let path = closure.path_of(main.module);
-    let span = word_span(main);
-    Err(format!(
-        "error: cannot import `{}`: it declares a word named `main` (line {}, col {}); a library file may not declare `main`",
-        path.display(),
-        span.line,
-        span.col
-    ))
-}
-
 /// R5/R6 (slice 5b): bulk-lower a whole checked import closure to one `.so`.
 /// Reuses `ir::lower` (the native single-module lowerer), then renames every
 /// user word's func and its intra-closure call sites to the word's import-epoch
@@ -1613,8 +1593,10 @@ impl Session {
         check::check(&mut module)?;
         // R14/D4: an imported closure declaring `main` (in any of its files,
         // not only module 0) is rejected before any codegen, naming the file
-        // and the word.
-        check_no_main_in_closure(&module, &closure)?;
+        // and the word. `allowed_module: None` -- no file in an imported
+        // closure may declare `main`, unlike `driver::build`'s native path,
+        // where module 0 is the program's own entry point.
+        driver::check_no_main_in_closure(&module, &closure, None)?;
         // R12 (slice 6c): a closure exporting a quotation-taking word is no
         // longer rejected -- `splice_import` retains the combinator (D5).
         // R11: each selectively-imported name must be exported by module 0,
@@ -3864,7 +3846,7 @@ mod tests {
         let closure = driver::discover_closure(&lib).expect("closure resolves");
         let mut module = driver::assemble_module(&closure).expect("assembles");
         check::check(&mut module).expect("checks");
-        let err = check_no_main_in_closure(&module, &closure).unwrap_err();
+        let err = driver::check_no_main_in_closure(&module, &closure, None).unwrap_err();
         assert!(err.contains("main"), "names the word: {err}");
         assert!(
             err.contains(lib.file_name().unwrap().to_str().unwrap()),
