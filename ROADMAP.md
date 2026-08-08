@@ -441,14 +441,41 @@ Import reuses the same store (D5): the R24 rejection of a closure exporting a
 quotation-taking word is dropped, and a module-0 exported combinator is retained under its
 import-internal spelling with its body's calls — including a self-tail call — rewritten to
 internal spellings, so the self-tail recognizer still fires on an imported `while` rather than
-splicing forever. `examples/filter_while.sth`'s scenario is dogfooded again as a REPL session
-transcript, pinned to the same computed values.
+splicing forever. A review pass then closed a hygiene gap the brief's recon missed: a
+retained combinator's body call to a module-0 *private* word was left unrewritten and fell
+through to whatever the session's own env held under that bare name, a silent-wrong-answer
+risk on a name collision, plus a forgeable variant (a REPL-declared name matching a
+multi-file closure's internal mangled spelling). Both are closed: the body-call rewrite now
+covers every module-0 word, not only exports, and a REPL-declared name may no longer end in a
+resolver-mangled or import-epoch-tagged spelling. `examples/filter_while.sth`'s scenario is
+dogfooded again as a REPL session transcript, pinned to the same computed values.
 
-**Next action: Phase 4 Slice 6d or 6e.** Neither depends on the other; 6d (nested
-constant-stack loops, lifting the limit 6b inherited) and 6e (`if` in a polymorphic body) may
-land in any order. 6e was added after 6b shipped, once it became clear that no slice owned
-the polymorphic-`if` gap even though slice 7 depends on it and the core library's
-intrinsic-vs-library split is gated on it.
+**Phase 4 Slice 6d (nested constant-stack loops: the hoist-target split) is complete**: the
+cause was one field doing two jobs, `FuncBuilder::entry_block`, simultaneously the alloca
+home (where a hoisted `Alloc` must land, since QBE's frame-bumping `alloc*` never reclaims
+within a function) and the loop preheader (where a carried aggregate's seeding `Blit` must
+land, so it re-runs once per entry to that loop). Those two blocks coincide at exactly one
+loop level and diverge the moment loops nest, which was the whole of the bug. The fix keeps
+`entry_block`'s meaning as the per-loop preheader (it was already correct at any depth) and
+adds a separate, invariant `alloca_home` field that `push_alloc` routes into instead;
+`begin_loop` sets it once, on the outermost loop only, to the block current when that loop
+opens. This is narrower than this entry originally prescribed below ("split the field into an
+invariant alloca home and a per-loop preheader", implying both roles move) and inverts which
+half moves: only the alloca role does. The four-field loop-state save/restore duplicated at
+the two mid-body call sites collapsed into one shared helper first, as an inert de-risking
+step, before `alloca_home` joined it as a fifth field. With the split landed, the R18
+nested-loop rejection retired outright (both checker call sites, the dead
+`times_nested_in_loop_error` function, and the now-unread `loop_depth` bookkeeping), so all
+five 6a/6b combinators compose inside a `times` body and inside each other, at any depth,
+in constant stack; `examples/combinator_in_times.sth` dogfoods `each` inside a `times` against
+a hand-threaded twin, and a recursive-enum value's destructor call inside a `times` body
+inherits the fix for free, since a destructor's fused loop already opens at its own
+`IrFunc`'s true entry.
+
+**Next action: Phase 4 Slice 6e (`if` in a polymorphic body).** Its brief
+(`docs/phase4-slice6e-brief.md`) is written; 6c and 6d are both complete, so 6e is the only
+remaining slice in the 6-family. It has to read before slice 7, which needs it, and before the
+core library's intrinsic-vs-library split, which is gated on it.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1349,49 +1376,62 @@ then find out what the compiler owes it.
    **Exit:** `filter` and `while` written in Sooth and inlined the same way 6a's words are,
    with `while` running in constant stack and a non-tail combinator self-call still rejected.
 
-   **6c — quotation-taking words at the REPL.** *This entry previously said the frozen-binding
-   question of which generation of a callee an inlined body binds to should follow slice 2's
-   answer for instantiations (the defining line's resolver snapshot). `docs/phase4-slice6c-
-   brief.md`'s recon falsified that framing before any code changed: a combinator mints no
-   `IrFunc` and no symbol, so it has no compile event of its own to freeze against, and it is
-   re-checked and re-lowered at every splice site against that site's own live env, unlike a
-   poly body which is checked once. There is no frozen resolver to design; the charter below
-   is the corrected one.* Lifts 6a's located rejection: what it means to define and call a
-   combinator in a live session. The problem is retention, the same shape slice 2 solved for
-   polymorphic words and 8b for drop overrides — a session discards ordinary word bodies once
-   a line compiles to its `.so`, and an inliner needs the body. The fix is a plain session
-   store (`HashMap<String, WordDef>`, mono and poly combinators alike, replaced wholesale on
-   redefinition, D1) projected on demand into the two shapes the checker's and lowerer's
-   inline paths already read, threaded into the REPL entry points that hardcode an empty
-   combinators map today. Last of the three because the phase exit is a native criterion and
-   nothing else builds on it; its order against 6b is free. **Exit:** a session defining a
+   **6c — quotation-taking words at the REPL is implemented.** *This entry previously said
+   the frozen-binding question of which generation of a callee an inlined body binds to
+   should follow slice 2's answer for instantiations (the defining line's resolver snapshot).
+   `docs/phase4-slice6c-brief.md`'s recon falsified that framing before any code changed: a
+   combinator mints no `IrFunc` and no symbol, so it has no compile event of its own to freeze
+   against, and it is re-checked and re-lowered at every splice site against that site's own
+   live env, unlike a poly body which is checked once. There was no frozen resolver to
+   design; the charter below is the corrected one.* Lifted 6a's located rejection: what it
+   means to define and call a combinator in a live session. The problem was retention, the
+   same shape slice 2 solved for polymorphic words and 8b for drop overrides — a session
+   discards ordinary word bodies once a line compiles to its `.so`, and an inliner needs the
+   body. The fix was a plain session store (`HashMap<String, WordDef>`, mono and poly
+   combinators alike, replaced wholesale on redefinition, D1) projected on demand into the two
+   shapes the checker's and lowerer's inline paths already read, threaded into the REPL entry
+   points that hardcoded an empty combinators map. A review pass then closed a hygiene gap the
+   brief's recon missed: an imported combinator's body call to a module-0 private word (and
+   the forgeable variant, a REPL-declared name matching a multi-file closure's internal
+   mangled spelling) resolved against the session's own env instead of the closure's,
+   a silent-wrong-answer risk on a name collision. **Exit:** a session defining a
    quotation-taking word, calling it from a later line, and redefining it, with every splice
    at every call site reading that site's own live env (no frozen resolver, D1).
-   **6d — nested constant-stack loops (the hoist-target split).** Lifts R18, which today
-   rejects any `times` reached while a loop is already open. The limit is not hypothetical
-   and not confined to a future `while`: it bites every combinator 6a shipped, because each
-   one drives its own `times`. `2 [ | i | mk [ . ] c::each ] times` is a hard error today
-   ("a `times` cannot be nested in a loop yet"), so no combinator composes inside a loop,
-   and the rejection is a deferral rather than a design decision.
-   **The cause is one field doing two jobs.** `FuncBuilder::entry_block` (`src/ir.rs:2226`)
-   is simultaneously the alloca home and the loop preheader. It must be the function's true
+   **6d — nested constant-stack loops (the hoist-target split) is implemented.** Lifted R18,
+   which rejected any `times` reached while a loop was already open. The limit was not
+   hypothetical and not confined to `while`: it bit every combinator 6a shipped, because each
+   one drives its own `times`. `2 [ | i | mk [ . ] c::each ] times` was a hard error ("a
+   `times` cannot be nested in a loop yet"), so no combinator composed inside a loop, and the
+   rejection was a deferral rather than a design decision.
+   **The cause was one field doing two jobs.** `FuncBuilder::entry_block` (`src/ir.rs:2226`)
+   was simultaneously the alloca home and the loop preheader. It must be the function's true
    entry block for allocation, since QBE's alloca bumps the frame pointer on every execution
    and never reclaims within a function, so an `Alloc` reached per-iteration grows the frame
    until the constant-stack guarantee is worthless. It must be the *loop's* preheader for a
    carried aggregate's stable-slot seeding blit, which has to run once per entry to that
    loop. Those two blocks coincide at exactly one loop level and diverge the moment loops
-   nest, which is the whole of the bug. The fix is to split the field: an invariant alloca
-   home, and a per-loop preheader. The rest of the loop state (`header`, `carried_slots`,
-   `back_edges`) already saves and restores around a nested region (`src/ir.rs:2609-2687`,
-   the `times` arm), so the phi bookkeeping is largely present already.
-   **Handle with care, and not as a rider on another slice.** This is the same loop-lowering
+   nest, which was the whole of the bug. **The fix inverts, rather than matches, this entry's
+   original framing of "split the field into an invariant alloca home and a per-loop
+   preheader": only the alloca role moves.** `entry_block` keeps its meaning as the per-loop
+   preheader — it was already correct at any depth — and a new, invariant `alloca_home` field
+   takes over the allocation role; `push_alloc` routes into it, and `begin_loop` sets it once,
+   on the outermost loop only. The rest of the loop state (`header`, `carried_slots`,
+   `back_edges`) already saved and restored around a nested region (`src/ir.rs:2609-2687`,
+   the `times` arm), so the phi bookkeeping was largely present already; `alloca_home` joined
+   that same save/restore as a fifth field, behind one shared helper collapsing what had been
+   duplicated at two call sites.
+   **Handled with care, not as a rider on another slice.** This is the same loop-lowering
    code where the aggregate-return aliasing bug landed (see the Phase 4 slice 3 note above),
    whose fix, one entry-hoisted stable slot per carried aggregate plus an unconditional
    read-before-write staged blit on the back-edge, is exactly the invariant that rearranging
-   hoist targets can silently break. Its guards want mutation-testing, not just a green run.
-   Depends on 6a for its consumers; independent of 6b and 6c, and orderable against either.
-   **Exit:** a combinator called inside a `times` body compiles and runs in constant stack,
-   with a nested-loop golden and the slice-3 aliasing guards still green.
+   hoist targets could silently break. Its guards (the seeding-blit reseed probe and the
+   large-outer constant-stack witness) are mutation-tested, not merely run green: each is
+   shown to fail (wrong value, or SIGSEGV) against the fix reversed.
+   **Exit:** a combinator called inside a `times` body compiles and runs in constant stack —
+   `examples/combinator_in_times.sth` dogfoods `each`-in-`times` against a hand-threaded twin
+   — with the nested-loop goldens (all five combinators, any pairing, depth 3) and the slice-3
+   aliasing guards green, and a destructor call inside a `times` body inheriting the fix for
+   free (its fused loop already opens at its own `IrFunc`'s true entry).
    **6e — `if` in a polymorphic body.** Lifts the rejection at `src/check.rs:3690` (`` `if`
    in the polymorphic body of `{word}` is not yet supported ``), which has stood since slice
    1 deferred it and which no later slice picked up. **A 6-family letter for ordering and

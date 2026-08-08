@@ -425,16 +425,6 @@ struct Provenance {
     /// through the walk, so a quotation pushed in one `if` arm and read in a
     /// merge outlives the arm's cloned `Scope`.
     quotations: Vec<QuotBody>,
-    /// R16/R18/R14: how many constant-stack loops are currently open around
-    /// the term being checked -- a `times` body splice *or* a self-tail
-    /// combinator body splice (both lower to one `begin_loop`). Incremented
-    /// across each and **restored** after (not merely decremented), so two
-    /// *sequential* loops in one word do not false-positive as nested. A
-    /// non-zero value at a `times`, or at the opening of a self-tail
-    /// combinator loop, is the nested-loop case of R18/R14's rejection;
-    /// `scope.depth()` cannot substitute, since it counts every block, not
-    /// only a loop.
-    loop_depth: usize,
     /// R6/R14: the self-tail combinator currently being spliced (its name and
     /// its declared input arity), set for the duration of that body splice. A
     /// tail-position call to that same name reached inside the spliced body is
@@ -915,12 +905,6 @@ enum Ctx<'a> {
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
-        /// R16/R18: whether this word is self-tail-recursive, precomputed in
-        /// `word_ctx` (`has_self_tail_call` takes a `&WordDef` that `check_term`
-        /// does not have). A `times` in a self-tail word is the whole-word case
-        /// of R18's nested-loop rejection: lowering opens `begin_loop` for the
-        /// whole word, so a `times` inside it would nest two loops.
-        self_tail: bool,
     },
     Line {
         structs: &'a [StructDecl],
@@ -937,7 +921,6 @@ fn word_ctx<'a>(word: &'a WordDef, structs: &'a [StructDecl], enums: &'a [EnumDe
         effect: &word.effect,
         structs,
         enums,
-        self_tail: has_self_tail_call(word),
     }
 }
 
@@ -5294,26 +5277,14 @@ fn inline_combinator(
             }
         }
     }
-    // R6/R14a: a self-tail combinator opens a splice-time loop. Its body is
-    // spliced with `tail = true` so its own tail-position self-call is
-    // recognized as the back-edge (above), and the loop-open state is raised
-    // for the duration so a `times` inside it, or a second self-tail
-    // combinator, is the nested-loop rejection (R14b). Opening it while a
-    // loop is already open (`loop_depth > 0`, or an *enclosing* whole-word
-    // self-tail word) is R14a's located rejection; the combinator's own
-    // standalone check does not trip this (its `Ctx` names the combinator
-    // itself, not an enclosing loop).
+    // R6: a self-tail combinator opens a splice-time loop. Its body is spliced
+    // with `tail = true` so its own tail-position self-call is recognized as
+    // the back-edge (above). 6d/R6: the nested-loop rejection is retired --
+    // lowering's hoist-target split keeps a nested loop constant-stack -- so
+    // opening this loop inside another is now legal and `splice_tail` is just
+    // whether this is a self-tail combinator.
     let self_tail = crate::check::is_combinator(comb.word) && has_self_tail_call(comb.word);
-    let splice_tail = if self_tail {
-        let enclosing_self_tail =
-            matches!(ctx, Ctx::Word { self_tail: true, mangled, .. } if *mangled != name);
-        if prov.loop_depth > 0 || enclosing_self_tail {
-            return Err(times_nested_in_loop_error(ctx, span));
-        }
-        true
-    } else {
-        false
-    };
+    let splice_tail = self_tail;
     let input_count = match comb.word.poly.as_ref() {
         Some(sig) => sig.inputs.len(),
         None => comb.word.effect.inputs.len(),
@@ -5332,7 +5303,6 @@ fn inline_combinator(
             name: name.to_string(),
             input_count,
         });
-        prov.loop_depth += 1;
         Some(saved)
     } else {
         None
@@ -5351,7 +5321,6 @@ fn inline_combinator(
         poly,
     );
     if let Some(saved) = saved_marker {
-        prov.loop_depth -= 1;
         prov.self_tail_combinator = saved;
     }
     stack = result?;
@@ -5601,18 +5570,6 @@ fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
             span.line
         ),
     }
-}
-
-/// R18/N: a `times` nested in a loop -- inside a self-tail word, or inside
-/// another `times` body. Rejected in the checker (not lowering, which has no
-/// error channel): the clean hoist-target split that would allow nesting is a
-/// later slice's.
-fn times_nested_in_loop_error(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: a `times` cannot be nested in a loop yet{} (line {}): nested constant-stack loops need a hoist-target split deferred to a later slice",
-        in_word(ctx),
-        span.line,
-    )
 }
 
 /// R18: the body is spliced once but runs N times, so a linear outer local it
@@ -6025,24 +5982,11 @@ fn check_term(
                 if count.ty != Type::I64 {
                     return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
                 }
-                // R18/R14b: reject a `times` nested in a loop -- a self-tail
-                // word (whose whole-word `begin_loop` lowering would nest two
-                // loops), another `times` body, or a self-tail *combinator*
-                // body (whose splice-time `begin_loop` likewise nests). All
-                // are decided here, one stage before lowering's would-be
-                // `self.header.is_some()` test. `loop_depth` is raised across a
-                // self-tail combinator splice too (R14b), so a `times` sited
-                // in `while`'s body trips this.
-                let in_self_tail = matches!(
-                    ctx,
-                    Ctx::Word {
-                        self_tail: true,
-                        ..
-                    }
-                );
-                if in_self_tail || prov.loop_depth > 0 {
-                    return Err(times_nested_in_loop_error(ctx, span));
-                }
+                // 6d/R6: a `times` nested in a loop -- inside a self-tail word,
+                // another `times` body, or a self-tail combinator body -- is no
+                // longer rejected. Lowering's hoist-target split (R1-R3) keeps
+                // every such nesting constant-stack, so the old R18/R14b
+                // rejection and its `loop_depth` bookkeeping are gone.
                 // R18: the row is the remaining stack; a quotation anywhere in
                 // it would reach `begin_loop`'s phi over a phantom (R14). Guard
                 // the whole row, not just the consumed top.
@@ -6059,18 +6003,14 @@ fn check_term(
                 let row = stack.clone();
                 // Splice the body against the row plus a synthesized index (the
                 // body's top input), bracketed like `call` (R6), `tail = false`.
-                // `loop_depth` rides up across the splice so a `times` nested
-                // in the body trips the rejection above, and is *restored* (not
-                // decremented), so two sequential `times` do not false-positive.
+                // 6d/R6: a `times` nested in the body is now legal, so no
+                // `loop_depth` is raised across the splice.
                 stack.push(Slot::computed(Type::I64));
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                let saved_loop_depth = prov.loop_depth;
-                prov.loop_depth += 1;
                 let result = check_terms(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
                 )?;
-                prov.loop_depth = saved_loop_depth;
                 leave_block(
                     ctx,
                     scope,

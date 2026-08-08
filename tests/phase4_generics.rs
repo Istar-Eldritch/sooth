@@ -1008,26 +1008,9 @@ fn times_body_changing_the_row_is_error() {
     );
 }
 
-#[test]
-fn times_nested_in_a_loop_is_rejected() {
-    // Criterion N (R18): a `times` nested in a loop is rejected in the checker
-    // with a line number -- both a `times` inside another `times` body (splice
-    // depth) and a `times` inside a self-tail word (`has_self_tail_call`).
-    let inner = check_error(": main ( -- ) 0 10 [ | i | 0 5 [ + ] times + ] times . ;\n");
-    assert!(
-        inner.contains("a `times` cannot be nested in a loop yet") && inner.contains("(line 1)"),
-        "N (times-in-times) should reject with a line number, got: {inner}"
-    );
-    let self_tail = check_error(
-        ": loop ( i64 -- i64 ) | n | n 0 = if 0 else n 1 - 0 5 [ + ] times drop n 1 - loop end ;\n\
-         : main ( -- ) 3 loop . ;\n",
-    );
-    assert!(
-        self_tail.contains("a `times` cannot be nested in a loop yet")
-            && self_tail.contains("(line 1)"),
-        "N (times in self-tail word) should reject with a line number, got: {self_tail}"
-    );
-}
+// 6d retired `times_nested_in_a_loop_is_rejected`: the nested-loop rejection
+// (R18/R14b) is gone, so both its programs now compile and run. The
+// nesting-matrix goldens live in `tests/phase4_combinators.rs` (criteria 1-8).
 
 // --- Phase 4 Slice 4, phase 4: dogfood + docs.
 

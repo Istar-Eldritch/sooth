@@ -2194,6 +2194,17 @@ enum CarriedSlot {
     },
 }
 
+/// R15/D4: the five fields `save_loop_state`/`restore_loop_state` snapshot
+/// around a spliced nested loop-opening construct. See `save_loop_state`'s
+/// doc for why this must be all five (`alloca_home` is the 6d addition).
+struct LoopStateSnapshot {
+    header: Option<BlockId>,
+    entry_block: Option<BlockId>,
+    alloca_home: Option<BlockId>,
+    carried_slots: Vec<CarriedSlot>,
+    back_edges: Vec<(BlockId, Vec<Value>)>,
+}
+
 struct FuncBuilder<'a> {
     env: &'a HashMap<String, Arity>,
     resolve: Resolver<'a>,
@@ -2257,7 +2268,24 @@ struct FuncBuilder<'a> {
     /// slot before reading the prior iteration's value, because a carried
     /// aggregate is snapshotted onto its own stable slot on the back-edge (R4),
     /// so hoisting no longer depends on the body's read-before-overwrite order.
+    ///
+    /// 6d/D2: `entry_block` is the per-loop *preheader* only. It changes with
+    /// every nested loop (the block current when that loop opens) and is where
+    /// a carried aggregate's seeding `Blit` lands, so the blit re-runs once per
+    /// entry to *this* loop. The alloca-home role it used to double as (where
+    /// hoisted `Alloc`s land) moved to `alloca_home`.
     entry_block: Option<BlockId>,
+    /// 6d/D2: the invariant per-function alloca home, where `push_alloc`
+    /// hoists every `Alloc` so QBE's frame-bumping `alloc*` runs once per call
+    /// rather than once per iteration. Set on the *outermost* loop only (the
+    /// function's true entry, reached once per call) and kept across nested
+    /// loops, so an inner-loop `Alloc` still hoists to a block reached once per
+    /// call. `push_alloc` used to route into `entry_block` and rely silently
+    /// on the accident that, for a *top-level* loop, the preheader is that
+    /// once-per-call block; the moment a loop nests, the preheader is reached
+    /// once per outer iteration and the frame grows. Tracking the alloca home
+    /// separately from the preheader is the whole 6d fix.
+    alloca_home: Option<BlockId>,
     /// Whether the current block has already been sealed (by a back-edge Jmp or
     /// another terminator), so no fall-through Ret/Jmp should follow.
     terminated: bool,
@@ -2333,6 +2361,7 @@ impl<'a> FuncBuilder<'a> {
             carried_slots: Vec::new(),
             back_edges: Vec::new(),
             entry_block: None,
+            alloca_home: None,
             terminated: false,
             blocks: Vec::new(),
             cur_id: BlockId(0),
@@ -2371,23 +2400,59 @@ impl<'a> FuncBuilder<'a> {
         self.cur_instrs.push(instr);
     }
 
-    /// Hoist an `Alloc` (or a carried-aggregate init `Blit`, R3) into the entry
-    /// block while looping (`entry_block` is `Some`); otherwise emit it into the
-    /// current block. It appends whatever `Instr` it is given, not only an
-    /// `Alloc`. See `entry_block`'s doc comment for why a loop body must never
-    /// alloc.
+    /// Hoist an `Alloc` into the invariant alloca home while looping
+    /// (`alloca_home` is `Some`); otherwise emit it into the current block (the
+    /// no-loop path). It appends whatever `Instr` it is given, not only an
+    /// `Alloc`. 6d/D2: this used to route into `entry_block` (the preheader),
+    /// which is reached once per call only for a top-level loop; the alloca
+    /// home is the function's true entry, reached once per call at any nesting
+    /// depth. See `alloca_home`'s doc for why. The carried-aggregate seeding
+    /// `Blit` no longer rides this path (R3): it must land in the preheader,
+    /// not the alloca home, so it re-seeds once per loop entry.
     fn push_alloc(&mut self, instr: Instr) {
-        match self.entry_block {
-            Some(entry) => {
+        match self.alloca_home {
+            Some(home) => {
                 let block = self
                     .blocks
                     .iter_mut()
-                    .find(|b| b.id == entry)
-                    .expect("entry block");
+                    .find(|b| b.id == home)
+                    .expect("alloca home block");
                 block.instrs.push(instr);
             }
             None => self.push_instr(instr),
         }
+    }
+
+    /// R15/D4: save the five fields that together mean "a loop is open"
+    /// (`header`, `entry_block`, `alloca_home`, `carried_slots`, `back_edges`)
+    /// before splicing a nested loop-opening construct (a `times` term or a
+    /// self-tail combinator), pairing with `restore_loop_state` after.
+    /// `finalize_loop` clears only `carried_slots`/`back_edges`, never
+    /// `header`/`entry_block`, so without this save/restore a later `Alloc`
+    /// (or a second sequential loop) would wrongly hoist into the spliced
+    /// loop's now-dead entry block. `alloca_home` joins the set (6d/D4): the
+    /// outermost loop sets it and it must be cleared again after the splice so
+    /// a second sequential top-level loop reseats it to its own entry. One
+    /// shared helper for both mid-body call sites means the saved set cannot
+    /// drift between them.
+    fn save_loop_state(&mut self) -> LoopStateSnapshot {
+        LoopStateSnapshot {
+            header: self.header,
+            entry_block: self.entry_block,
+            alloca_home: self.alloca_home,
+            carried_slots: mem::take(&mut self.carried_slots),
+            back_edges: mem::take(&mut self.back_edges),
+        }
+    }
+
+    /// The inverse of `save_loop_state`: restore the caller's pre-splice loop
+    /// state from its snapshot.
+    fn restore_loop_state(&mut self, snapshot: LoopStateSnapshot) {
+        self.header = snapshot.header;
+        self.entry_block = snapshot.entry_block;
+        self.alloca_home = snapshot.alloca_home;
+        self.carried_slots = snapshot.carried_slots;
+        self.back_edges = snapshot.back_edges;
     }
 
     /// Seal the current block with `term` and append it to the function.
@@ -2432,21 +2497,39 @@ impl<'a> FuncBuilder<'a> {
         self.start_block(header);
         self.header = Some(header);
         self.entry_block = Some(entry);
+        // 6d/R2: the *outermost* loop fixes the alloca home to its entry (the
+        // function's true entry, reached once per call, since no block forks
+        // before the first loop). A nested loop sees it already set and keeps
+        // the outer home, so an inner-loop `Alloc` still hoists to a
+        // once-per-call block instead of this per-outer-iteration preheader.
+        if self.alloca_home.is_none() {
+            self.alloca_home = Some(entry);
+        }
         let mut outs = Vec::with_capacity(params.len());
         for &p in params {
             let ty = self.value_type(p);
             if stage_aggregates && is_aggregate(ty) {
-                // R1: one entry-hoisted stable slot (the pointer the body reads)
-                // and one staging temp per aggregate slot; both route through
-                // `push_alloc` into the already-sealed entry block.
+                // R1: one stable slot (the pointer the body reads) and one
+                // staging temp per aggregate slot; both route through
+                // `push_alloc` into the invariant alloca home.
                 let size = self.value_size(ty);
                 let stable = self.alloc_aggregate(ty);
                 let temp = self.alloc_aggregate(ty);
-                // R3: seed the stable slot with the incoming param once, before
-                // the loop runs, so iteration 1 reads an initialised value. A
-                // zero-size aggregate has no bytes to copy.
+                // R3: seed the stable slot with the incoming param once per
+                // entry to *this* loop, so iteration 1 reads an initialised
+                // value and a re-entered inner loop re-seeds per outer
+                // iteration. The seeding `Blit` goes into this loop's
+                // preheader (`entry`) directly, *not* through `push_alloc`
+                // (which would hoist it to the alloca home and seed it only
+                // once per call, the slice-3 aliasing bug). A zero-size
+                // aggregate has no bytes to copy.
                 if size > 0 {
-                    self.push_alloc(Instr::Blit(p, stable, size));
+                    let block = self
+                        .blocks
+                        .iter_mut()
+                        .find(|b| b.id == entry)
+                        .expect("preheader block");
+                    block.instrs.push(Instr::Blit(p, stable, size));
                 }
                 self.carried_slots
                     .push(CarriedSlot::Aggregate { stable, temp, size });
@@ -2601,10 +2684,7 @@ impl<'a> FuncBuilder<'a> {
     /// arm does. A tail-position self-call inside the body is emitted as a
     /// back-edge (`lower_call`, keyed on `cur_combinator`), never a re-splice.
     fn lower_self_tail_combinator(&mut self, name: &str, body: &[Term]) {
-        let saved_header = self.header;
-        let saved_entry = self.entry_block;
-        let saved_carried = mem::take(&mut self.carried_slots);
-        let saved_back_edges = mem::take(&mut self.back_edges);
+        let saved_loop_state = self.save_loop_state();
         let saved_combinator = self.cur_combinator.take();
         let locals_depth = self.locals.len();
 
@@ -2646,10 +2726,7 @@ impl<'a> FuncBuilder<'a> {
 
         self.locals.truncate(locals_depth);
         self.cur_combinator = saved_combinator;
-        self.header = saved_header;
-        self.entry_block = saved_entry;
-        self.carried_slots = saved_carried;
-        self.back_edges = saved_back_edges;
+        self.restore_loop_state(saved_loop_state);
     }
 
     fn lower_call(&mut self, name: &str, span: Span, tail: bool) {
@@ -2714,20 +2791,14 @@ impl<'a> FuncBuilder<'a> {
             // input and returns the row on the back-edge (R18). `tail = false`
             // for the same reason as `call`.
             "times" => {
-                // R14 step 0: the checker rejects a nested `times` (R18), so no
-                // loop is open here; a `debug_assert` records that guarantee.
-                debug_assert!(
-                    self.header.is_none(),
-                    "checker (R18) rejects a `times` nested in a loop"
-                );
-                // R15: `finalize_loop` clears only `carried_slots`/`back_edges`,
-                // never `header`/`entry_block`, so save all four and restore
-                // them after the loop, or a later `Alloc` in the same word
-                // would wrongly hoist into this dead `times` entry block.
-                let saved_header = self.header;
-                let saved_entry = self.entry_block;
-                let saved_carried = mem::take(&mut self.carried_slots);
-                let saved_back_edges = mem::take(&mut self.back_edges);
+                // 6d/R5: a nested `times` is now legal (the checker's R18
+                // rejection retired), so no `debug_assert` on `header.is_none()`
+                // here; the hoist-target split (R1-R3) keeps it constant-stack.
+                // R15: save the loop state (see `save_loop_state`'s doc) and
+                // restore it after the loop, so a nested `times` composes and a
+                // later `Alloc` in the same word does not hoist into this now-
+                // dead `times` preheader.
+                let saved_loop_state = self.save_loop_state();
 
                 let qv = self.stack.pop().expect("times: quotation on stack");
                 let id = self.quot_bodies[&qv];
@@ -2755,9 +2826,10 @@ impl<'a> FuncBuilder<'a> {
                 self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
 
                 // Body: the row plus the index (top input), spliced `tail =
-                // false`. `entry_block` stays `Some` across the splice, so an
+                // false`. `alloca_home` stays `Some` across the splice, so an
                 // aggregate the body constructs hoists its `Alloc` into the
-                // entry block (R17), not the per-iteration body block.
+                // invariant alloca home (R17/6d), not the per-iteration body
+                // block, at any nesting depth.
                 self.start_block(body_block);
                 self.terminated = false;
                 self.stack = row_phis;
@@ -2800,10 +2872,7 @@ impl<'a> FuncBuilder<'a> {
 
                 // R15: restore the pre-`times` loop state so the `times`
                 // composes with a later `Alloc` or a second sequential `times`.
-                self.header = saved_header;
-                self.entry_block = saved_entry;
-                self.carried_slots = saved_carried;
-                self.back_edges = saved_back_edges;
+                self.restore_loop_state(saved_loop_state);
             }
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
@@ -4688,11 +4757,15 @@ mod tests {
 
     #[test]
     fn times_saves_and_restores_loop_state() {
-        // R15u: after the `times` arm returns, `header`/`entry_block`/
-        // `carried_slots`/`back_edges` are all back to their pre-`times` values.
-        // `finalize_loop` clears only two of the four, so the arm's explicit
-        // save/restore is what lets a later `Alloc` (or a second sequential
-        // `times`) not hoist into the dead `times` entry block.
+        // R15u/U12: after the `times` arm returns, all five loop-state fields
+        // (`header`/`entry_block`/`alloca_home`/`carried_slots`/`back_edges`)
+        // are back to their pre-`times` values. `finalize_loop` clears only
+        // two of them, so the arm's explicit save/restore is what lets a later
+        // `Alloc` (or a second sequential `times`) not hoist into the dead
+        // `times` preheader, and lets a second top-level loop reseat the
+        // alloca home to its own entry. Dropping the `alloca_home` member from
+        // the shared helper leaves it stuck at the first loop's entry and this
+        // fails (mutation-test the guard, U12).
         let env: HashMap<String, Arity> = HashMap::new();
         let structs = Structs::default();
         let enums = Enums::default();
@@ -4724,12 +4797,47 @@ mod tests {
 
         let saved_header = b.header;
         let saved_entry = b.entry_block;
+        let saved_alloca_home = b.alloca_home;
         b.lower_call("times", Span { line: 1, col: 1 }, false);
 
         assert_eq!(b.header, saved_header, "header restored");
         assert_eq!(b.entry_block, saved_entry, "entry_block restored");
+        assert_eq!(b.alloca_home, saved_alloca_home, "alloca_home restored");
         assert!(b.carried_slots.is_empty(), "carried_slots restored");
         assert!(b.back_edges.is_empty(), "back_edges restored");
+
+        // D4: the combinator mid-body site shares the same save/restore
+        // helper as the `times` arm above. `lower_self_tail_combinator` is
+        // called directly (bypassing the `self_tail` dispatch gate) with a
+        // body that is itself the self-call (`foo`), so it back-edges to the
+        // header exactly as a real `while` body would, and this exercises the
+        // same four-field save/restore.
+        let state = b.fresh_value(IrType::I64);
+        b.push_instr(Instr::Const(state, 7));
+        b.const_vals.insert(state, 7);
+        b.stack.push(state);
+        let saved_header = b.header;
+        let saved_entry = b.entry_block;
+        let saved_alloca_home = b.alloca_home;
+        b.lower_self_tail_combinator("foo", &line_terms("foo"));
+
+        assert_eq!(b.header, saved_header, "header restored (combinator site)");
+        assert_eq!(
+            b.entry_block, saved_entry,
+            "entry_block restored (combinator site)"
+        );
+        assert_eq!(
+            b.alloca_home, saved_alloca_home,
+            "alloca_home restored (combinator site)"
+        );
+        assert!(
+            b.carried_slots.is_empty(),
+            "carried_slots restored (combinator site)"
+        );
+        assert!(
+            b.back_edges.is_empty(),
+            "back_edges restored (combinator site)"
+        );
     }
 
     #[test]
