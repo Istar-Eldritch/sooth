@@ -4388,7 +4388,7 @@ fn poly_arm_local_unconsumed_error(
     let where_ = ctx.word_name().unwrap_or("<line>");
     match ctx {
         Ctx::Word { .. } => format!(
-            "error: linear value `{}` is never consumed in `{}` (line {})\n  local `{}` (`{}`) bound in the `{}` arm is never consumed in it (nothing is dropped for you)",
+            "error: linear value `{}` is never consumed in `{}` (line {})\n  local `{}` (`{}`) is never consumed, and its scope ends at the `{}` (nothing is dropped for you)",
             local,
             where_,
             span.line,
@@ -4397,7 +4397,7 @@ fn poly_arm_local_unconsumed_error(
             token,
         ),
         Ctx::Line { .. } => format!(
-            "error: local `{}` (`{}`) bound in the `{}` arm is never consumed in it",
+            "error: local `{}` (`{}`) is never consumed, and its scope ends at the `{}`",
             local,
             poly_type_str(pt, sig),
             token,

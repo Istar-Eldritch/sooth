@@ -63,7 +63,7 @@ Destructures `TermKind::If { then_branch, else_branch, else_span, end_span }`:
 
 ## Delivery (as implemented)
 
-- **Phase 1** (`3d61a7e`, hard) — whole `src/check.rs` change: `Moves` reuse in `PolyScope`, `snapshot`/`leave_arm`, three error fns, the `if` arm, T1 rewrite + T2–T8. Machinery landed with the `if` arm (no standalone private-function tests — placebo-prone); every test drives real source through `check_src`. M1–M3 verified.
+- **Phase 1** (`3d61a7e`, hard) — whole `src/check.rs` change: `Moves` reuse in `PolyScope`, `snapshot`/`leave_arm`, three error fns, the `if` arm, T1 rewrite + T2–T8. Machinery landed with the `if` arm (no standalone private-function tests — placebo-prone); every test drives real source through `check_src`. M1–M4 verified (M4 confirmed real during review round 1, via mutation testing in an isolated `/tmp` copy: `Moves::join`'s `(Live, Live) => Moved` mutation makes T5 fail to fail, as predicted).
 - **Phase 2** (`2b847cd`) — `tests/phase4_generics.rs` T9/T10/T11 via `run_src`; new `examples/poly_if.sth` (`mymax`, `choose`, nested `mymax3`, `main` at both instantiations).
 - **Phase 3** (`835bd87`, +review cycles `2fad343`, `b0d77c2`) — `ROADMAP.md`: 6e marked implemented, slice-7 dependency confirmed satisfied.
 
