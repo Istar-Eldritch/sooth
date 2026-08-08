@@ -31,13 +31,13 @@ rejection test (`src/check.rs:8470`, brief said `:8469`).
   (`branch_mismatch_error` `:5610`, `branch_type_mismatch_error` `:5622`), then
   `scope.moves = Moves::join(then_scope.moves, else_scope.moves)`.
 - Move-state machinery to reuse: `MoveState` (`src/check.rs:597`), `Moves` (`:607`) with
-  `take` (`:615`), `moved_site` (`:629`), `unconsumed` (`:634`), and `Moves::join` (in the
+  `take` (`:615`), `moved_site` (`:629`), `unconsumed` (`:639`), and `Moves::join` (in the
   `Moves` impl at `:607`, the `fn join` that maps disagreement to `MaybeMoved`).
-- `PolyType` derives `PartialEq, Eq` (`src/ast.rs:511`), so per-slot type comparison at the
+- `PolyType` derives `PartialEq, Eq` (`src/ast.rs:513`), so per-slot type comparison at the
   join is a direct `==`, no new comparison logic.
 - `PolyScope` (`src/check.rs:3458`): `locals: HashMap<String, PolyType>` and
   `moves: HashMap<String, Option<Span>>` (`:3460`), with a name-sorted `unconsumed()`
-  (`:3463`). The poly binder inserts `None` for a non-`Copy` local (`:3661`); the poly local
+  (`:3466`). The poly binder inserts `None` for a non-`Copy` local (`:3661`); the poly local
   read consumes it by inserting `Some(span)` and rejects a second read via
   `poly_use_after_move_error` (`:3719`-`:3723`, error fn at `:4222`).
 
@@ -85,7 +85,7 @@ Two coupled changes to `PolyScope` (`src/check.rs:3458`):
    discipline structurally identical to the monomorphic side rather than a parallel
    invention (the brief and CLAUDE.md both want this). Downstream edits this forces, all
    mechanical:
-   - `PolyScope::unconsumed()` (`:3463`) delegates to `self.moves.unconsumed()`.
+   - `PolyScope::unconsumed()` (`:3466`) delegates to `self.moves.unconsumed()`.
    - The poly binder (`:3661`) inserts `MoveState::Live` (via `self.moves.states.insert`)
      instead of `None` for a non-`Copy` local.
    - The poly local read (`:3719`-`:3723`) becomes
@@ -204,7 +204,7 @@ Replaces the early-out at `src/check.rs:3674`. Destructures
    `else_scope.leave_arm(&before, "end")`.
 6. `scope.moves = Moves::join(then_scope.moves, else_scope.moves);`
 7. Length check: `then_stack.len() != else_stack.len()` → `poly_branch_mismatch_error`.
-8. Per-slot: zip; `t_then != t_else` (direct `PolyType` `==`, `src/ast.rs:511`) →
+8. Per-slot: zip; `t_then != t_else` (direct `PolyType` `==`, `src/ast.rs:513`) →
    `poly_branch_type_mismatch_error`. **No** quotation-identity case and **no** deriv/place
    merge (those are monomorphic-only, borrow-provenance and quotation concerns absent from
    `PolyType`).
@@ -242,8 +242,8 @@ Source in → expected output or diagnostic out.
 | T4 | `check_poly_if_moved_on_one_arm_leaks` (`src/check.rs`) | unit reject | 1 | `: one ( 'T bool -- ) \| x flag \| flag if x drop else end ;` → err naming `x` (leak) |
 | T5 | `check_poly_if_moved_on_neither_arm_leaks` (`src/check.rs`) | unit reject | 1 | `: none ( 'T bool -- ) \| x flag \| flag if else end ;` → err naming `x` (leak) |
 | T6 | `check_poly_if_condition_not_bool_is_error` (`src/check.rs`) | unit reject | 1 | `: bad ( 'T 'T -- 'T ) if drop else drop end ;` → type-mismatch, `if` wants `Bool` |
-| T7 | `check_poly_if_branch_depth_mismatch_is_error` (`src/check.rs`) | unit reject | 1 | `: bad ( 'T bool -- 'T ) \| x flag \| flag if x else x x end ;` → branch-depth mismatch |
-| T8 | `check_poly_if_use_after_join_is_error` (`src/check.rs`) | unit reject | 1 | a local consumed on both arms, read again after `end` → use-after-move naming it |
+| T7 | `check_poly_if_branch_depth_mismatch_is_error` (`src/check.rs`) | unit reject | 1 | `: bad ( 'T: Copy bool -- 'T ) \| x flag \| flag if x else x x end ;` → branch-depth mismatch (**not** use-after-move: `x` needs the `Copy` bound the brief's example omitted, or the else-arm's second `x` read hits `poly_use_after_move_error` first since an unbounded `'T` is linear, masking the depth check this test exists to prove) |
+| T8 | `check_poly_if_use_after_join_is_error` (`src/check.rs`) | unit reject | 1 | `: bad ( 'T bool -- ) \| x flag \| flag if x drop else x drop end x drop ;` → both arms consume `x` (join: Moved), the `x drop` after `end` is a second read → use-after-move naming it |
 | T9 | `poly_mymax_runs_at_i64_and_f64` (`tests/phase4_generics.rs`) | e2e accept | 2 | `mymax` at `i64` (`3 7 mymax`→`7`) and `f64` (`3.0 7.0 mymax`→`7`) in one program |
 | T10 | `poly_choose_runs_at_i64_and_f64` (`tests/phase4_generics.rs`) | e2e accept | 2 | `choose` at `i64` and `f64`, each prints the kept operand |
 | T11 | `poly_nested_if_dogfood_runs` (`tests/phase4_generics.rs`) | e2e accept | 2 | build+run `examples/poly_if.sth` (nested-`if` `mymax3`) → expected line(s) |
@@ -275,6 +275,14 @@ throwaway copy of the checker, not on the shared worktree.
   of `MaybeMoved`): T4 must then **fail to fail** (`one` wrongly compiles). Mutate
   `Moves::unconsumed` to exclude `MaybeMoved`: T4 must again **fail to fail**. T3 must keep
   passing through both mutations (proving it is not just accepting everything).
+
+- **M4 (guards T5) — `none`'s leak is not incidentally covered by M3.** T5's local (`x`) is
+  untouched on both arms (`Live`+`Live`), so neither of M3's two mutations (disagreement→
+  `Moved`, or `unconsumed` excluding `MaybeMoved`) can break it: `Live`+`Live` is not a
+  disagreement and is never `MaybeMoved`. T5 needs its own mutation: change `Moves::join`'s
+  `(Live, Live) => Live` case to `(Live, Live) => Moved`. T5 must then **fail to fail**
+  (`none` wrongly compiles, `x`'s leak goes unreported). Without M4, T5 has no mutation
+  proving it can fail and is not load-bearing in practice despite the table's flag.
 
 ## Phased delivery plan
 
