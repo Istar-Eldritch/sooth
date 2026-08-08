@@ -1965,6 +1965,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(Some(id)),
+                &HashMap::new(),
             )
         };
 
@@ -2166,6 +2167,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(None),
+                &HashMap::new(),
             ));
             funcs
         };
@@ -2323,6 +2325,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.drop_override_bodies(None),
+                &HashMap::new(),
             );
             (func, m, out_bytes, aggregate_destructors)
         };
@@ -3155,6 +3158,7 @@ mod tests {
             &resolve,
             regs,
             &session.drop_override_bodies(declaring),
+            &HashMap::new(),
         )
         .into_iter()
         .map(|f| f.name)
