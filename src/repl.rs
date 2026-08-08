@@ -347,15 +347,44 @@ fn remap_imported_combinator(
     }
 }
 
-/// R8e (slice 5b): a REPL-declared name may not contain `::`, the separator
-/// reserved for a qualified imported spelling; otherwise a user could forge an
-/// import's internal epoch-tagged name and hijack its accessor sigs. A new,
-/// REPL-only guard (native `.sth` declarations have the same latent gap but no
-/// tag to collide with), located, naming the offending spelling.
+/// True if `name` ends in `__m` or `__import` followed by one or more ascii
+/// digits -- the resolver's cross-module mangle (`resolve::mangle`,
+/// `{raw}__m{module}`) and the import epoch tag (`import_symbol`,
+/// `{raw}__import{epoch}`), respectively. A multi-file closure's non-module-0
+/// words are called, from a retained combinator's body, by exactly this
+/// mangled spelling -- it is never rewritten to a `{q}::...__import{epoch}`
+/// alias, since the existing body-call rewrite only covers module-0 words --
+/// so a REPL-declared word whose bare name happens to equal it would silently
+/// hijack that body call instead of the closure's own definition.
+fn ends_with_mangled_digit_suffix(name: &str) -> bool {
+    for marker in ["__import", "__m"] {
+        if let Some(idx) = name.rfind(marker) {
+            let digits = &name[idx + marker.len()..];
+            if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// R8e (slice 5b) + review fix (slice 6c): a REPL-declared name may not
+/// contain `::`, the separator reserved for a qualified imported spelling,
+/// nor end in a resolver-mangled or import-epoch-tagged spelling (see
+/// `ends_with_mangled_digit_suffix`); either way a user could forge an
+/// internal spelling and hijack a closure's own resolution. A new, REPL-only
+/// guard (native `.sth` declarations have the same latent gap but no tag to
+/// collide with), located, naming the offending spelling.
 fn reject_double_colon_name(kind: &str, name: &str, span: Span) -> Result<(), String> {
     if name.contains("::") {
         return Err(format!(
             "error: a REPL-declared {kind} name may not contain `::` (`{name}` at line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    if ends_with_mangled_digit_suffix(name) {
+        return Err(format!(
+            "error: a REPL-declared {kind} name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`{name}` at line {}, col {})",
             span.line, span.col
         ));
     }
@@ -1821,6 +1850,49 @@ impl Session {
             }
         }
 
+        // Review fix (slice 6c): bind each *private* (non-exported) module-0
+        // ordinary word into `self.env` too, under the same internal spelling
+        // an export gets, but with no `import_aliases` entry -- R15 privacy
+        // holds, a session-typed `q::name` still misses. Without this, a
+        // retained combinator's body call to a private word (e.g. `apply2`
+        // calling `helper`) is left at its bare closure spelling by
+        // `body_rename` below and falls through to whatever the *session's*
+        // own env happens to hold under that name: a hygiene break that
+        // silently returns a wrong answer instead of resolving against the
+        // closure's own private definition.
+        for w in &module.words {
+            if w.module != 0
+                || w.poly.is_some()
+                || w.name == "main"
+                || w.name == "drop"
+                || check::word_declares_quotation_parameter(w)
+            {
+                continue;
+            }
+            let raw = if multi {
+                w.name.strip_suffix("__m0").unwrap_or(&w.name)
+            } else {
+                w.name.as_str()
+            };
+            if exports0.contains(raw) {
+                continue; // already bound by the exports loop above
+            }
+            let sig = Sig {
+                inputs: w.effect.inputs.iter().map(|s| remap(s.ty)).collect(),
+                outputs: w.effect.outputs.iter().map(|s| remap(s.ty)).collect(),
+            };
+            let internal = format!("{q}::{raw}__import{epoch}");
+            let symbol = import_symbol(&w.name, epoch);
+            self.env.insert(
+                internal,
+                WordEntry {
+                    sig,
+                    generation: epoch,
+                    symbol,
+                },
+            );
+        }
+
         // R13/R14 (slice 6c): retain each module-0 exported *combinator* (mono
         // or poly) in the combinator store under its internal epoch-tagged
         // spelling, so a *later* session line calling `q::name` inlines its
@@ -1831,21 +1903,25 @@ impl Session {
         // there and needs this loop. Unlike an ordinary word this keeps no
         // `self.env` row and no symbol, only the raw terms and the alias.
         //
-        // `body_rename` maps every module-0 export's body spelling to its
-        // internal spelling, so a retained body's call to any module-0 export
-        // (itself included, R14) resolves at the session splice site; the
-        // self-call rewrite is what keeps an imported `while`'s self-tail edge
-        // recognizable.
-        let body_rename: HashMap<String, String> = module.modules[0]
-            .exports
+        // `body_rename` maps *every* module-0 word's body spelling to its
+        // internal spelling -- not only its exports (review fix, slice 6c): a
+        // retained body's call to a module-0 export (itself included, R14)
+        // or to a module-0 *private* word must both resolve at the session
+        // splice site against the closure's own definitions, never against
+        // whatever the session's own env holds under that bare spelling. The
+        // self-call rewrite is also what keeps an imported `while`'s
+        // self-tail edge recognizable.
+        let body_rename: HashMap<String, String> = module
+            .words
             .iter()
-            .filter_map(|(raw, _)| {
-                let mangled = mangled_of(raw);
-                module
-                    .words
-                    .iter()
-                    .any(|w| w.module == 0 && w.name == mangled)
-                    .then(|| (mangled, format!("{q}::{raw}__import{epoch}")))
+            .filter(|w| w.module == 0 && w.name != "main" && w.name != "drop")
+            .map(|w| {
+                let raw = if multi {
+                    w.name.strip_suffix("__m0").unwrap_or(&w.name)
+                } else {
+                    w.name.as_str()
+                };
+                (w.name.clone(), format!("{q}::{raw}__import{epoch}"))
             })
             .collect();
         for (raw, _span) in &module.modules[0].exports {

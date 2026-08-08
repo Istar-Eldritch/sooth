@@ -1325,7 +1325,7 @@ const FILTER_DEF: &str = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usi
 // across lines, so a second call's `stack:` line shows both results.
 
 #[test]
-fn repl_quotation_taking_definition_is_rejected() {
+fn repl_quotation_taking_definition_is_accepted() {
     // R19: the former R23 rejection is now acceptance. A monomorphic
     // quotation-taking word defines at a session line and a *later* bare line
     // calls it, inlined against that line's live env (D1): `5 [ 3 + ] apply`
@@ -1340,7 +1340,7 @@ fn repl_quotation_taking_definition_is_rejected() {
 }
 
 #[test]
-fn repl_poly_quotation_taking_definition_is_rejected() {
+fn repl_poly_quotation_taking_definition_is_accepted() {
     // R19: the former poly rejection (the `eval_poly_def` path) is now
     // acceptance. A *polymorphic* combinator (`apply1 ( 'a [ 'a -- 'a ] -- 'a )`)
     // defines and a later line calls it, leaving 6 -- a value witness, unlike an
@@ -1355,7 +1355,7 @@ fn repl_poly_quotation_taking_definition_is_rejected() {
 }
 
 #[test]
-fn repl_self_tail_combinator_definition_is_rejected() {
+fn repl_self_tail_combinator_definition_is_accepted() {
     // R19: the former self-tail rejection is now acceptance. `while` defines at
     // a session line (the self-tail edge is permitted, 6b D5) rather than being
     // rejected on its declared quotation parameter.
@@ -1617,6 +1617,123 @@ fn repl_import_exporting_combinator_retains_and_runs() {
     assert!(
         ok.contains("imported c") && ok.contains("stack: 6") && !ok.contains("error"),
         "internal-only quotation word imports and runs: {ok}"
+    );
+}
+
+#[test]
+fn repl_imported_combinator_body_call_to_private_word_uses_closure_env() {
+    // Review fix (slice 6c): an exported combinator's body call to a
+    // closure-*private* word must resolve against the closure's own private
+    // definition, never against a same-named word the session happens to
+    // define. The session defines `priv_calc6c` (+1000) *before* importing a
+    // closure whose private `priv_calc6c` is +1 and whose exported `apply2`
+    // calls it: `5 [ 10 * ] c::apply2` is `(5 * 10) + 1 = 51` if the
+    // closure's own `priv_calc6c` wins, or `1050` if the retained body was
+    // left unrewritten and fell through to the session's `priv_calc6c` -- the
+    // hygiene break this test pins shut. (Named distinctly from the plainer
+    // `helper` other goldens in this file use for their own session-defined
+    // word, so this test's generation-0 `.so` symbol can't collide with
+    // theirs when `cargo test` runs this file's tests concurrently under one
+    // process's shared `dlopen(RTLD_GLOBAL)` namespace.)
+    let path = temp_lib(
+        "private-body-call",
+        ": priv_calc6c ( i64 -- i64 ) 1 + ;\n\
+         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call priv_calc6c ;\n\
+         export: apply2 ;\n",
+    );
+    let transcript = repl_error(&format!(
+        ": priv_calc6c ( i64 -- i64 ) 1000 + ;\nimport: c \"{}\" ;\n5 [ 10 * ] c::apply2\n:quit\n",
+        path.display()
+    ));
+    std::fs::remove_file(&path).ok();
+    assert_eq!(transcript, "defined priv_calc6c\nimported c\nstack: 51\n");
+}
+
+#[test]
+fn repl_imported_combinator_body_call_to_private_word_without_collision_resolves() {
+    // FIX D (slice 6c, second review pass): the no-collision sibling of
+    // `repl_imported_combinator_body_call_to_private_word_uses_closure_env`
+    // above -- same shape, but the session never defines `priv_calc6c_nc`
+    // itself, so there is nothing to fall through to even if the rewrite
+    // silently failed. `5 [ 10 * ] c::apply2` must still land on `51`
+    // ((5 * 10) + 1), and the import must not error.
+    let path = temp_lib(
+        "private-body-call-no-collision",
+        ": priv_calc6c_nc ( i64 -- i64 ) 1 + ;\n\
+         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call priv_calc6c_nc ;\n\
+         export: apply2 ;\n",
+    );
+    let transcript = repl_error(&format!(
+        "import: c \"{}\" ;\n5 [ 10 * ] c::apply2\n:quit\n",
+        path.display()
+    ));
+    std::fs::remove_file(&path).ok();
+    assert_eq!(transcript, "imported c\nstack: 51\n");
+}
+
+#[test]
+fn repl_imported_private_word_still_rejected_by_qualified_name() {
+    // FIX D / R15 (slice 6c, second review pass): R14's broadened body-call
+    // rewrite binds a module-0 private word into `self.env` under its
+    // internal spelling so a retained combinator's body can reach it (the
+    // two tests above), but adds no `import_aliases` entry -- R15 privacy
+    // still holds, so a session line naming it directly by its qualified
+    // name still errors `not exported`, exactly as an ordinary private word
+    // does.
+    let path = temp_lib(
+        "private-body-call-qualified",
+        ": privword6c ( i64 -- i64 ) 1 + ;\n\
+         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call privword6c ;\n\
+         export: apply2 ;\n",
+    );
+    let transcript = repl_error(&format!(
+        "import: c \"{}\" ;\n5 c::privword6c\n:quit\n",
+        path.display()
+    ));
+    std::fs::remove_file(&path).ok();
+    assert!(
+        transcript.contains("imported c"),
+        "the import itself must still succeed: {transcript}"
+    );
+    assert!(
+        transcript.contains("not exported") && transcript.contains("privword6c"),
+        "the qualified call to the private word is still rejected: {transcript}"
+    );
+}
+
+#[test]
+fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
+    // FIX A (slice 6c, second review pass): a REPL-declared name ending in
+    // the resolver's cross-module mangle (`__m{digits}`, `resolve::mangle`)
+    // or the import-epoch tag (`__import{digits}`, `import_symbol`) is
+    // rejected at definition time. Closes a forgeable-collision hole: a
+    // multi-file closure's non-module-0 words are called, from a retained
+    // combinator's body, by exactly this mangled spelling
+    // (`{raw}__m{module_index}`), which is never rewritten to an internal
+    // `{q}::...__import{epoch}` alias (the existing body-call rewrite only
+    // covers module-0 words) -- so a same-named session word defined first
+    // would otherwise silently win that body call instead of erroring. The
+    // guard fires on the name alone, no import needed to reproduce.
+    let transcript = repl_error(": dhelp__m1 ( i64 -- i64 ) 1000 + ;\n:quit\n");
+    assert_eq!(
+        transcript,
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 28)\n",
+        "the mangled-suffix name is rejected outright, never defined: {transcript}"
+    );
+    assert!(
+        !transcript.contains("defined dhelp__m1"),
+        "must not have been accepted as an ordinary definition: {transcript}"
+    );
+
+    let transcript = repl_error(": foo__import7 ( -- i64 ) 1 ;\n:quit\n");
+    assert_eq!(
+        transcript,
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`foo__import7` at line 1, col 27)\n",
+        "the import-epoch-suffix name is rejected outright, never defined: {transcript}"
+    );
+    assert!(
+        !transcript.contains("defined foo__import7"),
+        "must not have been accepted as an ordinary definition: {transcript}"
     );
 }
 

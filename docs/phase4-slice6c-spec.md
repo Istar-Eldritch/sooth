@@ -38,6 +38,7 @@ inline mechanism itself is unchanged.
 ## Requirements (all implemented)
 
 ### Session store (`src/repl.rs`)
+
 - **R1.** `Session.combinators: HashMap<String, WordDef>` (empty in `new`), mono+poly in one
   store. Key = the name the checker dispatches on: plain word name for session-defined;
   `{q}::{raw}__import{epoch}` for imported (R13). No generation/epoch/symbol; redefinition
@@ -47,6 +48,7 @@ inline mechanism itself is unchanged.
   Required `check::Combinator` / its construction visible to `repl.rs`.
 
 ### Threading, checker side (`src/check.rs`, `src/repl.rs`)
+
 - **R3.** `check_def`, `check_def_collecting_drop_sites`, `infer_line` grow a
   `combinators: &HashMap<String, Combinator>` param, threaded into `PolyCtx`, replacing local
   `no_combinators`. Non-REPL/build callers and unit tests pass an empty map (concrete path
@@ -57,6 +59,7 @@ inline mechanism itself is unchanged.
   (`run_terms`/`check_type_line`→`infer_line`).
 
 ### Threading, IR side (`src/ir.rs`, `src/repl.rs`)
+
 - **R5.** `lower_word`, `lower_instantiation`, `lower_line` grow a
   `combinators: &HashMap<String, Vec<Term>>` param set onto `FuncBuilder`. **`lower_line`
   (`src/ir.rs:1736`) was the under-counted fifth site**; without it a bare line calling a
@@ -65,6 +68,7 @@ inline mechanism itself is unchanged.
   `run_terms`→`lower_line`. Native `ir::lower` untouched.
 
 ### Defining a combinator at the REPL (D3)
+
 - **R6.** Replaced R23. In `eval_def`, after `audit_word_quotation_positions`, a word for which
   `word_declares_quotation_parameter` holds routes to `eval_combinator_def`.
 - **R7.** `eval_combinator_def` builds the checker view **including the definee itself** (prior
@@ -73,7 +77,7 @@ inline mechanism itself is unchanged.
 - **R8.** Before storing, runs `check_combinator_cycles` over that view, so a cross-line cycle is
   the located `combinator_cycle_error` while a self-*tail* edge stays permitted. `pub(crate)`.
 - **R9.** Body check branches on shape, stores into the one store: mono via `check_def`; poly via
-  `check_poly_combinator_standalone` (**not** `eval_poly_def`), **bypassing the `>= 2`-outputs
+  `check_poly_combinator_repl` (**not** `eval_poly_def`), **bypassing the `>= 2`-outputs
   deferral** (a combinator is spliced inline, never lowered to a bundle-returning `IrFunc`, so
   the return-bundle limit cannot arise). `pub(crate)`.
 - **R10.** On success, insert `WordDef` into `self.combinators`; **no** lowering/emit/`compile_so`/
@@ -81,6 +85,7 @@ inline mechanism itself is unchanged.
   untouched via `eval_line`'s existing snapshot-and-truncate rollback.
 
 ### Mutual exclusion on redefinition (D4)
+
 - **R11.** Combinator dispatch runs first, so a stale wrong-store entry would silently win.
   Redefining `name`: `eval_combinator_def` evicts `self.env` and `self.poly_words`; `eval_def`
   mono commit adds `self.combinators.remove(&name)`; `eval_poly_def` commit adds
@@ -88,6 +93,7 @@ inline mechanism itself is unchanged.
   stable, inert); eviction comment states this.
 
 ### Import (D5)
+
 - **R12.** Deleted `check_no_exported_quotation_word_in_closure` and its call in `eval_import`.
   Only a **module-0 exported** combinator needs retention (internal-only ones inline with the
   closure).
@@ -97,16 +103,37 @@ inline mechanism itself is unchanged.
   (plus bare alias for selective import). Symmetric to the exported-ordinary-word loop (which
   filters `w.poly.is_none()` and so never sees `filter`/`while`). No re-check.
 - **R14.** Stored copy remapped like every imported declaration (positional-id shift via reused
-  `remap`); `.name` set to internal spelling; body calls to any module-0 combinator (**itself
-  included**) or exported ordinary word rewritten to internal spellings. The **body self-call
-  rewrite is load-bearing**: `while`'s self-call must become `{q}::while__import{epoch}` or
-  `body_tail_calls_self` misses and the splice recurses forever. For `filter`/`while` the id
-  remap is a no-op, so the realistic case exercises the call-name rewrite.
-- **R15.** Two sub-questions confirmed, no new machinery: an exported combinator whose signature
-  names a private type is already rejected at the closure's own `check` (golden, no REPL guard);
-  an exported combinator whose body calls a private word is out of scope (no stopgap guard).
+  `remap`); `.name` set to internal spelling; body calls to **any module-0 word** (combinator,
+  ordinary export, or ordinary private word) are **rewritten** to internal spellings. That
+  rewrite scope is broader than the **binding** scope, though: only module-0 **exports** and
+  module-0 **private mono ordinary** words are actually bound into `self.env` (the exported-word
+  loop plus the review-fix private-word loop, below). A module-0 **private combinator or
+  polymorphic word**, called directly from a retained combinator's body, is renamed to a spelling
+  nothing binds -- a clean `unknown word` error, an accurate limitation of this slice, not a bug
+  (no golden in `lib/combinators.sth` exercises one private combinator calling another). The
+  **body self-call rewrite is load-bearing**: `while`'s self-call must become
+  `{q}::while__import{epoch}` or `body_tail_calls_self` misses and the splice recurses forever.
+  For `filter`/`while` the id remap is a no-op, so the realistic case exercises the call-name
+  rewrite. Review fix: an exported combinator's body call to a module-0 *private mono ordinary*
+  word is rewritten to an internal spelling now bound into `self.env` (no `import_aliases` entry,
+  so R15 privacy holds); this closes a hygiene hole where the call would otherwise fall through
+  to whatever the *session's own* env held under the bare name.
+- **R15.** Two sub-questions: an exported combinator whose signature names a private type is
+  already rejected at the closure's own `check` (golden, no REPL guard). A **direct** body call
+  from a retained/spliced combinator to **any non-module-0 word** -- private or exported alike;
+  privacy is not the relevant axis here -- is rewritten (R14) to a spelling nothing binds (the
+  binding side only covers module-0), producing a clean `unknown word` error, not silent wrong
+  data. A **transitive** call reaching a non-module-0 word *through* a module-0 ordinary word
+  resolves correctly: that ordinary word's own body lives in the closure's own `.so` and is
+  called by symbol rather than spliced, so it never goes through the body-rename mechanism at
+  all -- only a spliced combinator body's *direct* calls do. Second-review fix: a REPL-declared
+  name may no longer end in a resolver-mangled `__m{digits}` or import-epoch `__import{digits}`
+  spelling, so the *forged-collision* variant of this gap (a session word chosen to match a
+  non-module-0 word's mangled spelling) is now closed unconditionally; the residual gap is purely
+  "clean error, not silent," full stop.
 
 ### Invariants preserved
+
 - **R16.** No frozen resolver/env/generation/epoch/symbol (D1). Falsifiable pin required
   (criterion 4).
 - **R17.** QBE only; `Ptr[T]` opaque; no LLVM/native/JIT/comptime; `IrType` gains no quotation
@@ -134,25 +161,33 @@ inline mechanism itself is unchanged.
 | 8 | import `lib/combinators.sth`, run `while` to fixpoint; self-call rewrite holds, constant stack | `repl_imported_while_runs_to_fixpoint` | 2 |
 | 9 | import `lib/combinators.sth`, run `filter` over an array; compacts, leaves both outputs | `repl_imported_filter_runs` | 2 |
 | 10 | import a combinator whose signature names a private type is rejected at the closure's check | `repl_import_combinator_with_private_type_in_signature_is_rejected` | 2 |
-| 11 | R19: the three former-rejection goldens now assert define-and-call acceptance | `repl_quotation_taking_definition_is_rejected` et al. | 1 |
+| 11 | R19: the three former-rejection goldens now assert define-and-call acceptance | `repl_quotation_taking_definition_is_accepted` et al. | 1 |
 | 12 | dogfood: import + `filter`/`while` session transcript matches native example output | `repl_combinators_dogfood_matches_native` | 3 |
+| 13 | R14 review fix: an exported combinator's body call to a closure-*private* word resolves against the closure's own definition, not a same-named session word defined first (hygiene) | `repl_imported_combinator_body_call_to_private_word_uses_closure_env` | 2 (review fix) |
 
 **Load-bearing guards (mutation-tested):**
+
 - Crit 2 fails if R5's `lower_line` threading is reverted (link-fail or infinite splice).
 - Crit 3 fails if R9 routes a poly combinator through `eval_poly_def`.
 - Crit 4 fails if any frozen-resolver/env capture is added (D1).
 - Crit 6 fails if R11's `self.combinators.remove` is dropped from a redefinition path.
 - Crit 7 fails if `check_combinator_cycles` is not run at the REPL.
 - Crit 8 fails if R14's body self-call rewrite is deleted.
+- Crit 13 fails if R14's broadened `body_rename` (module-0 private words, not only exports) is
+  reverted: the session's pre-import `priv_calc6c` (+1000) would silently win over the closure's
+  own (+1), landing `1050` instead of `51`.
 
 ## Sanctioned edits (as implemented)
 
 `src/repl.rs`: `Session.combinators`, `eval_combinator_def`, R6 route, R11 three-path eviction,
 R12 deletion + R13/R14 retention, checker/IR view builders. `src/check.rs`: `pub(crate)` on
-`Combinator`/`check_combinator_cycles`/`check_poly_combinator_standalone`; R3 params; R18
+`Combinator`/`check_combinator_cycles`/`check_poly_combinator_repl`; R3 params; R18
 doc-comment fix. `src/ir.rs`: R5 params on `lower_word`/`lower_instantiation`/`lower_line`.
 `tests/phase4_combinators.rs`: goldens + R19 conversions. `ROADMAP.md`/`DESIGN.md` (R20). No
-change to the inline mechanism, `Instr`/`Terminator`/`qbe.rs`, or any non-REPL behavior.
+change to the inline mechanism or any non-REPL behavior, beyond a benign arity fixup at two
+`mod tests` call sites in `src/backend/qbe.rs` (an added `&HashMap::new()` arg apiece, both call
+sites using `lower_line`), mechanically forced by R5's new `combinators` param on `lower_line`.
+No `Instr`/`Terminator` change.
 
 ## Implementation notes
 
