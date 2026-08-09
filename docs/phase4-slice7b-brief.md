@@ -100,7 +100,51 @@ split... through `&q`, `&!q`, and by value" the ROADMAP names is new surface syn
 checking from nothing, the same way `@`/`!`/`+!` are new relative to a bare local read — not a
 relaxation of an existing case.
 
-**10. The old R12 wording names this slice as a future destination that, once this slice
+**11. Probed empirically (`docs/phase4-slice7b-q1-probe.md`), not just read: direction (b) as originally
+framed is unbuildable, and the checker today cannot tell a sound escaping capture from an
+unsound one.** In a throwaway copy, the 7b rejection was lifted (`body_captures_enclosing`'s two
+guard sites deleted, nothing else touched) and both members of the Q2 pair from recon above were
+run through the real compiler:
+
+```
+: make-a ( -- [ i64 -- i64 ] )        \ UNSOUND: captures its own frame's local
+  0 4 fill | arr |
+  [ &arr 0 >usize &> @ + ] ;
+: main ( -- ) make-a 5 swap call . ;
+```
+
+The checker **accepted** this. It only failed later, in lowering, with no diagnostic
+(`panicked at src/ir.rs:3577: checked: a borrow's operand is a local`) — a closure over a
+dangling pointer into a returned frame, waved through. The sound sibling (capture arrives as a
+parameter, referent lives in the caller's frame) was **accepted identically**; the checker does
+not distinguish the two cases at all today. Re-run independently against the probe's own
+throwaway copy and confirmed exit-for-exit.
+
+The same probe found (b)'s stated premise self-contradicts once measured at two different
+points: evaluated *at the boundary*, 6f's `capture_alive_names` liveness says yes to the unsound
+program above (`arr` is still visibly read on the return line, so it reads alive by 6f's own
+test); evaluated *at the call site*, the same liveness says no to both of 7b's own motivating
+programs — a dispatch table of closures and a struct-stored closure observing a later mutation —
+because materialization already set `quot = None` at the store, so `capture_alive_names`
+(recon 3's `if let Some(QuotRef::Known(id)) = ...` guard) has already dropped those names from
+the walk by the time the call is reached. One query, opposite failures depending on where it's
+asked; there is no existing single evaluation point that admits the sound programs and rejects
+the unsound one. (b) is not smaller than (a), it is unsound as literally stated.
+
+The probe also found the one piece of *existing* machinery that does separate the two cases: the
+R12 exit-row check in `check_literal_against_declared_effect` (`src/check.rs:6101-6109`) already
+compares a borrow's `Deriv.owned_root` against `outer_locals` — exactly `make-a`-vs-`make-b`'s
+distinction (root in the current frame vs. a parameter) — but only for a borrow left live on the
+literal's synthetic re-execution's exit row, never for one consumed inside the body via a
+capture. The same test, pointed at the capture set instead of the exit row, is a small, sound
+floor: reject a captured reference whose `owned_root` names a local of the *current* frame,
+admit one rooted in a parameter or global. It rules out `make-a` and admits `make-b` — but does
+*not* reach 7b's own motivating programs, both of which capture a local of the *same* frame that
+later calls the closure (never escaping upward at all); those still need a capture set that
+survives erasure and feeds `capture_alive_names`, i.e. direction (a)'s actual machinery. Full
+report, exact programs and compiler output: `docs/phase4-slice7b-q1-probe.md`.
+
+**12. The old R12 wording names this slice as a future destination that, once this slice
 ships, no longer is one.** `capturing_quotation_error` (`src/check.rs`, 7a) reads "a capturing
 quotation cannot {boundary} (**capturing closures are slice 7b**)". Once 7b exists, every
 program this message currently rejects either becomes legal (a non-escaping capture, live
@@ -138,15 +182,38 @@ representation decision (7a's own D5 is what kept 7b additive; the wrong call he
 
 - **Q1. How does an erased quotation's capture set survive materialization, given `QuotRef`'s
   single-variant design (recon 4) and `capture_alive_names`'s hard dependency on `Known`
-  (recon 3)?** Two directions, not necessarily exhaustive: (a) widen `QuotRef` with a second
-  variant carrying a capture-set handle (e.g. `Materialized(CaptureSetId)`, the join's union of
-  both arms' sets when they differ) so recon 3's walk gets a second case instead of going blind
-  at `None`; (b) restrict materialization of a capturing literal to shapes where 6f's *existing*
-  liveness already keeps every captured name alive on its own merits (no new tracking needed,
-  at the cost of rejecting some upward escapes that (a) would allow). (a) is more capable and
-  is what the exit criteria's "called while that capture is still live" bullet implies is
-  needed in general; (b) is smaller and might be enough for a first cut, deferring the general
-  case the way 7a deferred capture at all.
+  (recon 3)?** *Settled by measurement, not argument — recon 11.* The brief originally posed
+  this as a symmetric a-vs-b choice: widen `QuotRef` with a capture-set-carrying variant, or
+  restrict materialization to what 6f's existing liveness already covers, deferring the general
+  case the way 7a deferred capture at all. The probe found (b) is not the smaller, deferred
+  option — it is unbuildable as stated, because 6f's existing liveness gives opposite answers
+  depending on where it's asked: it accepts the unsound frame-escape (`make-a`, a closure over a
+  dead frame's local, which the checker waved through with no diagnostic today) and rejects both
+  of 7b's own motivating programs (a dispatch table, a struct-stored closure observing a later
+  mutation) because erasure already zeroed their capture visibility by the time the call is
+  reached. There is no single existing evaluation point that admits the sound programs and
+  rejects the unsound one.
+
+  What the probe found instead is two ordered pieces, not one binary choice:
+
+  - **A soundness floor, buildable now from existing machinery.** The R12 exit-row check
+    (`check.rs:6101-6109`) already compares a borrow's `Deriv.owned_root` against `outer_locals`
+    — exactly the test that separates `make-a` from `make-b` (root in the current frame vs. a
+    parameter) — but only for a borrow left on the literal's synthetic exit row, never for one
+    consumed via a capture. Pointed at the capture set instead, at the boundary: reject a capture
+    whose `owned_root` names a local of the *current* frame; admit one rooted in a parameter or
+    global. Small, sound, and closes the actual hole the probe found.
+  - **The env-plumbing direction (the old option (a)) for everything the floor doesn't reach.**
+    Both motivating programs capture a local of the *same* frame that later calls the closure
+    (never escaping upward), so the floor above admits them without objection — but admitting
+    them safely still requires a capture set that survives materialization and feeds
+    `capture_alive_names` past the call site, which is unavoidably a lowering change: `env` is
+    hardcoded null and never read anywhere in lowering today (recon 5), so this is new plumbing,
+    not an extension of a stub.
+
+  Open for the spec: whether these ship together, or the floor lands first as a standalone
+  soundness fix (closing the `make-a` hole even before 7b's capability work) with the env
+  plumbing following as the bulk of the slice. Full probe: `docs/phase4-slice7b-q1-probe.md`.
 
 - **Q2. Where does the env live, and what may an escaping closure capture?** *This question was
   first written as one fork ("heap-allocate the env" vs "only let `^T`-owned data be captured"),
@@ -206,14 +273,14 @@ representation decision (7a's own D5 is what kept 7b additive; the wrong call he
   `&!q` mean only "callable without consuming," not "callable with internal state change")?
 
 - **Q4. Does joining two different capturing literals need the union of both arms' capture
-  sets, or does it need something narrower?** If Q1 picks direction (a), the join produces one
-  value that might be either literal; keeping every name either might read alive for as long as
+  sets, or does it need something narrower?** Once Q1's env-plumbing direction lands, the join
+  produces one value that might be either literal; keeping every name either might read alive for as long as
   the joined value survives is conservative but sound. Does this conservatism compound if the
   joined value itself later flows into a further join or store (widening the tracked set
   further each time), and if so, is that an acceptable cost or does it need a cap (e.g., "a
   capturing quotation may cross at most one join before its capture set is frozen")?
 
-- **Q5. Does the old R12 wording get retired, and with what replacement vocabulary?** Recon 10:
+- **Q5. Does the old R12 wording get retired, and with what replacement vocabulary?** Recon 12:
   "capturing closures are slice 7b" has no correct audience once 7b ships. The exit criteria
   imply at least two new diagnostics (past-last-use, past-owning-frame) with their own located
   wording; decide whether they reuse `capturing_quotation_error`'s shape with a different tail
