@@ -1,0 +1,250 @@
+\ Dogfood: Phase 4 Slice 7a. The same bytecode stack machine as `examples/vm.sth`,
+\ rewired around a table of quotations instead of a clause-dispatched `run`.
+\
+\ `Op` still needs one clause elimination (sum types are clause-style only,
+\ slice 7a Q5), but that clause is now a pure *decoder*: it reads the tag and
+\ any immediate operand, pushes the operand onto the `Vm`'s operand stack, and
+\ yields an opcode index. The nine opcode *handlers* are uniform, match-free
+\ `[ Vm -- Vm ]` quotations living in one array (a materialization boundary,
+\ 7a): dispatch indexes the table and `call`s the selected entry indirectly.
+\ `decode` always advances `pc` by one; `h-jz`/`h-jmp` overwrite it afterward,
+\ so no handler needs to know whether it is straight-line or a branch.
+
+type: Op
+| Push v i64
+| Add
+| Sub
+| Mul
+| Load  addr usize
+| Store addr usize
+| Jz    target usize
+| Jmp   target usize
+| Halt
+;
+
+type: Vm
+  prog  [Op 13]
+  pc    usize
+  stack [i64 8]
+  sp    usize
+  mem   [i64 4]
+;
+
+type: Fetched vm Vm op Op ;
+type: VmPop vm Vm val i64 ;
+type: Decoded vm Vm idx usize ;
+
+: vm-push ( Vm i64 -- Vm )
+  | vm x |
+  vm Vm>sp | i |
+  &!vm &!Vm>stack i &!> x !
+  vm vm Vm>sp 1 + Vm<sp ;
+
+: vm-pop ( Vm -- VmPop )
+  | vm |
+  vm Vm>sp 1 - | i |
+  &vm &Vm>stack i &> @ | x |
+  vm i Vm<sp
+  x
+  VmPop ;
+
+: bump-pc ( Vm -- Vm )
+  dup Vm>pc 1 + Vm<pc ;
+
+: fetch ( Vm -- Fetched )
+  | vm |
+  vm Vm>pc | i |
+  &vm &Vm>prog i &> @ | op |
+  vm op Fetched ;
+
+\ Opcode indices into the handler table (Q5): the only place these numbers
+\ are chosen; `decode` and `build-table` must agree on them.
+\   0 Push  1 Add  2 Sub  3 Mul  4 Load  5 Store  6 Jz  7 Jmp  8 Halt
+
+: decode ( Vm Op -- Decoded )
+| Push  | vm v |
+    vm v vm-push
+    bump-pc
+    0 >usize
+    Decoded
+| Add   | vm |
+    vm
+    bump-pc
+    1 >usize
+    Decoded
+| Sub   | vm |
+    vm
+    bump-pc
+    2 >usize
+    Decoded
+| Mul   | vm |
+    vm
+    bump-pc
+    3 >usize
+    Decoded
+| Load  | vm addr |
+    addr >i64 | a |
+    vm a vm-push
+    bump-pc
+    4 >usize
+    Decoded
+| Store | vm addr |
+    addr >i64 | a |
+    vm a vm-push
+    bump-pc
+    5 >usize
+    Decoded
+| Jz    | vm target |
+    target >i64 | t |
+    vm t vm-push
+    bump-pc
+    6 >usize
+    Decoded
+| Jmp   | vm target |
+    target >i64 | t |
+    vm t vm-push
+    bump-pc
+    7 >usize
+    Decoded
+| Halt  | vm |
+    vm
+    bump-pc
+    8 >usize
+    Decoded
+;
+
+\ Nine uniform, match-free handlers. `decode` has already pushed every
+\ immediate operand the handler needs onto the `Vm`'s operand stack, in the
+\ order the handler pops it back off.
+
+: h-push ( Vm -- Vm ) ;
+
+: h-add ( Vm -- Vm )
+  vm-pop VmPop> | b |
+  vm-pop VmPop>
+  b +
+  vm-push ;
+
+: h-sub ( Vm -- Vm )
+  vm-pop VmPop> | b |
+  vm-pop VmPop>
+  b -
+  vm-push ;
+
+: h-mul ( Vm -- Vm )
+  vm-pop VmPop> | b |
+  vm-pop VmPop>
+  b *
+  vm-push ;
+
+: h-load ( Vm -- Vm )
+  vm-pop VmPop> | vm addr64 |
+  addr64 >usize | addr |
+  &vm &Vm>mem addr &> @ | x |
+  vm x vm-push ;
+
+: h-store ( Vm -- Vm )
+  vm-pop VmPop> | vm addr64 |
+  addr64 >usize | addr |
+  vm vm-pop VmPop> | vm2 x |
+  &!vm2 &!Vm>mem addr &!> x !
+  vm2 ;
+
+: h-jz ( Vm -- Vm )
+  vm-pop VmPop> | vm target64 |
+  target64 >usize | target |
+  vm vm-pop VmPop> | vm2 x |
+  x 0 =
+  if
+    vm2 target Vm<pc
+  else
+    vm2
+  end ;
+
+: h-jmp ( Vm -- Vm )
+  vm-pop VmPop> | vm target64 |
+  target64 >usize | target |
+  vm target Vm<pc ;
+
+: h-halt ( Vm -- Vm ) ;
+
+\ `fill` infers its element type from the value on the stack and has no
+\ declared context of its own to materialize a bare literal against (a
+\ boundary needs an expected `Type::Quotation`, R7), so the seed comes from a
+\ word with a declared quotation output instead (that word-output boundary
+\ materializes it).
+: mk-h-push ( -- [ Vm -- Vm ] ) [ h-push ] ;
+
+: build-table ( -- [ [ Vm -- Vm ] 9 ] )
+  mk-h-push 9 fill | t |
+  &!t 1 >usize &!> [ h-add ] !
+  &!t 2 >usize &!> [ h-sub ] !
+  &!t 3 >usize &!> [ h-mul ] !
+  &!t 4 >usize &!> [ h-load ] !
+  &!t 5 >usize &!> [ h-store ] !
+  &!t 6 >usize &!> [ h-jz ] !
+  &!t 7 >usize &!> [ h-jmp ] !
+  &!t 8 >usize &!> [ h-halt ] !
+  t ;
+
+\ The dispatch loop: fetch, decode (the one legal clause elimination), and
+\ either stop (index 8 is `Halt`) or index the table and indirect-call the
+\ selected handler, then tail-call itself with the updated `Vm`. `table` is
+\ threaded alongside `Vm` across the self-tail-call back-edge exactly as
+\ `Vm`'s own arrays are.
+: dispatch ( Vm [ [ Vm -- Vm ] 9 ] -- i64 )
+  | vm0 table |
+  vm0 fetch Fetched> decode Decoded> | vm idx |
+  idx 8 >usize =
+  if
+    vm vm-pop VmPop>
+    swap drop
+  else
+    &table idx &> @ | h |
+    vm h call
+    table
+    dispatch
+  end ;
+
+\ Assembles the sum-1..N-via-bytecode program, identical to `examples/vm.sth`'s
+\ `build`:
+\   0  Load  0    (L)   push i
+\   1  Jz    11         if i == 0 goto E
+\   2  Load  1          push acc
+\   3  Load  0          push i
+\   4  Add               acc + i
+\   5  Store 1          acc = acc + i
+\   6  Load  0          push i
+\   7  Push  1
+\   8  Sub               i - 1
+\   9  Store 0          i = i - 1
+\   10 Jmp   0          backward branch to L
+\   11 Load  1    (E)   push acc
+\   12 Halt             result = acc on top of stack (seeded by fill)
+: build ( -- [Op 13] )
+  Halt 13 fill | prog |
+  &!prog 0  >usize &!> 0  >usize Load  !
+  &!prog 1  >usize &!> 11 >usize Jz    !
+  &!prog 2  >usize &!> 1  >usize Load  !
+  &!prog 3  >usize &!> 0  >usize Load  !
+  &!prog 4  >usize &!> Add !
+  &!prog 5  >usize &!> 1  >usize Store !
+  &!prog 6  >usize &!> 0  >usize Load  !
+  &!prog 7  >usize &!> 1 Push !
+  &!prog 8  >usize &!> Sub !
+  &!prog 9  >usize &!> 0  >usize Store !
+  &!prog 10 >usize &!> 0  >usize Jmp   !
+  &!prog 11 >usize &!> 1  >usize Load  !
+  prog ;
+
+: main ( -- )
+  build
+  0 >usize                       \ pc = 0
+  0 8 fill
+  0 >usize                       \ sp = 0
+  0 4 fill | mem |
+  &!mem 0 >usize &!> 100000 !    \ mem[0] = N = 100000, mem[1] = 0
+  mem
+  Vm
+  build-table
+  dispatch . ;

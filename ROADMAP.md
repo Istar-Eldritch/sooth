@@ -1574,7 +1574,7 @@ then find out what the compiler owes it.
    env to disagree about.
 
    **7a — quotations as values: representation, calling convention, and non-capturing
-   quotations.**
+   quotations. Implemented.**
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
    The seam is already cut: `Type::Quotation`/`PolyType::Quotation` exist with unification and
    `apply_subst` following (6a), and what is missing is strictly downstream — `ir_type_of`'s
