@@ -21,10 +21,10 @@ is a compile error).
 
 ## Status
 
-**Phases 0-2 complete; Phase 3 (the memory model) in progress** (see ROADMAP.md). The
-pipeline is implemented end to end: the examples compile to native binaries and run, and
-`cargo run -- repl` gives an interactive session where words are compiled to shared objects
-and `dlopen`'d in as you define them.
+**Phases 0-3 complete; Phase 4 (minimal polymorphism + quotations) well underway** (see
+ROADMAP.md for the slice-by-slice detail). The pipeline is implemented end to end: the
+examples compile to native binaries and run, and `cargo run -- repl` gives an interactive
+session where words are compiled to shared objects and `dlopen`'d in as you define them.
 
 Phase 2 delivered the **typed core**, all of it heap-free: a `Type` per stack slot, unified
 at branch joins; the fixed-width integer tower (`i8`..`i64`, `u8`..`u64`) with explicit
@@ -35,17 +35,32 @@ form, inline-aggregate layout, generated constructor/accessor words); **enums/AD
 elimination, no inline `match`); **fixed-size arrays** with `usize`; self-tail-call
 lowered to a jump; and a bytecode VM as the exit dogfood.
 
-Phase 3 is making the linear spine real rather than aspirational. Landed so far:
-move-by-default with `dup` gated on `Copy` and `drop` as an explicit destructor call;
-`^T`, a compiler-known single heap cell that is always linear and propagates linearity
-transitively through structs and enums, behind a `malloc`/`free` shim with an OOM trap;
-recursive heap data (lists, trees, mutually recursive shapes) whose synthesized
-destructors dispose in **constant stack**, verified past a million nodes under a 1 MB
-stack; **general locals**, where `| names |` binds at any point in a body and REPL
-lines can bind too; and **second-class references**, where `&a`/`&!a` borrows a local,
-projection reaches a field, element or cell payload, and `@`/`!`/`+!` read and mutate
-through a reference, governed by per-place exclusivity and structural escape prevention
-rather than by any lifetime system. Next is opt-in reference counting (`Rc`/`Arc`).
+Phase 3 made the linear spine real: move-by-default with `dup` gated on `Copy` and `drop`
+as an explicit destructor call; `^T`, a compiler-known single heap cell that is always
+linear and propagates linearity transitively through structs and enums, behind a
+`malloc`/`free` shim with an OOM trap; recursive heap data (lists, trees, mutually
+recursive shapes) whose synthesized destructors dispose in **constant stack**, verified
+past a million nodes under a 1 MB stack; **general locals**, where `| names |` binds at
+any point in a body and REPL lines can bind too; **second-class references**, where
+`&a`/`&!a` borrows a local, projection reaches a field, element or cell payload, and
+`@`/`!`/`+!` read and mutate through a reference, governed by per-place exclusivity and
+structural escape prevention rather than by any lifetime system; typed foreign calls
+(`extern:`) and string slices; and resources as linear values with user-definable
+destructor bodies (`drop` overrides). Opt-in reference counting (`Rc`/`Arc`) is deferred
+to Phase 6, alongside the rest of the stdlib layering.
+
+Phase 4 adds bounded polymorphism (`'T`/`'N`/`..s` type, length, and row variables,
+monomorphized per instantiation, no vtables) and quotations: `[ ... ]` literals, `call`,
+and a `times` loop primitive that lowers self-tail recursion to a constant-stack back-edge
+rather than an unrolled splice. On top of that, a combinator library written in Sooth
+itself (`lib/combinators.sth`: `each`/`map`/`fold`/`filter`/`while`), inlined by a
+term-splicing compiler pass rather than minting a function per call site; multi-file
+modules with word/type imports, natively and at the REPL; and quotations as real runtime
+values (non-capturing closures, storable and passable to non-inlined higher-order code).
+In progress: capturing closures and static ad-hoc overloading (`docs/phase4-slice7b-brief.md`,
+`docs/phase4-slice8a-brief.md`); briefed but not started: retiring `times` as a compiler
+intrinsic in favor of a library word once quotation effects can carry a row variable
+(`docs/phase4-slice10-brief.md`), and `if` becoming an ordinary combinator.
 
 The compiler is a Rust bootstrap; the language will later self-host.
 
@@ -86,18 +101,3 @@ stack: 25 1
 
 The last line binds two values the *previous* line left on the session stack. A line's
 names are scoped to that line; the stack is what persists.
-
-## Layout
-
-```
-src/lexer.rs  parser.rs  ast.rs   front end
-src/check.rs                      stack-effect checker
-src/ir.rs                         backend-neutral IR (Ptr[T] kept abstract)
-src/backend/qbe.rs                QBE IL emission
-src/driver.rs                     pipeline orchestration
-src/repl.rs                       REPL session: dlopen loop, generation mangling
-examples/                         target programs (gcd, lerp, shapes, stack, list, vm, ...)
-tests/phase0.rs                   golden tests: build+run + diagnostics across the typed core
-tests/phase1.rs                   golden REPL sessions (define/redefine/recover)
-tests/phase3_locals.rs            goldens for general locals (mid-body and REPL-line)
-```

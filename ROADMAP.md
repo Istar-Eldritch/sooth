@@ -2000,14 +2000,39 @@ then find out what the compiler owes it.
    that calls a non-`drop` disposal word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
-   and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
-   the other eight enable: it needs quotations (slice 4) for `if` to be a word at all, and
-   dispatch (slice 8a specifically — see above) so `Bool`'s type-directed printing becomes an
-   ordinary overload instead of a re-added special case — which is the whole point of
-   waiting, per the bundle note above. Mechanically it is a large migration rather than a
-   design problem: `bool` has been in the test suite since Phase 2 Slice 1, so this is
-   8c-shaped work (delete the special cases, let the exhaustiveness checker find the arms,
-   migrate the call sites) and should run 8c's lightweight process.
+   and `type: Bool | False | True ;` replaces the primitive. Near the end because it is the
+   cleanup the other eight enable, not because anything later depends on it: it needs
+   quotations (slice 4) for `if` to be a word at all, and dispatch (slice 8a specifically —
+   see above) so `Bool`'s type-directed printing becomes an ordinary overload instead of a
+   re-added special case — which is the whole point of waiting, per the bundle note above.
+   Mechanically it is a large migration rather than a design problem: `bool` has been in the
+   test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special cases, let
+   the exhaustiveness checker find the arms, migrate the call sites) and should run 8c's
+   lightweight process.
+
+10. **Rows in quotation effects: `times` stops being a compiler intrinsic.** The self-tail-
+    call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6) are both
+    already general, keyword-free machinery; the one loop shape user code still cannot write
+    is `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can be
+    declared at a word's own top level but not inside a nested quotation's declared effect
+    (slice 6a's R2/R28, deliberately deferred). Split 10a/10b, the same shape as 6/7/8's
+    splits: 10a adds the mechanism (parsing and checking a row inside a quotation effect) and
+    exits on a user-space `my-times` compiling beside the untouched intrinsic; 10b then
+    deletes the intrinsic (`check_abstract_quotation_times`, the `check_term`/`ir.rs`
+    `"times"` arms) and moves `times` itself into `lib/combinators.sth`, 8c-shaped lightweight
+    process. Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
+    smaller half of the gap: at every check point a combinator's row is concrete (combinators
+    are spliced per call site and mint no `IrFunc`, per slice 6's R18/R20), so there is no
+    abstract row unification or `Subst` change, only per-splice depth arithmetic the
+    intrinsic's own `check_abstract_quotation_times` already prototypes. The bigger,
+    row-independent bug the brief's paper pre-check found: the self-tail back-edge arm
+    (`src/check.rs`) models its result as the combinator's non-quotation inputs, true only
+    for `while`'s state-threading shape and false for any loop that consumes its counters —
+    a fully concrete, row-free `times`-shaped combinator fails today with a stack-depth
+    mismatch between its `if` branches. 10a fixes that arm (ground declared outputs, plus an
+    explicit unify of the self-call's arguments against the ground declared inputs)
+    independent of whether rows land. Sequenced after 7b and 8a land (all three touch
+    `check_term`'s dispatch spine), not gated on 9.
 
 ### Phase 5 — Errors as values  `[S]`
 
