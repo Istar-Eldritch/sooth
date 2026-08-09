@@ -3562,6 +3562,37 @@ fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
 }
 
 #[test]
+fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
+    // `foo` ends in the builtin `<` on two `i64`s. The tail-call cycle pass
+    // runs before any body is checked, so it saw only the name and credited
+    // an edge `foo -> <` to the `Vec2` overload, closing a cycle with that
+    // overload's tail call to `foo` and rejecting this valid program as
+    // `mutual tail recursion`.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: foo ( i64 i64 -- bool ) < ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x foo ;\n\
+: main ( -- ) 1 0 Vec2 5 0 Vec2 < . ;\n";
+    let (stdout, code) = run_overload_src("tail-cycle-builtin", src);
+    assert_eq!(stdout, "true\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutual_tail_recursion_between_ordinary_words_is_still_an_error() {
+    // The guard above must not have disarmed the pass for ordinary names,
+    // which is the case it exists for.
+    let src = ": a ( i64 -- i64 ) b ;\n: b ( i64 -- i64 ) a ;\n: main ( -- ) 1 a . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-tail-cycle-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("mutual tail recursion") && err.contains("`a`") && err.contains("`b`"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
 fn overloads_of_an_ordinary_word_name_are_both_reachable() {
     // R1 widened the duplicate-word key to admit these two definitions, but
     // the checking env held one `Sig` per name, so the second silently

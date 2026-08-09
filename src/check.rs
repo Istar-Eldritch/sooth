@@ -3676,10 +3676,24 @@ fn check_tail_call_cycles(
     // otherwise register a tail call *to* the overload and fabricate a cycle.
     // Keyed by registry membership, not the literal name, matching every
     // other exclusion in this pass.
+    //
+    // Slice 8a generalizes that to every builtin name, for the same reason
+    // `drop` needed it: this pass runs before any body is checked, so it has
+    // only names, and a tail-position `<` is far more often the builtin on two
+    // scalars than a call to a `Vec2 <` overload that happens to share the
+    // name. Crediting it as an edge rejects valid programs outright -- a word
+    // ending in `<` beside any `<` overload was reported as `mutual tail
+    // recursion`. The cost is that a real mutual cycle between two
+    // builtin-named overloads is no longer rejected here; it compiles as
+    // ordinary mutual recursion (correct, but without the tier-1 loop shape,
+    // so it will overflow the stack when driven deep), which is the same
+    // trade `has_self_tail_call` documents. Deciding these apart needs each
+    // call site's resolved candidate, which exists only after the body walk
+    // this pass precedes.
     let name_to_idx: HashMap<&str, usize> = words
         .iter()
         .enumerate()
-        .filter(|(i, _)| !drop_overload_indices.contains(i))
+        .filter(|(i, w)| !drop_overload_indices.contains(i) && !is_builtin_word_name(&w.name))
         .map(|(i, w)| (w.name.as_str(), i))
         .collect();
 
