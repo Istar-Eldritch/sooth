@@ -150,8 +150,11 @@ drifted materially.
   reference.
 
   **D4 amendment (scalar snapshot).** A captured **scalar** value — any local whose type is NOT
-  `Type::Struct | Type::Enum | Type::Array | Type::OwnedCell`, is NOT itself a `Type::Ref`, and is
-  NOT a `Type::Quotation` (a locally-bound quotation value, a `Slot` with `quot: Some(...)`) — i.e.
+  `Type::Struct | Type::Enum | Type::Array | Type::OwnedCell`, is NOT itself a `Type::Ref`, and does
+  NOT itself hold a quotation value in either of the checker's two mutually exclusive
+  representations (a **Known** literal, `quot.is_some()` / `ty == Type::Cstr`, or an already-**erased**
+  one, `ty == Type::Quotation` / `quot: None` — never both at once, so "not `Type::Quotation`" alone
+  is not the right test) — i.e.
   precisely the class that reaches `borrow_of_scalar_local_error` in `check_reference_word`
   (`check.rs:8210`–`:8214`) (`i64`/`u64`/`f32`/`f64`/`bool`/`usize` etc.) — is **snapshotted into the
   env (copied), not referenced**. That function's `!matches!(local_ty, Struct|Enum|Array|OwnedCell)`
@@ -159,8 +162,10 @@ drifted materially.
   locals (`check.rs:8204`, `scope.local(rest).is_some_and(|b| b.quot.is_some())` →
   `reject_quotation_operand`) and `Type::Ref` locals (`check.rs:8207`, `local_ty.is_ref()` →
   `borrow_of_reference_local_error`) before the scalar predicate ever runs, so the class the scalar
-  message actually applies to is "not aggregate, not `Ref`, AND not quotation-marked" — the snapshot
-  class must exclude all three (a captured quotation-typed name is case 4 in R15, never a snapshot). This is sound, not a hedge, and loses nothing D4 was protecting: a scalar local
+  message actually applies to is "not aggregate, not `Ref`, AND not quotation-marked (by either
+  representation)" — the snapshot class must exclude a captured quotation-typed name by both
+  representations, and R15's case 4 **defers** that case (rejected, not admitted or snapshotted).
+  This is sound, not a hedge, and loses nothing D4 was protecting: a scalar local
   can never be mutated after capture through any path Sooth admits, because (a) a scalar has no
   address and so can never be borrowed at all (`borrow_of_scalar_local_error`, `check.rs:7845`), and
   (b) R4 forbids rebinding a name already in scope, for Copy values too (`check.rs:5563`). So a
@@ -268,8 +273,10 @@ requirements are R14+.
   `quotation_captures(id)`, D3; no new analysis):
 
   1. **Scalar value capture** — the name binds a scalar local (D4's snapshot class: not
-     `Struct`/`Enum`/`Array`/`OwnedCell`, not a `Type::Ref`, and not a `Type::Quotation` — see
-     case 4). **Always admissible, at every one of the four boundaries including word-output**: the
+     `Struct`/`Enum`/`Array`/`OwnedCell`, not a `Type::Ref`, and holds no quotation value in either
+     representation — neither `quot.is_some()` (Known) nor `ty == Type::Quotation` (erased); see
+     case 4, which defers that case entirely rather than snapshotting it). **Always admissible, at
+     every one of the four boundaries including word-output**: the
      env snapshots it (D4 amendment), so it can never dangle. No `owned_root` test, no surviving-set
      entry. (This is the new first branch, and it is what admits the four re-pointed 7a goldens,
      R25.)
@@ -301,22 +308,27 @@ requirements are R14+.
      `owned_root` is a current-frame local, so it is frame-rooted and rejected at a word-output
      boundary.
 
-  4. **Captured quotation-typed name** — the name binds a **quotation** value (its type is
-     `Type::Quotation`, a `Slot` with `quot: Some(...)`), not a scalar/aggregate/borrow. It is
-     neither snapshotted (rule 1) nor root-classified (rules 2/3): it is **materialized** (if its
-     `quot` is `Known`) and its own capture set — `quotation_captures(id)` / `capture_names` (D3) —
-     is folded **transitively** into the outer closure's surviving set (R19/R20), so R22's
-     word-output escape guard can see through it to any frame-rooted capture nested inside. Golden
-     `:160` (`capturing_through_nested_quotation_is_error`, `[ [ x + ] call ]`) is **not** a case-4
-     program: its inner `[ x + ]` is an inline literal spliced via `call`, never bound to a local
-     name, so only the scalar `x` is captured and `:160` stays a rule-1 scalar case (R25).
+  4. **Captured quotation-typed name** — the name binds a quotation value, in either of the
+     checker's two mutually exclusive representations: a **Known** literal (`quot.is_some()`,
+     `ty == Type::Cstr`) or an already-**erased** one (`ty == Type::Quotation`, `quot: None`).
+     Admitting this for real would need machinery nothing else in this slice requires: materializing
+     a nested `Known` quotation (or unioning an erased one's own `SurvivingCaptureSetId`, potentially
+     recursively, since a captured quotation can itself capture another), plus an env representation
+     for a two-word `(code, env)` value that R16's null/inline-reference/reference-bundle ladder has
+     no slot for. No exit criterion needs it. Rather than build unmotivated machinery, capturing a
+     quotation-typed name by name is **rejected as deferred**, at every boundary, parallel to R18's
+     2+-capture deferral: `error: capturing a quotation value by name is deferred (line {n})`
+     (T-quot-cap-deferred). Golden `:160` (`capturing_through_nested_quotation_is_error`,
+     `[ [ x + ] call ]`) is **not** this case: its inner `[ x + ]` is an inline literal spliced via
+     `call`, never bound to a local name, so only the scalar `x` is captured and `:160` stays a
+     rule-1 scalar case (R25).
 
   Boundary summary: a **scalar** capture (kind 1) admits at all four boundaries unconditionally; an
   **aggregate value or borrow** capture (kinds 2/3) admits an *outer-rooted* capture at any
   boundary, admits a *frame-rooted* capture only at an **in-frame** boundary (Phase 2, R21), and
   rejects a frame-rooted capture at a **word-output** boundary with past-owning-frame (R24); a
-  **captured quotation-typed name** (kind 4) carries no admission decision of its own — it folds its
-  transitive capture set into the outer closure's surviving set and is decided by those members.
+  **captured quotation-typed name** (kind 4) is rejected as deferred at every boundary (R15 case 4,
+  T-quot-cap-deferred), independent of which boundary it appears at.
 
 **Env representation and lowering (Phase 1: inline single; Phase 2: bundle)**
 
@@ -534,6 +546,7 @@ its liveness extension; the join union; the two new diagnostics; a dogfood progr
 | T-makea | `escaping_closure_over_frame_local_is_past_owning_frame` | reject | 1 | `make-a` (captures a `[i64 4]` local of its own frame), returned → exact past-owning-frame message via `assert_eq!` |
 | T-env-inline | `materialized_single_capture_builds_inline_env` | unit+IR | 1 | one-capture materialization → `env` slot holds the reference, no `Alloc` bundle, `IrFunc` has one extra `Ptr` param |
 | T-multi-esc | `multi_capture_escaping_closure_is_rejected_deferred` | reject | 1 | a returned closure capturing two param refs → exact "at most one reference (heap env deferred)" message |
+| T-quot-cap-deferred | `capturing_quotation_typed_name_is_rejected_deferred` | reject | 1 | a quotation bound to a name and captured by another literal (e.g. `[ 1 + ] \| q \| [ q call ] Holder Holder>q ...`) → exact "capturing a quotation value by name is deferred" message (R15 case 4) |
 | T-dispatch | `dispatch_table_of_capturing_closures_runs` | run | 2 | an array of same-frame capturing closures, indexed and `call`ed in-frame → same values as spliced; `CallIndirect` present |
 | T-lateread | `struct_stored_closure_observes_later_mutation` | run | 2 | a closure stored in a struct field, its captured array mutated, then `call`ed → observes the mutation (D4 late read); `CallIndirect` present |
 | T-lastuse | `captured_reference_read_past_last_use_is_error` | reject | 2 | a same-frame capture whose referent is consumed/exclusively re-borrowed before the `call` → exact past-last-use message via `assert_eq!` (contrast: `lateread_known`-shaped program stays rejected as today) |
@@ -609,7 +622,7 @@ cargo test`.
 
 - **Phase 1 — soundness floor + escaping single-capture.** R14, R15, R16 (inline single only), R17
   (env param + inline build/read), R18, R24 (past-owning-frame), R25. Goldens T-makeb, T-makea,
-  T-env-inline, T-multi-esc, T-repoint, T-repoint-join. Drive M1, M4 (partial), M5.
+  T-env-inline, T-multi-esc, T-quot-cap-deferred, T-repoint, T-repoint-join. Drive M1, M4 (partial), M5.
 - **Phase 2 — surviving capture set + in-frame same-frame captures.** R16 (bundle), R19, R20, R21,
   R22, R23, R24 (past-last-use). Goldens T-dispatch, T-lateread, T-lastuse, T-bundle, T-carrier,
   T-join, T-join-union. Drive M2, M3, M4.
@@ -625,7 +638,7 @@ cargo test`.
   "phases": [
     {
       "phase": 1,
-      "focus": "Soundness floor + escaping single-capture: retire 7a's blanket capturing-quotation boundary rejection (R14, delete capturing_quotation_error at check.rs:6238 and the inline join copy at :7204); add the admission rule (R15) as a four-way classification on capture kind: (1) a scalar value capture is always admissible at every boundary via an env snapshot (D4 amendment, the scalar class that reaches borrow_of_scalar_local_error in check_reference_word at check.rs:8210-8214, after its earlier quotation guard at :8204 and Type::Ref guard at :8207 peel off those kinds), (2) an aggregate value capture (no deriv) is classified by whether the local's binding belongs to the current frame, (3) a reference capture is classified by owned_root-vs-current-frame when it carries a Deriv and is outer-rooted by construction when deriv is None (a &T parameter/global, matching check_reference_across_back_edge at check.rs:5527-5531), reusing the test at check.rs:6108/:5519, and (4) a captured quotation-typed name is materialized and its capture set folded transitively into the outer surviving set (R19/R20); build and read an inline single-reference env (R16/R17) by giving the materialized IrFunc one extra Ptr param (lower_materialized, ir.rs:2370), building env in materialize_quot_value (ir.rs:4170, replacing Const(env,0) at ir.rs:4188) and passing it in lower_indirect_call (ir.rs:4245); reject a 2+-capture escaping closure as deferred (R18); add the past-owning-frame diagnostic (R24, modeled on reference_across_back_edge_error at check.rs:5501); re-point the four 7a goldens (tests/phase4_quotations.rs:123/:143/:160/:231) to positive tests since all four capture a bare scalar and now compile (R25): the three in-frame goldens (:123/:143/:160) admit via R15 rule 1 with an added call, and the join golden (:231, T-repoint-join) runs as a scalar snapshot surviving a word-output boundary via inline env (R18). Goldens T-makeb, T-makea, T-env-inline, T-multi-esc, T-repoint, T-repoint-join; drive mutation tests M1, M5.",
+      "focus": "Soundness floor + escaping single-capture: retire 7a's blanket capturing-quotation boundary rejection (R14, delete capturing_quotation_error at check.rs:6238 and the inline join copy at :7204); add the admission rule (R15) as a four-way classification on capture kind: (1) a scalar value capture is always admissible at every boundary via an env snapshot (D4 amendment, the scalar class that reaches borrow_of_scalar_local_error in check_reference_word at check.rs:8210-8214, after its earlier quotation guard at :8204 and Type::Ref guard at :8207 peel off those kinds), (2) an aggregate value capture (no deriv) is classified by whether the local's binding belongs to the current frame, (3) a reference capture is classified by owned_root-vs-current-frame when it carries a Deriv and is outer-rooted by construction when deriv is None (a &T parameter/global, matching check_reference_across_back_edge at check.rs:5527-5531), reusing the test at check.rs:6108/:5519, and (4) a captured quotation-typed name (either a Known literal, quot.is_some(), or an already-erased one, ty == Type::Quotation) is rejected as deferred at every boundary, parallel to R18's 2+-capture deferral (T-quot-cap-deferred), since admitting it would need unmotivated recursive-fold and two-word-env machinery no exit criterion needs; build and read an inline single-reference env (R16/R17) by giving the materialized IrFunc one extra Ptr param (lower_materialized, ir.rs:2370), building env in materialize_quot_value (ir.rs:4170, replacing Const(env,0) at ir.rs:4188) and passing it in lower_indirect_call (ir.rs:4245); reject a 2+-capture escaping closure as deferred (R18); add the past-owning-frame diagnostic (R24, modeled on reference_across_back_edge_error at check.rs:5501); re-point the four 7a goldens (tests/phase4_quotations.rs:123/:143/:160/:231) to positive tests since all four capture a bare scalar and now compile (R25): the three in-frame goldens (:123/:143/:160) admit via R15 rule 1 with an added call, and the join golden (:231, T-repoint-join) runs as a scalar snapshot surviving a word-output boundary via inline env (R18). Goldens T-makeb, T-makea, T-env-inline, T-multi-esc, T-quot-cap-deferred, T-repoint, T-repoint-join; drive mutation tests M1, M5.",
       "difficulty": "hard"
     },
     {
