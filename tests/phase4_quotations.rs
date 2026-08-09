@@ -135,6 +135,25 @@ fn capturing_literal_stored_is_error_naming_7b() {
     );
 }
 
+// -- T-cap-store (array element): the same rejection through a reference store,
+// not just a struct-constructor argument (D4's boundary is `!`/`+!` through a
+// reference, shared by an array element and a struct field alike -- see R12).
+
+#[test]
+fn capturing_literal_stored_in_array_element_is_error_naming_7b() {
+    let err = check_error(
+        ": one ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+         : main ( -- )\n\
+         10 | x |\n\
+         one 2 fill | a |\n\
+         &!a 1 >usize &!> [ x + ] ! ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: a capturing quotation cannot be stored (capturing closures are slice 7b) (line 5)"
+    );
+}
+
 // -- M3: capture through a *nested* quotation is still caught -----------------
 
 #[test]

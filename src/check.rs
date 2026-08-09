@@ -5837,8 +5837,11 @@ fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>) -> bool {
 /// R12/D4: a capturing quotation reaching a materialization boundary. 7a
 /// materializes only non-capturing literals; a capturing one is a located
 /// rejection naming 7b, reusing the escaping-quotation vocabulary shape.
-/// `boundary` is one of the four D4 sites: `be stored`, `be an array element`,
-/// `be returned`, `be left on a branch`.
+/// `boundary` is one of the three wordings this project's boundaries produce:
+/// `be stored` (a constructor/setter argument, or a `!`/`+!` store through a
+/// reference -- the latter covers both a struct field and an array element
+/// via reference alike, since a reference carries no record of what it was
+/// borrowed from), `be returned`, `be left on a branch`.
 fn capturing_quotation_error(ctx: &Ctx, span: Span, boundary: &str) -> String {
     let _ = ctx;
     format!(
