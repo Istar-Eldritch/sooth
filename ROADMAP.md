@@ -1867,28 +1867,6 @@ then find out what the compiler owes it.
    8c-shaped work (delete the special cases, let the exhaustiveness checker find the arms,
    migrate the call sites) and should run 8c's lightweight process.
 
-**Two pre-existing bugs, unrelated to this slice plan, fixable any time.** Both were measured
-while scoping slice 5a/5b and gated on nothing here — neither needs type variables, dispatch,
-or any other Phase 4 machinery, only the module system slice 5 already shipped. Do not let
-them drift onto slice 8's dependency chain just because they were noticed nearby.
-
-- **Two modules can each declare `main` and nothing rejects it.** `mangle` (`src/resolve.rs`)
-  exempts `main`/`drop` from module-disambiguating suffixes, and `check_main_effect`
-  (`src/check.rs`) finds the *first* word literally named `main` in the whole checked module
-  with no uniqueness check. Slice 5a shipped with this latent (a library file has no reason
-  to declare `main`); slice 5b closes it on the REPL path it's building (a located rejection
-  of an imported file declaring `main`) but leaves the native path unfixed. Fix: reject it
-  the same way slice 5a already rejects an exported word naming a private type, at the
-  declaration, naming both the file and the word.
-- **Two words of the same name in one file are not rejected by any check** and leak a bare
-  assembler `symbol already defined` error, native build included. `check_duplicate_type_names`
-  (`src/check.rs`) covers structs/enums only; the word env (`HashMap<String, Sig>` built by
-  plain `insert`) silently overwrites on a repeat name, so both `WordDef`s still lower to
-  codegen and only the linker notices. Slice 5b's REPL-side import-symbol design inherits this
-  pre-existing gap unfixed (an imported closure with a duplicate word name gets the same leaky
-  error). Fix: a located duplicate-word-name check, parallel to `check_duplicate_type_names`,
-  naming both definitions' locations.
-
 ### Phase 5 — Errors as values  `[S]`
 
 Result/Either as an ordinary ADT (mostly free from Phase 2), plus the `?`-style
