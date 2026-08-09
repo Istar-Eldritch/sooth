@@ -355,9 +355,11 @@ struct Deriv {
     /// ancestor frame, so there is no place in this body to protect.
     owned_root: Option<String>,
     /// Whether `place` is a reference local this was reborrowed from, which is
-    /// what the suspend rule is keyed on. Cleared when the derivation is bound
-    /// into a local: the binding consumes the reborrow, which is why
-    /// `push-byte` may name `b` three times.
+    /// what the suspend rule is keyed on. Binding into a local does *not*
+    /// clear this: the place stays suspended for as long as the bound
+    /// reference is live. What lets `push-byte` name `b` three times is
+    /// last-use liveness (6f) ending that suspension once the bound name's
+    /// last use has passed, not the binding itself.
     reborrow: bool,
     mutable: bool,
     /// Whether any projection step stands between the place and this
@@ -589,17 +591,6 @@ impl Provenance {
         };
         Some(self.add(deriv))
     }
-
-    /// Binding a reference into a local consumes the reborrow it came from,
-    /// so the place it was reborrowed from is suspended no longer. The owned
-    /// root survives: the local still keeps its referent borrowed.
-    fn bind(&mut self, held: Option<DerivId>) -> Option<DerivId> {
-        let deriv = Deriv {
-            reborrow: false,
-            ..self.deriv(held?).clone()
-        };
-        Some(self.add(deriv))
-    }
 }
 
 /// R14: the move-state of one linear local, a three-value lattice. `Moved` and
@@ -744,7 +735,7 @@ impl Scope {
             name: name.to_string(),
             ty: slot.ty,
             aliases,
-            deriv: prov.bind(slot.deriv),
+            deriv: slot.deriv,
             quot: slot.quot,
         });
     }
@@ -12163,24 +12154,40 @@ mod tests {
     }
 
     #[test]
-    fn provenance_bind_consumes_the_reborrow_and_keeps_the_owned_root() {
-        // The asymmetry that makes `push-byte` legal while the underlying check still
-        // fires: binding a projected reference into a local releases the place
-        // it was reborrowed from, but not the owned local it ultimately borrows.
+    fn scope_bind_keeps_the_reborrow_and_the_owned_root() {
+        // The fix this replaces: a bound reference used to release the place
+        // it was reborrowed from, which silently dropped protection for a
+        // reborrow of a reference *parameter* (no `owned_root` either, so
+        // nothing was left to suspend). Binding must be a no-op on
+        // provenance now: what ends a suspension is last-use liveness (6f),
+        // not the bind. `Scope::bind` stores `slot.deriv` verbatim (no
+        // `Provenance` transform in between), so this asserts that directly.
         let mut prov = Provenance::default();
+        let mut scope = Scope::default();
         let span = Span { line: 1, col: 1 };
         let fresh = prov.borrow("v", true, span);
-        let held = prov.bind(Some(fresh)).expect("a bound derivation");
-        let reborrow = prov.reborrow("r", Some(held), true, span);
+        let reborrow = prov.reborrow("r", Some(fresh), true, span);
         let projected = prov.project(Some(reborrow)).expect("a projection");
         assert!(prov.deriv(projected).reborrow, "still suspends `r`");
         assert!(prov.deriv(projected).projected, "R7's note is apt here");
         assert_eq!(prov.deriv(projected).owned_root.as_deref(), Some("v"));
 
-        let rebound = prov.bind(Some(projected)).expect("a bound derivation");
-        assert!(!prov.deriv(rebound).reborrow, "`r` is suspended no longer");
+        scope.bind(
+            "e",
+            Slot::derived(Type::I64, Some(projected)),
+            false,
+            &mut prov,
+        );
+        let bound = scope
+            .local("e")
+            .and_then(|b| b.deriv)
+            .expect("a bound deriv");
+        assert!(
+            prov.deriv(bound).reborrow,
+            "`r` stays suspended after binding"
+        );
         assert_eq!(
-            prov.deriv(rebound).owned_root.as_deref(),
+            prov.deriv(bound).owned_root.as_deref(),
             Some("v"),
             "`v` is still borrowed by the local"
         );

@@ -672,6 +672,73 @@ fn reborrow_while_projected_reference_still_live_is_error() {
 }
 
 #[test]
+fn mutable_borrow_bound_to_a_local_still_suspends_its_place_is_error() {
+    // F3: `e` is a reference derived from `p` (a reference *parameter*, so it
+    // has no `owned_root`) and is bound into a local. Before the fix, binding
+    // cleared the derivation's `reborrow` flag, and with no `owned_root`
+    // either the suspension key collapsed to `(None, None)`: nothing
+    // protected `p` at all, so this was silently accepted. `e`'s last use is
+    // *after* the reborrow, so it must still be rejected exactly like the
+    // stack-resident twin above.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf -- )\n  | p |\n  p &!Buf>len | e |\n  \
+         p &!Buf>len 1 +!\n  e 1 +! ;\n: main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `p`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+    assert!(
+        err.contains("the derivation taken at line 4"),
+        "the error should name the live derivation: {err}"
+    );
+    assert!(err.contains("line 5"), "the error should locate it: {err}");
+}
+
+#[test]
+fn mutable_borrow_bound_to_a_local_over_an_owned_root_still_suspends_its_place_is_error() {
+    // F3's other shape: the root this time is an *owned* local (`b`), not a
+    // reference parameter, so `owned_root` is `Some("b")`. The suspend check
+    // (`live_deriv` filtered on `d.reborrow && d.place == name`) never
+    // consults `owned_root` at all, so the bug was not specific to
+    // parameter-rooted reborrows: any bound reborrow lost protection.
+    // Verified this shape was *also* silently accepted pre-fix.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | b |\n  \
+         &!b | p |\n  p &!Buf>len | e |\n  p &!Buf>len 1 +!\n  \
+         e 1 +!\n  b drop ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `p`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+    assert!(
+        err.contains("the derivation taken at line 5"),
+        "the error should name the live derivation: {err}"
+    );
+    assert!(err.contains("line 6"), "the error should locate it: {err}");
+}
+
+#[test]
+fn mutable_borrow_bound_to_a_local_released_at_its_last_use_is_accepted() {
+    // `push-byte`'s own shape (`examples/refs.sth`): `e` is bound from a
+    // reborrow of `p`, used for the last time, and only *then* is `p`
+    // reborrowed again. Last-use liveness (6f) is what makes this legal, not
+    // the bind: the fix must not regress this into a spurious rejection.
+    let (stdout, code) = run_src(
+        "borrow-bound-local-released-at-last-use",
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf -- )\n  | p |\n  p &!Buf>len | e |\n  e 1 +!\n  \
+         p &!Buf>len @ . ;\n: main ( -- )\n  \
+         0 >u8 64 fill ^ 0 >usize Buf | b |\n  &!b f\n  b drop ;\n",
+    );
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn two_live_mutable_borrows_to_different_places_is_accepted() {
     // Per place, never a single global counter: `copy-byte` holds a `&!Buf` and
     // a `&Buf` at once, rooted at two different locals.

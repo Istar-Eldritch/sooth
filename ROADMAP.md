@@ -127,11 +127,10 @@ merge unions the arms and **no aliasing rejection happens at a join**: selecting
 owned records compiles, and the error lands at the borrow where it can name both ends.
 `examples/refs.sth` dogfoods it.
 
-**Bug found in review (6f, slice 6f review round 2), not fixed there, not 6f's: binding a
-reborrow loses the suspend rule.** The stack-resident shape is rejected
-(`reborrow_while_projected_reference_still_live_is_error`, `tests/phase3_refs.rs:654`):
-taking a second projection out of a place while the first projected reference is still live
-correctly fails. Naming the first projection's result before taking the second does not:
+**Bug found in review (6f, slice 6f review round 2), fixed on the 6f branch: binding a
+reborrow used to lose the suspend rule.** The stack-resident shape was always rejected
+(`reborrow_while_projected_reference_still_live_is_error`, `tests/phase3_refs.rs:654`), but
+naming the first projection's result before taking the second was not:
 ```
 type: Buf data ^[u8 64] len usize ;
 : f ( &!Buf -- )
@@ -141,13 +140,16 @@ type: Buf data ^[u8 64] len usize ;
   e 1 +! ;
 : main ( -- ) ;
 ```
-builds clean, where it should be rejected on the same grounds as the stack-resident case.
-The suspend check (`src/check.rs:6487`, scans `live_deriv` for `d.reborrow && d.place ==
-*name`) appears to lose the `reborrow`/`place` association once a deriv passes through
-`Scope::bind` (`src/check.rs:596`). Reproduces identically before slice 6f (and its review
-round) touched anything, so it predates this slice and is not caused by it; unfixed,
-recorded here against the slice that owns the suspend rule rather than patched as a 6f
-stopgap.
+used to build clean; now rejected on the same grounds as the stack-resident case. Root
+cause: `Provenance::bind` deliberately cleared a derivation's `reborrow` flag on bind, as a
+workaround for bound references living for the whole block (so `push-byte` could name its
+buffer parameter again after binding a projection off it). Predates 6f, but its fix
+depends on 6f: `bind` no longer needs to lie, because last-use liveness ends the
+suspension honestly once the bound name's last use has passed. Landed here because it
+could not land on main without 6f (verified: the same one-line change breaks `push-byte`
+pre-6f). `Provenance::bind` was provably an identity function once the flag-clear was
+removed (proven by replaying the whole suite with the call site reading `slot.deriv`
+directly), so it is deleted rather than kept as a no-op.
 **Phase 3 Slice 8a (typed foreign calls + string slices) is complete**: one `extern:` declaration
 form (a C symbol string plus a stack effect), registered into the ordinary word environment so
 existing arity/type checks apply unchanged; the boundary type set is the numeric tower, `&T`/`&!T`,
