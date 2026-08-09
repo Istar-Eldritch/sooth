@@ -131,6 +131,7 @@ owned records compiles, and the error lands at the borrow where it can name both
 reborrow used to lose the suspend rule.** The stack-resident shape was always rejected
 (`reborrow_while_projected_reference_still_live_is_error`, `tests/phase3_refs.rs:654`), but
 naming the first projection's result before taking the second was not:
+
 ```
 type: Buf data ^[u8 64] len usize ;
 : f ( &!Buf -- )
@@ -140,6 +141,7 @@ type: Buf data ^[u8 64] len usize ;
   e 1 +! ;
 : main ( -- ) ;
 ```
+
 used to build clean; now rejected on the same grounds as the stack-resident case. Root
 cause: `Provenance::bind` deliberately cleared a derivation's `reborrow` flag on bind, as a
 workaround for bound references living for the whole block (so `push-byte` could name its
@@ -1726,12 +1728,20 @@ then find out what the compiler owes it.
    have to invent standalone. The env holds a reference to a captured aggregate rather than a
    snapshot of it, which is what makes a materialized closure mean what the spliced one means
    (see the split rationale above); that is also what makes this, and not 7a, the slice that
-   needs 6f. Carries the capture-set analysis (7a needs only a *predicate* — does this body
-   read any enclosing name — and none exists today either way; the D3 check only rejects,
-   never computes), upward closures on `^Env` with their single-owner linearity, and the
+   needs 6f. *This entry previously said the capture-set analysis "needs building, and none
+   exists today either way"; 7b's brief found that 6f already built it as a side effect of its
+   own liveness fix* — `capture_names`/`quotation_captures` (`src/check.rs:777`/`:544`) cache a
+   quotation literal's free-name set by `QuotId` at intern time, a real set, not the bare
+   predicate 7a's own D3 needed. *What 7b actually still lacks, which 6f's fix has no reason to
+   have built*: a way for that set to survive a materialized quotation's identity erasing —
+   `capture_alive_names` only ever reads the set through a still-`Known` marker, and `QuotRef`
+   is single-variant by an explicit note that stops holding the moment two different capturing
+   literals may join. Upward closures on `^Env` with their single-owner linearity, and the
    `Fn`/`FnMut`/`FnOnce`-equivalent split that falls out of `call` through `&q`, `&!q`, and by
-   value.
+   value, are both new surface and new checking from nothing (verified: `call` pops its
+   operand unconditionally today, `src/check.rs:6716`; no reference-mode call exists anywhere).
    Depends on 6f (the exact rule this points at) and 7a (the carrier it points the rule at).
+   Brief written (`docs/phase4-slice7b-brief.md`).
    Inherits one obligation from 6f: a quotation's captures are kept alive by whether the
    quotation itself is still reachable (on the stack, or bound and not yet dead, transitively
    through whatever else reaches it), which is sound only while a capturing quotation cannot

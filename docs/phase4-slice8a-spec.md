@@ -16,64 +16,65 @@ of this writing.
 
 ## Grounding facts (verified against the tree)
 
-All anchors are `src/check.rs` unless noted. Lines drift under concurrent work;
-they were correct at spec time. Resolve by the enclosing function name if a
-line has moved.
+All anchors are `src/check.rs` unless noted, and are given as **file plus
+enclosing symbol**, deliberately without line numbers: concurrent slices land in
+this file constantly (7a and 6f each shifted it by hundreds of lines while this
+slice was being specified, invalidating pinned lines twice), so a symbol name is
+the only citation that survives. Resolve with `grep -n "fn <name>"`.
 
-- `struct Sig { inputs, outputs }` — `check.rs:23`. `sig_of` — `check.rs:29`.
-- `enum PairMatch` — `check.rs:200`; `fn unify_pair` — `check.rs:206`.
-  `enum SlotMatch` / `fn match_slot` — `check.rs:165` / `check.rs:177`.
-  `is_size_type` — `check.rs:155`.
-- `fn builtin_table() -> HashMap<String, Sig>` returning `HashMap::new()` —
-  `check.rs:224`. Seeded into the checking env in `fn check` at `check.rs:1322`
-  (`struct_generated_sigs` / `enum_generated_sigs` added on top), and into the
-  REPL env in `Session::typed_env` at `repl.rs:1141` (call at `repl.rs:1142`).
-- `fn check_term` — `check.rs:6154`. Its builtin probe chain (the fall-through
-  dispatch order) — `check.rs:6489`–`6503`: `check_access_word`, `check_shuffle`,
-  `check_operator`, `check_str_word`, `check_array_word`, `check_owned_cell_word`,
+- `struct Sig { inputs, outputs }` and `fn sig_of`.
+- `enum PairMatch` and `fn unify_pair`; `enum SlotMatch` / `fn match_slot`;
+  `fn is_size_type`.
+- `fn builtin_table() -> HashMap<String, Sig>`, returning `HashMap::new()`.
+  Seeded into the checking env in `fn check` (`struct_generated_sigs` /
+  `enum_generated_sigs` added on top), and into the REPL env in
+  `Session::typed_env` (`src/repl.rs`).
+- `fn check_term`, whose builtin probe chain is the fall-through dispatch order:
+  `check_reference_word`, `check_access_word`, `check_shuffle`, `check_operator`,
+  `check_str_word`, `check_array_word`, `check_owned_cell_word`,
   `check_struct_peek_word`, `check_struct_get_word`, then the back-edge /
-  combinator-inline / poly-call interceptions, then the concrete `env` lookup
-  at `check.rs:6580`.
-- `fn check_operator` — `check.rs:6901`. The type-directed arms this slice
-  retires: `+ - *` (`6962`), `/` (`6978`), `mod` (`6990`), `and|or|xor`
-  (`7006`), `not` (`7022`), `shl|shr` (`7032`), the comparisons `= < > <= >= <>`
-  (`7057` region), `max` (`7069`), `max-total` (`7091`), the `"."` arm and its
-  category predicate `is_numeric() || is_bool() || matches!(Str|Cstr)` (`7106`),
-  and the `>`-prefixed conversion fall-through (`_ =>` at `7117`, `7118`).
-- `fn check_str_word` — `check.rs:7913`; its `"len"` arm (`str` → consuming,
-  pushes `usize`) at `7925`, its `"cstr"` arm at `7935`.
-- `fn check_array_word` — `check.rs:7952`; its `"len"` arm (array →
-  non-consuming, folds constant `N`) at `8003`, its `"fill"` arm at `7961`.
-- `fn check_shuffle` — `check.rs:8214` (`dup`/`drop`/`swap`/`over`/`rot`; **not**
-  in scope, see rule 0 / out-of-scope).
-- `fn check_duplicate_word_names` — `check.rs:2132` (keys `(module, name)`,
-  exempts `drop`).
-- `fn check_selective_imports` — `check.rs:1847`; `selective_collision_error`
-  — `check.rs:1925`; `selective_collides_with_local_error` — `check.rs:1934`.
-- `fn find_drop_overloads` — `check.rs:992`; `drop_overload_struct_id` —
-  `check.rs:1019`. (`drop`'s bespoke registry and duplicate-check exemption stay
-  untouched, dies in 8b.)
-- `const BUILTIN_WORDS` — `check.rs:1578`; `fn is_builtin_word_name` —
-  `check.rs:1616`; its single caller `fn check_extern_decls` — `check.rs:1540`
-  (redeclaration guard at `1565`).
+  combinator-inline / poly-call interceptions, then the concrete `env` lookup.
+- `fn check_operator`. The type-directed arms this slice retires, in order:
+  `+ - *`, `/`, `mod`, `and|or|xor`, `not`, `shl|shr`, the comparisons
+  `= < > <= >= <>`, `max`, `max-total`, the `"."` arm and its category predicate
+  `is_numeric() || is_bool() || matches!(Str|Cstr)`, and the `>`-prefixed
+  conversion fall-through (`_ =>`).
+- **`check_operator` and `check_str_word` each have *two* call sites**, and R6
+  must satisfy both: `fn check_term` (the monomorphic chain above) and
+  `fn poly_delegate_op`, which extracts the maximal concrete suffix of a
+  polymorphic body's stack and delegates the operator to the same concrete
+  checkers. A polymorphic word body using `+` on concrete operands reaches
+  `check_operator` only through this second path.
+- `fn check_str_word`: its `"len"` arm (`str` → consuming, pushes `usize`) and
+  its `"cstr"` arm.
+- `fn check_array_word`: its `"len"` arm (array → non-consuming, folds constant
+  `N`) and its `"fill"` arm.
+- `fn check_shuffle` (`dup`/`drop`/`swap`/`over`/`rot`; **not** in scope, see
+  rule 0 / out-of-scope). Note it also has a second caller in the test module.
+- `fn check_duplicate_word_names` (keys `(module, name)`, exempts `drop`).
+- `fn check_selective_imports`, `fn selective_collision_error`,
+  `fn selective_collides_with_local_error`.
+- `fn find_drop_overloads` and `fn drop_overload_struct_id`. (`drop`'s bespoke
+  registry and duplicate-check exemption stay untouched; both die in 8b.)
+- `const BUILTIN_WORDS`, `fn is_builtin_word_name`, and its single caller
+  `fn check_extern_decls`.
 - Lowering mirror: `MirBuilder::lower_call`'s name-directed match in `src/ir.rs`
-  — the arithmetic/`cmp`/`max`/`max-total`/`.`/`len`/`cstr` arms at
-  `ir.rs:3326`–`3403`, and `self.push_instr(Instr::Print(v))` at `ir.rs:3373`.
-  The `_` fall-through (combinator inline, `&`-words, `>T` conversions, struct/
-  enum words, self-tail, ordinary `Instr::Call`) begins at `ir.rs:3399`.
-- `Instr::Print` codegen — `src/backend/qbe.rs:1026` (15 printable `IrType`
-  arms; the aggregate/cell/quotation/`Ptr` arms are `unreachable!`). `qbe_name`
-  — `qbe.rs:222` (the injective sanitizer, already fixed ahead of this slice;
-  regression tests at `qbe.rs:1289` / `qbe.rs:1331`).
-- Types: `enum Type` — `ast.rs:690`; `is_numeric`/`is_int`/`is_float`/`is_bool`
-  — `ast.rs:894`/`884`/`889`/`899`; `Type::from_name` — `ast.rs:851`.
-  `enum Bound { Copy, Ord }` — `ast.rs:503`; `enum PolyType` — `ast.rs:521`;
-  `struct PolySig` — `ast.rs:538`; `enum Len` — `ast.rs:511`.
-- Per-call-site record precedent: `struct CallInst` (`ast.rs`, keyed by `Span`
-  in `Module::instantiations`, filled in `fn check` at `check.rs:1499`–`1507`,
-  read by lowering). This is the pattern the lowering hand-off (R7) reuses.
-- Test helpers that call `builtin_table()` and will move to the new shape:
-  `check.rs:9420` (env build), `check.rs:9541`, `check.rs:10723`.
+  — the arithmetic/`cmp`/`max`/`max-total`/`.`/`len`/`cstr` arms, including
+  `self.push_instr(Instr::Print(v))` — then the `_` fall-through (combinator
+  inline, `&`-words, `>T` conversions, struct/enum words, self-tail, ordinary
+  `Instr::Call`).
+- `Instr::Print` codegen — `src/backend/qbe.rs` (15 printable `IrType` arms; the
+  aggregate/cell/quotation/`Ptr` arms are `unreachable!`). `fn qbe_name` in the
+  same file is the injective sanitizer, already fixed ahead of this slice; keep
+  its regression tests green.
+- Types, all `src/ast.rs`: `enum Type`; `is_numeric`/`is_int`/`is_float`/
+  `is_bool`; `Type::from_name`; `enum Bound { Copy, Ord }`; `enum PolyType`;
+  `struct PolySig`; `enum Len`.
+- Per-call-site record precedent: `struct CallInst` (`src/ast.rs`), keyed by
+  `Span` in `Module::instantiations`, filled in `fn check`, read by lowering.
+  This is the pattern the lowering hand-off (R7) reuses.
+- Test helpers that call `builtin_table()` and must move to the new shape: three
+  of them in `check.rs`'s test module (`grep -n "builtin_table()" src/check.rs`).
 
 The printable-type set `.` dispatches over today (rule 6's N rows), read off
 the `check_operator` `"."` predicate cross-checked against the `Instr::Print`
@@ -185,8 +186,8 @@ No specialization ordering.
   error: generic overload `: + ( 'T 'T -- 'T )` (line 2, col 3) overlaps a concrete overload of `+`; a name cannot mix a generic and a concrete candidate
   ```
 
-- Poly candidates live in `poly_env` (`check.rs:1364` region); the overlap
-  check compares `poly_env` names against `builtin_table` rows + concrete `env`
+- Poly candidates live in the `poly_env` built by `fn check`; the overlap check
+  compares `poly_env` names against `builtin_table` rows + concrete `env`
   entries of the same name.
 
 ### R6 — Dispatch is table-driven exact-match, coercion as fallback
@@ -216,14 +217,38 @@ resolution step over the merged candidate set for the name:
    `max_over_float_error`, `max_total_requires_float_error`). For `.` there is
    no coercion; an exact miss → `print_requires_printable_error`.
 
-Quotation-operand rejection (`reject_quotation_operand`, the R11 guard at
-`check_operator:6943`/`6946`) is preserved: it fires before operand types are read, so
-it moves into step 1 unchanged.
+Quotation-operand rejection (`reject_quotation_operand`, the R11 guard at the top
+of `check_operator`) is preserved: it fires before operand types are read, so it
+moves into step 1 unchanged.
+
+**Both call sites must route through one resolution entry point.**
+`check_operator` is reached from two places, and a plan that rewrites only the
+first silently breaks the second:
+
+1. `fn check_term`'s probe chain — the monomorphic path, what steps 1-3 above
+   describe.
+2. `fn poly_delegate_op` — reached from a *polymorphic word body*, which
+   extracts the maximal concrete suffix of its `PolyType` stack, converts it to
+   concrete `Slot`s, and delegates to `check_operator` / `check_str_word`. Every
+   operator used inside a polymorphic body arrives here, never through (1).
+
+Extract the resolution step as one function taking the operand slots and the
+name, and call it from both sites. A polymorphic body must dispatch identically
+to a monomorphic one — including resolving a user overload, since a poly body
+calling `+` on two concrete `Vec2` values is the same call as anywhere else. Do
+not leave `poly_delegate_op` pointed at a retained copy of the old arms: two
+resolution paths that must agree is the failure mode rule 1 already refuses
+elsewhere, and nothing would keep them in step.
+
+This is a Phase 1 obligation, not a follow-up: the corpus contains polymorphic
+bodies using operators, so R9's byte-for-byte criterion fails immediately if the
+second site is left behind.
 
 ### R7 — Lowering dispatches to the resolved candidate
 
-`lower_call` (`ir.rs:3326`) must agree with the checker's resolution. Today it
-re-dispatches by name; a raw `+` at a `Vec2` site would wrongly emit `Bin(Add)`.
+`MirBuilder::lower_call` (`src/ir.rs`) must agree with the checker's resolution.
+Today it re-dispatches by name; a raw `+` at a `Vec2` site would wrongly emit
+`Bin(Add)`.
 
 The checker records, per call `Span`, the sites that resolved to a **user
 overload of a builtin-named word**, with the resolved callee symbol — a sparse
@@ -412,11 +437,14 @@ Introduce `BuiltinRow` / `BuiltinLower`; populate `builtin_table` with the
 arithmetic tower, comparisons, `max`, `max-total`, and `.`'s 15 rows (Q-A).
 Replace `check_operator`'s dispatch-selection with the R6 resolution step
 (exact pass over builtin rows; `unify_pair` + operand-class diagnostics as the
-numeric fallback, Q-B), and drop the retired arms from the `check_term` probe
-chain. Adapt every `builtin_table()` caller to the new return type (`check`'s
-env seed, `repl.rs` `typed_env`, the three test helpers). No user-overload
-behaviour yet. Exit: the corpus is byte-for-byte unchanged (R9 baseline golden),
-`check_operator`'s selection arms are gone, `builtin_table` is populated.
+numeric fallback, Q-B), extracted as **one** entry point called from both
+`check_term`'s probe chain and `fn poly_delegate_op` (R6; the corpus has
+polymorphic bodies using operators, so missing the second site fails R9
+immediately). Adapt every `builtin_table()` caller to the new return type
+(`check`'s env seed, `repl.rs` `typed_env`, the three test helpers). No
+user-overload behaviour yet. Exit: the corpus is byte-for-byte unchanged (R9
+baseline golden), `check_operator`'s selection arms are gone from both call
+paths, `builtin_table` is populated.
 
 ### Phase 2: User-overload dispatch, check and lowering
 
