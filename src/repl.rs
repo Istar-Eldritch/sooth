@@ -344,6 +344,7 @@ fn remap_imported_combinator(
         },
         poly,
         module: module_base + w.module,
+        span: w.span,
     }
 }
 
@@ -409,26 +410,6 @@ fn session_selective_collision_error(name: &str, first: &str, second: &str, span
         "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
         span.line, span.col
     )
-}
-
-/// R14/D4 (slice 5b): reject an imported closure that declares a word named
-/// `main`, naming the declaring file and the word, before any codegen.
-/// `mangle` (`src/resolve.rs`) never renames `main` regardless of module, so
-/// a plain name scan over every file in the closure finds it, whichever file
-/// it came from (recon #4's native collision turned into a diagnostic here;
-/// the native path's own exposure stays unfixed, per D4).
-fn check_no_main_in_closure(module: &Module, closure: &driver::Closure) -> Result<(), String> {
-    let Some(main) = module.words.iter().find(|w| w.name == "main") else {
-        return Ok(());
-    };
-    let path = closure.path_of(main.module);
-    let span = word_span(main);
-    Err(format!(
-        "error: cannot import `{}`: it declares a word named `main` (line {}, col {}); a library file may not declare `main`",
-        path.display(),
-        span.line,
-        span.col
-    ))
 }
 
 /// R5/R6 (slice 5b): bulk-lower a whole checked import closure to one `.so`.
@@ -622,6 +603,10 @@ fn rich_value_size(
         ir::IrType::Float { bits } => (bits / 8) as usize,
         ir::IrType::Usize | ir::IrType::Isize => ir::WORD_WIDTH as usize,
         ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
+        // Slice 7a: a code handle is one word; a quotation value spans its
+        // fixed two-slot layout (only reached as a struct/enum/array field).
+        ir::IrType::Code => ir::WORD_WIDTH as usize,
+        ir::IrType::Quotation(_) => ir::quotation_layout(ir::WORD_WIDTH).size as usize,
         ir::IrType::Struct(id) => layouts[id.index()].size as usize,
         ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
         ir::IrType::Array(id) => array_layouts[id.index()].size as usize,
@@ -670,6 +655,11 @@ fn render_rich_value(
         ir::IrType::Ptr => "<ptr>".to_string(),
         ir::IrType::Str => "<str>".to_string(),
         ir::IrType::Cstr => "<cstr>".to_string(),
+        // Slice 7a: a code handle / quotation value carries no printable
+        // payload; reached only as a struct/enum/array field (a bare
+        // quotation on the residual is rejected before rendering).
+        ir::IrType::Code => "<code>".to_string(),
+        ir::IrType::Quotation(_) => "<quotation>".to_string(),
         ir::IrType::Struct(id) => {
             let layout = &layouts[id.index()];
             let fields: Vec<String> = layout
@@ -1255,7 +1245,7 @@ impl Session {
                     .cloned()
                     .unwrap_or_else(|| name.to_string())
             };
-            funcs.push(ir::lower_instantiation(
+            funcs.extend(ir::lower_instantiation(
                 &inst.symbol,
                 sig,
                 &inst.subst,
@@ -1613,8 +1603,10 @@ impl Session {
         check::check(&mut module)?;
         // R14/D4: an imported closure declaring `main` (in any of its files,
         // not only module 0) is rejected before any codegen, naming the file
-        // and the word.
-        check_no_main_in_closure(&module, &closure)?;
+        // and the word. `allowed_module: None` -- no file in an imported
+        // closure may declare `main`, unlike `driver::build`'s native path,
+        // where module 0 is the program's own entry point.
+        driver::check_no_main_in_closure(&module, &closure, None)?;
         // R12 (slice 6c): a closure exporting a quotation-taking word is no
         // longer rejected -- `splice_import` retains the combinator (D5).
         // R11: each selectively-imported name must be exported by module 0,
@@ -2268,11 +2260,14 @@ impl Session {
             )
         };
 
+        let quot_sigs =
+            ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
+            quot_sigs,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("drop_{}_epoch{epoch}.so", id.index()));
@@ -2528,7 +2523,9 @@ impl Session {
             // R7 (Slice 2): thread the instantiation table + poly-arity map so
             // a call to a retained polymorphic word inside this body lowers to
             // its per-site symbol via `lower_poly_call`.
-            let mut func = ir::lower_word(
+            // R9: element 0 is this word; any quotation literal it materialized
+            // at a boundary follows, each its own `IrFunc`.
+            let mut funcs = ir::lower_word(
                 &word,
                 &ir_lower_env,
                 &resolve,
@@ -2537,8 +2534,7 @@ impl Session {
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
-            func.name = symbol.clone();
-            let mut funcs = vec![func];
+            funcs[0].name = symbol.clone();
             // R12: this module must carry its own struct/enum destructors
             // (they are not emitted elsewhere in the REPL, unlike the build
             // path's single shared module), or `drop` on a linear struct/enum
@@ -2561,11 +2557,14 @@ impl Session {
         // body recorded into this module, against the frozen snapshot resolver.
         funcs.extend(self.emit_instantiations(&insts, regs));
 
+        let quot_sigs =
+            ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
+            quot_sigs,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
@@ -2700,9 +2699,9 @@ impl Session {
             cells: &cells,
             refs: &refs,
         };
-        let (func, m, out_bytes, aggregate_destructors) = {
+        let (func, quot_funcs, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
-            let (func, m, out_bytes) = ir::lower_line(
+            let (func, quot_funcs, m, out_bytes) = ir::lower_line(
                 seq,
                 terms,
                 entry_depth,
@@ -2724,7 +2723,7 @@ impl Session {
                 &self.drop_override_bodies(None),
                 &bodies,
             );
-            (func, m, out_bytes, aggregate_destructors)
+            (func, quot_funcs, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
         // checker's independently-inferred net effect) are the same depth
@@ -2738,16 +2737,21 @@ impl Session {
         );
 
         let mut funcs = vec![func];
+        // R9: the line's materialized quotation callees.
+        funcs.extend(quot_funcs);
         funcs.extend(aggregate_destructors);
         // R7 (Slice 2, D2): lower each not-yet-exported instantiation this line
         // recorded into this module, against each poly word's frozen snapshot
         // resolver; an already-exported symbol emits nothing (trace B dedup).
         funcs.extend(self.emit_instantiations(&insts, regs));
+        let quot_sigs =
+            ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts.clone(),
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),
+            quot_sigs,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
@@ -3864,7 +3868,7 @@ mod tests {
         let closure = driver::discover_closure(&lib).expect("closure resolves");
         let mut module = driver::assemble_module(&closure).expect("assembles");
         check::check(&mut module).expect("checks");
-        let err = check_no_main_in_closure(&module, &closure).unwrap_err();
+        let err = driver::check_no_main_in_closure(&module, &closure, None).unwrap_err();
         assert!(err.contains("main"), "names the word: {err}");
         assert!(
             err.contains(lib.file_name().unwrap().to_str().unwrap()),

@@ -144,27 +144,23 @@ fn malformed_quotation_type_is_located_parse_error() {
 
 #[test]
 fn quotation_type_is_rejected_at_every_audited_position() {
-    // R7a: exactly one position accepts a quotation type (a direct word
-    // parameter); every other is a located rejection naming the position and
-    // slice 7. One row per audited position: deleting any one rejection must
-    // flip its row from Err to Ok and fail this test, which is what makes
-    // R7's `unreachable!` mangling/`IrType` arms sound.
+    // R7a, revised for slice 7a: a quotation type is now legal at the three
+    // D4 materialization boundaries (a struct field, an array element, a
+    // monomorphic word output), so those positions moved to the positive
+    // goldens in `tests/phase4_quotations.rs`. Every position *still* rejected
+    // in 7a keeps a row here: a direct word parameter is the one accepting
+    // position, and each other is a located rejection naming the position and
+    // slice 7. Deleting any one rejection must flip its row from Err to Ok and
+    // fail this test, which is what keeps R7's `unreachable!` arms sound for
+    // the positions 7a does not lift.
     struct Row {
         src: &'static str,
         position: &'static str,
     }
     let rows = [
         Row {
-            src: "type: S f [ i64 -- ] ;\n: main ( -- ) ;\n",
-            position: "the field `f` of struct `S`",
-        },
-        Row {
             src: "type: E | v p [ i64 -- ] ;\n: main ( -- ) ;\n",
             position: "the field `p` of enum variant `E::v`",
-        },
-        Row {
-            src: ": main ( [ [ i64 -- ] 3 ] -- ) drop ;\n",
-            position: "an array element",
         },
         Row {
             src: ": main ( ^[ i64 -- ] -- ) drop ;\n",
@@ -177,10 +173,6 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         Row {
             src: ": mut ( &![ i64 -- ] -- ) drop ;\n: main ( -- ) ;\n",
             position: "a reference referent",
-        },
-        Row {
-            src: ": f ( -- [ i64 -- ] ) [ drop ] ;\n: main ( -- ) ;\n",
-            position: "the output of `f`",
         },
         Row {
             src: "extern: c ( [ i64 -- ] -- ) \"c_fn\" ;\n: main ( -- ) ;\n",
@@ -246,16 +238,8 @@ fn quotation_type_is_rejected_at_every_audited_position() {
     // session is not bricked: the following `1` line still evaluates.
     let repl_rows = [
         Row {
-            src: "type: S f [ i64 -- ] ;\n1\n",
-            position: "the field `f` of struct `S`",
-        },
-        Row {
             src: "type: E | v p [ i64 -- ] ;\n1\n",
             position: "the field `p` of enum variant `E::v`",
-        },
-        Row {
-            src: ": w ( [ [ i64 -- ] 3 ] -- ) drop ;\n1\n",
-            position: "an array element",
         },
         Row {
             src: ": w ( ^[ i64 -- ] -- ) drop ;\n1\n",
@@ -264,10 +248,6 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         Row {
             src: ": w ( &[ i64 -- ] -- ) drop ;\n1\n",
             position: "a reference referent",
-        },
-        Row {
-            src: ": w ( -- [ i64 -- ] ) [ drop ] ;\n1\n",
-            position: "the output of `w`",
         },
     ];
     for Row { src, position } in repl_rows {
@@ -300,11 +280,11 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         src: &'static str,
         msg: &'static str,
     }
+    // An array-of-quotation field (struct or enum) is now legal (the array
+    // carve-out interns it), so the two `[ [ i64 -- ] 3 ]` rows moved to the
+    // positive goldens; a cell-payload quotation and a reference field stay
+    // rejected, and must still leave the session usable.
     let item1_rows = [
-        BrickRow {
-            src: "type: P x [ [ i64 -- ] 3 ] ;\n40 2 +\n",
-            msg: "a quotation type",
-        },
         BrickRow {
             src: "type: P x ^[ i64 -- ] ;\n40 2 +\n",
             msg: "a quotation type",
@@ -312,10 +292,6 @@ fn quotation_type_is_rejected_at_every_audited_position() {
         BrickRow {
             src: "type: P x &[ i64 -- ] ;\n40 2 +\n",
             msg: "a reference cannot be stored",
-        },
-        BrickRow {
-            src: "type: Q | Mk a [ [ i64 -- ] 3 ] ;\n40 2 +\n",
-            msg: "a quotation type",
         },
         BrickRow {
             src: "type: X | Mk a ^[ i64 -- ] ;\n40 2 +\n",
@@ -342,20 +318,16 @@ fn quotation_type_is_rejected_at_every_audited_position() {
 // -- criterion 2c: array-of-quotation is the array-element rejection ----------
 
 #[test]
-fn array_of_quotation_type_is_located_rejection() {
+fn array_of_quotation_type_is_a_legal_declaration() {
     // `[ [ i64 -- ] 3 ]` has no top-depth `--` (the inner one is at depth 1),
-    // so it takes the array branch and parses as an array of quotations; it
-    // must reject at the array-element position, not error as an array count
-    // and not panic in layout.
-    let err = check_error(": main ( [ [ i64 -- ] 3 ] -- ) drop ;\n");
-    assert!(
-        err.contains("a quotation type") && err.contains("an array element"),
-        "an array-of-quotation type should reject at the array-element position, got: {err}"
-    );
-    assert!(
-        !err.contains("array count"),
-        "it must not be the array-count diagnostic, got: {err}"
-    );
+    // so it takes the array branch and parses as an array of quotations, not
+    // an array count. Slice 7a lifts the array-element boundary, so declaring
+    // one is now legal (pre-7a this was a located rejection); it must neither
+    // error as an array count nor panic in layout.
+    let tokens =
+        lexer::lex(": main ( [ [ i64 -- i64 ] 3 ] -- ) drop ;\n").expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("an array-of-quotation type is legal to declare in 7a");
 }
 
 // -- criterion 3: the monomorphic combinator inlines and runs -----------------
@@ -1899,10 +1871,13 @@ fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
     // covers module-0 words) -- so a same-named session word defined first
     // would otherwise silently win that body call instead of erroring. The
     // guard fires on the name alone, no import needed to reproduce.
+    // (Column 3 is the name token itself, not the body's first term: `WordDef`
+    // carries its own declaration span now, so `word_span` no longer derives
+    // a word's location from its body -- see the `word_span` fix.)
     let transcript = repl_error(": dhelp__m1 ( i64 -- i64 ) 1000 + ;\n:quit\n");
     assert_eq!(
         transcript,
-        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 28)\n",
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`dhelp__m1` at line 1, col 3)\n",
         "the mangled-suffix name is rejected outright, never defined: {transcript}"
     );
     assert!(
@@ -1913,7 +1888,7 @@ fn repl_mangled_internal_spelling_in_declared_name_is_rejected() {
     let transcript = repl_error(": foo__import7 ( -- i64 ) 1 ;\n:quit\n");
     assert_eq!(
         transcript,
-        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`foo__import7` at line 1, col 27)\n",
+        "error: a REPL-declared word name may not end in a mangled `__m<digits>` or `__import<digits>` spelling (`foo__import7` at line 1, col 3)\n",
         "the import-epoch-suffix name is rejected outright, never defined: {transcript}"
     );
     assert!(
@@ -2080,10 +2055,13 @@ fn r12_capture_diagnostic_shows_unmangled_word() {
 
 #[test]
 fn r7a_quotation_output_diagnostic_shows_unmangled_word() {
-    // A word `c` with a quotation in its *output* row (R7a audit).
+    // A *polymorphic* word `c` with a quotation in its output row. Slice 7a
+    // makes a monomorphic quotation output legal (it materializes), so the
+    // still-rejected output position that exercises the R7a audit's naming is
+    // a poly one; the diagnostic must name `c`, not the mangled `c__m0`.
     let err = build_error_with_import(
         "m0-r7a",
-        ": c ( i64 -- [ i64 -- i64 ] ) [ 1 + ] ;\n: main ( -- ) ;\n",
+        ": c ( ['T 'N] -- ['T 'N] [ 'T -- ] ) ;\n: main ( -- ) ;\n",
     );
     assert!(
         err.contains("cannot appear as the output of `c`"),

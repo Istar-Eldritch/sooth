@@ -486,6 +486,13 @@ pub struct WordDef {
     /// Phase 4 slice 5a (R10): the owning module id, mirroring
     /// `StructDecl::module`.
     pub module: u32,
+    /// The declaration site (the word's name token), used by every
+    /// diagnostic that must point at this word regardless of its body shape.
+    /// Kept separate from `word_span`'s old first-term/first-clause fallback
+    /// (which is `Span::default()`, i.e. line 0 col 0, for an empty body --
+    /// `: main ( -- ) ;` and every other trivial stub word hit this) so a
+    /// located error always has somewhere real to point.
+    pub span: Span,
 }
 
 /// R3/R6 (phase 4 slice 1): a capability a type variable can be bounded by.

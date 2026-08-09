@@ -222,6 +222,17 @@ surplus value. Exclusivity is also keyed per place rather than per path, so two
 references into disjoint fields of one local conflict while both are live; sequencing
 them is the workaround.
 
+Borrow *liveness* is asymmetric, and only by accident deliberately so: a reference on the
+stack is live from the term that creates it until the term that consumes its slot, while a
+reference bound to a local is live for the whole block (`live_derivs` chains the stack
+slots with the scope's bindings). Chaining a borrow therefore compiles where naming it does
+not, and the rejection lands on the natural shape — borrow a place, write through the
+borrow, then consume the place. Ending a reference local's borrow at its *last use* would
+make the two consistent. That is not a lifetime system by the definition above (no lifetime
+variables, no regions, nothing binding a reference's validity to a named scope), only a
+rule about when a borrow ends inside one block, and the anonymous case already works that
+way. Deferred; see ROADMAP Phase 4 Slice 6f.
+
 The rule that specifying references actually forced into the open is not about references
 at all: **naming an aggregate does not copy it**, so two names can denote one region of
 memory. That was invisible while nothing could mutate in place, and `!`/`+!` make it
@@ -241,6 +252,24 @@ refusal of a linear field, and by the standing ban on linear array elements. So 
 was a wrong *value*, never a double free or a use-after-free, and the linear spine was never
 at risk. It is still exactly the class of silent failure this language exists to turn into a
 compile error, which is why it is closed rather than documented.
+
+That same `Copy`-only construction has a payoff that only surfaced under Phase 4's
+combinators. A **linear** aggregate threaded through a loop as an accumulator needs no copy
+at all: passing it *moves* it, so the outer name is dead, the aliasing rule has nothing to
+fire on, and a body that borrows it mutably, writes through the borrow, and hands the same
+value back lowers to stores straight into the loop's carried slot. A `Copy` aggregate in
+the same position must copy, because another live name could observe the old value — the
+`dup` the aliasing rule demands, plus the loop's own back-edge staging. So linearity is not
+the awkward case for in-place iteration, it is the *enabling* one, and the awkward case is
+an aggregate that is `Copy` by inference. Two things follow. Linearity cannot be
+**declared**: `is_copy` derives it structurally, and the only way to opt a type out is to
+give it a `drop` overload, which spells "thread this in place" as "give this a destructor".
+And the `Copy` case is awkward only because the aliasing rule is keyed on names that are
+merely in lexical scope: measured, a `Copy` aggregate accumulator threads with the same zero
+copies once a name that is never used again stops counting as a second denoting name. Paying
+for a *performance* property with a *semantic* one (a destructor obligation, no free `dup`,
+move-on-every-use) is the wrong trade, so that relaxation rides with the borrow one; see
+ROADMAP Phase 4 Slice 6f.
 
 Because a branch merge can denote either arm's place, a value carries a *set* of regions
 rather than one. The merge unions both arms, so no aliasing rejection ever happens at a
@@ -857,6 +886,35 @@ rows, no borrow analysis needed to write the compiler in it.
 - Bootstrap: host-language compiler then self-host a small subset, fixpoint-verify.
   Host language now free choice; Rust the sensible default.
 
+## Tie-breakers
+
+How to choose when two designs both work. `Decided` records what was chosen and `Declined`
+what was chosen against; these are the rules that settle the next call, extracted from ones
+that were argued out rather than assumed.
+
+- **Never charge a semantic price for a performance property.** If a program needs an
+  in-place update, the answer is not "make your type linear". Linearity is a semantic
+  commitment — a destructor obligation, no free `dup`, move-on-every-use — and spending it to
+  buy codegen is a bad trade that also lies about the type. Phase 4 Slice 6f is the worked
+  example: a `Copy` aggregate accumulator could only be copied, at a full memcpy per loop
+  iteration, because an aliasing rule was keyed on names merely in lexical scope, and the
+  workaround on offer was to change the type's linearity. Fix the rule; do not bill the
+  programmer. This is the same instinct as the Memory model's "a compiler-inserted copy is
+  the same category of invisible behaviour as an auto-drop", pointed the other way: an
+  invisible cost is a defect whether the compiler inserts it or the language extracts it.
+- **One diagnostic severity.** Everything the compiler says is an error. "Unused" is an
+  error exactly when a *linear obligation* is unmet, which the leak check already enforces;
+  hygiene with no obligation behind it (a reference bound and never named, a dead local) is a
+  linter's job. A warning tier would be a second, weaker answer to a question the linear
+  spine already answers, and every diagnostic that is merely advisory is one the reader
+  learns to skip.
+- **A named thing behaves like the anonymous one.** Locals are the only readability tool a
+  concatenative language has, so a rule that holds for a value on the stack must hold for the
+  same value under a name. Where the two diverge, treat the named case as the bug: 6f exists
+  because a borrow left on the stack ended at its last use while the identical borrow bound
+  to a local lived to the end of its block, which made the legible spelling the rejected one
+  and taught the workaround "don't name things".
+
 ## Open / deferred
 
 - Exact surface syntax for quotations/closures and their captures (illustrative
@@ -906,9 +964,24 @@ rows, no borrow analysis needed to write the compiler in it.
   answer, alongside `contains_reference` and `is_copy`. What stays true is that a borrowed view
   **cannot be returned**: the no-declared-output-reference rule is precisely what keeps a
   two-point lattice from having to grow into lifetime variables, so a word handing a region back
-  returns indices instead. Still deferred until a real client pushes on it. The likely client is
-  Phase 9's self-hosted lexer, which wants byte offsets for diagnostics anyway, and is also where
-  the evidence would exist to justify whatever it costs.
+  returns indices instead.
+  **Storage versus view, and why the length stays in the array type.** The length lives in the
+  *storage* type (`[T N]`: statically sized, so it can be a struct field and needs no allocator,
+  which is what makes the `fixed` layer possible at all) and is erased in the *view* type. Those
+  stay two types with two costs, permanently: `len` on storage folds to a compile-time constant
+  read off the type, `len` on a view is a runtime load. Phase 4 Slice 1's length polymorphism
+  (`'N`) is the partial substitute standing in for the missing view, which is why it
+  monomorphizes per length rather than erasing it.
+  Ordering, whenever it lands: after Phase 4 Slice 8a, since one `len` or `&>` accepting both
+  storage and a view *is* static overloading, and building it earlier only adds hardcoded
+  dispatch arms that slice exists to retire.
+  Still deferred until a real client pushes on it. What makes deferring cheap here, unlike
+  explicit allocators (viral through every collection's type parameter, so they land with the
+  collections or not at all), is that a view type is additive: a collection specified without one
+  gains view-returning words later without changing existing signatures. The first plausible
+  client is Phase 6's collections wanting to hand out a view over their storage, earlier than the
+  self-hosted lexer this entry used to name, which wants byte offsets for diagnostics anyway and
+  remains where the evidence to justify whatever it costs would exist.
 - **`.` appending no separator, for every type (decided, not yet implemented).** Today `.` appends
   a trailing newline for every type except `str`/`cstr` (slice 8a's R9). The decision is to make it
   uniform the other way: `.` writes exactly the value and nothing else, a newline spelled
@@ -923,6 +996,29 @@ rows, no borrow analysis needed to write the compiler in it.
   static overloading; until then it is one wrapper word per type, e.g. `: println ( i64 -- ) .
   "\n" . ;`, or an explicit `"\n" .` at each call site — and the wrapper is only expressible
   from slice 8a onward, since it needs a string literal.
+- **Bounded rows (`..N`), with variadic FFI as a consumer rather than the justification.**
+  `..s` is an *unbounded* row: opaque, passed through untouched, and checkable precisely
+  because nothing ever looks at it (`check_poly_body`, `src/check.rs`). A **bounded** row is
+  the missing sibling: N stack slots whose element types the checker reads off the concrete
+  stack at each call site. The better motivation is not FFI at all -- Forth's
+  depth-parameterized stack words (`ndrop`, `npick`, `nroll`) have no expressible signature in
+  Sooth today, since `..s` cannot be consumed and a fixed arity cannot vary. Variadic FFI then
+  falls out for free: in an `extern:` declaration the row's *position* marks the
+  fixed/variadic boundary, because C's fixed parameters are exactly the individually named
+  ones, so no C-specific keyword is needed anywhere in the language.
+  **N is a compile-time literal on top of the row** (precedent: `fill`'s count is already
+  required to be literal), so `"%d %d" 42 43 2 printf` reads format string deepest, then the
+  arguments, then the count.
+  **Rejected**: a zero-width boundary marker (`( cstr .. i64 -- i64 )`), which reads as
+  variable-arity when it consumes nothing and collides with `..s` occupying the same position
+  meaning nearly the opposite; and a separate `"printf" variadic 1` clause, which bolts a C
+  ABI fact onto the declaration form instead of using syntax that earns its place elsewhere.
+  **Open**: whether the literal count slot is spelled in the effect or implied by `..N`; how
+  `..N` relates to the existing `'N` length variables (shared namespace, or linked); and the
+  diagnostic when the literal disagrees with the stack's actual depth, which is the one real
+  cost of literal-on-top over encoding the count in the word name (`printf2`), since a name
+  cannot disagree with itself. Nothing blocks on this: Phase 4 slice 8a's `.` keeps its
+  backend lowering either way.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

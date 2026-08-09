@@ -7,8 +7,9 @@
 use std::fmt::Write;
 
 use crate::ir::{
-    ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, StructLayout,
-    Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
+    ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
+    QuotSigLayout, StructLayout, Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL,
+    TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -27,6 +28,19 @@ const TRACE_EVENT_SYMBOL: &str = "sooth_trace_event";
 struct Layouts<'a> {
     structs: &'a [StructLayout],
     enums: &'a [EnumLayout],
+    /// Slice 7a: the module's distinct quotation signatures, so a quotation
+    /// value's ABI/member spelling resolves to its `:Q{n}` symbol.
+    quot_sigs: &'a [QuotSigLayout],
+}
+
+/// Slice 7a: the `:Q{n}` symbol index for a quotation signature, found by
+/// structural effect equality (two equal effects share one `type :Q{n}`).
+fn quot_index(layouts: Layouts, sig: QuotSigId) -> usize {
+    layouts
+        .quot_sigs
+        .iter()
+        .position(|q| q.effect == sig.0)
+        .expect("a quotation IrType names an effect interned in `quot_sigs`")
 }
 
 pub fn emit(ir: &IrModule) -> Result<String, String> {
@@ -34,6 +48,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     let layouts = Layouts {
         structs: &ir.structs,
         enums: &ir.enums,
+        quot_sigs: &ir.quot_sigs,
     };
     out.push_str("data $fmt = { b \"%ld\\n\", b 0 }\n");
     out.push_str("data $ufmt = { b \"%lu\\n\", b 0 }\n");
@@ -79,6 +94,13 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     }
     for (idx, layout) in ir.arrays.iter().enumerate() {
         emit_array_type(&mut out, idx, layout);
+    }
+    // Slice 7a: a quotation value is a fixed two-slot `{ code, env }`
+    // aggregate; every distinct effect gets its own `:Q{n}` (like arrays,
+    // self-contained, so a struct field of quotation type sees it already
+    // declared). All slots classify `l`, so the members are `{ l, l }`.
+    for idx in 0..ir.quot_sigs.len() {
+        writeln!(out, "type :Q{idx} = {{ l, l }}").unwrap();
     }
     for idx in topo_sorted_structs(&ir.structs) {
         emit_struct_type(&mut out, &ir.structs[idx], layouts);
@@ -180,30 +202,41 @@ fn array_type_symbol(idx: usize) -> String {
 /// The Sooth `main` word is emitted as `sooth_main`; the C shim owns `main`.
 /// Sooth word names may contain characters (`-`, `<`, `>`, etc., identifier-
 /// continuation characters in the lexer) that are not valid in a QBE global
-/// symbol, so any such character is replaced with `_`; applied identically at
-/// both the function definition and every call site, so it never causes a
-/// collision within a single compilation unit's word names.
+/// symbol. Every character outside `[A-Za-z0-9_]` -- including a literal
+/// `.`, since `.` is the escape lead-in below and must not become ambiguous
+/// with one -- becomes `.{hex}.`, its codepoint in lowercase hex. This is
+/// injective: scanning the output left to right, `.` is never a passthrough
+/// character, so it can only ever open or close an escape, which means every
+/// output string has exactly one valid parse back into the source characters
+/// that produced it. Two distinct names can therefore never collide on the
+/// same symbol (`+` and `-` used to both sanitize to the bare symbol `_`;
+/// they now produce `.2b.` and `.2d.`). `.` is deliberately the escape
+/// character rather than `_`: every compiler-generated symbol this function
+/// also has to leave alone (`sooth_line_{seq}`'s dlopen lookup in `repl.rs`,
+/// the resolver's `__m{module}`/`__import{epoch}` mangle suffix, the alloc/
+/// free/OOB-trap shims below, all `_`-only) would otherwise need to move in
+/// lockstep with a change here; none of them contain `.`, so none of them
+/// are affected by fixing this. Applied identically at both the function
+/// definition and every call site, so a lookup by name always finds the
+/// symbol that source name actually owns.
 fn qbe_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name == "main" {
         return std::borrow::Cow::Borrowed("sooth_main");
     }
-    if name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-    {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         std::borrow::Cow::Borrowed(name)
     } else {
-        std::borrow::Cow::Owned(
-            name.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect(),
-        )
+        let mut out = String::with_capacity(name.len());
+        for c in name.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                out.push(c);
+            } else {
+                out.push('.');
+                out.push_str(&format!("{:x}", c as u32));
+                out.push('.');
+            }
+        }
+        std::borrow::Cow::Owned(out)
     }
 }
 
@@ -255,6 +288,10 @@ fn width(ty: IrType) -> &'static str {
         // `str`'s descriptor address and `cstr`'s bytes pointer are each one
         // opaque pointer, exactly like `Ptr`.
         IrType::Str | IrType::Cstr => "l",
+        // A code handle and a quotation value are each one pointer in a
+        // register; the quotation's `:Q{n}` aggregate type is only spelled in
+        // ABI/member positions.
+        IrType::Code | IrType::Quotation(_) => "l",
     }
 }
 
@@ -266,6 +303,7 @@ fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
+        IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
         _ => width(ty).to_string(),
     }
 }
@@ -286,9 +324,12 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Ptr => "l".to_string(),
         IrType::OwnedCell(_) => "l".to_string(),
         IrType::Str | IrType::Cstr => "l".to_string(),
+        // A code slot is one opaque pointer, `l` like `Ptr`.
+        IrType::Code => "l".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
+        IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
     }
 }
 
@@ -314,7 +355,9 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Ptr => ("l", "loadl"),
         IrType::OwnedCell(_) => ("l", "loadl"),
         IrType::Str | IrType::Cstr => ("l", "loadl"),
-        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+        // A quotation's `code` slot is one opaque pointer, loaded at `l`.
+        IrType::Code => ("l", "loadl"),
+        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
     }
@@ -334,7 +377,9 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Ptr => "storel",
         IrType::OwnedCell(_) => "storel",
         IrType::Str | IrType::Cstr => "storel",
-        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
+        // A quotation's `code` slot is one opaque pointer, stored at `l`.
+        IrType::Code => "storel",
+        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
     }
@@ -929,9 +974,55 @@ fn emit_instr(
                 None => writeln!(out, "\tcall ${}({})", qbe_name(f), a.join(", ")),
             }
         }
+        // Slice 7a (R4): materialize a function symbol as a `Code` handle; the
+        // symbol is sanitized identically to a direct call site.
+        Instr::FuncAddr(dst, sym) => {
+            writeln!(out, "\t{} =l copy ${}", val(*dst), qbe_name(sym))
+        }
+        // Slice 7a (R4): an indirect call through a code-handle value. Mirrors
+        // `Call` but the callee is `%fp`, not a `$sym`; `env` is not passed in
+        // 7a (a non-capturing callee has no env parameter).
+        Instr::CallIndirect(ret, fp, args) => {
+            let a: Vec<String> = args
+                .iter()
+                .map(|x| {
+                    format!(
+                        "{} {}",
+                        qbe_abi_ty(ty_of(value_types, *x), layouts),
+                        val(*x)
+                    )
+                })
+                .collect();
+            match ret {
+                Some(r) => {
+                    let w = qbe_abi_ty(ty_of(value_types, *r), layouts);
+                    writeln!(
+                        out,
+                        "\t{} ={w} call {}({})",
+                        val(*r),
+                        val(*fp),
+                        a.join(", ")
+                    )
+                }
+                None => writeln!(out, "\tcall {}({})", val(*fp), a.join(", ")),
+            }
+        }
         // `.` is type-directed on the operand's own `IrType` (same dispatch
         // shape as `Cmp`/`Shr`): signed decimal, unsigned decimal, `%g` float,
         // or `true`/`false` for `Bool`.
+        //
+        // Every `$printf` call below writes `...` last, which in QBE means "all
+        // preceding arguments are fixed, zero variadic ones" -- the marker is
+        // positional, `call $printf(l $fmt, ..., w %v)` is the form that says the
+        // value is variadic. Wrong per C, but currently unobservable: on
+        // amd64_sysv, arm64 and rv64 QBE emits identical code either way, and
+        // `driver.rs` invokes `qbe` with no `-t`, so only the default
+        // amd64_sysv target is ever built. It becomes a real wrong-output bug on
+        // `arm64_apple`, whose ABI passes variadic arguments on the stack while
+        // fixed ones go in registers: `printf` would read the stack while these
+        // calls left the value in a register. Fix the marker position before
+        // adding target selection. Same shape in `sooth_oom_trap`'s `dprintf`
+        // and `sooth_trace_event`'s `printf`.
         Instr::Print(v) => match ty_of(value_types, *v) {
             IrType::Bool => {
                 // No branch needed: widen the canonical 0/1 to an index into
@@ -1011,6 +1102,9 @@ fn emit_instr(
             }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 unreachable!("an aggregate is not a printable scalar; checker rejects it (X6/M2)")
+            }
+            IrType::Code | IrType::Quotation(_) => {
+                unreachable!("a quotation/code is not a printable scalar; checker rejects it")
             }
         },
         Instr::PtrOffset(dst, base, bytes) => {
@@ -1146,7 +1240,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let entry_types = vec![Type::I64; entry_depth];
-        let (func, _m, _) = lower_line(
+        let (func, _q, _m, _) = lower_line(
             0,
             &terms,
             entry_depth,
@@ -1176,13 +1270,70 @@ mod tests {
         // A word name containing `-` (a legal identifier-continuation
         // character in the lexer, e.g. the S8 dogfood's `shift-x`) is not a
         // valid QBE global symbol; it is sanitized identically at the
-        // function definition and its call site.
+        // function definition and its call site. `-` is codepoint 0x2d, so
+        // it escapes to `.2d.` (see `qbe_name`), not a bare `_` -- a bare `_`
+        // would collide with any other name whose own non-alphanumeric
+        // characters also collapsed to one underscore.
         let il = emit_src(
             ": shift-x ( i64 -- i64 ) | n | n 1 + ;
             : main ( -- ) 5 shift-x . ;",
         );
         assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
-        assert!(il.contains("$shift_x"), "expected sanitized symbol: {il}");
+        assert!(
+            il.contains("$shift.2d.x"),
+            "expected the injective sanitized symbol: {il}"
+        );
+    }
+
+    #[test]
+    fn qbe_name_distinct_operator_names_never_collide() {
+        // Regression: qbe_name used to replace every non-alphanumeric
+        // character with a bare `_`, so any two names built entirely of
+        // non-alphanumeric characters of the same length collapsed onto the
+        // identical symbol -- `+` and `-` both sanitized to `_`. This is the
+        // exact set 8a's overload table is about to make dispatchable, so
+        // every pair in it must be checked, not just one.
+        let ops = [
+            "+",
+            "-",
+            "*",
+            "/",
+            "mod",
+            "and",
+            "or",
+            "xor",
+            "not",
+            "shl",
+            "shr",
+            "=",
+            "<",
+            ">",
+            "<=",
+            ">=",
+            "<>",
+            "max",
+            "max-total",
+            ".",
+        ];
+        let sanitized: Vec<String> = ops.iter().map(|op| qbe_name(op).into_owned()).collect();
+        for i in 0..ops.len() {
+            for j in (i + 1)..ops.len() {
+                assert_ne!(
+                    sanitized[i], sanitized[j],
+                    "`{}` and `{}` collide on the symbol `{}`",
+                    ops[i], ops[j], sanitized[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qbe_name_plus_and_minus_no_longer_collide() {
+        // The exact reproduction that broke before the fix: `~` and `?`
+        // (ordinary symbolic word names, nothing to do with operator
+        // overloading) both sanitized to the bare symbol `_`.
+        assert_ne!(qbe_name("~"), qbe_name("?"));
+        assert_ne!(qbe_name("+"), qbe_name("-"));
     }
 
     #[test]
@@ -1393,7 +1544,7 @@ mod tests {
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
         let f64_ty = Type::from_name("f64").unwrap();
-        let (func, _m, _) = lower_line(
+        let (func, _q, _m, _) = lower_line(
             0,
             &terms,
             1,
@@ -2368,10 +2519,10 @@ type: Counter n i64 ;
         // Structural because a runtime golden cannot
         // distinguish "mutated in place" from "rebuilt correctly", and
         // eliminating the rebuild is the point of the slice. Pinned to the
-        // mangled symbol: `qbe_name` rewrites `-` to `_`, so the literal
+        // mangled symbol: `qbe_name` escapes `-` to `.2d.`, so the literal
         // `push-byte` could never match.
         let il = emit_src(MUTATION_PROBE);
-        let body = func_body(&il, "export function $push_byte(");
+        let body = func_body(&il, "export function $push.2d.byte(");
         assert!(
             !body.contains("alloc"),
             "mutation through a reference must not allocate a rebuilt aggregate: {body}"
@@ -2401,7 +2552,7 @@ type: Counter n i64 ;
         // whole-aggregate rebuild, so the no-rebuild test's assertion is measuring
         // `push-byte` rather than an emitter that stopped emitting `alloc`.
         let il = emit_src(MUTATION_PROBE);
-        let body = func_body(&il, "export function :Counter $bump_rebuild(");
+        let body = func_body(&il, "export function :Counter $bump.2d.rebuild(");
         assert!(
             body.contains("alloc"),
             "a functional setter still allocates its new shell: {body}"
@@ -2409,6 +2560,78 @@ type: Counter n i64 ;
         assert!(
             body.contains("blit"),
             "a functional setter still copies the old shell: {body}"
+        );
+    }
+
+    #[test]
+    fn qbe_emits_func_addr_as_copy_of_symbol() {
+        // T-qbe-addr (R4): materializing a function symbol as a `Code` handle
+        // is a plain `copy` of the (sanitized) global address, `l`-wide,
+        // distinct from any pointer arithmetic.
+        let func = IrFunc {
+            name: "t".to_string(),
+            params: vec![],
+            ret: Some(IrType::Code),
+            blocks: vec![crate::ir::Block {
+                id: crate::ir::BlockId(0),
+                instrs: vec![Instr::FuncAddr(Value(0), "f".to_string())],
+                term: Terminator::Ret(Some(Value(0))),
+            }],
+            value_types: vec![IrType::Code],
+        };
+        let il = emit(&IrModule {
+            funcs: vec![func],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            il.contains("=l copy $f"),
+            "a `Code` handle is a copy of the symbol: {il}"
+        );
+    }
+
+    #[test]
+    fn qbe_emits_indirect_call_through_value() {
+        // T-qbe-ind (R4): an indirect call goes through the callee *value*
+        // (`%v1`, not a `$sym`); an aggregate quotation argument is spelled
+        // with its `:Q{n}` ABI type (from the module's `quot_sigs`), and the
+        // module emits the matching `type :Q0 = { l, l }`.
+        let sig = match crate::ir::ir_type_of(crate::ast::quotation_type(
+            vec![Type::I64],
+            vec![Type::I64],
+        )) {
+            IrType::Quotation(sig) => sig,
+            other => panic!("expected a quotation IrType, got {other:?}"),
+        };
+        let quot = IrType::Quotation(sig);
+        let func = IrFunc {
+            name: "t".to_string(),
+            params: vec![quot, IrType::Code],
+            ret: Some(IrType::I64),
+            blocks: vec![crate::ir::Block {
+                id: crate::ir::BlockId(0),
+                instrs: vec![Instr::CallIndirect(
+                    Some(Value(2)),
+                    Value(1),
+                    vec![Value(0)],
+                )],
+                term: Terminator::Ret(Some(Value(2))),
+            }],
+            value_types: vec![quot, IrType::Code, IrType::I64],
+        };
+        let il = emit(&IrModule {
+            funcs: vec![func],
+            quot_sigs: vec![QuotSigLayout { effect: sig.0 }],
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(
+            il.contains("type :Q0 = { l, l }"),
+            "the module emits the quotation aggregate type: {il}"
+        );
+        assert!(
+            il.contains("call %v1(:Q0 %v0)"),
+            "the call goes through the value with a `:Q` aggregate arg: {il}"
         );
     }
 }

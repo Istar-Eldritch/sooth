@@ -261,11 +261,47 @@ pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
     Ok(module)
 }
 
+/// R14/D4 (slice 5b), generalized: reject a closure where a module *other
+/// than* `allowed_module` declares a word named `main`, naming the declaring
+/// file and the word, before any codegen. `mangle` (`src/resolve.rs`) never
+/// renames `main` regardless of module, so a plain name scan over every file
+/// in the closure finds it, whichever file it came from.
+///
+/// `allowed_module` distinguishes the two callers: `eval_import` passes
+/// `None`, since every file in an *imported* closure is a library file and
+/// none may declare `main`; `build` passes `Some(0)`, since module 0 there is
+/// the program's own entry file and is the one place `main` is expected.
+pub(crate) fn check_no_main_in_closure(
+    module: &Module,
+    closure: &Closure,
+    allowed_module: Option<u32>,
+) -> Result<(), String> {
+    let Some(main) = module
+        .words
+        .iter()
+        .find(|w| w.name == "main" && Some(w.module) != allowed_module)
+    else {
+        return Ok(());
+    };
+    let path = closure.path_of(main.module);
+    let span = check::word_span(main);
+    Err(format!(
+        "error: `{}` declares a word named `main` (line {}, col {}); a library file may not declare `main`",
+        path.display(),
+        span.line,
+        span.col
+    ))
+}
+
 /// Compile a source file to a native binary. Returns the binary's path.
 pub fn build(path: &Path) -> Result<PathBuf, String> {
     let closure = discover_closure(path)?;
     let mut module = assemble_module(&closure)?;
     check::check(&mut module)?;
+    // R14/D4 (native-build fix): only the entry file (module 0) may declare
+    // `main`; an imported file that also declares one is rejected here,
+    // mirroring the REPL import path's own scan.
+    check_no_main_in_closure(&module, &closure, Some(0))?;
     let ir = ir::lower(&module)?;
     let ssa = backend::qbe::emit(&ir)?;
 
@@ -455,6 +491,75 @@ mod tests {
         assert!(err.contains("cycle"), "names the failure: {err}");
         assert!(err.contains("a.sth"), "names the first file: {err}");
         assert!(err.contains("b.sth"), "names the second file: {err}");
+    }
+
+    /// The native build path's entry file (module 0) is allowed to declare
+    /// `main` -- the common case -- while an imported file that declares none
+    /// checks cleanly.
+    #[test]
+    fn check_no_main_in_closure_allows_entry_module_main() {
+        let s = Sandbox::new("entry-main-ok");
+        s.write("lib.sth", ": helper ( -- i64 ) 1 ;\nexport: helper ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure).expect("assembles");
+        check::check(&mut module).expect("checks");
+        check_no_main_in_closure(&module, &closure, Some(0))
+            .expect("module 0's own `main` is allowed");
+    }
+
+    /// The native build path rejects an *imported* file that also declares
+    /// `main`, naming that file and the word -- the bug this test guards
+    /// against regressing (previously nothing rejected this).
+    #[test]
+    fn check_no_main_in_closure_rejects_imported_module_main() {
+        let s = Sandbox::new("imported-main-bad");
+        let lib = s.write(
+            "lib.sth",
+            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure).expect("assembles");
+        check::check(&mut module).expect("checks");
+        let err = check_no_main_in_closure(&module, &closure, Some(0)).unwrap_err();
+        assert!(err.contains("main"), "names the word: {err}");
+        assert!(
+            err.contains(lib.file_name().unwrap().to_str().unwrap()),
+            "names the imported file, not the entry: {err}"
+        );
+    }
+
+    /// End-to-end regression guard, through `build` itself rather than the
+    /// helper directly: the bug this whole fix exists for was that
+    /// `cargo run -- build` never called `check_no_main_in_closure` on the
+    /// native path at all (only `Session::eval_import`, the REPL path, did),
+    /// so an imported file's `main` reached codegen silently. Calling
+    /// `check_no_main_in_closure` in isolation (the two tests above) cannot
+    /// catch a missing call site; only driving `build` proves it is wired in.
+    #[test]
+    fn build_rejects_imported_module_declaring_main() {
+        let s = Sandbox::new("build-imported-main-bad");
+        let lib = s.write(
+            "lib.sth",
+            ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
+        );
+        let entry = s.write(
+            "main.sth",
+            "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
+        );
+        let err = build(&entry).expect_err("an imported `main` must reject the native build");
+        assert!(err.contains("main"), "names the word: {err}");
+        assert!(
+            err.contains(lib.file_name().unwrap().to_str().unwrap()),
+            "names the imported file, not the entry: {err}"
+        );
     }
 
     #[test]

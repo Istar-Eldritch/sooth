@@ -1164,6 +1164,17 @@ impl Ctx<'_> {
             Ctx::Line { .. } => None,
         }
     }
+
+    /// R11: the enclosing word's declared output row, the context a branch join
+    /// in tail position materializes its quotation arms against (the merged
+    /// slot maps to the output at the same index). A bare REPL line has no
+    /// declared row, so a materializing join there stays a located error.
+    fn declared_outputs(&self) -> Option<&[TypedSlot]> {
+        match self {
+            Ctx::Word { effect, .. } => Some(&effect.outputs),
+            Ctx::Line { .. } => None,
+        }
+    }
 }
 
 /// R1: recognize every user-defined `drop` overload -- a word literally
@@ -1323,6 +1334,13 @@ pub(crate) fn audit_quotation_type_registries(
 ) -> Result<(), String> {
     for s in structs {
         for (fname, fty) in &s.fields {
+            // R8 (D4): a quotation type is legal as a struct field this slice
+            // (a materialization boundary); the store of a literal into it is
+            // checked at the constructor/setter call site (R7). Every other
+            // registry position below stays rejected.
+            if matches!(fty, Type::Quotation(_)) {
+                continue;
+            }
             reject_quotation_type_position(
                 *fty,
                 &format!("the field `{fname}` of struct `{}`", s.name),
@@ -1343,6 +1361,12 @@ pub(crate) fn audit_quotation_type_registries(
         }
     }
     for a in arrays {
+        // R8 (D4): a quotation is legal as an array element this slice (a
+        // materialization boundary, checked at `fill`/`!`); a cell payload and
+        // a reference referent below are not D4 boundaries and stay rejected.
+        if matches!(a.element, Type::Quotation(_)) {
+            continue;
+        }
         reject_quotation_type_position(a.element, "an array element")?;
     }
     for c in cells {
@@ -1362,6 +1386,13 @@ pub(crate) fn audit_quotation_type_registries(
 pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> {
     let word = crate::resolve::demangle_word(&w.name);
     for slot in &w.effect.outputs {
+        // R8 (D4): a monomorphic word may declare a `Type::Quotation` output (a
+        // materialization boundary, checked at the exit row by `check_outputs`).
+        // The poly path below still rejects a quotation output: polymorphic
+        // quotation *values* are out of scope this slice.
+        if matches!(slot.ty, Type::Quotation(_)) {
+            continue;
+        }
         reject_quotation_type_position(slot.ty, &format!("the output of `{word}`"))?;
     }
     // R18/R7a: a monomorphic word taking a quotation is a combinator,
@@ -1523,6 +1554,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     for decl in &module.externs {
         env.insert(decl.name.clone(), sig_of(&decl.effect));
     }
+
+    // A duplicate word name in one module is rejected here, before the
+    // population loop below would otherwise silently keep only the last one
+    // seen and let both bodies reach codegen.
+    check_duplicate_word_names(&module.words)?;
 
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
@@ -2284,6 +2320,48 @@ fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Res
     Ok(())
 }
 
+/// A duplicate word name within one module leaks past every existing check
+/// straight to the linker's bare `symbol already defined` error: nothing
+/// before this rejects a repeat `word.name` the way `check_duplicate_type_names`
+/// already does for structs/enums, so the word-environment population loop in
+/// `check` silently keeps only the last one seen and both bodies still lower
+/// to codegen. Keyed by `(module, name)`, mirroring that check exactly, so two
+/// modules each declaring `push` is not a duplicate (`resolve::mangle` already
+/// disambiguates that pair's symbols; by the time this runs post-`resolve`,
+/// their `name`s already differ) while two `push`es in one module still
+/// mangle identically and collide here.
+///
+/// `drop`-named words are skipped entirely, not treated as exempt from the
+/// rule: `find_drop_overloads` (run earlier, unconditionally, as the first
+/// step of `check`) already owns every `drop` word's multiplicity, keyed by
+/// the struct id it overrides rather than by the shared literal name `"drop"`
+/// -- two overloads for two distinct structs are not a duplicate and must
+/// coexist, while a second overload for the *same* struct already failed
+/// there, before this ever runs. Re-checking `drop` here by name alone would
+/// reject that legitimate multi-type overloading (Phase 3 slice 8b) as a
+/// false positive. `main` gets no such carve-out: nothing else validates a
+/// repeat `main` within one module, so it is an ordinary word for this check.
+fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
+    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
+    for word in words {
+        if word.name == "drop" {
+            continue;
+        }
+        let span = word_span(word);
+        if let Some(first) = seen.insert((word.module, word.name.as_str()), span) {
+            return Err(format!(
+                "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
+                crate::resolve::demangle_word(&word.name),
+                span.line,
+                span.col,
+                first.line,
+                first.col
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Whether a struct's field-type graph node has been visited by
 /// `check_struct_recursion`'s DFS: `InProgress` marks an ancestor on the
 /// current path (finding one again is a cycle), `Done` marks a node already
@@ -2949,10 +3027,7 @@ pub fn has_self_tail_call(word: &WordDef) -> bool {
 /// A word's location, derived from the first term (or clause) of its body,
 /// for locating a whole-word diagnostic like X1.
 pub(crate) fn word_span(word: &WordDef) -> Span {
-    match &word.body {
-        WordBody::Terms { terms, .. } => terms.first().map(|t| t.span).unwrap_or_default(),
-        WordBody::Clauses(clauses) => clauses.first().map(|c| c.span).unwrap_or_default(),
-    }
+    word.span
 }
 
 /// R3/R4 (D3, X1): build the whole-module tail-call graph (an edge `A -> B`
@@ -3434,13 +3509,40 @@ fn check_terms_word(
     let ctx = word_ctx(word, structs, enums);
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
-    let final_stack = check_terms(
+    let mut final_stack = check_terms(
         terms, initial, &ctx, env, arrays, cells, refs, &mut prov, &mut scope, true, poly,
     )?;
-    dropped.append(&mut prov.dropped);
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
+    // R7/D4: a declared `Type::Quotation` output is a materialization boundary.
+    // Materialize each non-capturing `Known` literal the body leaves there
+    // (reject a capturing one naming 7b, R12) before `check_outputs`, whose
+    // bare-quotation guard would otherwise reject it outright.
+    for (i, want) in declared.iter().enumerate() {
+        if let Type::Quotation(eff) = *want {
+            if let Some(QuotRef::Known(id)) = final_stack.get(i).and_then(|s| s.quot) {
+                let span = prov.quotations[id.0].span;
+                final_stack[i] = materialize_quotation_at_boundary(
+                    id,
+                    eff,
+                    "be returned",
+                    &word.name,
+                    span,
+                    &ctx,
+                    env,
+                    arrays,
+                    cells,
+                    refs,
+                    &mut prov,
+                    &mut scope,
+                    poly,
+                )?;
+            }
+        }
+    }
+    dropped.append(&mut prov.dropped);
+
     check_outputs(word, &final_stack, &declared, line, structs, enums, arrays)?;
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
@@ -3683,21 +3785,70 @@ fn poly_is_copy(
 #[derive(Debug, Clone, Default)]
 struct PolyScope {
     locals: HashMap<String, PolyType>,
-    moves: HashMap<String, Option<Span>>,
+    moves: Moves,
 }
 
 impl PolyScope {
     /// The non-`Copy` locals still holding an unconsumed value, name-sorted so
-    /// a body with two of them always reports the same one.
+    /// a body with two of them always reports the same one. A `MaybeMoved`
+    /// local (consumed on one `if` arm only) counts as still-unconsumed here,
+    /// which is the whole point of tracking three move states (D2).
     fn unconsumed(&self) -> Vec<&str> {
-        let mut names: Vec<&str> = self
-            .moves
-            .iter()
-            .filter(|(_, site)| site.is_none())
-            .map(|(name, _)| name.as_str())
+        self.moves.unconsumed()
+    }
+
+    /// The names bound before an `if` arm is walked; a name absent from this
+    /// set after the arm was bound inside it. `PolyScope` has no depth concept
+    /// and reports leaks name-sorted, so a keys-snapshot is the faithful twin
+    /// of `Scope::depth` here, not an ordered `Vec`.
+    fn snapshot(&self) -> HashSet<String> {
+        self.locals.keys().cloned().collect()
+    }
+
+    /// `leave_block`'s poly twin: reject an arm-local non-`Copy` value never
+    /// consumed inside the arm, then drop every arm-local from scope so the two
+    /// arms' name sets agree at the join and `Moves::join` cannot panic on a
+    /// key mismatch. `token` names the arm's closing keyword ("else" or "end")
+    /// for the diagnostic. The removal happens whether or not a leak fired, so
+    /// a successful arm always leaves the pre-`if` name set behind.
+    fn leave_arm(
+        &mut self,
+        before: &HashSet<String>,
+        token: &str,
+        ctx: &Ctx,
+        span: Span,
+        sig: &PolySig,
+    ) -> Result<(), String> {
+        let mut arm_locals: Vec<String> = self
+            .locals
+            .keys()
+            .filter(|k| !before.contains(k.as_str()))
+            .cloned()
             .collect();
-        names.sort_unstable();
-        names
+        arm_locals.sort_unstable();
+        let unconsumed: HashSet<String> = self
+            .moves
+            .unconsumed()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // An arm-local cannot be `MaybeMoved` (it does not exist in the other
+        // arm), so its leak is always a plain unconsumed; take the first in
+        // sort order, capturing its type before the removal drops it.
+        let leak = arm_locals
+            .iter()
+            .find(|n| unconsumed.contains(n.as_str()))
+            .map(|n| (n.clone(), self.locals[n].clone()));
+        for name in &arm_locals {
+            self.locals.remove(name);
+            self.moves.states.remove(name);
+        }
+        if let Some((name, pt)) = leak {
+            return Err(poly_arm_local_unconsumed_error(
+                ctx, span, &name, &pt, token, sig,
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -3763,6 +3914,7 @@ fn check_poly_combinator_standalone(
         body: WordBody::Terms { terms },
         poly: None,
         module: word.module,
+        span: word.span,
     };
     let mut dropped = Vec::new();
     check_word(
@@ -3915,23 +4067,80 @@ fn poly_term(
                 // A non-`Copy` binding carries a consume-exactly-once
                 // obligation tracked in `moves`; a `Copy` one does not.
                 if !poly_is_copy(&pt, sig, structs, enums, arrays) {
-                    scope.moves.insert(name.clone(), None);
+                    scope.moves.states.insert(name.clone(), MoveState::Live);
                 }
                 scope.locals.insert(name.clone(), pt);
             }
         }
-        TermKind::If { .. } => {
-            // A polymorphic `if` needs the monomorphic arm's machinery
-            // (condition-pop, per-arm unconsumed-linear check, move-join); none
-            // of that is lifted to `PolyType` yet, and a partial version both
-            // over-rejects valid bodies and can leave the stack in a state that
-            // panics a later stage. Reject it outright here until a future
-            // slice implements it properly, mirroring the monomorphic arm.
-            return Err(format!(
-                "error: `if` in the polymorphic body of `{}` (line {}) is not yet supported",
-                ctx.word_name().unwrap_or("<line>"),
-                span.line
-            ));
+        TermKind::If {
+            then_branch,
+            else_branch,
+            else_span,
+            end_span: _,
+        } => {
+            // Mirrors the monomorphic arm minus all quotation handling (D3): a
+            // `PolyType` is provably never a quotation (the literal is rejected
+            // eagerly at the `Quotation` arm above), so the condition-pop skips
+            // `reject_quotation_operand` and the join skips the two
+            // quotation-identity cases.
+            let cond = stack
+                .pop()
+                .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
+            if cond != PolyType::Concrete(Type::Bool) {
+                return Err(match cond {
+                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::Bool, t),
+                    other => poly_op_on_variable_error(ctx, span, "if", &other, sig),
+                });
+            }
+            // R14/R2: each arm advances its own copy of the move-state and its
+            // own name set; the join reconciles the moves into `MaybeMoved`
+            // wherever they disagree, and `leave_arm` drops each arm's locals
+            // so the two name sets agree at the join.
+            let before = scope.snapshot();
+            let mut then_scope = scope.clone();
+            let mut else_scope = scope.clone();
+            let then_stack = poly_walk(
+                then_branch,
+                stack.clone(),
+                &mut then_scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+            )?;
+            let then_token = if else_span.is_some() { "else" } else { "end" };
+            then_scope.leave_arm(&before, then_token, ctx, span, sig)?;
+            let else_stack = poly_walk(
+                else_branch,
+                stack,
+                &mut else_scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+            )?;
+            else_scope.leave_arm(&before, "end", ctx, span, sig)?;
+            scope.moves = Moves::join(then_scope.moves, else_scope.moves);
+            if then_stack.len() != else_stack.len() {
+                return Err(poly_branch_mismatch_error(
+                    ctx,
+                    span,
+                    then_stack.len(),
+                    else_stack.len(),
+                ));
+            }
+            for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
+                if t_then != t_else {
+                    return Err(poly_branch_type_mismatch_error(
+                        ctx, span, t_then, t_else, sig,
+                    ));
+                }
+            }
+            stack = then_stack;
         }
         TermKind::Call(name) => {
             return poly_call_term(
@@ -3973,12 +4182,10 @@ fn poly_call_term(
     // the monomorphic checker treats a linear local; a `Copy` local carries no
     // such obligation and is absent from `moves`.
     if let Some(pt) = scope.locals.get(name).cloned() {
-        if let Some(state) = scope.moves.get(name) {
-            if let Some(site) = *state {
-                return Err(poly_use_after_move_error(ctx, span, name, site));
-            }
-            scope.moves.insert(name.to_string(), Some(span));
-        }
+        scope
+            .moves
+            .take(name, span)
+            .map_err(|site| poly_use_after_move_error(ctx, span, name, site))?;
         stack.push(pt);
         return Ok(stack);
     }
@@ -4482,6 +4689,80 @@ fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> 
         "error: use after move in `{where_}` (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
         span.line, site.line, site.col,
     )
+}
+
+/// R14 twin of `branch_mismatch_error` for the polymorphic body checker: the
+/// two `if` arms leave stacks of different depth. Takes `usize` depths, so no
+/// `PolyType` argument is needed here.
+fn poly_branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
+            name, span.line, d_then, d_else, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
+        ),
+    }
+}
+
+/// R14 twin of `branch_type_mismatch_error`: the two `if` arms leave differing
+/// types in the same slot. Compares `PolyType`, which is why the monomorphic
+/// `Type`-taking sibling cannot be reused; `sig` renders each variable's
+/// surface spelling.
+fn poly_branch_type_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    t_then: &PolyType,
+    t_else: &PolyType,
+    sig: &PolySig,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
+            name,
+            span.line,
+            poly_type_str(t_then, sig),
+            poly_type_str(t_else, sig),
+            effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `if` branches leave different types (then: `{}`, else: `{}`)",
+            poly_type_str(t_then, sig),
+            poly_type_str(t_else, sig),
+        ),
+    }
+}
+
+/// R14/R2 twin of `linear_local_out_of_scope_error`: a non-`Copy` local bound
+/// inside one `if` arm is never consumed before that arm ends. `token` names
+/// the arm's closing keyword ("else" or "end").
+fn poly_arm_local_unconsumed_error(
+    ctx: &Ctx,
+    span: Span,
+    local: &str,
+    pt: &PolyType,
+    token: &str,
+    sig: &PolySig,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    match ctx {
+        Ctx::Word { .. } => format!(
+            "error: linear value `{}` is never consumed in `{}` (line {})\n  local `{}` (`{}`) is never consumed, and its scope ends at the `{}` (nothing is dropped for you)",
+            local,
+            where_,
+            span.line,
+            local,
+            poly_type_str(pt, sig),
+            token,
+        ),
+        Ctx::Line { .. } => format!(
+            "error: local `{}` (`{}`) is never consumed, and its scope ends at the `{}`",
+            local,
+            poly_type_str(pt, sig),
+            token,
+        ),
+    }
 }
 
 fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
@@ -5708,6 +5989,112 @@ fn check_literal_against_declared_effect(
     Ok(())
 }
 
+/// R6 (Q1): does the quotation `body` read any name in `enclosing` that the
+/// body does not itself bind? The cheap boolean the D3 materialization line
+/// needs (no captures / captures), strictly less work than 7b's capture *set*.
+/// Mirrors `alpha_rename_locals`'s walk (ast.rs): a `Call` strips a leading
+/// `&!`/`&` exactly as `rename_call`, and a nested `TermKind::Quotation` / `if`
+/// arm is walked carrying the body-bound names *by value*, so a read of an
+/// outer name from inside a nested quotation still counts (D4's
+/// capture-into-another-quotation case). Pure over the term tree: it inspects
+/// no `Slot`/`Deriv` state, so it is testable in isolation.
+fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>) -> bool {
+    fn walk(terms: &[Term], enclosing: &HashSet<String>, bound: &mut Vec<String>) -> bool {
+        for term in terms {
+            match &term.kind {
+                TermKind::Bind(names) => {
+                    for n in names {
+                        bound.push(n.clone());
+                    }
+                }
+                TermKind::Call(name) => {
+                    let stripped = name
+                        .strip_prefix("&!")
+                        .or_else(|| name.strip_prefix('&'))
+                        .unwrap_or(name);
+                    if enclosing.contains(stripped) && !bound.iter().any(|b| b == stripped) {
+                        return true;
+                    }
+                }
+                TermKind::Quotation(inner) => {
+                    let mut inner_bound = bound.clone();
+                    if walk(inner, enclosing, &mut inner_bound) {
+                        return true;
+                    }
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    let mut tb = bound.clone();
+                    let mut eb = bound.clone();
+                    if walk(then_branch, enclosing, &mut tb) {
+                        return true;
+                    }
+                    if walk(else_branch, enclosing, &mut eb) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+    walk(body, enclosing, &mut Vec::new())
+}
+
+/// R12/D4: a capturing quotation reaching a materialization boundary. 7a
+/// materializes only non-capturing literals; a capturing one is a located
+/// rejection naming 7b, reusing the escaping-quotation vocabulary shape.
+/// `boundary` is one of the three wordings this project's boundaries produce:
+/// `be stored` (a constructor/setter argument, or a `!`/`+!` store through a
+/// reference -- the latter covers both a struct field and an array element
+/// via reference alike, since a reference carries no record of what it was
+/// borrowed from), `be returned`, `be left on a branch`.
+fn capturing_quotation_error(ctx: &Ctx, span: Span, boundary: &str) -> String {
+    let _ = ctx;
+    format!(
+        "error: a capturing quotation cannot {boundary} (capturing closures are slice 7b) (line {})",
+        span.line,
+    )
+}
+
+/// R7/D4: a materialization boundary. Materialize a non-capturing `Known`
+/// literal into a runtime quotation value, or reject a capturing one naming 7b
+/// (R12). (i) run the boolean capture predicate (R6); (ii) if it captures,
+/// raise R12 with `boundary`'s wording; (iii) else confirm the literal against
+/// the boundary's expected `Type::Quotation(eff)` via
+/// `check_literal_against_declared_effect`, and return the slot *erased*
+/// (`quot: None`, a real `Type::Quotation`) -- the signal `call`/`times` read
+/// to emit an indirect call rather than a splice.
+#[allow(clippy::too_many_arguments)]
+fn materialize_quotation_at_boundary(
+    id: QuotId,
+    eff: &'static QuotEffect,
+    boundary: &str,
+    word: &str,
+    span: Span,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    poly: &mut PolyCtx,
+) -> Result<Slot, String> {
+    let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
+    let body = prov.quotations[id.0].body.clone();
+    if body_captures_enclosing(&body, &enclosing) {
+        return Err(capturing_quotation_error(ctx, span, boundary));
+    }
+    check_literal_against_declared_effect(
+        id, eff, word, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+    )?;
+    Ok(Slot::computed(Type::Quotation(eff)))
+}
+
 /// R10/R21: a quotation parameter position whose argument is not a quotation
 /// the callee can consume -- a non-quotation value, or (after R21 admits the
 /// abstract forward) a quotation whose *declared effect* disagrees with the
@@ -6293,6 +6680,35 @@ fn check_term(
             )? {
                 return Ok(stack);
             }
+            // R8 (D4): `!`/`+!` into a `&!Type::Quotation` referent is a
+            // materialization boundary (an array element or a struct field via
+            // reference). Materialize a non-capturing `Known` literal in place
+            // before `check_access_word` (whose bare-quotation store guard would
+            // else reject it), reject a capturing one naming 7b (R12). The
+            // referent's declared effect is the boundary's expected effect.
+            if matches!(name.as_str(), "!" | "+!") && stack.len() >= 2 {
+                let vi = stack.len() - 1;
+                if let Some(QuotRef::Known(id)) = stack[vi].quot {
+                    if let Some((Type::Quotation(eff), _)) = ref_parts(stack[vi - 1].ty, refs) {
+                        let qspan = prov.quotations[id.0].span;
+                        stack[vi] = materialize_quotation_at_boundary(
+                            id,
+                            eff,
+                            "be stored",
+                            name,
+                            qspan,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                        )?;
+                    }
+                }
+            }
             if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
                 return Ok(stack);
             }
@@ -6389,6 +6805,38 @@ fn check_term(
             let base = stack.len() - n;
             for (i, want) in sig.inputs.iter().enumerate() {
                 let found = stack[base + i];
+                // R8 (D4): a declared `Type::Quotation` parameter is a
+                // materialization boundary. This is the site a struct
+                // *constructor* call (`[ 1 + ] Holder`) and a generated setter
+                // reach; a non-capturing `Known` literal is materialized
+                // (validated here, lowered to a `(code, env)` value), a
+                // capturing one rejected naming 7b (R12). Gated strictly on
+                // `want`'s type, so it covers a constructor, a setter, and an
+                // ordinary user word declaring a quotation parameter alike; an
+                // `extern` never reaches here (its declared effect cannot name
+                // a `Type::Quotation`, rejected at declaration).
+                if let Type::Quotation(eff) = *want {
+                    if let Some(QuotRef::Known(id)) = found.quot {
+                        stack[base + i] = materialize_quotation_at_boundary(
+                            id,
+                            eff,
+                            "be stored",
+                            name,
+                            span,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                        )?;
+                        continue;
+                    }
+                    // An already-erased runtime quotation value falls through
+                    // to the ordinary `match_slot` (Exact) below.
+                }
                 // R9: a quotation argument rejects before ordinary unification,
                 // so the message names the word rather than mismatching the
                 // `Cstr` placeholder. Also covers generated struct
@@ -6499,27 +6947,73 @@ fn check_term(
                 ));
             }
             let mut merged = Vec::with_capacity(then_stack.len());
-            for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
-                // R7: a branch merge cannot carry a quotation whose identity is
-                // ambiguous, so reject at the join (not at consumption, which
-                // is too late: `lower_if` would emit a `Phi` over the phantoms
-                // even for a merged quotation only ever `drop`ped). Two arms
-                // carrying the *same* literal are safe (`lower_if`'s `t == e`
-                // fast path emits no `Phi`) and forward the marker. The `Cstr`
+            for (i, (t_then, t_else)) in then_stack.iter().zip(&else_stack).enumerate() {
+                // R7/R11: a branch merge cannot carry a quotation whose
+                // identity is ambiguous *unless* the enclosing context declares
+                // its type, in which case the join materializes each arm into a
+                // runtime `(code, env)` value (D4). Two arms carrying the
+                // *same* literal stay a forwarded marker (`lower_if`'s `t == e`
+                // fast path emits no `Phi`, splice preserved). The `Cstr`
                 // placeholder makes an arm's real `Cstr` compare equal to a
                 // quotation, so the ordinary `ty` mismatch below never catches
                 // the one-quotation shape; this guard has both phrasings.
-                let quot = match (t_then.quot, t_else.quot) {
-                    (None, None) => None,
+                let (quot, erased_ty) = match (t_then.quot, t_else.quot) {
+                    (None, None) => (None, None),
                     (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
-                        Some(QuotRef::Known(a))
+                        (Some(QuotRef::Known(a)), None)
                     }
-                    (Some(_), Some(_)) => {
-                        return Err(different_quotations_at_join_error(ctx, span));
+                    (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) => {
+                        // R11 ordering pin: the capture check runs before the
+                        // id/expected-type resolution, so a capturing arm always
+                        // raises R12 rather than falling through to
+                        // `different_quotations_at_join_error`.
+                        let enclosing: HashSet<String> =
+                            scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
+                        for id in [a, b] {
+                            let body = prov.quotations[id.0].body.clone();
+                            if body_captures_enclosing(&body, &enclosing) {
+                                return Err(capturing_quotation_error(
+                                    ctx,
+                                    prov.quotations[id.0].span,
+                                    "be left on a branch",
+                                ));
+                            }
+                        }
+                        // The expected quotation type threaded from the
+                        // enclosing declared context: at a word-body tail the
+                        // merged slot maps to the declared output at index `i`.
+                        // Without one the join cannot give the erased value a
+                        // type, so it stays a located error.
+                        let expected = if tail {
+                            ctx.declared_outputs()
+                                .and_then(|outs| outs.get(i))
+                                .map(|slot| slot.ty)
+                        } else {
+                            None
+                        };
+                        match expected {
+                            Some(Type::Quotation(eff)) => {
+                                let word = ctx.word_name().unwrap_or("the branch");
+                                let a_span = prov.quotations[a.0].span;
+                                let b_span = prov.quotations[b.0].span;
+                                check_literal_against_declared_effect(
+                                    a, eff, word, a_span, ctx, env, arrays, cells, refs, prov,
+                                    scope, poly,
+                                )?;
+                                check_literal_against_declared_effect(
+                                    b, eff, word, b_span, ctx, env, arrays, cells, refs, prov,
+                                    scope, poly,
+                                )?;
+                                // Erased: a runtime `(code, env)` value with a
+                                // real `Type::Quotation`, no `Known` marker.
+                                (None, Some(Type::Quotation(eff)))
+                            }
+                            _ => return Err(different_quotations_at_join_error(ctx, span)),
+                        }
                     }
                     _ => return Err(quotation_versus_value_at_join_error(ctx, span)),
                 };
-                if t_then.ty != t_else.ty {
+                if erased_ty.is_none() && t_then.ty != t_else.ty {
                     return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
                 }
                 // The type-only join above already rejects two arms whose
@@ -6567,7 +7061,9 @@ fn check_term(
                     }),
                 };
                 merged.push(Slot {
-                    ty: t_then.ty,
+                    // R11: a materialized join slot carries the declared
+                    // quotation type in place of the arms' `Cstr` placeholder.
+                    ty: erased_ty.unwrap_or(t_then.ty),
                     literal: t_then.literal && t_else.literal,
                     // A value merged from two branches is never a single
                     // known literal, so it can't feed a compile-time count.
@@ -7095,7 +7591,7 @@ fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
 /// not at consumption (R12's containment rests on it).
 fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+        "error: these two branches leave different quotations at line {}{}; give the quotation a declared type (a word output or field) so it can be materialized, or make both arms the same literal (a runtime quotation value is slice 7)",
         span.line,
         in_word(ctx),
     )
@@ -8061,6 +8557,7 @@ mod tests {
             body: WordBody::Terms { terms: Vec::new() },
             poly: None,
             module: 0,
+            span: Span::default(),
         };
         let mut module = Module {
             words: vec![mk_word],
@@ -8116,6 +8613,7 @@ mod tests {
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
                 module,
+                span: Span::default(),
             }
         }
         fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
@@ -8270,6 +8768,51 @@ mod tests {
         ];
         let err = check_duplicate_type_names(&same_module, &[]).unwrap_err();
         assert!(err.contains("duplicate type `Point`"), "raw name: {err}");
+    }
+
+    /// Two words of the same name in one module are rejected; the same pair
+    /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).
+    #[test]
+    fn duplicate_word_name_is_rejected_only_within_one_module() {
+        fn word_at(name: &str, module: u32, line: u32) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect::default(),
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+                span: Span { line, col: 1 },
+            }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            word_at(name, module, 0)
+        }
+
+        // Two modules, one `push` each: not a duplicate.
+        assert!(check_duplicate_word_names(&[word("push", 0), word("push", 1)]).is_ok());
+
+        // Same module, two `push`: a duplicate, naming both locations.
+        let err = check_duplicate_word_names(&[word_at("push", 0, 1), word_at("push", 0, 2)])
+            .unwrap_err();
+        assert!(
+            err.contains("duplicate word `push`") && err.contains("line 2"),
+            "names the repeat's location: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "also names the first definition's location: {err}"
+        );
+
+        // A repeat `main` in one module is caught too: nothing else validates
+        // `main`'s multiplicity within a module.
+        let err = check_duplicate_word_names(&[word("main", 0), word("main", 0)]).unwrap_err();
+        assert!(err.contains("duplicate word `main`"), "names main: {err}");
+
+        // Two `drop`s sharing a module are *not* rejected here: distinct-struct
+        // overloading is `find_drop_overloads`'s job, keyed by struct id, not
+        // this check's; re-flagging by name alone would reject Phase 3 slice
+        // 8b's legitimate multi-type overloading.
+        assert!(check_duplicate_word_names(&[word("drop", 0), word("drop", 0)]).is_ok());
     }
 
     // A one-field struct with a `drop` overload: linear for the same reason any
@@ -8751,23 +9294,103 @@ mod tests {
     }
 
     #[test]
-    fn check_poly_body_with_if_is_rejected() {
-        // `if` in a polymorphic body is rejected outright until a future slice
-        // lifts the monomorphic arm's condition-pop / per-arm leak check /
-        // move-join to `PolyType`; a partial version both over-rejects valid
-        // bodies and can panic a later stage.
+    fn check_poly_body_with_if_accepts_choose() {
+        // T1: a polymorphic body may branch. `choose` consumes `a` and `b` on
+        // both arms but at different sites; the move-join must recognise
+        // `Moved`+`Moved` as consumed-once (not a leak), or `choose` would be
+        // wrongly rejected at the word end (M1).
+        assert!(
+            check_src(
+                ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n: main ( -- ) 1 2 true choose drop ;",
+            )
+            .is_ok(),
+            "choose should type-check"
+        );
+    }
+
+    #[test]
+    fn check_poly_arm_local_unconsumed_is_error() {
+        // T2: `y` is bound inside the `then` arm and never consumed in it;
+        // `leave_arm` must catch the arm-local leak (M2).
         let err = check_src(
-            ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n: main ( -- ) 1 2 true choose drop ;",
+            ": arm_leak ( 'T 'T bool -- 'T ) | a b flag | flag if a b | y | else a drop b end ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(err.contains('y'), "names the arm-local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_if_moved_on_both_arms_is_accepted() {
+        // T3: `a`/`b` consumed on both arms (`Moved`+`Moved` => `Moved`), so
+        // nothing leaks at the word end.
+        assert!(
+            check_src(
+                ": both ( 'T 'T bool -- ) | a b flag | flag if a drop b drop else b drop a drop end ;\n: main ( -- ) ;",
+            )
+            .is_ok(),
+            "both should type-check"
+        );
+    }
+
+    #[test]
+    fn check_poly_if_moved_on_one_arm_leaks() {
+        // T4: `x` consumed on the `then` arm only (`Moved`+`Live` =>
+        // `MaybeMoved`), which the leak check must count as still-unconsumed
+        // (M3).
+        let err =
+            check_src(": one ( 'T bool -- ) | x flag | flag if x drop else end ;\n: main ( -- ) ;")
+                .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_if_moved_on_neither_arm_leaks() {
+        // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
+        // parked in a local across an `if` still leaks at the word end (M4).
+        let err = check_src(": none ( 'T bool -- ) | x flag | flag if else end ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_poly_if_condition_not_bool_is_error() {
+        // T6: the `if` condition must be `bool`; here the popped condition is
+        // the type variable `'T`, so the condition guard fires before anything
+        // else (an output-mismatch never mentions `if`).
+        let err = check_src(": bad ( 'T 'T -- 'T ) if drop else drop end ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains("if"), "names the `if`: {err}");
+        assert!(err.contains("'T"), "names the variable condition: {err}");
+    }
+
+    #[test]
+    fn check_poly_if_branch_depth_mismatch_is_error() {
+        // T7: the arms leave different stack depths (then: 1, else: 2). `'T`
+        // carries a `Copy` bound so the repeated reads are not use-after-move,
+        // leaving the depth mismatch as the sole failure this test proves.
+        let err = check_src(
+            ": bad ( 'T: Copy bool -- 'T ) | x flag | flag if x else x x end ;\n: main ( -- ) ;",
         )
         .unwrap_err();
         assert!(
-            err.contains("`if` in the polymorphic body of `choose`"),
+            err.contains("different stack depths"),
             "unexpected message: {err}"
         );
-        assert!(
-            err.contains("not yet supported"),
-            "unexpected message: {err}"
-        );
+    }
+
+    #[test]
+    fn check_poly_if_use_after_join_is_error() {
+        // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
+        // after `end` is a second read: use-after-move, not a leak.
+        let err = check_src(
+            ": bad ( 'T bool -- ) | x flag | flag if x drop else x drop end x drop ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains('x'), "names the moved local: {err}");
     }
 
     #[test]
@@ -9562,6 +10185,44 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn check_duplicate_word_in_one_file_is_error() {
+        // Two `push` words in one file used to reach codegen silently (the
+        // env-population loop kept only the last), surfacing only as a bare
+        // linker `symbol already defined` error at the very end of the
+        // pipeline. Now it is a located compiler diagnostic.
+        let err =
+            check_src(": push ( -- i64 ) 1 ;\n: push ( -- i64 ) 2 ;\n: main ( -- ) push drop ;")
+                .unwrap_err();
+        assert!(
+            err.contains("duplicate word `push`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "names the first definition's location too: {err}"
+        );
+    }
+
+    #[test]
+    fn check_duplicate_empty_bodied_word_reports_a_real_location() {
+        // Regression: `word_span` used to derive a word's location from its
+        // first term/clause, so an empty body (`terms.first()` is `None`)
+        // fell back to `Span::default()` -- line 0, col 0 -- for every
+        // trivial stub word, `main ( -- )` being the single most common
+        // shape that hits it. `WordDef` now carries its own declaration span
+        // (the name token), independent of body shape.
+        let err = check_src(": main ( -- ) ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("duplicate word `main`") && err.contains("line 2"),
+            "names the repeat's real location: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "names the first definition's real location, not line 0: {err}"
+        );
     }
 
     #[test]

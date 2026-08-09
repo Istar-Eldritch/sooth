@@ -472,33 +472,52 @@ a hand-threaded twin, and a recursive-enum value's destructor call inside a `tim
 inherits the fix for free, since a destructor's fused loop already opens at its own
 `IrFunc`'s true entry.
 
+**Phase 4 Slice 6e (`if` in a polymorphic body) is complete**: the unconditional rejection at
+`poly_term`'s `TermKind::If` arm is replaced by a full arm mirroring the monomorphic one
+(condition pop, `Bool` check, per-arm walk, move-state join) with no quotation handling
+(a `PolyType` is never a quotation) and no lowering path (checker-acceptance-only; the
+concrete instantiation already lowers correctly through `check_word`). `PolyScope`'s move
+tracking is upgraded from a two-state `Option<Span>` map to the monomorphic `Moves`
+three-state lattice (`Live`/`Moved`/`MaybeMoved`), joined at the `if` the same way branch
+joins already are, and a keys-snapshot `leave_arm` rejects an arm-local linear value never
+consumed inside its own arm before dropping it from scope. `choose` (arms `drop` different
+operands) and `mymax` (the `Ord`-bounded polymorphic `max` the intrinsic could not
+previously give up) both compile and run at two instantiations (`i64`, `f64`); a nested-`if`
+`mymax3` dogfoods that recursion needs no special case. Slice 7's dependency on a
+branching polymorphic body is now satisfied; the core library's intrinsic-vs-library split
+for `max` is unblocked.
+
 **Phase 4 Slice 6f (liveness ends at last use) is complete**: a reference bound to a local now
 dies at its **last use**, the way one left on the stack already did, so a held-then-unused
 borrow no longer blocks consuming its place — `&!acc &!Acc>arr | f | f 0 >usize &!> 5 ! acc
 drop` compiles where before only its identical chained form did. Checker-acceptance-only (D1):
 no new `Instr`/`Terminator`, no lowering, `Type`, or `IrType` change, and since `Deriv`/
 `DerivId` never leave `src/check.rs`, no emitted code changes by construction. The rule is a
-per-`check_terms` `Liveness` pre-pass (`scan`/`dead`, modelled on `alpha_rename_locals`' walk)
-keyed only on names *that* invocation binds, threaded with the current term index through
-`check_term` into the `live_derivs` family; only the `scope.bound` half of each table becomes
-use-bounded, both stack halves left byte-for-byte (D2). A binding inherited into a nested `if`
-arm or `times` body is absent from that body's `Liveness` and so never relaxed there, which is
-what keeps a reference carried into a loop live for the whole body (D6); a nested use is
-attributed to the containing top-level index, a conservative max across arms (Q3). The same
-analysis relaxes `aliasing_origin`'s name loop by each candidate's own last use — one analysis,
-two tables (D8) — with overlap preserved, so a still-live second name still rejects. Because a
-wrong answer on that half is a silent wrong *value*, not just a wrongly accepted program, the
-alias half is mutation-tested rather than merely run green (D9): each of the 17 alias guards is
-shown to go red against the half that catches it. Ending a borrow disposes nothing and emits
-nothing (D7). Two sequential mutable borrows of one place with the first unused are now legal, a
-deliberate exclusivity relaxation pinned by its own test (D10). `examples/inplace_fold.sth`
-dogfoods a named-accumulator in-place `fold` at both a `Copy` and a linear `Acc`, with the
-emitted QBE loop body carrying no per-iteration `blit`.
+per-`check_terms` `Liveness` pre-pass keyed only on names *that* invocation binds; only the
+`scope.bound` half of each table becomes use-bounded, both stack halves left byte-for-byte
+(D2). The same analysis relaxes `aliasing_origin`'s name loop by each candidate's own last use
+(D8), overlap preserved. Because a wrong answer on that half is a silent wrong *value*, the
+alias half is mutation-tested rather than merely run green (D9). `examples/inplace_fold.sth`
+dogfoods a named-accumulator in-place `fold` at both a `Copy` and a linear `Acc`, with no
+per-iteration `blit` in the emitted QBE loop body.
 
-**Next action: Phase 4 Slice 6e (`if` in a polymorphic body).** Its brief
-(`docs/phase4-slice6e-brief.md`) is written; 6c, 6d, and 6f are complete, so 6e is the only
-remaining slice in the 6-family. It has to read before slice 7, which needs it, and before the
-core library's intrinsic-vs-library split, which is gated on it.
+Review found and fixed a soundness regression the first implementation introduced: a quotation
+bound to a local (`[ ... ] | q |`) had its captures attributed to the *literal*, not the
+binding, so a borrow captured by a quotation called later looked dead and a second `&!` to the
+same place was silently accepted. Captures now die with the binding, transitively through a
+quotation capturing a quotation. This is sound only because a capturing quotation still cannot
+escape the block that binds it (7a ships *non-capturing* quotations as values; a capturing
+literal reaching a materialization boundary is a located error naming 7b).
+
+**Next action: close 6f's remaining capture-detection gap.** The fix identifies the binding a
+quotation belongs to syntactically — the literal immediately preceding a `Bind`, taking that
+bind's last name — which misses two reachable shapes: a quotation separated from its `Bind` by
+any other value (`[ ... ] 5 | q n |`), and a `Bind` naming two or more quotations, where only
+the topmost is detected (`[ A ] [ B ] | qa qb |` with only `A` capturing). Both are accepted
+today and both were rejected before the slice. The fact the checker needs is one it already
+has in the main pass, where `Slot.quot` says exactly which name each quotation lands in; the
+syntactic pre-pass cannot see the stack. Moving capture propagation onto that authority, rather
+than widening the heuristic, is the fix. After that, slice 7b.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -764,7 +783,11 @@ same as Phase 2). This absorbs the dissolved Phase 2 Slice 8.
    the special-casing has become the mechanism and Phase 4's generics should subsume all of
    them. Allocation is a single global allocator, deliberately not parameterized per value,
    since a swappable global is cheap to retrofit later while per-value allocators change every
-   value's representation. See [the brief](./docs/phase3-slice2-brief.md) and
+   value's representation. **Half that rationale is wrong, corrected rather than rewritten**:
+   under the type-parameter design Phase 6 will use (an allocator type parameter defaulted to
+   the global one, carrying a zero-size handle in that case), a per-value allocator does *not*
+   change representation. The deferral holds on the other half — it needs generics, which did
+   not exist here. See [the brief](./docs/phase3-slice2-brief.md) and
    [the spec](./docs/phase3-slice2-spec.md) for the full decision record.
    **Known limitation, and where it will first hurt**: because a cell is linear and slice 1
    rejects linear array elements, there is **no collection of resources** in this slice, and
@@ -1291,7 +1314,7 @@ then find out what the compiler owes it.
 6. **The combinator library in Sooth + inlining, and the machinery that work measured (the
    phase's headline exit).** *This heading used to end "+ closing the polymorphic-path gaps".
    It did not close them and no longer claims to: 6b's pre-check established that neither gap
-   gates a combinator. 6a-6c are the library itself; 6d and 6e are gaps the library work
+   gates a combinator. 6a-6c are the library itself; 6d, 6e and 6f are gaps the library work
    surfaced but does not itself need, grouped here for ordering rather than subject matter.*
    `each`/`map`/`filter`/`fold`/`while` as ordinary library words over quotations,
    with the compiler inlining the common ones and their quotation arguments so they lower to
@@ -1455,9 +1478,10 @@ then find out what the compiler owes it.
    — with the nested-loop goldens (all five combinators, any pairing, depth 3) and the slice-3
    aliasing guards green, and a destructor call inside a `times` body inheriting the fix for
    free (its fused loop already opens at its own `IrFunc`'s true entry).
-   **6e — `if` in a polymorphic body.** Lifts the rejection at `src/check.rs:3690` (`` `if`
-   in the polymorphic body of `{word}` is not yet supported ``), which has stood since slice
-   1 deferred it and which no later slice picked up. **A 6-family letter for ordering and
+   **6e — `if` in a polymorphic body. Complete.** Lifted the rejection in `poly_term`'s
+   `TermKind::If` arm (`src/check.rs:3715`, formerly `` `if` in the polymorphic body of
+   `{word}` is not yet supported ``), which had stood since slice 1 deferred it and which no
+   later slice picked up. **A 6-family letter for ordering and
    discovery, not subject matter:** 6b's pre-check is what measured this gap (while ruling it
    out of 6b's scope), and it has to read before slice 7, which needs it. Unlike 6d, whose
    consumers are the 6a combinators themselves, this one's consumers sit outside the family
@@ -1480,32 +1504,88 @@ then find out what the compiler owes it.
    arm reaching `ir.rs`'s `drop: non-empty stack`). `max`'s own body is a fair test rather
    than a trivial one: its arms `drop` different operands, so it exercises exactly the
    move-state join that is missing.
-   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3708`).
+   **Not in scope: the quotation-in-a-polymorphic-body rejection** (`src/check.rs:3798`).
    It is a sibling wall, not this one, and it belongs to slice 7, which is where a quotation
    acquires the runtime representation that would let a polymorphic body carry one.
-   Depends on slice 1 only; independent of 6a-6d and orderable against all of them.
-   **Exit:** a polymorphic word that branches, including one whose arms consume different
-   operands, compiles and runs at two instantiations, with the linear checks that motivated
-   the original deferral proven by tests that fail without them.
+   Depended on slice 1 only; independent of 6a-6d and landed after 6d.
+   **Exit, met:** a polymorphic word that branches, including one whose arms consume
+   different operands, compiles and runs at two instantiations (`choose` and the newly
+   library-writable `mymax` at `i64` and `f64`), with the linear checks that motivated the
+   original deferral proven by tests (T2-T8, `src/check.rs`) that fail without them and by
+   mutation-tested guards on the three-state move join. Slice 7's stated dependency on a
+   branching polymorphic body is satisfied.
 
-   **6f — liveness ends at last use is implemented.** Made a reference bound to a local die at
-   its **last use**, the way one left on the stack already did: `live_derivs`
-   (`src/check.rs`) chained the virtual stack's derivations, which die when a term consumes a
-   slot, with the scope's bindings, which lived for the whole block, and the two halves
-   disagreed — so `&!acc &!Acc>arr | f | f 0 >usize &!> 5 ! acc drop` was rejected while its
-   identical chained form compiled. The fix is a per-`check_terms` `Liveness` pre-pass keyed
-   on the names that invocation binds, filtering only the `scope.bound` half of each table
-   (D2); the same analysis relaxes `aliasing_origin`'s name loop by each candidate's own last
-   use (D8), overlap preserved so a still-live second name still rejects. Not a lifetime
-   system (no lifetime variables, no regions): a rule about *when a borrow ends inside one
-   block*, which the anonymous stack case already followed. The alias half is mutation-tested,
-   not merely run green (D9): each of the 17 alias guards proven red against the half that
-   catches it, since a wrong answer there is a silent wrong *value*, not just a wrongly
-   accepted program.
-   **Exit:** the in-place `fold` dogfood (`examples/inplace_fold.sth`) builds and runs at both
-   a `Copy` and a linear `Acc` with no per-iteration `blit` in the emitted QBE loop body, the
-   two flip tests rewritten to genuine use-after-consume still reject, and the stack-side
-   controls unchanged.
+   **6f — liveness ends at last use. Implemented**, with one known gap (below). The
+   motivation, as originally written: `live_derivs`
+   (`src/check.rs:759`) chains the stack slots with the scope's bindings, so a reference left
+   on the stack dies when a term consumes its slot, while a reference bound to a local stays
+   live for the whole block. Chaining a borrow therefore compiles where naming it does not,
+   and the rejection lands on the natural shape: borrow a place, write through the borrow,
+   then consume the place, which fails with `cannot consume the borrowed local` pointing at
+   the consume. Verified by compiling, in a straight-line word body with no loop and no
+   quotation involved — so this is not about iteration scoping, which already expires a
+   body's bindings per cycle (`leave_block` after the `times` body).
+   **Not a lifetime system**, by DESIGN.md's own definition: no lifetime variables, no
+   regions, nothing binding a reference's validity to a named scope. It is a rule about when
+   a borrow ends inside one block, and the anonymous case already works that way, so this
+   makes named references behave like the stack values the language is otherwise built
+   around rather than adding a concept.
+   **Why a slice and not a workaround.** Locals are the only readability tool a concatenative
+   language has, and this makes them poison exactly where they help most; the workaround is
+   to spell the whole projection as one chain, which is the opposite of the legibility the
+   language trades on.
+   **Before slice 7**, which points Phase 3 Slice 6's escape checking at a new carrier
+   (closure captures, which inherit their captures' restrictions). Settling when a borrow
+   *ends* after closures start capturing them means answering one question twice, the failure
+   this plan keeps citing.
+   Implementation shape the brief should start from: word bodies are flat term lists, so a
+   backward scan gives a last-use index per reference local, and `live_derivs` filters the
+   bindings whose last use has passed, given a current-term index threaded into the query.
+   Two wrinkles: branches (last use is the max across arms) and loop bodies (any use means
+   live for the whole body, which the identity-on-borrow-state check at `src/check.rs:6041`
+   already wants).
+   **Two tables, one rule.** The same lexical-vs-last-use question applies to
+   `aliasing_origin` (`src/check.rs:854`), which rejects a mutable borrow of a place a second
+   live *name* denotes. Both scan a scope table for names that are merely in lexical scope,
+   and both leave their stack halves alone; taking only the borrow half would answer one
+   question twice. **Measured, not assumed:** stubbing `aliasing_origin` out makes a `Copy`
+   aggregate accumulator thread through `fold` with **zero** per-iteration blits, printing the
+   right answer and matching the linear case's shape, against four blits per iteration for the
+   `dup` form it forces today. That gap is an expensive implicit memcpy standing where a
+   reader expects a move, and it is reachable now only by making the type linear — paying a
+   semantic price (a destructor obligation, no free `dup`, move-on-every-use) for a
+   performance property. Seventeen tests guard the rule; the three sampled all use the
+   aliasing name *after* the borrow, so they stay live and keep failing for the reason they
+   state, with the risk concentrated in the six branch/merge cases where region unioning meets
+   per-arm liveness. **The two halves differ in failure mode** and the slice must treat them
+   differently: the borrow half wrongly accepts or rejects a program, while the alias half can
+   silently produce a wrong *value* — the class DESIGN.md names as the one this language
+   exists to turn into a compile error — so every alias-half test is mutation-tested, not just
+   asserted.
+   **A sibling gap, measured in the same investigation: linearity cannot be declared.**
+   `is_copy` (`src/check.rs:239`) derives it structurally, and the only way to opt a struct
+   out of `Copy` is to give it a `drop` overload. That matters because a linear aggregate
+   accumulator *already* threads through `fold` with zero copies — verified: no `blit` in the
+   loop body and stores straight into the carried slot, against four blits per iteration for
+   the `Copy`-plus-`dup` form — so the zero-copy path exists and is reachable only by
+   spelling "thread this in place" as "give this a destructor". Its answer is entangled with
+   slice 1's parked question of whether `Copy` is a privileged constraint and with slice 8's
+   polymorphic `drop`: do not settle it here, do not foreclose it either.
+   Depends on nothing in 6a-6e; orderable against all of them, required before 7b.
+
+   **Known gap, open.** A quotation bound to a local propagates its captures to the binding's
+   last use (transitively), but the binding is identified *syntactically*: the literal
+   immediately preceding a `Bind`, taking that bind's last name. A quotation separated from
+   its `Bind` by another value (`[ ... ] 5 | q n |`), or any `Bind` naming two or more
+   quotations where a non-topmost one holds the capture (`[ A ] [ B ] | qa qb |`), is not
+   detected, and the borrow it captures is wrongly treated as dead. Both shapes were rejected
+   before this slice and are accepted after it. The main pass already knows the answer
+   (`Slot.quot` records which name each quotation lands in); the syntactic pre-pass does not.
+   The fix is to move capture propagation onto that authority rather than widen the heuristic.
+
+   **Exit:** a reference bound to a local, used and then finished with, no longer blocks
+   consuming the place it borrowed; the in-place accumulator body compiles as written; and a
+   test proves the borrow is still rejected when the reference is used *after* the consume.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
@@ -1515,58 +1595,204 @@ then find out what the compiler owes it.
    keeps citing). *This entry used to add "and after slice 6b because it lifts the polymorphic
    `if`"; 6b did not, and never claimed to once its pre-check corrected the charter. The
    polymorphic `if` any interesting closure-taking word needs is 6e, which is therefore a real
-   prerequisite here.*
+   prerequisite here -- now met.*
+   **Split 7a/7b, the same reason 6d/6e/6f split off 6a-6c: one dependency the rest of the
+   slice does not share. The line is no-captures / captures.** *This paragraph first drew it
+   at "non-reference captures / reference captures"; 7a's brief falsified that by probing the
+   built compiler before any code changed.* Splicing is textual, so a captured aggregate is
+   re-read at the *call* site, while a materialized env would snapshot it at the *literal*:
+   measured, a body capturing an array prints `99` today where a snapshot env would print `7`.
+   That is a silent wrong value, and it is not academic — `map` in `lib/combinators.sth`
+   writes its captured `arr` through `&!` each iteration and reads it back the next, so
+   snapshot semantics would break a shipped library word. Preserving today's meaning under
+   materialization therefore needs the env to hold a *reference*, which is Phase 3 Slice 6's
+   escape checking pointed at a new carrier — exactly the machinery 6f is mid-flight on
+   changing. So *every* capture waits for 6f, not just an explicitly reference-typed one, and
+   what is left for 7a is the representation itself: a quotation that captures nothing has no
+   env to disagree about.
+
+   **7a — quotations as values: representation, calling convention, and non-capturing
+   quotations. Implemented.**
    **Most of the machinery already exists, which is why this is a slice and not a phase.**
-   The environment of a downward closure (passed in, never returned or stored beyond the
-   frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
-   discipline that keeps it sound is Phase 3 Slice 6's structural escape checking, pointed at
-   a new carrier, since a closure simply inherits its captures' restrictions. Slice 6f settled
-   the other half of that inheritance — *when* a captured borrow ends — by making a bound
-   reference die at its last use exactly as a stacked one does, so a closure capturing a
-   reference now has a settled end-of-borrow rule to point at rather than an open question. It
-   also fixed the same question for a quotation bound to a local and called later, whose
-   captures now die with the binding rather than the literal, transitively through a
-   quotation capturing a quotation — sound only because such a quotation cannot yet escape the
-   block that binds it (a runtime quotation value is this slice); once one can, that
-   propagation needs re-grounding against whatever this slice's environment-capture rule
-   turns out to be, not inherited unexamined. The `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
-   question is how the call takes the closure, and Sooth already spells all three, `call`
-   through `&q`, through `&!q`, and by value. A closure capturing a linear value is itself
-   linear, so dropping it disposes the captures through the existing destructor mechanism.
-   **Upward closures are not blocked on Phase 6.** `^T` is already an owning heap pointer
-   backed by a real allocator (`src/backend/qbe.rs:672-685`, `malloc` plus an OOM trap) with
-   Phase 3's full disposal story, so an escaping closure is `(code pointer, ^Env)`: the
-   environment lives in a cell instead of a frame slot and drops through machinery that
-   exists. DESIGN.md:512's "a non-escaping quotation is core but an escaping one is `alloc`"
-   is a statement about which stdlib layer the feature belongs to, not about missing
-   machinery. What is genuinely new is the environment's *type*: each capturing quotation has
-   its own capture set, so the compiler synthesizes an env struct per quotation literal, the
-   way slice 1 already synthesizes and interns bundle structs for multi-output returns.
-   Known limit to take in with open eyes: `^` is single-owner, so a `^`-closure is linear and
-   two owners of one callback needs Rc, which stays deferred.
-   This also pays the real type cost slice 4 deferred: a quotation must become nameable, so
+   The seam is already cut: `Type::Quotation`/`PolyType::Quotation` exist with unification and
+   `apply_subst` following (6a), and what is missing is strictly downstream — `ir_type_of`'s
+   arm is an `unreachable!` whose comment already names this slice as the lift, so the change
+   is additive at a known point rather than a refactor.
+   This pays the real type cost slice 4 deferred: a quotation must become nameable, so
    `Type`/`PolyType`/`IrType` gain a variant and unification, `apply_subst`, `Subst`,
    `instantiation_symbol` mangling, the monomorphization walk, layout, and the backend all
    follow. That is a slice-1-sized representation change and the second-largest item in the
    phase; slice 4's brief sized it deliberately before deferring it here. Representation:
-   one uniform `(code, env)` pair, with a non-capturing quotation carrying an unused env,
-   revisited only if the RT subset demands a distinct bare-pointer type (DESIGN.md:480 names
-   dynamic dispatch through escaping quotations as a hot-path enemy). Decide at its brief
-   whether downward and upward land together; probably yes, since splitting means designing
-   the environment layout twice.
+   one uniform `(code, env)` pair, with 7a's non-capturing quotation carrying an unused env,
+   so 7b fills the env in rather than changing the representation (DESIGN.md:480 names
+   dynamic dispatch through escaping quotations as a hot-path enemy, so a distinct
+   bare-pointer type is the one thing worth pricing at the spec).
+   **Which half force-inlining lands in: neither, it stays.** 6a's D2 survives — `each` still
+   mints no `IrFunc` and every call site splices it — which is what makes an erased quotation
+   compose for free: `table @ each` splices the loop skeleton as always, the abstract
+   parameter binds a runtime value, and the `call` inside the spliced body goes indirect.
+   Provenance decides (`Slot.quot`, already the right bit and already a one-variant enum),
+   never a size budget, which this plan called actively harmful before a fallback existed and
+   which nothing about having one improves.
+   **Upward closures and `^Env` ride with 7b, not here**: with no captures there is nothing to
+   escape *with*, so a 7a quotation is a bare code pointer with no lifetime story at all.
+   Depends on 6a (the calling convention's real consumer) and 6e (a closure-taking word that
+   branches, now met). Independent of 6f. Brief written
+   (`docs/phase4-slice7a-brief.md`).
    Dogfood: rewrite `examples/vm.sth`'s dispatch around a table of quotations and compare it
    against the enum-plus-clause version it replaces.
+   **Exit:** a quotation stored in a struct field and in an array, returned from a word, and
+   left by two differing branches of an `if`, all compile; `call` on each emits an indirect
+   call and runs; `times` driving an erased quotation runs in constant stack; every 6a-6f
+   golden still lowers to the same spliced tight loop with no per-element `Instr::Call`; and a
+   *capturing* literal reaching a materialization boundary is a located error naming 7b.
+
+   **7b — capturing closures.**
+   Points Phase 3 Slice 6's escape checking at the env-struct carrier 7a introduces, using
+   6f's settled last-use rule rather than duplicating the whole-block one it would otherwise
+   have to invent standalone. The env holds a reference to a captured aggregate rather than a
+   snapshot of it, which is what makes a materialized closure mean what the spliced one means
+   (see the split rationale above); that is also what makes this, and not 7a, the slice that
+   needs 6f. Carries the capture-set analysis (7a needs only a *predicate* — does this body
+   read any enclosing name — and none exists today either way; the D3 check only rejects,
+   never computes), upward closures on `^Env` with their single-owner linearity, and the
+   `Fn`/`FnMut`/`FnOnce`-equivalent split that falls out of `call` through `&q`, `&!q`, and by
+   value.
+   Depends on 6f (the exact rule this points at) and 7a (the carrier it points the rule at).
+   Inherits one obligation from 6f: a quotation's captures are kept alive by propagating the
+   quotation binding's own last use, which is sound only while a capturing quotation cannot
+   escape the block that binds it. This slice is what lifts that restriction, so it has to
+   re-ground that propagation against whatever escape rule it settles on rather than inherit
+   it unexamined.
+   **Exit:** a closure capturing an aggregate, called while that capture is still live,
+   compiles and observes the same values the spliced form does; one captured past its last use
+   (or, for an upward closure, past its owning frame) is rejected with a located error naming
+   the capture; dropping a linear-capturing closure disposes its captures.
 
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
-   concrete types is a rule that gets rewritten once type variables exist. **The compiler
-   already does this by hand and this slice is where it stops**: the numeric-tower operators
-   and `.` (type-directed over any printable scalar) dispatch on the concrete operand type
-   inside `check_operator`/`check_term` match arms rather than through any table — which is
-   why `builtin_table` is empty. `len`'s length-polymorphism (slice 1) and 8b's `drop`
-   overloads are the other such sites; the latter are explicitly parked for here ("`drop`
-   becoming fully polymorphic is still Phase 4"), and absorbing them means retiring the
-   hardcoded interception arms in `check.rs`/`ir.rs` that currently run before any env lookup.
+   concrete types is a rule that gets rewritten once type variables exist.
+   **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is bounded, the other is the
+   open question.** 8a's table is mechanical, but it is not behaviour-preserving: it is what
+   makes user overloads reachable at all (see 8a's rules below). 8b is where `drop` picks up a
+   bound it did not have before, exactly the kind of decision Phase 3's own Slice 8 took
+   three review rounds to settle when it split into 8a/8b/8c mid-flight for the same reason.
+   Landing 8a first also unblocks slice 9's dependency on dispatch early: slice 9 needs `.`'s
+   overload (an 8a case) for `Bool`'s type-directed printing, not `drop`'s, so it does not
+   have to wait on 8b's argument to be settled.
+
+   **8a — the mechanism.** The compiler already does this by hand and this slice is where it
+   stops: the numeric-tower operators and `.` (type-directed over any printable scalar)
+   dispatch on the concrete operand type inside `check_operator`/`check_term` match arms
+   rather than through any table — which is why `builtin_table` is empty. `len`'s
+   length-polymorphism (slice 1) is the other such site. Retire the hardcoded match arms into
+   a real overload table, with a golden asserting every existing operator/`.`/`len` call site
+   lowers identically. Brief written (`docs/phase4-slice8a-brief.md`), which found a third
+   latent collision while measuring this slice, fixed standalone rather than folded in:
+   `qbe_name` (`src/backend/qbe.rs`) mapped every character outside `[A-Za-z0-9_.]` to `_`,
+   so `+` and `-` defined in one file both emitted the bare symbol `_` and failed at the
+   assembler as already-defined — a general bug reachable today independent of dispatch (two
+   ordinary symbol-named words collide the same way), fixed by making the mangle injective
+   rather than diagnosed, since there is nothing wrong with a program defining both.
+
+   **Operators are just words, so a user overload needs no new syntax: `: + ( Vec2 Vec2 --
+   Vec2 ) ;` is already the definition form, and it already parses and checks.** What blocks
+   it is that `check_term` probes builtins by name (`BUILTIN_WORDS`, `check.rs`) *before* the
+   word env is consulted at all, so that definition compiles, links, and can never be called:
+   a call site with two `Vec2` operands dies in `check_operator`'s `is_numeric` gate before
+   any lookup. Sooth today silently accepts a word it will never dispatch to, which is the
+   exact class of Forth silent failure this language exists to reject. `drop` is the one
+   existing counterexample, resolved by a bespoke registry (`find_drop_overloads`); 8a
+   generalises that rather than inventing it. **Six rules, settled:**
+   1. **No shadowing.** A user overload whose input types exactly match an existing candidate
+      (builtin or imported) is a located error, not a silent override — the same shape as the
+      duplicate-word check.
+   2. **Exact match beats coercion.** `unify_pair`'s literal/size-type coercion (`check.rs`)
+      ranks below an exact-type candidate, so adding an overload cannot silently steal a call
+      site that previously coerced.
+   3. **Overloads are imported, not carried by the type.** An importer of `Vec2` does not get
+      `+` for it without importing `+`. Absence is a resolution error naming the missing
+      overload, never a silent fallback. Two candidates with identical input types in one
+      scope is rule 1's error regardless of whether they arrived locally or by import.
+   4. **One arity per name in scope.** Candidates for a name must agree on how many inputs
+      they take, because the resolver has to know how deep to read the stack before it can
+      match any candidate. `: + ( Vec2 -- Vec2 ) ;` alongside `: + ( Vec2 Vec2 -- Vec2 ) ;`
+      leaves `a b +` matching both, one consuming both operands and one leaving `a`, and both
+      check locally. Disagreement is a located error where the second candidate *enters
+      scope*: the definition site when one is local, the import site when both are imported.
+      It is not a call-site ambiguity to be resolved by ranking; the clash is rejected before
+      any call site is looked at.
+   5. **Overlap between a concrete and a generic candidate is rejected, not ranked.**
+      `: + ( 'T 'T -- 'T )` beside `: + ( i64 i64 -- i64 )` is not identity (a poly word's
+      `effect` is empty by construction, so rule 1's textual match never fires) but the
+      domains still overlap at every concrete type. No specialization ordering: reject it the
+      same shape as rule 1. Nothing today needs a generic default and a concrete override to
+      coexist, and inventing ordering semantics for a consumer that doesn't exist is the same
+      mistake the generic-struct-declarations item already made once; loosen this later if a
+      real consumer asks.
+   6. **`.` gets N concrete rows, not a category key.** One row per `IrType` it already
+      handles, each an exact-type match tagged to the existing `Instr::Print` lowering. Only
+      `.`'s dispatch key changes, to the same exact-match shape every other row uses — which
+      is also what makes a user's own `: . ( Vec2 -- ) ;` reachable through the same table.
+      `.`'s lowering stays backend code for this slice because moving it is strictly larger
+      work, not because it cannot move: `extern:` cannot express a variadic C call *today*,
+      but QBE emits variadic calls natively (that is what `Instr::Print` already does), so no
+      runtime shim library is needed — an earlier draft of this item claimed otherwise and was
+      wrong. The real path to `.` as ordinary library code is DESIGN.md's bounded-row entry
+      (`..N`) plus a way to decompose a `str` descriptor for `%.*s`; it would also move `.`
+      from universally available to `hosted`-layer only, which is a semantic decision, not a
+      refactor. None of that is 8a's job.
+
+   Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
+   structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot
+   simply inherit these six rules, and which ends with `drop` no longer being the universal
+   disposal verb at all.
+
+   **These rules widen a check that shipped after this plan was written.**
+   `check_duplicate_word_names` (`check.rs`) keys on `(module, name)` and exempts only
+   `drop`, so two `+` definitions in one file are rejected as duplicates before any overload
+   resolution runs. 8a widens that key to `(module, name, input types)` rather than exempting
+   overloadable names: an exemption class would reproduce the bespoke registry
+   (`find_drop_overloads`) that 8a exists to retire, and two collision checks that have to
+   agree with each other is a worse failure mode than one check with a wider key. Deleting it
+   and letting table registration own collisions is also wrong: it hands back the bare linker
+   `symbol already defined` error that check was added to replace. Enforcement stays at the
+   two sites that already exist — that check for definitions, and `check_selective_imports`'
+   `selective_collision_error`/`selective_collides_with_local_error` for imports, which are
+   already the two halves rule 4 needs. `drop`'s exemption survives 8a and dies in 8b, when
+   `drop` moves onto the table; do not delete it early as tidying.
+
+   **The brief's first job is the table's entry shape, which is not `Sig`.** Three measured
+   constraints rule that out, all in `src/check.rs`: (a) `builtin_table` is
+   `HashMap<String, Sig>`, one concrete effect per *name*, which cannot hold several
+   candidates per name at all; (b) `len` is non-consuming over an array of *any* length and
+   element type, which is a `PolySig`-shaped entry, not a finite set of concrete rows — so
+   either the table carries generic entries from day one or `len` is carved out, and the
+   roadmap's claim that `len` is simply absorbed is the thing to check first. `len` is also the
+   case proving an entry cannot be a signature alone: its two *shipped* candidates differ in
+   lowering and in consumption, not merely in operand type. The array case folds to the constant
+   `N` off the type and leaves the array on the stack; `str` consumes its operand and emits a
+   runtime `Instr::StrLen` load (`ir.rs`, R8: the length is carried at runtime, not derivable
+   from the type). So an entry carries a lowering, not just an effect. A third candidate of the
+   runtime kind appears if the deferred view type ever lands (DESIGN.md, *Slicing a buffer into
+   a view*, which now records 8a as its ordering gate); the entry shape should not preclude it;
+   (c) `.`'s category dispatch and the concrete/generic overlap are both settled above as
+   rules 6 and 5, so the only genuinely open question `unify_pair` raises stands alone: it is
+   one cross-cutting rule shared by a dozen binary operators, so the spec must say whether it
+   runs before lookup (leaving the table to answer only "is this operator defined for these
+   types") or becomes table rows (which would multiply entries and lose X10's "needs an
+   explicit conversion to `usize`" specificity).
+   **Exit:** `check_operator`/`check_term`'s type-directed arms are gone, `builtin_table` is
+   populated, the full existing corpus (goldens, examples) is unchanged byte-for-byte, a
+   user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches*, and
+   `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;` in one file compiles and links
+   — with rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
+   overlap each a located error, and no definition left silently unreachable.
+
+   **8b — polymorphic `drop`, and the constraint it forces.** `drop` overloads ride the 8a
+   table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
+   that currently run before any env lookup (explicitly parked here since Phase 3 slice 8b,
+   "`drop` becoming fully polymorphic is still Phase 4").
    **One constraint from the destructor side, which the polymorphic `drop` must not
    violate: it cannot be structurally total.** A generic `drop ( 'T -- )` that accepts a
    resource type discharges the linear obligation while leaking the resource, turning
@@ -1584,6 +1810,90 @@ then find out what the compiler owes it.
    compiler-generated traversal nobody reads while direct code keeps `close` visible, but
    decide it rather than inherit it. Slice 5's export rule depends on the answer: whatever
    `drop` cannot dispose, a module must export a disposal word for.
+   **Answer that generally: disposal may require inputs beyond the value.** A resource needs
+   a named consumer (`close`); a heap value under Phase 6's explicit allocators needs the
+   allocator that owns it (`free ( &!'A ^T -- )`). Both break the assumption that
+   `drop ( 'T -- )` is the whole disposal interface, and the container boundary above is one
+   question, not two: whether generated traversal of a `Vec[Box['A]]` may thread the
+   allocator down is the same decision as whether traversal of a `List[File]` may call
+   `close`. Settle the general form here, where the constraint system is being designed —
+   what a disposal word may require, how the constraint records it, how generated traversal
+   supplies it — rather than inferring it from the single resource case and reopening it in
+   Phase 6, whose *Generic struct declarations* item and Slice 2 allocator rework are the
+   consumers waiting on the answer.
+
+   **The disposal-scope invariant: structural disposal must never silently substitute for a
+   type's real disposal word.** 8a rule 3 makes overloads imported rather than carried by the
+   type, and `drop` cannot inherit that rule as written. For `+`, a missing import is a
+   resolution error: no candidate matches, compile fails, you import it. For `drop` a
+   structural fallback always exists and always type-checks, so a module importing `File`
+   without its disposal word would pop the `i64` and never `close` — the same leak the
+   structural-totality constraint above exists to prevent, arriving by scope rather than by
+   derivation. Optional overloads can be import-scoped; a non-optional obligation cannot,
+   unless its absence is made an error.
+
+   **Resolution: the type declares its disposal word, and `drop` stops being the universal
+   disposal verb.** Making `drop` the tracked slot and trusting an override to do the right
+   thing is the weak part: nothing checks that a `drop` override actually calls `close`,
+   nothing gives `close`/`free` any status, and generated traversal only knows to call `drop`
+   — the operation that matters is invisible while a wrapper around it is what is enforced.
+   So `File` declares `close ( File -- )`, `Vec['T 'A]` declares `free ( &!'A Vec['T 'A] -- )`,
+   a plain struct declares nothing and is disposed structurally, and today's
+   `: drop ( File -- )` is the special case where the declared word happens to be named
+   `drop`. This is 8b's own "declared-consumer types … disposed by their named word" option
+   promoted from a coin flip to the design, the other option (a structurally-total generic
+   `drop`) having already been ruled out above.
+   Three things fall out of one mechanism, which is the argument for it: the checker gets a
+   *named* word to require rather than a boolean (`has_drop_overload` cannot distinguish a
+   plain struct from a resource whose disposal word is not called `drop` — both leave the bit
+   `false`, and the second must reject structural disposal); Phase 6's allocator case stops
+   being separate, since `free`'s extra `&!'A` input is just a declared disposal word with a
+   richer signature; and it answers 8b's own general question (what a disposal word may
+   require, how the constraint records it, how generated traversal supplies it) once instead
+   of per-resource-kind. It is additive to linearity rather than a change to it: `close`
+   already satisfies use-exactly-once as an ordinary consuming word today. The declaration
+   only supplies what inference cannot reach — generated disposal, and the import rule.
+
+   **The error fires at the disposal site, not at import.** Importing `File` without `close`
+   is legal, as is holding one, storing one, passing one onward, or reading it through
+   `&File`; a module that only forwards a resource never needs its disposal word in scope, and
+   an import-time rule would break that legitimate shape for no safety gain. What is an error
+   is *disposing* it by any path that would fall back to structural disposal — calling `drop`
+   on it, destructuring it (the sibling hole below, same error family), or disposing a
+   container that holds it — located at that site and naming the word to import. The container
+   case is where this composes and where the container-boundary question above bites: disposing
+   a `Vec[File]` requires `File`'s declared word in scope, reported at the `Vec`'s disposal
+   site.
+   `find_drop_overloads`' existing *program-wide* uniqueness stays program-wide even though
+   callability becomes scope-local, because scope-local uniqueness alone would let two modules
+   declare disposal for one `File`, never collide, and dispose the same value two different
+   ways. **Open sub-question:** nothing today requires an override to live in the module
+   declaring the type (`drop_overload_struct_id` derives the id from the input type, no
+   same-module check), so orphan overrides are legal and made safe only by that uniqueness
+   check. Restricting disposal to the declaring module is optional; uniqueness is the
+   load-bearing part.
+
+   **What this costs, so the brief does not discover it.** It needs a way to declare the word
+   on the type, which is new surface on `type:` — the brief's question, and the only genuinely
+   new syntax in 8a/8b. It also *reinterprets* shipped machinery rather than extending it:
+   Phase 3 slice 8b's overrides, REPL retention, epoch-suffixed destructor symbols, and
+   `examples/resources.sth` as the Phase 3 exit dogfood all assume `drop` is the slot. Reading
+   a `drop` override as "declared disposal word, named `drop`" keeps every one of those working
+   unchanged, but that reading is load-bearing and should be stated, not discovered.
+   Two further notes for the allocator case, which the "disposal may require inputs beyond the
+   value" paragraph above does not capture. First, the set of affected types is **not** the heap
+   types but everything *transitively owning* heap storage: a `Record` holding a `String['A]`
+   is a stack value whose disposal frees heap, so the property propagates structurally exactly
+   as linearity already does (`ir.rs`: `has_drop_overload || any field is linear`), and it is
+   viral in the type parameter — such a `Record` either becomes generic over `'A` or pins one,
+   which is the tax `'A = Global` exists to blunt. Second, a type parameter names the allocator
+   *statically* while `free` needs the allocator *instance* at runtime, allocators being
+   stateful; so either the value carries a reference to its allocator (a word per allocation,
+   which Rust deliberately refuses) or the disposal site must have it in scope and pass it.
+   None of this is visible today because `src/backend/qbe.rs` has exactly one global allocator
+   behind `allocate(n)`/`free(ptr, n)`; Phase 6 making allocators plural is what creates the
+   input, and Slice 2's shim-to-FFI rework is the logged consumer.
+
    **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
    override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
    the field and never runs the destructor. So today a `File` can have its fd extracted and the
@@ -1596,35 +1906,24 @@ then find out what the compiler owes it.
    opaque-by-default draft would have papered over it, and only for types whose author chose
    opacity), which is an argument for fixing it properly here rather than with a visibility
    rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
-   **A second, unrelated sibling hole, measured while scoping slice 5b: two modules can each
-   declare `main` and nothing rejects it.** `mangle` (`src/resolve.rs`) exempts `main`/`drop`
-   from module-disambiguating suffixes, and `check_main_effect` (`src/check.rs`) finds the
-   *first* word literally named `main` in the whole checked module with no uniqueness check.
-   Slice 5a shipped with this latent (a library file has no reason to declare `main`); slice 5b
-   closes it on the REPL path it's building (a located rejection of an imported file declaring
-   `main`) but leaves the native path unfixed. Whoever picks this up: reject it the same way
-   slice 5a already rejects an exported word naming a private type, at the declaration, naming
-   both the file and the word.
-   **A third sibling hole, measured while designing slice 5b's import-symbol scheme: two
-   words of the same name in one file are not rejected by any check and leak a bare
-   assembler `symbol already defined` error, native build included.** `check_duplicate_type_names`
-   (`src/check.rs`) covers structs/enums only; the word env (`HashMap<String, Sig>` built by
-   plain `insert`) silently overwrites on a repeat name, so both `WordDef`s still lower to
-   codegen and only the linker notices. Slice 5b's REPL-side import-symbol design inherits
-   this pre-existing gap unfixed (an imported closure with a duplicate word name gets the
-   same leaky error) rather than patching it as a drive-by. Whoever picks this up: a located
-   duplicate-word-name check, parallel to `check_duplicate_type_names`, naming both
-   definitions' locations.
+   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`; a
+   type declaring a disposal word (`File`/`close`) rejects the generic path at the call site,
+   naming that word; destructuring such a type is a located error; disposing one without its
+   declared word in scope is a located error *at the disposal site* naming the word to import,
+   while importing the type, forwarding it, and `&`-reading it all still compile; disposing a
+   `Vec[File]` reports the same error at the container's disposal site; and the
+   container-boundary decision is recorded and, if implicit, exercised by a generated traversal
+   that calls a non-`drop` disposal word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
    the other eight enable: it needs quotations (slice 4) for `if` to be a word at all, and
-   dispatch (slice 8) so `Bool`'s type-directed printing becomes an ordinary overload instead
-   of a re-added special case — which is the whole point of waiting, per the bundle note
-   above. Mechanically it is a large migration rather than a design problem: `bool` has been
-   in the test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special
-   cases, let the exhaustiveness checker find the arms, migrate the call sites) and should
-   run 8c's lightweight process.
+   dispatch (slice 8a specifically — see above) so `Bool`'s type-directed printing becomes an
+   ordinary overload instead of a re-added special case — which is the whole point of
+   waiting, per the bundle note above. Mechanically it is a large migration rather than a
+   design problem: `bool` has been in the test suite since Phase 2 Slice 1, so this is
+   8c-shaped work (delete the special cases, let the exhaustiveness checker find the arms,
+   migrate the call sites) and should run 8c's lightweight process.
 
 ### Phase 5 — Errors as values  `[S]`
 
@@ -1707,6 +2006,18 @@ out of (a bundle is an ABI detail, not a nameable type). `Vec['T]` and `Map['K '
 real consumers and they live here, which is what makes this the right phase: specifying it
 in Phase 4 would have designed it against a consumer that does not exist, the same test
 that sends open multimethods' former slot to Phase 6.
+**Explicit allocators ride on this item and belong in its brief, not after it.** A defaulted
+type parameter (`Vec['T 'A = Global]`, a zero-size handle in the default case) is what makes
+an allocator explicit without the parameter appearing at every use site, and the `core` /
+`fixed` / `alloc` split bounds where it can appear at all. Retrofitting it onto collections
+specified without it is the mistake Rust's `allocator_api` is still paying for, and this is
+the only moment it is cheap. Two prerequisites, both already logged: Phase 4 Slice 8's
+general answer to what a disposal word may require beyond the value, and Slice 2's parked
+rework of the compiler-emitted `malloc`/`free` shim into ordinary bound foreign words, since
+a user-supplied allocator cannot be a backend special case. Ambient context (Odin/Jai-style)
+is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
+rather than the allocation site, which converts a compile error into a runtime one in the
+language whose point is the opposite.
 
 **Worklist-based disposal for branching structures (moved from Phase 3 Slice 4).** A
 multi-child recursive type's synthesized destructor loops only its *last* recursive field

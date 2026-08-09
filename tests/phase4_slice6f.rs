@@ -25,9 +25,10 @@ fn run_dogfood() -> (String, i32) {
     )
 }
 
-/// The emitted QBE body of `word`, mangled name and all (`qbe_name` rewrites
-/// `-` to `_`, so the fold words emit as `prefix_copy`/`prefix_linear`). Panics
-/// if the word is absent, so a rename that silences the assertion fails loudly.
+/// The emitted QBE body of `word`, mangled name and all. `qbe_name` escapes each
+/// non-alphanumeric character as `.{hex}.` to stay injective, so `-` (0x2d) makes
+/// the fold words emit as `prefix.2d.copy`/`prefix.2d.linear`. Panics if the word
+/// is absent, so a rename that silences the assertion fails loudly.
 fn fold_body(word: &str) -> String {
     let tokens = lexer::lex(DOGFOOD).expect("dogfood should lex");
     let mut module = parser::parse(&tokens).expect("dogfood should parse");
@@ -68,7 +69,7 @@ fn inplace_fold_copy_lowers_without_per_iteration_blit() {
     assert_eq!(stdout, "1\n3\n6\n10\n1\n3\n6\n10\n");
     assert_eq!(code, 0);
 
-    let body = fold_body("prefix_copy");
+    let body = fold_body("prefix.2d.copy");
     assert_in_place_loop(&body);
     assert!(
         !body.contains("blit"),
@@ -85,7 +86,7 @@ fn inplace_fold_linear_lowers_without_per_iteration_blit() {
     assert_eq!(stdout, "1\n3\n6\n10\n1\n3\n6\n10\n");
     assert_eq!(code, 0);
 
-    let body = fold_body("prefix_linear");
+    let body = fold_body("prefix.2d.linear");
     assert_in_place_loop(&body);
     assert!(
         !body.contains("blit"),
