@@ -44,7 +44,12 @@ and coercion survive as a fallback.
 existing candidate (builtin/local/imported) is a located error, not silent
 override. `check_duplicate_word_names`' key widens `(module, name)` →
 `(module, name, input_types)`: identical keys keep today's `duplicate word`
-message byte-for-byte; differing input types no longer collide. The same check
+message byte-for-byte; differing input types no longer collide. Admitting them
+is only half the rule: the checking env holds a candidate *list* per name and
+resolves by exact operand match, or the second definition would displace the
+first and leave it unreachable (exit criterion 4). Each candidate is minted
+under its own lowering symbol (`ast::overload_symbols`), since two bodies under
+one name would otherwise collide at the assembler. The same check
 rejects a def whose `(name, input_types)` equals a **builtin row**:
 `error: overload of `+` (line 2, col 3) has the same input types (i64 i64) as a builtin`.
 One check, wider key: no exemption class, no deletion.
@@ -57,7 +62,9 @@ run. Adding an overload cannot silently steal a previously-coercing site.
 bring `+`. A named word with candidates but no operand match (exact or coerced)
 → located resolution error, never silent fallback. For a builtin operator this
 **is** today's `operand_pair_mismatch_error` byte-for-byte; for a user
-non-operator name, a message naming operands and the missing overload.
+non-operator name, `no_overload_matches_error` lists what the name does accept
+(`error: no overload of `show` in `main` (line 3) accepts these operands`,
+followed by one `candidate:` line per candidate's inputs).
 
 **R4 — One arity per name in scope.** All candidates (builtin rows + locals +
 imports) must agree on input count; disagreement is a located error at the
@@ -109,6 +116,12 @@ handling replaces the `check_operator` probe with one resolution step:
 recorded symbol and returns; unrecorded sites take the existing name-directed
 arms unchanged. The corpus produces no records, so its lowering is literally
 untouched. Lowering never re-runs resolution (checker is the single source).
+The map records any overloaded call, not only builtin-named ones, and
+`ir::lower` keys its env by the same per-candidate symbol the checker recorded,
+so the two cannot disagree about which body a call reaches. `lower_line` /
+`lower_word` are threaded with it too: without that the REPL accepted an
+overloaded call and then lowered it as the builtin, which segfaulted the
+session rather than merely failing to dispatch.
 The poly-body dispatch path (`poly_delegate_op`, `poly_call_term`'s own `env`
 lookup) mirrors this: a builtin-named exact match found there is recorded
 onto the same `Module::builtin_overloads` map, keyed by the poly body's own
@@ -153,7 +166,10 @@ deferred view type; moving any builtin onto `extern:` (`.` stays `Instr::Print`,
 only its key changes); generic table entries / a `Bound`-style category
 mechanism; REPL builtin-overloading as a demonstrated feature (`typed_env` must
 adopt the new shape without regressing REPL goldens, but user builtin-overload
-dispatch *in the REPL* is not an exit criterion).
+dispatch *in the REPL* is not an exit criterion). Note that being outside the
+exit criteria did not license crashing: the REPL accepted such a call and
+lowered it as the builtin, taking SIGSEGV, so the resolution record is threaded
+through its lowering path and it now dispatches.
 
 ## Exit criteria
 
@@ -164,8 +180,14 @@ dispatch *in the REPL* is not an exit criterion).
    **and dispatches** on two `Vec2` operands, printing correctly (R6 + R7).
 4. Rules 1/3/4/5 each a **located** error with the specified message; no
    definition left silently unreachable.
-5. `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;` compiles and
-   links (relies on the merged `qbe_name` fix; keep its regression tests green).
+5. Two symbol-named words in one file compile and link (relies on the merged
+   `qbe_name` fix; keep its regression tests green). Stated originally as
+   `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;`, which R1 now
+   rejects in that exact form (its inputs equal a builtin row's), so the
+   surviving regression test uses struct operand types instead.
+6. Two overloads of an ordinary (non-builtin) word name are both reachable,
+   each lowering under its own symbol, and a call matching neither is a located
+   error naming the candidates (R1/R3).
 
 ## Testing
 
