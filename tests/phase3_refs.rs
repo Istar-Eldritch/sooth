@@ -738,6 +738,179 @@ fn mutable_borrow_bound_to_a_local_released_at_its_last_use_is_accepted() {
     assert_eq!(code, 0);
 }
 
+// --- D6 relaxed: a bound reference dead before a nested block (an `if` arm,
+// a `times`/quotation body) is dead *inside* it too, not live to the end of
+// the enclosing invocation. Found reviewing `9d9f857`: that fix made the
+// suspend rule fully dependent on last-use liveness, and D6's original
+// blanket "an outer name is never relaxed inside a nested invocation" turned
+// latent conservatism into real over-rejections the moment the two combined.
+
+#[test]
+fn mutable_borrow_dead_before_an_if_arm_is_accepted() {
+    // OR-1: `p` is consumed at the outer level, before the `if` is even
+    // reached, so it is releasable into *both* arms (`releasable_into`) —
+    // neither arm uses it, so it is dead throughout each.
+    let (stdout, code) = run_src(
+        "borrow-dead-before-if-arm",
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  p @ drop\n  \
+         n 0 = if\n    b &!Buf>len 1 +!\n  else\n  end ;\n\
+         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
+         &!a 0 f\n  &a &Buf>len @ .\n  a drop ;\n",
+    );
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_dead_before_a_times_body_is_accepted() {
+    // OR-2: same shape as OR-1, but the reborrow is inside a `times` body
+    // instead of an `if` arm. `p` has no use anywhere in the body, so it is
+    // dead throughout it (`back_edge = true`'s "unused anywhere -> dead
+    // throughout" half, not the fine per-use half `if` arms get).
+    let (stdout, code) = run_src(
+        "borrow-dead-before-times-body",
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  p @ drop\n  \
+         3 [ drop b &!Buf>len 1 +! ] times ;\n\
+         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
+         &!a f\n  &a &Buf>len @ .\n  a drop ;\n",
+    );
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_dead_before_an_if_arm_through_a_projection_is_accepted() {
+    // OR-3: the same shape through an extra projection step (`&!^`, an array
+    // handle) -- `push-byte`'s own body with the trailing `+!` moved inside a
+    // conditional. Exercises `nested_uses`' attribution through a deeper
+    // projected reference, not just a direct field borrow.
+    let (stdout, code) = run_src(
+        "borrow-dead-before-if-arm-through-projection",
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>data &!^ | arr |\n  \
+         arr 0 >usize &!> 7 >u8 !\n  n 0 = if\n    b &!Buf>len 1 +!\n  else\n  end ;\n\
+         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
+         &!a 0 f\n  &a &Buf>data &^ 0 >usize &> @ .\n  \
+         &a &Buf>len @ .\n  a drop ;\n",
+    );
+    assert_eq!(stdout, "7\n1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_used_then_reborrowed_within_one_if_arm_is_accepted() {
+    // OR-4: `p`'s only use and the reborrow of `b` are both *inside* the same
+    // arm, in sequence. This is the shape that needs the arm's own nested
+    // `check_terms` invocation to track `p` at all (`Liveness::scan` seeding
+    // granted names into its own `bound`-equivalent tracking, not just the
+    // binary "unused anywhere" test OR-1/OR-2 rely on).
+    let (stdout, code) = run_src(
+        "borrow-used-then-reborrowed-within-one-if-arm",
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  \
+         n 0 = if\n    p @ drop\n    b &!Buf>len 1 +!\n  else\n    p @ drop\n  end ;\n\
+         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
+         &!a 0 f\n  &a &Buf>len @ .\n  a drop ;\n",
+    );
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_used_after_an_if_term_is_still_error() {
+    // The residual-use neighbour of OR-1: `p` is used *after* the whole `if`
+    // term, at the outer level, so `releasable_into` must exclude it
+    // (`references(rest, "p")` finds the outer-level use) -- granting it
+    // anyway would let `b`'s reborrow inside the arm outlive a use of `p`
+    // that is genuinely still ahead.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  \
+         n 0 = if\n    b &!Buf>len 1 +!\n  else\n  end\n  p @ drop ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_used_across_a_times_back_edge_is_still_error() {
+    // The back-edge neighbour of OR-2: `p` *is* used inside the `times` body
+    // (unlike OR-2, where it has zero uses in the body), so a granted name's
+    // use inside a back-edge body must pin it live for the *whole* body
+    // (`IMMORTAL_IN_BODY`), not die at its own last use the way OR-4's `if`
+    // arm does -- iteration N's use of `p` follows iteration N-1 reaching the
+    // body end while `p` is still meant to be live.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  \
+         3 [ drop p @ drop b &!Buf>len 1 +! ] times ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_dead_before_two_levels_of_nested_if_arms_is_accepted() {
+    // The relaxation composes: `p` dies before the outer `if`, which is
+    // itself releasable-checked again at the *inner* `if`, so `b`'s reborrow
+    // two levels deep is accepted exactly like OR-1's one-level case.
+    let (stdout, code) = run_src(
+        "borrow-dead-before-two-levels-of-nested-if-arms",
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  p @ drop\n  \
+         n 0 = if\n    true if\n      b &!Buf>len 1 +!\n    else\n    end\n  else\n  end ;\n\
+         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
+         &!a 0 f\n  &a &Buf>len @ .\n  a drop ;\n",
+    );
+    assert_eq!(stdout, "1\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_used_after_two_levels_of_nested_if_arms_is_still_error() {
+    // The residual-use mirror at two levels deep: `p` is used after the
+    // *outer* `if` finishes, so it must not be granted into either level's
+    // arms, however deeply nested the reborrow is.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf i64 -- )\n  | b n |\n  b &!Buf>len | p |\n  \
+         n 0 = if\n    true if\n      b &!Buf>len 1 +!\n    else\n    end\n  else\n  end\n  \
+         p @ drop ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_by_a_still_callable_quotation_is_still_error() {
+    // The quotation-capture neighbour: `p` is captured by `q`, and `q` is
+    // still callable (not yet called) when `b` is reborrowed. `capture_alive_
+    // names` must keep gating this independently of the D6 relaxation above
+    // -- a quotation on the stack is unconditionally live, regardless of
+    // whether `p` would otherwise be `outer_releasable`.
+    let err = check_error(
+        "type: Buf data ^[u8 64] len usize ;\n\
+         : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  \
+         [ p @ drop ] | q |\n  b &!Buf>len 1 +!\n  q call ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
+        "expected the suspended-place rejection: {err}"
+    );
+}
+
 #[test]
 fn two_live_mutable_borrows_to_different_places_is_accepted() {
     // Per place, never a single global counter: `copy-byte` holds a `&!Buf` and
@@ -1748,19 +1921,57 @@ fn reference_to_local_across_back_edge_is_error() {
 }
 
 #[test]
-fn borrowed_local_carried_across_back_edge_is_error() {
-    // The other half of the loop justification: an owned local that is still
-    // borrowed cannot be loop-carried either. D6/D5: the borrow is bound
-    // *outside* the loop's `if`, so it is inherited into the else-arm
-    // invocation and never relaxed there (last-use only expires bindings
-    // created within the current invocation), staying live across the
-    // back-edge. Naming `acc` to carry it is then still rejected. Bound
-    // *inside* the arm and left unused, the borrow would end at its bind and
-    // the carry would be legal, which is why it is hoisted out here.
-    let err = check_error(
+fn borrowed_local_unused_across_back_edge_is_accepted() {
+    // Formerly `borrowed_local_carried_across_back_edge_is_error`: this exact
+    // program was rejected before the D6 relaxation below, and its own prior
+    // comment already named why -- `r` is bound *outside* the loop's `if`
+    // and never referenced anywhere, so it is genuinely dead by the time
+    // `acc` is named again in the else arm, whether that arm is the tail
+    // back-edge of a self-tail loop or not. The gap was D6's blanket "outer
+    // names are never relaxed inside a nested invocation", not a real
+    // back-edge invariant: `check_reference_across_back_edge` (R15) already
+    // separately guards the self-tail call's own arguments, and this program
+    // never passes `r` to `spin` at all. See the two neighbour tests below
+    // for the shapes that must still reject: `r` used elsewhere in the
+    // program (so it is not `outer_releasable`), or named again after the
+    // recursive call within the same arm (a residual use).
+    let (stdout, code) = run_src(
+        "borrowed-local-unused-across-back-edge",
         "type: V x i64 ;\n\
          : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = if\n    0 V\n  else\n    \
          acc n 1 - spin\n  end ;\n\
+         : main ( -- ) 1 V 3 spin V> . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn borrowed_local_used_in_tail_arm_before_recursive_call_is_accepted() {
+    // The same shape, but `r` is *used* in the else arm before the recursive
+    // call: OR-4's shape (use-then-reborrow in one arm), landing on the alias
+    // check instead of the reborrow-suspend check. `r`'s last use is the
+    // `@` read; naming `acc` again afterward is then safe.
+    let (stdout, code) = run_src(
+        "borrowed-local-used-before-recursive-call",
+        "type: V x i64 ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = if\n    0 V\n  else\n    \
+         r &!V>x @ drop\n    acc n 1 - spin\n  end ;\n\
+         : main ( -- ) 1 V 3 spin V> . ;\n",
+    );
+    assert_eq!(stdout, "0\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn borrowed_local_used_in_tail_arm_after_recursive_call_is_error() {
+    // The residual-use mirror of the accept above: `r` is named again
+    // *after* the recursive call, in the same arm, so it is not dead when
+    // `acc` is renamed -- must still reject regardless of the D6 relaxation.
+    let err = check_error(
+        "type: V x i64 ;\n\
+         : spin ( V i64 -- V )\n  | acc n |\n  &!acc | r |\n  n 0 = if\n    0 V\n  else\n    \
+         acc n 1 - spin\n    r &!V>x @ drop\n  end ;\n\
          : main ( -- ) ;\n",
     );
     assert!(

@@ -810,12 +810,13 @@ fn capture_names_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut 
 
 /// Q1/D3: the last-use index, within one `check_terms` invocation's term list,
 /// of every reference/aggregate name that invocation *binds*. A name used but
-/// not bound here (an outer local inherited into this block) is deliberately
-/// absent, so it is never relaxed by this invocation (D6). A name is *used* by
-/// a `TermKind::Call` whose bare-or-sigilled target resolves to it, at any
-/// depth; a use inside a nested `if` arm or quotation literal is attributed
-/// to the index of the top-level term of *this* list that contains it (Q3's
-/// conservative max).
+/// not bound here (an outer local inherited into this block) is absent from
+/// `last_use` UNLESS the caller has established it as `outer_releasable`
+/// (D6's relaxation, below): once granted, it is tracked exactly like a name
+/// this invocation binds. A name is *used* by a `TermKind::Call` whose
+/// bare-or-sigilled target resolves to it, at any depth; a use inside a
+/// nested `if` arm or quotation literal is attributed to the index of the
+/// top-level term of *this* list that contains it (Q3's conservative max).
 ///
 /// This is a floor, not the whole story, for a quotation: a literal bound to
 /// a local (`[ ... ] | q |`) does not execute at its own position, it
@@ -827,12 +828,32 @@ fn capture_names_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut 
 /// directly, at query time, in `live_derivs` and `aliasing_origin`. This scan
 /// treats every quotation literal exactly like an `if` arm, giving each
 /// capture its floor; `capture_alive_names` is strictly additive on top.
+///
+/// D6, relaxed: a name bound by an *ancestor* invocation is only ever a
+/// candidate for early death here if the caller first proves it has no
+/// residual use anywhere past this block (`outer_releasable`, computed at
+/// each recursion site from "not referenced in the remaining sibling terms"
+/// composed with whatever the caller itself was granted). An `if` arm is
+/// execute-once, so a granted name gets the same fine last-use tracking as a
+/// name bound here (`back_edge = false`): it may die at its own last call
+/// inside the arm. A `times`/quotation body can run more than once or be
+/// invoked from elsewhere, so a granted name used anywhere inside is pinned
+/// live for the *whole* body (`back_edge = true`, sentinel `usize::MAX`);
+/// only a name unused anywhere in the body dies, and it dies throughout.
+/// Either way this only *adds* candidates for death beyond what the plain
+/// bound-here rule already grants (D1: monotone).
 struct Liveness {
     last_use: HashMap<String, usize>,
+    outer_releasable: HashSet<String>,
 }
 
+/// Sentinel `last_use` for a name proven used somewhere inside a back-edge
+/// body: never `< at` for any real term index, so it stays live for the
+/// whole body rather than dying at its first (or any) use inside it.
+const IMMORTAL_IN_BODY: usize = usize::MAX;
+
 impl Liveness {
-    fn scan(terms: &[Term]) -> Self {
+    fn scan(terms: &[Term], outer_releasable: &HashSet<String>, back_edge: bool) -> Self {
         let mut last_use = HashMap::new();
         let mut bound: HashSet<String> = HashSet::new();
         for (i, term) in terms.iter().enumerate() {
@@ -850,36 +871,72 @@ impl Liveness {
                     let local = call_local(name);
                     if bound.contains(local) {
                         last_use.insert(local.to_string(), i);
+                    } else if outer_releasable.contains(local) {
+                        Self::record_granted_use(&mut last_use, local, i, back_edge);
                     }
                 }
                 // A nested `if` arm is its own `check_terms` invocation with
                 // its own binds; here we only look for uses of names *this*
-                // list bound, attributed to the containing top-level index
-                // (Q3's conservative max). Nested binds are not collected:
-                // they belong to the nested invocation's own scan.
+                // list bound (or was granted), attributed to the containing
+                // top-level index (Q3's conservative max). Nested binds are
+                // not collected: they belong to the nested invocation's own
+                // scan.
                 TermKind::If {
                     then_branch,
                     else_branch,
                     ..
                 } => {
-                    Self::nested_uses(then_branch, &bound, i, &mut last_use);
-                    Self::nested_uses(else_branch, &bound, i, &mut last_use);
+                    Self::nested_uses(
+                        then_branch,
+                        &bound,
+                        outer_releasable,
+                        back_edge,
+                        i,
+                        &mut last_use,
+                    );
+                    Self::nested_uses(
+                        else_branch,
+                        &bound,
+                        outer_releasable,
+                        back_edge,
+                        i,
+                        &mut last_use,
+                    );
                 }
                 // Same treatment as an `if` arm: this is only a floor
                 // (`capture_alive_names` extends it for a quotation the
                 // checker later finds is still reachable, bound or not).
                 TermKind::Quotation(inner) => {
-                    Self::nested_uses(inner, &bound, i, &mut last_use);
+                    Self::nested_uses(inner, &bound, outer_releasable, back_edge, i, &mut last_use);
                 }
                 _ => {}
             }
         }
-        Liveness { last_use }
+        Liveness {
+            last_use,
+            outer_releasable: outer_releasable.clone(),
+        }
+    }
+
+    /// Record a use of a granted (outer-releasable) name at index `at`: fine
+    /// last-use tracking for an execute-once block, or the immortal sentinel
+    /// for a back-edge body (see the struct doc).
+    fn record_granted_use(
+        last_use: &mut HashMap<String, usize>,
+        local: &str,
+        at: usize,
+        back_edge: bool,
+    ) {
+        let value = if back_edge { IMMORTAL_IN_BODY } else { at };
+        let entry = last_use.entry(local.to_string()).or_insert(value);
+        *entry = (*entry).max(value);
     }
 
     fn nested_uses(
         terms: &[Term],
         bound: &HashSet<String>,
+        outer_releasable: &HashSet<String>,
+        back_edge: bool,
         at: usize,
         last_use: &mut HashMap<String, usize>,
     ) {
@@ -890,6 +947,8 @@ impl Liveness {
                     if bound.contains(local) {
                         let entry = last_use.entry(local.to_string()).or_insert(at);
                         *entry = (*entry).max(at);
+                    } else if outer_releasable.contains(local) {
+                        Self::record_granted_use(last_use, local, at, back_edge);
                     }
                 }
                 TermKind::If {
@@ -897,23 +956,85 @@ impl Liveness {
                     else_branch,
                     ..
                 } => {
-                    Self::nested_uses(then_branch, bound, at, last_use);
-                    Self::nested_uses(else_branch, bound, at, last_use);
+                    Self::nested_uses(
+                        then_branch,
+                        bound,
+                        outer_releasable,
+                        back_edge,
+                        at,
+                        last_use,
+                    );
+                    Self::nested_uses(
+                        else_branch,
+                        bound,
+                        outer_releasable,
+                        back_edge,
+                        at,
+                        last_use,
+                    );
                 }
                 TermKind::Quotation(inner) => {
-                    Self::nested_uses(inner, bound, at, last_use);
+                    Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
                 }
                 _ => {}
             }
         }
     }
 
-    /// A binding is dead at term index `at` iff this invocation bound it and
-    /// its last use (its bind index when never mentioned again) is strictly
-    /// before `at`. Absent (outer) names are never dead here (D6).
+    /// A binding is dead at term index `at` iff its last use (its bind index
+    /// when never mentioned again) is strictly before `at`. A name this
+    /// invocation neither bound nor used at all is dead throughout iff the
+    /// caller granted it (`outer_releasable`); otherwise D6's original rule
+    /// holds unchanged: an outer name with no entry is never dead here.
     fn dead(&self, name: &str, at: usize) -> bool {
-        self.last_use.get(name).is_some_and(|&last| last < at)
+        match self.last_use.get(name) {
+            Some(&last) => last < at,
+            None => self.outer_releasable.contains(name),
+        }
     }
+}
+
+/// Whether `name` (already sigil-stripped) is referenced by a `TermKind::Call`
+/// anywhere in `terms`, at any nesting depth (an `if` arm, a quotation
+/// literal). Used to ask "is there a residual use past this point" for the
+/// D6 relaxation above; a name still in scope may not be rebound while live
+/// (`rebound_local_error`), so there is no shadowing case to exclude here.
+fn references(terms: &[Term], name: &str) -> bool {
+    terms.iter().any(|term| match &term.kind {
+        TermKind::Call(n) => call_local(n) == name,
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => references(then_branch, name) || references(else_branch, name),
+        TermKind::Quotation(inner) => references(inner, name),
+        _ => false,
+    })
+}
+
+/// D6 relaxation: the set of ancestor-bound names safe to grant into a nested
+/// block starting right after term index `at` in the current invocation.
+/// A name qualifies iff it is either bound *within* the current invocation
+/// (position `>= base_depth`, so nothing outside this invocation could ever
+/// need it) or already granted to the current invocation by its own caller,
+/// and it is not referenced anywhere in `rest` (the current invocation's own
+/// remaining sibling terms after `at`) -- a sibling `if` arm's own uses stay
+/// invisible here because they live *inside* `terms[at]`, not in `rest`.
+fn releasable_into(
+    scope: &Scope,
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
+    rest: &[Term],
+) -> HashSet<String> {
+    scope
+        .bound
+        .iter()
+        .enumerate()
+        .filter(|(idx, b)| {
+            (*idx >= base_depth || outer_releasable.contains(&b.name)) && !references(rest, &b.name)
+        })
+        .map(|(_, b)| b.name.clone())
+        .collect()
 }
 
 /// Every name kept alive by a still-live quotation, at query index `at`: a
@@ -6360,7 +6481,7 @@ fn borrow_join_disagreement_error(
 #[allow(clippy::too_many_arguments)]
 fn check_terms(
     terms: &[Term],
-    mut stack: Vec<Slot>,
+    stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
@@ -6371,10 +6492,56 @@ fn check_terms(
     tail: bool,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
+    check_terms_relaxed(
+        terms,
+        stack,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        scope,
+        tail,
+        poly,
+        &HashSet::new(),
+        false,
+    )
+}
+
+/// D6 relaxation entry point: `outer_releasable` is the set of ancestor-bound
+/// names this invocation's caller has already proven have no residual use
+/// past this block (`releasable_into`), and `back_edge` is whether this
+/// invocation's own body can run more than once or be entered from elsewhere
+/// (`times`/quotation), which changes how a granted name's use inside is
+/// tracked (see the `Liveness` struct doc). `check_terms` above is the plain
+/// entry point every root invocation (a word body, a REPL line, a `case`
+/// clause) uses: nothing is ancestor to those, so both are empty/`false`.
+#[allow(clippy::too_many_arguments)]
+fn check_terms_relaxed(
+    terms: &[Term],
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    tail: bool,
+    poly: &mut PolyCtx,
+    outer_releasable: &HashSet<String>,
+    back_edge: bool,
+) -> Result<Vec<Slot>, String> {
     let last = terms.len().wrapping_sub(1);
     // Q1/D3: last-use over *this* invocation's term list, in its own index
     // space. Nested bodies re-enter `check_terms` and rebuild their own.
-    let live = Liveness::scan(terms);
+    let live = Liveness::scan(terms, outer_releasable, back_edge);
+    // The depth this invocation was entered at: a binding at or past this
+    // position was made *within* this invocation (nothing outside it could
+    // ever need it), a binding before it is ancestor-bound and only a
+    // recursion candidate if it is also in `outer_releasable` (`releasable_into`).
+    let base_depth = scope.depth();
     for (i, term) in terms.iter().enumerate() {
         stack = check_term(
             term,
@@ -6390,6 +6557,9 @@ fn check_terms(
             poly,
             &live,
             i,
+            terms,
+            base_depth,
+            outer_releasable,
         )?;
     }
     Ok(stack)
@@ -6410,6 +6580,9 @@ fn check_term(
     poly: &mut PolyCtx,
     live: &Liveness,
     at: usize,
+    siblings: &[Term],
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
 ) -> Result<Vec<Slot>, String> {
     let span = term.span;
     match &term.kind {
@@ -6566,10 +6739,18 @@ fn check_term(
                 // linear value bound inside it is caught by `leave_block`
                 // (R6). `tail` is pinned `false`: lowering emits a real call
                 // here, never a self-tail back-edge (R6/R13).
+                //
+                // D6: a quotation body can be called from elsewhere too, so a
+                // granted outer name is tracked as a back-edge body (used
+                // anywhere inside pins it live throughout, unused kills it
+                // throughout), never at its own last use inside.
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                stack = check_terms(
+                let granted =
+                    releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+                stack = check_terms_relaxed(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                    &granted, true,
                 )?;
                 leave_block(
                     ctx,
@@ -6645,8 +6826,17 @@ fn check_term(
                 stack.push(Slot::computed(Type::I64));
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                let result = check_terms(
+                // D6: the row-preservation guard below already rejects a
+                // body that carries a reference across the back-edge, so a
+                // granted outer name is tracked the same back-edge way as a
+                // quotation's own body (used anywhere inside pins it live
+                // throughout, per-iteration re-entry means it cannot die
+                // early inside).
+                let granted =
+                    releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+                let result = check_terms_relaxed(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                    &granted, true,
                 )?;
                 leave_block(
                     ctx,
@@ -6915,9 +7105,17 @@ fn check_term(
             // each arm is also a block, so a name it binds is gone by the join
             // and the two arms' name sets agree there again.
             let depth = scope.depth();
+            // D6: a name safe past this `if` term (no use in the remaining
+            // sibling terms, composed with whatever this invocation was
+            // itself granted) is safe inside *either* arm: an arm's own use
+            // of a sibling arm's-only names is invisible here (it lives
+            // inside `siblings[at]`, not after it), and an arm executes
+            // exactly once, so it may die at its own last use inside
+            // (`back_edge = false`).
+            let granted = releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
             let mut then_scope = scope.clone();
             let mut else_scope = scope.clone();
-            let then_stack = check_terms(
+            let then_stack = check_terms_relaxed(
                 then_branch,
                 stack.clone(),
                 ctx,
@@ -6929,6 +7127,8 @@ fn check_term(
                 &mut then_scope,
                 tail,
                 poly,
+                &granted,
+                false,
             )?;
             let (then_token, then_at) = match else_span {
                 Some(at) => ("else", *at),
@@ -6943,7 +7143,7 @@ fn check_term(
                     span: then_at,
                 },
             )?;
-            let else_stack = check_terms(
+            let else_stack = check_terms_relaxed(
                 else_branch,
                 stack,
                 ctx,
@@ -6955,6 +7155,8 @@ fn check_term(
                 &mut else_scope,
                 tail,
                 poly,
+                &granted,
+                false,
             )?;
             leave_block(
                 ctx,

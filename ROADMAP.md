@@ -150,6 +150,32 @@ could not land on main without 6f (verified: the same one-line change breaks `pu
 pre-6f). `Provenance::bind` was provably an identity function once the flag-clear was
 removed (proven by replaying the whole suite with the call site reading `slot.deriv`
 directly), so it is deleted rather than kept as a no-op.
+
+**Second bug found in review (6f, slice 6f review round 3), fixed on the 6f branch: the
+previous fix's own dependency turned latent conservatism into real over-rejections.**
+D6's original rule never relaxed an outer-bound name inside a nested invocation (an `if`
+arm, a `times`/quotation body), which was harmless until the fix above made the
+reborrow-suspend rule fully depend on this liveness table. From then on, binding a
+reference outside a nested block, consuming it before the block, and reborrowing its
+root inside the block was rejected even though the bound reference was provably dead --
+four distinct shapes reproduced it (an `if` arm, a `times` body, a deeper projection, and
+use-then-reborrow within one arm), and one, consuming a field into a local then mutating
+through the root in a loop, is an ordinary way to write a buffer routine. Fixed by
+generalizing D6 rather than reverting the first fix: a name is granted into a nested
+invocation only once the caller proves no residual use anywhere past the block
+(`releasable_into`), and a granted name is then tracked by the nested invocation's own
+`Liveness::scan` exactly like a name it binds -- fine last-use for an execute-once `if`
+arm, pinned live for the whole body once used anywhere inside for a `times`/quotation
+body (`back_edge`, since a per-iteration use must not die before the back-edge). Also
+surfaced and corrected in the same pass: a pre-existing test
+(`borrowed_local_carried_across_back_edge_is_error`) had been asserting the D6 gap
+itself as the desired behaviour, on a self-tail loop's own back-edge arm; its own prior
+comment already said the borrow would be legal if bound inside the arm, which is exactly
+what this generalization now grants, so it is rewritten as an accept test with two new
+reject neighbours (residual use elsewhere in the program; named again after the
+recursive call within the same arm) rather than left as a stale reject. See
+`docs/phase4-slice6f-spec.md`'s D6 and M4/M5 for the mechanism and its mutation matrix.
+
 **Phase 3 Slice 8a (typed foreign calls + string slices) is complete**: one `extern:` declaration
 form (a C symbol string plus a stack effect), registered into the ordinary word environment so
 existing arity/type checks apply unchanged; the boundary type set is the numeric tower, `&T`/`&!T`,
@@ -545,6 +571,17 @@ name is actually still live is answered fresh at each query by walking which quo
 currently reachable (on the stack, unconditionally; bound, transitively through whichever other
 bound quotations are themselves still reachable) — mirroring `live_derivs`' existing stack-half/
 scope-half shape rather than adding a second one beside it.
+
+A third review round found and fixed an over-rejection the first fix's own dependency
+introduced: making the reborrow-suspend rule depend on this liveness table meant D6's original
+blanket "an outer name is never relaxed inside a nested invocation" turned real, four distinct
+safe programs (bind-consume-then-reborrow across an `if` arm, a `times` body, a deeper
+projection, and use-then-reborrow within one arm) went from accepted to rejected. Generalized
+rather than reverted: a name is granted into a nested invocation only once the caller proves no
+residual use anywhere past the block, and a granted name is then tracked by that invocation's
+own scan exactly like one it binds — dying at its own last use in an execute-once `if` arm,
+pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
+prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
 
 **Next action: Phase 4 Slice 7b (capturing closures).** 7a (non-capturing quotations as values)
 is done; 7b inherits both 6f's settled last-use rule and the capture-propagation obligation
