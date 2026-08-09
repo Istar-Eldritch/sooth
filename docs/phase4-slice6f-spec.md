@@ -1,6 +1,11 @@
 # Phase 4 Slice 6f: liveness ends at last use (spec)
 
-A reference bound to a local now dies at its **last use**, matching the anonymous stack case. `live_derivs` (`src/check.rs:759`) chains the virtual stack's derivations with the scope's bindings; the two halves disagreed (a stack slot's deriv dies when its slot is consumed, a binding's lived for the whole block). This slice ends a binding's borrow at its last use, and applies the same rule to `aliasing_origin` (`:854`), which asks the same lexical-vs-last-use question for a second *name* of a place.
+*`file:line` anchors below are pre-implementation, taken before this slice and its
+review-round fix added ~450 lines to `src/check.rs`; most have drifted and are not
+renumbered here. The two load-bearing ones are corrected: `live_derivs` is now
+`src/check.rs:985`, `aliasing_origin` is now `:1099`.*
+
+A reference bound to a local now dies at its **last use**, matching the anonymous stack case. `live_derivs` (`src/check.rs:985`, originally `:759`) chains the virtual stack's derivations with the scope's bindings; the two halves disagreed (a stack slot's deriv dies when its slot is consumed, a binding's lived for the whole block). This slice ends a binding's borrow at its last use, and applies the same rule to `aliasing_origin` (`:1099`, originally `:854`), which asks the same lexical-vs-last-use question for a second *name* of a place.
 
 **Checker-acceptance-only (D1):** no new `Instr`/`Terminator`, no lowering/`Type`/`IrType` change. `Deriv`/`DerivId` stay confined to `src/check.rs`, so no emitted code changes by construction. Not a lifetime system (no lifetime variables, regions, or scope-bound validity); a rule about *when a borrow ends inside one block*.
 
@@ -33,7 +38,7 @@ A reference bound to a local now dies at its **last use**, matching the anonymou
 
 ## Resolved questions
 
-- **Q1 — Per-invocation pre-pass, keyed by names bound in that invocation (option c, narrowed).** Compute a `Liveness` over the invocation's own term list; thread `&Liveness` + index `i` through `check_term` into the consumers. Rejected: (a) a `Binding.last_use` field hits an index-space wall across nested invocations and disturbs the stack-half struct (violates D2); (b) re-scanning per query pays repeatedly for cacheable info. Pre-pass is O(subtree) once per invocation.
+- **Q1 — Per-invocation pre-pass, keyed by names bound in that invocation (option c, narrowed).** Compute a `Liveness` over the invocation's own term list; thread `&Liveness` + index `i` through `check_term` into the consumers. Rejected: (a) a `Binding.last_use` field hits an index-space wall across nested invocations and disturbs the stack-half struct (violates D2); (b) re-scanning per query pays repeatedly for cacheable info. Pre-pass is O(subtree) once per invocation. **Correction (review round):** the (b) rationale does not carry over cleanly to `Provenance.quotation_captures`, added later for the quotation-capture fix — that cache memoizes `capture_names` (O(literal body), cheap, computed once per literal at intern time), but the actual per-query work, `capture_alive_names`' fixpoint over `scope.bound`, is recomputed fresh at every call site regardless. The cache is kept because it costs nothing and the association is already computed once anyway, not because it avoids the re-scanning (b) warns about — that cost is paid on every query either way.
 
   ```rust
   struct Liveness { last_use: HashMap<String, usize> }
@@ -61,30 +66,31 @@ A reference bound to a local now dies at its **last use**, matching the anonymou
 - **Q3 — Branches: conservative max at the `if` term's index.** A reference used inside one arm expires only when the `if` ends. Falls out of Q1: the outer scan attributes any arm use to the `if` index; inside an arm's own invocation the outer binding isn't in that arm's `Liveness`. Per-arm precision not pursued (never more permissive in any dogfood; max can't be unsound). Highest-risk (six of 17 alias guards are merge cases).
 - **Q4 — `leave_block` needs nothing** (read at `:5625`). `scope.leave` inspects only `moves.states`; a reference has none (D7). Relaxation touches only mid-block borrow-conflict queries; `Liveness` is dropped when the invocation returns.
 - **Q5 — REPL unchanged.** A line is one `check_terms` invocation; nothing crosses lines. A reference with no later use expires at line end (`reference_local_expires_without_drop`, `:590`). `reference_surviving_repl_line_is_error` (`:518`) is a stack carry (D2, untouched). Confirmed by regression run.
-- **Q6 — One shared `Liveness`, filtered per binding by its own name; overlap preserved.** `aliasing_origin` keys on alias-set *overlap*, not name identity. Filtering each candidate by its own last use composes: name A (dead) is dropped but overlapping live name B still returns and rejects; accepted only when *no* live name overlaps. Filter added alongside the existing `moved_site(...).is_none()`:
+- **Q6 — One shared `Liveness`, filtered per binding by its own name; overlap preserved.** `aliasing_origin` keys on alias-set *overlap*, not name identity. Filtering each candidate by its own last use composes: name A (dead) is dropped but overlapping live name B still returns and rejects; accepted only when *no* live name overlaps. Filter added alongside the existing `moved_site(...).is_none()`. **Shipped shape (`src/check.rs:1099`, updated in the review-round quotation-capture fix from the `!live.dead(...)`-only form this Q originally specified):**
 
   ```rust
+  let captured = capture_alive_names(stack, scope, prov, live, at);
   .filter(|b| {
       b.name != place
           && b.aliases.is_some_and(&overlaps)
           && scope.moves.moved_site(&b.name).is_none()
-          && !live.dead(&b.name, at)
+          && (!live.dead(&b.name, at) || captured.contains(&b.name))
   })
   ```
 
-  The `place` binding is never relaxed (loop skips `b.name == place`); `&!place` is a `check_reference_word` term, not a `Call`, so it never registers as a "use."
+  The `place` binding is never relaxed (loop skips `b.name == place`); `&!place` is a `check_reference_word` term, not a `Call`, so it never registers as a "use." The `captured.contains(&b.name)` disjunct is the same quotation-capture extension `live_derivs` gets (see "Where the change landed"); a name a still-reachable quotation captures is never treated as dead here either, for the identical reason.
 
 ## Mechanism
 
 1. `Liveness::scan`/`dead` (Q1) as a private struct/impl near `Scope`.
 2. `check_terms` builds `let live = Liveness::scan(terms);` once, passes `&live` + `i` into each `check_term`. `check_term` gains `live: &Liveness, at: usize`. Nested bodies rebuild their own `Liveness` (D3).
 3. `live_derivs`/`live_deriv`/`live_borrow_of`/`live_mutable_borrow_of` gain `(live, at)` and apply the scope-half filter; consumers pass through; `times` snapshots pass `(live, i)` to both (Q2).
-4. `aliasing_origin` gains `(live, at)` and the `!live.dead(...)` clause on its name loop only (Q6/D8); stack tail (`:876`) unchanged.
-5. No `Binding`/`Slot` field, no lowering touch (D1/D2/D7).
+4. `aliasing_origin` gains `(live, at)` and, on its name loop only, `(!live.dead(&b.name, at) || captured.contains(&b.name))` — the same last-use-or-still-captured test as the borrow half (Q6/D8); stack tail (`:876`, now `:1125`) unchanged.
+5. No `Binding`/`Slot` field, no lowering touch (D1/D2/D7). **Amended by the review-round fix:** `Slot.quot`/`Binding.quot` already carried the association a quotation-capture fix needs, so no new field was needed there either — the one addition is `Provenance.quotation_captures`, a cache of each quotation literal's own free-name set, keyed by `QuotId` and populated once at intern time.
 
 ## Sanctioned files
 
-- `src/check.rs` — `Liveness`; `live_derivs` family + `aliasing_origin` signature/filter; `check_terms`/`check_term` threading; `times` snapshot calls; new unit tests.
+- `src/check.rs` — `Liveness`; `live_derivs` family + `aliasing_origin` signature/filter; `check_terms`/`check_term` threading; `times` snapshot calls; `capture_names`/`capture_names_into`/`capture_alive_names`; `Provenance.quotation_captures`; new unit tests.
 - `tests/phase3_refs.rs` — rewrite the two flip tests (D5); probe pair (T3/T4); D10 test (T7); alias relaxation pair (T9/T10); mutation-test assertions.
 - `examples/inplace_fold.sth` — dogfood (new), at `Copy` and linear `Acc`.
 - `ROADMAP.md` — mark 6f implemented; confirm slice-7 dependency note.
@@ -142,7 +148,7 @@ Revert each guard in a **throwaway copy** (not the shared worktree).
 
 **Phase 3 — Dogfood + QBE goldens.** Add `examples/inplace_fold.sth`; T12/T13 build+run at Copy and linear `Acc`, assert stdout, assert no per-iteration `blit` in emitted QBE loop body.
 
-**Phase 4 — ROADMAP.** Mark 6f implemented (`ROADMAP.md:1468`); confirm slice-7's borrow-end dependency satisfied. T14.
+**Phase 4 — ROADMAP.** Mark 6f implemented (`ROADMAP.md:1526`); confirm slice-7's borrow-end dependency satisfied. T14.
 
 ```json
 {

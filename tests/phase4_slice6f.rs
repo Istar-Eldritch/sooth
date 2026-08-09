@@ -28,7 +28,14 @@ fn run_dogfood() -> (String, i32) {
 /// The emitted QBE body of `word`, mangled name and all. `qbe_name` escapes each
 /// non-alphanumeric character as `.{hex}.` to stay injective, so `-` (0x2d) makes
 /// the fold words emit as `prefix.2d.copy`/`prefix.2d.linear`. Panics if the word
-/// is absent, so a rename that silences the assertion fails loudly.
+/// is absent, so a rename that silences the assertion fails loudly. Every
+/// function definition's whole line starts with `export function ` (see
+/// `src/backend/qbe.rs`'s `"export function {ret_ty}${}("`; `ret_ty` sits
+/// between `function` and the `$name`, so a bare `function `-prefix check on
+/// the header itself would miss it), so this anchors on the enclosing line
+/// rather than the header alone, picking the definition even if a call site
+/// (`${word}(` with no `export function ` on its own line) appears earlier
+/// in the emitted module.
 fn fold_body(word: &str) -> String {
     let tokens = lexer::lex(DOGFOOD).expect("dogfood should lex");
     let mut module = parser::parse(&tokens).expect("dogfood should parse");
@@ -36,10 +43,15 @@ fn fold_body(word: &str) -> String {
     let irm = ir::lower(&module).expect("dogfood should lower");
     let il = backend::qbe::emit(&irm).expect("dogfood should emit");
     let header = format!("${word}(");
-    let start = il
-        .find(&header)
-        .unwrap_or_else(|| panic!("no `{header}` in emitted IL:\n{il}"));
-    let rest = &il[start..];
+    let def_at = il
+        .match_indices(&header)
+        .map(|(i, _)| i)
+        .find(|&i| {
+            let line_start = il[..i].rfind('\n').map_or(0, |n| n + 1);
+            il[line_start..i].starts_with("export function ")
+        })
+        .unwrap_or_else(|| panic!("no function definition for `{header}` in emitted IL:\n{il}"));
+    let rest = &il[def_at..];
     let end = rest.find("\n}").expect("a function body ends in `}`");
     rest[..end].to_string()
 }

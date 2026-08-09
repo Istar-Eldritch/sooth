@@ -770,6 +770,10 @@ fn move_of_place_borrowed_in_locals_is_error() {
             && err.contains("still live"),
         "a borrow held in a local and used after the consume must count as live: {err}"
     );
+    assert!(
+        err.contains("the shared borrow taken at line 7"),
+        "the still-live borrow must be `&b` bound to `r` on line 7, not `b`'s own bind: {err}"
+    );
 }
 
 #[test]
@@ -783,6 +787,10 @@ fn dispose_of_borrowed_place_is_error() {
         err.contains("cannot consume the borrowed local `b` of type `Box`")
             && err.contains("the mutable borrow taken at"),
         "disposing a borrowed place is a consumption like any other: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 7"),
+        "the still-live borrow must be `&!b` bound to `r` on line 7, not `b`'s own bind: {err}"
     );
 }
 
@@ -1519,6 +1527,103 @@ fn unbound_quotation_capture_still_dies_at_its_own_literal() {
     );
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_captured_by_a_bound_quotation_is_released_when_the_quotation_dies() {
+    // Accept twin of the shapes above: `out`'s capture must not outlive `q`
+    // itself. `q` is called immediately after its own bind, so by the time
+    // `out2` is bound `q` -- and therefore what it captures -- is dead, and
+    // a second `&!arr` is legal. Guards the `base_alive` gate in
+    // `capture_alive_names`: a mutation that makes a bound quotation's
+    // captures alive unconditionally (dropping that gate) wrongly rejects
+    // this, and nothing else in this file would catch it -- every other
+    // capture test here only checks that a still-live capture is rejected,
+    // never that a dead one is released.
+    let (stdout, code) = run_src(
+        "captured-borrow-released-when-quotation-dies",
+        &format!(
+            "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+             [ out 0 >usize &!> 9 ! ] | q |\n  q call\n  &!arr | out2 |\n  \
+             out2 1 >usize &!> 7 !\n  &arr 0 >usize &> @ . ;\n"
+        ),
+    );
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutable_borrow_captured_through_a_nested_quotation_literal_is_error() {
+    // `q`'s own body is `[ out ... ] apply`: the capture of `out` is one
+    // level down, inside a *nested quotation literal*, not a direct `Call`
+    // in `q`'s own term list. This is a different code path from the
+    // transitive test above (`[ q1 call ] | q2 |`), which finds `q1` via a
+    // top-level `Call` and only then reads `q1`'s own capture set; here
+    // there is no bound name to chain through; `capture_names_into` must
+    // itself recurse into the nested `TermKind::Quotation` to see `out` at
+    // all.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+         : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ [ out 0 >usize &!> 9 ! ] apply ] | q |\n  &!arr | out2 |\n  \
+         out2 1 >usize &!> 7 !\n  q call arr drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 6") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured through the nested literal: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_only_inside_an_if_arm_of_a_quotation_body_is_error() {
+    // `out` is referenced only inside the `then` arm of an `if` that lives
+    // inside `q`'s body, never as a top-level `Call` in `q`'s own term list.
+    // `capture_names_into` must recurse into both arms of a nested `if` to
+    // find it, the same way it recurses into a nested quotation literal.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ 1 drop true if out 0 >usize &!> 9 ! else 0 drop end ] | q |\n  \
+         &!arr | out2 |\n  out2 1 >usize &!> 7 !\n  q call arr drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 5") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured only inside the `if` arm: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_by_a_quotation_defined_after_the_second_borrow_is_error() {
+    // The conflict precedes the capturing literal in program order: `out2`
+    // is bound and used *before* the quotation that captures `out` is even
+    // written. `capture_alive_names` reads `Slot.quot`/`Binding.quot` at
+    // query time and cannot see a quotation that does not exist yet at that
+    // index; only `Liveness::scan`'s own quotation arm -- a single
+    // whole-body pre-pass giving every capture a floor at its literal's
+    // position, run once up front over the entire term list before
+    // per-term checking starts -- sees this in advance and keeps `out`
+    // alive back at `out2`'s bind.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+         : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         &!arr | out2 |\n  out2 1 >usize &!> 7 !\n  \
+         [ out 0 >usize &!> 9 ! ] apply\n  arr drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 6") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured by a literal defined later: {err}"
+    );
 }
 
 // --- loop back-edge rules, both sides

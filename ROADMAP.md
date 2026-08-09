@@ -126,6 +126,28 @@ can denote either arm's place, a value carries a *set* of regions rather than on
 merge unions the arms and **no aliasing rejection happens at a join**: selecting one of two
 owned records compiles, and the error lands at the borrow where it can name both ends.
 `examples/refs.sth` dogfoods it.
+
+**Bug found in review (6f, slice 6f review round 2), not fixed there, not 6f's: binding a
+reborrow loses the suspend rule.** The stack-resident shape is rejected
+(`reborrow_while_projected_reference_still_live_is_error`, `tests/phase3_refs.rs:654`):
+taking a second projection out of a place while the first projected reference is still live
+correctly fails. Naming the first projection's result before taking the second does not:
+```
+type: Buf data ^[u8 64] len usize ;
+: f ( &!Buf -- )
+  | p |
+  p &!Buf>len | e |
+  p &!Buf>len 1 +!
+  e 1 +! ;
+: main ( -- ) ;
+```
+builds clean, where it should be rejected on the same grounds as the stack-resident case.
+The suspend check (`src/check.rs:6487`, scans `live_deriv` for `d.reborrow && d.place ==
+*name`) appears to lose the `reborrow`/`place` association once a deriv passes through
+`Scope::bind` (`src/check.rs:596`). Reproduces identically before slice 6f (and its review
+round) touched anything, so it predates this slice and is not caused by it; unfixed,
+recorded here against the slice that owns the suspend rule rather than patched as a 6f
+stopgap.
 **Phase 3 Slice 8a (typed foreign calls + string slices) is complete**: one `extern:` declaration
 form (a C symbol string plus a stack effect), registered into the ordinary word environment so
 existing arity/type checks apply unchanged; the boundary type set is the numeric tower, `&T`/`&!T`,
@@ -1523,9 +1545,9 @@ then find out what the compiler owes it.
    mutation-tested guards on the three-state move join. Slice 7's stated dependency on a
    branching polymorphic body is satisfied.
 
-   **6f — liveness ends at last use. Implemented**, with one known gap (below). The
+   **6f — liveness ends at last use. Implemented**; a gap found in review is closed, below. The
    motivation, as originally written: `live_derivs`
-   (`src/check.rs:759`) chains the stack slots with the scope's bindings, so a reference left
+   (originally `src/check.rs:759`, now `:985`) chains the stack slots with the scope's bindings, so a reference left
    on the stack dies when a term consumes its slot, while a reference bound to a local stays
    live for the whole block. Chaining a borrow therefore compiles where naming it does not,
    and the rejection lands on the natural shape: borrow a place, write through the borrow,
@@ -1553,7 +1575,7 @@ then find out what the compiler owes it.
    live for the whole body, which the identity-on-borrow-state check at `src/check.rs:6041`
    already wants).
    **Two tables, one rule.** The same lexical-vs-last-use question applies to
-   `aliasing_origin` (`src/check.rs:854`), which rejects a mutable borrow of a place a second
+   `aliasing_origin` (originally `src/check.rs:854`, now `:1099`), which rejects a mutable borrow of a place a second
    live *name* denotes. Both scan a scope table for names that are merely in lexical scope,
    and both leave their stack halves alone; taking only the borrow half would answer one
    question twice. **Measured, not assumed:** stubbing `aliasing_origin` out makes a `Copy`
@@ -1618,8 +1640,8 @@ then find out what the compiler owes it.
    writes its captured `arr` through `&!` each iteration and reads it back the next, so
    snapshot semantics would break a shipped library word. Preserving today's meaning under
    materialization therefore needs the env to hold a *reference*, which is Phase 3 Slice 6's
-   escape checking pointed at a new carrier — exactly the machinery 6f is mid-flight on
-   changing. So *every* capture waits for 6f, not just an explicitly reference-typed one, and
+   escape checking pointed at a new carrier — exactly the machinery 6f settled the borrow-end
+   rule for. So *every* capture waits for 6f, not just an explicitly reference-typed one, and
    what is left for 7a is the representation itself: a quotation that captures nothing has no
    env to disagree about.
 
