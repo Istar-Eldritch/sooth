@@ -844,6 +844,37 @@ fn non_tail_combinator_self_call_is_still_a_cycle_error() {
 }
 
 #[test]
+fn mutual_combinator_cycle_through_an_ambiguous_overloaded_name_is_still_caught() {
+    // Slice 8a: `a` now carries two candidates sharing the name. A bare
+    // callee name can't say which one `b`'s call to `a` reaches statically,
+    // so this pass must not resolve it to a *single* index the way it did
+    // pre-8a -- doing so could point at the wrong candidate (or, worse,
+    // silently miss the real cycle through the other one, which would have
+    // the inliner splice forever rather than merely mis-detect a runtime
+    // optimization the way the tail-call cycle guard's analogous narrowing
+    // does). `b`'s own operand types mean it really does resolve to the
+    // `bool` candidate of `a`, closing a genuine cycle: a(bool) -> b -> a(bool).
+    // Declared with the cycling candidate *first* and the unrelated one
+    // last: a name-to-single-index map built by plain `.collect()` keeps
+    // whichever candidate is declared last, so it would point `b`'s edge at
+    // the i64 candidate (a leaf, no edge back to `b`) and miss the cycle
+    // through the bool one entirely -- accepting a program that should be
+    // rejected, rather than merely detecting the wrong optimization
+    // opportunity the way the tail-call cycle guard's analogous narrowing
+    // does.
+    let err = check_error(
+        ": a ( bool [ bool -- bool ] -- bool ) b ;\n\
+         : a ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+         : b ( bool [ bool -- bool ] -- bool ) a ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("`a`") && err.contains("`b`") && err.contains("recursive"),
+        "a mutual cycle through an overloaded combinator name should still be a located rejection, got: {err}"
+    );
+}
+
+#[test]
 fn mutual_combinator_cycle_is_still_an_error() {
     // Criterion 6 (R4, load-bearing): a two-combinator mutual cycle is
     // untouched by the relaxation (which skips only a *self*-edge, i==j), so

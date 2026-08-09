@@ -3610,6 +3610,80 @@ fn mutual_tail_recursion_between_ordinary_words_is_still_an_error() {
 }
 
 #[test]
+fn overloads_of_a_combinator_name_are_both_reachable() {
+    // main rejects two same-name `apply` combinators outright. R1's widened
+    // key admits them as distinct definitions once their concrete parameter
+    // types differ, but collect_combinators stayed a bare-name-keyed
+    // single-value map, so the second candidate silently displaced the first
+    // exactly as env's Sig did before B1 (and poly_env did for a poly word).
+    let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+: apply ( bool [ bool -- bool ] -- bool ) call ;\n\
+: main ( -- ) 5 [ 2 * ] apply . true [ not ] apply . ;\n";
+    let (stdout, code) = run_overload_src("combinator-overload", src);
+    assert_eq!(stdout, "10\nfalse\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_combinator_call_matching_no_overload_names_the_candidates() {
+    let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+: apply ( bool [ bool -- bool ] -- bool ) call ;\n\
+: main ( -- ) \"x\" [ drop \"y\" ] apply drop ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-combinator-overload-nomatch-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("no overload of `apply`") && err.contains("accepts these operands"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("candidate: `i64`") && err.contains("candidate: `bool`"),
+        "expected both candidates listed: {err}"
+    );
+}
+
+#[test]
+fn overloads_of_a_polymorphic_word_name_are_both_reachable() {
+    // main rejects two same-name poly words outright (`duplicate word`); R1
+    // widened the concrete-word key but poly_env stayed a bare-name-keyed
+    // single-value map, so the second candidate silently displaced the first
+    // exactly as env's Sig did before B1.
+    let src = ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'T bool -- 'T ) drop ;\n\
+: main ( -- ) 1 2 idpair . 7 true idpair . ;\n";
+    let (stdout, code) = run_overload_src("poly-overload", src);
+    assert_eq!(stdout, "1\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_polymorphic_call_matching_no_candidate_names_the_signatures() {
+    let src = ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'T bool -- 'T ) drop ;\n\
+: main ( -- ) 1 2.5 idpair . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-poly-overload-nomatch-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("no overload of `idpair`") && err.contains("accepts these operands"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("candidate: : idpair ( 'T 'T -- 'T )")
+            && err.contains("candidate: : idpair ( 'T bool -- 'T )"),
+        "expected both candidate signatures listed: {err}"
+    );
+}
+
+#[test]
 fn overloads_of_an_ordinary_word_name_are_both_reachable() {
     // R1 widened the duplicate-word key to admit these two definitions, but
     // the checking env held one `Sig` per name, so the second silently

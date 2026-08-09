@@ -154,10 +154,10 @@ fn ir_arity_env(env: &HashMap<String, Vec<check::Overload>>) -> HashMap<String, 
 /// `WordDef`. A free function over the one field rather than a `&self` method,
 /// so a caller can still borrow `self.arrays`/`self.owned_cells`/`self.refs`
 /// mutably alongside it (disjoint fields).
-fn checker_combinators(store: &HashMap<String, WordDef>) -> HashMap<String, check::Combinator<'_>> {
+fn checker_combinators(store: &HashMap<String, WordDef>) -> check::CombinatorEnv<'_> {
     store
         .iter()
-        .filter_map(|(name, word)| check::combinator_of(word).map(|c| (name.clone(), c)))
+        .filter_map(|(name, word)| check::combinator_of(word).map(|c| (name.clone(), vec![c])))
         .collect()
 }
 
@@ -1186,7 +1186,7 @@ impl Session {
     /// generation it was retained at (so `check_poly_call` mints the
     /// generation-stamped symbol, R2/R2b). Kept out of `typed_env` because a
     /// polymorphic word never enters the concrete env (R3).
-    fn poly_env(&self) -> HashMap<String, (PolySig, Option<u64>)> {
+    fn poly_env(&self) -> check::PolyEnv {
         self.poly_words
             .iter()
             .map(|(name, entry)| {
@@ -1196,7 +1196,7 @@ impl Session {
                     .as_deref()
                     .expect("a poly_words entry always has a polymorphic signature")
                     .clone();
-                (name.clone(), (sig, Some(entry.generation)))
+                (name.clone(), vec![(sig, Some(entry.generation))])
             })
             .collect()
     }
@@ -2421,7 +2421,7 @@ impl Session {
         // definee, which outlives the check calls below.
         let mut combinators = checker_combinators(&self.combinators);
         if let Some(c) = check::combinator_of(&word) {
-            combinators.insert(name.clone(), c);
+            combinators.insert(name.clone(), vec![c]);
         }
         // R8: reject a cycle formed *across lines* (define `a`; define `b`
         // calling `a`; redefine `a` calling `b`) as the same located

@@ -50,6 +50,23 @@ type ResolvedCalls = (HashMap<Span, CallInst>, HashMap<Span, String>);
 /// `ResolvedCalls` plus the residual stack a REPL line leaves behind.
 type InferredLine = (Vec<Type>, HashMap<Span, CallInst>, HashMap<Span, String>);
 
+/// R5/R14: every candidate registered under one polymorphic-word name, its
+/// `PolySig` paired with the REPL generation it was retained at (`None` on
+/// the native/module path, which has no generations). `check_poly_call`
+/// resolves a bare call by trial unification across candidates, the same
+/// shape as `Overload`'s exact-match resolution for concrete words -- a
+/// name-keyed single-value map here would silently shadow a second
+/// polymorphic overload exactly as env's `Sig` did before B1.
+pub(crate) type PolyEnv = HashMap<String, Vec<(PolySig, Option<u64>)>>;
+
+/// R18/R6a: every quotation-taking word registered under one name. A name
+/// can carry more than one candidate exactly as an ordinary overloaded word
+/// can (R1); resolving which one a call splices needs the live stack's
+/// operand types, the same shape as `Overload`/poly-candidate resolution --
+/// a single-value map here would silently shadow a second combinator
+/// overload exactly as env's `Sig` did before B1.
+pub(crate) type CombinatorEnv<'a> = HashMap<String, Vec<Combinator<'a>>>;
+
 #[derive(Debug, Clone)]
 pub struct Overload {
     pub sig: Sig,
@@ -76,7 +93,7 @@ fn resolve_overload<'a>(candidates: &'a [Overload], operands: &[Type]) -> Option
 /// `check_poly_call`'s mint reads both from one lookup with no second
 /// channel.
 struct PolyCtx<'a> {
-    env: &'a HashMap<String, (PolySig, Option<u64>)>,
+    env: &'a PolyEnv,
     insts: &'a mut HashMap<Span, CallInst>,
     /// Slice 8a phase 2 (R7): the call sites this walk resolved to a user
     /// overload of a builtin-named word (`Vec2 +` -> the user `+`), span ->
@@ -90,7 +107,7 @@ struct PolyCtx<'a> {
     /// stack (the compiler's only inliner) rather than lowered to an
     /// `Instr::Call` to a word that mints no `IrFunc` (R20). Empty on the REPL
     /// paths, where defining such a word is rejected up front (R23).
-    combinators: &'a HashMap<String, Combinator<'a>>,
+    combinators: &'a CombinatorEnv<'a>,
 }
 
 /// Slice 6a (R18): one monomorphic quotation-taking word available to inline.
@@ -1925,7 +1942,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // not concrete `Sig` types); it lives in `poly_env` instead, and a call
     // site is intercepted there before the concrete lookup, where its
     // `PolySig` is unified against the concrete stack.
-    let mut poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
+    let mut poly_env: PolyEnv = HashMap::new();
     // Slice 8a fix 1 (R1): each word's distinct lowering symbol, aligned by
     // index -- equal to its own name unless it shares that name with another
     // word in this module (an overload set), in which case each candidate's
@@ -1936,7 +1953,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
             continue;
         }
         if let Some(sig) = &word.poly {
-            poly_env.insert(word.name.clone(), ((**sig).clone(), None));
+            poly_env
+                .entry(word.name.clone())
+                .or_default()
+                .push(((**sig).clone(), None));
         } else {
             env.entry(word.name.clone()).or_default().push(Overload {
                 sig: sig_of(&word.effect),
@@ -3238,8 +3258,8 @@ pub(crate) fn check_def(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
 ) -> Result<ResolvedCalls, String> {
     let (_sites, insts, overloads) = check_def_collecting_drop_sites(
         word,
@@ -3280,8 +3300,8 @@ pub(crate) fn check_def_collecting_drop_sites(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
 ) -> Result<InferredLine, String> {
     let mut env = env.clone();
     let symbol = word.name.clone();
@@ -3356,8 +3376,8 @@ pub(crate) fn infer_line(
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
 ) -> Result<InferredLine, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
     // A line is one block: names it binds die with it, so its end is a scope
@@ -4635,8 +4655,8 @@ pub(crate) fn check_poly_combinator_repl(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
     let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
@@ -5200,6 +5220,258 @@ fn poly_delegate_op(
 /// pass-through: the stack beneath the fixed inputs is untouched, so `θ`
 /// carries no row types and the word's ABI never sees the caller's deeper
 /// stack (S2 rejected the carried runtime stack).
+/// R5/R14 (Slice 8a): the outcome of resolving a name with more than one
+/// polymorphic candidate. Kept distinct from a plain `None` so the caller can
+/// still raise R9p's specific rejection (a quotation operand disqualifies
+/// every candidate the same way, since binding `'T` to the placeholder would
+/// monomorphize a call over a phantom) rather than a generic no-match message
+/// that would misdescribe the reason.
+enum PolyOverloadMiss {
+    Quotation,
+    NoMatch,
+}
+
+/// The first candidate among `candidates` whose declared inputs unify against
+/// the tail of `stack`, tried in declaration order -- the same shape as
+/// `resolve_overload`'s exact-match resolution for concrete words, adapted to
+/// unification since a poly input may be a type variable rather than a fixed
+/// `Type`. Only reached with 2+ candidates; the caller keeps the exact
+/// existing single-candidate path (and its position-specific diagnostics)
+/// untouched. Bounds (R6) are checked only against the chosen candidate by
+/// the caller, matching the single-candidate path: they gate a resolved
+/// instantiation, not resolution itself.
+fn resolve_poly_overload(
+    candidates: &[(PolySig, Option<u64>)],
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Result<(PolySig, Option<u64>), PolyOverloadMiss> {
+    let mut saw_quotation = false;
+    for (sig, generation) in candidates {
+        let n_in = sig.inputs.len();
+        if stack.len() < n_in {
+            continue;
+        }
+        let base = stack.len() - n_in;
+        if stack[base..].iter().any(|s| s.quot.is_some()) {
+            saw_quotation = true;
+            continue;
+        }
+        if poly_sig_unifies(sig, stack, name, span, ctx, arrays) {
+            return Ok((sig.clone(), *generation));
+        }
+    }
+    Err(if saw_quotation {
+        PolyOverloadMiss::Quotation
+    } else {
+        PolyOverloadMiss::NoMatch
+    })
+}
+
+/// R5/R14: a named call matching no polymorphic candidate's declared inputs,
+/// listing each candidate's whole signature (`poly_sig_str`) the way
+/// `no_overload_matches_error` lists concrete candidates' input shapes.
+fn no_poly_overload_matches_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    candidates: &[(PolySig, Option<u64>)],
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|(sig, _)| poly_sig_str(name, sig))
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{demangled}` accepts these operands{listed}")
+        }
+    }
+}
+
+/// Whether `sig`'s declared inputs unify against the tail of `stack`,
+/// without committing any successful bindings past this call: a fresh
+/// `Subst` per attempt, discarded either way. The shared predicate behind
+/// resolving an overloaded polymorphic word (`resolve_poly_overload`) and an
+/// overloaded polymorphic combinator (`resolve_combinator_overload`) alike --
+/// unlike `resolve_poly_overload`'s own caller, a combinator's declared
+/// inputs legitimately include a quotation type, so this makes no R9p
+/// judgement about one; that stays the caller's decision.
+fn poly_sig_unifies(
+    sig: &PolySig,
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> bool {
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return false;
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    (0..n_in).all(|i| {
+        unify_poly_input(
+            sig,
+            &sig.inputs[i],
+            stack[base + i].ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )
+        .is_ok()
+    })
+}
+
+/// Whether `sig`'s declared inputs *could* match the tail of `stack`, for
+/// selecting among 2+ poly combinator candidates only. A declared quotation
+/// position (`poly_input_is_quotation`) contributes no constraint and is
+/// skipped: a stack slot standing for a quotation carries a placeholder `ty`
+/// (`Slot::quot`'s own doc -- "no user op accepts" it) rather than the
+/// literal's real effect until `inline_combinator` materializes it, and
+/// checking that for real means running the literal's body, which this
+/// selection step must not do speculatively once per candidate (unlike a
+/// concrete type or a bare `'T`, a quotation's real effect is not known
+/// without side-effecting work). Every other declared position unifies for
+/// real. Whichever candidate this selects still has every declared position,
+/// quotation included, validated for real exactly once by the existing
+/// single-candidate path this only decides which candidate reaches.
+fn poly_sig_could_match(
+    sig: &PolySig,
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> bool {
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return false;
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    (0..n_in).all(|i| {
+        if poly_input_is_quotation(&sig.inputs[i]) {
+            return true;
+        }
+        unify_poly_input(
+            sig,
+            &sig.inputs[i],
+            stack[base + i].ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )
+        .is_ok()
+    })
+}
+
+/// The first candidate among `candidates` whose declared shape matches the
+/// tail of `stack`, tried in declaration order: exact type match for a mono
+/// candidate (the same exact-match philosophy `resolve_overload` uses for an
+/// ordinary word, R2), a could-match probe for a poly one. `inline_combinator`
+/// already branches the same way for the sole-candidate case; this only
+/// decides which candidate reaches that branch. A declared quotation
+/// position never distinguishes a mono candidate either, for the identical
+/// placeholder-`ty` reason `poly_sig_could_match` skips one -- treated as a
+/// wildcard on both branches. Only reached with 2+ candidates sharing one
+/// name.
+///
+/// Accepted narrowing: two candidates identical in every *non*-quotation
+/// position, differing only in a declared quotation's effect, are
+/// indistinguishable here; the first declared wins, the same trade
+/// `resolve_poly_overload` already accepts on an ambiguous unification.
+fn resolve_combinator_overload<'a>(
+    candidates: &[Combinator<'a>],
+    stack: &[Slot],
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Option<Combinator<'a>> {
+    for comb in candidates {
+        let matched = match comb.word.poly.as_ref() {
+            Some(sig) => {
+                poly_sig_could_match(sig, stack, comb.word.name.as_str(), span, ctx, arrays)
+            }
+            None => {
+                let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
+                let n = inputs.len();
+                stack.len() >= n
+                    && stack[stack.len() - n..]
+                        .iter()
+                        .zip(inputs.iter())
+                        .all(|(s, want)| matches!(want, Type::Quotation(_)) || s.ty == *want)
+            }
+        };
+        if matched {
+            return Some(*comb);
+        }
+    }
+    None
+}
+
+/// R18: a call to an overloaded combinator name matching no candidate's
+/// declared shape, listing each candidate the way an ordinary overload's miss
+/// does -- a rendered signature for a poly candidate, input types for a mono
+/// one.
+fn no_combinator_overload_matches_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    candidates: &[Combinator],
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|comb| match comb.word.poly.as_ref() {
+            Some(sig) => poly_sig_str(name, sig),
+            None => {
+                let inputs: Vec<String> = comb
+                    .word
+                    .effect
+                    .inputs
+                    .iter()
+                    .map(|s| format!("`{}`", s.ty))
+                    .collect();
+                match inputs.is_empty() {
+                    true => "no operands".to_string(),
+                    false => inputs.join(" "),
+                }
+            }
+        })
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{demangled}` accepts these operands{listed}")
+        }
+    }
+}
+
 fn check_poly_call(
     name: &str,
     span: Span,
@@ -5208,11 +5480,19 @@ fn check_poly_call(
     arrays: &mut Vec<ArrayDecl>,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
-    let (sig, generation) = poly
-        .env
-        .get(name)
-        .expect("caller checked membership")
-        .clone();
+    let candidates = poly.env.get(name).expect("caller checked membership");
+    let (sig, generation) = match candidates.as_slice() {
+        [(sig, generation)] => (sig.clone(), *generation),
+        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays) {
+            Ok(chosen) => chosen,
+            Err(PolyOverloadMiss::Quotation) => {
+                return Err(reject_quotation_argument(ctx, span, name))
+            }
+            Err(PolyOverloadMiss::NoMatch) => {
+                return Err(no_poly_overload_matches_error(ctx, span, name, candidates))
+            }
+        },
+    };
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
         return Err(underflow_error(ctx, span, name, n_in, stack.len()));
@@ -6320,14 +6600,16 @@ fn check_abstract_quotation_times(
 /// call to one is intercepted and its body spliced (the inliner) rather than
 /// lowered to a call to a word that mints no `IrFunc` (R20). `inline_combinator`
 /// branches on `word.poly` internally to pick the mono or poly splice path.
-fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
-    let mut map = HashMap::new();
+fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
+    let mut map: CombinatorEnv<'_> = HashMap::new();
     for word in words {
         if !is_combinator(word) {
             continue;
         }
         if let WordBody::Terms { terms } = &word.body {
-            map.insert(word.name.clone(), Combinator { word, terms });
+            map.entry(word.name.clone())
+                .or_default()
+                .push(Combinator { word, terms });
         }
     }
     map
@@ -6403,15 +6685,22 @@ fn poly_input_is_quotation(p: &PolyType) -> bool {
 /// count exceeds `tail_position_calls` count) keeps its self-edge and stays a
 /// cycle error, and every cycle of length >= 2 (a mutual cycle) is untouched.
 /// Reuses `check_tail_call_cycles`'s 3-colour DFS shape (recon 8).
-pub(crate) fn check_combinator_cycles(
-    combinators: &HashMap<String, Combinator>,
-) -> Result<(), String> {
-    let members: Vec<&Combinator> = combinators.values().collect();
-    let idx: HashMap<&str, usize> = members
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.word.name.as_str(), i))
-        .collect();
+pub(crate) fn check_combinator_cycles(combinators: &CombinatorEnv) -> Result<(), String> {
+    let members: Vec<&Combinator> = combinators.values().flatten().collect();
+    // Slice 8a: two combinators may now share a name (an overload set, R1),
+    // so a bare callee name can name more than one node. Unlike
+    // `check_tail_call_cycles`'s diagnostic -- where treating an ambiguous
+    // name as no edge at all merely costs a runtime optimization on the rare
+    // program that hits it -- a missed edge here is not a missed diagnostic,
+    // it is the inliner splicing a real cycle forever. So this pass
+    // over-approximates: an ambiguous name is an edge to *every* candidate
+    // that shares it, never to none, which can only reject a cycle-free
+    // program that happens to share a combinator name (rare, and equivalent
+    // to renaming one of the two), never miss a real one.
+    let mut idx: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, c) in members.iter().enumerate() {
+        idx.entry(c.word.name.as_str()).or_default().push(i);
+    }
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
     for (i, c) in members.iter().enumerate() {
         let self_name = c.word.name.as_str();
@@ -6427,7 +6716,10 @@ pub(crate) fn check_combinator_cycles(
         // and at least one) is permitted -- the loop transform makes it finite.
         let tail_only_self = self_all > 0 && self_all == self_tail;
         for callee in all_calls(&c.word.body) {
-            if let Some(&j) = idx.get(callee) {
+            let Some(targets) = idx.get(callee) else {
+                continue;
+            };
+            for &j in targets {
                 if i == j && tail_only_self {
                     continue;
                 }
@@ -7672,14 +7964,24 @@ fn check_term(
                 stack.extend(outs);
                 return Ok(stack);
             }
-            // R18: a call to a monomorphic quotation-taking word is inlined
-            // (term-splice) rather than looked up in `env` and lowered to a
-            // call: it mints no `IrFunc` (R20). Copy the `Combinator` out of
-            // the borrowed map first (it is two pointers) so `poly` can be
-            // reborrowed mutably for the splice.
-            if let Some(comb) = poly.combinators.get(name).copied() {
+            // R18: a call to a quotation-taking word is inlined (term-splice)
+            // rather than looked up in `env` and lowered to a call: it mints
+            // no `IrFunc` (R20). One name can carry several candidates
+            // exactly as an ordinary overloaded word can (R1); a single one
+            // resolves exactly as before, a set resolves against the live
+            // stack. Copy the chosen `Combinator` out of the borrowed map
+            // first (it is two pointers) so `poly` can be reborrowed mutably
+            // for the splice.
+            if let Some(candidates) = poly.combinators.get(name) {
+                let chosen = match candidates.as_slice() {
+                    [only] => *only,
+                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays)
+                        .ok_or_else(|| {
+                            no_combinator_overload_matches_error(ctx, span, name, candidates)
+                        })?,
+                };
                 return inline_combinator(
-                    &comb, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
                 );
             }
             // R5/R14: a call to a polymorphic word is intercepted before the
