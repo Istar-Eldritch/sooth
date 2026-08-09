@@ -2261,6 +2261,9 @@ fn lower_word_parts(
     b.instantiations = instantiations;
     b.poly_arities = poly_arities;
     b.combinators = combinators;
+    // R11: the declared output row's `IrType`s, so a tail branch join can find
+    // the target quotation type for the slot it materializes.
+    b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
 
     // Params occupy the first N value ids; leftmost input is deepest.
     // (b.cur_word_name is set above for R7's self-tail-call detection.)
@@ -2522,6 +2525,13 @@ struct FuncBuilder<'a> {
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     cur_word_name: String,
+    /// Slice 7a (R11): the `IrType` of each declared output, in order. A branch
+    /// join in tail position maps its merged slot `i` to `cur_outputs[i]`; a
+    /// differing phantom-quotation pair whose target is `IrType::Quotation` is
+    /// materialized into a `(code, env)` value in each arm and `Phi`-joined.
+    /// Empty on the REPL-line path (a line has no declared row, so the checker
+    /// never lets a materializing join reach here).
+    cur_outputs: Vec<IrType>,
     /// R10: the self-tail combinator whose body is currently being spliced
     /// (its mangled name and the length of the loop-carried state row). A
     /// tail-position call to that same name inside the splice is the loop
@@ -2648,6 +2658,7 @@ impl<'a> FuncBuilder<'a> {
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,
+            cur_outputs: Vec::new(),
             cur_combinator: None,
             header: None,
             carried_slots: Vec::new(),
@@ -2761,6 +2772,37 @@ impl<'a> FuncBuilder<'a> {
     /// Begin a fresh (empty) block; `cur_instrs` is already empty after a seal.
     fn start_block(&mut self, id: BlockId) {
         self.cur_id = id;
+    }
+
+    /// Slice 7a (R11): re-open an already-sealed block for appending, so a
+    /// branch join can add its arm's quotation materialization *after* both
+    /// arms are lowered (the differing-pair decision needs both stacks). Pulls
+    /// the block out of `blocks`, restores it as the current block, and returns
+    /// its original position and terminator for `reseal_block_at`.
+    fn reopen_block(&mut self, id: BlockId) -> (usize, Terminator) {
+        let pos = self
+            .blocks
+            .iter()
+            .position(|b| b.id == id)
+            .expect("reopen: a sealed block");
+        let block = self.blocks.remove(pos);
+        self.cur_id = block.id;
+        self.cur_instrs = block.instrs;
+        (pos, block.term)
+    }
+
+    /// The inverse of `reopen_block`: re-seal the current block with `term` at
+    /// its original position, so block order (entry first) is unchanged.
+    fn reseal_block_at(&mut self, pos: usize, term: Terminator) {
+        let instrs = mem::take(&mut self.cur_instrs);
+        self.blocks.insert(
+            pos,
+            Block {
+                id: self.cur_id,
+                instrs,
+                term,
+            },
+        );
     }
 
     /// R6/R1-R3: open the loop shape. The current (entry) block binds `params`,
@@ -2950,9 +2992,11 @@ impl<'a> FuncBuilder<'a> {
             // R12: a quotation literal interns its body and lowers to a phantom
             // `Value` with a placeholder `IrType` and *no* `Instr`. The checker
             // guarantees this phantom reaches only `call`/`times`/shuffle/bind
-            // (R7's join rejection keeps it out of a `Phi`), so it never enters
-            // an operand, terminator, or runtime code value. `I64` is the
-            // plainest non-aggregate placeholder (the IR side has no
+            // or a materialization boundary (a store, a word output, or a
+            // branch join, R11) -- where it is turned into a real `(code, env)`
+            // aggregate *before* it enters a `Phi`, operand, terminator, or
+            // runtime code value; it never enters one as a bare phantom. `I64`
+            // is the plainest non-aggregate placeholder (the IR side has no
             // `if`-condition concern, so the checker's `Cstr` choice does not
             // bind here).
             TermKind::Quotation(body) => {
@@ -3102,8 +3146,11 @@ impl<'a> FuncBuilder<'a> {
                 let saved_loop_state = self.save_loop_state();
 
                 let qv = self.stack.pop().expect("times: quotation on stack");
-                let id = self.quot_bodies[&qv];
-                let body = self.quot_defs[id.0].clone();
+                // R10/D1/D6: provenance decides, exactly as `call`. A phantom
+                // the checker resolved to a literal splices its body per
+                // iteration; a materialized value whose identity was erased is
+                // indirect-called once per iteration (still constant stack).
+                let quot_id = self.quot_bodies.get(&qv).copied();
                 let count = self.stack.pop().expect("times: count on stack");
 
                 // Synthesize the induction variable seeded 0; the row is the
@@ -3136,7 +3183,13 @@ impl<'a> FuncBuilder<'a> {
                 self.stack = row_phis;
                 self.stack.push(index_phi);
                 let locals_depth = self.locals.len();
-                self.lower_terms(&body, false);
+                match quot_id {
+                    Some(id) => {
+                        let body = self.quot_defs[id.0].clone();
+                        self.lower_terms(&body, false);
+                    }
+                    None => self.lower_indirect_call(qv),
+                }
                 self.locals.truncate(locals_depth);
 
                 // Back-edge: the body's result row plus index + 1.
@@ -4138,6 +4191,51 @@ impl<'a> FuncBuilder<'a> {
         dst
     }
 
+    /// Slice 7a (R11): at a branch join, materialize each arm's escaping
+    /// quotation phantom into a runtime `(code, env)` value so the join `Phi`s
+    /// two real aggregates. A slot needs materializing when the two arms leave
+    /// *different* phantoms (`t != e`, both in `quot_bodies`); a shared phantom
+    /// (`t == e`, a literal bound before the `if`) is forwarded untouched and
+    /// spliced past the join. The target signature is the declared output at
+    /// that slot (`cur_outputs[i]`): the checker only erases a differing join
+    /// in tail position feeding the word output, so the merged slot always maps
+    /// there. Materialization is appended to each arm's already-sealed block
+    /// (via `reopen_block`), since the differing-pair decision needs both
+    /// arms' stacks, known only after both are lowered.
+    fn materialize_join_quotations(
+        &mut self,
+        then_pred: BlockId,
+        mut then_stack: Vec<Value>,
+        else_pred: BlockId,
+        mut else_stack: Vec<Value>,
+    ) -> (Vec<Value>, Vec<Value>) {
+        let mut jobs: Vec<(usize, QuotSigId)> = Vec::new();
+        for (i, (t, e)) in then_stack.iter().zip(&else_stack).enumerate() {
+            if t != e && self.quot_bodies.contains_key(t) && self.quot_bodies.contains_key(e) {
+                match self.cur_outputs.get(i) {
+                    Some(&IrType::Quotation(sig)) => jobs.push((i, sig)),
+                    _ => unreachable!(
+                        "a differing quotation join slot maps to a declared quotation output"
+                    ),
+                }
+            }
+        }
+        if jobs.is_empty() {
+            return (then_stack, else_stack);
+        }
+        let (then_pos, then_term) = self.reopen_block(then_pred);
+        for &(i, sig) in &jobs {
+            then_stack[i] = self.materialize_quot_value(then_stack[i], sig);
+        }
+        self.reseal_block_at(then_pos, then_term);
+        let (else_pos, else_term) = self.reopen_block(else_pred);
+        for &(i, sig) in &jobs {
+            else_stack[i] = self.materialize_quot_value(else_stack[i], sig);
+        }
+        self.reseal_block_at(else_pos, else_term);
+        (then_stack, else_stack)
+    }
+
     /// Slice 7a (R10): lower `call` on a materialized quotation value whose
     /// identity the checker could not resolve to a literal. Load the value's
     /// `code` slot and call it indirectly -- its inputs the stack below the
@@ -4536,6 +4634,15 @@ impl<'a> FuncBuilder<'a> {
                 self.stack = s;
             }
             (Some((then_pred, then_stack)), Some((else_pred, else_stack))) => {
+                // R11: two arms leaving *different* quotation phantoms are a
+                // materialization boundary the checker already accepted; each
+                // arm mints its `(code, env)` value in its own (sealed) block
+                // so the join `Phi`s two real aggregates, not two phantoms
+                // (which define no bytes). The same phantom in both arms
+                // (`t == e`) stays a forwarded marker and is spliced past the
+                // join, so it is never materialized here.
+                let (then_stack, else_stack) =
+                    self.materialize_join_quotations(then_pred, then_stack, else_pred, else_stack);
                 self.start_block(join_id);
                 self.terminated = false;
                 let mut join_stack = Vec::with_capacity(then_stack.len());

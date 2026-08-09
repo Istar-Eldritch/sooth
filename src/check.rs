@@ -952,6 +952,17 @@ impl Ctx<'_> {
             Ctx::Line { .. } => None,
         }
     }
+
+    /// R11: the enclosing word's declared output row, the context a branch join
+    /// in tail position materializes its quotation arms against (the merged
+    /// slot maps to the output at the same index). A bare REPL line has no
+    /// declared row, so a materializing join there stays a located error.
+    fn declared_outputs(&self) -> Option<&[TypedSlot]> {
+        match self {
+            Ctx::Word { effect, .. } => Some(&effect.outputs),
+            Ctx::Line { .. } => None,
+        }
+    }
 }
 
 /// R1: recognize every user-defined `drop` overload -- a word literally
@@ -6712,27 +6723,73 @@ fn check_term(
                 ));
             }
             let mut merged = Vec::with_capacity(then_stack.len());
-            for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
-                // R7: a branch merge cannot carry a quotation whose identity is
-                // ambiguous, so reject at the join (not at consumption, which
-                // is too late: `lower_if` would emit a `Phi` over the phantoms
-                // even for a merged quotation only ever `drop`ped). Two arms
-                // carrying the *same* literal are safe (`lower_if`'s `t == e`
-                // fast path emits no `Phi`) and forward the marker. The `Cstr`
+            for (i, (t_then, t_else)) in then_stack.iter().zip(&else_stack).enumerate() {
+                // R7/R11: a branch merge cannot carry a quotation whose
+                // identity is ambiguous *unless* the enclosing context declares
+                // its type, in which case the join materializes each arm into a
+                // runtime `(code, env)` value (D4). Two arms carrying the
+                // *same* literal stay a forwarded marker (`lower_if`'s `t == e`
+                // fast path emits no `Phi`, splice preserved). The `Cstr`
                 // placeholder makes an arm's real `Cstr` compare equal to a
                 // quotation, so the ordinary `ty` mismatch below never catches
                 // the one-quotation shape; this guard has both phrasings.
-                let quot = match (t_then.quot, t_else.quot) {
-                    (None, None) => None,
+                let (quot, erased_ty) = match (t_then.quot, t_else.quot) {
+                    (None, None) => (None, None),
                     (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
-                        Some(QuotRef::Known(a))
+                        (Some(QuotRef::Known(a)), None)
                     }
-                    (Some(_), Some(_)) => {
-                        return Err(different_quotations_at_join_error(ctx, span));
+                    (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) => {
+                        // R11 ordering pin: the capture check runs before the
+                        // id/expected-type resolution, so a capturing arm always
+                        // raises R12 rather than falling through to
+                        // `different_quotations_at_join_error`.
+                        let enclosing: HashSet<String> =
+                            scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
+                        for id in [a, b] {
+                            let body = prov.quotations[id.0].body.clone();
+                            if body_captures_enclosing(&body, &enclosing) {
+                                return Err(capturing_quotation_error(
+                                    ctx,
+                                    prov.quotations[id.0].span,
+                                    "be left on a branch",
+                                ));
+                            }
+                        }
+                        // The expected quotation type threaded from the
+                        // enclosing declared context: at a word-body tail the
+                        // merged slot maps to the declared output at index `i`.
+                        // Without one the join cannot give the erased value a
+                        // type, so it stays a located error.
+                        let expected = if tail {
+                            ctx.declared_outputs()
+                                .and_then(|outs| outs.get(i))
+                                .map(|slot| slot.ty)
+                        } else {
+                            None
+                        };
+                        match expected {
+                            Some(Type::Quotation(eff)) => {
+                                let word = ctx.word_name().unwrap_or("the branch");
+                                let a_span = prov.quotations[a.0].span;
+                                let b_span = prov.quotations[b.0].span;
+                                check_literal_against_declared_effect(
+                                    a, eff, word, a_span, ctx, env, arrays, cells, refs, prov,
+                                    scope, poly,
+                                )?;
+                                check_literal_against_declared_effect(
+                                    b, eff, word, b_span, ctx, env, arrays, cells, refs, prov,
+                                    scope, poly,
+                                )?;
+                                // Erased: a runtime `(code, env)` value with a
+                                // real `Type::Quotation`, no `Known` marker.
+                                (None, Some(Type::Quotation(eff)))
+                            }
+                            _ => return Err(different_quotations_at_join_error(ctx, span)),
+                        }
                     }
                     _ => return Err(quotation_versus_value_at_join_error(ctx, span)),
                 };
-                if t_then.ty != t_else.ty {
+                if erased_ty.is_none() && t_then.ty != t_else.ty {
                     return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
                 }
                 // The type-only join above already rejects two arms whose
@@ -6780,7 +6837,9 @@ fn check_term(
                     }),
                 };
                 merged.push(Slot {
-                    ty: t_then.ty,
+                    // R11: a materialized join slot carries the declared
+                    // quotation type in place of the arms' `Cstr` placeholder.
+                    ty: erased_ty.unwrap_or(t_then.ty),
                     literal: t_then.literal && t_else.literal,
                     // A value merged from two branches is never a single
                     // known literal, so it can't feed a compile-time count.
@@ -7308,7 +7367,7 @@ fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
 /// not at consumption (R12's containment rests on it).
 fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
     format!(
-        "error: a quotation's body must be known where it is used, but these two branches leave different quotations at line {}{} (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+        "error: these two branches leave different quotations at line {}{}; give the quotation a declared type (a word output or field) so it can be materialized, or make both arms the same literal (a runtime quotation value is slice 7)",
         span.line,
         in_word(ctx),
     )
