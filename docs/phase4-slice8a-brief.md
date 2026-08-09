@@ -58,10 +58,20 @@ entry (slice 1's machinery), not a finite enumeration. Either the table carries 
 entries from day one or `len` is carved out and stays hardcoded, and the roadmap's claim that
 `len` is simply absorbed is the first thing the spec should check rather than inherit.
 
-**5. `.` dispatches on a category that exists only as Rust code.** `src/check.rs:6839`:
-`is_numeric() || is_bool() || matches!(Str | Cstr)`. There is no list of printable types
-anywhere to copy into a table. Table-ifying it means either expanding the predicate into one
-row per concrete numeric type by hand, or giving entries a category/bound key.
+**5. `.` dispatches on a category that exists only as Rust code, but its lowering rules that
+out anyway.** `src/check.rs:6839`: `is_numeric() || is_bool() || matches!(Str | Cstr)`.
+`.`'s actual codegen (`backend/qbe.rs:935`, `Instr::Print`) is inline QBE emitting QBE's own
+native variadic-call syntax (`call $printf(l $fmt, l {v}, ...)`) directly, plus hand-rolled
+widening and a static `$boolstrs` lookup table for `Bool`. Nothing about that lowering is
+reachable through `extern:`, which was deliberately built in Phase 3 to reject variadic C
+functions (`check_extern_cannot_express_a_variadic_c_function`), and there is no linked
+runtime library to bind against in the first place: every backend helper Sooth has today
+(`sooth_alloc`, `sooth_free`, `sooth_oob_trap`, `.`'s own printf calls) is QBE IR the backend
+emits fresh into each compiled binary, not a shared object. So `.` stays backend-lowered.
+What changes is only its *dispatch*: settled below as N concrete table rows, one per `IrType`
+it already handles, each tagged to the existing `Instr::Print` lowering. No category/bound
+key needed, because every row is an exact-type match like any other overload -- which is also
+what lets a user's own `: . ( Vec2 -- ) ;` become reachable through the same table, for free.
 
 **6. `unify_pair` is one cross-cutting rule, not per-operator logic.** `src/check.rs:206`
 handles literal and size-type coercion for the dozen binary operators
@@ -69,27 +79,15 @@ handles literal and size-type coercion for the dozen binary operators
 conversion to `usize`" diagnostic. Whether it runs before lookup or becomes table rows
 decides how much of `check_operator` actually disappears.
 
-**7. A latent symbol collision sits directly on this slice's path.** `qbe_name`
-(`src/backend/qbe.rs:186`) replaces every character outside `[A-Za-z0-9_.]` with `_`. Its own
-doc comment claims this "never causes a collision within a single compilation unit's word
-names". That is false, and cheap to demonstrate:
-
-```
-: + ( i64 i64 -- i64 ) drop ;
-: - ( i64 i64 -- i64 ) drop ;
-: main ( -- ) ;
-=> error: "cc" failed: Assembler messages:
-   Error: symbol `_' is already defined
-```
-
-Both `+` and `-` sanitize to the bare symbol `_`. The comment's reasoning confuses *applied
-consistently* with *injective*: using the same non-injective map at the definition and every
-call site keeps call sites pointing at the right string, but distinct source names still
-collapse onto one symbol. `check_duplicate_word_names` (`src/check.rs:2101`) does not catch it
-because it keys on source names, which differ. This is invisible today because operator
-definitions are unreachable anyway (finding 1). The moment this slice makes them dispatch, a
-`Vec2` module defining `+` and `-` hits it immediately, so it is in scope here rather than
-filed as a fourth pre-existing bug.
+**7. A latent symbol collision was on this slice's path, and turned out to be general.**
+`qbe_name` (`src/backend/qbe.rs:186`) replaced every character outside `[A-Za-z0-9_.]` with
+`_`, which is not injective: `+` and `-` both sanitized to the bare symbol `_`, and so did any
+two ordinary word names made of the same count of symbol characters (`~` and `?`, reproduced
+on `main` with no relation to overloading at all). Fixed standalone, outside this slice, since
+it was reachable today independent of dispatch and fixing it (not just diagnosing it) was the
+only correct answer: there is nothing wrong with a program defining both `+` and `-`, so a
+located collision error would have permanently forbidden a legitimate program rather than
+rejecting an actually-invalid one.
 
 ## Decisions (settled in ROADMAP.md, not reopened by the spec)
 
@@ -105,6 +103,20 @@ filed as a fourth pre-existing bug.
    Disagreement is a located error where the second candidate enters scope: the definition
    site when one is local, the import site when both are imported. Never a call-site
    ambiguity resolved by ranking.
+5. **Overlap between a concrete and a generic candidate is rejected, not ranked.**
+   `: + ( 'T 'T -- 'T )` beside `: + ( i64 i64 -- i64 )` is not identity (rule 1 doesn't
+   catch it: a poly word's `effect` is empty by construction, its signature living in
+   `PolySig`, so the types don't textually match), but it is still two candidates whose
+   domains overlap at every concrete type. No specialization ordering: reject it the same
+   shape as rule 1, at whichever site the second candidate enters scope. Nothing in the
+   language today needs a generic default with a concrete override to coexist, and inventing
+   ordering semantics for a consumer that doesn't exist yet is exactly the mistake the
+   generic-struct-declarations item already made once. Loosen this later if a real consumer
+   asks for it.
+6. **`.` gets N concrete rows, not a category key.** One row per `IrType` it already
+   handles (`i64`, `f64`, `Bool`, `Str`, `Cstr`, ...), each an exact-type match tagged to the
+   existing `Instr::Print` lowering (finding 5). No `Bound`-style category mechanism is built
+   for this slice; `.`'s printability was the only candidate for one, and it doesn't need it.
 
 Enforcement reuses the two sites that already exist rather than adding any:
 `check_duplicate_word_names` for definitions, and `check_selective_imports`'
@@ -123,20 +135,9 @@ error the check was added to replace. `drop`'s exemption survives 8a untouched a
 - **The entry type.** Findings 2, 3, and 4 rule out `Sig`. An entry carries a lowering, and at
   least one shipped candidate set (`len`) is generic over length and element type. Does the
   table hold generic entries from day one, or does `len` get carved out?
-- **The key.** It cannot be a plain list of concrete types once polymorphic words are
-  candidates: a poly word's `effect` is empty by construction, its signature living in
-  `PolySig`. `: + ( 'T 'T -- 'T )` against `: + ( i64 i64 -- i64 )` is *overlap*, not
-  identity. Rule 1 forbids identity and rule 2 ranks exact above coercion; neither covers a
-  concrete candidate sitting inside a generic candidate's domain.
 - **Where `unify_pair` runs.** Before lookup, leaving the table to answer only "is this
   operator defined for these types"? Or as table rows, which multiplies entries and has to
   re-derive X10's specificity from a lookup miss?
-- **`.`'s category.** Enumerate every printable concrete type as rows, or give entries a
-  category key?
-- **The `qbe_name` collision (finding 7).** Make the sanitizer injective, or reject the
-  collision at check time with a located error? An injective mangle changes every emitted
-  symbol name, so it interacts with the byte-for-byte exit criterion below and needs deciding
-  before implementation, not during.
 
 ## Out of scope
 
@@ -149,16 +150,20 @@ error the check was added to replace. `drop`'s exemption survives 8a untouched a
 - **The deferred view type** (DESIGN.md, *Slicing a buffer into a view*), which records this
   slice as its ordering gate. It would add a third `len` candidate of the runtime kind, so the
   entry shape must not preclude one, but nothing here waits on it.
+- **Moving `.` (or any builtin) onto `extern:`.** `.`'s lowering stays backend code (finding
+  5); only its dispatch key changes. Giving Sooth an actual linked runtime library, so a
+  print primitive could be declared via `extern:` instead of hand-lowered, is a real question
+  for later, not one this slice needs an answer to.
 
 ## Exit
 
 - `check_operator` / `check_term`'s type-directed match arms are gone and `builtin_table` is
   populated.
-- The full existing corpus, goldens and examples, is unchanged byte-for-byte, modulo whatever
-  the `qbe_name` decision forces (see open questions).
+- The full existing corpus, goldens and examples, is unchanged byte-for-byte.
 - A user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches* at a call site with
   two `Vec2` operands.
-- Rule 1's collision, rule 3's missing import, and rule 4's arity clash are each a located
-  error, with no definition left silently unreachable.
-- `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;` in one file no longer reaches
-  the assembler as a bare `symbol '_' is already defined`.
+- Rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
+  concrete/generic overlap are each a located error, with no definition left silently
+  unreachable.
+- `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;` in one file compiles and links
+  (the `qbe_name` fix, merged ahead of this slice).

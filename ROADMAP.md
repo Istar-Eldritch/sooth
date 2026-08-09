@@ -1644,13 +1644,13 @@ then find out what the compiler owes it.
    rather than through any table — which is why `builtin_table` is empty. `len`'s
    length-polymorphism (slice 1) is the other such site. Retire the hardcoded match arms into
    a real overload table, with a golden asserting every existing operator/`.`/`len` call site
-   lowers identically. Brief written (`docs/phase4-slice8a-brief.md`), which adds a third
-   measured collision to the two fixed above: `qbe_name` (`src/backend/qbe.rs`) maps every
-   character outside `[A-Za-z0-9_.]` to `_`, so `+` and `-` defined in one file both emit the
-   bare symbol `_` and already fail at the assembler as already-defined, despite that
-   function's doc comment claiming a collision is impossible. Invisible today only because
-   operator definitions are unreachable; in scope here, because this slice is what makes
-   them reachable.
+   lowers identically. Brief written (`docs/phase4-slice8a-brief.md`), which found a third
+   latent collision while measuring this slice, fixed standalone rather than folded in:
+   `qbe_name` (`src/backend/qbe.rs`) mapped every character outside `[A-Za-z0-9_.]` to `_`,
+   so `+` and `-` defined in one file both emitted the bare symbol `_` and failed at the
+   assembler as already-defined — a general bug reachable today independent of dispatch (two
+   ordinary symbol-named words collide the same way), fixed by making the mangle injective
+   rather than diagnosed, since there is nothing wrong with a program defining both.
 
    **Operators are just words, so a user overload needs no new syntax: `: + ( Vec2 Vec2 --
    Vec2 ) ;` is already the definition form, and it already parses and checks.** What blocks
@@ -1660,7 +1660,7 @@ then find out what the compiler owes it.
    any lookup. Sooth today silently accepts a word it will never dispatch to, which is the
    exact class of Forth silent failure this language exists to reject. `drop` is the one
    existing counterexample, resolved by a bespoke registry (`find_drop_overloads`); 8a
-   generalises that rather than inventing it. **Four rules, settled:**
+   generalises that rather than inventing it. **Six rules, settled:**
    1. **No shadowing.** A user overload whose input types exactly match an existing candidate
       (builtin or imported) is a located error, not a silent override — the same shape as the
       duplicate-word check.
@@ -1679,10 +1679,26 @@ then find out what the compiler owes it.
       scope*: the definition site when one is local, the import site when both are imported.
       It is not a call-site ambiguity to be resolved by ranking; the clash is rejected before
       any call site is looked at.
+   5. **Overlap between a concrete and a generic candidate is rejected, not ranked.**
+      `: + ( 'T 'T -- 'T )` beside `: + ( i64 i64 -- i64 )` is not identity (a poly word's
+      `effect` is empty by construction, so rule 1's textual match never fires) but the
+      domains still overlap at every concrete type. No specialization ordering: reject it the
+      same shape as rule 1. Nothing today needs a generic default and a concrete override to
+      coexist, and inventing ordering semantics for a consumer that doesn't exist is the same
+      mistake the generic-struct-declarations item already made once; loosen this later if a
+      real consumer asks.
+   6. **`.` gets N concrete rows, not a category key.** One row per `IrType` it already
+      handles, each an exact-type match tagged to the existing `Instr::Print` lowering. `.`'s
+      lowering stays backend code — it is inline QBE using QBE's own variadic-call syntax
+      directly, which `extern:` cannot express (deliberately, since Phase 3: no variadic C
+      functions) and there is no linked runtime library to bind against regardless, since
+      every backend helper Sooth has is IR emitted fresh into each compiled binary. Only
+      `.`'s dispatch key changes, to the same exact-match shape every other row uses — which
+      is also what makes a user's own `: . ( Vec2 -- ) ;` reachable through the same table.
 
    Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
    structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot
-   simply inherit these four rules, and which ends with `drop` no longer being the universal
+   simply inherit these six rules, and which ends with `drop` no longer being the universal
    disposal verb at all.
 
    **These rules widen a check that shipped after this plan was written.**
@@ -1713,23 +1729,18 @@ then find out what the compiler owes it.
    from the type). So an entry carries a lowering, not just an effect. A third candidate of the
    runtime kind appears if the deferred view type ever lands (DESIGN.md, *Slicing a buffer into
    a view*, which now records 8a as its ordering gate); the entry shape should not preclude it;
-   (c) `.` dispatches on a *category* (`is_numeric() || is_bool() || Str | Cstr`), a predicate that
-   exists only as Rust code, so table-ifying it means either enumerating every concrete
-   numeric type by hand or giving entries a category/bound key. Related: `unify_pair`'s
-   coercion is one cross-cutting rule shared by a dozen binary operators, so the brief must
-   say whether it runs before lookup (leaving the table to answer only "is this operator
-   defined for these types") or becomes table rows (which would multiply entries and lose
-   X10's "needs an explicit conversion to `usize`" specificity); and (d) the key cannot be a
-   plain list of concrete types once polymorphic words are candidates, because a poly word's
-   `effect` is empty by construction (its signature lives in `PolySig`, slice 1). So
-   `: + ( 'T 'T -- 'T )` against `: + ( i64 i64 -- i64 )` is *overlap*, not identity: rule 1
-   forbids identity and rule 2 ranks exact above coercion, and neither covers a concrete
-   candidate sitting inside a generic candidate's domain.
+   (c) `.`'s category dispatch and the concrete/generic overlap are both settled above as
+   rules 6 and 5, so the only genuinely open question `unify_pair` raises stands alone: it is
+   one cross-cutting rule shared by a dozen binary operators, so the spec must say whether it
+   runs before lookup (leaving the table to answer only "is this operator defined for these
+   types") or becomes table rows (which would multiply entries and lose X10's "needs an
+   explicit conversion to `usize`" specificity).
    **Exit:** `check_operator`/`check_term`'s type-directed arms are gone, `builtin_table` is
-   populated, the full existing corpus (goldens, examples) is unchanged byte-for-byte, and a
-   user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches* — with rule 1's
-   collision and rule 3's missing-import both located errors, and no definition left silently
-   unreachable.
+   populated, the full existing corpus (goldens, examples) is unchanged byte-for-byte, a
+   user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches*, and
+   `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;` in one file compiles and links
+   — with rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
+   overlap each a located error, and no definition left silently unreachable.
 
    **8b — polymorphic `drop`, and the constraint it forces.** `drop` overloads ride the 8a
    table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
