@@ -255,9 +255,16 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
 
 /// One builtin overload candidate (slice 8a, Q-A): the concrete input types
 /// it matches (deepest-first), the concrete outputs it produces, and the
-/// codegen a call resolving to it emits. `lower` is what lowering consults
-/// once a user overload can shadow a builtin name (slice 8a phase 2); the
-/// checker's dispatch reads only `inputs`/`outputs`.
+/// codegen a call resolving to it emits.
+///
+/// Only `inputs`/`outputs` are load-bearing: they are what the checker's
+/// dispatch reads. `lower` records which instruction each row's retired
+/// `check_operator` arm produced, but nothing consumes it -- lowering reaches
+/// a builtin through `lower_call`'s name-directed arms and an overload
+/// through the per-`Span` resolved-symbol record, neither of which consults
+/// this table. It is unused weight kept only because it documents the
+/// name-to-codegen mapping; delete it, and the unit tests that only assert
+/// its shape, unless a table-driven lowering actually arrives to want it.
 #[derive(Debug, Clone)]
 pub struct BuiltinRow {
     pub inputs: Vec<Type>,
@@ -3643,10 +3650,19 @@ fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
 /// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;` ends in the
 /// *builtin* `<` on two `i64`s. Treating either as a back-edge opens loop
 /// machinery whose phi operands never arrive, and lowering then panics on the
-/// missing header. A genuine self-recursive overload is unaffected in meaning:
-/// it lowers as an ordinary recursive `Instr::Call` instead of a loop, correct
-/// but not tail-call-optimized. Telling those apart needs the call site's
-/// resolved operand types, which this syntactic pass does not have.
+/// missing header.
+///
+/// A genuine self-recursive overload keeps its meaning but loses its loop: it
+/// lowers as an ordinary recursive `Instr::Call`, so it computes the right
+/// answer and then overflows the stack once driven deep (measured: a segfault
+/// around 1e6 frames, where the identical body under a non-builtin name loops
+/// in constant space). Renaming a word to a builtin name therefore changes its
+/// depth behaviour silently, which is a poor fit for a language whose point is
+/// turning Forth's silent failures into errors. Telling the two apart needs
+/// the call site's resolved operand types: the checker does have those in
+/// `check_term`, so a diagnostic (or a resolution-aware self-call test) is
+/// reachable future work; this syntactic pass, which runs over a `WordDef`
+/// alone, is simply the wrong place for it.
 pub fn has_self_tail_call(word: &WordDef) -> bool {
     !is_builtin_word_name(&word.name)
         && tail_position_calls(&word.body)

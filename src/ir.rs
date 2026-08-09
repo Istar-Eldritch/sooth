@@ -2478,8 +2478,19 @@ fn is_aggregate(ty: IrType) -> bool {
 /// R10: whether a combinator body has a tail-position call to itself, the
 /// lowering twin of the checker's `tail_position_calls`/`has_self_tail_call`
 /// (which take a `&WordBody` this splice site does not hold). The syntactic
-/// tail rule is identical: the final term of the body, or the final term of
+/// tail rule is the same: the final term of the body, or the final term of
 /// either arm of a terminal `if`, recursively.
+///
+/// The *conclusion* drawn from it no longer is. Since slice 8a,
+/// `has_self_tail_call` additionally refuses a builtin-named word, because
+/// the same name in tail position may resolve to the builtin rather than to
+/// the enclosing word; this function still decides on the bare name. The two
+/// only agree today because a builtin-named combinator cannot exist: a
+/// combinator takes a quotation operand, and `check_operator`'s R11 guard
+/// rejects a quotation operand to any builtin name before the env combinator
+/// lookup runs. Nothing pins that, so if the R11 guard ever narrows, this
+/// needs the same refusal or check and lowering will disagree about whether a
+/// splice is a loop.
 fn body_tail_calls_self(body: &[Term], name: &str) -> bool {
     match body.last().map(|t| &t.kind) {
         Some(TermKind::Call(n)) => n == name,

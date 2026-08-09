@@ -562,12 +562,17 @@ fn unrelated_modules_generic_and_concrete_same_name_do_not_collide() {
     // Slice 8a fix 3 (R5, module-scoped): a poly word in one module and an
     // unrelated concrete word of the same name and arity in a *different*
     // module that does not import it must not trip the generic/concrete
-    // overlap check -- it is keyed by name alone before this fix, global
-    // across the whole program, so this used to reject `g::bump` merely
-    // because the unrelated sibling `c` happened to also define a concrete
-    // `bump`. `main` imports both `g` and `c` (so both share one `Module`,
-    // the only way the pre-fix global bug could ever fire), but `g` and `c`
-    // do not import each other.
+    // overlap check -- it was keyed by name alone before this fix, global
+    // across the whole program. `main` imports both `g` and `c`, but `g` and
+    // `c` do not import each other.
+    //
+    // This is a shape check, not the guard: it stays green with the fix
+    // reverted, because `resolve::mangle` is unconditional per-module, so two
+    // modules' bare `bump`s never collide by string in a real multi-file
+    // build and the global key could not fire here. The discriminating test
+    // is the direct `WordDef`-construction unit test in `check.rs`, which
+    // does fail when reverted. Kept because it pins the user-visible
+    // behaviour end to end.
     let c = Closure::new("overlap-unrelated-modules");
     c.write("g.sth", ": bump ( 'T -- 'T ) ;\nexport: bump ;\n");
     c.write(
