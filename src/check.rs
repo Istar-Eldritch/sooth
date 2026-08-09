@@ -765,9 +765,26 @@ fn call_local(name: &str) -> &str {
 /// not bound here (an outer local inherited into this block) is deliberately
 /// absent, so it is never relaxed by this invocation (D6). A name is *used* by
 /// a `TermKind::Call` whose bare-or-sigilled target resolves to it, at any
-/// depth; a use inside a nested `if` arm or quotation is attributed to the
-/// index of the top-level term of *this* list that contains it (Q3's
-/// conservative max).
+/// depth; a use inside a nested `if` arm is attributed to the index of the
+/// top-level term of *this* list that contains it (Q3's conservative max),
+/// since both arms execute synchronously there.
+///
+/// A quotation is different: an *unbound* literal (passed directly to a word,
+/// e.g. a combinator argument) is consumed at its own position, so a capture
+/// inside it is correctly attributed there, same as an `if` arm. But a
+/// quotation *bound* to a local (`[ ... ] | q |`) does not execute at its own
+/// literal; it executes wherever `q` is later used, arbitrarily far away, and
+/// a capture inside it must not die before that. `bound_quotation_name`
+/// detects the bound case (the literal immediately followed by the `Bind`
+/// that names it -- nothing else can have intervened, so it is exactly the
+/// bind's shallowest/last name); its captures go into `captures` instead of
+/// `last_use`, and a post-pass fixpoint propagates each bound name's own
+/// last use through the capture graph, transitively (a quotation capturing a
+/// quotation, e.g. `[ q1 call ] | q2 |`). The graph is acyclic -- a
+/// quotation can only capture names already bound earlier in program order --
+/// so the fixpoint always terminates. A quotation not immediately followed by
+/// a `Bind` (passed straight to a word, or produced but never named) keeps
+/// the old, unchanged behaviour.
 struct Liveness {
     last_use: HashMap<String, usize>,
 }
@@ -776,6 +793,7 @@ impl Liveness {
     fn scan(terms: &[Term]) -> Self {
         let mut last_use = HashMap::new();
         let mut bound: HashSet<String> = HashSet::new();
+        let mut captures: HashMap<String, HashSet<String>> = HashMap::new();
         for (i, term) in terms.iter().enumerate() {
             match &term.kind {
                 TermKind::Bind(names) => {
@@ -793,11 +811,11 @@ impl Liveness {
                         last_use.insert(local.to_string(), i);
                     }
                 }
-                // A nested `if` arm or quotation is its own `check_terms`
-                // invocation with its own binds; here we only look for uses of
-                // names *this* list bound, attributed to the containing
-                // top-level index (Q3's conservative max). Nested binds are not
-                // collected: they belong to the nested invocation's own scan.
+                // A nested `if` arm is its own `check_terms` invocation with
+                // its own binds; here we only look for uses of names *this*
+                // list bound, attributed to the containing top-level index
+                // (Q3's conservative max). Nested binds are not collected:
+                // they belong to the nested invocation's own scan.
                 TermKind::If {
                     then_branch,
                     else_branch,
@@ -807,12 +825,54 @@ impl Liveness {
                     Self::nested_uses(else_branch, &bound, i, &mut last_use);
                 }
                 TermKind::Quotation(inner) => {
-                    Self::nested_uses(inner, &bound, i, &mut last_use);
+                    if let Some(name) = Self::bound_quotation_name(terms, i) {
+                        let mut reached = HashSet::new();
+                        Self::nested_captures(inner, &bound, &mut reached);
+                        captures.entry(name).or_default().extend(reached);
+                    } else {
+                        Self::nested_uses(inner, &bound, i, &mut last_use);
+                    }
                 }
                 _ => {}
             }
         }
+
+        // Fixpoint: propagate each bound quotation's own last use to every
+        // name its body captures, repeating until nothing grows.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (name, reached) in &captures {
+                let Some(&own) = last_use.get(name) else {
+                    continue;
+                };
+                for target in reached {
+                    let entry = last_use.entry(target.clone()).or_insert(own);
+                    if *entry < own {
+                        *entry = own;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
         Liveness { last_use }
+    }
+
+    /// The name a quotation literal at `terms[i]` is bound to, if the very
+    /// next term is the `Bind` that names it. Bind pops one value per name,
+    /// leftmost taking the deepest; since nothing intervenes between the
+    /// literal and this `Bind`, the literal is the most recently pushed
+    /// value, i.e. the bind's *last* name. Anything else immediately
+    /// following (a word call consuming it, another quotation, end of list,
+    /// or a `Bind` reached only after other values were pushed in between)
+    /// means the quotation is not detectably bound here, and keeps the old
+    /// consumed-at-its-own-position treatment.
+    fn bound_quotation_name(terms: &[Term], i: usize) -> Option<String> {
+        match terms.get(i + 1).map(|t| &t.kind) {
+            Some(TermKind::Bind(names)) => names.last().cloned(),
+            _ => None,
+        }
     }
 
     fn nested_uses(
@@ -840,6 +900,35 @@ impl Liveness {
                 }
                 TermKind::Quotation(inner) => {
                     Self::nested_uses(inner, bound, at, last_use);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Like `nested_uses`, but for a *bound* quotation's body: instead of
+    /// attributing an outer name's use directly to an index, record that this
+    /// quotation's body syntactically reaches it, so `scan`'s fixpoint can
+    /// propagate through it once the binding's own last use is known.
+    fn nested_captures(terms: &[Term], bound: &HashSet<String>, out: &mut HashSet<String>) {
+        for term in terms {
+            match &term.kind {
+                TermKind::Call(name) => {
+                    let local = call_local(name);
+                    if bound.contains(local) {
+                        out.insert(local.to_string());
+                    }
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::nested_captures(then_branch, bound, out);
+                    Self::nested_captures(else_branch, bound, out);
+                }
+                TermKind::Quotation(inner) => {
+                    Self::nested_captures(inner, bound, out);
                 }
                 _ => {}
             }

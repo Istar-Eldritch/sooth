@@ -1523,8 +1523,13 @@ then find out what the compiler owes it.
    a new carrier, since a closure simply inherits its captures' restrictions. Slice 6f settled
    the other half of that inheritance — *when* a captured borrow ends — by making a bound
    reference die at its last use exactly as a stacked one does, so a closure capturing a
-   reference now has a settled end-of-borrow rule to point at rather than an open question. The
-   `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
+   reference now has a settled end-of-borrow rule to point at rather than an open question. It
+   also fixed the same question for a quotation bound to a local and called later, whose
+   captures now die with the binding rather than the literal, transitively through a
+   quotation capturing a quotation — sound only because such a quotation cannot yet escape the
+   block that binds it (a runtime quotation value is this slice); once one can, that
+   propagation needs re-grounding against whatever this slice's environment-capture rule
+   turns out to be, not inherited unexamined. The `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
    question is how the call takes the closure, and Sooth already spells all three, `call`
    through `&q`, through `&!q`, and by value. A closure capturing a linear value is itself
    linear, so dropping it disposes the captures through the existing destructor mechanism.

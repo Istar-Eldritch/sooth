@@ -1362,6 +1362,99 @@ fn dup_makes_a_stack_alias_independent() {
     assert_eq!(code, 0);
 }
 
+// --- a borrow captured by a quotation bound to a local
+
+/// A mutable borrow of `arr`, captured by a quotation immediately bound to
+/// `q` and called later, then a second `&!arr`. Regression cover for the
+/// fix to `Liveness::scan`'s quotation handling: it used to attribute a
+/// capture to the literal's own textual position (correct for an `if` arm,
+/// wrong for a quotation that executes only at `call`), so `out` looked dead
+/// the moment `q`'s literal was written and a second live `&!arr` slipped
+/// through silently aliasing the first.
+const CAPTURE_PRELUDE: &str = "\
+: input ( -- [i64 4] ) 0 4 fill | s | s ;
+";
+
+#[test]
+fn mutable_borrow_captured_by_a_bound_quotation_called_later_is_error() {
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ out 0 >usize &!> 9 ! ] | q |\n  &!arr | out2 |\n  \
+         out2 1 >usize &!> 7 !\n  q call\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 5") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured by `q` and not yet called: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_transitively_through_nested_quotations_is_error() {
+    // A quotation capturing a quotation (`q2` calls `q1`, `q1` captures
+    // `out`): a single-level propagation of a bound quotation's last use to
+    // its own captures is not enough, since `out` is never referenced by
+    // `q2`'s own body directly. The fixpoint in `Liveness::scan` must chain
+    // through `q1` to reach `out`.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ out 0 >usize &!> 9 ! ] | q1 |\n  [ q1 call ] | q2 |\n  &!arr | out2 |\n  \
+         out2 1 >usize &!> 7 !\n  q2 call\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 5") && err.contains("is still live"),
+        "the still-live borrow must still be traced back to `out`: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_by_a_quotation_passed_to_another_word_is_error() {
+    // The capturing quotation need not be called directly (`q call`): any
+    // top-level use of `q` (here, passed as an operand to `apply`, which
+    // calls it) must extend the capture through to the borrow it holds.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+         : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ out 0 >usize &!> 9 ! ] | q |\n  &!arr | out2 |\n  \
+         out2 1 >usize &!> 7 !\n  q apply\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 6") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured by `q`: {err}"
+    );
+}
+
+#[test]
+fn unbound_quotation_capture_still_dies_at_its_own_literal() {
+    // Control: a quotation passed *directly* to a word (never bound to a
+    // local) must keep the old behaviour untouched -- its capture dies at
+    // its own position, so a second `&!arr` right after is accepted. This is
+    // the shape the dogfood (`c::fold`) depends on; if this regresses, the
+    // fix has widened past bound quotations into unbound ones.
+    let (stdout, code) = run_src(
+        "unbound-quotation-capture-dies-at-its-own-position",
+        &format!(
+            "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+             : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+             [ out 0 >usize &!> 9 ! ] apply\n  &!arr | out2 |\n  \
+             out2 1 >usize &!> 7 !\n  &arr 0 >usize &> @ .\n ;\n"
+        ),
+    );
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+}
+
 // --- loop back-edge rules, both sides
 
 const BIG_LIST: &str = "\
