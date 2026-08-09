@@ -1,0 +1,230 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+data $strb0 = { b 101, b 120, b 97, b 109, b 112, b 108, b 101, b 115, b 47, b 114, b 101, b 115, b 111, b 117, b 114, b 99, b 101, b 95, b 102, b 105, b 120, b 116, b 117, b 114, b 101, b 46, b 116, b 120, b 116, b 0 }
+data $strd0 = { l $strb0, l 29 }
+type :arr_0 = align 1 { b 64 }
+type :File = { l }
+
+export function $sooth_main() {
+@start
+	%v0 =l copy $strd0
+	%v1 =l loadl %v0
+	%v2 =l copy 0
+	%v3 =l call $open(l %v1, l %v2)
+	%v4 =l alloc8 8
+	%v5 =l add %v4, 0
+	storel %v3, %v5
+	%v6 =l copy 0
+	%v7 =w and %v6, 255
+	%v8 =l copy 64
+	%v9 =l alloc4 64
+	%v10 =l add %v9, 0
+	storeb %v7, %v10
+	%v11 =l add %v9, 1
+	storeb %v7, %v11
+	%v12 =l add %v9, 2
+	storeb %v7, %v12
+	%v13 =l add %v9, 3
+	storeb %v7, %v13
+	%v14 =l add %v9, 4
+	storeb %v7, %v14
+	%v15 =l add %v9, 5
+	storeb %v7, %v15
+	%v16 =l add %v9, 6
+	storeb %v7, %v16
+	%v17 =l add %v9, 7
+	storeb %v7, %v17
+	%v18 =l add %v9, 8
+	storeb %v7, %v18
+	%v19 =l add %v9, 9
+	storeb %v7, %v19
+	%v20 =l add %v9, 10
+	storeb %v7, %v20
+	%v21 =l add %v9, 11
+	storeb %v7, %v21
+	%v22 =l add %v9, 12
+	storeb %v7, %v22
+	%v23 =l add %v9, 13
+	storeb %v7, %v23
+	%v24 =l add %v9, 14
+	storeb %v7, %v24
+	%v25 =l add %v9, 15
+	storeb %v7, %v25
+	%v26 =l add %v9, 16
+	storeb %v7, %v26
+	%v27 =l add %v9, 17
+	storeb %v7, %v27
+	%v28 =l add %v9, 18
+	storeb %v7, %v28
+	%v29 =l add %v9, 19
+	storeb %v7, %v29
+	%v30 =l add %v9, 20
+	storeb %v7, %v30
+	%v31 =l add %v9, 21
+	storeb %v7, %v31
+	%v32 =l add %v9, 22
+	storeb %v7, %v32
+	%v33 =l add %v9, 23
+	storeb %v7, %v33
+	%v34 =l add %v9, 24
+	storeb %v7, %v34
+	%v35 =l add %v9, 25
+	storeb %v7, %v35
+	%v36 =l add %v9, 26
+	storeb %v7, %v36
+	%v37 =l add %v9, 27
+	storeb %v7, %v37
+	%v38 =l add %v9, 28
+	storeb %v7, %v38
+	%v39 =l add %v9, 29
+	storeb %v7, %v39
+	%v40 =l add %v9, 30
+	storeb %v7, %v40
+	%v41 =l add %v9, 31
+	storeb %v7, %v41
+	%v42 =l add %v9, 32
+	storeb %v7, %v42
+	%v43 =l add %v9, 33
+	storeb %v7, %v43
+	%v44 =l add %v9, 34
+	storeb %v7, %v44
+	%v45 =l add %v9, 35
+	storeb %v7, %v45
+	%v46 =l add %v9, 36
+	storeb %v7, %v46
+	%v47 =l add %v9, 37
+	storeb %v7, %v47
+	%v48 =l add %v9, 38
+	storeb %v7, %v48
+	%v49 =l add %v9, 39
+	storeb %v7, %v49
+	%v50 =l add %v9, 40
+	storeb %v7, %v50
+	%v51 =l add %v9, 41
+	storeb %v7, %v51
+	%v52 =l add %v9, 42
+	storeb %v7, %v52
+	%v53 =l add %v9, 43
+	storeb %v7, %v53
+	%v54 =l add %v9, 44
+	storeb %v7, %v54
+	%v55 =l add %v9, 45
+	storeb %v7, %v55
+	%v56 =l add %v9, 46
+	storeb %v7, %v56
+	%v57 =l add %v9, 47
+	storeb %v7, %v57
+	%v58 =l add %v9, 48
+	storeb %v7, %v58
+	%v59 =l add %v9, 49
+	storeb %v7, %v59
+	%v60 =l add %v9, 50
+	storeb %v7, %v60
+	%v61 =l add %v9, 51
+	storeb %v7, %v61
+	%v62 =l add %v9, 52
+	storeb %v7, %v62
+	%v63 =l add %v9, 53
+	storeb %v7, %v63
+	%v64 =l add %v9, 54
+	storeb %v7, %v64
+	%v65 =l add %v9, 55
+	storeb %v7, %v65
+	%v66 =l add %v9, 56
+	storeb %v7, %v66
+	%v67 =l add %v9, 57
+	storeb %v7, %v67
+	%v68 =l add %v9, 58
+	storeb %v7, %v68
+	%v69 =l add %v9, 59
+	storeb %v7, %v69
+	%v70 =l add %v9, 60
+	storeb %v7, %v70
+	%v71 =l add %v9, 61
+	storeb %v7, %v71
+	%v72 =l add %v9, 62
+	storeb %v7, %v72
+	%v73 =l add %v9, 63
+	storeb %v7, %v73
+	%v74 =l add %v4, 0
+	%v75 =l loadl %v74
+	%v76 =l add %v9, 0
+	%v77 =l copy 64
+	%v78 =l copy %v77
+	%v79 =l call $read(l %v75, l %v76, l %v78)
+	call $printf(l $fmt, l %v79, ...)
+	call $sooth_struct_drop_0(:File %v4)
+	ret
+}
+
+export function $sooth_struct_drop_0(:File %v0) {
+@start
+	%v1 =l add %v0, 0
+	%v2 =l loadl %v1
+	%v3 =l call $close(l %v2)
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

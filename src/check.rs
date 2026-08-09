@@ -7510,6 +7510,12 @@ fn check_operator(
     // name being one we handle (else fall through so a later dispatcher can
     // claim it), before the type-directed reads that would otherwise spell the
     // `Cstr` placeholder into a mismatch.
+    // This name list mirrors `BUILTIN_TABLE`'s keys (plus the `>T` conversions,
+    // which are name-parsed, not table rows). Keep it in sync when a table
+    // operator is added. It is not derived from `BUILTIN_TABLE.contains_key`
+    // on purpose: the guard must also cover `>T`, and `is_unary` below can't be
+    // read off row arity without changing `>=` (which the `>`-prefix test
+    // already treats as unary here).
     let is_operator = matches!(
         name,
         "+" | "-"
@@ -11393,9 +11399,12 @@ mod tests {
 
     #[test]
     fn operator_dispatch_resolves_the_exact_row_type() {
-        // The table exact-pass drives the resulting slot type: a homogeneous
-        // op over `u8` yields `u8`, a comparison yields `bool`, `.` yields
-        // nothing. Guards the table -> stack-effect wiring in `check_operator`.
+        // Guards that resolution yields the right stack-effect type: a
+        // homogeneous op over `u8` yields `u8`, a comparison yields `bool`,
+        // `.` yields nothing. Note these all resolve identically through the
+        // numeric fallback too, so this does *not* prove the table pass is
+        // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
+        // guard that the exact-match table row actually drives dispatch.
         assert_eq!(
             infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
             vec![Type::from_name("u8").unwrap()]
