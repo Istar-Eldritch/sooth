@@ -124,6 +124,14 @@ struct PolyWordEntry {
     word: WordDef,
     resolver: HashMap<String, String>,
     ir_lower_env: HashMap<String, ir::Arity>,
+    /// The defining-line body's resolved-overload record (R7), frozen
+    /// alongside `resolver`/`ir_lower_env`: a later instantiation lowers this
+    /// word's own body, so it must dispatch a builtin-overloaded call site the
+    /// same way the definition-time check resolved it, not the empty map.
+    /// Omitting this compiled the call and then lowered it as the builtin,
+    /// which crashed rather than merely mis-dispatched (segfault, not a wrong
+    /// answer) on pointer/aggregate operands.
+    builtin_overloads: HashMap<Span, String>,
 }
 
 /// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
@@ -1269,6 +1277,7 @@ impl Session {
             funcs.extend(ir::lower_instantiation(
                 &inst.symbol,
                 sig,
+                &entry.builtin_overloads,
                 &inst.subst,
                 &entry.word.body,
                 &entry.ir_lower_env,
@@ -2318,10 +2327,11 @@ impl Session {
         // multi-output gate below only ever sees a body that already
         // type-checked (`: twice ( 'T -- 'T 'T ) dup ;` fails the `Copy` gate
         // here as X1, never reaching the gate despite its two outputs).
-        // Slice 8a fix 2: REPL lowering of a poly instantiation always passes
-        // an empty overloads map (out of scope this slice), so this record is
-        // scratch, discarded once the body checks.
-        let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+        // R7: this body's resolved-overload call sites, frozen into
+        // `PolyWordEntry` alongside the resolver/arity snapshot below, so a
+        // later instantiation's lowering dispatches through them instead of
+        // an empty map.
+        let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
         check::check_poly_body(
             &word,
             &sig,
@@ -2329,7 +2339,7 @@ impl Session {
             &self.structs,
             &self.enums,
             &self.arrays,
-            &mut scratch_overloads,
+            &mut builtin_overloads,
         )?;
 
         // R3/R7/X3: a body resolving to two or more concrete outputs, or an
@@ -2382,6 +2392,7 @@ impl Session {
                 word,
                 resolver,
                 ir_lower_env,
+                builtin_overloads,
             },
         );
         writeln!(writer, "defined {name}").map_err(|e| format!("writing stdout: {e}"))?;

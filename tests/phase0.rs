@@ -3578,6 +3578,23 @@ fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
 }
 
 #[test]
+fn a_tail_call_to_an_overloaded_ordinary_name_is_not_a_fabricated_cycle() {
+    // `p`'s tail call means the i64 `show` (a leaf); `show(Vec2)`'s tail call
+    // to `p` is the only real edge. name_to_idx previously mapped the shared
+    // name `show` to a single word index via `.collect()`, silently keeping
+    // whichever candidate was indexed last, so `p`'s tail call landed on
+    // `show(Vec2)` instead and closed a cycle that does not exist.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: show ( i64 -- ) . ;\n\
+: p ( Vec2 -- ) | v | v Vec2>x show ;\n\
+: show ( Vec2 -- ) | v | v p ;\n\
+: main ( -- ) 3 4 Vec2 show ;\n";
+    let (stdout, code) = run_overload_src("tail-cycle-ordinary-overload", src);
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn mutual_tail_recursion_between_ordinary_words_is_still_an_error() {
     // The guard above must not have disarmed the pass for ordinary names,
     // which is the case it exists for.

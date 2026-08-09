@@ -3706,10 +3706,38 @@ fn check_tail_call_cycles(
     // trade `has_self_tail_call` documents. Deciding these apart needs each
     // call site's resolved candidate, which exists only after the body walk
     // this pass precedes.
+    //
+    // The identical hazard exists for an *ordinary* overloaded name once R1
+    // admits two candidates sharing it: `name_to_idx` maps a name to one word
+    // index, so building it via a plain `.collect()` over every non-builtin
+    // word silently kept only the last-indexed candidate, and a tail call
+    // meant for the other candidate was credited as an edge to it instead --
+    //   : show ( i64 -- ) . ;
+    //   : p ( Vec2 -- ) | v | v Vec2>x show ;   -- tail-calls show(i64), a leaf
+    //   : show ( Vec2 -- ) | v | v p ;          -- tail-calls p
+    // has no real cycle (`show(i64)` calls nothing further), but the fabricated
+    // edge `p -> show(Vec2) -> p` reported `mutual tail recursion`. Any name
+    // with more than one non-drop-overload candidate is excluded from
+    // `name_to_idx` for the same reason a builtin name is: which candidate a
+    // bare tail call reaches cannot be decided here. The same accepted cost
+    // applies -- a genuine mutual cycle purely between two candidates of one
+    // overloaded name is no longer caught by this pass -- and for the same
+    // reason: the call site's resolved candidate exists only after the body
+    // walk this pass precedes.
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for (i, w) in words.iter().enumerate() {
+        if !drop_overload_indices.contains(&i) {
+            *name_counts.entry(w.name.as_str()).or_insert(0) += 1;
+        }
+    }
     let name_to_idx: HashMap<&str, usize> = words
         .iter()
         .enumerate()
-        .filter(|(i, w)| !drop_overload_indices.contains(i) && !is_builtin_word_name(&w.name))
+        .filter(|(i, w)| {
+            !drop_overload_indices.contains(i)
+                && !is_builtin_word_name(&w.name)
+                && name_counts.get(w.name.as_str()) == Some(&1)
+        })
         .map(|(i, w)| (w.name.as_str(), i))
         .collect();
 

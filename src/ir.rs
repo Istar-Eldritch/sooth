@@ -2234,6 +2234,7 @@ pub(crate) fn lower_word(
 pub(crate) fn lower_instantiation(
     symbol: &str,
     sig: &PolySig,
+    builtin_overloads: &HashMap<Span, String>,
     subst: &Subst,
     body: &WordBody,
     env: &HashMap<String, Arity>,
@@ -2252,7 +2253,7 @@ pub(crate) fn lower_instantiation(
         resolve,
         regs,
         empty_instantiations(),
-        empty_builtin_overloads(),
+        builtin_overloads,
         empty_poly_arities(),
         combinators,
     )
