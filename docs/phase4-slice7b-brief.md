@@ -148,21 +148,51 @@ representation decision (7a's own D5 is what kept 7b additive; the wrong call he
   needed in general; (b) is smaller and might be enough for a first cut, deferring the general
   case the way 7a deferred capture at all.
 
-- **Q2. What does `^Env` actually own?** Two readings of the ROADMAP's own words, which read as
-  compatible until recon 6/7 forces the question: (i) the env struct itself is heap-allocated
-  (an `OwnedCellId` over a synthesized reference-carrying capture struct), single-owner so
-  dropping the closure disposes it — this needs the recon 7 carve-out in `contains_reference`'s
-  `^`-site check, explicitly scoped to this one synthesized shape, not a general relaxation; or
-  (ii) a capture that needs to escape upward must itself already be `^T`-owned, and "capture by
-  reference" for that case means borrowing *through* the existing heap pointer, whose address
-  is stable regardless of which frame currently holds it — sidestepping frame-liveness
-  reasoning entirely in favor of the *existing* linear move-tracking on the `^T` handle, at the
-  cost of restricting what an upward closure may capture (only `^T`-owned data, not an ordinary
-  stack-resident aggregate). (ii) is smaller, reuses more, and costs a real restriction; (i) is
-  the more literal reading of "upward closures on `^Env`" but is new machinery on top of new
-  machinery. Recon 7's existing rejection has to be dealt with explicitly either way, since (ii)
-  still needs to explain why capturing a `^T` doesn't just move it (must be a *borrow* of the
-  cell, not a consumption).
+- **Q2. Where does the env live, and what may an escaping closure capture?** *This question was
+  first written as one fork ("heap-allocate the env" vs "only let `^T`-owned data be captured"),
+  and writing the sample program below falsified that shape before any code was touched: the two
+  halves are independent, and neither original option is the rule.* The program:
+
+  ```
+  : make-a ( -- [ i64 -- i64 ] )            \ A: captures a local of its OWN frame
+    0 4 fill | arr |
+    [ &arr 0 >usize &> @ + ] ;              \ arr's storage dies at return
+
+  : make-b ( &[i64 4] -- [ i64 -- i64 ] )   \ B: captures a reference that arrived IN
+    | r |
+    [ r 0 >usize &> @ + ] ;                 \ referent lives in the CALLER's frame
+  ```
+
+  Both are rejected identically today ("a capturing quotation cannot be returned", verified),
+  because 7a has no reason to tell them apart. A is unsound to allow under any design; B is
+  sound. That splits the question in two:
+
+  **Q2a (representation): where does the env live** — inline in the two-slot value, or behind a
+  heap `^Env`? Driven by how many captures there are and whether they fit in a word, *not* by
+  safety: heap-allocating the env does nothing for case A, since what dangles is what the
+  reference points **at**, not where the env sits. The original option (i) was answering a
+  question that is not the safety question.
+
+  **Q2b (admission): what may an escaping closure's captured reference be rooted in?** The
+  distinction A-vs-B already exists in the checker and is already load-bearing elsewhere. A
+  word's declared inputs start as `Slot::computed` with `deriv: None` (`src/check.rs:3651`), so
+  a `&T` **parameter** carries no derivation in this frame at all, while a borrow of a
+  frame-local gets `owned_root: Some(place)` (`Provenance::borrow`, `:555`).
+  `check_reference_across_back_edge` (`:5519-5534`) rejects exactly and only the latter, with
+  "a reference derived from `{place}`, a local of this frame ... that local's storage does not
+  survive to the next iteration" — the same shape of question as the upward return, one loop
+  iteration instead of one frame. So the admission rule has a precedent to copy rather than a
+  lifetime system to invent, which matters because Slice 6 explicitly bought "no lifetime
+  apparatus" and this slice should not quietly spend it. The original option (ii) is too
+  strict on this evidence: it rejects case B, which is sound and is the more natural spelling.
+
+  What does **not** go away: B is safe to *return*, but nothing then stops the caller consuming
+  or mutating `arr` while the returned closure still holds a reference to it. That is Q1 — Q2b
+  and Q1 are one question from two ends, "may it escape at all" and "for how long after it
+  does" — which is a further argument for settling Q1 by probe rather than by argument.
+  Recon 7's existing `^`-site rejection still has to be dealt with explicitly if Q2a picks the
+  heap env, since a synthesized reference-carrying payload is rejected by general-purpose code
+  today.
 
 - **Q3. What are the exact semantics of `call` through `&q` and `&!q`, and what does each mode
   do to the env?** By-value `call` today consumes its operand (recon 9); does it now also mean
