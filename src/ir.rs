@@ -7,7 +7,7 @@
 //! never assumed to be a native `u64`, so QBE (native pointers) and WASM
 //! (linear-memory offsets) can each concretise it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 
 use crate::ast::{
@@ -1268,6 +1268,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 &module.instantiations,
                 &poly_arities,
                 &combinator_bodies,
+                EnvPlan::None,
             )
         })
         .collect();
@@ -1327,6 +1328,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             &module.instantiations,
             &poly_arities,
             &combinator_bodies,
+            EnvPlan::None,
         ));
     }
 
@@ -1786,6 +1788,7 @@ fn synthesize_struct_destructor_override(
         empty_instantiations(),
         empty_poly_arities(),
         combinators,
+        EnvPlan::None,
     );
     funcs[0].name = struct_drop_symbol(id, regs.structs.layouts[id.index()].drop_generation);
     funcs
@@ -2198,6 +2201,7 @@ pub(crate) fn lower_word(
         instantiations,
         poly_arities,
         combinators,
+        EnvPlan::None,
     )
 }
 
@@ -2232,6 +2236,7 @@ pub(crate) fn lower_instantiation(
         empty_instantiations(),
         empty_poly_arities(),
         combinators,
+        EnvPlan::None,
     )
 }
 
@@ -2252,8 +2257,16 @@ fn lower_word_parts(
     instantiations: &HashMap<Span, CallInst>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
+    env_plan: EnvPlan,
 ) -> Vec<IrFunc> {
-    let params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
+    let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
+    // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
+    // parameter after its declared inputs (even when it captures nothing, so
+    // `lower_indirect_call` can pass the env slot uniformly).
+    let n_declared = params.len();
+    if matches!(env_plan, EnvPlan::Env(_)) {
+        params.push(IrType::Ptr);
+    }
     let bundle = bundle_of(&effect.outputs, regs.structs);
     let ret = word_ret_ty(&effect.outputs, regs.structs);
 
@@ -2274,20 +2287,53 @@ fn lower_word_parts(
     // the body reads the phi outputs so each iteration rebinds them. A word
     // with no tail self-call lowers exactly as before (no header, no phi).
     let entry_values = if self_tail {
-        // R1a: aggregate staging gated ON for the user self-tail-call loop.
+        // R1a: aggregate staging gated ON for the user self-tail-call loop. A
+        // materialized body is never self-tail, so its env param is never here.
         b.begin_loop(&params_values, true)
     } else {
         params_values
     };
 
+    // 7b/R17: the trailing env param is not a stack input; split it off. Its
+    // value binds the captured local (if any); the declared inputs alone seed
+    // the stack.
+    let env_value = if matches!(env_plan, EnvPlan::Env(_)) {
+        Some(entry_values[n_declared])
+    } else {
+        None
+    };
+    let stack_inputs: Vec<Value> = entry_values[..n_declared].to_vec();
+
     // A reference parameter arrives as an opaque `Ptr`, so the referent
     // shape every projection and access needs comes from the declared type,
-    // not from the value. Seeded against `entry_values` so a loop reads it off
+    // not from the value. Seeded against `stack_inputs` so a loop reads it off
     // the header phi output the body actually uses.
-    for (slot, value) in effect.inputs.iter().zip(&entry_values) {
+    for (slot, value) in effect.inputs.iter().zip(&stack_inputs) {
         if let Type::Ref(id, _, _) = slot.ty {
             b.ref_inner.insert(*value, regs.refs.referent[id.index()]);
         }
+    }
+
+    // 7b/R16: bind the captured local to a read of the env word before the body
+    // runs, so its `Call` references resolve. A reference capture *is* the env
+    // pointer (carry its referent shape); a scalar snapshot reinterprets the
+    // env word back to the scalar's own type (`Ptr` is neither arithmetic nor
+    // printable), a typed add-of-zero.
+    if let (Some(env), EnvPlan::Env(Some(cap))) = (env_value, &env_plan) {
+        let bound = match cap.referent {
+            Some(referent) => {
+                b.ref_inner.insert(env, referent);
+                env
+            }
+            None => {
+                let zero = b.fresh_value(cap.ty);
+                b.push_instr(Instr::Const(zero, 0));
+                let v = b.fresh_value(cap.ty);
+                b.push_instr(Instr::Bin(v, BinOp::Add, env, zero));
+                v
+            }
+        };
+        b.locals.push((cap.name.clone(), bound));
     }
 
     match body {
@@ -2295,7 +2341,7 @@ fn lower_word_parts(
             // Every input starts on the stack (D6: the header phi outputs when
             // looping); an entry `| ... |` binding pops from it like any other
             // binding term.
-            b.stack = entry_values;
+            b.stack = stack_inputs;
             b.lower_terms(terms, self_tail);
         }
         WordBody::Clauses(clauses) => {
@@ -2304,7 +2350,7 @@ fn lower_word_parts(
                 .last()
                 .expect("clause word has a scrutinee input")
                 .ty;
-            b.lower_clauses(clauses, &entry_values, scrutinee_ty)
+            b.lower_clauses(clauses, &stack_inputs, scrutinee_ty)
         }
     }
 
@@ -2404,6 +2450,7 @@ fn lower_materialized(
             instantiations,
             poly_arities,
             combinators,
+            EnvPlan::Env(m.capture),
         ));
     }
     out
@@ -2437,6 +2484,38 @@ fn is_aggregate(ty: IrType) -> bool {
         ty,
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_)
     )
+}
+
+/// 7b/R16: the lowering twin of the checker's `capture_names`/`call_local`
+/// (which live in `check.rs`): every free name a quotation body reads, at any
+/// depth, that is not bound *inside* the body. A `&`/`&!` sigil is stripped so
+/// a borrow of a local resolves to the local's name. `materialize_quot_value`
+/// intersects this against `self.locals` to find the captured value.
+fn free_locals_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut HashSet<String>) {
+    for term in terms {
+        match &term.kind {
+            TermKind::Bind(names) => shadowed.extend(names.iter().cloned()),
+            TermKind::Call(name) => {
+                let local = name
+                    .strip_prefix("&!")
+                    .or_else(|| name.strip_prefix('&'))
+                    .unwrap_or(name);
+                if !shadowed.contains(local) {
+                    out.insert(local.to_string());
+                }
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                free_locals_into(then_branch, &mut shadowed.clone(), out);
+                free_locals_into(else_branch, &mut shadowed.clone(), out);
+            }
+            TermKind::Quotation(inner) => free_locals_into(inner, &mut shadowed.clone(), out),
+            _ => {}
+        }
+    }
 }
 
 /// R10: whether a combinator body has a tail-position call to itself, the
@@ -2493,6 +2572,31 @@ struct MaterializedQuot {
     symbol: String,
     effect: &'static QuotEffect,
     body: Vec<Term>,
+    /// 7b/R16: the single captured local this closure snapshots into its `env`
+    /// slot, or `None` for a non-capturing literal (the 7a shape). Phase 1's
+    /// inline env holds one word, so at most one capture reaches here.
+    capture: Option<EnvCapture>,
+}
+
+/// 7b/R16: a materialized closure's one captured local, as the lowered body
+/// needs to bind it. `referent` is `Some` when the capture is a reference (its
+/// `ty` is `Ptr`), carrying the referent shape a projection through it needs;
+/// `None` marks a scalar snapshot, whose env word is reinterpreted back to `ty`
+/// at the body's entry.
+#[derive(Clone)]
+struct EnvCapture {
+    name: String,
+    ty: IrType,
+    referent: Option<IrType>,
+}
+
+/// 7b/R17: the env-parameter plan for a lowered body. A user word (or REPL
+/// line) has none; a materialized quotation body always takes one trailing
+/// `Ptr` env parameter, uniform so `lower_indirect_call` can pass the env slot
+/// without knowing the callee, and binds a captured local when it has one.
+enum EnvPlan {
+    None,
+    Env(Option<EnvCapture>),
 }
 
 struct FuncBuilder<'a> {
@@ -4161,20 +4265,31 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Slice 7a (R9): build the runtime `(code, env)` aggregate for phantom
-    /// quotation `phantom`, recording the callee `IrFunc` to mint (deduped by
-    /// symbol). `code` gets the callee's address (`FuncAddr`); `env` is the
-    /// null pointer (7a captures nothing, so there is no environment to
-    /// snapshot -- 7b fills this slot). The symbol is `{enclosing}__quot{id}`,
-    /// unique because word names are unique and `QuotId` is per-function.
+    /// Slice 7a/7b (R9/R16): build the runtime `(code, env)` aggregate for
+    /// phantom quotation `phantom`, recording the callee `IrFunc` to mint
+    /// (deduped by symbol). `code` gets the callee's address (`FuncAddr`). The
+    /// `env` slot is 7a's null pointer for a non-capturing literal (byte for
+    /// byte), else the one captured local's live value snapshotted from the
+    /// enclosing frame -- a scalar's value, or a reference's pointer. The
+    /// symbol is `{enclosing}__quot{id}`, unique because word names are unique
+    /// and `QuotId` is per-function.
     fn materialize_quot_value(&mut self, phantom: Value, sig: QuotSigId) -> Value {
         let id = self.quot_bodies[&phantom];
         let symbol = format!("{}__quot{}", self.cur_word_name, id.0);
+        // The captured local (Phase 1: at most one, the checker having rejected
+        // more), resolved against the live frame at this boundary.
+        let capture = self.quotation_capture(id);
         if !self.materialized.iter().any(|m| m.symbol == symbol) {
+            let capture = capture.as_ref().map(|(name, value)| EnvCapture {
+                name: name.clone(),
+                ty: self.value_type(*value),
+                referent: self.ref_inner.get(value).copied(),
+            });
             self.materialized.push(MaterializedQuot {
                 symbol: symbol.clone(),
                 effect: sig.0,
                 body: self.quot_defs[id.0].clone(),
+                capture,
             });
         }
         let layout = quotation_layout(WORD_WIDTH);
@@ -4184,11 +4299,35 @@ impl<'a> FuncBuilder<'a> {
         self.push_instr(Instr::FuncAddr(code, symbol));
         let code_ptr = self.field_ptr(dst, layout.code_offset);
         self.push_instr(Instr::FieldStore(code_ptr, code));
-        let env = self.fresh_value(IrType::Ptr);
-        self.push_instr(Instr::Const(env, 0));
+        // A capture's value stores width-exact (a word); a non-capture stores
+        // the null pointer 7a always did.
+        let env = match &capture {
+            Some((_, value)) => *value,
+            None => {
+                let z = self.fresh_value(IrType::Ptr);
+                self.push_instr(Instr::Const(z, 0));
+                z
+            }
+        };
         let env_ptr = self.field_ptr(dst, layout.env_offset);
         self.push_instr(Instr::FieldStore(env_ptr, env));
         dst
+    }
+
+    /// 7b/R16: the one enclosing local a quotation body captures, as `(name,
+    /// live value)` resolved against `self.locals` at the materialization
+    /// boundary, or `None` if it captures nothing bound here (a free global
+    /// word needs no env). The checker's R15 admission has already rejected a
+    /// 2+-capture closure, so scanning for the first match suffices.
+    fn quotation_capture(&self, id: QuotId) -> Option<(String, Value)> {
+        let body = &self.quot_defs[id.0];
+        let mut names = HashSet::new();
+        free_locals_into(body, &mut HashSet::new(), &mut names);
+        self.locals
+            .iter()
+            .rev()
+            .find(|(name, _)| names.contains(name))
+            .map(|(name, value)| (name.clone(), *value))
     }
 
     /// Slice 7a (R11): at a branch join, materialize each arm's escaping
@@ -4248,11 +4387,18 @@ impl<'a> FuncBuilder<'a> {
         };
         let eff = sig.0;
         let split = self.stack.len() - eff.inputs.len();
-        let args = self.stack.split_off(split);
+        let mut args = self.stack.split_off(split);
         let layout = quotation_layout(WORD_WIDTH);
         let code_ptr = self.field_ptr(v, layout.code_offset);
         let code = self.fresh_value(IrType::Code);
         self.push_instr(Instr::FieldLoad(code, code_ptr));
+        // 7b/R17: pass the env word as the trailing argument. Every materialized
+        // body takes an env param (null for a non-capturing one), so this is
+        // uniform without knowing which callee a merged/stored value holds.
+        let env_ptr = self.field_ptr(v, layout.env_offset);
+        let env = self.fresh_value(IrType::Ptr);
+        self.push_instr(Instr::FieldLoad(env, env_ptr));
+        args.push(env);
         let outs: Vec<TypedSlot> = eff
             .outputs
             .iter()

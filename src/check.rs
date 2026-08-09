@@ -3664,10 +3664,11 @@ fn check_terms_word(
 
     let declared: Vec<Type> = word.effect.outputs.iter().map(|s| s.ty).collect();
     let line = terms.last().map(|t| t.span.line).unwrap_or(0);
-    // R7/D4: a declared `Type::Quotation` output is a materialization boundary.
-    // Materialize each non-capturing `Known` literal the body leaves there
-    // (reject a capturing one naming 7b, R12) before `check_outputs`, whose
-    // bare-quotation guard would otherwise reject it outright.
+    // R7/R15/D4: a declared `Type::Quotation` output is a materialization
+    // boundary. Materialize each `Known` literal the body leaves there --
+    // running the R15 admission rule on a capturing one (`be returned` is an
+    // escaping boundary) -- before `check_outputs`, whose bare-quotation guard
+    // would otherwise reject it outright.
     for (i, want) in declared.iter().enumerate() {
         if let Type::Quotation(eff) = *want {
             if let Some(QuotRef::Known(id)) = final_stack.get(i).and_then(|s| s.quot) {
@@ -6193,28 +6194,152 @@ fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>) -> bool {
     walk(body, enclosing, &mut Vec::new())
 }
 
-/// R12/D4: a capturing quotation reaching a materialization boundary. 7a
-/// materializes only non-capturing literals; a capturing one is a located
-/// rejection naming 7b, reusing the escaping-quotation vocabulary shape.
-/// `boundary` is one of the three wordings this project's boundaries produce:
-/// `be stored` (a constructor/setter argument, or a `!`/`+!` store through a
-/// reference -- the latter covers both a struct field and an array element
-/// via reference alike, since a reference carries no record of what it was
-/// borrowed from), `be returned`, `be left on a branch`.
-fn capturing_quotation_error(ctx: &Ctx, span: Span, boundary: &str) -> String {
+/// R24: an escaping closure captures a local of the *current* frame whose
+/// storage dies at return. Wording modeled on `reference_across_back_edge_error`
+/// (`:5501`): the same "a local of this frame ... does not survive" shape, one
+/// frame instead of one loop iteration. Fires for `make-a` (R15) and, in
+/// Phase 2, for a frame capture escaping through a returned carrier (R22).
+fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str) -> String {
     let _ = ctx;
     format!(
-        "error: a capturing quotation cannot {boundary} (capturing closures are slice 7b) (line {})",
+        "error: an escaping closure captures `{name}`, a local of this frame, whose storage does not survive the return (line {})",
         span.line,
     )
 }
 
-/// R7/D4: a materialization boundary. Materialize a non-capturing `Known`
-/// literal into a runtime quotation value, or reject a capturing one naming 7b
-/// (R12). (i) run the boolean capture predicate (R6); (ii) if it captures,
-/// raise R12 with `boundary`'s wording; (iii) else confirm the literal against
-/// the boundary's expected `Type::Quotation(eff)` via
-/// `check_literal_against_declared_effect`, and return the slot *erased*
+/// R18: an escaping closure captures more than one value. Phase 1 stores a
+/// single word-sized capture inline in the `env` slot; a 2+-capture escaping
+/// closure needs a heap env, deferred with the rest of the heap-env case.
+fn multi_capture_escaping_error(ctx: &Ctx, span: Span) -> String {
+    let _ = ctx;
+    format!(
+        "error: an escaping closure may capture at most one reference (a heap env is deferred) (line {})",
+        span.line,
+    )
+}
+
+/// R15 case 4: a captured quotation-typed name. Admitting it would need a
+/// two-word `(code, env)` env slot and a recursive surviving-set fold no exit
+/// criterion requires, so it is deferred, parallel to the 2+-capture deferral.
+fn captured_quotation_name_deferred_error(ctx: &Ctx, span: Span) -> String {
+    let _ = ctx;
+    format!(
+        "error: capturing a quotation value by name is deferred (line {})",
+        span.line,
+    )
+}
+
+/// A same-frame aggregate/borrow capture at an *in-frame* boundary: admissible
+/// only under Phase 2's surviving-capture-set liveness (R21), deferred here in
+/// the Phase-1 floor (which builds no surviving set).
+fn same_frame_capture_deferred_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let _ = ctx;
+    format!(
+        "error: capturing `{name}`, a local of this frame, in a stored closure is deferred (line {})",
+        span.line,
+    )
+}
+
+/// R15: how a captured name's referent is rooted, which decides whether it may
+/// outlive the closure's calls.
+enum CaptureClass {
+    /// A scalar local: snapshotted into the env (D4 amendment), so it can never
+    /// dangle and is admissible at every boundary.
+    Scalar,
+    /// An aggregate value or borrow whose referent lives in the current frame:
+    /// its storage dies at return.
+    FrameRooted,
+    /// An aggregate value or borrow rooted in a parameter or global: its
+    /// referent outlives the frame.
+    OuterRooted,
+}
+
+/// R15: classify a captured name by its binding (case 4 quotation-typed names
+/// are peeled off before this runs). The frame-rooted/outer-rooted split reuses
+/// the exact `owned_root`-vs-current-frame test the R12 exit-row check
+/// (`:6108`) and `check_reference_across_back_edge` (`:5519`) already apply.
+fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) -> CaptureClass {
+    match b.ty {
+        // Case 2: an aggregate value read directly (no deriv). A scope-bound
+        // aggregate is owned by (and dies with) this frame; a global aggregate
+        // is not in scope and never reaches here.
+        Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..) => {
+            CaptureClass::FrameRooted
+        }
+        // Case 3: a borrow. A `Deriv` whose `owned_root` names a current-frame
+        // local is frame-rooted; a `&T` parameter carries no deriv (or a
+        // reborrow with no owned root) and is outer-rooted by construction,
+        // matching `check_reference_across_back_edge`'s own `deriv` handling.
+        Type::Ref(..) => match b.deriv {
+            Some(id) => match &prov.deriv(id).owned_root {
+                Some(place) if scope.local(place).is_some() => CaptureClass::FrameRooted,
+                _ => CaptureClass::OuterRooted,
+            },
+            None => CaptureClass::OuterRooted,
+        },
+        // Case 1: any other local is a scalar.
+        _ => CaptureClass::Scalar,
+    }
+}
+
+/// R15: admit or reject a capturing quotation at a materialization boundary
+/// (7b, replacing 7a's blanket R12 rejection). `escaping` is true at a
+/// word-output boundary (`be returned`, or a differing-arm `if` join feeding
+/// the declared output), false at an in-frame store. A four-way classification
+/// on capture kind (D3's cached free-name set is the source, no new analysis):
+/// a scalar snapshot admits everywhere; an outer-rooted aggregate/borrow admits
+/// everywhere; a frame-rooted one is past-owning-frame at a word-output
+/// boundary and deferred to Phase 2 at an in-frame one; a captured
+/// quotation-typed name is deferred everywhere. Phase 1's inline env holds a
+/// single word, so a 2+-capture closure is deferred.
+fn check_capture_admission(
+    id: QuotId,
+    escaping: bool,
+    span: Span,
+    ctx: &Ctx,
+    prov: &Provenance,
+    scope: &Scope,
+) -> Result<(), String> {
+    // Only names bound in the enclosing scope are real captures; a free global
+    // word resolves at the call and needs no env.
+    let mut names: Vec<&str> = prov
+        .quotation_captures(id)
+        .iter()
+        .filter(|n| scope.local(n).is_some())
+        .map(|n| n.as_str())
+        .collect();
+    names.sort_unstable();
+    if names.is_empty() {
+        return Ok(());
+    }
+    // Case 4: a captured quotation-typed name (a `Known` literal, `quot.is_some()`,
+    // or an already-erased `Type::Quotation`) is deferred at every boundary.
+    for name in &names {
+        let b = scope.local(name).expect("filtered to a bound name");
+        if b.quot.is_some() || matches!(b.ty, Type::Quotation(_)) {
+            return Err(captured_quotation_name_deferred_error(ctx, span));
+        }
+    }
+    // Phase 1's env holds one word inline; 2+ captures need the bundle (in-frame,
+    // Phase 2) or a heap env (escaping, deferred).
+    if names.len() >= 2 {
+        return Err(multi_capture_escaping_error(ctx, span));
+    }
+    let name = names[0];
+    let b = scope.local(name).expect("filtered to a bound name");
+    match classify_capture(b, prov, scope) {
+        CaptureClass::Scalar | CaptureClass::OuterRooted => Ok(()),
+        CaptureClass::FrameRooted if escaping => Err(past_owning_frame_error(ctx, span, name)),
+        CaptureClass::FrameRooted => Err(same_frame_capture_deferred_error(ctx, span, name)),
+    }
+}
+
+/// R7/R15/D4: a materialization boundary. Materialize a non-capturing `Known`
+/// literal into a runtime quotation value, or run the R15 admission rule on a
+/// capturing one. (i) run the boolean capture gate (R6); (ii) if it captures,
+/// admit or reject per R15 (`escaping` from `boundary`'s wording); (iii)
+/// confirm the literal against the boundary's expected `Type::Quotation(eff)`
+/// via `check_literal_against_declared_effect`, and return the slot *erased*
 /// (`quot: None`, a real `Type::Quotation`) -- the signal `call`/`times` read
 /// to emit an indirect call rather than a splice.
 #[allow(clippy::too_many_arguments)]
@@ -6236,7 +6361,8 @@ fn materialize_quotation_at_boundary(
     let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let body = prov.quotations[id.0].body.clone();
     if body_captures_enclosing(&body, &enclosing) {
-        return Err(capturing_quotation_error(ctx, span, boundary));
+        let escaping = matches!(boundary, "be returned" | "be left on a branch");
+        check_capture_admission(id, escaping, span, ctx, prov, scope)?;
     }
     check_literal_against_declared_effect(
         id, eff, word, span, ctx, env, arrays, cells, refs, prov, scope, poly,
@@ -6900,10 +7026,11 @@ fn check_term(
             }
             // R8 (D4): `!`/`+!` into a `&!Type::Quotation` referent is a
             // materialization boundary (an array element or a struct field via
-            // reference). Materialize a non-capturing `Known` literal in place
-            // before `check_access_word` (whose bare-quotation store guard would
-            // else reject it), reject a capturing one naming 7b (R12). The
-            // referent's declared effect is the boundary's expected effect.
+            // reference). Materialize a `Known` literal in place before
+            // `check_access_word` (whose bare-quotation store guard would else
+            // reject it), running the R15 admission rule on a capturing one (a
+            // store is an in-frame boundary). The referent's declared effect is
+            // the boundary's expected effect.
             if matches!(name.as_str(), "!" | "+!") && stack.len() >= 2 {
                 let vi = stack.len() - 1;
                 if let Some(QuotRef::Known(id)) = stack[vi].quot {
@@ -7026,9 +7153,10 @@ fn check_term(
                 // R8 (D4): a declared `Type::Quotation` parameter is a
                 // materialization boundary. This is the site a struct
                 // *constructor* call (`[ 1 + ] Holder`) and a generated setter
-                // reach; a non-capturing `Known` literal is materialized
-                // (validated here, lowered to a `(code, env)` value), a
-                // capturing one rejected naming 7b (R12). Gated strictly on
+                // reach; a `Known` literal is materialized (validated here,
+                // lowered to a `(code, env)` value), a capturing one run through
+                // the R15 admission rule (a parameter is an in-frame boundary).
+                // Gated strictly on
                 // `want`'s type, so it covers a constructor, a setter, and an
                 // ordinary user word declaring a quotation parameter alike; an
                 // `extern` never reaches here (its declared effect cannot name
@@ -7193,20 +7321,19 @@ fn check_term(
                         (Some(QuotRef::Known(a)), None)
                     }
                     (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) => {
-                        // R11 ordering pin: the capture check runs before the
-                        // id/expected-type resolution, so a capturing arm always
-                        // raises R12 rather than falling through to
-                        // `different_quotations_at_join_error`.
+                        // R11 ordering pin: the capture admission runs before
+                        // the id/expected-type resolution, so a rejected
+                        // capturing arm raises R15 rather than falling through
+                        // to `different_quotations_at_join_error`. A join feeds
+                        // the declared word output, so it is an escaping
+                        // boundary (R15).
                         let enclosing: HashSet<String> =
                             scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
                         for id in [a, b] {
                             let body = prov.quotations[id.0].body.clone();
                             if body_captures_enclosing(&body, &enclosing) {
-                                return Err(capturing_quotation_error(
-                                    ctx,
-                                    prov.quotations[id.0].span,
-                                    "be left on a branch",
-                                ));
+                                let span = prov.quotations[id.0].span;
+                                check_capture_admission(id, true, span, ctx, prov, scope)?;
                             }
                         }
                         // The expected quotation type threaded from the

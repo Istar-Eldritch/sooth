@@ -1,14 +1,18 @@
-//! Phase 4 Slice 7a goldens: a non-capturing quotation literal reaching a
-//! materialization boundary (a struct field, an array element, a word output,
-//! or a branch join) becomes a runtime `(code, env)` value, and `call`/`times`
-//! on an erased quotation whose identity the checker cannot resolve emits an
-//! indirect call. A capturing literal at a boundary is rejected (7b); a
-//! capturing literal at a direct `call` still splices, unaffected. The branch
-//! join materializes each arm against the enclosing declared output row (R11);
-//! the same literal in both arms stays a splice.
+//! Phase 4 Slice 7a/7b goldens: a quotation literal reaching a materialization
+//! boundary (a struct field, an array element, a word output, or a branch
+//! join) becomes a runtime `(code, env)` value, and `call`/`times` on an
+//! erased quotation whose identity the checker cannot resolve emits an indirect
+//! call. 7b (capturing closures): a captured *scalar* is snapshotted into the
+//! env and admissible at every boundary; an *outer-rooted* reference (a `&T`
+//! parameter) is admitted; a *frame-rooted* capture escaping the frame is a
+//! past-owning-frame error; a captured quotation-typed name and a 2+-capture
+//! escaping closure are deferred. A capturing literal at a direct `call` still
+//! splices, unaffected. The branch join materializes each arm against the
+//! enclosing declared output row (R11); the same literal in both arms stays a
+//! splice.
 
 use sooth::ast::WordBody;
-use sooth::ir::Instr;
+use sooth::ir::{Instr, IrType};
 use sooth::{check, lexer, parser};
 
 mod common;
@@ -61,6 +65,22 @@ fn count_call_indirect(src: &str) -> usize {
         .flat_map(|b| b.instrs.iter())
         .filter(|i| matches!(i, Instr::CallIndirect(..)))
         .count()
+}
+
+/// The param list of the sole materialized quotation func (its symbol carries
+/// `__quot`), for the 7b env-parameter shape assertions.
+fn materialized_quot_params(src: &str) -> Vec<IrType> {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = sooth::ir::lower(&module).expect("lower should succeed");
+    let mut mats: Vec<&sooth::ir::IrFunc> = ir
+        .funcs
+        .iter()
+        .filter(|f| f.name.contains("__quot"))
+        .collect();
+    assert_eq!(mats.len(), 1, "expected exactly one materialized quotation");
+    mats.remove(0).params.clone()
 }
 
 // -- T-field: a quotation stored in a struct field, called back out ----------
@@ -117,57 +137,129 @@ fn quotation_returned_from_word_indirect_calls() {
     );
 }
 
-// -- T-cap-store: a capturing literal at a store boundary is rejected (7b) ----
+// -- T-repoint (struct field): a captured scalar snapshots into the env -------
 
 #[test]
-fn capturing_literal_stored_is_error_naming_7b() {
-    // `[ x + ]` reads the enclosing local `x`, so storing it into a field
-    // would capture an environment 7a does not represent. The message is
-    // distinct from the pre-existing `:7024` "escaping quotations are slice 7"
-    // wording, so it is asserted whole rather than by `.contains`.
-    let err = check_error(
-        "type: Holder q [ i64 -- i64 ] ;\n\
-         : main ( -- ) 10 | x | [ x + ] Holder drop ;\n",
-    );
-    assert_eq!(
-        err,
-        "error: a capturing quotation cannot be stored (capturing closures are slice 7b) (line 2)"
-    );
+fn capturing_scalar_stored_snapshots_into_env() {
+    // 7b re-points 7a's `capturing_literal_stored_is_error_naming_7b`: `[ x + ]`
+    // reads the enclosing scalar `x`, which is now snapshotted into the env
+    // rather than rejected. Stored into a field, read back, and called with 4:
+    // 4 + 10 = 14.
+    let src = "type: Holder q [ i64 -- i64 ] ;\n\
+               : main ( -- ) 10 | x | [ x + ] Holder Holder>q 4 swap call . ;\n";
+    let (stdout, code) = run_src("qcapfield", src);
+    assert_eq!(stdout, "14\n");
+    assert_eq!(code, 0);
 }
 
-// -- T-cap-store (array element): the same rejection through a reference store,
-// not just a struct-constructor argument (D4's boundary is `!`/`+!` through a
-// reference, shared by an array element and a struct field alike -- see R12).
+// -- T-repoint (array element): a scalar snapshot stored through a reference --
 
 #[test]
-fn capturing_literal_stored_in_array_element_is_error_naming_7b() {
-    let err = check_error(
-        ": one ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
-         : main ( -- )\n\
-         10 | x |\n\
-         one 2 fill | a |\n\
-         &!a 1 >usize &!> [ x + ] ! ;\n",
-    );
-    assert_eq!(
-        err,
-        "error: a capturing quotation cannot be stored (capturing closures are slice 7b) (line 5)"
-    );
+fn capturing_scalar_in_array_element_snapshots() {
+    // The `!`/`+!` store boundary (an array element via reference), re-pointed:
+    // `[ x + ]` snapshots `x = 10`; read back and called with 4 gives 14.
+    let src = ": one ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+               : main ( -- )\n\
+               10 | x |\n\
+               one 2 fill | a |\n\
+               &!a 1 >usize &!> [ x + ] !\n\
+               &a 1 &> @ 4 swap call . ;\n";
+    let (stdout, code) = run_src("qcaparray", src);
+    assert_eq!(stdout, "14\n");
+    assert_eq!(code, 0);
 }
 
-// -- M3: capture through a *nested* quotation is still caught -----------------
+// -- T-repoint (nested): a scalar captured through a *nested* quotation -------
 
 #[test]
-fn capturing_through_nested_quotation_is_error() {
+fn capturing_scalar_through_nested_quotation_snapshots() {
     // `x` is read inside a nested `[ x + ]`, not at the stored quotation's own
-    // top level. The capture predicate must recurse into nested quotation
-    // bodies (D4) or this store wrongly materializes.
+    // top level. The capture scan recurses into nested quotation bodies, so the
+    // outer `[ [ x + ] call ]` snapshots `x` and stores admissibly: 4 + 10 = 14.
+    let src = "type: Holder q [ i64 -- i64 ] ;\n\
+               : main ( -- ) 10 | x | [ [ x + ] call ] Holder Holder>q 4 swap call . ;\n";
+    let (stdout, code) = run_src("qcapnested", src);
+    assert_eq!(stdout, "14\n");
+    assert_eq!(code, 0);
+}
+
+// -- T-makeb: an outer-rooted reference capture (a `&T` parameter) is admitted -
+
+#[test]
+fn make_b_captures_outer_rooted_reference_admits() {
+    // `make-b`'s closure captures `r`, a `&[i64 4]` *parameter*: its referent
+    // is rooted outside `make-b`'s frame (in `main`'s `a`, still live at the
+    // call), so the escaping capture is admitted. The env holds the reference;
+    // reading `r[0] = 5` and adding the input 4 gives 9.
+    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ + ] ;\n\
+               : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
+    let (stdout, code) = run_src("qmakeb", src);
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+    // T-env-inline: the materialized body takes the declared `i64` input plus
+    // one trailing `Ptr` env parameter (R17). Dropping the env param would
+    // shorten this list and the reference could not reach the body.
+    assert_eq!(
+        materialized_quot_params(src),
+        vec![
+            IrType::Int {
+                bits: 64,
+                signed: true
+            },
+            IrType::Ptr
+        ],
+        "a one-capture materialized body has its declared input plus a Ptr env param"
+    );
+}
+
+// -- T-makea: a frame-rooted capture escaping its owning frame is rejected ----
+
+#[test]
+fn make_a_captures_frame_local_past_owning_frame_error() {
+    // `make-a`'s closure borrows `arr`, a `[i64 4]` bound *inside* `make-a`;
+    // returning the closure would let it outlive `arr`'s storage. Unlike
+    // `make-b`'s parameter, this is frame-rooted, so the escaping boundary is a
+    // past-owning-frame error (R15/R24), asserted whole.
     let err = check_error(
-        "type: Holder q [ i64 -- i64 ] ;\n\
-         : main ( -- ) 10 | x | [ [ x + ] call ] Holder drop ;\n",
+        ": make-a ( -- [ i64 -- i64 ] ) 5 4 fill | arr | [ &arr 0 >usize &> @ + ] ;\n\
+         : main ( -- ) make-a 4 swap call . ;\n",
     );
     assert_eq!(
         err,
-        "error: a capturing quotation cannot be stored (capturing closures are slice 7b) (line 2)"
+        "error: an escaping closure captures `arr`, a local of this frame, whose storage does not survive the return (line 1)"
+    );
+}
+
+// -- T-quot-cap-deferred: capturing a quotation-typed name is deferred --------
+
+#[test]
+fn capturing_quotation_typed_name_is_deferred() {
+    // The outer `[ q call ]` captures `q`, itself a quotation local. A
+    // quotation env slot is two words and needs a recursive surviving-set fold
+    // (R15 case 4), so it is deferred at every boundary rather than admitted.
+    let err = check_error(
+        ": wrap ( -- [ i64 -- i64 ] ) [ 1 + ] | q | [ q call ] ;\n\
+         : main ( -- ) wrap 4 swap call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: capturing a quotation value by name is deferred (line 1)"
+    );
+}
+
+// -- T-multi-esc: a 2+-capture escaping closure is deferred (single-word env) -
+
+#[test]
+fn escaping_closure_with_two_captures_is_deferred() {
+    // Phase 1's inline env holds one word; `[ x y + + ]` captures two scalars,
+    // which needs a heap env (R18), deferred.
+    let err = check_error(
+        ": mk ( -- [ i64 -- i64 ] ) 10 | x | 20 | y | [ x y + + ] ;\n\
+         : main ( -- ) mk 4 swap call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure may capture at most one reference (a heap env is deferred) (line 1)"
     );
 }
 
@@ -225,22 +317,19 @@ fn same_quotation_both_arms_still_splices() {
     );
 }
 
-// -- T-cap-join: a capturing literal in one arm of a materializing join -------
+// -- T-repoint-join: a scalar snapshot in one arm of a materializing join -----
 
 #[test]
-fn capturing_literal_at_join_is_error_naming_7b() {
-    // A materializing join (the word declares a `[ i64 -- i64 ]` output) with a
-    // capturing literal in one arm. R11's ordering pin: the capture check runs
-    // before the id/expected-type resolution, so this fires the capturing-
-    // quotation error rather than `different_quotations_at_join_error`.
-    let err = check_error(
-        ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | if [ x + ] else [ 2 + ] end ;\n\
-         : main ( -- ) true pick 4 swap call . ;\n",
-    );
-    assert_eq!(
-        err,
-        "error: a capturing quotation cannot be left on a branch (capturing closures are slice 7b) (line 1)"
-    );
+fn capturing_scalar_at_join_snapshots() {
+    // A materializing join (the word declares a `[ i64 -- i64 ]` output) whose
+    // `true` arm captures the scalar `x`. 7b re-points 7a's rejection: the arm
+    // snapshots `x = 10` and both arms materialize (the `false` arm captures
+    // nothing, a null env). `true`: 4 + 10 = 14; `false`: 4 + 2 = 6.
+    let src = ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | if [ x + ] else [ 2 + ] end ;\n\
+               : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
+    let (stdout, code) = run_src("qcapjoin", src);
+    assert_eq!(stdout, "14\n6\n");
+    assert_eq!(code, 0);
 }
 
 // -- T-times: `times` over an erased quotation is one indirect call in a loop -
