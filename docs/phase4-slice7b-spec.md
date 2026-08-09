@@ -287,9 +287,17 @@ requirements are R14+.
      to the current frame — the same current-frame membership test the R12 exit-row check
      (`check.rs:6108`) and `check_reference_across_back_edge` (`check.rs:5519`) already apply to a
      `place` name, here applied to the captured name directly rather than to a `Deriv.owned_root`.
-     **Frame-rooted** (the local is a binding of the current frame) → the original rule: rejected at
-     a **word-output** boundary with past-owning-frame (R24), admitted at an **in-frame** boundary
-     per R21 (Phase 2). **Outer-rooted** (an aggregate parameter/global) → admitted at any boundary.
+     Every aggregate *value* reaching this classification is **frame-rooted**: a scope-bound
+     aggregate is owned by (and dies with) the current frame — including a by-value aggregate
+     *parameter*, which under move semantics is moved into the callee and dropped at the callee's
+     return, so a closure over it that escaped would dangle — and a *global* aggregate is filtered
+     out before classification (it is not `scope.local`, so it never reaches here). Frame-rooted is
+     rejected at a **word-output** boundary with past-owning-frame (R24) and admitted at an
+     **in-frame** boundary per R21 (Phase 2). (Review correction to the original prose, which read
+     "outer-rooted (an aggregate parameter/global) → admitted at any boundary": there is no
+     reachable outer-rooted *aggregate-value* case. Only a *borrow* — kind 3 — can be outer-rooted,
+     via a `&T` parameter or a `Deriv` whose `owned_root` lies outside the frame. The implementation
+     classifies every case-2 aggregate as frame-rooted unconditionally, which is sound.)
   3. **Reference capture** — the captured name is `Type::Ref`-typed. Split by whether it carries a
      `Deriv`:
      - **Carries a `Deriv`/`owned_root`** (created by `&`/`&!` inside the current frame): read
@@ -324,8 +332,9 @@ requirements are R14+.
      rule-1 scalar case (R25).
 
   Boundary summary: a **scalar** capture (kind 1) admits at all four boundaries unconditionally; an
-  **aggregate value or borrow** capture (kinds 2/3) admits an *outer-rooted* capture at any
-  boundary, admits a *frame-rooted* capture only at an **in-frame** boundary (Phase 2, R21), and
+  **aggregate value or borrow** capture (kinds 2/3) admits an *outer-rooted* capture (only a
+  *borrow* can be one — an aggregate value is always frame-rooted, see kind 2) at any boundary,
+  admits a *frame-rooted* capture only at an **in-frame** boundary (Phase 2, R21), and
   rejects a frame-rooted capture at a **word-output** boundary with past-owning-frame (R24); a
   **captured quotation-typed name** (kind 4) is rejected as deferred at every boundary (R15 case 4,
   T-quot-cap-deferred), independent of which boundary it appears at.
@@ -386,7 +395,12 @@ requirements are R14+.
 - **R21.** Admit **frame-rooted** captures at **in-frame** boundaries (struct field, array element,
   join): the two motivating programs — a dispatch table (array of capturing closures) and a
   struct-stored closure observing a later mutation — compile and run, observing the same values the
-  spliced form does, with R20 enforcing the referent stays live to each call.
+  spliced form does, with R20 enforcing the referent stays live to each call. When this lands, the
+  bundle env (R16) also covers the **in-frame 2+-capture** case, so the Phase-1
+  `multi_capture_escaping_error` (whose wording — "an escaping closure may capture at most one
+  reference (a heap env is deferred)" — is a stopgap that misfits an in-frame multi-*scalar*
+  capture; review finding, no Phase-1 test reaches it) must stop firing for an in-frame boundary:
+  keep the escaping-worded error only for the still-deferred escaping-heap-env case.
 - **R22.** Word-output escape guard over the surviving set. At a **word-output** boundary, reject a
   returned quotation — directly, or transitively through a returned struct field / array element
   carrier — whose surviving capture set (R19) includes a **frame-rooted** capture, with

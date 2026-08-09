@@ -157,15 +157,18 @@ fn capturing_scalar_stored_snapshots_into_env() {
 #[test]
 fn capturing_scalar_in_array_element_snapshots() {
     // The `!`/`+!` store boundary (an array element via reference), re-pointed:
-    // `[ x + ]` snapshots `x = 10`; read back and called with 4 gives 14.
+    // `[ x + ]` snapshots `x = 10` into element 1, while element 0 keeps `one`'s
+    // non-capturing seed; each reads its own env, proving coexistence. Element
+    // 0: 4 + 1 = 5; element 1: 4 + 10 = 14.
     let src = ": one ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
                : main ( -- )\n\
                10 | x |\n\
                one 2 fill | a |\n\
                &!a 1 >usize &!> [ x + ] !\n\
+               &a 0 &> @ 4 swap call .\n\
                &a 1 &> @ 4 swap call . ;\n";
     let (stdout, code) = run_src("qcaparray", src);
-    assert_eq!(stdout, "14\n");
+    assert_eq!(stdout, "5\n14\n");
     assert_eq!(code, 0);
 }
 
@@ -227,6 +230,25 @@ fn make_a_captures_frame_local_past_owning_frame_error() {
     assert_eq!(
         err,
         "error: an escaping closure captures `arr`, a local of this frame, whose storage does not survive the return (line 1)"
+    );
+}
+
+// -- T-makea-ref: a frame-rooted *borrow* (case 3, not case 2) is rejected ---
+
+#[test]
+fn make_a_captures_frame_local_borrow_past_owning_frame_error() {
+    // `make-a` above captures `arr` itself (case 2, the aggregate). This
+    // pins case 3: `r` is a *bound borrow* (`&arr | r |`) whose `owned_root`
+    // is `arr`, a local of this frame -- the `owned_root`-in-scope test in
+    // `classify_capture`'s `Type::Ref` arm, not the unconditional aggregate
+    // arm. Rejected the same way, naming `r`.
+    let err = check_error(
+        ": make-a2 ( -- [ i64 -- i64 ] ) 5 4 fill | arr | &arr | r | [ r 0 >usize &> @ + ] ;\n\
+         : main ( -- ) make-a2 4 swap call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure captures `r`, a local of this frame, whose storage does not survive the return (line 1)"
     );
 }
 

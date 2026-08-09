@@ -9220,6 +9220,159 @@ mod tests {
         assert_eq!(scope.local("q").unwrap().quot, marker);
     }
 
+    fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
+        Binding {
+            name: name.to_string(),
+            ty,
+            aliases: None,
+            deriv,
+            quot: None,
+        }
+    }
+
+    #[test]
+    fn classify_capture_splits_scalar_aggregate_and_borrow_roots() {
+        // U-classify (R15): the four-way capture classifier, each arm on its
+        // own, since only case 2 and one case-3 direction are reachable from a
+        // golden (make-a hits the aggregate arm, the case-3 golden the
+        // frame-rooted borrow; the outer-rooted and no-deriv arms ride only on
+        // make-b end to end).
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let ref_ty = intern_ref_type(&mut refs, arr_ty, false);
+        let span = Span { line: 1, col: 1 };
+
+        // Case 1: a scalar local -> Scalar (snapshotted, never dangles).
+        let prov = Provenance::default();
+        let empty = Scope::default();
+        let scalar = capture_binding("x", Type::I64, None);
+        assert!(matches!(
+            classify_capture(&scalar, &prov, &empty),
+            CaptureClass::Scalar
+        ));
+
+        // Case 2: a by-value aggregate -> FrameRooted (owned by, dies with,
+        // this frame).
+        let agg = capture_binding("arr", arr_ty, None);
+        assert!(matches!(
+            classify_capture(&agg, &prov, &empty),
+            CaptureClass::FrameRooted
+        ));
+
+        // Case 3a: a borrow whose `owned_root` names a current-frame local ->
+        // FrameRooted.
+        let mut prov = Provenance::default();
+        let d = prov.borrow("arr", false, span);
+        let mut framed = Scope::default();
+        framed.bound.push(capture_binding("arr", arr_ty, None));
+        let borrow_local = capture_binding("r", ref_ty, Some(d));
+        assert!(matches!(
+            classify_capture(&borrow_local, &prov, &framed),
+            CaptureClass::FrameRooted
+        ));
+
+        // Case 3b: the same borrow, but its `owned_root` is not in this scope
+        // (rooted in an ancestor frame) -> OuterRooted.
+        assert!(matches!(
+            classify_capture(&borrow_local, &prov, &empty),
+            CaptureClass::OuterRooted
+        ));
+
+        // Case 3c: a `&T` parameter reborrow carrying no owned root at all ->
+        // OuterRooted by construction, without consulting the scope.
+        let mut prov = Provenance::default();
+        let d = prov.add(Deriv {
+            place: "p".to_string(),
+            owned_root: None,
+            reborrow: true,
+            mutable: false,
+            projected: false,
+            span,
+        });
+        let param_ref = capture_binding("r", ref_ty, Some(d));
+        assert!(matches!(
+            classify_capture(&param_ref, &prov, &empty),
+            CaptureClass::OuterRooted
+        ));
+    }
+
+    #[test]
+    fn check_capture_admission_gates_each_capture_kind() {
+        // U-admit (R15): the admission gate around `classify_capture`. Each
+        // deferral/rejection is its own row, since a dropped guard is a silent
+        // accept the well-typed goldens never trip.
+        fn prov_with(names: &[&str]) -> Provenance {
+            let mut prov = Provenance::default();
+            prov.quotation_captures
+                .push(names.iter().map(|s| s.to_string()).collect());
+            prov
+        }
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let span = Span { line: 1, col: 1 };
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let admit = |prov: &Provenance, escaping, scope: &Scope| {
+            check_capture_admission(QuotId(0), escaping, span, &ctx, prov, scope)
+        };
+
+        // No real capture: an empty set, and a free global not in scope, both
+        // admit (a free word resolves at the call and needs no env).
+        assert!(admit(&prov_with(&[]), true, &Scope::default()).is_ok());
+        assert!(admit(&prov_with(&["some-word"]), true, &Scope::default()).is_ok());
+
+        // A single scalar capture admits at every boundary.
+        let mut scope = Scope::default();
+        scope.bound.push(capture_binding("x", Type::I64, None));
+        assert!(admit(&prov_with(&["x"]), true, &scope).is_ok());
+
+        // A frame-rooted aggregate is past-owning-frame when escaping, and
+        // deferred to Phase 2 at an in-frame store.
+        let mut scope = Scope::default();
+        scope.bound.push(capture_binding("arr", arr_ty, None));
+        let escaping = admit(&prov_with(&["arr"]), true, &scope).unwrap_err();
+        assert!(
+            escaping.contains("`arr`") && escaping.contains("does not survive the return"),
+            "escaping frame-rooted capture is past-owning-frame: {escaping}"
+        );
+        let in_frame = admit(&prov_with(&["arr"]), false, &scope).unwrap_err();
+        assert!(
+            in_frame.contains("`arr`") && in_frame.contains("in a stored closure is deferred"),
+            "in-frame frame-rooted capture is deferred: {in_frame}"
+        );
+
+        // Case 4: a quotation-typed name is deferred at every boundary.
+        let mut scope = Scope::default();
+        scope.bound.push(Binding {
+            name: "q".to_string(),
+            ty: Type::I64,
+            aliases: None,
+            deriv: None,
+            quot: Some(QuotRef::Known(QuotId(0))),
+        });
+        let quot_name = admit(&prov_with(&["q"]), true, &scope).unwrap_err();
+        assert!(
+            quot_name.contains("capturing a quotation value by name is deferred"),
+            "a captured quotation-typed name is deferred: {quot_name}"
+        );
+
+        // Two captures need a bundle/heap env, deferred in Phase 1's one-word
+        // inline env.
+        let mut scope = Scope::default();
+        scope.bound.push(capture_binding("x", Type::I64, None));
+        scope.bound.push(capture_binding("y", Type::I64, None));
+        let multi = admit(&prov_with(&["x", "y"]), true, &scope).unwrap_err();
+        assert!(
+            multi.contains("at most one reference"),
+            "a 2+-capture escaping closure is deferred: {multi}"
+        );
+    }
+
     #[test]
     fn times_typing_obligations() {
         // R18u: the three `times` typing obligations, each its own row, since a
