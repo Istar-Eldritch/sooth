@@ -47,6 +47,13 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 struct PolyCtx<'a> {
     env: &'a HashMap<String, (PolySig, Option<u64>)>,
     insts: &'a mut HashMap<Span, CallInst>,
+    /// Slice 8a phase 2 (R7): the call sites this walk resolved to a user
+    /// overload of a builtin-named word (`Vec2 +` -> the user `+`), span ->
+    /// resolved callee name, relayed onto `Module::builtin_overloads` so
+    /// lowering emits an `Instr::Call` there instead of the builtin
+    /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
+    /// not lower a builtin overload (out of scope this slice).
+    builtin_overloads: &'a mut HashMap<Span, String>,
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
@@ -1896,6 +1903,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         refs,
         externs: _,
         instantiations: _,
+        builtin_overloads: _,
         modules: _,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
@@ -1923,6 +1931,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // Slice 8a phase 2 (R7): the builtin-name overload dispatch sites, filled
+    // as each monomorphic body's operator calls resolve, then relayed to the
+    // module for lowering (empty for the whole corpus, so its lowering is
+    // untouched byte-for-byte).
+    let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -1936,9 +1949,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // by term-splice at its concrete call sites, so the
                 // instantiation records it produces here are scratch.
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+                let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
+                    builtin_overloads: &mut scratch_overloads,
                     combinators: &combinators,
                 };
                 check_poly_combinator_standalone(
@@ -1962,6 +1977,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
             let mut poly = PolyCtx {
                 env: &poly_env,
                 insts: &mut insts,
+                builtin_overloads: &mut builtin_overloads,
                 combinators: &combinators,
             };
             check_word(
@@ -2013,6 +2029,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         }
     }
     module.instantiations = insts;
+    module.builtin_overloads = builtin_overloads;
     Ok(())
 }
 
@@ -2977,6 +2994,9 @@ pub(crate) fn check_def_collecting_drop_sites(
     // collector passes the empty map (a `drop` overload is never polymorphic),
     // keeping the reachability walk byte-identical on the concrete path (D2).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // Slice 8a phase 2: a REPL definition does not relay builtin-name overload
+    // dispatch to lowering (out of scope), so its records are scratch.
+    let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // defined word's body can call one and have it inlined, exactly as native
     // inlines one drawn from `module.words`. The build path and unit tests
@@ -2984,6 +3004,7 @@ pub(crate) fn check_def_collecting_drop_sites(
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
+        builtin_overloads: &mut scratch_overloads,
         combinators,
     };
     check_word(
@@ -3045,12 +3066,16 @@ pub(crate) fn infer_line(
     // relayed to the caller for lowering. A `build`-path caller passes the
     // empty map (Slice 1's D2 behaviour).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // Slice 8a phase 2: a REPL line does not relay builtin-name overload
+    // dispatch to lowering (out of scope), so its records are scratch.
+    let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
+        builtin_overloads: &mut scratch_overloads,
         combinators,
     };
     let final_stack = check_terms(
@@ -4247,9 +4272,11 @@ pub(crate) fn check_poly_combinator_repl(
     combinators: &HashMap<String, Combinator>,
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+    let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut scratch,
+        builtin_overloads: &mut scratch_overloads,
         combinators,
     };
     check_poly_combinator_standalone(
@@ -4687,14 +4714,24 @@ fn poly_delegate_op(
             _ => unreachable!("suffix is all concrete by construction"),
         })
         .collect();
-    let handled = if let Some(s) = check_operator(name, span, &mut cstack, ctx)? {
-        cstack = s;
-        true
-    } else if let Some(s) = check_str_word(name, span, &mut cstack, ctx)? {
-        cstack = s;
-        true
-    } else {
-        false
+    let handled = match check_operator(name, span, &mut cstack, ctx, None)? {
+        OpDispatch::Builtin(s) => {
+            cstack = s;
+            true
+        }
+        // `poly_delegate_op` passes no user overload, so the resolver never
+        // returns this: a user overload reached from a polymorphic body is
+        // resolved by the caller's own `env` lookup (poly_term) before it
+        // delegates the residual operator here.
+        OpDispatch::UserOverload => unreachable!("poly_delegate_op passes no user overload"),
+        OpDispatch::NotOperator => {
+            if let Some(s) = check_str_word(name, span, &mut cstack, ctx)? {
+                cstack = s;
+                true
+            } else {
+                false
+            }
+        }
     };
     if !handled {
         return Ok(None);
@@ -7080,8 +7117,19 @@ fn check_term(
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
-                return Ok(stack);
+            match check_operator(name, span, &mut stack, ctx, env.get(name))? {
+                OpDispatch::Builtin(stack) => return Ok(stack),
+                // Slice 8a phase 2 (R6/R7): a builtin operator name whose
+                // operands match a user overload exactly dispatches to the
+                // user word. Record the site so lowering emits an `Instr::Call`
+                // here (R7), then fall through: the operands stay on the stack
+                // and the ordinary `env` word-call path below performs the
+                // dispatch (arity/type checks, move/borrow discipline, output
+                // push) exactly as for any user word.
+                OpDispatch::UserOverload => {
+                    poly.builtin_overloads.insert(span, name.clone());
+                }
+                OpDispatch::NotOperator => {}
             }
             if let Some(stack) = check_str_word(name, span, &mut stack, ctx)? {
                 return Ok(stack);
@@ -7499,12 +7547,31 @@ fn check_term(
 /// picks the print codegen (signed/unsigned decimal, `%g` float, or
 /// `true`/`false`) at the call site, same dispatch shape as the rest of this
 /// function.
+/// The outcome of resolving an operator name against `BUILTIN_TABLE` and, on a
+/// builtin-row exact miss, an optional same-named user overload (slice 8a
+/// phase 2, R6). The single resolution entry point both `check_term`'s probe
+/// chain and `poly_delegate_op` route through.
+enum OpDispatch {
+    /// Resolved to a builtin row (or the `>T` conversion), carrying the new
+    /// stack; the caller pushes nothing further.
+    Builtin(Vec<Slot>),
+    /// A user overload of this builtin name matched the operands exactly and
+    /// beats the numeric coercion fallback (R2). The caller records the site
+    /// (R7) and dispatches through the ordinary `env` word-call path; the
+    /// stack is left untouched here.
+    UserOverload,
+    /// The name is not a table operator (nor a `>T` conversion): fall through
+    /// to the next probe in the chain.
+    NotOperator,
+}
+
 fn check_operator(
     name: &str,
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
-) -> Result<Option<Vec<Slot>>, String> {
+    user_overload: Option<&Sig>,
+) -> Result<OpDispatch, String> {
     // R11: every operator this function handles reads the top slot, so a
     // quotation on top is always an operand of it. Guard once, gated on the
     // name being one we handle (else fall through so a later dispatcher can
@@ -7580,7 +7647,7 @@ fn check_operator(
         // (R0), dispatched by parsing the target type out of the name rather
         // than keyed on operand type, so no row can hold them.
         let Some(rest) = name.strip_prefix('>').filter(|r| !r.is_empty()) else {
-            return Ok(None);
+            return Ok(OpDispatch::NotOperator);
         };
         let target = match Type::from_name(rest) {
             Some(ty) if ty.is_numeric() => ty,
@@ -7592,7 +7659,7 @@ fn check_operator(
         }
         stack.pop();
         stack.push(Slot::computed(target));
-        return Ok(Some(std::mem::take(stack)));
+        return Ok(OpDispatch::Builtin(std::mem::take(stack)));
     };
     // Every row for one name agrees on arity (R4), so the first row's input
     // count is the operand count to read.
@@ -7605,7 +7672,21 @@ fn check_operator(
     if let Some(hit) = rows.iter().find(|r| r.inputs == operands) {
         stack.truncate(base);
         stack.extend(hit.outputs.iter().map(|ty| Slot::computed(*ty)));
-        return Ok(Some(std::mem::take(stack)));
+        return Ok(OpDispatch::Builtin(std::mem::take(stack)));
+    }
+
+    // Slice 8a phase 2 (R2/R6): a user overload of this builtin name whose
+    // inputs match the operands exactly beats the numeric coercion fallback
+    // below, so a call the builtin already answers is untouched (corpus
+    // byte-for-byte, since no corpus word overloads a builtin name) while a
+    // `Vec2 +` site is redirected to the user word. Checked only on a
+    // builtin-row exact miss, and only from `check_term` (which passes the
+    // candidate); `poly_delegate_op` passes `None` (a poly body resolves a
+    // user overload through its own env lookup before delegating here).
+    if let Some(sig) = user_overload {
+        if sig.inputs == operands {
+            return Ok(OpDispatch::UserOverload);
+        }
     }
 
     match name {
@@ -7766,7 +7847,7 @@ fn check_operator(
         }
         _ => unreachable!("BUILTIN_TABLE holds only these operator names"),
     }
-    Ok(Some(std::mem::take(stack)))
+    Ok(OpDispatch::Builtin(std::mem::take(stack)))
 }
 
 /// An array word (`fill`/`len`) applied to a non-array operand: names the
@@ -8981,6 +9062,7 @@ mod tests {
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: HashMap::new(),
+            builtin_overloads: HashMap::new(),
             modules: vec![ModuleInfo {
                 imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
@@ -9039,6 +9121,7 @@ mod tests {
                 refs: Vec::new(),
                 externs: Vec::new(),
                 instantiations: HashMap::new(),
+                builtin_overloads: HashMap::new(),
                 modules,
             }
         }

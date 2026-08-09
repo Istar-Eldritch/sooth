@@ -44,6 +44,14 @@ pub struct Module {
     /// keyed by the call site's `Span`, emitted by the checker and consumed by
     /// lowering. Empty for a program with no polymorphic calls.
     pub instantiations: std::collections::HashMap<Span, CallInst>,
+    /// Phase 4 slice 8a phase 2 (R7): the call sites that resolved to a user
+    /// overload of a builtin-named word (e.g. `+` on two `Vec2`), keyed by the
+    /// call site's `Span`, valued by the resolved callee's Sooth name. A
+    /// sparse map mirroring `instantiations`: lowering consults it before its
+    /// name-directed builtin dispatch, so a recorded site emits an
+    /// `Instr::Call` to the user word instead of the builtin instruction. The
+    /// corpus produces no records, so its lowering is untouched byte-for-byte.
+    pub builtin_overloads: std::collections::HashMap<Span, String>,
     /// Phase 4 slice 5a (R10): one entry per file in the import closure, in
     /// topological order, module 0 being the entry file. A single-file program
     /// (and every REPL session) has exactly one entry. Every `StructDecl`/
@@ -1260,6 +1268,7 @@ mod tests {
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            builtin_overloads: std::collections::HashMap::new(),
             modules: Vec::new(),
         }
     }
@@ -1376,6 +1385,7 @@ mod tests {
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            builtin_overloads: std::collections::HashMap::new(),
             modules: Vec::new(),
         }
     }
@@ -1436,6 +1446,7 @@ mod tests {
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
+            builtin_overloads: std::collections::HashMap::new(),
             modules: Vec::new(),
         };
         assert!(matches!(

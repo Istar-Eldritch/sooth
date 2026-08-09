@@ -1266,6 +1266,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 &resolve,
                 regs,
                 &module.instantiations,
+                &module.builtin_overloads,
                 &poly_arities,
                 &combinator_bodies,
             )
@@ -1325,6 +1326,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             &resolve,
             regs,
             &module.instantiations,
+            &module.builtin_overloads,
             &poly_arities,
             &combinator_bodies,
         ));
@@ -1784,6 +1786,7 @@ fn synthesize_struct_destructor_override(
         resolve,
         regs,
         empty_instantiations(),
+        empty_builtin_overloads(),
         empty_poly_arities(),
         combinators,
     );
@@ -2093,6 +2096,7 @@ pub fn lower_line(
         resolve,
         regs,
         instantiations,
+        empty_builtin_overloads(),
         poly_arities,
         combinators,
     );
@@ -2196,6 +2200,7 @@ pub(crate) fn lower_word(
         resolve,
         regs,
         instantiations,
+        empty_builtin_overloads(),
         poly_arities,
         combinators,
     )
@@ -2230,6 +2235,7 @@ pub(crate) fn lower_instantiation(
         resolve,
         regs,
         empty_instantiations(),
+        empty_builtin_overloads(),
         empty_poly_arities(),
         combinators,
     )
@@ -2250,6 +2256,7 @@ fn lower_word_parts(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
@@ -2259,6 +2266,7 @@ fn lower_word_parts(
 
     let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
     b.instantiations = instantiations;
+    b.builtin_overloads = builtin_overloads;
     b.poly_arities = poly_arities;
     b.combinators = combinators;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
@@ -2355,6 +2363,7 @@ fn lower_word_parts(
         resolve,
         regs,
         instantiations,
+        builtin_overloads,
         poly_arities,
         combinators,
     ));
@@ -2373,6 +2382,7 @@ fn lower_materialized(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
@@ -2402,6 +2412,7 @@ fn lower_materialized(
             resolve,
             regs,
             instantiations,
+            builtin_overloads,
             poly_arities,
             combinators,
         ));
@@ -2415,6 +2426,14 @@ fn lower_materialized(
 /// threading one.
 fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+/// Slice 8a phase 2: the builtin-overload companion of `empty_instantiations`,
+/// handed to every lowering path with no user builtin overloads (the REPL,
+/// destructor synthesis, unit tests, and every corpus program).
+fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
 
@@ -2511,6 +2530,13 @@ struct FuncBuilder<'a> {
     /// entry's mangled symbol and per-θ output shape, not the name-keyed
     /// `env`/`resolve`. Empty on the REPL/destructor/test paths.
     instantiations: &'a HashMap<Span, CallInst>,
+    /// Slice 8a phase 2 (R7): the call sites the checker resolved to a user
+    /// overload of a builtin-named word, span -> resolved callee name.
+    /// Consulted before the name-directed builtin dispatch in `lower_call`, so
+    /// a recorded `Vec2 +` site emits an `Instr::Call` to the user word
+    /// instead of `Bin(Add)`. Empty on every corpus/REPL/test path (the
+    /// checker records nothing there), so their lowering is byte-for-byte.
+    builtin_overloads: &'a HashMap<Span, String>,
     /// R14: the fixed input arity of each polymorphic word, name-keyed. How
     /// many args a polymorphic call pops (the `CallInst` carries the output
     /// shape, but the input count is name-constant across θ, so it lives here).
@@ -2655,6 +2681,7 @@ impl<'a> FuncBuilder<'a> {
             cells,
             refs,
             instantiations: empty_instantiations(),
+            builtin_overloads: empty_builtin_overloads(),
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,

@@ -701,6 +701,7 @@ mod tests {
             refs,
             externs: Vec::new(),
             instantiations: HashMap::new(),
+            builtin_overloads: HashMap::new(),
             modules: vec![
                 ModuleInfo {
                     imports: imports0,

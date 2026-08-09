@@ -248,6 +248,7 @@ pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
         refs,
         externs,
         instantiations: HashMap::new(),
+        builtin_overloads: HashMap::new(),
         modules,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
