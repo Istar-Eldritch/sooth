@@ -1907,6 +1907,33 @@ library; the `fixed` layer works with no allocator present.
 **Dogfood:** a genuinely useful small tool (a line-oriented text utility, a small
 static-site or markdown thing) written entirely in Sooth.
 
+**Static storage and global sets, and they land before the allocator work.** Module-level
+static storage (a *place*, not a value: never owned, moved, or dropped, reached only
+through a second-class ref, constant-initialised) plus the per-word **global set** that
+keeps it honest, the statics a word touches and in what mode, inferred within a module and
+declared on exported words. DESIGN.md's *Embedded* section carries the full design,
+including why a static needs its own carve-out from the must-consume rule beside `Copy`'s,
+and why this is a closed monomorphic list rather than the effect rows the type system
+declines. **It looks like a Phase 8 feature and isn't**, because two items in this phase
+need it first:
+
+- The **allocator rework**. A user-supplied allocator has state: a bump pointer, a free
+  list. Today that state hides inside libc's `malloc`; the moment the allocator is ordinary
+  Sooth code bound as foreign words, it needs somewhere in the program to live. Statics are
+  a prerequisite of the explicit-allocator item below, not a sibling of it.
+- The **API description**. A global clause on an exported word is part of that word's
+  exported signature. Building the serialisable API format first and adding globals to it
+  later means retrofitting the format and re-baselining every diff it has already emitted.
+
+Ordered before both; no ordering constraint against the lens item either way. The
+target-facing half of the embedded story (fixed-address MMIO overlays, the volatile aspect,
+bit-level register layout, ISR symbol export) stays in Phase 8, where its consumer is.
+This is what pushes the phase from `[L]` toward `[XL]`: it is a language feature and a new
+checker analysis, not a stdlib item.
+**Exit:** a module with private static state exports a word whose declared global set the
+checker verifies, and an undeclared static access inside that module is a located compile
+error naming the static.
+
 **Modules: what's left after Slice 5.** Phase 4 Slice 5 already pulled the whole
 compilation-unit story forward: a file is a compilation unit, and an import brings a word
 or a struct/enum declaration across a file boundary by qualified name, landed once writing
@@ -1990,14 +2017,37 @@ AST, a genuinely deep branching structure.
 
 ### Phase 7 — Concurrency (library)  `[M]`
 
-Core intrinsics only: **atomics + memory ordering** (LL/SC on arm64, or FFI to C11
-atomics on QBE) and a **spawn** primitive (thin FFI to `pthread_create` at the
-hosted layer). Everything else is library: split-endpoint channels, mutexes,
-pools, and actors (mailbox + loop + move-only messages). Data-race freedom is
-inherited from the linear spine (send = move) and non-escaping refs, no separate
-`Send`/`Sync` apparatus. Ship two libraries: the convenient hosted one and a
-constrained `no_std`/RT one (static topology, fixed mailboxes, no escaping
-captures).
+Core intrinsics only: **atomics + memory ordering** and a **spawn** primitive (thin
+FFI to `pthread_create` at the hosted layer). Everything else is library:
+split-endpoint channels, mutexes, pools, and actors (mailbox + loop + move-only
+messages). Data-race freedom is inherited from the linear spine (send = move) and
+non-escaping refs, no separate `Send`/`Sync` apparatus. Ship two libraries: the
+convenient hosted one and a constrained `no_std`/RT one (static topology, fixed
+mailboxes, no escaping captures).
+
+**Atomics are a QBE patch, not FFI.** Real per-target codegen (x86 `LOCK CMPXCHG`, arm64
+`LDAXR`/`STLXR` or LSE `CAS`, rv64 `LR.W`/`SC.W` or `A`-extension AMOs), landing together
+with the volatile patch since both touch the same handful of files: the spare flag bit
+already available on `Ins`, `load.c`/`gvn.c`'s dedup passes (mustn't ever treat an atomic
+op as a redundant/foldable load), and the dead-result guard duplicated across
+`amd64/isel.c`, `arm64/isel.c`, and `rv64/isel.c` (no longer a single shared `isel.c` in
+canonical QBE). `~/code/qbe` tracks canonical upstream (`git://c9x.me/qbe.git`), so the
+fork has a real base to patch against.
+
+**Three codegen strategies, chosen per target, not a language-level choice.** LL/SC or AMO
+where the ISA has it (arm64, RISC-V with `A`). A critical section by interrupt masking
+where it does not: ARMv6-M has no LDREX/STREX at all, and a RISC-V core without `A` has
+neither AMO nor LR/SC; this is what `libatomic` and Rust's `portable-atomic` already do on
+those cores, and it is sufficient against anything that can only *preempt*, which covers an
+ISR against mainline code on the same core. A hardware lock where masking cannot reach,
+since masking is per-core: RP2040 is dual Cortex-M0+ and provides SIO spinlocks for exactly
+the cross-core case. Fences order accesses and do not exclude a concurrent one, so they are
+not a fourth option and cannot stand in for the missing instructions.
+**Check the RT library against Ravenscar rather than deriving it from scratch.** Ada's
+restricted tasking profile is the same shape already described here (static topology, no
+task termination, no dynamic priorities, one entry per protected object, mandatory ceiling
+locking) and has been through DO-178C level A in avionics and space. Deviating from it is
+fine; deviating without noticing is not.
 **Exit:** concurrent programs that are data-race-free by construction; a deliberate
 attempt to alias a sent value is a compile error.
 **Dogfood:** a small worker-pool or a producer/consumer pipeline.

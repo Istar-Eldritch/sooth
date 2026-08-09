@@ -33,12 +33,23 @@ Recorded so the scope decision isn't re-litigated by accident.
   proven-real-time by Ada/SPARK, refinement+SMT by F*/Dafny/Liquid Haskell,
   effects by Koka, data-race-free actors by Pony. A new general-purpose language
   faces a brutal adoption bar against incumbents that keep improving.
-- **Therefore, for production, use a mainstream language** (Rust when its
-  guarantees are needed, Go/typed-Python when they aren't). Sooth is the hobby,
-  kept honestly separate.
+- **Therefore, for a general-purpose production language, use a mainstream one**
+  (Rust when its guarantees are needed, Go/typed-Python when they aren't).
 
 Nothing below is justified by market need. It's justified by being interesting to
 build and to write in.
+
+**One real target domain, which is not the same as becoming a product.**
+Embedded/real-time is a first-class target and Sooth is expected to be *used* there,
+starting with the goggles firmware. That does not reopen the market argument above,
+which still holds for the general-purpose case: it narrows to a domain where the
+linear spine has something the incumbents don't, and supplies the thing a craft
+project otherwise lacks, a consumer that says no. The craft constraints are unchanged
+(small enough to hold in one head, legible compiler, simplicity over reach); what
+changes is that "nobody depends on this" stops being an excuse for leaving a hole
+where a hard problem should be. Where the linear spine pays off concretely: a DMA
+transfer *is* an ownership transfer, so "don't touch the buffer while the controller
+owns it" becomes a type error instead of a comment in a driver.
 
 ## Surface language
 
@@ -621,10 +632,17 @@ next).
 
 QBE's costs, accepted: it emits assembly text, so you depend on the system assembler
 
-- linker (a cross-toolchain + sysroot when cross-compiling the hosted layer);
-atomics lower via FFI to C11 atomics rather than a QBE primitive. Its modest optimiser is a feature, not a
-bug: more predictable than LLVM's aggressive passes and friendlier to any later WCET
-work.
+- linker (a cross-toolchain + sysroot when cross-compiling the hosted layer); it has no
+volatile or atomic primitives, patched in rather than worked around (see Embedded and
+Concurrency below). Its modest optimiser is a feature, not a bug: more predictable than
+LLVM's aggressive passes and friendlier to any later WCET work.
+
+**QBE is a tracked fork, not a system dependency.** `~/code/qbe` tracks canonical upstream
+(`git://c9x.me/qbe.git`) at v1.3 plus a few, matching the installed binary's target list
+(`amd64_sysv/apple/win`, `arm64`/`arm64_apple`, `rv64`) exactly. Forking it for volatile
+and atomics is accepted; that does not extend to a Thumb/ARMv6-M target, a full new
+backend and an unrelated order of magnitude, argued on its own terms rather than
+inheriting "we already patch QBE" as a precedent.
 
 **WASM is a sibling lowering, not routed through QBE.** Sooth's IR is already
 stack-shaped with structured control flow, exactly what WASM wants, so WASM hangs off
@@ -685,9 +703,19 @@ Only two things must be core intrinsics; everything else is a library.
 **Core intrinsics (cannot be synthesised from below):**
 
 - **Atomics + memory ordering** (compare-and-swap, acquire/release). Codegen must
-  respect them as barriers. On the from-scratch backend, emit LL/SC (arm64) or
-  `LOCK`/CAS (x86) directly; on QBE, lean on FFI to C11 atomics or hand-written asm
-  (QBE's atomics story is thin).
+  respect them as barriers. QBE gets patched with real per-target CAS/fence ops (x86
+  `LOCK CMPXCHG`, arm64 `LDAXR`/`STLXR` or LSE `CAS`, rv64 `LR.W`/`SC.W` or `A`-extension
+  AMOs) rather than FFI to libc, sharing the volatile patch's touch points (the `Ins`
+  flag bit, `load.c`/`gvn.c`'s dedup passes, each target's `isel.c` dead-result guard).
+  **No single codegen strategy across targets**, and the embedded ones are where a
+  uniform one breaks: LL/SC/AMO where the ISA has it (arm64, RISC-V with `A`); a critical
+  section by interrupt masking (`cpsid i`/PRIMASK) where it doesn't (ARMv6-M has no
+  LDREX/STREX, a RISC-V core without `A` has neither AMO nor LR/SC) — the same technique
+  `libatomic` and Rust's `portable-atomic` use on those cores, sufficient against
+  anything that can only *preempt* (an ISR against mainline code on the same core); and a
+  hardware spinlock where masking can't reach, since masking is per-core (RP2040's SIO
+  spinlocks for its two Cortex-M0+ cores). Fences order accesses, they do not exclude a
+  concurrent one, so they aren't a fourth option.
 - **A spawn primitive.** Can be a thin FFI to `pthread_create` at the hosted layer
   rather than a language feature.
 
@@ -744,6 +772,16 @@ What was *not* built is the RT *guarantee* machinery:
 The RT-safe subset is exactly: core + the fixed (no-alloc) layer + the no-escape
 concurrency library.
 
+**One piece of that moved from discipline to enforcement**: unsynchronised sharing
+between an interrupt handler and mainline code is a checked error, via the global-set
+analysis below. WCET reasoning stays the programmer's. **Ravenscar is the reference to
+check the RT concurrency library against**, not to derive it from scratch: Ada's
+restricted tasking profile (static task topology, no termination, no dynamic
+priorities, one entry per protected object, mandatory ceiling locking) is the same
+shape as "static topology, fixed mailboxes, no escaping captures", except it has
+already survived DO-178C level A certification in avionics and space. Deviating from
+it is allowed; deviating without noticing is not.
+
 ## `no_std` core and layering
 
 The core is `no_std` and everything else layers on top. This is the honest shape of
@@ -780,6 +818,97 @@ tax Rust paid early; avoid it. And `no_std` core is not "runs on nothing": it st
 assumes a handful of intrinsics (memcpy/memset for moves, integer-divide and
 soft-float helpers where there's no hardware, the atomics) plus a per-target linker
 script and entry point.
+
+## Embedded: statics, MMIO, and interrupts
+
+Four things the language has no answer for, all of them prerequisites for the bare-metal
+milestone rather than extras on top of it. Ada is the prior art throughout, because it is
+the one language that solves all of this *in the language* rather than with macros (C) or
+generated `unsafe` peripheral crates (Rust).
+
+**Static storage is a third category, not a storage class.** The linear spine assumes a
+value has one owner that moves it forward and one checked `drop` endpoint. A static has
+neither: it exists before `main`, is reachable from arbitrarily many call sites, and is
+never consumed, because an embedded device does not shut down. So a static is a *place*,
+not a value: never owned, never moved, never dropped, reached only through a second-class
+ref. `Copy` already carves one exception into linearity, for cheap duplicable values; this
+is a second one, for permanent mutable state, and the must-consume rule needs an explicit
+carve-out saying so rather than an accident that happens to typecheck. Initialisers are
+compile-time constants (literals, zero) only, which is not a new restriction to argue for:
+it falls straight out of "no comptime interpreter". Ada tiers this (`Pure` / `Preelaborate`
+/ arbitrary startup code with binder-computed ordering); constants-only is the
+`Preelaborate` tier, and the tier above it is available if that ever proves too tight.
+Static state is declared at module level where it is nameable, never hidden inside a word
+the way C's function-local `static` allows, because the analysis below has to be able to
+name it.
+
+**MMIO is a typed overlay with a volatile aspect, not a cast.** Two flavours of static,
+and they are not the same feature: storage the compiler allocates (a ring buffer, a
+counter), and a *fixed address the hardware defines* with a type asserted onto it. The
+second is closer to `extern:` than to a variable, and the declaration site is the trust
+boundary exactly as it already is for foreign calls, so there is still no separate `unsafe`
+marker. Volatile is a property of the declaration, not a hope: for a register the access's
+*existence* is the side effect, so the backend may never elide, coalesce, or reorder it.
+**QBE does not model volatile**, so a discarded load, two loads of the same address, and a
+store followed by a load of the same address are all fair game for elimination, CSE, and
+forwarding respectively — all three matter for real registers (clear-on-read status bits, a
+FIFO data register, write-then-verify), so QBE gets patched with a `vol` flag rather than
+routing every access through an opaque call. `struct Ins`'s `op:30` field has a spare bit
+to give it at zero size cost. Three sites need to honour it: `load.c`'s redundant-load/
+store-forwarding elimination, `gvn.c`'s `dedupins` (must never call a volatile op equal to
+anything, including itself elsewhere), and the dead-result guard duplicated across each
+target's own `isel.c` (amd64/arm64/rv64, no longer one shared file). GCM's block-pinning
+already covers in-block ordering for free, since loads and stores are `pinned` in the op
+table, so a volatile access spinning in a loop is not hoisted out without any new work.
+Copy Ada's declaration-side triple wholesale: an address clause, a `Volatile` aspect, and
+record representation clauses that lay a control register out to the bit, so a register is
+a typed record with named fields instead of hand-rolled shifts and masks.
+
+**An ISR is an exported symbol, not a called word.** On Cortex-M the hardware stacks the
+caller-saved registers on exception entry, so a handler is an ordinary C-ABI `void(void)`
+function reached through a vector table. What's missing is only a way to give a word a
+fixed symbol name and linker section, which is a linker/attribute mechanism rather than a
+language design problem.
+
+**Shared state between an ISR and mainline code is the hard part, and it gets an
+analysis.** An interrupt has no call site, so there is no move point at which ownership
+could transfer: both sides genuinely touch the same object, which is precisely what the
+rest of the language is built to prevent. What makes it tractable is a **global set** per
+word, the statics it touches and in what mode, computed bottom-up over the call graph. The
+hazard is then a set intersection: any static reachable from both an interrupt handler and
+mainline code needs masking or a protected wrapper. Without that set the hazards cannot
+even be enumerated, which is why C and embedded Rust both leave this to human discipline.
+Ada goes further and makes the mutual exclusion structural (a handler *must* be a protected
+procedure, and ceiling locking compiles to interrupt masking); whether the wrapper here is
+a library type or a language construct is open, but the analysis is needed either way.
+
+**Inferred everywhere, declared at boundaries.** Global sets are inferred within a module
+and *declared* on exported words and ISR-attached words. That line is not a staging plan,
+it is where visibility ends: inside a module the compiler sees every body, across a module
+boundary a caller cannot. The argument for declaring is not documentation, it is blame
+localisation, and it is the same argument that already made stack effects declared rather
+than inferred: an inferred contract reports a violation wherever it surfaces, not where the
+mistake was made, so an access added three words deep is silently absorbed and detonates at
+an ISR boundary the author never read. A declaration is a ratchet, catching the change in
+contract at the moment of the change. It also buys SPARK's `Abstract_State` benefit for
+free: an exported word declares that it touches module state without publishing which
+variables, so refactoring internals doesn't churn callers' contracts. Inferring internally
+is what keeps the annotation burden off every intermediate helper, which is the specific
+friction that makes real Ada projects skip `Global` contracts.
+
+**This is a global clause, not effect rows, and the difference is the whole budget.**
+Effect rows mean row *variables*, polymorphism, unification, and inference threaded through
+the type system, which the type system section declines. A global set is a closed
+monomorphic list of names with modes, checked by set inclusion; the bottom-up computation
+is a fixpoint over the call graph, not HM unification, so "no inference" does not settle it
+either way. Higher-order code is normally exactly where that distinction collapses, since
+`each`'s effects would have to be whatever its quotation's are, and Sooth escapes it
+through a decision already made for other reasons: combinators are **inlined at call
+sites**, so `each` never exists as a separate callee needing a polymorphic contract. The
+exception is escaping quotations, which cannot be inlined, and those are already
+`alloc`-layer and already excluded from the RT subset. The restriction lands exactly on a
+boundary that exists anyway, which is the reason to believe the narrow version holds rather
+than sliding into the general one.
 
 ## Liveness and the craft discipline
 
@@ -880,9 +1009,34 @@ rows, no borrow analysis needed to write the compiler in it.
 - Concurrency: library, not core. Only atomics + spawn are intrinsics; data-race
   freedom is free from linear types + non-escaping refs.
 - Real-time: soft-RT out of the box; hard-RT by discipline (fixed layer + static
-  topology), not by enforced guarantee.
+  topology), not by enforced guarantee, with one exception now enforced
+  (unsynchronised ISR/mainline sharing is a checked error). WCET stays the
+  programmer's. Check the RT concurrency library against Ravenscar rather than
+  deriving it fresh.
 - `no_std` core with core / fixed / alloc / hosted layering; allocator interface in
   core; seams fixed day one.
+- Embedded/RT is a first-class target, and the one domain where Sooth is meant to be
+  used rather than only built. Static storage is a third category beside linear and
+  `Copy` (a *place*: never owned, moved, or dropped, reached only by second-class ref,
+  constant-initialised, declared at module level); MMIO is a typed fixed-address
+  overlay with a volatile aspect and bit-level register layout, following Ada, with
+  the declaration site as the trust boundary as for `extern:`; an ISR is a word
+  exported under a fixed symbol and section.
+- Statics get a **global set** per word (which statics it touches, in what mode),
+  inferred within a module and declared at module-export and ISR boundaries, so
+  unsynchronised ISR/mainline sharing is a set intersection the checker can compute.
+  A closed monomorphic list, explicitly *not* effect rows; combinator inlining is what
+  keeps it monomorphic under higher-order code, and escaping quotations (the one case
+  that would break it) are already outside the RT subset.
+- Atomics and volatile are both **QBE patches**, landing as real ops (`Ins`'s spare flag
+  bit, `load.c`/`gvn.c`'s dedup passes, each target's `isel.c`) rather than FFI-to-libc or
+  an opaque-call escape; `~/code/qbe` tracks canonical upstream for this. Atomics have no
+  single implementation strategy per target: LL/SC or AMO where the ISA has it (arm64,
+  RISC-V with `A`), interrupt masking as a critical section where it doesn't (ARMv6-M,
+  RISC-V without `A`), and a hardware spinlock where masking cannot reach (across
+  RP2040's two cores). Fences order; they do not exclude. Forking QBE for this does not
+  pre-decide a Thumb/ARMv6-M backend, a different order of magnitude argued on its own
+  terms.
 - Bootstrap: host-language compiler then self-host a small subset, fixpoint-verify.
   Host language now free choice; Rust the sensible default.
 
@@ -917,6 +1071,23 @@ that were argued out rather than assumed.
 
 ## Open / deferred
 
+- **Surface syntax for statics, the global clause, and register layout.** The
+  semantics are settled (see Embedded); the spellings are not. The global clause has
+  to attach to the stack effect without turning a one-line signature into three, and
+  register layout needs a bitfield form that doesn't grow a second declaration
+  language. Settle these in one brief, not four, since they all land in the same
+  declaration.
+- **Whether the ISR/mainline wrapper is a library type or a language construct.** Ada
+  makes it structural: a handler must be a protected procedure, and ceiling locking
+  compiles to interrupt masking. The cheap version here is a `fixed`-layer type whose
+  operations mask, with the global-set analysis catching anything that bypasses it;
+  the expensive version enforces that statics shared across a preemption boundary are
+  *only* reachable through such a type. Decide against a real driver, not in the
+  abstract.
+- **Whether an ISR's global set can be checked at all under separate compilation.**
+  The intersection is a whole-program question, and firmware links whole-program, so
+  this is likely a link-time check rather than a per-module one. Unresolved: what the
+  REPL's `dlopen` path does with it, where there is no link step and no ISR.
 - Exact surface syntax for quotations/closures and their captures (illustrative
   above, not settled).
 - Whether to add optional HM inference later (kept possible by the `(value, type)`
