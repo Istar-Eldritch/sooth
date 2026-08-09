@@ -11331,10 +11331,13 @@ mod tests {
     fn builtin_table_plus_has_a_row_per_numeric_type() {
         // Q-A: `+` resolves by exact operand type, so the table carries one
         // homogeneous `(T T -- T)` row for every numeric type and nothing
-        // else. Mutation-check: emptying the `+` loop drops these rows and
-        // this fails.
+        // else. Anchored to the literal count (12: eight fixed-width ints,
+        // usize/isize, two floats) rather than `numeric_types()` itself, so
+        // shrinking that function can't shrink both sides of the comparison
+        // together and hide a wiring bug.
         let table = builtin_table();
         let rows = table.get("+").expect("`+` is a builtin operator");
+        assert_eq!(rows.len(), 12, "12 numeric rows");
         let mut got: Vec<Type> = rows
             .iter()
             .map(|r| {
@@ -11351,6 +11354,18 @@ mod tests {
         got.sort_by_key(|t| t.name());
         want.sort_by_key(|t| t.name());
         assert_eq!(got, want, "one `+` row per numeric type, no more");
+    }
+
+    #[test]
+    fn check_not_on_literal_count_is_not_a_literal_for_fill() {
+        // The retired hand-written `not` arm left its operand slot in place,
+        // preserving `literal`/`int_val` (so a `not`'d literal fed to `fill`
+        // would have used the *pre-negation* value, silently wrong). The
+        // table row it was replaced with emits `Slot::computed`, so `fill`
+        // now correctly refuses a `not`'d literal as a non-literal count
+        // instead of miscounting.
+        let err = check_src(": w ( -- ) 0 4 not fill drop ;").unwrap_err();
+        assert!(err.contains("literal count"), "unexpected message: {err}");
     }
 
     #[test]
