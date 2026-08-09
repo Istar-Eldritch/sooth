@@ -150,10 +150,17 @@ drifted materially.
   reference.
 
   **D4 amendment (scalar snapshot).** A captured **scalar** value — any local whose type is NOT
-  `Type::Struct | Type::Enum | Type::Array | Type::OwnedCell` and is not itself a `Type::Ref`, i.e.
-  precisely the class `check_borrow_word` (`check.rs:8210`–`:8213`) already uses to reject `&`/`&!`
-  on a local (`i64`/`u64`/`f32`/`f64`/`bool`/`usize` etc.) — is **snapshotted into the env (copied),
-  not referenced**. This is sound, not a hedge, and loses nothing D4 was protecting: a scalar local
+  `Type::Struct | Type::Enum | Type::Array | Type::OwnedCell`, is NOT itself a `Type::Ref`, and is
+  NOT a `Type::Quotation` (a locally-bound quotation value, a `Slot` with `quot: Some(...)`) — i.e.
+  precisely the class that reaches `borrow_of_scalar_local_error` in `check_reference_word`
+  (`check.rs:8210`–`:8214`) (`i64`/`u64`/`f32`/`f64`/`bool`/`usize` etc.) — is **snapshotted into the
+  env (copied), not referenced**. That function's `!matches!(local_ty, Struct|Enum|Array|OwnedCell)`
+  predicate is not the whole class: two earlier guards run first, peeling off quotation-marked
+  locals (`check.rs:8204`, `scope.local(rest).is_some_and(|b| b.quot.is_some())` →
+  `reject_quotation_operand`) and `Type::Ref` locals (`check.rs:8207`, `local_ty.is_ref()` →
+  `borrow_of_reference_local_error`) before the scalar predicate ever runs, so the class the scalar
+  message actually applies to is "not aggregate, not `Ref`, AND not quotation-marked" — the snapshot
+  class must exclude all three (a captured quotation-typed name is case 4 in R15, never a snapshot). This is sound, not a hedge, and loses nothing D4 was protecting: a scalar local
   can never be mutated after capture through any path Sooth admits, because (a) a scalar has no
   address and so can never be borrowed at all (`borrow_of_scalar_local_error`, `check.rs:7845`), and
   (b) R4 forbids rebinding a name already in scope, for Copy values too (`check.rs:5563`). So a
@@ -256,15 +263,16 @@ requirements are R14+.
   *being* capturing; it is admitted or rejected by the admission rule (R15). `body_captures_enclosing`
   (`check.rs:6150`) stays as the cheap "does it capture at all" gate deciding whether the admission
   rule and env build run; `capturing_quotation_error` is deleted.
-- **R15.** Admission rule (Q2b), a **three-way classification on capture kind**, branched *before*
+- **R15.** Admission rule (Q2b), a **four-way classification on capture kind**, branched *before*
   the frame-rooted/outer-rooted test even applies. For each captured name (the set is
   `quotation_captures(id)`, D3; no new analysis):
 
   1. **Scalar value capture** — the name binds a scalar local (D4's snapshot class: not
-     `Struct`/`Enum`/`Array`/`OwnedCell`, and not a `Type::Ref`). **Always admissible, at every one
-     of the four boundaries including word-output**: the env snapshots it (D4 amendment), so it can
-     never dangle. No `owned_root` test, no surviving-set entry. (This is the new first branch, and
-     it is what admits the four re-pointed 7a goldens, R25.)
+     `Struct`/`Enum`/`Array`/`OwnedCell`, not a `Type::Ref`, and not a `Type::Quotation` — see
+     case 4). **Always admissible, at every one of the four boundaries including word-output**: the
+     env snapshots it (D4 amendment), so it can never dangle. No `owned_root` test, no surviving-set
+     entry. (This is the new first branch, and it is what admits the four re-pointed 7a goldens,
+     R25.)
   2. **Aggregate value capture, no derivation** — the name binds an aggregate local
      (`Struct`/`Enum`/`Array`/`OwnedCell`) read *directly*, not via `&`/`&!`, so it carries no
      `Deriv`/`owned_root` (the general `[ arr ... ]` shape where `arr` the aggregate itself, not a
@@ -275,17 +283,40 @@ requirements are R14+.
      **Frame-rooted** (the local is a binding of the current frame) → the original rule: rejected at
      a **word-output** boundary with past-owning-frame (R24), admitted at an **in-frame** boundary
      per R21 (Phase 2). **Outer-rooted** (an aggregate parameter/global) → admitted at any boundary.
-  3. **Explicit borrow capture** — the name binds a `&x`/`&!x`, carrying a `Deriv`/`owned_root`.
-     Unchanged from the original rule: read `Deriv.owned_root` and compare against the current
-     frame's locals (the machinery `check.rs:6108`/`:5519` already uses). `owned_root` in the
-     **current frame** → frame-rooted (rejected at word-output, admitted in-frame per R21);
-     `owned_root` in a **parameter/global** → outer-rooted, admitted at any boundary. This is
-     `make-a` (frame-rooted, rejected) vs `make-b` (parameter, admitted).
+  3. **Reference capture** — the captured name is `Type::Ref`-typed. Split by whether it carries a
+     `Deriv`:
+     - **Carries a `Deriv`/`owned_root`** (created by `&`/`&!` inside the current frame): read
+       `Deriv.owned_root` and compare against the current frame's locals (the machinery
+       `check.rs:6108`/`:5519` already uses). `owned_root` in the **current frame** → frame-rooted
+       (rejected at word-output, admitted in-frame per R21); `owned_root` in a **parameter/global**
+       → outer-rooted, admitted at any boundary.
+     - **Carries no `Deriv`** (`deriv: None` — a `&T` parameter or global): **outer-rooted by
+       construction**, admitted at any boundary. This matches `check_reference_across_back_edge`'s
+       own `if let Some(id) = slot.deriv { ... }` handling (`check.rs:5527`–`:5531`): a `None` deriv
+       never reaches the `owned_root` check, so it never rejects.
+
+     This admits **T-makeb**, which captures `r`, a `&[i64 4]` **parameter** with `deriv: None` (not
+     created by `&`/`&!` in this frame), as outer-rooted. It still rejects **make-a**'s shape — a
+     frame-local aggregate borrow (`&arr` over a `[i64 4]` local), which *does* carry a `Deriv` whose
+     `owned_root` is a current-frame local, so it is frame-rooted and rejected at a word-output
+     boundary.
+
+  4. **Captured quotation-typed name** — the name binds a **quotation** value (its type is
+     `Type::Quotation`, a `Slot` with `quot: Some(...)`), not a scalar/aggregate/borrow. It is
+     neither snapshotted (rule 1) nor root-classified (rules 2/3): it is **materialized** (if its
+     `quot` is `Known`) and its own capture set — `quotation_captures(id)` / `capture_names` (D3) —
+     is folded **transitively** into the outer closure's surviving set (R19/R20), so R22's
+     word-output escape guard can see through it to any frame-rooted capture nested inside. Golden
+     `:160` (`capturing_through_nested_quotation_is_error`, `[ [ x + ] call ]`) is **not** a case-4
+     program: its inner `[ x + ]` is an inline literal spliced via `call`, never bound to a local
+     name, so only the scalar `x` is captured and `:160` stays a rule-1 scalar case (R25).
 
   Boundary summary: a **scalar** capture (kind 1) admits at all four boundaries unconditionally; an
   **aggregate value or borrow** capture (kinds 2/3) admits an *outer-rooted* capture at any
   boundary, admits a *frame-rooted* capture only at an **in-frame** boundary (Phase 2, R21), and
-  rejects a frame-rooted capture at a **word-output** boundary with past-owning-frame (R24).
+  rejects a frame-rooted capture at a **word-output** boundary with past-owning-frame (R24); a
+  **captured quotation-typed name** (kind 4) carries no admission decision of its own — it folds its
+  transitive capture set into the outer closure's surviving set and is decided by those members.
 
 **Env representation and lowering (Phase 1: inline single; Phase 2: bundle)**
 
@@ -294,7 +325,10 @@ requirements are R14+.
   positional bundle of references (like `intern_bundle_struct`, `ast.rs:433`) stack-allocated in the
   materializing frame, `env` holding the pointer. `env` stays `IrType::Ptr` (opaque; NF1). The
   inline single case lands in Phase 1; the bundle in Phase 2 (it is only reachable by an in-frame
-  multi-capture closure, R21).
+  multi-capture closure, R21). The bundle is an IR-level `Alloc`/`FieldStore` construct built in
+  `ir.rs`, **not** an interned `StructDecl`: `intern_bundle_struct` (`ast.rs:433`) is named only as
+  the *layout* analogue (positional word-width field offsets), no real struct is interned for the
+  env, and `src/ast.rs` is intentionally **not** in the sanctioned-files list.
 - **R17.** Lowering. `lower_materialized` (`ir.rs:2370`) mints the callee `IrFunc` with **one extra
   env parameter** (`IrType::Ptr`) appended after the declared inputs; inside the body a captured name
   resolves to a read from `env` (inline: the `env` value itself; bundle: a field load at the
@@ -355,7 +389,11 @@ requirements are R14+.
   `SurvivingCaptureSetId` for the union); it does **not** mutate either arm's existing set in place
   — this is what keeps the field `Copy`-compatible, and it is a real (bounded) allocation per join,
   not free. A scalar-captured arm contributes nothing to the union (no surviving-set membership,
-  R19 / D4 amendment). No cap.
+  R19 / D4 amendment). No cap. **T-join-union pins this as a genuine union, not a one-arm
+  passthrough:** each arm must capture a *distinct* aggregate/borrow referent, and killing *either*
+  arm's referent independently before the `call` must fire past-last-use (R24). A “keep only one
+  arm's set” bug survives killing the arm it happened to keep, so the test kills each arm's referent
+  in turn and requires both to reject — which holds only if the union carries both.
 
 **Diagnostics (Phases 1–2)**
 
@@ -376,16 +414,64 @@ requirements are R14+.
   a snapshot and is **always admissible**. So all four now **compile**, not reject; each is
   re-pointed to a **positive** test with a `call` **added** so it observes the captured scalar's
   value (not a vacuous store-then-drop). Do not delete them.
-  - `:123`, `:143`, `:160` → positive tests of R15 rule 1 at an **in-frame** boundary, landing in
-    **Phase 1** (rule 1 has no Phase 1/2 distinction — it is unconditional admission — and the
-    admission-pass change lands in Phase 1). Each adds a `call` and asserts the observed value.
-    `:160` keeps its **nested-quotation** shape (it uniquely exercises transitive capture through
-    `capture_names` recursion), adds a `call`, and asserts the printed value.
+  All three land in **Phase 1** (rule 1 has no Phase 1/2 distinction — it is unconditional admission
+  — and the admission-pass change lands in Phase 1). The retrieval syntax is the exact getter an
+  existing passing test already uses (`Holder>q` at `:71`; `&a IDX &> @` for an array element). Each
+  is kept as a concrete re-pointed program:
+
+  - `:123` (`capturing_literal_stored_is_error_naming_7b`) → the **struct-constructor** boundary
+    (`check.rs:7038`), rule-1 scalar snapshot. Re-pointed program (expected stdout `14\n`):
+
+    ```
+    type: Holder q [ i64 -- i64 ] ;
+    : main ( -- ) 10 | x | [ x + ] Holder Holder>q 4 swap call . ;
+    ```
+
+    The scalar `x = 10` is snapshotted into the inline env, stored in `Holder`, retrieved via
+    `Holder>q`, and called with `4` → `14`.
+  - `:143` (`capturing_literal_stored_in_array_element_is_error_naming_7b`) → the **reference-store**
+    boundary (`&!` through an array referent, `check.rs:6912`), rule-1 scalar snapshot. It mirrors
+    the existing *passing* non-capturing oracle `quotation_in_array_element_indirect_calls`
+    (`tests/phase4_quotations.rs:83`) verbatim, changing only element 1's literal to the capturing
+    `[ x + ]`. Re-pointed program (expected stdout `5\n14\n`):
+
+    ```
+    : one ( -- [ i64 -- i64 ] ) [ 1 + ] ;
+    : main ( -- )
+      10 | x |
+      one 2 fill | a |
+      &!a 1 >usize &!> [ x + ] !
+      &a 0 &> @ 4 swap call .
+      &a 1 &> @ 4 swap call . ;
+    ```
+
+    Element 0 stays `[ 1 + ]` → `4 + 1 = 5`; element 1 is the capturing `[ x + ]`, `x = 10` →
+    `4 + 10 = 14`. **Kept as a re-point, not subsumed:** it is the only golden covering rule-1
+    scalar snapshot at the reference-store boundary (T-dispatch / T-lateread cover that boundary
+    only for Phase-2 *aggregate/borrow* captures), and pairing a capturing with a non-capturing
+    element in one array proves the two coexist and each reads its own env. Array cleanup needs no
+    explicit `drop` — the oracle at `:83` compiles without one (an all-Copy-element array is Copy),
+    so the re-point needs none either.
+  - `:160` (`capturing_through_nested_quotation_is_error`) → the struct-constructor boundary again,
+    but **keeping its nested-quotation shape** (it uniquely exercises transitive capture through
+    `capture_names` recursion). Re-pointed program (expected stdout `14\n`):
+
+    ```
+    type: Holder q [ i64 -- i64 ] ;
+    : main ( -- ) 10 | x | [ [ x + ] call ] Holder Holder>q 4 swap call . ;
+    ```
+
+    The outer `[ [ x + ] call ]` has effect `[ i64 -- i64 ]` and captures the scalar `x = 10`
+    transitively through the inner spliced `[ x + ]`; stored, retrieved, and called with `4` → `14`.
+    The inner `[ x + ]` is an inline literal spliced via `call`, never bound to a name, so only the
+    scalar `x` is captured — a rule-1 case, not case 4 (R15).
   - `:231` (`pick`, returns the join) → a positive **run** test under its own golden name
-    **T-repoint-join**: the returned closure, called, produces the correct value regardless of which
-    branch was taken — a scalar capture surviving a **word-output** boundary via snapshot (inline
-    env, R18). This is a *different* kind of test from **T-makeb** (which is a *reference* capture of
-    a parameter, not a snapshotted scalar), so it gets its own name and rationale.
+    **T-repoint-join**. `main` passes `true`, so the taken (`true`) branch's capture (`[ x + ]`,
+    `x = 10`) survives the **word-output** boundary via snapshot (inline env, R18) and, called with
+    `4`, yields `14` (the `else` arm `[ 2 + ]` would yield `6`; the point is that the *taken* arm's
+    snapshot survives, not branch-independence). This is a *different* kind of test from **T-makeb**
+    (which is a *reference* capture of a parameter, not a snapshotted scalar), so it gets its own
+    name and rationale.
   - **Unchanged by this amendment:** `make-a`/**T-makea** (`0 4 fill | arr | [ &arr ... ]`) captures
     via an explicit **borrow** of an **aggregate** (`[i64 4]`) — R15 rule 3, `owned_root` in the
     current frame — and is still correctly rejected past-owning-frame; do not weaken it. **T-makeb**
@@ -454,9 +540,9 @@ its liveness extension; the join union; the two new diagnostics; a dogfood progr
 | T-bundle | `materialized_multi_capture_builds_stack_bundle` | unit+IR | 2 | two-capture in-frame materialization → `Alloc` bundle, two `FieldStore`s, `env` = bundle pointer; offsets word-width derived |
 | T-carrier | `frame_capture_escaping_via_struct_is_past_owning_frame` | reject | 2 | a same-frame-capturing closure stored in a struct that is then returned → exact past-owning-frame message (R22; `contains_reference` cannot catch this) |
 | T-join | `join_of_two_capturing_arms_unions_capture_sets` | run+IR | 2 | two differing capturing literals joined, the merged closure `call`ed while both arms' captures live → correct value. A pure run test cannot prove the set is the *union* (it can pass with only one arm tracked); pair with T-join-union (R23) |
-| T-join-union | `join_capture_union_kills_one_arm_referent_is_past_last_use` | reject | 2 | companion to T-join: one arm captures an **aggregate/borrow** referent (R15 rule 2/3); consume or exclusively re-borrow that referent before the `call` → exact past-last-use via `assert_eq!`, which fires *only* if that arm's capture actually entered the unioned surviving set (R23). Applies only to an aggregate/borrow-captured arm — a scalar-captured arm has no surviving-set membership (R19) |
+| T-join-union | `join_capture_union_kills_either_arm_referent_is_past_last_use` | reject | 2 | companion to T-join. **Each arm captures a distinct aggregate/borrow referent** (R15 rule 2/3) — arm-a its own, arm-b another. The union must hold with **either** arm's referent killed: consume/exclusively re-borrow arm-a's referent before the `call` → past-last-use; *independently*, kill arm-b's referent → past-last-use. **Both** must fire (two variants, or one test asserting both), which holds only if the unioned set contains **both** arms' captures (R23) — a “keep only one arm's set” bug survives killing the kept arm but is caught by killing the other. Applies only to aggregate/borrow-captured arms — a scalar-captured arm has no surviving-set membership (R19) |
 | T-repoint | three 7a goldens (`:123`/`:143`/`:160`) re-pointed to positive **in-frame** tests | run | 1 | R15 rule 1 (scalar snapshot) admits; each adds a `call` and asserts the observed value (`:160` keeps its nested-capture shape, R25) |
-| T-repoint-join | `capturing_literal_at_join_is_error_naming_7b` (`:231`) re-pointed | run | 1 | a scalar capture surviving a **word-output** boundary via inline-env snapshot (R18); returned closure `call`ed → correct value regardless of branch; distinct from T-makeb (reference, not snapshot) |
+| T-repoint-join | `capturing_literal_at_join_is_error_naming_7b` (`:231`) re-pointed | run | 1 | a scalar capture surviving a **word-output** boundary via inline-env snapshot (R18); `main` passes `true`, so the taken (`true`) branch's capture (`[ x + ]`, `x = 10`) survives the boundary and, called with `4`, yields `14`; distinct from T-makeb (reference, not snapshot) |
 | T-reg | 7a's splice pins (`ir.rs:5214`/`:5228`, `is_call_instr` sites) stay green | IR | 3 | no spliced literal regresses into `CallIndirect` when the env param is added (R26) |
 | T-dogfood | `capturing_dispatch_matches_spliced_version` | run+IR | 4 | a new `examples/*.sth` capturing-closure program == its hand-spliced twin's stdout; path emits `CallIndirect` with a non-null `env` |
 | T-roadmap | ROADMAP 7b marked implemented | doc | 4 | prose exit line; no test |
@@ -480,6 +566,10 @@ worktree), per the project's mutation-testing convention.
 - **M2 (R20 surviving-set liveness — T-lastuse).** Drop the erased-slot union added to
   `capture_alive_names`: T-lastuse stops rejecting (the referent reads dead before the call, exactly
   the probe-P4 erasure gap). Proves the surviving set actually feeds liveness.
+  *Verify at mutation-test time (implementer note):* before trusting M2, confirm in the throwaway
+  copy that the pre-existing R12 exit-row borrow check (`check.rs:6108` area) does not already
+  incidentally reject T-lastuse's consume-before-call for an unrelated reason — if it does, M2 is a
+  placebo and T-lastuse proves nothing about R20.
 - **M3 (R22 escape guard — T-carrier).** Delete the surviving-set walk at the word-output boundary:
   T-carrier stops rejecting (a frame capture escapes through a struct, undetectable by
   `contains_reference`). Proves the guard is real and not delegated to the blind structural check.
@@ -535,12 +625,12 @@ cargo test`.
   "phases": [
     {
       "phase": 1,
-      "focus": "Soundness floor + escaping single-capture: retire 7a's blanket capturing-quotation boundary rejection (R14, delete capturing_quotation_error at check.rs:6238 and the inline join copy at :7204); add the admission rule (R15) as a three-way classification on capture kind: (1) a scalar value capture is always admissible at every boundary via an env snapshot (D4 amendment, the scalar class check_borrow_word rejects &/&! on at check.rs:8210-8213), (2) an aggregate value capture (no deriv) is classified by whether the local's binding belongs to the current frame, and (3) an explicit borrow capture is classified by owned_root-vs-current-frame reusing the test at check.rs:6108/:5519; build and read an inline single-reference env (R16/R17) by giving the materialized IrFunc one extra Ptr param (lower_materialized, ir.rs:2370), building env in materialize_quot_value (ir.rs:4170, replacing Const(env,0) at ir.rs:4188) and passing it in lower_indirect_call (ir.rs:4245); reject a 2+-capture escaping closure as deferred (R18); add the past-owning-frame diagnostic (R24, modeled on reference_across_back_edge_error at check.rs:5501); re-point the four 7a goldens (tests/phase4_quotations.rs:123/:143/:160/:231) to positive tests since all four capture a bare scalar and now compile (R25): the three in-frame goldens (:123/:143/:160) admit via R15 rule 1 with an added call, and the join golden (:231, T-repoint-join) runs as a scalar snapshot surviving a word-output boundary via inline env (R18). Goldens T-makeb, T-makea, T-env-inline, T-multi-esc, T-repoint, T-repoint-join; drive mutation tests M1, M5.",
+      "focus": "Soundness floor + escaping single-capture: retire 7a's blanket capturing-quotation boundary rejection (R14, delete capturing_quotation_error at check.rs:6238 and the inline join copy at :7204); add the admission rule (R15) as a four-way classification on capture kind: (1) a scalar value capture is always admissible at every boundary via an env snapshot (D4 amendment, the scalar class that reaches borrow_of_scalar_local_error in check_reference_word at check.rs:8210-8214, after its earlier quotation guard at :8204 and Type::Ref guard at :8207 peel off those kinds), (2) an aggregate value capture (no deriv) is classified by whether the local's binding belongs to the current frame, (3) a reference capture is classified by owned_root-vs-current-frame when it carries a Deriv and is outer-rooted by construction when deriv is None (a &T parameter/global, matching check_reference_across_back_edge at check.rs:5527-5531), reusing the test at check.rs:6108/:5519, and (4) a captured quotation-typed name is materialized and its capture set folded transitively into the outer surviving set (R19/R20); build and read an inline single-reference env (R16/R17) by giving the materialized IrFunc one extra Ptr param (lower_materialized, ir.rs:2370), building env in materialize_quot_value (ir.rs:4170, replacing Const(env,0) at ir.rs:4188) and passing it in lower_indirect_call (ir.rs:4245); reject a 2+-capture escaping closure as deferred (R18); add the past-owning-frame diagnostic (R24, modeled on reference_across_back_edge_error at check.rs:5501); re-point the four 7a goldens (tests/phase4_quotations.rs:123/:143/:160/:231) to positive tests since all four capture a bare scalar and now compile (R25): the three in-frame goldens (:123/:143/:160) admit via R15 rule 1 with an added call, and the join golden (:231, T-repoint-join) runs as a scalar snapshot surviving a word-output boundary via inline env (R18). Goldens T-makeb, T-makea, T-env-inline, T-multi-esc, T-repoint, T-repoint-join; drive mutation tests M1, M5.",
       "difficulty": "hard"
     },
     {
       "phase": 2,
-      "focus": "Surviving capture set + same-frame in-frame captures: add an optional surviving capture set field to Slot (R19) as a Copy interned SurvivingCaptureSetId into a side table (not an inline HashSet, which would break Slot: Copy at check.rs:102; mirrors the QuotRef::Known(QuotId) and Provenance::quotation_captures patterns at check.rs:437/:544), set at every boundary for aggregate/borrow captures only (a scalar snapshot is never a member) and forwarded by shuffles; extend capture_alive_names (check.rs:1054) and live_derivs (:1097) to union an erased slot's surviving set, not only Some(QuotRef::Known) reachable captures (R20); admit frame-rooted aggregate/borrow captures at in-frame boundaries so the dispatch-table and struct-stored-closure programs run (R21); add the stack-allocated multi-capture bundle env built like intern_bundle_struct at ast.rs:433 (R16 bundle case); add the word-output escape guard walking the surviving set (R22, since contains_reference at check.rs:285 is blind to the env); union both arms' surviving sets at a differing-literal join by interning a new set (R23, check.rs:7195); add the past-last-use diagnostic (R24). Goldens T-dispatch, T-lateread, T-lastuse, T-bundle, T-carrier, T-join, T-join-union; drive mutation tests M2, M3, M4.",
+      "focus": "Surviving capture set + same-frame in-frame captures: add an optional surviving capture set field to Slot (R19) as a Copy interned SurvivingCaptureSetId into a side table (not an inline HashSet, which would break Slot: Copy at check.rs:102; mirrors the QuotRef::Known(QuotId) and Provenance::quotation_captures patterns at check.rs:437/:544), set at every boundary for aggregate/borrow captures only (a scalar snapshot is never a member) and forwarded by shuffles; extend capture_alive_names (check.rs:1054) and live_derivs (:1097) to union an erased slot's surviving set, not only Some(QuotRef::Known) reachable captures (R20); admit frame-rooted aggregate/borrow captures at in-frame boundaries so the dispatch-table and struct-stored-closure programs run (R21); add the stack-allocated multi-capture bundle env built like intern_bundle_struct at ast.rs:433 (R16 bundle case); add the word-output escape guard walking the surviving set (R22, since contains_reference at check.rs:285 is blind to the env); union both arms' surviving sets at a differing-literal join by interning a new set (R23, check.rs:7195); add the past-last-use diagnostic (R24). T-join-union must capture a distinct referent per arm and reject past-last-use when *either* arm's referent is killed, proving the union carries both (not a one-arm passthrough). Goldens T-dispatch, T-lateread, T-lastuse, T-bundle, T-carrier, T-join, T-join-union; drive mutation tests M2, M3, M4.",
       "difficulty": "hard"
     },
     {
