@@ -1139,7 +1139,8 @@ impl Session {
     /// The checker's typed env: builtins, the generated struct words, the
     /// variant-constructor words, plus every successfully-defined user word.
     fn typed_env(&self) -> HashMap<String, Sig> {
-        let mut env = check::builtin_table();
+        // Builtins are table-resolved in the checker, not held in the env.
+        let mut env: HashMap<String, Sig> = HashMap::new();
         for (name, sig) in check::struct_generated_sigs(&self.structs) {
             env.insert(name, sig);
         }
