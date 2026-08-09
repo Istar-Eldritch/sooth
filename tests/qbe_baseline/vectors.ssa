@@ -1,0 +1,163 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+type :Vec2 = { l, l }
+type :Segment = { :Vec2, :Vec2 }
+
+export function :Vec2 $sub(:Vec2 %v0, :Vec2 %v1) {
+@start
+	%v2 =l add %v0, 0
+	%v3 =l loadl %v2
+	%v4 =l add %v1, 0
+	%v5 =l loadl %v4
+	%v6 =l sub %v3, %v5
+	%v7 =l add %v0, 8
+	%v8 =l loadl %v7
+	%v9 =l add %v1, 8
+	%v10 =l loadl %v9
+	%v11 =l sub %v8, %v10
+	%v12 =l alloc8 16
+	%v13 =l add %v12, 0
+	storel %v6, %v13
+	%v14 =l add %v12, 8
+	storel %v11, %v14
+	ret %v12
+}
+
+export function l $len2(:Vec2 %v0) {
+@start
+	%v1 =l add %v0, 0
+	%v2 =l loadl %v1
+	%v3 =l add %v0, 0
+	%v4 =l loadl %v3
+	%v5 =l mul %v2, %v4
+	%v6 =l add %v0, 8
+	%v7 =l loadl %v6
+	%v8 =l add %v0, 8
+	%v9 =l loadl %v8
+	%v10 =l mul %v7, %v9
+	%v11 =l add %v5, %v10
+	ret %v11
+}
+
+export function :Vec2 $span(:Segment %v0) {
+@start
+	%v1 =l add %v0, 0
+	%v2 =l add %v0, 16
+	%v3 =:Vec2 call $sub(:Vec2 %v2, :Vec2 %v1)
+	ret %v3
+}
+
+export function :Vec2 $shift.2d.x(:Vec2 %v0, l %v1) {
+@start
+	%v2 =l add %v0, 0
+	%v3 =l loadl %v2
+	%v4 =l add %v3, %v1
+	%v5 =l alloc8 16
+	blit %v0, %v5, 16
+	%v6 =l add %v5, 0
+	storel %v4, %v6
+	ret %v5
+}
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 0
+	%v1 =l copy 0
+	%v2 =l alloc8 16
+	%v3 =l add %v2, 0
+	storel %v0, %v3
+	%v4 =l add %v2, 8
+	storel %v1, %v4
+	%v5 =l copy 3
+	%v6 =l copy 4
+	%v7 =l alloc8 16
+	%v8 =l add %v7, 0
+	storel %v5, %v8
+	%v9 =l add %v7, 8
+	storel %v6, %v9
+	%v10 =l alloc8 32
+	%v11 =l add %v10, 0
+	blit %v2, %v11, 16
+	%v12 =l add %v10, 16
+	blit %v7, %v12, 16
+	%v13 =:Vec2 call $span(:Segment %v10)
+	%v14 =l call $len2(:Vec2 %v13)
+	call $printf(l $fmt, l %v14, ...)
+	%v15 =l copy 5
+	%v16 =l copy 6
+	%v17 =l alloc8 16
+	%v18 =l add %v17, 0
+	storel %v15, %v18
+	%v19 =l add %v17, 8
+	storel %v16, %v19
+	%v20 =l copy 1
+	%v21 =:Vec2 call $shift.2d.x(:Vec2 %v17, l %v20)
+	%v22 =l add %v21, 0
+	%v23 =l loadl %v22
+	call $printf(l $fmt, l %v23, ...)
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

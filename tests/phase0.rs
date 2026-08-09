@@ -3624,3 +3624,24 @@ fn overload_from_poly_body_dispatches_to_user_word() {
     assert_eq!(stdout, "4\n6\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn overload_exact_type_beats_numeric_coercion_at_the_call_site() {
+    // R2: the resolver runs an exact-input-type pass across every candidate
+    // (builtin rows and user overloads) before numeric coercion ever runs.
+    // `+ ( usize i64 -- usize )` is a legal overload (its mixed input types
+    // match no homogeneous builtin row, R1), and `5 >usize 3 +` presents
+    // exactly those operand types (a `usize` and an unconverted `i64`
+    // literal) -- without this overload, that same call site would coerce
+    // the literal into the builtin homogeneous `usize +` (`unify_pair`'s
+    // literal-coercion arm) and print `8`. The overload must win instead:
+    // if a later addition ever let coercion run first, or ran it whenever an
+    // exact candidate merely *exists* without checking the operands first,
+    // this site would silently start printing `8` instead of the
+    // overload's sentinel.
+    let src = ": + ( usize i64 -- usize ) drop drop 999 ;\n\
+: main ( -- ) 5 >usize 3 + . ;\n";
+    let (stdout, code) = run_overload_src("exact-beats-coercion", src);
+    assert_eq!(stdout, "999\n");
+    assert_eq!(code, 0);
+}

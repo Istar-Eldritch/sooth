@@ -13,12 +13,46 @@ use std::path::{Path, PathBuf};
 /// The `(gcd/factorial/strings/refs/resources)` cross-section the spec names:
 /// arithmetic + control flow, recursion, strings/`cstr`, references, and the
 /// resource/allocation path.
+///
+/// Slice 8a fix 4: every other standalone `examples/*.sth` (one declaring its
+/// own `main`) is added too, so the byte-for-byte guarantee covers the whole
+/// committed corpus, not just this original cross-section. `modules_ops.sth`/
+/// `modules_point.sth` are excluded: they declare no `main` of their own (they
+/// are libraries `modules.sth` imports) and so cannot be built standalone by
+/// `emit_ssa`; `modules.sth` itself, which pulls both in, is included.
 const CORPUS: &[(&str, &str)] = &[
     ("gcd", "examples/gcd.sth"),
     ("factorial", "examples/factorial.sth"),
     ("strings", "examples/strings.sth"),
     ("refs", "examples/refs.sth"),
     ("resources", "examples/resources.sth"),
+    ("array_totals", "examples/array_totals.sth"),
+    ("array_totals_hand", "examples/array_totals_hand.sth"),
+    ("bool_abi", "examples/bool_abi.sth"),
+    ("combinator_in_times", "examples/combinator_in_times.sth"),
+    (
+        "combinator_in_times_hand",
+        "examples/combinator_in_times_hand.sth",
+    ),
+    ("countdown", "examples/countdown.sth"),
+    ("filter_while", "examples/filter_while.sth"),
+    ("filter_while_hand", "examples/filter_while_hand.sth"),
+    ("inplace_fold", "examples/inplace_fold.sth"),
+    ("leap", "examples/leap.sth"),
+    ("lerp", "examples/lerp.sth"),
+    ("list", "examples/list.sth"),
+    ("mean", "examples/mean.sth"),
+    ("modules", "examples/modules.sth"),
+    ("poly_if", "examples/poly_if.sth"),
+    ("rgb", "examples/rgb.sth"),
+    ("rgb_bits", "examples/rgb_bits.sth"),
+    ("shapes", "examples/shapes.sth"),
+    ("sign", "examples/sign.sth"),
+    ("stack", "examples/stack.sth"),
+    ("times", "examples/times.sth"),
+    ("vectors", "examples/vectors.sth"),
+    ("vm", "examples/vm.sth"),
+    ("vm_table", "examples/vm_table.sth"),
 ];
 
 fn baseline_path(name: &str) -> PathBuf {

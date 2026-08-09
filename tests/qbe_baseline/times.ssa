@@ -1,0 +1,89 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 0
+	%v1 =l copy 1000000
+	%v3 =l copy 0
+	jmp @blk1
+@blk1
+	%v4 =l phi @start %v0, @blk2 %v9
+	%v5 =l phi @start %v3, @blk2 %v11
+	%v6 =w csltl %v5, %v1
+	jnz %v6, @blk2, @blk3
+@blk2
+	%v7 =l copy 1
+	%v8 =l add %v5, %v7
+	%v9 =l add %v4, %v8
+	%v10 =l copy 1
+	%v11 =l add %v5, %v10
+	jmp @blk1
+@blk3
+	call $printf(l $fmt, l %v4, ...)
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

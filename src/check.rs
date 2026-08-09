@@ -11958,6 +11958,193 @@ mod tests {
         assert_eq!(got, want, "one `+` row per numeric type, no more");
     }
 
+    /// Assert `name`'s rows are exactly a homogeneous `(T T -- T)` set, one
+    /// per type in `want`, all lowering `lower`. Shared shape for the
+    /// binary numeric-tower operators, mirroring
+    /// `builtin_table_plus_has_a_row_per_numeric_type`.
+    fn assert_homogeneous_binary_rows(name: &str, want: Vec<Type>, lower: BuiltinLower) {
+        let table = builtin_table();
+        let rows = table
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is a builtin operator"));
+        assert_eq!(rows.len(), want.len(), "row count for `{name}`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], r.outputs[0]],
+                    "a `{name}` row is homogeneous `(T T -- T)`"
+                );
+                assert_eq!(r.lower, lower, "`{name}` lowers `{lower:?}`");
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = want;
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `{name}` row per expected type, no more");
+    }
+
+    #[test]
+    fn builtin_table_sub_has_a_row_per_numeric_type() {
+        assert_homogeneous_binary_rows("-", numeric_types(), BuiltinLower::Sub);
+    }
+
+    #[test]
+    fn builtin_table_mul_has_a_row_per_numeric_type() {
+        assert_homogeneous_binary_rows("*", numeric_types(), BuiltinLower::Mul);
+    }
+
+    #[test]
+    fn builtin_table_div_has_a_row_per_float_type() {
+        // `/` is float-only (D7): the integer tower divides via a separate
+        // hand-written path this table does not cover.
+        assert_homogeneous_binary_rows("/", float_types(), BuiltinLower::DivFloat);
+    }
+
+    #[test]
+    fn builtin_table_mod_has_a_row_per_int_type() {
+        assert_homogeneous_binary_rows("mod", int_types(), BuiltinLower::Mod);
+    }
+
+    #[test]
+    fn builtin_table_max_has_a_row_per_int_type() {
+        // `max` is integer-only: `max-total` is the float twin (D7).
+        assert_homogeneous_binary_rows("max", int_types(), BuiltinLower::Max);
+    }
+
+    #[test]
+    fn builtin_table_max_total_has_a_row_per_float_type() {
+        assert_homogeneous_binary_rows("max-total", float_types(), BuiltinLower::MaxTotal);
+    }
+
+    #[test]
+    fn builtin_table_and_has_a_row_per_int_type_plus_bool() {
+        // `and`/`or`/`xor` are bitwise on every integer width and logical on
+        // `bool` (eager evaluation makes bitwise-on-0/1 coincide with
+        // logical), so their domain is `int_types()` plus one `bool` row.
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_homogeneous_binary_rows("and", want, BuiltinLower::And);
+    }
+
+    #[test]
+    fn builtin_table_or_has_a_row_per_int_type_plus_bool() {
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_homogeneous_binary_rows("or", want, BuiltinLower::Or);
+    }
+
+    #[test]
+    fn builtin_table_xor_has_a_row_per_int_type_plus_bool() {
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_homogeneous_binary_rows("xor", want, BuiltinLower::Xor);
+    }
+
+    #[test]
+    fn builtin_table_not_has_a_row_per_int_type_plus_bool() {
+        // `not` is unary, so it does not fit `assert_homogeneous_binary_rows`
+        // (a `(T -- T)` shape, not `(T T -- T)`).
+        let table = builtin_table();
+        let rows = table.get("not").expect("`not` is a builtin operator");
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_eq!(rows.len(), want.len(), "row count for `not`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(r.inputs, vec![r.outputs[0]], "a `not` row is `(T -- T)`");
+                assert_eq!(r.lower, BuiltinLower::Not);
+                r.outputs[0]
+            })
+            .collect();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `not` row per int type plus `bool`, no more");
+    }
+
+    /// Assert `name`'s rows are the irregular `(T, i64 -- T)` shape (the
+    /// shift-amount operand is always `i64` regardless of `T`), one per
+    /// `int_types()`, lowering `lower`. Nothing before slice 8a fix 4 checked
+    /// that the *second* input type is right: a row wrongly shaped `(T, T --
+    /// T)` would still pass `builtin_table_plus_has_a_row_per_numeric_type`-
+    /// style checks that only compare `inputs[0]`/`inputs[1]` against
+    /// `outputs[0]`.
+    fn assert_shift_rows(name: &str, lower: BuiltinLower) {
+        let table = builtin_table();
+        let rows = table
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is a builtin operator"));
+        let want = int_types();
+        assert_eq!(rows.len(), want.len(), "row count for `{name}`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], Type::I64],
+                    "a `{name}` row is `(T, i64 -- T)`, the count is always `i64`"
+                );
+                assert_eq!(r.lower, lower, "`{name}` lowers `{lower:?}`");
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = want;
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `{name}` row per int type, no more");
+    }
+
+    #[test]
+    fn builtin_table_shl_rows_take_an_i64_count_regardless_of_element_type() {
+        assert_shift_rows("shl", BuiltinLower::Shl);
+    }
+
+    #[test]
+    fn builtin_table_shr_rows_take_an_i64_count_regardless_of_element_type() {
+        assert_shift_rows("shr", BuiltinLower::Shr);
+    }
+
+    #[test]
+    fn builtin_table_comparisons_have_a_row_per_numeric_type() {
+        use crate::ir::CmpOp;
+        let table = builtin_table();
+        for (op, cmp) in [
+            ("=", CmpOp::Eq),
+            ("<", CmpOp::Lt),
+            (">", CmpOp::Gt),
+            ("<=", CmpOp::Le),
+            (">=", CmpOp::Ge),
+            ("<>", CmpOp::Ne),
+        ] {
+            let rows = table
+                .get(op)
+                .unwrap_or_else(|| panic!("`{op}` is a builtin operator"));
+            let want = numeric_types();
+            assert_eq!(rows.len(), want.len(), "row count for `{op}`");
+            let mut got: Vec<Type> = rows
+                .iter()
+                .map(|r| {
+                    assert_eq!(r.outputs, vec![Type::Bool], "`{op}` produces `bool`");
+                    assert_eq!(r.inputs.len(), 2, "`{op}` is binary");
+                    assert_eq!(r.inputs[0], r.inputs[1], "a `{op}` row is homogeneous");
+                    assert_eq!(
+                        r.lower,
+                        BuiltinLower::Cmp(cmp),
+                        "`{op}` lowers `Cmp({cmp:?})`"
+                    );
+                    r.inputs[0]
+                })
+                .collect();
+            let mut want = want;
+            got.sort_by_key(|t| t.name());
+            want.sort_by_key(|t| t.name());
+            assert_eq!(got, want, "one `{op}` row per numeric type, no more");
+        }
+    }
+
     #[test]
     fn check_not_on_literal_count_is_not_a_literal_for_fill() {
         // The retired hand-written `not` arm left its operand slot in place,
