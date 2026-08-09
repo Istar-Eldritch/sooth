@@ -351,8 +351,15 @@ enum-plus-clause `examples/vm.sth` byte-for-byte.
 
 - **R11.** The join (`src/check.rs`, the `(t_then.quot, t_else.quot)` match near `:6467`): when both
   arms leave a quotation, materialize each against an **expected `Type::Quotation(eff)` threaded
-  into the `if`** from the enclosing declared context (the word's declared output row, or the
-  declared type of the field/array/binding the join flows into). Both arms non-capturing and their
+  into the `if`** from the enclosing declared context. **As shipped in Phase 3, the only threaded
+  context is the word's declared output row, at a tail `if`** (`ctx.declared_outputs().get(i)`,
+  gated on `tail`); every Phase 3 exit criterion (T-join/T-join-same/T-cap-join/T-times) is a
+  tail case, so this is sufficient for this slice, but it is narrower than "the field/array/binding
+  the join flows into" — a non-tail join whose result is stored straight into a field or array
+  element has no expected type threaded and falls through to `different_quotations_at_join_error`
+  below rather than materializing. Extending R11 to thread from a non-tail store/field/array
+  context is unimplemented and left for whichever future slice needs a materializing join outside
+  a word's tail position. Both arms non-capturing and their
   effects unifying → the join yields a runtime quotation value (`quot: None`); the equal-`Known`-ids
   fast path (`a == b`) still forwards a marker with no `Phi` (splice preserved). Either arm
   capturing → R12, **checked before the id/expected-type resolution runs** (ordering pin, so a
@@ -403,9 +410,17 @@ enum-plus-clause `examples/vm.sth` byte-for-byte.
   extractors.** Verified against the source, not assumed: neither `call_symbols` nor any of the
   eleven inline `matches!(i, Instr::Call(..))` closures can see `Instr::CallIndirect` (it is a
   distinct variant, mapped to `None`/`false` by both). A splice regressing into `CallIndirect`
-  therefore contributes nothing to either extractor's count, every existing assertion still
-  passes, and the regression ships silently — including at `call_of_literal_emits_no_call_instr`
-  and `times_lowers_...`, the two tests closest to R10's new provenance branch.
+  therefore contributes nothing to either extractor's count and the *`is_call_instr`/`call_symbols`
+  assertion itself* stays silent everywhere. For the `call_symbols` units (`each_lowers_...`,
+  `while_lowers_...`) that is the whole test, so those two are a total placebo pre-widening. For
+  the two `count(.., is_call_instr)` sites closest to R10's new provenance branch
+  (`call_of_literal_emits_no_call_instr`, `times_lowers_...`), each also carries an unrelated
+  secondary assertion (the spliced `Add` count; the per-iteration `Vec2` `Alloc`-hoist check) that
+  happens to fail too when the splice regresses to an indirect call, since the operation moves out
+  of the caller's block entirely — so those two were never *total* placebos, only ones whose
+  failure would have pointed at the wrong assertion. R13a is still required: it is the only guard
+  for the `call_symbols` units, and for the other two it makes the failure land on the intended
+  `count(is_call_instr)` line instead of an unrelated one.
 
   **R13a (required, blocking, Phase 1).** Widen **both** extractors *before* `CallIndirect` exists
   in any lowering path, so the pin is real by the time it could be tripped:
