@@ -180,30 +180,41 @@ fn array_type_symbol(idx: usize) -> String {
 /// The Sooth `main` word is emitted as `sooth_main`; the C shim owns `main`.
 /// Sooth word names may contain characters (`-`, `<`, `>`, etc., identifier-
 /// continuation characters in the lexer) that are not valid in a QBE global
-/// symbol, so any such character is replaced with `_`; applied identically at
-/// both the function definition and every call site, so it never causes a
-/// collision within a single compilation unit's word names.
+/// symbol. Every character outside `[A-Za-z0-9_]` -- including a literal
+/// `.`, since `.` is the escape lead-in below and must not become ambiguous
+/// with one -- becomes `.{hex}.`, its codepoint in lowercase hex. This is
+/// injective: scanning the output left to right, `.` is never a passthrough
+/// character, so it can only ever open or close an escape, which means every
+/// output string has exactly one valid parse back into the source characters
+/// that produced it. Two distinct names can therefore never collide on the
+/// same symbol (`+` and `-` used to both sanitize to the bare symbol `_`;
+/// they now produce `.2b.` and `.2d.`). `.` is deliberately the escape
+/// character rather than `_`: every compiler-generated symbol this function
+/// also has to leave alone (`sooth_line_{seq}`'s dlopen lookup in `repl.rs`,
+/// the resolver's `__m{module}`/`__import{epoch}` mangle suffix, the alloc/
+/// free/OOB-trap shims below, all `_`-only) would otherwise need to move in
+/// lockstep with a change here; none of them contain `.`, so none of them
+/// are affected by fixing this. Applied identically at both the function
+/// definition and every call site, so a lookup by name always finds the
+/// symbol that source name actually owns.
 fn qbe_name(name: &str) -> std::borrow::Cow<'_, str> {
     if name == "main" {
         return std::borrow::Cow::Borrowed("sooth_main");
     }
-    if name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
-    {
+    if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         std::borrow::Cow::Borrowed(name)
     } else {
-        std::borrow::Cow::Owned(
-            name.chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect(),
-        )
+        let mut out = String::with_capacity(name.len());
+        for c in name.chars() {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                out.push(c);
+            } else {
+                out.push('.');
+                out.push_str(&format!("{:x}", c as u32));
+                out.push('.');
+            }
+        }
+        std::borrow::Cow::Owned(out)
     }
 }
 
@@ -1176,13 +1187,70 @@ mod tests {
         // A word name containing `-` (a legal identifier-continuation
         // character in the lexer, e.g. the S8 dogfood's `shift-x`) is not a
         // valid QBE global symbol; it is sanitized identically at the
-        // function definition and its call site.
+        // function definition and its call site. `-` is codepoint 0x2d, so
+        // it escapes to `.2d.` (see `qbe_name`), not a bare `_` -- a bare `_`
+        // would collide with any other name whose own non-alphanumeric
+        // characters also collapsed to one underscore.
         let il = emit_src(
             ": shift-x ( i64 -- i64 ) | n | n 1 + ;
             : main ( -- ) 5 shift-x . ;",
         );
         assert!(!il.contains("shift-x"), "raw hyphenated name leaked: {il}");
-        assert!(il.contains("$shift_x"), "expected sanitized symbol: {il}");
+        assert!(
+            il.contains("$shift.2d.x"),
+            "expected the injective sanitized symbol: {il}"
+        );
+    }
+
+    #[test]
+    fn qbe_name_distinct_operator_names_never_collide() {
+        // Regression: qbe_name used to replace every non-alphanumeric
+        // character with a bare `_`, so any two names built entirely of
+        // non-alphanumeric characters of the same length collapsed onto the
+        // identical symbol -- `+` and `-` both sanitized to `_`. This is the
+        // exact set 8a's overload table is about to make dispatchable, so
+        // every pair in it must be checked, not just one.
+        let ops = [
+            "+",
+            "-",
+            "*",
+            "/",
+            "mod",
+            "and",
+            "or",
+            "xor",
+            "not",
+            "shl",
+            "shr",
+            "=",
+            "<",
+            ">",
+            "<=",
+            ">=",
+            "<>",
+            "max",
+            "max-total",
+            ".",
+        ];
+        let sanitized: Vec<String> = ops.iter().map(|op| qbe_name(op).into_owned()).collect();
+        for i in 0..ops.len() {
+            for j in (i + 1)..ops.len() {
+                assert_ne!(
+                    sanitized[i], sanitized[j],
+                    "`{}` and `{}` collide on the symbol `{}`",
+                    ops[i], ops[j], sanitized[i]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn qbe_name_plus_and_minus_no_longer_collide() {
+        // The exact reproduction that broke before the fix: `~` and `?`
+        // (ordinary symbolic word names, nothing to do with operator
+        // overloading) both sanitized to the bare symbol `_`.
+        assert_ne!(qbe_name("~"), qbe_name("?"));
+        assert_ne!(qbe_name("+"), qbe_name("-"));
     }
 
     #[test]
@@ -2368,10 +2436,10 @@ type: Counter n i64 ;
         // Structural because a runtime golden cannot
         // distinguish "mutated in place" from "rebuilt correctly", and
         // eliminating the rebuild is the point of the slice. Pinned to the
-        // mangled symbol: `qbe_name` rewrites `-` to `_`, so the literal
+        // mangled symbol: `qbe_name` escapes `-` to `.2d.`, so the literal
         // `push-byte` could never match.
         let il = emit_src(MUTATION_PROBE);
-        let body = func_body(&il, "export function $push_byte(");
+        let body = func_body(&il, "export function $push.2d.byte(");
         assert!(
             !body.contains("alloc"),
             "mutation through a reference must not allocate a rebuilt aggregate: {body}"
@@ -2401,7 +2469,7 @@ type: Counter n i64 ;
         // whole-aggregate rebuild, so the no-rebuild test's assertion is measuring
         // `push-byte` rather than an emitter that stopped emitting `alloc`.
         let il = emit_src(MUTATION_PROBE);
-        let body = func_body(&il, "export function :Counter $bump_rebuild(");
+        let body = func_body(&il, "export function :Counter $bump.2d.rebuild(");
         assert!(
             body.contains("alloc"),
             "a functional setter still allocates its new shell: {body}"
