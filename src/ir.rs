@@ -3099,6 +3099,40 @@ impl<'a> FuncBuilder<'a> {
             self.stack.push(value); // i64 is Copy; reuse the value id.
             return;
         }
+        // Slice 8a phase 4 (R7): a call site the checker resolved to a user
+        // overload of a builtin-named word must dispatch to that word, not
+        // the name-directed builtin arms below (a literal name match like
+        // "+" would otherwise always win) nor the self-tail/back-edge checks
+        // further down (a word named `.` overloading print must not be
+        // miscategorized as a self-tail call on `.`). Same env-lookup +
+        // resolve + bundle-unpack shape as the ordinary user-word path in the
+        // `_` arm below, since this *is* that path, reached early.
+        if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
+            let (in_arity, out_arity, ret_ty) = *self
+                .env
+                .get(&sym_name)
+                .expect("checked user overload exists");
+            let split = self.stack.len() - in_arity;
+            let args = self.stack.split_off(split);
+            let bundle = match ret_ty {
+                Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+                _ => None,
+            };
+            let ret = if out_arity == 1 || bundle.is_some() {
+                Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+            } else {
+                None
+            };
+            let sym = (self.resolve)(&sym_name);
+            self.push_instr(Instr::Call(ret, sym, args));
+            if let Some(v) = ret {
+                self.stack.push(v);
+            }
+            if let Some(id) = bundle {
+                self.unpack_bundle(id);
+            }
+            return;
+        }
         // R10: a tail-position self-call inside a self-tail combinator splice
         // is the loop back-edge. The loop carries only the state row (length
         // recorded when the loop opened); the quotation argument(s) above it

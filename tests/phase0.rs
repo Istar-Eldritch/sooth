@@ -3540,3 +3540,69 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
         "two colliding-under-the-old-scheme word names should build cleanly: {built:?}"
     );
 }
+
+// -- slice 8a fix 1 (R7): lowering dispatches builtin overloads -------------
+
+/// Write, build, and run `src`, returning `(stdout, exit_code)`. `tag`
+/// distinguishes the temp source (and its emitted binary) per test.
+fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
+    let path =
+        std::env::temp_dir().join(format!("sooth-overload-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&binary).ok();
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        output.status.code().expect("process exits normally"),
+    )
+}
+
+#[test]
+fn overload_vec2_plus_dispatches_to_user_word() {
+    // `Module::builtin_overloads` records this call site's resolution to the
+    // user `+` overload, but before the fix `lower_call`'s name-directed
+    // `"+" | "-" | ...` arm never consulted it, so it always emitted
+    // `Instr::Bin(Add)` on the two `Vec2` struct pointers (an address add),
+    // producing a garbage pointer that segfaulted on the following field
+    // reads. `lower_call` must check `builtin_overloads` first and emit an
+    // `Instr::Call` to the user word instead.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 + dup Vec2>x . Vec2>y . ;\n";
+    let (stdout, code) = run_overload_src("plus", src);
+    assert_eq!(stdout, "4\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_vec2_minus_dispatches_to_user_word() {
+    // Same bug, `-`: unfixed, `Instr::Bin(Sub)` on the two struct pointers
+    // subtracts addresses rather than fields, yielding a bogus pointer whose
+    // field reads then segfault.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: - ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x - a Vec2>y b Vec2>y - Vec2 ;\n\
+: main ( -- ) 5 6 Vec2 1 2 Vec2 - dup Vec2>x . Vec2>y . ;\n";
+    let (stdout, code) = run_overload_src("minus", src);
+    assert_eq!(stdout, "4\n4\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_vec2_lt_dispatches_to_user_word() {
+    // Same bug, `<`: unfixed, `Instr::Cmp(Lt)` compares the two struct
+    // pointers' addresses rather than dispatching to the user overload, so
+    // the printed boolean tracks allocation order, not the operands' values.
+    // Negative coordinates whose semantic sum is negative (so the correct
+    // answer is `false`) still allocate `a` before `b` (a lower address), so
+    // the old pointer-compare silently printed `true` here.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + + 0 > ;\n\
+: main ( -- ) -3 -4 Vec2 -1 -2 Vec2 < . ;\n";
+    let (stdout, code) = run_overload_src("lt", src);
+    assert_eq!(stdout, "false\n");
+    assert_eq!(code, 0);
+}
