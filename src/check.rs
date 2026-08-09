@@ -2834,29 +2834,40 @@ fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity:
 /// concrete row) at a call site. A poly word's `effect` is empty by
 /// construction, so R1's textual key never sees it; this is why the check is
 /// separate rather than folded into `check_duplicate_word_names`.
+///
+/// Module-scoped like `check_duplicate_word_names`' `(module, name)` key: a
+/// builtin candidate is in scope everywhere (no module), but a local concrete
+/// candidate only overlaps a poly candidate declared in *its own* module. An
+/// unrelated same-named concrete word in a different, non-importing module is
+/// invisible here by construction; a selectively-imported name that collides
+/// with a local poly word is already rejected generically by
+/// `check_selective_imports`' local-collision check, regardless of poly vs.
+/// concrete, so that case needs no mirror here.
 fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), String> {
     let builtins = builtin_table();
-    let mut concrete_arity: HashMap<&str, usize> = HashMap::new();
+    let mut builtin_arity: HashMap<&str, usize> = HashMap::new();
     for (name, rows) in builtins.iter() {
-        concrete_arity.insert(name.as_str(), rows[0].inputs.len());
+        builtin_arity.insert(name.as_str(), rows[0].inputs.len());
     }
+    let mut concrete_arity: HashMap<(u32, &str), usize> = HashMap::new();
     for word in words {
         if word.name != "drop" && word.poly.is_none() {
             concrete_arity
-                .entry(word.name.as_str())
+                .entry((word.module, word.name.as_str()))
                 .or_insert_with(|| word.effect.inputs.len());
         }
     }
     for word in words {
         let Some(sig) = &word.poly else { continue };
-        if let Some(&arity) = concrete_arity.get(word.name.as_str()) {
-            if sig.inputs.len() == arity {
-                return Err(generic_concrete_overlap_error(
-                    &word.name,
-                    sig,
-                    word_span(word),
-                ));
-            }
+        let arity = sig.inputs.len();
+        let overlaps = builtin_arity.get(word.name.as_str()) == Some(&arity)
+            || concrete_arity.get(&(word.module, word.name.as_str())) == Some(&arity);
+        if overlaps {
+            return Err(generic_concrete_overlap_error(
+                &word.name,
+                sig,
+                word_span(word),
+            ));
         }
     }
     Ok(())
@@ -10404,6 +10415,76 @@ mod tests {
 : bump ( 'T 'T -- 'T ) drop ;\n\
 : main ( -- ) ;\n";
         check_src(ok).expect("a differing-arity poly candidate must not trip the overlap check");
+    }
+
+    /// Fix 3 (R5, module-scoped): `check_generic_concrete_overlap` operates
+    /// directly on `WordDef`s carrying pre-mangle bare names and hand-set
+    /// module ids -- unlike a `check_src` scenario (always module 0), this
+    /// exercises the cross-module key `resolve::mangle` would otherwise
+    /// disambiguate before `check` ever ran on a real multi-file program, so
+    /// the two candidates' bare names can actually collide by string here.
+    #[test]
+    fn overload_generic_and_concrete_overlap_is_module_scoped() {
+        fn concrete_word(name: &str, module: u32, arity: usize) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect {
+                    inputs: (0..arity)
+                        .map(|_| TypedSlot {
+                            name: None,
+                            ty: Type::I64,
+                        })
+                        .collect(),
+                    outputs: Vec::new(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+                span: Span::default(),
+            }
+        }
+        fn poly_word(name: &str, module: u32, arity: usize) -> WordDef {
+            let sig = PolySig {
+                row_in: None,
+                inputs: (0..arity as u32).map(PolyType::Var).collect(),
+                outputs: Vec::new(),
+                row_out: None,
+                bounds: Vec::new(),
+                ty_var_names: (0..arity).map(|i| format!("'T{i}")).collect(),
+                len_var_names: Vec::new(),
+                row_var_names: Vec::new(),
+            };
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect {
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: Some(Box::new(sig)),
+                module,
+                span: Span::default(),
+            }
+        }
+
+        // R5, module-scoped: an unrelated concrete `bump` in module 1 does
+        // not overlap a poly `bump` of the same arity declared in module 0 --
+        // pre-fix, both were keyed by the bare name alone, globally, so this
+        // combination was rejected even though nothing imports across the
+        // two modules.
+        let words = vec![concrete_word("bump", 1, 1), poly_word("bump", 0, 1)];
+        check_generic_concrete_overlap(&words)
+            .expect("an unrelated same-name concrete word in a different module must not overlap");
+
+        // Mutation check: the *same*-module case must still be rejected --
+        // module-scoping narrows the key, it does not disable the check.
+        let words = vec![concrete_word("bump", 0, 1), poly_word("bump", 0, 1)];
+        let err = check_generic_concrete_overlap(&words).unwrap_err();
+        assert!(
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `bump`"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

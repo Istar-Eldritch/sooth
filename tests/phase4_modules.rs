@@ -556,3 +556,53 @@ fn modules_example_builds_and_runs() {
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "4\n52\n");
     assert_eq!(output.status.code().unwrap(), 0);
 }
+
+#[test]
+fn unrelated_modules_generic_and_concrete_same_name_do_not_collide() {
+    // Slice 8a fix 3 (R5, module-scoped): a poly word in one module and an
+    // unrelated concrete word of the same name and arity in a *different*
+    // module that does not import it must not trip the generic/concrete
+    // overlap check -- it is keyed by name alone before this fix, global
+    // across the whole program, so this used to reject `g::bump` merely
+    // because the unrelated sibling `c` happened to also define a concrete
+    // `bump`. `main` imports both `g` and `c` (so both share one `Module`,
+    // the only way the pre-fix global bug could ever fire), but `g` and `c`
+    // do not import each other.
+    let c = Closure::new("overlap-unrelated-modules");
+    c.write("g.sth", ": bump ( 'T -- 'T ) ;\nexport: bump ;\n");
+    c.write(
+        "c.sth",
+        "type: Vec2 x i64 y i64 ;\n: bump ( Vec2 -- Vec2 ) ;\nexport: bump Vec2 ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: g \"g.sth\" ;\nimport: c \"c.sth\" ;\n: main ( -- ) 5 g::bump . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn same_module_generic_and_concrete_overlap_still_rejected_across_files() {
+    // Slice 8a fix 3 (R5, module-scoped): the module-scoping in the fix above
+    // must not weaken a genuine same-module collision -- a poly `bump` and a
+    // concrete `bump` of the same arity declared in the *same* module (here,
+    // the importer's own `main.sth`) are still rejected, even though the
+    // program also spans an unrelated second file.
+    let c = Closure::new("overlap-same-module");
+    c.write("lib.sth", ": p ( -- i64 ) 1 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n\
+type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T -- 'T ) ;\n\
+: main ( -- ) lib::p . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("generic overload") && err.contains("overlaps a concrete overload of `bump`"),
+        "unexpected message: {err}"
+    );
+}
