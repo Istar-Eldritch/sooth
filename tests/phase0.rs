@@ -3518,12 +3518,14 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
     // replace every character outside `[A-Za-z0-9_.]` with a bare `_`, so
     // two distinct word names built entirely of such characters could
     // collapse onto the identical symbol. `+` and `-` are both ordinary `:`
-    // definitions -- accepted and lowered today even though dispatch cannot
-    // yet reach them -- and both used to sanitize to `_`, failing at the
-    // assembler with `symbol `_' is already defined` well before either
-    // word could ever be called.
-    let src = ": + ( i64 i64 -- i64 ) drop ;\n\
-: - ( i64 i64 -- i64 ) drop ;\n\
+    // definitions, overloading the builtin operators on a struct type (so
+    // R1's builtin-collision check, slice 8a, does not itself reject them --
+    // the point here is purely the symbol sanitizer) -- and both used to
+    // sanitize to `_`, failing at the assembler with `symbol `_' is already
+    // defined` well before either word could ever be called.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: - ( Vec2 Vec2 -- Vec2 ) drop ;\n\
 : main ( -- ) ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-qbe-name-injective-{}.sth",

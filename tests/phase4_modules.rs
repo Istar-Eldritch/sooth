@@ -495,6 +495,36 @@ fn selective_import_of_type_exposes_members_unqualified() {
 }
 
 #[test]
+fn selective_import_of_builtin_name_with_mismatched_arity_is_error() {
+    // Phase 4 slice 8a, R4 (import mirror): `lib` overloads `+` unary on
+    // `Vec2`, but the builtin `+` is binary; nothing else forbids this
+    // import outright (no local `+`, no other selective import of `+`), so
+    // the arity mismatch against the builtin is the only thing left to
+    // reject it, at the import site rather than surfacing as an ambiguity
+    // at a call site.
+    let c = Closure::new("selective-arity-clash");
+    c.write(
+        "lib.sth",
+        "type: Vec2 x i64 y i64 ;\n: + ( Vec2 -- Vec2 ) ;\nexport: + Vec2 ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib | + | \"lib.sth\" ;\n: main ( -- ) ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("selective import of `+`") && err.contains("lib"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("takes 1 input")
+            && err.contains("the builtin `+` takes 2")
+            && err.contains("agree on input count"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
 fn selective_type_import_member_collision_is_error() {
     // Criterion 21b: two modules each expose a `Point`; selectively importing
     // both collides on the base name (and thus on every generated member),

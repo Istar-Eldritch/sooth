@@ -1862,6 +1862,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // population loop below would otherwise silently keep only the last one
     // seen and let both bodies reach codegen.
     check_duplicate_word_names(&module.words)?;
+    // R5: a generic candidate overlapping a concrete one of the same name and
+    // arity (a builtin row or a local monomorphic word) is rejected here too,
+    // before either enters `poly_env`/`env` below -- there is no ranking that
+    // could otherwise pick between them.
+    check_generic_concrete_overlap(&module.words)?;
 
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
@@ -2373,6 +2378,7 @@ pub fn check_selective_imports(
     module: &Module,
     selective_by_module: &[Vec<SelectiveName>],
 ) -> Result<(), String> {
+    let builtins = builtin_table();
     for (m, entries) in selective_by_module.iter().enumerate() {
         let locals = local_decl_names(module, m as u32);
         // name -> the qualifier that first exposed it, for R21's both-sources error.
@@ -2400,6 +2406,31 @@ pub fn check_selective_imports(
                     &entry.qualifier,
                     entry.span,
                 ));
+            }
+            // R4 (import mirror): a selective import naming a builtin
+            // operator must agree with it on input count. The other two
+            // collision checks above already forbid an import from sharing a
+            // name with a local decl or with another selective import
+            // outright, so a builtin row is the only candidate this site can
+            // still silently disagree with.
+            if let Some(rows) = builtins.get(entry.name.as_str()) {
+                let builtin_arity = rows[0].inputs.len();
+                if let Some(imported) = module
+                    .words
+                    .iter()
+                    .find(|w| w.module == entry.target && w.name == entry.name && w.poly.is_none())
+                {
+                    let arity = imported.effect.inputs.len();
+                    if arity != builtin_arity {
+                        return Err(selective_arity_clash_error(
+                            &entry.name,
+                            &entry.qualifier,
+                            entry.span,
+                            arity,
+                            builtin_arity,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -2460,6 +2491,26 @@ fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) 
     format!(
         "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
         span.line, span.col
+    )
+}
+
+/// R4 (import mirror): a selective import of a builtin-named word whose input
+/// count disagrees with the builtin's -- the arity clash rejected at the
+/// second candidate's site (`overload_arity_clash_error`'s local twin), here
+/// the import site rather than a definition site.
+fn selective_arity_clash_error(
+    name: &str,
+    qualifier: &str,
+    span: Span,
+    arity: usize,
+    builtin_arity: usize,
+) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) takes {arity} input{} but the builtin `{name}` takes {builtin_arity}; all overloads of a name must agree on input count",
+        span.line,
+        span.col,
+        plural(arity),
     )
 }
 
@@ -2655,13 +2706,36 @@ fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Res
 /// false positive. `main` gets no such carve-out: nothing else validates a
 /// repeat `main` within one module, so it is an ordinary word for this check.
 fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
-    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
+    let builtins = builtin_table();
+    // R1: keyed by `(module, name, input_types)`, widened from `(module, name)`
+    // so two overloads of one name that differ in input type no longer
+    // collide; two with identical inputs still hit the existing `duplicate
+    // word` message byte-for-byte. Linear (not hashed): `Type` carries no
+    // `Hash`, and a module's word count never approaches a scale where that
+    // matters.
+    let mut seen: Vec<(u32, &str, Vec<Type>, Span)> = Vec::new();
+    // R4: one arity per name in scope. Seeded with each builtin row's arity
+    // (rows for one name already agree on arity, `builtin_table`'s own
+    // invariant), since a builtin candidate is always in scope; a local
+    // overload is the "second candidate" the moment it disagrees.
+    let mut arities: HashMap<(u32, &str), (usize, Span)> = HashMap::new();
     for word in words {
         if word.name == "drop" {
             continue;
         }
+        // R5 owns generic/concrete overlap; a poly word's `effect` is empty
+        // by construction (its signature lives in `poly`), so it has no
+        // concrete input types to key or count here.
+        if word.poly.is_some() {
+            continue;
+        }
         let span = word_span(word);
-        if let Some(first) = seen.insert((word.module, word.name.as_str()), span) {
+        let input_types: Vec<Type> = word.effect.inputs.iter().map(|s| s.ty).collect();
+        if let Some((.., first)) = seen
+            .iter()
+            .find(|(m, n, ins, _)| *m == word.module && *n == word.name && *ins == input_types)
+        {
+            let first = *first;
             return Err(format!(
                 "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
                 crate::resolve::demangle_word(&word.name),
@@ -2671,8 +2745,148 @@ fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
                 first.col
             ));
         }
+        if let Some(rows) = builtins.get(word.name.as_str()) {
+            if rows.iter().any(|r| r.inputs == input_types) {
+                return Err(overload_matches_builtin_error(
+                    &word.name,
+                    span,
+                    &input_types,
+                ));
+            }
+        }
+        let arity = input_types.len();
+        if let Some(&(first_arity, _)) = arities.get(&(word.module, word.name.as_str())) {
+            if first_arity != arity {
+                return Err(overload_arity_clash_error(
+                    &word.name,
+                    span,
+                    arity,
+                    first_arity,
+                ));
+            }
+        } else {
+            let builtin_arity = builtins
+                .get(word.name.as_str())
+                .map(|rows| rows[0].inputs.len());
+            if let Some(builtin_arity) = builtin_arity {
+                if builtin_arity != arity {
+                    return Err(overload_arity_clash_error(
+                        &word.name,
+                        span,
+                        arity,
+                        builtin_arity,
+                    ));
+                }
+            }
+            arities.insert((word.module, word.name.as_str()), (arity, span));
+        }
+        seen.push((word.module, word.name.as_str(), input_types, span));
     }
     Ok(())
+}
+
+/// R1: a definition whose `(name, input_types)` exactly matches a builtin
+/// row. Distinct from the plain `duplicate word` message: there is no first
+/// *definition* to cite, only the builtin's operand types.
+fn overload_matches_builtin_error(name: &str, span: Span, input_types: &[Type]) -> String {
+    let types = input_types
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "error: overload of `{}` (line {}, col {}) has the same input types ({}) as a builtin",
+        crate::resolve::demangle_word(name),
+        span.line,
+        span.col,
+        types
+    )
+}
+
+/// R4: two candidates for one name (local overloads, or a local overload
+/// against a builtin row) that disagree on input count. Rejected at the
+/// second candidate's site, never resolved by call-site ranking; the other
+/// candidate may be a builtin, which has no declaration site to cite, so the
+/// message names it rather than locating it.
+fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity: usize) -> String {
+    let name = crate::resolve::demangle_word(name);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "error: overload of `{name}` (line {}, col {}) takes {arity} input{} but another `{name}` takes {other_arity}; all overloads of a name must agree on input count",
+        span.line,
+        span.col,
+        plural(arity),
+    )
+}
+
+/// R5: a name with both a generic (poly) candidate and a concrete candidate
+/// (a builtin row or a local monomorphic word) of the same input arity is
+/// rejected -- there is no specialization ordering that could otherwise pick
+/// between `: + ( 'T 'T -- 'T )` and `: + ( i64 i64 -- i64 )` (or a builtin
+/// concrete row) at a call site. A poly word's `effect` is empty by
+/// construction, so R1's textual key never sees it; this is why the check is
+/// separate rather than folded into `check_duplicate_word_names`.
+fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), String> {
+    let builtins = builtin_table();
+    let mut concrete_arity: HashMap<&str, usize> = HashMap::new();
+    for (name, rows) in builtins.iter() {
+        concrete_arity.insert(name.as_str(), rows[0].inputs.len());
+    }
+    for word in words {
+        if word.name != "drop" && word.poly.is_none() {
+            concrete_arity
+                .entry(word.name.as_str())
+                .or_insert_with(|| word.effect.inputs.len());
+        }
+    }
+    for word in words {
+        let Some(sig) = &word.poly else { continue };
+        if let Some(&arity) = concrete_arity.get(word.name.as_str()) {
+            if sig.inputs.len() == arity {
+                return Err(generic_concrete_overlap_error(
+                    &word.name,
+                    sig,
+                    word_span(word),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// R5: render the poly candidate's whole declared signature (`: + ( 'T 'T --
+/// 'T )`), naming it and the concrete overload it overlaps.
+fn generic_concrete_overlap_error(name: &str, sig: &PolySig, span: Span) -> String {
+    format!(
+        "error: generic overload `{}` (line {}, col {}) overlaps a concrete overload of `{}`; a name cannot mix a generic and a concrete candidate",
+        poly_sig_str(name, sig),
+        span.line,
+        span.col,
+        crate::resolve::demangle_word(name),
+    )
+}
+
+/// Render a poly word's whole declared signature for a diagnostic (R5's
+/// overlap error is the only caller that needs the full `( ins -- outs )`
+/// shape rather than one `PolyType`, which `poly_type_str` already renders).
+fn poly_sig_str(name: &str, sig: &PolySig) -> String {
+    let render_row = |types: &[PolyType], row_var: Option<u32>| {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(v) = row_var {
+            parts.push(sig.row_var_names[v as usize].clone());
+        }
+        parts.extend(types.iter().map(|t| poly_type_str(t, sig)));
+        parts.join(" ")
+    };
+    let ins = render_row(&sig.inputs, sig.row_in);
+    let outs = render_row(&sig.outputs, sig.row_out);
+    let body = match (ins.is_empty(), outs.is_empty()) {
+        (true, true) => "--".to_string(),
+        (true, false) => format!("-- {outs}"),
+        (false, true) => format!("{ins} --"),
+        (false, false) => format!("{ins} -- {outs}"),
+    };
+    format!(": {} ( {body} )", crate::resolve::demangle_word(name))
 }
 
 /// Whether a struct's field-type graph node has been visited by
@@ -10004,6 +10218,151 @@ mod tests {
                 "unexpected message for `{name}`: {err}"
             );
         }
+    }
+
+    #[test]
+    fn overload_exact_input_match_is_error() {
+        // R1: two definitions with identical `(module, name, input_types)`
+        // still hit the `duplicate word` message, byte-for-byte.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 0 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 1 ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("duplicate word `dist`"),
+            "unexpected message: {err}"
+        );
+
+        // R1: an overload whose input types exactly match a builtin row is a
+        // located error too, naming the operand types.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( i64 i64 -- i64 ) drop ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `+`") && err.contains("as a builtin"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("i64 i64"), "names the operand types: {err}");
+
+        // Mutation check: two overloads of one name with *different* input
+        // types no longer collide as a duplicate (the whole reason for R1's
+        // widened key).
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 0 ;\n\
+: dist ( Vec2 -- i64 ) drop 0 ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            !err.contains("duplicate word"),
+            "different input types must not collide as a duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn overload_arity_clash_is_error() {
+        // R4: a local overload of `+` whose arity disagrees with the
+        // builtin's is rejected at its own definition site.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 -- Vec2 ) ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `+`")
+                && err.contains("takes 1 input but another `+` takes 2")
+                && err.contains("must agree on input count"),
+            "unexpected message: {err}"
+        );
+
+        // R4: two local overloads of a non-builtin name disagreeing on
+        // arity, rejected at the second's site.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `bump`") && err.contains("takes 2 input"),
+            "unexpected message: {err}"
+        );
+
+        // Mutation check: two overloads agreeing on arity (even with
+        // different input types) never hit this check.
+        let ok = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( i64 -- i64 ) ;\n\
+: main ( -- ) ;\n";
+        check_src(ok).expect("same-arity overloads must not trip the arity check");
+    }
+
+    #[test]
+    fn overload_generic_and_concrete_overlap_is_error() {
+        // R5: a poly candidate overlapping the builtin `+` of the same
+        // arity is rejected -- no specialization ordering.
+        let src = ": + ( 'T 'T -- 'T ) drop ;\n: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("generic overload") && err.contains("overlaps a concrete overload of `+`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains(": + ( 'T 'T -- 'T )"),
+            "renders the poly signature: {err}"
+        );
+
+        // R5: a poly candidate overlapping a *local* concrete overload of
+        // the same name and arity.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T -- 'T ) ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `bump`"),
+            "unexpected message: {err}"
+        );
+
+        // Mutation check: a poly candidate of a *different* arity than
+        // every concrete candidate for the name never trips the check.
+        let ok = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T 'T -- 'T ) drop ;\n\
+: main ( -- ) ;\n";
+        check_src(ok).expect("a differing-arity poly candidate must not trip the overlap check");
+    }
+
+    #[test]
+    fn overload_missing_at_call_site_is_error() {
+        // R3: a builtin operator's exact-match miss falls back to its
+        // existing operand-class diagnostic, byte-for-byte, even when a
+        // *different* struct's overload of the same name exists in the
+        // module (importing `Vec2` does not bring `+` for it, and a local
+        // `Vec2 +` overload does not answer an `i64 bool` call site
+        // either).
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) 1 true + drop ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("requires two operands of the same numeric type")
+                && err.contains("`i64`")
+                && err.contains("`bool`"),
+            "unexpected message: {err}"
+        );
+
+        // R3: a user-overloaded, non-operator name called with operands
+        // that match no candidate names the operand types, the same as any
+        // ordinary word call.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: describe ( Vec2 -- ) drop ;\n\
+: main ( -- ) 1 describe ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("expected `Vec2`") && err.contains("found `i64`"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
