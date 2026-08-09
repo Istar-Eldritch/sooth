@@ -875,6 +875,24 @@ fn mutual_combinator_cycle_through_an_ambiguous_overloaded_name_is_still_caught(
 }
 
 #[test]
+fn two_poly_combinators_declaring_the_same_signature_is_a_duplicate_error() {
+    // Deferred from round 3, the combinator half of the same gap fixed for
+    // ordinary poly words: `is_combinator` doesn't discriminate poly vs.
+    // mono, so a poly combinator sharing a name with an identically-signed
+    // poly combinator has the same route to silently resolving to whichever
+    // is declared first, forever.
+    let err = check_error(
+        ": apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+         : apply ( 'T [ 'T -- 'T ] -- 'T ) call call ;\n\
+         : main ( -- ) 5 [ 2 * ] apply . ;\n",
+    );
+    assert!(
+        err.contains("duplicate overload") && err.contains("apply"),
+        "a second poly combinator declaring the same signature should be a duplicate error, got: {err}"
+    );
+}
+
+#[test]
 fn mutual_combinator_cycle_is_still_an_error() {
     // Criterion 6 (R4, load-bearing): a two-combinator mutual cycle is
     // untouched by the relaxation (which skips only a *self*-edge, i==j), so

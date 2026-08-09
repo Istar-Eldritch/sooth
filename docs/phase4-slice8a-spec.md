@@ -98,11 +98,20 @@ declared quotation position is a wildcard for resolution purposes (a stack
 slot standing for a quotation carries a placeholder type until the literal's
 body is actually checked against a chosen candidate's declared effect, which
 resolution must not do speculatively per candidate); every other declared
-position is real. Deferred: two candidates identical in every respect except
-a declared quotation's effect, or two structurally identical poly
-signatures, are indistinguishable to resolution and the first declared wins
-silently rather than erroring -- narrower than what R1 covers for concrete
-words, and not something either round of review demonstrated.
+position is real. Two structurally identical poly signatures (or two
+identical poly combinator signatures) under one name are a located
+`check_duplicate_poly_signatures` error, module-scoped like R5
+(`check_duplicate_poly_signatures`, native build path only, matching
+`check_generic_concrete_overlap`'s own existing scope -- neither runs at the
+REPL). Comparison is structural (`PolySig`'s semantic fields, not its
+`*_var_names` surface-spelling tables) since a variable's id is assigned by
+first-appearance order per signature, so two declarations spelling an
+otherwise-identical shape with different variable names still compare equal.
+Still deferred, narrower and undemonstrated by any review round: two
+candidates identical in every *non-quotation* respect, differing only in a
+declared quotation's effect, are indistinguishable to *resolution* (not this
+duplicate check, which only catches an *exact* signature match) and the
+first declared wins silently.
 
 **R6 — Table-driven exact-match, coercion fallback.** `check_term`'s Call
 handling replaces the `check_operator` probe with one resolution step:

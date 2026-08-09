@@ -1931,6 +1931,10 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // before either enters `poly_env`/`env` below -- there is no ranking that
     // could otherwise pick between them.
     check_generic_concrete_overlap(&module.words)?;
+    // Two poly words (or two poly combinators) declaring the exact same
+    // signature under one name are rejected before either enters `poly_env`
+    // below -- unresolvable ambiguity, not a legitimate second overload.
+    check_duplicate_poly_signatures(&module.words)?;
 
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
@@ -2946,6 +2950,73 @@ fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Deferred from round 3's slice 8a review: two poly words (or two poly
+/// combinators -- `is_combinator` doesn't discriminate mono vs poly) sharing
+/// a name and declaring the exact same signature were legal to define, and
+/// resolved to whichever was declared first, the second silently dead rather
+/// than reachable-but-wrong. Unlike every other duplicate/overlap case
+/// R1/R4/R5 already cover, that traded a clear error for a confusing one --
+/// the exact failure this whole slice exists to close. Module-scoped like
+/// R5's own key: a poly word only collides with an identically-signed poly
+/// word in its own module.
+///
+/// Structural, not textual: a signature's variable id space is per-signature
+/// (`PolySig`'s own doc), and `intern_ty_var`/`intern_len_var` number a
+/// variable by first-appearance order, so two declarations spelling an
+/// otherwise-identical shape with different variable names (`'T 'T -- 'T`
+/// vs. `'U 'U -- 'U`) still produce identical ids and compare equal here --
+/// alpha-equivalence, not merely textual identity. `*_var_names` (surface
+/// spelling only, irrelevant to what the signature actually accepts) is
+/// deliberately excluded from the comparison. Scoped to the native build
+/// path only, matching `check_generic_concrete_overlap`'s own existing
+/// scope: neither runs at the REPL, where per-definition poly checking
+/// stays out of this slice's exit criteria (crashing was never licensed;
+/// a missing duplicate-signature diagnostic there is a pre-existing gap
+/// this slice doesn't widen).
+fn check_duplicate_poly_signatures(words: &[WordDef]) -> Result<(), String> {
+    let mut seen: Vec<(u32, &str, &PolySig, Span)> = Vec::new();
+    for word in words {
+        let Some(sig) = &word.poly else { continue };
+        if let Some((.., first)) = seen
+            .iter()
+            .find(|(m, n, s, _)| *m == word.module && *n == word.name && poly_sig_shape_eq(s, sig))
+        {
+            let first = *first;
+            return Err(duplicate_poly_signature_error(
+                &word.name,
+                sig,
+                word_span(word),
+                first,
+            ));
+        }
+        seen.push((word.module, word.name.as_str(), sig, word_span(word)));
+    }
+    Ok(())
+}
+
+/// The comparison `check_duplicate_poly_signatures` needs: every field that
+/// determines what the signature actually accepts (not `*_var_names`, the
+/// surface spelling).
+fn poly_sig_shape_eq(a: &PolySig, b: &PolySig) -> bool {
+    a.row_in == b.row_in
+        && a.inputs == b.inputs
+        && a.outputs == b.outputs
+        && a.row_out == b.row_out
+        && a.bounds == b.bounds
+}
+
+fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: Span) -> String {
+    format!(
+        "error: duplicate overload `{}` (line {}, col {}); another overload of `{}` already declares this exact signature at line {}, col {}",
+        poly_sig_str(name, sig),
+        span.line,
+        span.col,
+        crate::resolve::demangle_word(name),
+        first.line,
+        first.col,
+    )
 }
 
 /// R5: render the poly candidate's whole declared signature (`: + ( 'T 'T --

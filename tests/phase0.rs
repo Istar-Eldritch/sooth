@@ -3684,6 +3684,58 @@ fn a_polymorphic_call_matching_no_candidate_names_the_signatures() {
 }
 
 #[test]
+fn two_poly_words_declaring_the_same_signature_is_a_duplicate_error() {
+    // Deferred from round 3: unlike a genuinely different second candidate
+    // (the two tests above), a *second* poly word declaring the exact same
+    // signature as the first has no legitimate reason to exist -- it would
+    // silently resolve to the first, forever, the second dead code rather
+    // than a reachable overload.
+    let path = std::env::temp_dir().join(format!(
+        "sooth-poly-dup-signature-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'T 'T -- 'T ) drop drop ;\n\
+: main ( -- ) 1 2 idpair . ;\n",
+    )
+    .expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("duplicate overload") && err.contains(": idpair ( 'T 'T -- 'T )"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn two_poly_words_declaring_an_alpha_equivalent_signature_is_a_duplicate_error() {
+    // Same shape as the test above, spelled with a different variable name
+    // (`'U` instead of `'T`) -- a variable's id is assigned by
+    // first-appearance order per signature (`PolySig`'s own doc), so this is
+    // structurally the same signature, not a different one, and must still
+    // be caught rather than passing because the surface spelling differs.
+    let path = std::env::temp_dir().join(format!(
+        "sooth-poly-dup-signature-alpha-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'U 'U -- 'U ) drop drop ;\n\
+: main ( -- ) 1 2 idpair . ;\n",
+    )
+    .expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("duplicate overload"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
 fn overloads_of_an_ordinary_word_name_are_both_reachable() {
     // R1 widened the duplicate-word key to admit these two definitions, but
     // the checking env held one `Sig` per name, so the second silently
