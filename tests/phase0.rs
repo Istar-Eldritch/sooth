@@ -3511,3 +3511,30 @@ fn example_list_matches_golden() {
     assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
+    // Regression: the QBE backend's symbol sanitizer (`qbe_name`) used to
+    // replace every character outside `[A-Za-z0-9_.]` with a bare `_`, so
+    // two distinct word names built entirely of such characters could
+    // collapse onto the identical symbol. `+` and `-` are both ordinary `:`
+    // definitions -- accepted and lowered today even though dispatch cannot
+    // yet reach them -- and both used to sanitize to `_`, failing at the
+    // assembler with `symbol `_' is already defined` well before either
+    // word could ever be called.
+    let src = ": + ( i64 i64 -- i64 ) drop ;\n\
+: - ( i64 i64 -- i64 ) drop ;\n\
+: main ( -- ) ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-qbe-name-injective-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let built = driver::build(&path);
+    std::fs::remove_file(&path).ok();
+
+    assert!(
+        built.is_ok(),
+        "two colliding-under-the-old-scheme word names should build cleanly: {built:?}"
+    );
+}
