@@ -425,6 +425,14 @@ struct Provenance {
     /// through the walk, so a quotation pushed in one `if` arm and read in a
     /// merge outlives the arm's cloned `Scope`.
     quotations: Vec<QuotBody>,
+    /// 6f: each quotation's free-name set (every outer local its body reads,
+    /// sigil-stripped, minus whatever the body binds and shadows itself),
+    /// computed once at intern time and indexed in lockstep with
+    /// `quotations` by `QuotId`. A pure function of the literal's own AST, so
+    /// it needs no invalidation and is safe to cache: whether a captured name
+    /// is actually still live is a separate, per-query question answered by
+    /// `capture_alive_names`, not baked in here.
+    quotation_captures: Vec<HashSet<String>>,
     /// R6/R14: the self-tail combinator currently being spliced (its name and
     /// its declared input arity), set for the duration of that body splice. A
     /// tail-position call to that same name reached inside the spliced body is
@@ -528,6 +536,11 @@ impl Provenance {
 
     fn deriv(&self, id: DerivId) -> &Deriv {
         &self.derivs[id.0 as usize]
+    }
+
+    /// The free names cached for quotation `id` at intern time (`capture_names`).
+    fn quotation_captures(&self, id: QuotId) -> &HashSet<String> {
+        &self.quotation_captures[id.0]
     }
 
     fn add(&mut self, deriv: Deriv) -> DerivId {
@@ -760,31 +773,69 @@ fn call_local(name: &str) -> &str {
         .unwrap_or(name)
 }
 
+/// Every free name a quotation body reads: a `Call` whose bare-or-sigilled
+/// target is not itself bound *inside* this body (shadowing), at any depth,
+/// recursing into `if` arms and nested quotation literals. Computed once per
+/// literal at intern time and cached on `Provenance` by `QuotId` -- it is a
+/// pure property of the literal's own AST, independent of where or when it
+/// gets called. Over-includes ordinary word names (there is no way to tell a
+/// local reference from a word call at this syntactic layer), which is
+/// harmless: `capture_alive_names` only ever intersects this set against
+/// actual scope bindings, so a name that never denotes a local simply never
+/// matches anything.
+fn capture_names(body: &[Term]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    capture_names_into(body, &mut HashSet::new(), &mut out);
+    out
+}
+
+fn capture_names_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut HashSet<String>) {
+    for term in terms {
+        match &term.kind {
+            TermKind::Bind(names) => {
+                shadowed.extend(names.iter().cloned());
+            }
+            TermKind::Call(name) => {
+                let local = call_local(name);
+                if !shadowed.contains(local) {
+                    out.insert(local.to_string());
+                }
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                capture_names_into(then_branch, &mut shadowed.clone(), out);
+                capture_names_into(else_branch, &mut shadowed.clone(), out);
+            }
+            TermKind::Quotation(inner) => {
+                capture_names_into(inner, &mut shadowed.clone(), out);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Q1/D3: the last-use index, within one `check_terms` invocation's term list,
 /// of every reference/aggregate name that invocation *binds*. A name used but
 /// not bound here (an outer local inherited into this block) is deliberately
 /// absent, so it is never relaxed by this invocation (D6). A name is *used* by
 /// a `TermKind::Call` whose bare-or-sigilled target resolves to it, at any
-/// depth; a use inside a nested `if` arm is attributed to the index of the
-/// top-level term of *this* list that contains it (Q3's conservative max),
-/// since both arms execute synchronously there.
+/// depth; a use inside a nested `if` arm or quotation literal is attributed
+/// to the index of the top-level term of *this* list that contains it (Q3's
+/// conservative max).
 ///
-/// A quotation is different: an *unbound* literal (passed directly to a word,
-/// e.g. a combinator argument) is consumed at its own position, so a capture
-/// inside it is correctly attributed there, same as an `if` arm. But a
-/// quotation *bound* to a local (`[ ... ] | q |`) does not execute at its own
-/// literal; it executes wherever `q` is later used, arbitrarily far away, and
-/// a capture inside it must not die before that. `bound_quotation_name`
-/// detects the bound case (the literal immediately followed by the `Bind`
-/// that names it -- nothing else can have intervened, so it is exactly the
-/// bind's shallowest/last name); its captures go into `captures` instead of
-/// `last_use`, and a post-pass fixpoint propagates each bound name's own
-/// last use through the capture graph, transitively (a quotation capturing a
-/// quotation, e.g. `[ q1 call ] | q2 |`). The graph is acyclic -- a
-/// quotation can only capture names already bound earlier in program order --
-/// so the fixpoint always terminates. A quotation not immediately followed by
-/// a `Bind` (passed straight to a word, or produced but never named) keeps
-/// the old, unchanged behaviour.
+/// This is a floor, not the whole story, for a quotation: a literal bound to
+/// a local (`[ ... ] | q |`) does not execute at its own position, it
+/// executes wherever `q` is later used, so a name it captures must not die
+/// before `q` itself does -- and, transitively, before whatever *else*
+/// captures `q`'s name does. Rather than infer that syntactically here, the
+/// checker already records the association on both carriers a quotation can
+/// occupy (`Slot.quot`, `Binding.quot`); `capture_alive_names` reads that
+/// directly, at query time, in `live_derivs` and `aliasing_origin`. This scan
+/// treats every quotation literal exactly like an `if` arm, giving each
+/// capture its floor; `capture_alive_names` is strictly additive on top.
 struct Liveness {
     last_use: HashMap<String, usize>,
 }
@@ -793,7 +844,6 @@ impl Liveness {
     fn scan(terms: &[Term]) -> Self {
         let mut last_use = HashMap::new();
         let mut bound: HashSet<String> = HashSet::new();
-        let mut captures: HashMap<String, HashSet<String>> = HashMap::new();
         for (i, term) in terms.iter().enumerate() {
             match &term.kind {
                 TermKind::Bind(names) => {
@@ -824,55 +874,16 @@ impl Liveness {
                     Self::nested_uses(then_branch, &bound, i, &mut last_use);
                     Self::nested_uses(else_branch, &bound, i, &mut last_use);
                 }
+                // Same treatment as an `if` arm: this is only a floor
+                // (`capture_alive_names` extends it for a quotation the
+                // checker later finds is still reachable, bound or not).
                 TermKind::Quotation(inner) => {
-                    if let Some(name) = Self::bound_quotation_name(terms, i) {
-                        let mut reached = HashSet::new();
-                        Self::nested_captures(inner, &bound, &mut reached);
-                        captures.entry(name).or_default().extend(reached);
-                    } else {
-                        Self::nested_uses(inner, &bound, i, &mut last_use);
-                    }
+                    Self::nested_uses(inner, &bound, i, &mut last_use);
                 }
                 _ => {}
             }
         }
-
-        // Fixpoint: propagate each bound quotation's own last use to every
-        // name its body captures, repeating until nothing grows.
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for (name, reached) in &captures {
-                let Some(&own) = last_use.get(name) else {
-                    continue;
-                };
-                for target in reached {
-                    let entry = last_use.entry(target.clone()).or_insert(own);
-                    if *entry < own {
-                        *entry = own;
-                        changed = true;
-                    }
-                }
-            }
-        }
-
         Liveness { last_use }
-    }
-
-    /// The name a quotation literal at `terms[i]` is bound to, if the very
-    /// next term is the `Bind` that names it. Bind pops one value per name,
-    /// leftmost taking the deepest; since nothing intervenes between the
-    /// literal and this `Bind`, the literal is the most recently pushed
-    /// value, i.e. the bind's *last* name. Anything else immediately
-    /// following (a word call consuming it, another quotation, end of list,
-    /// or a `Bind` reached only after other values were pushed in between)
-    /// means the quotation is not detectably bound here, and keeps the old
-    /// consumed-at-its-own-position treatment.
-    fn bound_quotation_name(terms: &[Term], i: usize) -> Option<String> {
-        match terms.get(i + 1).map(|t| &t.kind) {
-            Some(TermKind::Bind(names)) => names.last().cloned(),
-            _ => None,
-        }
     }
 
     fn nested_uses(
@@ -906,35 +917,6 @@ impl Liveness {
         }
     }
 
-    /// Like `nested_uses`, but for a *bound* quotation's body: instead of
-    /// attributing an outer name's use directly to an index, record that this
-    /// quotation's body syntactically reaches it, so `scan`'s fixpoint can
-    /// propagate through it once the binding's own last use is known.
-    fn nested_captures(terms: &[Term], bound: &HashSet<String>, out: &mut HashSet<String>) {
-        for term in terms {
-            match &term.kind {
-                TermKind::Call(name) => {
-                    let local = call_local(name);
-                    if bound.contains(local) {
-                        out.insert(local.to_string());
-                    }
-                }
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    Self::nested_captures(then_branch, bound, out);
-                    Self::nested_captures(else_branch, bound, out);
-                }
-                TermKind::Quotation(inner) => {
-                    Self::nested_captures(inner, bound, out);
-                }
-                _ => {}
-            }
-        }
-    }
-
     /// A binding is dead at term index `at` iff this invocation bound it and
     /// its last use (its bind index when never mentioned again) is strictly
     /// before `at`. Absent (outer) names are never dead here (D6).
@@ -943,22 +925,76 @@ impl Liveness {
     }
 }
 
+/// Every name kept alive by a still-live quotation, at query index `at`: a
+/// quotation on the virtual stack is unconditionally live (same as any other
+/// stack-resident value -- nothing has consumed it yet, whether or not it is
+/// ever bound), and a quotation held by a scope binding is live if that
+/// binding itself is (by the ordinary last-use rule, *or* because it is
+/// itself a name this same computation has already found alive). The second
+/// disjunct is what makes a quotation capturing a quotation transitive
+/// (`[ q1 call ] | q2 |`): once `q2` is found alive, `q1` -- a name `q2`'s
+/// body merely calls -- is added, and the next pass then reads `q1`'s own
+/// capture set. The graph is acyclic (a quotation can only capture a name
+/// already bound earlier in program order), so this always terminates.
+///
+/// Only ever *extends* what `live_derivs`/`aliasing_origin` already treat as
+/// live; it is never consulted to shorten anything (D1: monotone).
+fn capture_alive_names(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+) -> HashSet<String> {
+    let mut alive: HashSet<String> = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for slot in stack {
+            if let Some(QuotRef::Known(id)) = slot.quot {
+                for name in prov.quotation_captures(id) {
+                    if alive.insert(name.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for b in &scope.bound {
+            let base_alive = !live.dead(&b.name, at);
+            if let (true, Some(QuotRef::Known(id))) =
+                (base_alive || alive.contains(&b.name), b.quot)
+            {
+                for name in prov.quotation_captures(id) {
+                    if alive.insert(name.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    alive
+}
+
 /// Every derivation still live — held by a slot on the virtual stack, or by
 /// a reference-typed local whose binding is not yet dead at term index `at`
-/// (Q1/D2). A reference is live from the term that creates it until the term
-/// that consumes its slot; a reference *local* is live from its bind to its
-/// last use in this block.
+/// (Q1/D2), or whose name a still-live quotation captures
+/// (`capture_alive_names`). A reference is live from the term that creates it
+/// until the term that consumes its slot; a reference *local* is live from
+/// its bind to its last use in this block, extended for as long as a
+/// quotation that can still reach it survives.
 fn live_derivs<'a>(
     stack: &'a [Slot],
     scope: &'a Scope,
+    prov: &'a Provenance,
     live: &'a Liveness,
     at: usize,
 ) -> impl Iterator<Item = DerivId> + 'a {
+    let captured = capture_alive_names(stack, scope, prov, live, at);
     stack.iter().filter_map(|slot| slot.deriv).chain(
         scope
             .bound
             .iter()
-            .filter(move |b| !live.dead(&b.name, at))
+            .filter(move |b| !live.dead(&b.name, at) || captured.contains(&b.name))
             .filter_map(|b| b.deriv),
     )
 }
@@ -974,7 +1010,7 @@ fn live_deriv(
     at: usize,
     mut pred: impl FnMut(&Deriv) -> bool,
 ) -> Option<DerivId> {
-    live_derivs(stack, scope, live, at).find(|id| pred(prov.deriv(*id)))
+    live_derivs(stack, scope, prov, live, at).find(|id| pred(prov.deriv(*id)))
 }
 
 /// A live borrow rooted at the owned place `place`, whatever its
@@ -1070,6 +1106,7 @@ fn aliasing_origin<'a>(
 ) -> Option<AliasOrigin<'a>> {
     let set = scope.local(place)?.aliases?;
     let overlaps = |other: AliasSetId| prov.alias_sets_overlap(set, other);
+    let captured = capture_alive_names(stack, scope, prov, live, at);
     let mut names: Vec<&str> = scope
         .bound
         .iter()
@@ -1077,7 +1114,7 @@ fn aliasing_origin<'a>(
             b.name != place
                 && b.aliases.is_some_and(&overlaps)
                 && scope.moves.moved_site(&b.name).is_none()
-                && !live.dead(&b.name, at)
+                && (!live.dead(&b.name, at) || captured.contains(&b.name))
         })
         .map(|b| b.name.as_str())
         .collect();
@@ -6608,7 +6645,7 @@ fn check_term(
                 // bindings, so what remains changed is an *outer* local.
                 let moves_before = scope.moves.states.clone();
                 let derivs_before: HashSet<DerivId> =
-                    live_derivs(&stack, scope, live, at).collect();
+                    live_derivs(&stack, scope, prov, live, at).collect();
                 let row = stack.clone();
                 // Splice the body against the row plus a synthesized index (the
                 // body's top input), bracketed like `call` (R6), `tail = false`.
@@ -6648,7 +6685,7 @@ fn check_term(
                 // unchanged; a difference means a reference would cross the
                 // back-edge into the next iteration.
                 let derivs_after: HashSet<DerivId> =
-                    live_derivs(&result, scope, live, at).collect();
+                    live_derivs(&result, scope, prov, live, at).collect();
                 if derivs_after != derivs_before {
                     return Err(times_body_borrow_across_loop_error(ctx, span));
                 }
@@ -7088,6 +7125,7 @@ fn check_term(
                 body: body.clone(),
                 span,
             });
+            prov.quotation_captures.push(capture_names(body));
             stack.push(Slot {
                 quot: Some(QuotRef::Known(id)),
                 ..Slot::computed(Type::Cstr)

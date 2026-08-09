@@ -1436,6 +1436,72 @@ fn mutable_borrow_captured_by_a_quotation_passed_to_another_word_is_error() {
 }
 
 #[test]
+fn mutable_borrow_captured_by_a_quotation_separated_from_its_bind_is_error() {
+    // The syntactic heuristic this fix replaced only recognized a quotation
+    // literal immediately followed by its `Bind`; here another value (`5`)
+    // sits between the literal and `| q n |`, which the old heuristic missed
+    // entirely, treating `out` as dead. Reading `Binding.quot` directly (set
+    // regardless of what else was pushed in between) closes this.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ out 0 >usize &!> 9 ! ] 5 | q n |\n  &!arr | out2 |\n  \
+         out2 1 >usize &!> 7 !\n  n drop\n  q call\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 5") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured by `q`: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_by_the_non_topmost_of_two_bound_quotations_is_error() {
+    // A `Bind` naming two quotations at once (`| qa qb |`): the old
+    // heuristic only ever recognized the single literal immediately
+    // preceding the bind (`qb`'s), so a capture belonging to the other one
+    // (`qa`, holding `out`) went undetected. Reading `Binding.quot` off
+    // *each* name individually, rather than inferring one from adjacency,
+    // closes this regardless of which of the two captures.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ out 0 >usize &!> 9 ! ] [ 1 drop ] | qa qb |\n  &!arr | out2 |\n  \
+         out2 2 >usize &!> 7 !\n  qb call qa call\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 5") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured by `qa`: {err}"
+    );
+}
+
+#[test]
+fn mutable_borrow_captured_by_a_quotation_still_unbound_on_the_stack_is_error() {
+    // A quotation pushed but not yet bound to any name is still a value on
+    // the virtual stack, unconditionally live there like any other
+    // unconsumed slot -- there is no `Bind` for the old heuristic to even
+    // look for. Reading `Slot.quot` off the stack directly closes this.
+    let err = check_error(&format!(
+        "{CAPTURE_PRELUDE}\n: main ( -- )\n  input | arr |\n  &!arr | out |\n  \
+         [ out 0 >usize &!> 9 ! ]\n  &!arr | out2 |\n  \
+         out2 1 >usize &!> 7 !\n  | q |\n  q call\n  drop ;\n"
+    ));
+    assert!(
+        err.contains("`&!arr` conflicts with a live borrow of `arr`"),
+        "expected the conflicting-borrow rejection: {err}"
+    );
+    assert!(
+        err.contains("the mutable borrow taken at line 5") && err.contains("is still live"),
+        "the still-live borrow must be `out`, captured by the still-unbound literal: {err}"
+    );
+}
+
+#[test]
 fn unbound_quotation_capture_still_dies_at_its_own_literal() {
     // Control: a quotation passed *directly* to a word (never bound to a
     // local) must keep the old behaviour untouched -- its capture dies at

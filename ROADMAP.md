@@ -509,15 +509,23 @@ quotation capturing a quotation. This is sound only because a capturing quotatio
 escape the block that binds it (7a ships *non-capturing* quotations as values; a capturing
 literal reaching a materialization boundary is a located error naming 7b).
 
-**Next action: close 6f's remaining capture-detection gap.** The fix identifies the binding a
-quotation belongs to syntactically — the literal immediately preceding a `Bind`, taking that
-bind's last name — which misses two reachable shapes: a quotation separated from its `Bind` by
-any other value (`[ ... ] 5 | q n |`), and a `Bind` naming two or more quotations, where only
-the topmost is detected (`[ A ] [ B ] | qa qb |` with only `A` capturing). Both are accepted
-today and both were rejected before the slice. The fact the checker needs is one it already
-has in the main pass, where `Slot.quot` says exactly which name each quotation lands in; the
-syntactic pre-pass cannot see the stack. Moving capture propagation onto that authority, rather
-than widening the heuristic, is the fix. After that, slice 7b.
+The syntactic capture-detection gap flagged after that fix is closed. The heuristic (a literal
+immediately preceding a `Bind`, taking that bind's last name) is gone; capture propagation now
+reads `Slot.quot`/`Binding.quot` directly, the association the checker already records on both
+carriers a quotation can occupy. This closes the two known shapes (a quotation separated from
+its `Bind` by another value; a `Bind` naming two or more quotations where a non-topmost one
+captures) and a **third found while fixing the other two**: a conflict arising while the
+quotation is still unbound on the stack, which had no `Bind` for the old heuristic to even look
+for. A quotation's free-name set is a pure, cached property of its own body; whether a captured
+name is actually still live is answered fresh at each query by walking which quotations are
+currently reachable (on the stack, unconditionally; bound, transitively through whichever other
+bound quotations are themselves still reachable) — mirroring `live_derivs`' existing stack-half/
+scope-half shape rather than adding a second one beside it.
+
+**Next action: Phase 4 Slice 7b (capturing closures).** 7a (non-capturing quotations as values)
+is done; 7b inherits both 6f's settled last-use rule and the capture-propagation obligation
+noted above — re-ground it against whatever escape rule 7b settles on, once a quotation can
+escape the block that binds it, rather than inheriting it unexamined.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1573,15 +1581,19 @@ then find out what the compiler owes it.
    polymorphic `drop`: do not settle it here, do not foreclose it either.
    Depends on nothing in 6a-6e; orderable against all of them, required before 7b.
 
-   **Known gap, open.** A quotation bound to a local propagates its captures to the binding's
-   last use (transitively), but the binding is identified *syntactically*: the literal
-   immediately preceding a `Bind`, taking that bind's last name. A quotation separated from
-   its `Bind` by another value (`[ ... ] 5 | q n |`), or any `Bind` naming two or more
-   quotations where a non-topmost one holds the capture (`[ A ] [ B ] | qa qb |`), is not
-   detected, and the borrow it captures is wrongly treated as dead. Both shapes were rejected
-   before this slice and are accepted after it. The main pass already knows the answer
-   (`Slot.quot` records which name each quotation lands in); the syntactic pre-pass does not.
-   The fix is to move capture propagation onto that authority rather than widen the heuristic.
+   **Gap closed.** A quotation's captures no longer come from inferring which binding a
+   literal belongs to syntactically. `Slot.quot`/`Binding.quot` already record the association
+   directly, on both carriers a quotation can occupy — the checker now reads that instead of
+   guessing from adjacency. This closes the two shapes the syntactic heuristic missed (a
+   quotation separated from its `Bind` by another value; a `Bind` naming two or more
+   quotations where a non-topmost one holds the capture) and a third, found while fixing the
+   other two: a conflict arising while the quotation is still unbound on the stack, which the
+   syntactic approach had no `Bind` to even key off. A quotation's free-name set is a pure,
+   cached property of its own literal body; liveness itself is answered fresh at each query —
+   a name is alive if any currently-reachable quotation captures it, where a quotation on the
+   stack is unconditionally reachable and a bound one is reachable transitively through
+   whichever other bound quotations are themselves still reachable — mirroring `live_derivs`'
+   existing stack-half/scope-half shape rather than adding a second one beside it.
 
    **Exit:** a reference bound to a local, used and then finished with, no longer blocks
    consuming the place it borrowed; the in-place accumulator body compiles as written; and a
@@ -1659,11 +1671,12 @@ then find out what the compiler owes it.
    `Fn`/`FnMut`/`FnOnce`-equivalent split that falls out of `call` through `&q`, `&!q`, and by
    value.
    Depends on 6f (the exact rule this points at) and 7a (the carrier it points the rule at).
-   Inherits one obligation from 6f: a quotation's captures are kept alive by propagating the
-   quotation binding's own last use, which is sound only while a capturing quotation cannot
+   Inherits one obligation from 6f: a quotation's captures are kept alive by whether the
+   quotation itself is still reachable (on the stack, or bound and not yet dead, transitively
+   through whatever else reaches it), which is sound only while a capturing quotation cannot
    escape the block that binds it. This slice is what lifts that restriction, so it has to
-   re-ground that propagation against whatever escape rule it settles on rather than inherit
-   it unexamined.
+   re-ground that reachability rule against whatever escape rule it settles on rather than
+   inherit it unexamined.
    **Exit:** a closure capturing an aggregate, called while that capture is still live,
    compiles and observes the same values the spliced form does; one captured past its last use
    (or, for an upward closure, past its owning frame) is rejected with a located error naming
