@@ -355,9 +355,11 @@ struct Deriv {
     /// ancestor frame, so there is no place in this body to protect.
     owned_root: Option<String>,
     /// Whether `place` is a reference local this was reborrowed from, which is
-    /// what the suspend rule is keyed on. Cleared when the derivation is bound
-    /// into a local: the binding consumes the reborrow, which is why
-    /// `push-byte` may name `b` three times.
+    /// what the suspend rule is keyed on. Binding into a local does *not*
+    /// clear this: the place stays suspended for as long as the bound
+    /// reference is live. What lets `push-byte` name `b` three times is
+    /// last-use liveness (6f) ending that suspension once the bound name's
+    /// last use has passed, not the binding itself.
     reborrow: bool,
     mutable: bool,
     /// Whether any projection step stands between the place and this
@@ -425,6 +427,14 @@ struct Provenance {
     /// through the walk, so a quotation pushed in one `if` arm and read in a
     /// merge outlives the arm's cloned `Scope`.
     quotations: Vec<QuotBody>,
+    /// 6f: each quotation's free-name set (every outer local its body reads,
+    /// sigil-stripped, minus whatever the body binds and shadows itself),
+    /// computed once at intern time and indexed in lockstep with
+    /// `quotations` by `QuotId`. A pure function of the literal's own AST, so
+    /// it needs no invalidation and is safe to cache: whether a captured name
+    /// is actually still live is a separate, per-query question answered by
+    /// `capture_alive_names`, not baked in here.
+    quotation_captures: Vec<HashSet<String>>,
     /// R6/R14: the self-tail combinator currently being spliced (its name and
     /// its declared input arity), set for the duration of that body splice. A
     /// tail-position call to that same name reached inside the spliced body is
@@ -530,6 +540,11 @@ impl Provenance {
         &self.derivs[id.0 as usize]
     }
 
+    /// The free names cached for quotation `id` at intern time (`capture_names`).
+    fn quotation_captures(&self, id: QuotId) -> &HashSet<String> {
+        &self.quotation_captures[id.0]
+    }
+
     fn add(&mut self, deriv: Deriv) -> DerivId {
         let id = DerivId(self.derivs.len() as u32);
         self.derivs.push(deriv);
@@ -573,17 +588,6 @@ impl Provenance {
         let deriv = Deriv {
             projected: true,
             ..self.deriv(parent?).clone()
-        };
-        Some(self.add(deriv))
-    }
-
-    /// Binding a reference into a local consumes the reborrow it came from,
-    /// so the place it was reborrowed from is suspended no longer. The owned
-    /// root survives: the local still keeps its referent borrowed.
-    fn bind(&mut self, held: Option<DerivId>) -> Option<DerivId> {
-        let deriv = Deriv {
-            reborrow: false,
-            ..self.deriv(held?).clone()
         };
         Some(self.add(deriv))
     }
@@ -731,7 +735,7 @@ impl Scope {
             name: name.to_string(),
             ty: slot.ty,
             aliases,
-            deriv: prov.bind(slot.deriv),
+            deriv: slot.deriv,
             quot: slot.quot,
         });
     }
@@ -752,15 +756,359 @@ impl Scope {
     }
 }
 
-/// Every derivation still live — held by a slot on the virtual stack, or by
-/// a reference-typed local still in scope. A reference is live from the term
-/// that creates it until the term that consumes its slot; a reference *local*
-/// is live for the whole block.
-fn live_derivs<'a>(stack: &'a [Slot], scope: &'a Scope) -> impl Iterator<Item = DerivId> + 'a {
-    stack
+/// The bare local name a `Call` denotes, with any leading `&!`/`&` borrow
+/// sigil stripped (matching `ast::rename_call`'s notion of a use of a local).
+fn call_local(name: &str) -> &str {
+    name.strip_prefix("&!")
+        .or_else(|| name.strip_prefix('&'))
+        .unwrap_or(name)
+}
+
+/// Every free name a quotation body reads: a `Call` whose bare-or-sigilled
+/// target is not itself bound *inside* this body (shadowing), at any depth,
+/// recursing into `if` arms and nested quotation literals. Computed once per
+/// literal at intern time and cached on `Provenance` by `QuotId` -- it is a
+/// pure property of the literal's own AST, independent of where or when it
+/// gets called. Over-includes ordinary word names (there is no way to tell a
+/// local reference from a word call at this syntactic layer), which is
+/// harmless: `capture_alive_names` only ever intersects this set against
+/// actual scope bindings, so a name that never denotes a local simply never
+/// matches anything.
+fn capture_names(body: &[Term]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    capture_names_into(body, &mut HashSet::new(), &mut out);
+    out
+}
+
+fn capture_names_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut HashSet<String>) {
+    for term in terms {
+        match &term.kind {
+            TermKind::Bind(names) => {
+                shadowed.extend(names.iter().cloned());
+            }
+            TermKind::Call(name) => {
+                let local = call_local(name);
+                if !shadowed.contains(local) {
+                    out.insert(local.to_string());
+                }
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                capture_names_into(then_branch, &mut shadowed.clone(), out);
+                capture_names_into(else_branch, &mut shadowed.clone(), out);
+            }
+            TermKind::Quotation(inner) => {
+                capture_names_into(inner, &mut shadowed.clone(), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Q1/D3: the last-use index, within one `check_terms` invocation's term list,
+/// of every reference/aggregate name that invocation *binds*. A name used but
+/// not bound here (an outer local inherited into this block) is absent from
+/// `last_use` UNLESS the caller has established it as `outer_releasable`
+/// (D6's relaxation, below): once granted, it is tracked exactly like a name
+/// this invocation binds. A name is *used* by a `TermKind::Call` whose
+/// bare-or-sigilled target resolves to it, at any depth; a use inside a
+/// nested `if` arm or quotation literal is attributed to the index of the
+/// top-level term of *this* list that contains it (Q3's conservative max).
+///
+/// This is a floor, not the whole story, for a quotation: a literal bound to
+/// a local (`[ ... ] | q |`) does not execute at its own position, it
+/// executes wherever `q` is later used, so a name it captures must not die
+/// before `q` itself does -- and, transitively, before whatever *else*
+/// captures `q`'s name does. Rather than infer that syntactically here, the
+/// checker already records the association on both carriers a quotation can
+/// occupy (`Slot.quot`, `Binding.quot`); `capture_alive_names` reads that
+/// directly, at query time, in `live_derivs` and `aliasing_origin`. This scan
+/// treats every quotation literal exactly like an `if` arm, giving each
+/// capture its floor; `capture_alive_names` is strictly additive on top.
+///
+/// D6, relaxed: a name bound by an *ancestor* invocation is only ever a
+/// candidate for early death here if the caller first proves it has no
+/// residual use anywhere past this block (`outer_releasable`, computed at
+/// each recursion site from "not referenced in the remaining sibling terms"
+/// composed with whatever the caller itself was granted). An `if` arm is
+/// execute-once, so a granted name gets the same fine last-use tracking as a
+/// name bound here (`back_edge = false`): it may die at its own last call
+/// inside the arm. A `times`/quotation body can run more than once or be
+/// invoked from elsewhere, so a granted name used anywhere inside is pinned
+/// live for the *whole* body (`back_edge = true`, sentinel `usize::MAX`);
+/// only a name unused anywhere in the body dies, and it dies throughout.
+/// Either way this only *adds* candidates for death beyond what the plain
+/// bound-here rule already grants (D1: monotone).
+struct Liveness {
+    last_use: HashMap<String, usize>,
+    outer_releasable: HashSet<String>,
+}
+
+/// Sentinel `last_use` for a name proven used somewhere inside a back-edge
+/// body: never `< at` for any real term index, so it stays live for the
+/// whole body rather than dying at its first (or any) use inside it.
+const IMMORTAL_IN_BODY: usize = usize::MAX;
+
+impl Liveness {
+    fn scan(terms: &[Term], outer_releasable: &HashSet<String>, back_edge: bool) -> Self {
+        let mut last_use = HashMap::new();
+        let mut bound: HashSet<String> = HashSet::new();
+        for (i, term) in terms.iter().enumerate() {
+            match &term.kind {
+                TermKind::Bind(names) => {
+                    for name in names {
+                        bound.insert(name.clone());
+                        // The bind index is the floor of a name's last use: a
+                        // binding never mentioned again is dead from the term
+                        // after its bind (D5), not live for the whole block.
+                        last_use.insert(name.clone(), i);
+                    }
+                }
+                TermKind::Call(name) => {
+                    let local = call_local(name);
+                    if bound.contains(local) {
+                        last_use.insert(local.to_string(), i);
+                    } else if outer_releasable.contains(local) {
+                        Self::record_granted_use(&mut last_use, local, i, back_edge);
+                    }
+                }
+                // A nested `if` arm is its own `check_terms` invocation with
+                // its own binds; here we only look for uses of names *this*
+                // list bound (or was granted), attributed to the containing
+                // top-level index (Q3's conservative max). Nested binds are
+                // not collected: they belong to the nested invocation's own
+                // scan.
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::nested_uses(
+                        then_branch,
+                        &bound,
+                        outer_releasable,
+                        back_edge,
+                        i,
+                        &mut last_use,
+                    );
+                    Self::nested_uses(
+                        else_branch,
+                        &bound,
+                        outer_releasable,
+                        back_edge,
+                        i,
+                        &mut last_use,
+                    );
+                }
+                // Same treatment as an `if` arm: this is only a floor
+                // (`capture_alive_names` extends it for a quotation the
+                // checker later finds is still reachable, bound or not).
+                TermKind::Quotation(inner) => {
+                    Self::nested_uses(inner, &bound, outer_releasable, back_edge, i, &mut last_use);
+                }
+                _ => {}
+            }
+        }
+        Liveness {
+            last_use,
+            outer_releasable: outer_releasable.clone(),
+        }
+    }
+
+    /// Record a use of a granted (outer-releasable) name at index `at`: fine
+    /// last-use tracking for an execute-once block, or the immortal sentinel
+    /// for a back-edge body (see the struct doc).
+    fn record_granted_use(
+        last_use: &mut HashMap<String, usize>,
+        local: &str,
+        at: usize,
+        back_edge: bool,
+    ) {
+        let value = if back_edge { IMMORTAL_IN_BODY } else { at };
+        let entry = last_use.entry(local.to_string()).or_insert(value);
+        *entry = (*entry).max(value);
+    }
+
+    fn nested_uses(
+        terms: &[Term],
+        bound: &HashSet<String>,
+        outer_releasable: &HashSet<String>,
+        back_edge: bool,
+        at: usize,
+        last_use: &mut HashMap<String, usize>,
+    ) {
+        for term in terms {
+            match &term.kind {
+                TermKind::Call(name) => {
+                    let local = call_local(name);
+                    if bound.contains(local) {
+                        let entry = last_use.entry(local.to_string()).or_insert(at);
+                        *entry = (*entry).max(at);
+                    } else if outer_releasable.contains(local) {
+                        Self::record_granted_use(last_use, local, at, back_edge);
+                    }
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::nested_uses(
+                        then_branch,
+                        bound,
+                        outer_releasable,
+                        back_edge,
+                        at,
+                        last_use,
+                    );
+                    Self::nested_uses(
+                        else_branch,
+                        bound,
+                        outer_releasable,
+                        back_edge,
+                        at,
+                        last_use,
+                    );
+                }
+                TermKind::Quotation(inner) => {
+                    Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A binding is dead at term index `at` iff its last use (its bind index
+    /// when never mentioned again) is strictly before `at`. A name this
+    /// invocation neither bound nor used at all is dead throughout iff the
+    /// caller granted it (`outer_releasable`); otherwise D6's original rule
+    /// holds unchanged: an outer name with no entry is never dead here.
+    fn dead(&self, name: &str, at: usize) -> bool {
+        match self.last_use.get(name) {
+            Some(&last) => last < at,
+            None => self.outer_releasable.contains(name),
+        }
+    }
+}
+
+/// Whether `name` (already sigil-stripped) is referenced by a `TermKind::Call`
+/// anywhere in `terms`, at any nesting depth (an `if` arm, a quotation
+/// literal). Used to ask "is there a residual use past this point" for the
+/// D6 relaxation above; a name still in scope may not be rebound while live
+/// (`rebound_local_error`), so there is no shadowing case to exclude here.
+fn references(terms: &[Term], name: &str) -> bool {
+    terms.iter().any(|term| match &term.kind {
+        TermKind::Call(n) => call_local(n) == name,
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => references(then_branch, name) || references(else_branch, name),
+        TermKind::Quotation(inner) => references(inner, name),
+        _ => false,
+    })
+}
+
+/// D6 relaxation: the set of ancestor-bound names safe to grant into a nested
+/// block starting right after term index `at` in the current invocation.
+/// A name qualifies iff it is either bound *within* the current invocation
+/// (position `>= base_depth`, so nothing outside this invocation could ever
+/// need it) or already granted to the current invocation by its own caller,
+/// and it is not referenced anywhere in `rest` (the current invocation's own
+/// remaining sibling terms after `at`) -- a sibling `if` arm's own uses stay
+/// invisible here because they live *inside* `terms[at]`, not in `rest`.
+fn releasable_into(
+    scope: &Scope,
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
+    rest: &[Term],
+) -> HashSet<String> {
+    scope
+        .bound
         .iter()
-        .filter_map(|slot| slot.deriv)
-        .chain(scope.bound.iter().filter_map(|b| b.deriv))
+        .enumerate()
+        .filter(|(idx, b)| {
+            (*idx >= base_depth || outer_releasable.contains(&b.name)) && !references(rest, &b.name)
+        })
+        .map(|(_, b)| b.name.clone())
+        .collect()
+}
+
+/// Every name kept alive by a still-live quotation, at query index `at`: a
+/// quotation on the virtual stack is unconditionally live (same as any other
+/// stack-resident value -- nothing has consumed it yet, whether or not it is
+/// ever bound), and a quotation held by a scope binding is live if that
+/// binding itself is (by the ordinary last-use rule, *or* because it is
+/// itself a name this same computation has already found alive). The second
+/// disjunct is what makes a quotation capturing a quotation transitive
+/// (`[ q1 call ] | q2 |`): once `q2` is found alive, `q1` -- a name `q2`'s
+/// body merely calls -- is added, and the next pass then reads `q1`'s own
+/// capture set. The graph is acyclic (a quotation can only capture a name
+/// already bound earlier in program order), so this always terminates.
+///
+/// Only ever *extends* what `live_derivs`/`aliasing_origin` already treat as
+/// live; it is never consulted to shorten anything (D1: monotone).
+fn capture_alive_names(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+) -> HashSet<String> {
+    let mut alive: HashSet<String> = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for slot in stack {
+            if let Some(QuotRef::Known(id)) = slot.quot {
+                for name in prov.quotation_captures(id) {
+                    if alive.insert(name.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for b in &scope.bound {
+            let base_alive = !live.dead(&b.name, at);
+            if let (true, Some(QuotRef::Known(id))) =
+                (base_alive || alive.contains(&b.name), b.quot)
+            {
+                for name in prov.quotation_captures(id) {
+                    if alive.insert(name.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    alive
+}
+
+/// Every derivation still live — held by a slot on the virtual stack, or by
+/// a reference-typed local whose binding is not yet dead at term index `at`
+/// (Q1/D2), or whose name a still-live quotation captures
+/// (`capture_alive_names`). A reference is live from the term that creates it
+/// until the term that consumes its slot; a reference *local* is live from
+/// its bind to its last use in this block, extended for as long as a
+/// quotation that can still reach it survives.
+fn live_derivs<'a>(
+    stack: &'a [Slot],
+    scope: &'a Scope,
+    prov: &'a Provenance,
+    live: &'a Liveness,
+    at: usize,
+) -> impl Iterator<Item = DerivId> + 'a {
+    let captured = capture_alive_names(stack, scope, prov, live, at);
+    stack.iter().filter_map(|slot| slot.deriv).chain(
+        scope
+            .bound
+            .iter()
+            .filter(move |b| !live.dead(&b.name, at) || captured.contains(&b.name))
+            .filter_map(|b| b.deriv),
+    )
 }
 
 /// The first live derivation satisfying `pred`. The scan is over
@@ -770,9 +1118,11 @@ fn live_deriv(
     stack: &[Slot],
     scope: &Scope,
     prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     mut pred: impl FnMut(&Deriv) -> bool,
 ) -> Option<DerivId> {
-    live_derivs(stack, scope).find(|id| pred(prov.deriv(*id)))
+    live_derivs(stack, scope, prov, live, at).find(|id| pred(prov.deriv(*id)))
 }
 
 /// A live borrow rooted at the owned place `place`, whatever its
@@ -781,9 +1131,11 @@ fn live_borrow_of(
     stack: &[Slot],
     scope: &Scope,
     prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     place: &str,
 ) -> Option<DerivId> {
-    live_deriv(stack, scope, prov, |d| {
+    live_deriv(stack, scope, prov, live, at, |d| {
         d.owned_root.as_deref() == Some(place)
     })
 }
@@ -794,9 +1146,11 @@ fn live_mutable_borrow_of(
     stack: &[Slot],
     scope: &Scope,
     prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     place: &str,
 ) -> Option<DerivId> {
-    live_deriv(stack, scope, prov, |d| {
+    live_deriv(stack, scope, prov, live, at, |d| {
         d.mutable && d.owned_root.as_deref() == Some(place)
     })
 }
@@ -850,15 +1204,21 @@ enum AliasOrigin<'a> {
 /// of it. A bound name is preferred over a stack slot when both alias, being the
 /// more actionable end to report, and names are sorted so a place aliased twice
 /// always reports the same one. A consumed local is not a name for anything, so
-/// it never aliases.
+/// it never aliases; nor is a name whose last use has passed (Q6/D8): filtering
+/// each candidate by its *own* last use preserves overlap — a dead name A is
+/// dropped while any still-live name B overlapping `place` keeps rejecting, so
+/// the borrow is accepted only when no live name can observe the mutation.
 fn aliasing_origin<'a>(
     stack: &[Slot],
     scope: &'a Scope,
     prov: &Provenance,
+    live: &Liveness,
+    at: usize,
     place: &str,
 ) -> Option<AliasOrigin<'a>> {
     let set = scope.local(place)?.aliases?;
     let overlaps = |other: AliasSetId| prov.alias_sets_overlap(set, other);
+    let captured = capture_alive_names(stack, scope, prov, live, at);
     let mut names: Vec<&str> = scope
         .bound
         .iter()
@@ -866,6 +1226,7 @@ fn aliasing_origin<'a>(
             b.name != place
                 && b.aliases.is_some_and(&overlaps)
                 && scope.moves.moved_site(&b.name).is_none()
+                && (!live.dead(&b.name, at) || captured.contains(&b.name))
         })
         .map(|b| b.name.as_str())
         .collect();
@@ -6120,7 +6481,7 @@ fn borrow_join_disagreement_error(
 #[allow(clippy::too_many_arguments)]
 fn check_terms(
     terms: &[Term],
-    mut stack: Vec<Slot>,
+    stack: Vec<Slot>,
     ctx: &Ctx,
     env: &HashMap<String, Sig>,
     arrays: &mut Vec<ArrayDecl>,
@@ -6131,7 +6492,56 @@ fn check_terms(
     tail: bool,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
+    check_terms_relaxed(
+        terms,
+        stack,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        scope,
+        tail,
+        poly,
+        &HashSet::new(),
+        false,
+    )
+}
+
+/// D6 relaxation entry point: `outer_releasable` is the set of ancestor-bound
+/// names this invocation's caller has already proven have no residual use
+/// past this block (`releasable_into`), and `back_edge` is whether this
+/// invocation's own body can run more than once or be entered from elsewhere
+/// (`times`/quotation), which changes how a granted name's use inside is
+/// tracked (see the `Liveness` struct doc). `check_terms` above is the plain
+/// entry point every root invocation (a word body, a REPL line, a `case`
+/// clause) uses: nothing is ancestor to those, so both are empty/`false`.
+#[allow(clippy::too_many_arguments)]
+fn check_terms_relaxed(
+    terms: &[Term],
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    tail: bool,
+    poly: &mut PolyCtx,
+    outer_releasable: &HashSet<String>,
+    back_edge: bool,
+) -> Result<Vec<Slot>, String> {
     let last = terms.len().wrapping_sub(1);
+    // Q1/D3: last-use over *this* invocation's term list, in its own index
+    // space. Nested bodies re-enter `check_terms` and rebuild their own.
+    let live = Liveness::scan(terms, outer_releasable, back_edge);
+    // The depth this invocation was entered at: a binding at or past this
+    // position was made *within* this invocation (nothing outside it could
+    // ever need it), a binding before it is ancestor-bound and only a
+    // recursion candidate if it is also in `outer_releasable` (`releasable_into`).
+    let base_depth = scope.depth();
     for (i, term) in terms.iter().enumerate() {
         stack = check_term(
             term,
@@ -6145,6 +6555,11 @@ fn check_terms(
             scope,
             tail && i == last,
             poly,
+            &live,
+            i,
+            terms,
+            base_depth,
+            outer_releasable,
         )?;
     }
     Ok(stack)
@@ -6163,6 +6578,11 @@ fn check_term(
     scope: &mut Scope,
     tail: bool,
     poly: &mut PolyCtx,
+    live: &Liveness,
+    at: usize,
+    siblings: &[Term],
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
 ) -> Result<Vec<Slot>, String> {
     let span = term.span;
     match &term.kind {
@@ -6227,9 +6647,9 @@ fn check_term(
                     // live mutable references into one place.
                     Some((_, mutable)) => {
                         if mutable {
-                            if let Some(id) =
-                                live_deriv(&stack, scope, prov, |d| d.reborrow && d.place == *name)
-                            {
+                            if let Some(id) = live_deriv(&stack, scope, prov, live, at, |d| {
+                                d.reborrow && d.place == *name
+                            }) {
                                 return Err(suspended_place_error(ctx, span, name, prov.deriv(id)));
                             }
                         }
@@ -6242,7 +6662,7 @@ fn check_term(
                         // its owner has given away. Only a linear local is
                         // consumed by being named; a Copy one is merely read.
                         if is_linear(ty, ctx.structs(), ctx.enums(), arrays) {
-                            if let Some(id) = live_borrow_of(&stack, scope, prov, name) {
+                            if let Some(id) = live_borrow_of(&stack, scope, prov, live, at, name) {
                                 return Err(consume_of_borrowed_place_error(
                                     ctx,
                                     span,
@@ -6265,7 +6685,9 @@ fn check_term(
                         // come first. Only an aggregate has a region, and so
                         // only an aggregate can be a second name for one.
                         if aliases.is_some() {
-                            if let Some(id) = live_mutable_borrow_of(&stack, scope, prov, name) {
+                            if let Some(id) =
+                                live_mutable_borrow_of(&stack, scope, prov, live, at, name)
+                            {
                                 return Err(naming_aliases_borrowed_place_error(
                                     ctx,
                                     span,
@@ -6317,10 +6739,18 @@ fn check_term(
                 // linear value bound inside it is caught by `leave_block`
                 // (R6). `tail` is pinned `false`: lowering emits a real call
                 // here, never a self-tail back-edge (R6/R13).
+                //
+                // D6: a quotation body can be called from elsewhere too, so a
+                // granted outer name is tracked as a back-edge body (used
+                // anywhere inside pins it live throughout, unused kills it
+                // throughout), never at its own last use inside.
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                stack = check_terms(
+                let granted =
+                    releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+                stack = check_terms_relaxed(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                    &granted, true,
                 )?;
                 leave_block(
                     ctx,
@@ -6386,7 +6816,8 @@ fn check_term(
                 // before the splice; `leave_block` drops the body's own
                 // bindings, so what remains changed is an *outer* local.
                 let moves_before = scope.moves.states.clone();
-                let derivs_before: HashSet<DerivId> = live_derivs(&stack, scope).collect();
+                let derivs_before: HashSet<DerivId> =
+                    live_derivs(&stack, scope, prov, live, at).collect();
                 let row = stack.clone();
                 // Splice the body against the row plus a synthesized index (the
                 // body's top input), bracketed like `call` (R6), `tail = false`.
@@ -6395,8 +6826,17 @@ fn check_term(
                 stack.push(Slot::computed(Type::I64));
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                let result = check_terms(
+                // D6: the row-preservation guard below already rejects a
+                // body that carries a reference across the back-edge, so a
+                // granted outer name is tracked the same back-edge way as a
+                // quotation's own body (used anywhere inside pins it live
+                // throughout, per-iteration re-entry means it cannot die
+                // early inside).
+                let granted =
+                    releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+                let result = check_terms_relaxed(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+                    &granted, true,
                 )?;
                 leave_block(
                     ctx,
@@ -6425,7 +6865,8 @@ fn check_term(
                 // iteration, so a well-formed body leaves `live_derivs`
                 // unchanged; a difference means a reference would cross the
                 // back-edge into the next iteration.
-                let derivs_after: HashSet<DerivId> = live_derivs(&result, scope).collect();
+                let derivs_after: HashSet<DerivId> =
+                    live_derivs(&result, scope, prov, live, at).collect();
                 if derivs_after != derivs_before {
                     return Err(times_body_borrow_across_loop_error(ctx, span));
                 }
@@ -6453,7 +6894,7 @@ fn check_term(
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
-                name, span, &mut stack, ctx, scope, arrays, cells, refs, prov,
+                name, span, &mut stack, ctx, scope, arrays, cells, refs, prov, live, at,
             )? {
                 return Ok(stack);
             }
@@ -6664,9 +7105,17 @@ fn check_term(
             // each arm is also a block, so a name it binds is gone by the join
             // and the two arms' name sets agree there again.
             let depth = scope.depth();
+            // D6: a name safe past this `if` term (no use in the remaining
+            // sibling terms, composed with whatever this invocation was
+            // itself granted) is safe inside *either* arm: an arm's own use
+            // of a sibling arm's-only names is invisible here (it lives
+            // inside `siblings[at]`, not after it), and an arm executes
+            // exactly once, so it may die at its own last use inside
+            // (`back_edge = false`).
+            let granted = releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
             let mut then_scope = scope.clone();
             let mut else_scope = scope.clone();
-            let then_stack = check_terms(
+            let then_stack = check_terms_relaxed(
                 then_branch,
                 stack.clone(),
                 ctx,
@@ -6678,6 +7127,8 @@ fn check_term(
                 &mut then_scope,
                 tail,
                 poly,
+                &granted,
+                false,
             )?;
             let (then_token, then_at) = match else_span {
                 Some(at) => ("else", *at),
@@ -6692,7 +7143,7 @@ fn check_term(
                     span: then_at,
                 },
             )?;
-            let else_stack = check_terms(
+            let else_stack = check_terms_relaxed(
                 else_branch,
                 stack,
                 ctx,
@@ -6704,6 +7155,8 @@ fn check_term(
                 &mut else_scope,
                 tail,
                 poly,
+                &granted,
+                false,
             )?;
             leave_block(
                 ctx,
@@ -6865,6 +7318,7 @@ fn check_term(
                 body: body.clone(),
                 span,
             });
+            prov.quotation_captures.push(capture_names(body));
             stack.push(Slot {
                 quot: Some(QuotRef::Known(id)),
                 ..Slot::computed(Type::Cstr)
@@ -7605,6 +8059,8 @@ fn check_reference_word(
     cells: &[OwnedCellDecl],
     refs: &mut Vec<RefDecl>,
     prov: &mut Provenance,
+    live: &Liveness,
+    at: usize,
 ) -> Result<Option<Vec<Slot>>, String> {
     if !name.starts_with('&') {
         return Ok(None);
@@ -7768,7 +8224,7 @@ fn check_reference_word(
             // any live borrow of the place; a new shared one conflicts with a
             // live mutable borrow. Per place, never a global counter: two live
             // `&!` rooted at different locals do not conflict.
-            if let Some(id) = live_deriv(stack, scope, prov, |d| {
+            if let Some(id) = live_deriv(stack, scope, prov, live, at, |d| {
                 d.owned_root.as_deref() == Some(rest) && (mutable || d.mutable)
             }) {
                 return Err(conflicting_borrow_error(
@@ -7785,7 +8241,7 @@ fn check_reference_word(
             // caught here, one that comes later is caught there. Naming an
             // aggregate with no `&!` anywhere near it stays free either way.
             if mutable {
-                if let Some(origin) = aliasing_origin(stack, scope, prov, rest) {
+                if let Some(origin) = aliasing_origin(stack, scope, prov, live, at, rest) {
                     return Err(aliased_place_borrow_error(ctx, span, rest, &origin));
                 }
             }
@@ -11900,24 +12356,40 @@ mod tests {
     }
 
     #[test]
-    fn provenance_bind_consumes_the_reborrow_and_keeps_the_owned_root() {
-        // The asymmetry that makes `push-byte` legal while the underlying check still
-        // fires: binding a projected reference into a local releases the place
-        // it was reborrowed from, but not the owned local it ultimately borrows.
+    fn scope_bind_keeps_the_reborrow_and_the_owned_root() {
+        // The fix this replaces: a bound reference used to release the place
+        // it was reborrowed from, which silently dropped protection for a
+        // reborrow of a reference *parameter* (no `owned_root` either, so
+        // nothing was left to suspend). Binding must be a no-op on
+        // provenance now: what ends a suspension is last-use liveness (6f),
+        // not the bind. `Scope::bind` stores `slot.deriv` verbatim (no
+        // `Provenance` transform in between), so this asserts that directly.
         let mut prov = Provenance::default();
+        let mut scope = Scope::default();
         let span = Span { line: 1, col: 1 };
         let fresh = prov.borrow("v", true, span);
-        let held = prov.bind(Some(fresh)).expect("a bound derivation");
-        let reborrow = prov.reborrow("r", Some(held), true, span);
+        let reborrow = prov.reborrow("r", Some(fresh), true, span);
         let projected = prov.project(Some(reborrow)).expect("a projection");
         assert!(prov.deriv(projected).reborrow, "still suspends `r`");
         assert!(prov.deriv(projected).projected, "R7's note is apt here");
         assert_eq!(prov.deriv(projected).owned_root.as_deref(), Some("v"));
 
-        let rebound = prov.bind(Some(projected)).expect("a bound derivation");
-        assert!(!prov.deriv(rebound).reborrow, "`r` is suspended no longer");
+        scope.bind(
+            "e",
+            Slot::derived(Type::I64, Some(projected)),
+            false,
+            &mut prov,
+        );
+        let bound = scope
+            .local("e")
+            .and_then(|b| b.deriv)
+            .expect("a bound deriv");
+        assert!(
+            prov.deriv(bound).reborrow,
+            "`r` stays suspended after binding"
+        );
         assert_eq!(
-            prov.deriv(rebound).owned_root.as_deref(),
+            prov.deriv(bound).owned_root.as_deref(),
             Some("v"),
             "`v` is still borrowed by the local"
         );

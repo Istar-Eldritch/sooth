@@ -126,6 +126,56 @@ can denote either arm's place, a value carries a *set* of regions rather than on
 merge unions the arms and **no aliasing rejection happens at a join**: selecting one of two
 owned records compiles, and the error lands at the borrow where it can name both ends.
 `examples/refs.sth` dogfoods it.
+
+**Bug found in review (6f, slice 6f review round 2), fixed on the 6f branch: binding a
+reborrow used to lose the suspend rule.** The stack-resident shape was always rejected
+(`reborrow_while_projected_reference_still_live_is_error`, `tests/phase3_refs.rs:654`), but
+naming the first projection's result before taking the second was not:
+```
+type: Buf data ^[u8 64] len usize ;
+: f ( &!Buf -- )
+  | p |
+  p &!Buf>len | e |
+  p &!Buf>len 1 +!
+  e 1 +! ;
+: main ( -- ) ;
+```
+used to build clean; now rejected on the same grounds as the stack-resident case. Root
+cause: `Provenance::bind` deliberately cleared a derivation's `reborrow` flag on bind, as a
+workaround for bound references living for the whole block (so `push-byte` could name its
+buffer parameter again after binding a projection off it). Predates 6f, but its fix
+depends on 6f: `bind` no longer needs to lie, because last-use liveness ends the
+suspension honestly once the bound name's last use has passed. Landed here because it
+could not land on main without 6f (verified: the same one-line change breaks `push-byte`
+pre-6f). `Provenance::bind` was provably an identity function once the flag-clear was
+removed (proven by replaying the whole suite with the call site reading `slot.deriv`
+directly), so it is deleted rather than kept as a no-op.
+
+**Second bug found in review (6f, slice 6f review round 3), fixed on the 6f branch: the
+previous fix's own dependency turned latent conservatism into real over-rejections.**
+D6's original rule never relaxed an outer-bound name inside a nested invocation (an `if`
+arm, a `times`/quotation body), which was harmless until the fix above made the
+reborrow-suspend rule fully depend on this liveness table. From then on, binding a
+reference outside a nested block, consuming it before the block, and reborrowing its
+root inside the block was rejected even though the bound reference was provably dead --
+four distinct shapes reproduced it (an `if` arm, a `times` body, a deeper projection, and
+use-then-reborrow within one arm), and one, consuming a field into a local then mutating
+through the root in a loop, is an ordinary way to write a buffer routine. Fixed by
+generalizing D6 rather than reverting the first fix: a name is granted into a nested
+invocation only once the caller proves no residual use anywhere past the block
+(`releasable_into`), and a granted name is then tracked by the nested invocation's own
+`Liveness::scan` exactly like a name it binds -- fine last-use for an execute-once `if`
+arm, pinned live for the whole body once used anywhere inside for a `times`/quotation
+body (`back_edge`, since a per-iteration use must not die before the back-edge). Also
+surfaced and corrected in the same pass: a pre-existing test
+(`borrowed_local_carried_across_back_edge_is_error`) had been asserting the D6 gap
+itself as the desired behaviour, on a self-tail loop's own back-edge arm; its own prior
+comment already said the borrow would be legal if bound inside the arm, which is exactly
+what this generalization now grants, so it is rewritten as an accept test with two new
+reject neighbours (residual use elsewhere in the program; named again after the
+recursive call within the same arm) rather than left as a stale reject. See
+`docs/phase4-slice6f-spec.md`'s D6 and M4/M5 for the mechanism and its mutation matrix.
+
 **Phase 3 Slice 8a (typed foreign calls + string slices) is complete**: one `extern:` declaration
 form (a C symbol string plus a stack effect), registered into the ordinary word environment so
 existing arity/type checks apply unchanged; the boundary type set is the numeric tower, `&T`/`&!T`,
@@ -487,11 +537,56 @@ previously give up) both compile and run at two instantiations (`i64`, `f64`); a
 branching polymorphic body is now satisfied; the core library's intrinsic-vs-library split
 for `max` is unblocked.
 
-**Next action: Phase 4 Slice 6f (liveness ends at last use).** 6c, 6d, and 6e are all
-complete; 6f's brief and spec (`docs/phase4-slice6f-brief.md`, `docs/phase4-slice6f-spec.md`)
-are already written. It has to read before slice 7b specifically (7a, quotations as values, does not depend on
-it), which points Phase 3 Slice 6's escape checking at a new carrier (closure captures) once
-closures start capturing borrows.
+**Phase 4 Slice 6f (liveness ends at last use) is complete**: a reference bound to a local now
+dies at its **last use**, the way one left on the stack already did, so a held-then-unused
+borrow no longer blocks consuming its place — `&!acc &!Acc>arr | f | f 0 >usize &!> 5 ! acc
+drop` compiles where before only its identical chained form did. Checker-acceptance-only (D1):
+no new `Instr`/`Terminator`, no lowering, `Type`, or `IrType` change, and since `Deriv`/
+`DerivId` never leave `src/check.rs`, no emitted code changes by construction. The rule is a
+per-`check_terms` `Liveness` pre-pass keyed only on names *that* invocation binds; only the
+`scope.bound` half of each table becomes use-bounded, both stack halves left byte-for-byte
+(D2). The same analysis relaxes `aliasing_origin`'s name loop by each candidate's own last use
+(D8), overlap preserved. Because a wrong answer on that half is a silent wrong *value*, the
+alias half is mutation-tested rather than merely run green (D9). `examples/inplace_fold.sth`
+dogfoods a named-accumulator in-place `fold` at both a `Copy` and a linear `Acc`, with no
+per-iteration `blit` in the emitted QBE loop body.
+
+Review found and fixed a soundness regression the first implementation introduced: a quotation
+bound to a local (`[ ... ] | q |`) had its captures attributed to the *literal*, not the
+binding, so a borrow captured by a quotation called later looked dead and a second `&!` to the
+same place was silently accepted. Captures now die with the binding, transitively through a
+quotation capturing a quotation. This is sound only because a capturing quotation still cannot
+escape the block that binds it (7a ships *non-capturing* quotations as values; a capturing
+literal reaching a materialization boundary is a located error naming 7b).
+
+The syntactic capture-detection gap flagged after that fix is closed. The heuristic (a literal
+immediately preceding a `Bind`, taking that bind's last name) is gone; capture propagation now
+reads `Slot.quot`/`Binding.quot` directly, the association the checker already records on both
+carriers a quotation can occupy. This closes the two known shapes (a quotation separated from
+its `Bind` by another value; a `Bind` naming two or more quotations where a non-topmost one
+captures) and a **third found while fixing the other two**: a conflict arising while the
+quotation is still unbound on the stack, which had no `Bind` for the old heuristic to even look
+for. A quotation's free-name set is a pure, cached property of its own body; whether a captured
+name is actually still live is answered fresh at each query by walking which quotations are
+currently reachable (on the stack, unconditionally; bound, transitively through whichever other
+bound quotations are themselves still reachable) — mirroring `live_derivs`' existing stack-half/
+scope-half shape rather than adding a second one beside it.
+
+A third review round found and fixed an over-rejection the first fix's own dependency
+introduced: making the reborrow-suspend rule depend on this liveness table meant D6's original
+blanket "an outer name is never relaxed inside a nested invocation" turned real, four distinct
+safe programs (bind-consume-then-reborrow across an `if` arm, a `times` body, a deeper
+projection, and use-then-reborrow within one arm) went from accepted to rejected. Generalized
+rather than reverted: a name is granted into a nested invocation only once the caller proves no
+residual use anywhere past the block, and a granted name is then tracked by that invocation's
+own scan exactly like one it binds — dying at its own last use in an execute-once `if` arm,
+pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
+prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
+
+**Next action: Phase 4 Slice 7b (capturing closures).** 7a (non-capturing quotations as values)
+is done; 7b inherits both 6f's settled last-use rule and the capture-propagation obligation
+noted above — re-ground it against whatever escape rule 7b settles on, once a quotation can
+escape the block that binds it, rather than inheriting it unexamined.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1489,8 +1584,9 @@ then find out what the compiler owes it.
    mutation-tested guards on the three-state move join. Slice 7's stated dependency on a
    branching polymorphic body is satisfied.
 
-   **6f — liveness ends at last use.** Today it does not: `live_derivs`
-   (`src/check.rs:759`) chains the stack slots with the scope's bindings, so a reference left
+   **6f — liveness ends at last use. Implemented**; a gap found in review is closed, below. The
+   motivation, as originally written: `live_derivs`
+   (originally `src/check.rs:759`, now `:985`) chains the stack slots with the scope's bindings, so a reference left
    on the stack dies when a term consumes its slot, while a reference bound to a local stays
    live for the whole block. Chaining a borrow therefore compiles where naming it does not,
    and the rejection lands on the natural shape: borrow a place, write through the borrow,
@@ -1518,7 +1614,7 @@ then find out what the compiler owes it.
    live for the whole body, which the identity-on-borrow-state check at `src/check.rs:6041`
    already wants).
    **Two tables, one rule.** The same lexical-vs-last-use question applies to
-   `aliasing_origin` (`src/check.rs:854`), which rejects a mutable borrow of a place a second
+   `aliasing_origin` (originally `src/check.rs:854`, now `:1099`), which rejects a mutable borrow of a place a second
    live *name* denotes. Both scan a scope table for names that are merely in lexical scope,
    and both leave their stack halves alone; taking only the borrow half would answer one
    question twice. **Measured, not assumed:** stubbing `aliasing_origin` out makes a `Copy`
@@ -1544,7 +1640,22 @@ then find out what the compiler owes it.
    spelling "thread this in place" as "give this a destructor". Its answer is entangled with
    slice 1's parked question of whether `Copy` is a privileged constraint and with slice 8's
    polymorphic `drop`: do not settle it here, do not foreclose it either.
-   Depends on nothing in 6a-6e; orderable against all of them, required before 7.
+   Depends on nothing in 6a-6e; orderable against all of them, required before 7b.
+
+   **Gap closed.** A quotation's captures no longer come from inferring which binding a
+   literal belongs to syntactically. `Slot.quot`/`Binding.quot` already record the association
+   directly, on both carriers a quotation can occupy — the checker now reads that instead of
+   guessing from adjacency. This closes the two shapes the syntactic heuristic missed (a
+   quotation separated from its `Bind` by another value; a `Bind` naming two or more
+   quotations where a non-topmost one holds the capture) and a third, found while fixing the
+   other two: a conflict arising while the quotation is still unbound on the stack, which the
+   syntactic approach had no `Bind` to even key off. A quotation's free-name set is a pure,
+   cached property of its own literal body; liveness itself is answered fresh at each query —
+   a name is alive if any currently-reachable quotation captures it, where a quotation on the
+   stack is unconditionally reachable and a bound one is reachable transitively through
+   whichever other bound quotations are themselves still reachable — mirroring `live_derivs`'
+   existing stack-half/scope-half shape rather than adding a second one beside it.
+
    **Exit:** a reference bound to a local, used and then finished with, no longer blocks
    consuming the place it borrowed; the in-place accumulator body compiles as written; and a
    test proves the borrow is still rejected when the reference is used *after* the consume.
@@ -1568,8 +1679,8 @@ then find out what the compiler owes it.
    writes its captured `arr` through `&!` each iteration and reads it back the next, so
    snapshot semantics would break a shipped library word. Preserving today's meaning under
    materialization therefore needs the env to hold a *reference*, which is Phase 3 Slice 6's
-   escape checking pointed at a new carrier — exactly the machinery 6f is mid-flight on
-   changing. So *every* capture waits for 6f, not just an explicitly reference-typed one, and
+   escape checking pointed at a new carrier — exactly the machinery 6f settled the borrow-end
+   rule for. So *every* capture waits for 6f, not just an explicitly reference-typed one, and
    what is left for 7a is the representation itself: a quotation that captures nothing has no
    env to disagree about.
 
@@ -1621,6 +1732,12 @@ then find out what the compiler owes it.
    `Fn`/`FnMut`/`FnOnce`-equivalent split that falls out of `call` through `&q`, `&!q`, and by
    value.
    Depends on 6f (the exact rule this points at) and 7a (the carrier it points the rule at).
+   Inherits one obligation from 6f: a quotation's captures are kept alive by whether the
+   quotation itself is still reachable (on the stack, or bound and not yet dead, transitively
+   through whatever else reaches it), which is sound only while a capturing quotation cannot
+   escape the block that binds it. This slice is what lifts that restriction, so it has to
+   re-ground that reachability rule against whatever escape rule it settles on rather than
+   inherit it unexamined.
    **Exit:** a closure capturing an aggregate, called while that capture is still live,
    compiles and observes the same values the spliced form does; one captured past its last use
    (or, for an upward closure, past its owning frame) is rejected with a located error naming

@@ -1,0 +1,50 @@
+\ Dogfood: Phase 4 slice 6f. A named-accumulator in-place fold, the payoff of
+\ ending a bound borrow at its last use. `acc` is a named local, so it lives in
+\ a stable frame slot rather than being threaded through the `times` back-edge;
+\ a mutable borrow of its array is bound to `out` and drives the loop, writing
+\ each running sum straight into place. The borrow's last use is inside the
+\ loop, so after it `acc` is free to be named and returned. Before this slice a
+\ bound borrow lived to the end of its block, so the closing `acc` collided with
+\ the still-"live" `out` and the word was rejected; the anonymous form on the
+\ stack already ended at last use, and this makes the named form agree.
+\
+\ Because the accumulator is never loop-carried state, its `times` body lowers to
+\ address-arithmetic stores with no per-iteration aggregate `blit` (T12/T13). The
+\ same shape is dogfooded at a `Copy` accumulator (`AccC`) and a linear one
+\ (`AccL`, made linear by a `drop` overload): the borrow half carries both, and
+\ no aliasing rule fires for the linear case.
+
+type: AccC arr [i64 4] ;
+type: AccL arr [i64 4] ;
+
+: drop ( AccL -- )  | a | a AccL> drop ;
+
+: input ( -- [i64 4] )
+  0 4 fill | s |
+  &!s 0 >usize &!> 1 !
+  &!s 1 >usize &!> 2 !
+  &!s 2 >usize &!> 3 !
+  &!s 3 >usize &!> 4 !
+  s ;
+
+: prefix-copy ( [i64 4] AccC -- AccC )
+  | arr acc |
+  &!acc &!AccC>arr | out |
+  0 4 [ | i | &arr i >usize &> @ + | run | out i >usize &!> run ! run ] times
+  drop
+  acc ;
+
+: prefix-linear ( [i64 4] AccL -- AccL )
+  | arr acc |
+  &!acc &!AccL>arr | out |
+  0 4 [ | i | &arr i >usize &> @ + | run | out i >usize &!> run ! run ] times
+  drop
+  acc ;
+
+: main ( -- )
+  input 0 4 fill AccC prefix-copy | c |
+  4 [ | i | &c &AccC>arr i >usize &> @ . ] times
+  c AccC> drop
+  input 0 4 fill AccL prefix-linear | l |
+  4 [ | i | &l &AccL>arr i >usize &> @ . ] times
+  l drop ;
