@@ -2294,7 +2294,19 @@ impl Session {
         // multi-output gate below only ever sees a body that already
         // type-checked (`: twice ( 'T -- 'T 'T ) dup ;` fails the `Copy` gate
         // here as X1, never reaching the gate despite its two outputs).
-        check::check_poly_body(&word, &sig, &env, &self.structs, &self.enums, &self.arrays)?;
+        // Slice 8a fix 2: REPL lowering of a poly instantiation always passes
+        // an empty overloads map (out of scope this slice), so this record is
+        // scratch, discarded once the body checks.
+        let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+        check::check_poly_body(
+            &word,
+            &sig,
+            &env,
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &mut scratch_overloads,
+        )?;
 
         // R3/R7/X3: a body resolving to two or more concrete outputs, or an
         // output row variable, is a clean located deferral. REPL lowering

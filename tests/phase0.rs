@@ -3606,3 +3606,21 @@ fn overload_vec2_lt_dispatches_to_user_word() {
     assert_eq!(stdout, "false\n");
     assert_eq!(code, 0);
 }
+
+#[test]
+fn overload_from_poly_body_dispatches_to_user_word() {
+    // Slice 8a fix 2: a genuinely polymorphic word (`pair-sum`, generic in
+    // `'T` for an unrelated passthrough slot) whose body calls `+` on two
+    // *concretely*-typed `Vec2` operands from its own signature. Before the
+    // fix, `poly_call_term`'s env-based dispatch intercepted `+` by name
+    // alone and never recorded the call site, so lowering fell through to
+    // the builtin `Instr::Bin(Add)` arm on the two struct pointers and
+    // segfaulted, identically to the monomorphic bug fix 1 addresses.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+: pair-sum ( 'T Vec2 Vec2 -- 'T Vec2 ) + ;\n\
+: main ( -- ) 42 1 2 Vec2 3 4 Vec2 pair-sum swap drop dup Vec2>x . Vec2>y . ;\n";
+    let (stdout, code) = run_overload_src("poly-plus", src);
+    assert_eq!(stdout, "4\n6\n");
+    assert_eq!(code, 0);
+}

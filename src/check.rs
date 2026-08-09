@@ -1976,7 +1976,15 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // R7: a polymorphic body is checked over a `PolyType` stack by
                 // a dedicated pass, deliberately separate from the concrete
                 // walk.
-                check_poly_body(word, sig, &env, structs, enums, arrays)?;
+                check_poly_body(
+                    word,
+                    sig,
+                    &env,
+                    structs,
+                    enums,
+                    arrays,
+                    &mut builtin_overloads,
+                )?;
             }
         } else {
             let mut poly = PolyCtx {
@@ -4515,6 +4523,7 @@ pub fn check_poly_body(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
     let ctx = word_ctx(word, structs, enums);
     let terms = match &word.body {
@@ -4529,7 +4538,16 @@ pub fn check_poly_body(
     let stack = sig.inputs.clone();
     let mut scope = PolyScope::default();
     let residual = poly_walk(
-        terms, stack, &mut scope, sig, &ctx, env, structs, enums, arrays,
+        terms,
+        stack,
+        &mut scope,
+        sig,
+        &ctx,
+        env,
+        structs,
+        enums,
+        arrays,
+        builtin_overloads,
     )?;
     if residual != sig.outputs {
         return Err(poly_output_mismatch_error(word, sig, &residual));
@@ -4556,9 +4574,21 @@ fn poly_walk(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolyType>, String> {
     for term in terms {
-        stack = poly_term(term, stack, scope, sig, ctx, env, structs, enums, arrays)?;
+        stack = poly_term(
+            term,
+            stack,
+            scope,
+            sig,
+            ctx,
+            env,
+            structs,
+            enums,
+            arrays,
+            builtin_overloads,
+        )?;
     }
     Ok(stack)
 }
@@ -4574,6 +4604,7 @@ fn poly_term(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolyType>, String> {
     let span = term.span;
     match &term.kind {
@@ -4646,6 +4677,7 @@ fn poly_term(
                 structs,
                 enums,
                 arrays,
+                builtin_overloads,
             )?;
             let then_token = if else_span.is_some() { "else" } else { "end" };
             then_scope.leave_arm(&before, then_token, ctx, span, sig)?;
@@ -4659,6 +4691,7 @@ fn poly_term(
                 structs,
                 enums,
                 arrays,
+                builtin_overloads,
             )?;
             else_scope.leave_arm(&before, "end", ctx, span, sig)?;
             scope.moves = Moves::join(then_scope.moves, else_scope.moves);
@@ -4681,7 +4714,17 @@ fn poly_term(
         }
         TermKind::Call(name) => {
             return poly_call_term(
-                name, span, stack, scope, sig, ctx, env, structs, enums, arrays,
+                name,
+                span,
+                stack,
+                scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+                builtin_overloads,
             );
         }
         // R5p: a quotation in a polymorphic body is rejected eagerly at the
@@ -4713,6 +4756,7 @@ fn poly_call_term(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolyType>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
     // consumed on read (R3/D2): a second read is use-after-move, exactly as
@@ -4814,39 +4858,58 @@ fn poly_call_term(
     }
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
+    // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
+    // of an operator, e.g. `+`) does not intercept here on a *mismatch* --
+    // unlike an ordinary word, a builtin name also has `BUILTIN_TABLE` to
+    // fall back to, so a mismatched candidate defers to `poly_delegate_op`
+    // below instead of erroring outright. An exact match still wins here
+    // (R2, same priority as any other env candidate), but the call site is
+    // recorded for lowering (R7): the literal name would otherwise hit the
+    // builtin's own hardcoded `Instr::Bin`/`Instr::Cmp`/`Instr::Print` arm.
     if let Some(msig) = env.get(name) {
         let n_in = msig.inputs.len();
-        if stack.len() < n_in {
-            return Err(need(n_in, stack.len()));
-        }
-        let base = stack.len() - n_in;
-        for (i, inp) in msig.inputs.iter().enumerate() {
-            match &stack[base + i] {
-                PolyType::Concrete(t) if t == inp => {}
-                PolyType::Var(v) => {
-                    return Err(poly_var_to_concrete_error(
-                        ctx,
-                        span,
-                        name,
-                        &sig.ty_var_names[*v as usize],
-                        *inp,
-                    ));
-                }
-                other => {
-                    return Err(poly_op_on_variable_error(ctx, span, name, other, sig));
+        let is_builtin_name = BUILTIN_TABLE.contains_key(name);
+        let exact = stack.len() >= n_in
+            && stack[stack.len() - n_in..]
+                .iter()
+                .zip(&msig.inputs)
+                .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp));
+        if exact || !is_builtin_name {
+            if stack.len() < n_in {
+                return Err(need(n_in, stack.len()));
+            }
+            let base = stack.len() - n_in;
+            for (i, inp) in msig.inputs.iter().enumerate() {
+                match &stack[base + i] {
+                    PolyType::Concrete(t) if t == inp => {}
+                    PolyType::Var(v) => {
+                        return Err(poly_var_to_concrete_error(
+                            ctx,
+                            span,
+                            name,
+                            &sig.ty_var_names[*v as usize],
+                            *inp,
+                        ));
+                    }
+                    other => {
+                        return Err(poly_op_on_variable_error(ctx, span, name, other, sig));
+                    }
                 }
             }
+            stack.truncate(base);
+            for out in &msig.outputs {
+                stack.push(PolyType::Concrete(*out));
+            }
+            if exact && is_builtin_name {
+                builtin_overloads.insert(span, name.to_string());
+            }
+            return Ok(stack);
         }
-        stack.truncate(base);
-        for out in &msig.outputs {
-            stack.push(PolyType::Concrete(*out));
-        }
-        return Ok(stack);
     }
     // Everything else is an ordinary operator over concrete operands. Extract
     // the maximal concrete suffix, run the concrete check, reflect it back; a
     // variable operand (a too-short suffix) surfaces as the op's own error.
-    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx)? {
+    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
         return Ok(next);
     }
     Err(unknown_word_error(ctx, span, name))
@@ -4912,6 +4975,8 @@ fn poly_delegate_op(
     span: Span,
     stack: &mut Vec<PolyType>,
     ctx: &Ctx,
+    env: &HashMap<String, Sig>,
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Option<Vec<PolyType>>, String> {
     let mut split = stack.len();
     while split > 0 {
@@ -4928,16 +4993,24 @@ fn poly_delegate_op(
             _ => unreachable!("suffix is all concrete by construction"),
         })
         .collect();
-    let handled = match check_operator(name, span, &mut cstack, ctx, None)? {
+    let handled = match check_operator(name, span, &mut cstack, ctx, env.get(name))? {
         OpDispatch::Builtin(s) => {
             cstack = s;
             true
         }
-        // `poly_delegate_op` passes no user overload, so the resolver never
-        // returns this: a user overload reached from a polymorphic body is
-        // resolved by the caller's own `env` lookup (poly_term) before it
-        // delegates the residual operator here.
-        OpDispatch::UserOverload => unreachable!("poly_delegate_op passes no user overload"),
+        // R6/R7: a builtin-row exact miss whose operands exactly match this
+        // name's env candidate dispatches to the user word, same as
+        // `check_term`'s call site: apply the candidate's own outputs (the
+        // resolver already confirmed `sig.inputs == operands`).
+        OpDispatch::UserOverload => {
+            let sig = env
+                .get(name)
+                .expect("check_operator returned UserOverload from this env candidate");
+            cstack.truncate(cstack.len() - sig.inputs.len());
+            cstack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
+            builtin_overloads.insert(span, name.to_string());
+            true
+        }
         OpDispatch::NotOperator => {
             if let Some(s) = check_str_word(name, span, &mut cstack, ctx)? {
                 cstack = s;
