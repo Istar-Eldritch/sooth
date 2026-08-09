@@ -472,8 +472,31 @@ a hand-threaded twin, and a recursive-enum value's destructor call inside a `tim
 inherits the fix for free, since a destructor's fused loop already opens at its own
 `IrFunc`'s true entry.
 
+**Phase 4 Slice 6f (liveness ends at last use) is complete**: a reference bound to a local now
+dies at its **last use**, the way one left on the stack already did, so a held-then-unused
+borrow no longer blocks consuming its place — `&!acc &!Acc>arr | f | f 0 >usize &!> 5 ! acc
+drop` compiles where before only its identical chained form did. Checker-acceptance-only (D1):
+no new `Instr`/`Terminator`, no lowering, `Type`, or `IrType` change, and since `Deriv`/
+`DerivId` never leave `src/check.rs`, no emitted code changes by construction. The rule is a
+per-`check_terms` `Liveness` pre-pass (`scan`/`dead`, modelled on `alpha_rename_locals`' walk)
+keyed only on names *that* invocation binds, threaded with the current term index through
+`check_term` into the `live_derivs` family; only the `scope.bound` half of each table becomes
+use-bounded, both stack halves left byte-for-byte (D2). A binding inherited into a nested `if`
+arm or `times` body is absent from that body's `Liveness` and so never relaxed there, which is
+what keeps a reference carried into a loop live for the whole body (D6); a nested use is
+attributed to the containing top-level index, a conservative max across arms (Q3). The same
+analysis relaxes `aliasing_origin`'s name loop by each candidate's own last use — one analysis,
+two tables (D8) — with overlap preserved, so a still-live second name still rejects. Because a
+wrong answer on that half is a silent wrong *value*, not just a wrongly accepted program, the
+alias half is mutation-tested rather than merely run green (D9): each of the 17 alias guards is
+shown to go red against the half that catches it. Ending a borrow disposes nothing and emits
+nothing (D7). Two sequential mutable borrows of one place with the first unused are now legal, a
+deliberate exclusivity relaxation pinned by its own test (D10). `examples/inplace_fold.sth`
+dogfoods a named-accumulator in-place `fold` at both a `Copy` and a linear `Acc`, with the
+emitted QBE loop body carrying no per-iteration `blit`.
+
 **Next action: Phase 4 Slice 6e (`if` in a polymorphic body).** Its brief
-(`docs/phase4-slice6e-brief.md`) is written; 6c and 6d are both complete, so 6e is the only
+(`docs/phase4-slice6e-brief.md`) is written; 6c, 6d, and 6f are complete, so 6e is the only
 remaining slice in the 6-family. It has to read before slice 7, which needs it, and before the
 core library's intrinsic-vs-library split, which is gated on it.
 
@@ -1464,6 +1487,25 @@ then find out what the compiler owes it.
    **Exit:** a polymorphic word that branches, including one whose arms consume different
    operands, compiles and runs at two instantiations, with the linear checks that motivated
    the original deferral proven by tests that fail without them.
+
+   **6f — liveness ends at last use is implemented.** Made a reference bound to a local die at
+   its **last use**, the way one left on the stack already did: `live_derivs`
+   (`src/check.rs`) chained the virtual stack's derivations, which die when a term consumes a
+   slot, with the scope's bindings, which lived for the whole block, and the two halves
+   disagreed — so `&!acc &!Acc>arr | f | f 0 >usize &!> 5 ! acc drop` was rejected while its
+   identical chained form compiled. The fix is a per-`check_terms` `Liveness` pre-pass keyed
+   on the names that invocation binds, filtering only the `scope.bound` half of each table
+   (D2); the same analysis relaxes `aliasing_origin`'s name loop by each candidate's own last
+   use (D8), overlap preserved so a still-live second name still rejects. Not a lifetime
+   system (no lifetime variables, no regions): a rule about *when a borrow ends inside one
+   block*, which the anonymous stack case already followed. The alias half is mutation-tested,
+   not merely run green (D9): each of the 17 alias guards proven red against the half that
+   catches it, since a wrong answer there is a silent wrong *value*, not just a wrongly
+   accepted program.
+   **Exit:** the in-place `fold` dogfood (`examples/inplace_fold.sth`) builds and runs at both
+   a `Copy` and a linear `Acc` with no per-iteration `blit` in the emitted QBE loop body, the
+   two flip tests rewritten to genuine use-after-consume still reject, and the stack-side
+   controls unchanged.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
@@ -1478,7 +1520,10 @@ then find out what the compiler owes it.
    The environment of a downward closure (passed in, never returned or stored beyond the
    frame) is an ordinary frame-local aggregate, so it needs no allocator; the escape
    discipline that keeps it sound is Phase 3 Slice 6's structural escape checking, pointed at
-   a new carrier, since a closure simply inherits its captures' restrictions. The
+   a new carrier, since a closure simply inherits its captures' restrictions. Slice 6f settled
+   the other half of that inheritance — *when* a captured borrow ends — by making a bound
+   reference die at its last use exactly as a stacked one does, so a closure capturing a
+   reference now has a settled end-of-borrow rule to point at rather than an open question. The
    `Fn`/`FnMut`/`FnOnce` split does **not** need inventing: Rust needs it because the real
    question is how the call takes the closure, and Sooth already spells all three, `call`
    through `&q`, through `&!q`, and by value. A closure capturing a linear value is itself
