@@ -943,6 +943,19 @@ fn emit_instr(
         // `.` is type-directed on the operand's own `IrType` (same dispatch
         // shape as `Cmp`/`Shr`): signed decimal, unsigned decimal, `%g` float,
         // or `true`/`false` for `Bool`.
+        //
+        // Every `$printf` call below writes `...` last, which in QBE means "all
+        // preceding arguments are fixed, zero variadic ones" -- the marker is
+        // positional, `call $printf(l $fmt, ..., w %v)` is the form that says the
+        // value is variadic. Wrong per C, but currently unobservable: on
+        // amd64_sysv, arm64 and rv64 QBE emits identical code either way, and
+        // `driver.rs` invokes `qbe` with no `-t`, so only the default
+        // amd64_sysv target is ever built. It becomes a real wrong-output bug on
+        // `arm64_apple`, whose ABI passes variadic arguments on the stack while
+        // fixed ones go in registers: `printf` would read the stack while these
+        // calls left the value in a register. Fix the marker position before
+        // adding target selection. Same shape in `sooth_oom_trap`'s `dprintf`
+        // and `sooth_trace_event`'s `printf`.
         Instr::Print(v) => match ty_of(value_types, *v) {
             IrType::Bool => {
                 // No branch needed: widen the canonical 0/1 to an index into

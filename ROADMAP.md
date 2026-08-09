@@ -1688,13 +1688,17 @@ then find out what the compiler owes it.
       mistake the generic-struct-declarations item already made once; loosen this later if a
       real consumer asks.
    6. **`.` gets N concrete rows, not a category key.** One row per `IrType` it already
-      handles, each an exact-type match tagged to the existing `Instr::Print` lowering. `.`'s
-      lowering stays backend code — it is inline QBE using QBE's own variadic-call syntax
-      directly, which `extern:` cannot express (deliberately, since Phase 3: no variadic C
-      functions) and there is no linked runtime library to bind against regardless, since
-      every backend helper Sooth has is IR emitted fresh into each compiled binary. Only
+      handles, each an exact-type match tagged to the existing `Instr::Print` lowering. Only
       `.`'s dispatch key changes, to the same exact-match shape every other row uses — which
       is also what makes a user's own `: . ( Vec2 -- ) ;` reachable through the same table.
+      `.`'s lowering stays backend code for this slice because moving it is strictly larger
+      work, not because it cannot move: `extern:` cannot express a variadic C call *today*,
+      but QBE emits variadic calls natively (that is what `Instr::Print` already does), so no
+      runtime shim library is needed — an earlier draft of this item claimed otherwise and was
+      wrong. The real path to `.` as ordinary library code is DESIGN.md's bounded-row entry
+      (`..N`) plus a way to decompose a `str` descriptor for `%.*s`; it would also move `.`
+      from universally available to `hosted`-layer only, which is a semantic decision, not a
+      refactor. None of that is 8a's job.
 
    Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
    structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot

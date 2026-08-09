@@ -996,6 +996,29 @@ that were argued out rather than assumed.
   static overloading; until then it is one wrapper word per type, e.g. `: println ( i64 -- ) .
   "\n" . ;`, or an explicit `"\n" .` at each call site — and the wrapper is only expressible
   from slice 8a onward, since it needs a string literal.
+- **Bounded rows (`..N`), with variadic FFI as a consumer rather than the justification.**
+  `..s` is an *unbounded* row: opaque, passed through untouched, and checkable precisely
+  because nothing ever looks at it (`check_poly_body`, `src/check.rs`). A **bounded** row is
+  the missing sibling: N stack slots whose element types the checker reads off the concrete
+  stack at each call site. The better motivation is not FFI at all -- Forth's
+  depth-parameterized stack words (`ndrop`, `npick`, `nroll`) have no expressible signature in
+  Sooth today, since `..s` cannot be consumed and a fixed arity cannot vary. Variadic FFI then
+  falls out for free: in an `extern:` declaration the row's *position* marks the
+  fixed/variadic boundary, because C's fixed parameters are exactly the individually named
+  ones, so no C-specific keyword is needed anywhere in the language.
+  **N is a compile-time literal on top of the row** (precedent: `fill`'s count is already
+  required to be literal), so `"%d %d" 42 43 2 printf` reads format string deepest, then the
+  arguments, then the count.
+  **Rejected**: a zero-width boundary marker (`( cstr .. i64 -- i64 )`), which reads as
+  variable-arity when it consumes nothing and collides with `..s` occupying the same position
+  meaning nearly the opposite; and a separate `"printf" variadic 1` clause, which bolts a C
+  ABI fact onto the declaration form instead of using syntax that earns its place elsewhere.
+  **Open**: whether the literal count slot is spelled in the effect or implied by `..N`; how
+  `..N` relates to the existing `'N` length variables (shared namespace, or linked); and the
+  diagnostic when the literal disagrees with the stack's actual depth, which is the one real
+  cost of literal-on-top over encoding the count in the word name (`printf2`), since a name
+  cannot disagree with itself. Nothing blocks on this: Phase 4 slice 8a's `.` keeps its
+  backend lowering either way.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

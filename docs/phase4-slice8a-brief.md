@@ -58,20 +58,20 @@ entry (slice 1's machinery), not a finite enumeration. Either the table carries 
 entries from day one or `len` is carved out and stays hardcoded, and the roadmap's claim that
 `len` is simply absorbed is the first thing the spec should check rather than inherit.
 
-**5. `.` dispatches on a category that exists only as Rust code, but its lowering rules that
-out anyway.** `src/check.rs:6839`: `is_numeric() || is_bool() || matches!(Str | Cstr)`.
-`.`'s actual codegen (`backend/qbe.rs:935`, `Instr::Print`) is inline QBE emitting QBE's own
-native variadic-call syntax (`call $printf(l $fmt, l {v}, ...)`) directly, plus hand-rolled
-widening and a static `$boolstrs` lookup table for `Bool`. Nothing about that lowering is
-reachable through `extern:`, which was deliberately built in Phase 3 to reject variadic C
-functions (`check_extern_cannot_express_a_variadic_c_function`), and there is no linked
-runtime library to bind against in the first place: every backend helper Sooth has today
-(`sooth_alloc`, `sooth_free`, `sooth_oob_trap`, `.`'s own printf calls) is QBE IR the backend
-emits fresh into each compiled binary, not a shared object. So `.` stays backend-lowered.
-What changes is only its *dispatch*: settled below as N concrete table rows, one per `IrType`
-it already handles, each tagged to the existing `Instr::Print` lowering. No category/bound
-key needed, because every row is an exact-type match like any other overload -- which is also
-what lets a user's own `: . ( Vec2 -- ) ;` become reachable through the same table, for free.
+**5. `.` dispatches on a category that exists only as Rust code.** `src/check.rs:6839`:
+`is_numeric() || is_bool() || matches!(Str | Cstr)`. There is no list of printable types
+anywhere to copy into a table. The fix is settled below as N concrete rows, one per `IrType`
+it already handles, each tagged to the existing `Instr::Print` lowering (`backend/qbe.rs`).
+No category/bound key is needed, because every row is an exact-type match like any other
+overload -- which is also what lets a user's own `: . ( Vec2 -- ) ;` become reachable through
+the same table, for free.
+
+`.`'s lowering stays backend code here because moving it is strictly larger work, *not*
+because it cannot move. `extern:` cannot express a variadic C call today, but QBE emits
+variadic calls natively -- that is exactly what `Instr::Print` already does -- so no runtime
+shim library is required. The path to `.` as ordinary library code is DESIGN.md's bounded-row
+entry (`..N`), plus a way to decompose a `str` descriptor for `%.*s`, plus accepting that `.`
+becomes `hosted`-layer rather than universally available. All of that is out of scope here.
 
 **6. `unify_pair` is one cross-cutting rule, not per-operator logic.** `src/check.rs:206`
 handles literal and size-type coercion for the dozen binary operators
