@@ -73,9 +73,18 @@ Import via the `selective_collision_error` family in `check_selective_imports`.
 (signature in `PolySig`), so R1 never fires — distinct check comparing
 `poly_env` names against `builtin_table` rows + concrete `env` entries:
 `error: generic overload `: + ( 'T 'T -- 'T )` (line 2, col 3) overlaps a concrete overload of `+`; a name cannot mix a generic and a concrete candidate`.
+Module-scoped like R1/R4 (`(module, name)`, decided after this spec was first
+written): a builtin candidate is in scope everywhere, but a local concrete
+candidate only overlaps a poly candidate declared in its own module — an
+unrelated same-named concrete word in a different, non-importing module does
+not collide. A same-module collision, or one reached through an actual
+unqualified import, is unaffected (the latter already rejected generically by
+`check_selective_imports`' local-collision check, independent of poly vs.
+concrete).
 
 **R6 — Table-driven exact-match, coercion fallback.** `check_term`'s Call
 handling replaces the `check_operator` probe with one resolution step:
+
 1. **Operand read** — top `n` types (`n` = agreed arity); underflow →
    `underflow_error`. `reject_quotation_operand` (R11 guard) fires here first.
 2. **Exact pass** — one matching candidate wins: builtin row → its
@@ -100,6 +109,12 @@ handling replaces the `check_operator` probe with one resolution step:
 recorded symbol and returns; unrecorded sites take the existing name-directed
 arms unchanged. The corpus produces no records, so its lowering is literally
 untouched. Lowering never re-runs resolution (checker is the single source).
+The poly-body dispatch path (`poly_delegate_op`, `poly_call_term`'s own `env`
+lookup) mirrors this: a builtin-named exact match found there is recorded
+onto the same `Module::builtin_overloads` map, keyed by the poly body's own
+(instantiation-invariant) call-site span, so every monomorphization of a poly
+word calling a user-overloaded operator on a concretely-typed operand
+dispatches correctly too.
 
 **R8 — `extern:` unchanged.** An `extern:` redeclaring a builtin stays a located
 error (`check_extern_redeclaring_a_builtin_is_error`). `is_builtin_word_name`
@@ -178,9 +193,19 @@ Green = `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
    all `builtin_table()` callers (`check` env seed, `repl.rs` `typed_env`, three
    test helpers). Corpus byte-for-byte. — `51a6a7b`, `207a848`, `187f192`
    (src/check.rs, src/repl.rs, src/driver.rs, tests/qbe_baseline*).
-2. **User-overload dispatch, check + lowering.** Merge user/imported words into
-   R6; record resolved sites per `Span` on `Module::builtin_overloads` so
-   `lower_call` emits `Instr::Call` (R7). Delivers criterion 3. — `4a8f84b`
+2. **User-overload dispatch, check-side only.** Merge user/imported words into
+   R6 and record resolved call sites per `Span` on `Module::builtin_overloads`
+   (`check_term`'s `OpDispatch::UserOverload` arm). The intended consumer,
+   `lower_call` (R7), was never actually wired to read the map this phase
+   despite the plumbing existing end to end (`FuncBuilder::builtin_overloads`
+   threaded through, always populated, never consulted) — every builtin-named
+   user overload compiled, linked, and silently mis-lowered through the
+   name-directed builtin arm (a segfault for `+`/`-`, a pointer comparison for
+   `<`) until a later fix cycle added the actual `lower_call` read. The
+   `poly_delegate_op` half of the same gap (a poly body's own operator calls
+   never reaching a user overload at all, hardcoded `user_overload: None` and
+   an `unreachable!` in its place) was fixed in the same later cycle. Criterion
+   3 was therefore not actually met by this phase alone. — `4a8f84b`
    (src/{ast,check,driver,ir,parser,resolve}.rs).
 3. **Collision/arity/overlap enforcement.** Widen the duplicate-word key + the
    builtin-row comparison (R1), local arity-agreement pass (R4), concrete/generic
