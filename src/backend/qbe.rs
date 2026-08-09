@@ -1257,6 +1257,7 @@ mod tests {
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
         );
         emit(&IrModule {
             funcs: vec![func],
@@ -1558,6 +1559,7 @@ mod tests {
                 cells: &Cells::default(),
                 refs: &Refs::default(),
             },
+            &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),

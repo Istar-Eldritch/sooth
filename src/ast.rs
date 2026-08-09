@@ -634,6 +634,46 @@ pub fn instantiation_symbol(word: &str, subst: &Subst, generation: Option<u64>) 
     }
 }
 
+/// Slice 8a fix 1 (R1): the distinct lowering symbol for every word in
+/// `words`, aligned by index. Equal to the word's own name (already
+/// module-mangled by `resolve::mangle` by the time this runs), except within
+/// a run of same-named candidates -- an overload set, which R1's widened
+/// `(module, name, input_types)` duplicate-word key admits -- where each
+/// candidate gets a deterministic `$$N` suffix, `N` counting occurrences in
+/// declaration order, so two overloads of one name never collide on a single
+/// QBE symbol the way two same-named words used to before the `qbe_name`
+/// fix. Shared by `check::check` (which records a resolved call site's
+/// symbol here) and `ir::lower` (which mints each overloaded `WordDef`'s
+/// `IrFunc` under it), so the two can never disagree about which symbol a
+/// given candidate lowers under.
+///
+/// `drop`-named words are exempt from grouping: `find_drop_overloads`
+/// dispatches every `drop` call by the operand's `StructId`, never by name
+/// (`resolve.rs`'s own doc on this), so however many `drop`s a module
+/// declares, they never collide regardless of count, and suffixing them
+/// would only be inert churn.
+pub fn overload_symbols(words: &[WordDef]) -> Vec<String> {
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in words {
+        if w.name != "drop" {
+            *counts.entry(w.name.as_str()).or_insert(0) += 1;
+        }
+    }
+    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    words
+        .iter()
+        .map(|w| {
+            if w.name == "drop" || counts.get(w.name.as_str()).copied().unwrap_or(0) <= 1 {
+                return w.name.clone();
+            }
+            let i = seen.entry(w.name.as_str()).or_insert(0);
+            let sym = format!("{}$${i}", w.name);
+            *i += 1;
+            sym
+        })
+        .collect()
+}
+
 /// One `extern:` declaration (R1): a typed foreign-call binding. `symbol` is
 /// the explicit C symbol string, kept separate from `name` because a Sooth
 /// word name may use characters C cannot (`&!S>fi`), and because binding a
@@ -1558,5 +1598,45 @@ mod tests {
             instantiation_symbol("id", &subst, Some(0)),
             instantiation_symbol("id", &subst, Some(1))
         );
+    }
+
+    fn bare_word(name: &str) -> WordDef {
+        WordDef {
+            name: name.to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn overload_symbols_non_overloaded_names_keep_their_bare_name() {
+        let words = vec![bare_word("foo"), bare_word("bar")];
+        assert_eq!(overload_symbols(&words), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn overload_symbols_an_overload_set_gets_distinct_suffixed_symbols() {
+        let words = vec![bare_word("show"), bare_word("show"), bare_word("other")];
+        let syms = overload_symbols(&words);
+        assert_eq!(syms.len(), 3);
+        assert_ne!(
+            syms[0], syms[1],
+            "two `show`s get distinct symbols: {syms:?}"
+        );
+        assert_eq!(syms[2], "other", "an unrelated name is untouched: {syms:?}");
+        assert!(syms[0].starts_with("show"));
+        assert!(syms[1].starts_with("show"));
+    }
+
+    #[test]
+    fn overload_symbols_drop_is_exempt_regardless_of_count() {
+        let words = vec![bare_word("drop"), bare_word("drop"), bare_word("drop")];
+        assert_eq!(overload_symbols(&words), vec!["drop", "drop", "drop"]);
     }
 }

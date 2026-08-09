@@ -128,9 +128,13 @@ struct PolyWordEntry {
 
 /// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
 /// input/output counts and the output `IrType`, not the full typed effect.
-fn ir_arity_env(env: &HashMap<String, Sig>) -> HashMap<String, ir::Arity> {
+/// The REPL's env never carries more than one candidate per name (its
+/// redefinition model keeps exactly one live binding), so the sole candidate
+/// answers.
+fn ir_arity_env(env: &HashMap<String, Vec<check::Overload>>) -> HashMap<String, ir::Arity> {
     env.iter()
-        .map(|(name, sig)| {
+        .map(|(name, overloads)| {
+            let sig = &overloads[0].sig;
             let ret = sig.outputs.first().map(|&ty| ir::ir_type_of(ty));
             (name.clone(), (sig.inputs.len(), sig.outputs.len(), ret))
         })
@@ -1121,7 +1125,7 @@ impl Session {
         // R4 (Slice 6c): a `:type` line may name a retained combinator, so its
         // inference sees the session's inline view like any bare line.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, _insts) = check::infer_line(
+        let (net_stack, _insts, _overloads) = check::infer_line(
             &terms,
             &self.types,
             &env,
@@ -1138,17 +1142,33 @@ impl Session {
 
     /// The checker's typed env: builtins, the generated struct words, the
     /// variant-constructor words, plus every successfully-defined user word.
-    fn typed_env(&self) -> HashMap<String, Sig> {
+    /// Slice 8a fix 1: every entry is a single-candidate overload set (the
+    /// REPL's redefinition model keeps exactly one live binding per name, so
+    /// unlike a native module's `env` this one never grows a second
+    /// candidate); each candidate's `symbol` is its own bare name, matching
+    /// the bare-name keys `ir_arity_env`/the REPL's own `resolve` closures
+    /// already use, so a resolved overload record threaded into lowering
+    /// (item 3) needs no extra translation step.
+    fn typed_env(&self) -> HashMap<String, Vec<check::Overload>> {
         // Builtins are table-resolved in the checker, not held in the env.
-        let mut env: HashMap<String, Sig> = HashMap::new();
+        let mut env: HashMap<String, Vec<check::Overload>> = HashMap::new();
         for (name, sig) in check::struct_generated_sigs(&self.structs) {
-            env.insert(name, sig);
+            let symbol = name.clone();
+            env.insert(name, vec![check::Overload { sig, symbol }]);
         }
         for (name, sig) in check::enum_generated_sigs(&self.enums) {
-            env.insert(name, sig);
+            let symbol = name.clone();
+            env.insert(name, vec![check::Overload { sig, symbol }]);
         }
         for (name, entry) in &self.env {
-            env.insert(name.clone(), entry.sig.clone());
+            let symbol = name.clone();
+            env.insert(
+                name.clone(),
+                vec![check::Overload {
+                    sig: entry.sig.clone(),
+                    symbol,
+                }],
+            );
         }
         env
     }
@@ -2200,7 +2220,11 @@ impl Session {
         // so its site collection sees the session's inline view. The poly-env
         // stays empty above (a `drop` overload is never polymorphic).
         let combinators = checker_combinators(&self.combinators);
-        let (sites, _insts) = check::check_def_collecting_drop_sites(
+        // Item 3: a `drop` override body's own resolved-overload sites are
+        // discarded here, same as `_insts` -- `synthesize_aggregate_destructors`
+        // below has no threading for them yet (a narrower, pre-existing gap
+        // than the crash item 3 fixes; see its call site).
+        let (sites, _insts, _overloads) = check::check_def_collecting_drop_sites(
             &self.drop_overloads[&id].1,
             &self.enums,
             &env,
@@ -2490,7 +2514,11 @@ impl Session {
         // combinator; thread the session's inline view so it inlines exactly as
         // native inlines one drawn from `module.words`.
         let combinators = checker_combinators(&self.combinators);
-        let insts = check::check_def(
+        // Item 3: `overloads` is this body's own resolved overload-dispatch
+        // call sites, threaded into `ir::lower_word` below so it dispatches an
+        // overloaded call exactly as a native word body does, rather than
+        // silently mis-lowering through the name-directed builtin arm.
+        let (insts, overloads) = check::check_def(
             &word,
             &self.enums,
             &env,
@@ -2514,7 +2542,13 @@ impl Session {
         // whatever generation `env` still holds for `name`; seed the definee's
         // own signature so ir derives its return type. The arity map for ir is
         // derived from the typed env (RK2): ir needs only counts + output type.
-        env.insert(name.clone(), sig.clone());
+        env.insert(
+            name.clone(),
+            vec![check::Overload {
+                sig: sig.clone(),
+                symbol: name.clone(),
+            }],
+        );
         let ir_lower_env = ir_arity_env(&env);
         let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
             &self.structs,
@@ -2544,6 +2578,7 @@ impl Session {
                 &resolve,
                 regs,
                 &insts,
+                &overloads,
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
@@ -2674,7 +2709,7 @@ impl Session {
         // R4 (Slice 6c): a bare line may call a retained combinator; thread the
         // session's inline view so it inlines like native's `module.words` one.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, insts) = check::infer_line(
+        let (net_stack, insts, line_overloads) = check::infer_line(
             terms,
             &self.types,
             &env,
@@ -2723,6 +2758,7 @@ impl Session {
                 &resolve,
                 regs,
                 &insts,
+                &line_overloads,
                 &poly_arities,
                 &bodies,
             );

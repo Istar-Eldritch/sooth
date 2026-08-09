@@ -1194,6 +1194,13 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // same as `check`'s own env (`check.rs::check`): its body is compiled
     // under the struct's destructor symbol, never called by the literal
     // name `"drop"`.
+    // Slice 8a (R1/R7): keyed by each word's distinct lowering symbol rather
+    // than its surface name, so an overload set does not collapse to whichever
+    // candidate was inserted last. A name with one candidate keys under itself,
+    // which is every corpus word, so lookups by name are unchanged; an
+    // overloaded call reaches its candidate through the checker's per-span
+    // record, which carries the same symbol.
+    let symbols = crate::ast::overload_symbols(&module.words);
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -1203,10 +1210,10 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
         })
-        .map(|(_, w)| {
+        .map(|(idx, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
-                w.name.clone(),
+                symbols[idx].clone(),
                 (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
             )
         })
@@ -1253,12 +1260,16 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
         })
-        .flat_map(|(_, w)| {
-            let self_tail = crate::check::has_self_tail_call(w);
+        .flat_map(|(idx, w)| {
+            // A word sharing its name with another candidate is not self-tail
+            // recursive on a bare name match: the same name in its body may
+            // resolve to the other candidate, the same reasoning that excludes
+            // builtin-named words in `has_self_tail_call`.
+            let self_tail = crate::check::has_self_tail_call(w) && symbols[idx] == w.name;
             // R9: a word plus every quotation literal it materialized (element
             // 0 is the word itself).
             lower_word_parts(
-                &w.name,
+                &symbols[idx],
                 &w.effect,
                 &w.body,
                 self_tail,
@@ -1926,12 +1937,17 @@ pub fn lower_line(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> (IrFunc, Vec<IrFunc>, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
+    // R7: a line calling an overloaded word dispatches through the checker's
+    // per-span record, exactly as a compiled body does; without it the call
+    // falls into the name-directed builtin arm and miscompiles.
+    b.builtin_overloads = builtin_overloads;
     // R7 (Slice 2): a call to a retained polymorphic word resolves through the
     // instantiation table keyed by its call-site span, not the name-keyed env.
     b.instantiations = instantiations;
@@ -2096,7 +2112,7 @@ pub fn lower_line(
         resolve,
         regs,
         instantiations,
-        empty_builtin_overloads(),
+        builtin_overloads,
         poly_arities,
         combinators,
     );
@@ -2187,6 +2203,7 @@ pub(crate) fn lower_word(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
@@ -2200,7 +2217,7 @@ pub(crate) fn lower_word(
         resolve,
         regs,
         instantiations,
-        empty_builtin_overloads(),
+        builtin_overloads,
         poly_arities,
         combinators,
     )
@@ -5763,6 +5780,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -5791,6 +5809,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6132,6 +6151,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6167,6 +6187,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6205,6 +6226,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6249,6 +6271,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6288,6 +6311,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6376,6 +6400,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6974,6 +6999,7 @@ mod tests {
                 refs: &refs,
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );

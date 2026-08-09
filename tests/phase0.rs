@@ -3562,6 +3562,60 @@ fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
 }
 
 #[test]
+fn overloads_of_an_ordinary_word_name_are_both_reachable() {
+    // R1 widened the duplicate-word key to admit these two definitions, but
+    // the checking env held one `Sig` per name, so the second silently
+    // displaced the first: the call `42 show` then failed against the `bool`
+    // signature and the `i64` body was unreachable code. Both candidates must
+    // resolve, which is what makes the widened key mean anything.
+    let src = ": show ( i64 -- ) . ;\n\
+: show ( bool -- ) . ;\n\
+: main ( -- ) 42 show true show ;\n";
+    let (stdout, code) = run_overload_src("user-name-overloads", src);
+    assert_eq!(stdout, "42\ntrue\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overloads_of_an_ordinary_word_name_get_distinct_symbols() {
+    // Each candidate's body is minted under its own symbol
+    // (`ast::overload_symbols`); sharing one would collide at the assembler
+    // exactly as two symbol-named words did before the `qbe_name` fix. Both
+    // bodies here are distinguishable at runtime, so a collision that kept
+    // only one body would print the wrong pair.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: mag ( i64 -- i64 ) 10 * ;\n\
+: mag ( Vec2 -- i64 ) | v | v Vec2>x v Vec2>y + ;\n\
+: main ( -- ) 7 mag . 3 4 Vec2 mag . ;\n";
+    let (stdout, code) = run_overload_src("user-name-symbols", src);
+    assert_eq!(stdout, "70\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_call_matching_no_overload_names_the_candidates() {
+    // R3: the resolution failure is located and lists what the name does
+    // accept, rather than reporting a mismatch against whichever candidate
+    // happened to be stored last.
+    let src = ": show ( i64 -- ) . ;\n\
+: show ( bool -- ) . ;\n\
+: main ( -- ) 1.5 show ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-overload-nomatch-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("no overload of `show`") && err.contains("accepts these operands"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("candidate: `i64`") && err.contains("candidate: `bool`"),
+        "expected both candidates listed: {err}"
+    );
+}
+
+#[test]
 fn overload_vec2_plus_dispatches_to_user_word() {
     // `Module::builtin_overloads` records this call site's resolution to the
     // user `+` overload, but before the fix `lower_call`'s name-directed
