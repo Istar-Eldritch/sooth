@@ -89,6 +89,21 @@ unqualified import, is unaffected (the latter already rejected generically by
 `check_selective_imports`' local-collision check, independent of poly vs.
 concrete).
 
+R1 exempting poly words from duplicate-checking (no concrete `input_types` to
+key by) does not mean two same-named poly words, or two same-named
+combinators (mono or poly), are unresolved: `poly_env`/`collect_combinators`
+are candidate lists like `env`, resolved by trial unification rather than
+exact match, since a declared input may be a type variable. A combinator's
+declared quotation position is a wildcard for resolution purposes (a stack
+slot standing for a quotation carries a placeholder type until the literal's
+body is actually checked against a chosen candidate's declared effect, which
+resolution must not do speculatively per candidate); every other declared
+position is real. Deferred: two candidates identical in every respect except
+a declared quotation's effect, or two structurally identical poly
+signatures, are indistinguishable to resolution and the first declared wins
+silently rather than erroring -- narrower than what R1 covers for concrete
+words, and not something either round of review demonstrated.
+
 **R6 — Table-driven exact-match, coercion fallback.** `check_term`'s Call
 handling replaces the `check_operator` probe with one resolution step:
 
@@ -187,7 +202,10 @@ through its lowering path and it now dispatches.
    surviving regression test uses struct operand types instead.
 6. Two overloads of an ordinary (non-builtin) word name are both reachable,
    each lowering under its own symbol, and a call matching neither is a located
-   error naming the candidates (R1/R3).
+   error naming the candidates (R1/R3). Extends to a polymorphic word name and
+   a combinator name, each resolved by trial unification rather than the
+   ordinary path's exact match, since a declared input may be a type variable
+   or, for a combinator, a quotation.
 
 ## Testing
 
