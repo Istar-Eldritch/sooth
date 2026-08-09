@@ -603,6 +603,10 @@ fn rich_value_size(
         ir::IrType::Float { bits } => (bits / 8) as usize,
         ir::IrType::Usize | ir::IrType::Isize => ir::WORD_WIDTH as usize,
         ir::IrType::Ptr | ir::IrType::OwnedCell(_) | ir::IrType::Str | ir::IrType::Cstr => 8,
+        // Slice 7a: a code handle is one word; a quotation value spans its
+        // fixed two-slot layout (only reached as a struct/enum/array field).
+        ir::IrType::Code => ir::WORD_WIDTH as usize,
+        ir::IrType::Quotation(_) => ir::quotation_layout(ir::WORD_WIDTH).size as usize,
         ir::IrType::Struct(id) => layouts[id.index()].size as usize,
         ir::IrType::Enum(id) => enum_layouts[id.index()].size as usize,
         ir::IrType::Array(id) => array_layouts[id.index()].size as usize,
@@ -651,6 +655,11 @@ fn render_rich_value(
         ir::IrType::Ptr => "<ptr>".to_string(),
         ir::IrType::Str => "<str>".to_string(),
         ir::IrType::Cstr => "<cstr>".to_string(),
+        // Slice 7a: a code handle / quotation value carries no printable
+        // payload; reached only as a struct/enum/array field (a bare
+        // quotation on the residual is rejected before rendering).
+        ir::IrType::Code => "<code>".to_string(),
+        ir::IrType::Quotation(_) => "<quotation>".to_string(),
         ir::IrType::Struct(id) => {
             let layout = &layouts[id.index()];
             let fields: Vec<String> = layout
@@ -1236,7 +1245,7 @@ impl Session {
                     .cloned()
                     .unwrap_or_else(|| name.to_string())
             };
-            funcs.push(ir::lower_instantiation(
+            funcs.extend(ir::lower_instantiation(
                 &inst.symbol,
                 sig,
                 &inst.subst,
@@ -2251,11 +2260,14 @@ impl Session {
             )
         };
 
+        let quot_sigs =
+            ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
+            quot_sigs,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("drop_{}_epoch{epoch}.so", id.index()));
@@ -2511,7 +2523,9 @@ impl Session {
             // R7 (Slice 2): thread the instantiation table + poly-arity map so
             // a call to a retained polymorphic word inside this body lowers to
             // its per-site symbol via `lower_poly_call`.
-            let mut func = ir::lower_word(
+            // R9: element 0 is this word; any quotation literal it materialized
+            // at a boundary follows, each its own `IrFunc`.
+            let mut funcs = ir::lower_word(
                 &word,
                 &ir_lower_env,
                 &resolve,
@@ -2520,8 +2534,7 @@ impl Session {
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
-            func.name = symbol.clone();
-            let mut funcs = vec![func];
+            funcs[0].name = symbol.clone();
             // R12: this module must carry its own struct/enum destructors
             // (they are not emitted elsewhere in the REPL, unlike the build
             // path's single shared module), or `drop` on a linear struct/enum
@@ -2544,11 +2557,14 @@ impl Session {
         // body recorded into this module, against the frozen snapshot resolver.
         funcs.extend(self.emit_instantiations(&insts, regs));
 
+        let quot_sigs =
+            ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts,
             enums: enums.layouts,
             arrays: arrays.layouts,
+            quot_sigs,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
@@ -2683,9 +2699,9 @@ impl Session {
             cells: &cells,
             refs: &refs,
         };
-        let (func, m, out_bytes, aggregate_destructors) = {
+        let (func, quot_funcs, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
-            let (func, m, out_bytes) = ir::lower_line(
+            let (func, quot_funcs, m, out_bytes) = ir::lower_line(
                 seq,
                 terms,
                 entry_depth,
@@ -2707,7 +2723,7 @@ impl Session {
                 &self.drop_override_bodies(None),
                 &bodies,
             );
-            (func, m, out_bytes, aggregate_destructors)
+            (func, quot_funcs, m, out_bytes, aggregate_destructors)
         };
         // `m` (the wrapper's emitted output slot count) and `net_depth` (the
         // checker's independently-inferred net effect) are the same depth
@@ -2721,16 +2737,21 @@ impl Session {
         );
 
         let mut funcs = vec![func];
+        // R9: the line's materialized quotation callees.
+        funcs.extend(quot_funcs);
         funcs.extend(aggregate_destructors);
         // R7 (Slice 2, D2): lower each not-yet-exported instantiation this line
         // recorded into this module, against each poly word's frozen snapshot
         // resolver; an already-exported symbol emits nothing (trace B dedup).
         funcs.extend(self.emit_instantiations(&insts, regs));
+        let quot_sigs =
+            ir::collect_quot_sigs(&funcs, &structs.layouts, &enums.layouts, &arrays.layouts);
         let ssa = backend::qbe::emit(&IrModule {
             funcs,
             structs: structs.layouts.clone(),
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),
+            quot_sigs,
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
