@@ -1629,9 +1629,9 @@ then find out what the compiler owes it.
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
    concrete types is a rule that gets rewritten once type variables exist.
-   **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is mechanical with no design
-   risk, the other is the open question.** 8a proves the table on cases that already work
-   today, so nothing in it can regress observable behaviour. 8b is where `drop` picks up a
+   **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is bounded, the other is the
+   open question.** 8a's table is mechanical, but it is not behaviour-preserving: it is what
+   makes user overloads reachable at all (see 8a's rules below). 8b is where `drop` picks up a
    bound it did not have before, exactly the kind of decision Phase 3's own Slice 8 took
    three review rounds to settle when it split into 8a/8b/8c mid-flight for the same reason.
    Landing 8a first also unblocks slice 9's dependency on dispatch early: slice 9 needs `.`'s
@@ -1643,10 +1643,108 @@ then find out what the compiler owes it.
    dispatch on the concrete operand type inside `check_operator`/`check_term` match arms
    rather than through any table — which is why `builtin_table` is empty. `len`'s
    length-polymorphism (slice 1) is the other such site. Retire the hardcoded match arms into
-   a real overload table, keyed the same way the hand-written arms already resolve, with a
-   golden asserting every existing operator/`.`/`len` call site lowers identically.
+   a real overload table, with a golden asserting every existing operator/`.`/`len` call site
+   lowers identically. Brief written (`docs/phase4-slice8a-brief.md`), which found a third
+   latent collision while measuring this slice, fixed standalone rather than folded in:
+   `qbe_name` (`src/backend/qbe.rs`) mapped every character outside `[A-Za-z0-9_.]` to `_`,
+   so `+` and `-` defined in one file both emitted the bare symbol `_` and failed at the
+   assembler as already-defined — a general bug reachable today independent of dispatch (two
+   ordinary symbol-named words collide the same way), fixed by making the mangle injective
+   rather than diagnosed, since there is nothing wrong with a program defining both.
+
+   **Operators are just words, so a user overload needs no new syntax: `: + ( Vec2 Vec2 --
+   Vec2 ) ;` is already the definition form, and it already parses and checks.** What blocks
+   it is that `check_term` probes builtins by name (`BUILTIN_WORDS`, `check.rs`) *before* the
+   word env is consulted at all, so that definition compiles, links, and can never be called:
+   a call site with two `Vec2` operands dies in `check_operator`'s `is_numeric` gate before
+   any lookup. Sooth today silently accepts a word it will never dispatch to, which is the
+   exact class of Forth silent failure this language exists to reject. `drop` is the one
+   existing counterexample, resolved by a bespoke registry (`find_drop_overloads`); 8a
+   generalises that rather than inventing it. **Six rules, settled:**
+   1. **No shadowing.** A user overload whose input types exactly match an existing candidate
+      (builtin or imported) is a located error, not a silent override — the same shape as the
+      duplicate-word check.
+   2. **Exact match beats coercion.** `unify_pair`'s literal/size-type coercion (`check.rs`)
+      ranks below an exact-type candidate, so adding an overload cannot silently steal a call
+      site that previously coerced.
+   3. **Overloads are imported, not carried by the type.** An importer of `Vec2` does not get
+      `+` for it without importing `+`. Absence is a resolution error naming the missing
+      overload, never a silent fallback. Two candidates with identical input types in one
+      scope is rule 1's error regardless of whether they arrived locally or by import.
+   4. **One arity per name in scope.** Candidates for a name must agree on how many inputs
+      they take, because the resolver has to know how deep to read the stack before it can
+      match any candidate. `: + ( Vec2 -- Vec2 ) ;` alongside `: + ( Vec2 Vec2 -- Vec2 ) ;`
+      leaves `a b +` matching both, one consuming both operands and one leaving `a`, and both
+      check locally. Disagreement is a located error where the second candidate *enters
+      scope*: the definition site when one is local, the import site when both are imported.
+      It is not a call-site ambiguity to be resolved by ranking; the clash is rejected before
+      any call site is looked at.
+   5. **Overlap between a concrete and a generic candidate is rejected, not ranked.**
+      `: + ( 'T 'T -- 'T )` beside `: + ( i64 i64 -- i64 )` is not identity (a poly word's
+      `effect` is empty by construction, so rule 1's textual match never fires) but the
+      domains still overlap at every concrete type. No specialization ordering: reject it the
+      same shape as rule 1. Nothing today needs a generic default and a concrete override to
+      coexist, and inventing ordering semantics for a consumer that doesn't exist is the same
+      mistake the generic-struct-declarations item already made once; loosen this later if a
+      real consumer asks.
+   6. **`.` gets N concrete rows, not a category key.** One row per `IrType` it already
+      handles, each an exact-type match tagged to the existing `Instr::Print` lowering. Only
+      `.`'s dispatch key changes, to the same exact-match shape every other row uses — which
+      is also what makes a user's own `: . ( Vec2 -- ) ;` reachable through the same table.
+      `.`'s lowering stays backend code for this slice because moving it is strictly larger
+      work, not because it cannot move: `extern:` cannot express a variadic C call *today*,
+      but QBE emits variadic calls natively (that is what `Instr::Print` already does), so no
+      runtime shim library is needed — an earlier draft of this item claimed otherwise and was
+      wrong. The real path to `.` as ordinary library code is DESIGN.md's bounded-row entry
+      (`..N`) plus a way to decompose a `str` descriptor for `%.*s`; it would also move `.`
+      from universally available to `hosted`-layer only, which is a semantic decision, not a
+      refactor. None of that is 8a's job.
+
+   Note what rule 3 costs `drop`, whose absence is *not* an error today but a silent
+   structural fallback: see 8b's disposal-scope invariant, which is the reason `drop` cannot
+   simply inherit these six rules, and which ends with `drop` no longer being the universal
+   disposal verb at all.
+
+   **These rules widen a check that shipped after this plan was written.**
+   `check_duplicate_word_names` (`check.rs`) keys on `(module, name)` and exempts only
+   `drop`, so two `+` definitions in one file are rejected as duplicates before any overload
+   resolution runs. 8a widens that key to `(module, name, input types)` rather than exempting
+   overloadable names: an exemption class would reproduce the bespoke registry
+   (`find_drop_overloads`) that 8a exists to retire, and two collision checks that have to
+   agree with each other is a worse failure mode than one check with a wider key. Deleting it
+   and letting table registration own collisions is also wrong: it hands back the bare linker
+   `symbol already defined` error that check was added to replace. Enforcement stays at the
+   two sites that already exist — that check for definitions, and `check_selective_imports`'
+   `selective_collision_error`/`selective_collides_with_local_error` for imports, which are
+   already the two halves rule 4 needs. `drop`'s exemption survives 8a and dies in 8b, when
+   `drop` moves onto the table; do not delete it early as tidying.
+
+   **The brief's first job is the table's entry shape, which is not `Sig`.** Three measured
+   constraints rule that out, all in `src/check.rs`: (a) `builtin_table` is
+   `HashMap<String, Sig>`, one concrete effect per *name*, which cannot hold several
+   candidates per name at all; (b) `len` is non-consuming over an array of *any* length and
+   element type, which is a `PolySig`-shaped entry, not a finite set of concrete rows — so
+   either the table carries generic entries from day one or `len` is carved out, and the
+   roadmap's claim that `len` is simply absorbed is the thing to check first. `len` is also the
+   case proving an entry cannot be a signature alone: its two *shipped* candidates differ in
+   lowering and in consumption, not merely in operand type. The array case folds to the constant
+   `N` off the type and leaves the array on the stack; `str` consumes its operand and emits a
+   runtime `Instr::StrLen` load (`ir.rs`, R8: the length is carried at runtime, not derivable
+   from the type). So an entry carries a lowering, not just an effect. A third candidate of the
+   runtime kind appears if the deferred view type ever lands (DESIGN.md, *Slicing a buffer into
+   a view*, which now records 8a as its ordering gate); the entry shape should not preclude it;
+   (c) `.`'s category dispatch and the concrete/generic overlap are both settled above as
+   rules 6 and 5, so the only genuinely open question `unify_pair` raises stands alone: it is
+   one cross-cutting rule shared by a dozen binary operators, so the spec must say whether it
+   runs before lookup (leaving the table to answer only "is this operator defined for these
+   types") or becomes table rows (which would multiply entries and lose X10's "needs an
+   explicit conversion to `usize`" specificity).
    **Exit:** `check_operator`/`check_term`'s type-directed arms are gone, `builtin_table` is
-   populated, and the full existing corpus (goldens, examples) is unchanged byte-for-byte.
+   populated, the full existing corpus (goldens, examples) is unchanged byte-for-byte, a
+   user-defined `: + ( Vec2 Vec2 -- Vec2 ) ;` compiles *and dispatches*, and
+   `: + ( i64 i64 -- i64 ) ;` beside `: - ( i64 i64 -- i64 ) ;` in one file compiles and links
+   — with rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
+   overlap each a located error, and no definition left silently unreachable.
 
    **8b — polymorphic `drop`, and the constraint it forces.** `drop` overloads ride the 8a
    table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
@@ -1680,6 +1778,79 @@ then find out what the compiler owes it.
    supplies it — rather than inferring it from the single resource case and reopening it in
    Phase 6, whose *Generic struct declarations* item and Slice 2 allocator rework are the
    consumers waiting on the answer.
+
+   **The disposal-scope invariant: structural disposal must never silently substitute for a
+   type's real disposal word.** 8a rule 3 makes overloads imported rather than carried by the
+   type, and `drop` cannot inherit that rule as written. For `+`, a missing import is a
+   resolution error: no candidate matches, compile fails, you import it. For `drop` a
+   structural fallback always exists and always type-checks, so a module importing `File`
+   without its disposal word would pop the `i64` and never `close` — the same leak the
+   structural-totality constraint above exists to prevent, arriving by scope rather than by
+   derivation. Optional overloads can be import-scoped; a non-optional obligation cannot,
+   unless its absence is made an error.
+
+   **Resolution: the type declares its disposal word, and `drop` stops being the universal
+   disposal verb.** Making `drop` the tracked slot and trusting an override to do the right
+   thing is the weak part: nothing checks that a `drop` override actually calls `close`,
+   nothing gives `close`/`free` any status, and generated traversal only knows to call `drop`
+   — the operation that matters is invisible while a wrapper around it is what is enforced.
+   So `File` declares `close ( File -- )`, `Vec['T 'A]` declares `free ( &!'A Vec['T 'A] -- )`,
+   a plain struct declares nothing and is disposed structurally, and today's
+   `: drop ( File -- )` is the special case where the declared word happens to be named
+   `drop`. This is 8b's own "declared-consumer types … disposed by their named word" option
+   promoted from a coin flip to the design, the other option (a structurally-total generic
+   `drop`) having already been ruled out above.
+   Three things fall out of one mechanism, which is the argument for it: the checker gets a
+   *named* word to require rather than a boolean (`has_drop_overload` cannot distinguish a
+   plain struct from a resource whose disposal word is not called `drop` — both leave the bit
+   `false`, and the second must reject structural disposal); Phase 6's allocator case stops
+   being separate, since `free`'s extra `&!'A` input is just a declared disposal word with a
+   richer signature; and it answers 8b's own general question (what a disposal word may
+   require, how the constraint records it, how generated traversal supplies it) once instead
+   of per-resource-kind. It is additive to linearity rather than a change to it: `close`
+   already satisfies use-exactly-once as an ordinary consuming word today. The declaration
+   only supplies what inference cannot reach — generated disposal, and the import rule.
+
+   **The error fires at the disposal site, not at import.** Importing `File` without `close`
+   is legal, as is holding one, storing one, passing one onward, or reading it through
+   `&File`; a module that only forwards a resource never needs its disposal word in scope, and
+   an import-time rule would break that legitimate shape for no safety gain. What is an error
+   is *disposing* it by any path that would fall back to structural disposal — calling `drop`
+   on it, destructuring it (the sibling hole below, same error family), or disposing a
+   container that holds it — located at that site and naming the word to import. The container
+   case is where this composes and where the container-boundary question above bites: disposing
+   a `Vec[File]` requires `File`'s declared word in scope, reported at the `Vec`'s disposal
+   site.
+   `find_drop_overloads`' existing *program-wide* uniqueness stays program-wide even though
+   callability becomes scope-local, because scope-local uniqueness alone would let two modules
+   declare disposal for one `File`, never collide, and dispose the same value two different
+   ways. **Open sub-question:** nothing today requires an override to live in the module
+   declaring the type (`drop_overload_struct_id` derives the id from the input type, no
+   same-module check), so orphan overrides are legal and made safe only by that uniqueness
+   check. Restricting disposal to the declaring module is optional; uniqueness is the
+   load-bearing part.
+
+   **What this costs, so the brief does not discover it.** It needs a way to declare the word
+   on the type, which is new surface on `type:` — the brief's question, and the only genuinely
+   new syntax in 8a/8b. It also *reinterprets* shipped machinery rather than extending it:
+   Phase 3 slice 8b's overrides, REPL retention, epoch-suffixed destructor symbols, and
+   `examples/resources.sth` as the Phase 3 exit dogfood all assume `drop` is the slot. Reading
+   a `drop` override as "declared disposal word, named `drop`" keeps every one of those working
+   unchanged, but that reading is load-bearing and should be stated, not discovered.
+   Two further notes for the allocator case, which the "disposal may require inputs beyond the
+   value" paragraph above does not capture. First, the set of affected types is **not** the heap
+   types but everything *transitively owning* heap storage: a `Record` holding a `String['A]`
+   is a stack value whose disposal frees heap, so the property propagates structurally exactly
+   as linearity already does (`ir.rs`: `has_drop_overload || any field is linear`), and it is
+   viral in the type parameter — such a `Record` either becomes generic over `'A` or pins one,
+   which is the tax `'A = Global` exists to blunt. Second, a type parameter names the allocator
+   *statically* while `free` needs the allocator *instance* at runtime, allocators being
+   stateful; so either the value carries a reference to its allocator (a word per allocation,
+   which Rust deliberately refuses) or the disposal site must have it in scope and pass it.
+   None of this is visible today because `src/backend/qbe.rs` has exactly one global allocator
+   behind `allocate(n)`/`free(ptr, n)`; Phase 6 making allocators plural is what creates the
+   input, and Slice 2's shim-to-FFI rework is the logged consumer.
+
    **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
    override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
    the field and never runs the destructor. So today a `File` can have its fd extracted and the
@@ -1692,11 +1863,14 @@ then find out what the compiler owes it.
    opaque-by-default draft would have papered over it, and only for types whose author chose
    opacity), which is an argument for fixing it properly here rather than with a visibility
    rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
-   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`;
-   a declared-consumer type (`File`) rejects the generic path at the call site, naming its
-   named consumer; destructuring a type with a `drop` override is a located error; the
-   container-boundary decision is recorded and, if implicit, exercised by a generated
-   traversal that calls a non-`drop` disposal word.
+   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`; a
+   type declaring a disposal word (`File`/`close`) rejects the generic path at the call site,
+   naming that word; destructuring such a type is a located error; disposing one without its
+   declared word in scope is a located error *at the disposal site* naming the word to import,
+   while importing the type, forwarding it, and `&`-reading it all still compile; disposing a
+   `Vec[File]` reports the same error at the container's disposal site; and the
+   container-boundary decision is recorded and, if implicit, exercised by a generated traversal
+   that calls a non-`drop` disposal word.
 9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
    Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
    and `type: Bool | False | True ;` replaces the primitive. Last because it is the cleanup
@@ -1707,28 +1881,6 @@ then find out what the compiler owes it.
    design problem: `bool` has been in the test suite since Phase 2 Slice 1, so this is
    8c-shaped work (delete the special cases, let the exhaustiveness checker find the arms,
    migrate the call sites) and should run 8c's lightweight process.
-
-**Two pre-existing bugs, unrelated to this slice plan, fixable any time.** Both were measured
-while scoping slice 5a/5b and gated on nothing here — neither needs type variables, dispatch,
-or any other Phase 4 machinery, only the module system slice 5 already shipped. Do not let
-them drift onto slice 8's dependency chain just because they were noticed nearby.
-
-- **Two modules can each declare `main` and nothing rejects it.** `mangle` (`src/resolve.rs`)
-  exempts `main`/`drop` from module-disambiguating suffixes, and `check_main_effect`
-  (`src/check.rs`) finds the *first* word literally named `main` in the whole checked module
-  with no uniqueness check. Slice 5a shipped with this latent (a library file has no reason
-  to declare `main`); slice 5b closes it on the REPL path it's building (a located rejection
-  of an imported file declaring `main`) but leaves the native path unfixed. Fix: reject it
-  the same way slice 5a already rejects an exported word naming a private type, at the
-  declaration, naming both the file and the word.
-- **Two words of the same name in one file are not rejected by any check** and leak a bare
-  assembler `symbol already defined` error, native build included. `check_duplicate_type_names`
-  (`src/check.rs`) covers structs/enums only; the word env (`HashMap<String, Sig>` built by
-  plain `insert`) silently overwrites on a repeat name, so both `WordDef`s still lower to
-  codegen and only the linker notices. Slice 5b's REPL-side import-symbol design inherits this
-  pre-existing gap unfixed (an imported closure with a duplicate word name gets the same leaky
-  error). Fix: a located duplicate-word-name check, parallel to `check_duplicate_type_names`,
-  naming both definitions' locations.
 
 ### Phase 5 — Errors as values  `[S]`
 

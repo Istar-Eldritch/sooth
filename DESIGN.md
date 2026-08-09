@@ -964,9 +964,24 @@ that were argued out rather than assumed.
   answer, alongside `contains_reference` and `is_copy`. What stays true is that a borrowed view
   **cannot be returned**: the no-declared-output-reference rule is precisely what keeps a
   two-point lattice from having to grow into lifetime variables, so a word handing a region back
-  returns indices instead. Still deferred until a real client pushes on it. The likely client is
-  Phase 9's self-hosted lexer, which wants byte offsets for diagnostics anyway, and is also where
-  the evidence would exist to justify whatever it costs.
+  returns indices instead.
+  **Storage versus view, and why the length stays in the array type.** The length lives in the
+  *storage* type (`[T N]`: statically sized, so it can be a struct field and needs no allocator,
+  which is what makes the `fixed` layer possible at all) and is erased in the *view* type. Those
+  stay two types with two costs, permanently: `len` on storage folds to a compile-time constant
+  read off the type, `len` on a view is a runtime load. Phase 4 Slice 1's length polymorphism
+  (`'N`) is the partial substitute standing in for the missing view, which is why it
+  monomorphizes per length rather than erasing it.
+  Ordering, whenever it lands: after Phase 4 Slice 8a, since one `len` or `&>` accepting both
+  storage and a view *is* static overloading, and building it earlier only adds hardcoded
+  dispatch arms that slice exists to retire.
+  Still deferred until a real client pushes on it. What makes deferring cheap here, unlike
+  explicit allocators (viral through every collection's type parameter, so they land with the
+  collections or not at all), is that a view type is additive: a collection specified without one
+  gains view-returning words later without changing existing signatures. The first plausible
+  client is Phase 6's collections wanting to hand out a view over their storage, earlier than the
+  self-hosted lexer this entry used to name, which wants byte offsets for diagnostics anyway and
+  remains where the evidence to justify whatever it costs would exist.
 - **`.` appending no separator, for every type (decided, not yet implemented).** Today `.` appends
   a trailing newline for every type except `str`/`cstr` (slice 8a's R9). The decision is to make it
   uniform the other way: `.` writes exactly the value and nothing else, a newline spelled
@@ -981,6 +996,29 @@ that were argued out rather than assumed.
   static overloading; until then it is one wrapper word per type, e.g. `: println ( i64 -- ) .
   "\n" . ;`, or an explicit `"\n" .` at each call site — and the wrapper is only expressible
   from slice 8a onward, since it needs a string literal.
+- **Bounded rows (`..N`), with variadic FFI as a consumer rather than the justification.**
+  `..s` is an *unbounded* row: opaque, passed through untouched, and checkable precisely
+  because nothing ever looks at it (`check_poly_body`, `src/check.rs`). A **bounded** row is
+  the missing sibling: N stack slots whose element types the checker reads off the concrete
+  stack at each call site. The better motivation is not FFI at all -- Forth's
+  depth-parameterized stack words (`ndrop`, `npick`, `nroll`) have no expressible signature in
+  Sooth today, since `..s` cannot be consumed and a fixed arity cannot vary. Variadic FFI then
+  falls out for free: in an `extern:` declaration the row's *position* marks the
+  fixed/variadic boundary, because C's fixed parameters are exactly the individually named
+  ones, so no C-specific keyword is needed anywhere in the language.
+  **N is a compile-time literal on top of the row** (precedent: `fill`'s count is already
+  required to be literal), so `"%d %d" 42 43 2 printf` reads format string deepest, then the
+  arguments, then the count.
+  **Rejected**: a zero-width boundary marker (`( cstr .. i64 -- i64 )`), which reads as
+  variable-arity when it consumes nothing and collides with `..s` occupying the same position
+  meaning nearly the opposite; and a separate `"printf" variadic 1` clause, which bolts a C
+  ABI fact onto the declaration form instead of using syntax that earns its place elsewhere.
+  **Open**: whether the literal count slot is spelled in the effect or implied by `..N`; how
+  `..N` relates to the existing `'N` length variables (shared namespace, or linked); and the
+  diagnostic when the literal disagrees with the stack's actual depth, which is the one real
+  cost of literal-on-top over encoding the count in the word name (`printf2`), since a name
+  cannot disagree with itself. Nothing blocks on this: Phase 4 slice 8a's `.` keeps its
+  backend lowering either way.
 - Owning a native backend (a hand-written machine-code emitter replacing QBE's
   text-assembly path). Not now: the joy is the language, not codegen, and QBE plus
   `dlopen` cover native output and a live REPL without it. Reconsider after

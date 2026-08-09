@@ -330,7 +330,7 @@ goldens use `run_src`; REPL uses `run_session`. Source in → expected output or
 | T7 | `two_sequential_mutable_borrows_first_unused_is_accepted` (`tests/phase3_refs.rs`) | accept | 1 | D10: `&!v \| f \| &!v &!V>x 1 +!` (`f` unread) → builds; a variant that *does* use `f` after → still `conflicts with a live borrow` |
 | T8 | `times_body_borrow_across_loop_error` unchanged (`:1311`) | reject | 1 | Q2: a body genuinely leaving a borrow live is still caught |
 | T9 | `mutable_borrow_of_name_aliased_place_dead_is_accepted` (`tests/phase3_refs.rs`) | accept | 2 | Copy `V`: `v v \| p q \| q V> . . &!p &!V>x 1 +!` (`q` used *before* the borrow) → builds |
-| T10 | `mutable_borrow_of_name_aliased_place_live_is_error` (`:823`, unchanged) | reject | 2 | the same shape with `q` used *after* → `cannot borrow \`p\` mutably` + `aliased by \`q\`` (the T9/T10 pair is the alias analogue of T3/T4) |
+| T10 | `mutable_borrow_of_name_aliased_place_is_error` (`:895`, unchanged) | reject | 2 | the same shape with `q` used *after* → `cannot borrow \`p\` mutably` + `aliased by \`q\`` (the T9/T10 pair is the alias analogue of T3/T4) |
 | T11 | all 17 `aliasing_origin` guards still red (`tests/phase3_refs.rs`) | reject | 2 | every guard below still fails for its stated reason (each uses its alias name after the borrow) |
 | T12 | `inplace_fold_copy_lowers_without_per_iteration_blit` (`tests/phase4_*.rs`) | accept+QBE | 3 | dogfood at `Copy Acc`: builds, prints expected, emitted QBE loop body has **no** per-iteration `blit` |
 | T13 | `inplace_fold_linear_lowers_without_per_iteration_blit` (`tests/phase4_*.rs`) | accept+QBE | 3 | dogfood at linear `Acc`: same, borrow-half only (no aliasing rule fires) |

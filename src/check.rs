@@ -2815,10 +2815,7 @@ pub fn has_self_tail_call(word: &WordDef) -> bool {
 /// A word's location, derived from the first term (or clause) of its body,
 /// for locating a whole-word diagnostic like X1.
 pub(crate) fn word_span(word: &WordDef) -> Span {
-    match &word.body {
-        WordBody::Terms { terms, .. } => terms.first().map(|t| t.span).unwrap_or_default(),
-        WordBody::Clauses(clauses) => clauses.first().map(|c| c.span).unwrap_or_default(),
-    }
+    word.span
 }
 
 /// R3/R4 (D3, X1): build the whole-module tail-call graph (an edge `A -> B`
@@ -3705,6 +3702,7 @@ fn check_poly_combinator_standalone(
         body: WordBody::Terms { terms },
         poly: None,
         module: word.module,
+        span: word.span,
     };
     let mut dropped = Vec::new();
     check_word(
@@ -8334,6 +8332,7 @@ mod tests {
             body: WordBody::Terms { terms: Vec::new() },
             poly: None,
             module: 0,
+            span: Span::default(),
         };
         let mut module = Module {
             words: vec![mk_word],
@@ -8389,6 +8388,7 @@ mod tests {
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
                 module,
+                span: Span::default(),
             }
         }
         fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
@@ -8553,14 +8553,10 @@ mod tests {
             WordDef {
                 name: name.to_string(),
                 effect: StackEffect::default(),
-                body: WordBody::Terms {
-                    terms: vec![Term {
-                        kind: TermKind::IntLit(0),
-                        span: Span { line, col: 1 },
-                    }],
-                },
+                body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
                 module,
+                span: Span { line, col: 1 },
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -9982,6 +9978,25 @@ mod tests {
         assert!(
             err.contains("first defined at line 1"),
             "names the first definition's location too: {err}"
+        );
+    }
+
+    #[test]
+    fn check_duplicate_empty_bodied_word_reports_a_real_location() {
+        // Regression: `word_span` used to derive a word's location from its
+        // first term/clause, so an empty body (`terms.first()` is `None`)
+        // fell back to `Span::default()` -- line 0, col 0 -- for every
+        // trivial stub word, `main ( -- )` being the single most common
+        // shape that hits it. `WordDef` now carries its own declaration span
+        // (the name token), independent of body shape.
+        let err = check_src(": main ( -- ) ;\n: main ( -- ) ;\n").unwrap_err();
+        assert!(
+            err.contains("duplicate word `main`") && err.contains("line 2"),
+            "names the repeat's real location: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "names the first definition's real location, not line 0: {err}"
         );
     }
 
