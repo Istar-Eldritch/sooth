@@ -1,7 +1,7 @@
 # Phase 4 Slice 8a: static overloading, the mechanism (brief)
 
 Sooth already dispatches one name over several operand types. It does it in hand-written
-Rust match arms, not in any table, which is why `builtin_table` (`src/check.rs:224`) is empty
+Rust match arms, not in any table, which is why `builtin_table` (`src/check.rs`) is empty
 with no entries and no users. This slice retires the arms into a real table.
 
 The reason that is worth doing is not tidiness. Operators are already just words, so a user
@@ -20,7 +20,7 @@ type: Vec2 x i64 y i64 ;
      `+` requires two operands of the same numeric type, found `Vec2` and `Vec2`
 ```
 
-The call site dies in `check_operator`'s `is_numeric` gate (`src/check.rs:6695`) before any
+The call site dies in `check_operator`'s `is_numeric` gate (`src/check.rs`) before any
 environment lookup happens, naming the exact two types the author just defined an overload
 for and refusing anyway. So Sooth today accepts a word, lowers it, links it, and can never
 reach it. That is the Forth silent-failure class this language exists to convert into a
@@ -32,23 +32,22 @@ compile error, sitting in the compiler itself.
 `check_shuffle`, `check_operator`, `check_str_word`, and `check_array_word` in order, each
 returning `Ok(None)` to fall through, and only then consults the word env. There is no
 "is this a builtin" branch to flip at the call-site level. `is_builtin_word_name`
-(`src/check.rs:1585`) exists but has exactly one caller, `src/check.rs:1519`, the `extern:`
-redeclaration check. So `extern:` redeclaring a builtin is *already* a located error
+(`src/check.rs`) exists but has exactly one caller, inside `check_extern_decls`. So `extern:` redeclaring a builtin is *already* a located error
 (`check_extern_redeclaring_a_builtin_is_error`), while a `:` word redeclaring one is
 accepted silently. The asymmetry is the bug, and it is one-sided in the direction that hurts.
 
 **2. `builtin_table`'s entry type cannot hold overloads at all.** It is
-`HashMap<String, Sig>`, one effect per *name*, and `Sig` is
-`{ inputs: Vec<Type>, outputs: Vec<Type> }` (`src/check.rs:23`). Several candidates per name
+`HashMap<String, Sig>`, one effect per *name*, returning `HashMap::new()` today, and `Sig` is
+`{ inputs: Vec<Type>, outputs: Vec<Type> }` (both `src/check.rs`). Several candidates per name
 is not an extension of that shape, it is a different shape. This is the slice's first design
 question, not an implementation detail.
 
 **3. An entry has to carry a lowering, not just an effect, and `len` proves it.** `len` has
 two *shipped* candidates that differ in consumption and in codegen, dispatched by fall-through
-across two functions. On `str` (`check_str_word`, `src/check.rs:7652`) it pops its operand and
-emits a runtime `Instr::StrLen` load (`src/ir.rs:3052`), because R8 carries a string's length
-in the value. On an array (`check_array_word`, `src/check.rs:7730`) it leaves the array on the
-stack and folds to the constant `N` read off the type, emitting no instruction at all. Same
+across two functions. On `str` (`check_str_word`'s `"len"` arm) it pops its operand and emits a
+runtime `Instr::StrLen` load (`src/ir.rs`), because R8 carries a string's length in the value.
+On an array (`check_array_word`'s `"len"` arm) it leaves the array on the stack and folds to
+the constant `N` read off the type, emitting no instruction at all. Same
 name, different arity of effect, different lowering. A table of signatures cannot express
 that; a table of `(signature, lowering)` can.
 
@@ -58,8 +57,8 @@ entry (slice 1's machinery), not a finite enumeration. Either the table carries 
 entries from day one or `len` is carved out and stays hardcoded, and the roadmap's claim that
 `len` is simply absorbed is the first thing the spec should check rather than inherit.
 
-**5. `.` dispatches on a category that exists only as Rust code.** `src/check.rs:6839`:
-`is_numeric() || is_bool() || matches!(Str | Cstr)`. There is no list of printable types
+**5. `.` dispatches on a category that exists only as Rust code.** `check_operator`'s `"."`
+arm: `is_numeric() || is_bool() || matches!(Str | Cstr)`. There is no list of printable types
 anywhere to copy into a table. The fix is settled below as N concrete rows, one per `IrType`
 it already handles, each tagged to the existing `Instr::Print` lowering (`backend/qbe.rs`).
 No category/bound key is needed, because every row is an exact-type match like any other
@@ -73,14 +72,14 @@ shim library is required. The path to `.` as ordinary library code is DESIGN.md'
 entry (`..N`), plus a way to decompose a `str` descriptor for `%.*s`, plus accepting that `.`
 becomes `hosted`-layer rather than universally available. All of that is out of scope here.
 
-**6. `unify_pair` is one cross-cutting rule, not per-operator logic.** `src/check.rs:206`
-handles literal and size-type coercion for the dozen binary operators
+**6. `unify_pair` is one cross-cutting rule, not per-operator logic.** `unify_pair`
+(`src/check.rs`) handles literal and size-type coercion for the dozen binary operators
 (`+ - * mod and or xor = < > <= >= <>`), and carries X10's specific "needs an explicit
 conversion to `usize`" diagnostic. Whether it runs before lookup or becomes table rows
 decides how much of `check_operator` actually disappears.
 
 **7. A latent symbol collision was on this slice's path, and turned out to be general.**
-`qbe_name` (`src/backend/qbe.rs:186`) replaced every character outside `[A-Za-z0-9_.]` with
+`qbe_name` (`src/backend/qbe.rs`) replaced every character outside `[A-Za-z0-9_.]` with
 `_`, which is not injective: `+` and `-` both sanitized to the bare symbol `_`, and so did any
 two ordinary word names made of the same count of symbol characters (`~` and `?`, reproduced
 on `main` with no relation to overloading at all). Fixed standalone, outside this slice, since
@@ -120,12 +119,12 @@ rejecting an actually-invalid one.
 
 Enforcement reuses the two sites that already exist rather than adding any:
 `check_duplicate_word_names` for definitions, and `check_selective_imports`'
-`selective_collision_error` / `selective_collides_with_local_error` (`src/check.rs:1894`,
-`:1903`) for imports, which are already the two halves rule 4 needs.
+`selective_collision_error` / `selective_collides_with_local_error` (`src/check.rs`) for
+imports, which are already the two halves rule 4 needs.
 
 `check_duplicate_word_names`' key widens from `(module, name)` to
 `(module, name, input types)`. Not an exemption class for overloadable names: that would
-reproduce the bespoke `find_drop_overloads` registry (`src/check.rs:981`) this slice exists to
+reproduce the bespoke `find_drop_overloads` registry (`src/check.rs`) this slice exists to
 generalise, and two collision checks that must agree with each other is a worse failure mode
 than one check with a wider key. Not a deletion either, since that hands back the bare linker
 error the check was added to replace. `drop`'s exemption survives 8a untouched and dies in 8b.
