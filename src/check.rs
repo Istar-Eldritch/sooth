@@ -3564,15 +3564,21 @@ fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
 /// R2 (M1): whether a word contains at least one tail-position call to itself.
 /// The lowerer uses this to decide whether to build the loop shape at all.
 ///
-/// A `drop` overload never self-tail-calls, whatever its body's last term is:
-/// `drop` is intercepted as a builtin before any name resolution, at both
-/// check and lowering, so a trailing `drop` in a `: drop ( T -- )` body is a
-/// disposal of whatever is on top (typically some `Copy` scalar), not a call
-/// to the enclosing word. Without this, the dogfood's own
-/// `| f | f File>fd close drop ;` would lower to a back-edge loop instead of
-/// closing the fd.
+/// A word whose own name is a builtin's never self-tail-calls on a bare name
+/// match. A builtin name in tail position resolves against the builtin table
+/// first, so it need not mean the enclosing word: `: drop ( T -- )`'s trailing
+/// `drop` disposes whatever is on top (the dogfood's own
+/// `| f | f File>fd close drop ;` closes the fd rather than looping), and since
+/// slice 8a made every builtin name overloadable the same applies throughout,
+/// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;` ends in the
+/// *builtin* `<` on two `i64`s. Treating either as a back-edge opens loop
+/// machinery whose phi operands never arrive, and lowering then panics on the
+/// missing header. A genuine self-recursive overload is unaffected in meaning:
+/// it lowers as an ordinary recursive `Instr::Call` instead of a loop, correct
+/// but not tail-call-optimized. Telling those apart needs the call site's
+/// resolved operand types, which this syntactic pass does not have.
 pub fn has_self_tail_call(word: &WordDef) -> bool {
-    word.name != "drop"
+    !is_builtin_word_name(&word.name)
         && tail_position_calls(&word.body)
             .iter()
             .any(|&callee| callee == word.name)
@@ -12895,6 +12901,20 @@ mod tests {
     fn tail_position_trailing_drop_is_not_tail() {
         let w = first_word(": rec ( i64 -- i64 ) rec drop ;");
         assert_eq!(tail_position_calls(&w.body), vec!["drop"]);
+        assert!(!has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_builtin_named_word_trailing_its_own_name_is_not_self_tail() {
+        // Slice 8a made every builtin name overloadable, so a builtin-named
+        // word ending in that same name is resolving against the builtin
+        // table, not recursing: `<` here compares the two extracted `i64`s.
+        // `tail_position_calls` still reports the name (it is syntactic);
+        // only the self-call conclusion changes.
+        let w = first_word(
+            "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;",
+        );
+        assert_eq!(tail_position_calls(&w.body), vec!["<"]);
         assert!(!has_self_tail_call(&w));
     }
 

@@ -3608,6 +3608,36 @@ fn overload_vec2_lt_dispatches_to_user_word() {
 }
 
 #[test]
+fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
+    // The tail term `<` shares the enclosing word's name but resolves to the
+    // *builtin* `<` on two `i64` fields, not to a recursive call. Before the
+    // fix `has_self_tail_call` matched on the bare name, so the word was
+    // treated as self-tail-recursive: lowering opened loop machinery, the
+    // back-edge pushed the two `i64`s as phi operands for a header expecting
+    // two `Vec2`s, and the compiler panicked on the missing header block
+    // (`expect("header block")`) rather than emitting a comparison.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 < . ;\n";
+    let (stdout, code) = run_overload_src("lt-tail-self-name", src);
+    assert_eq!(stdout, "true\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn print_overload_ending_in_its_own_builtin_name_compiles_and_prints() {
+    // The same defect on `.`, the shape the slice's own review first hit: a
+    // `Vec2` print overload naturally ends by printing its last field with
+    // the builtin `.`, which is also its own name.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: . ( Vec2 -- ) | v | v Vec2>x . v Vec2>y . ;\n\
+: main ( -- ) 3 4 Vec2 . ;\n";
+    let (stdout, code) = run_overload_src("print-tail-self-name", src);
+    assert_eq!(stdout, "3\n4\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn overload_from_poly_body_dispatches_to_user_word() {
     // Slice 8a fix 2: a genuinely polymorphic word (`pair-sum`, generic in
     // `'T` for an unrelated passthrough slot) whose body calls `+` on two
