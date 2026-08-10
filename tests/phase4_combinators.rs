@@ -1673,6 +1673,46 @@ fn repl_cross_line_combinator_cycle_is_error() {
     );
 }
 
+#[test]
+fn repl_poly_word_calling_a_builtin_named_overload_does_not_segfault() {
+    // Round 3 (slice 8a): the REPL analogue of `overload_from_poly_body_
+    // dispatches_to_user_word` (tests/phase0.rs). `eval_poly_def`/
+    // `lower_instantiation` froze an *empty* overloads map onto every
+    // REPL-defined poly word, explicitly marked out of scope for this slice
+    // at the time -- so `vsum`'s body called `+` on two `Vec2` operands, the
+    // checker correctly resolved that to the user overload, but lowering
+    // fell into the builtin numeric `Instr::Bin(Add)` arm on the two struct
+    // pointers regardless, segfaulting the whole session (`run`/`build`
+    // threaded the real record from the start and never had this bug).
+    // Fixed by freezing the body's already-computed resolved-overload
+    // record into `PolyWordEntry` alongside `resolver`/`ir_lower_env`.
+    //
+    // Mutation-tested: reverting `PolyWordEntry`'s `builtin_overloads` field
+    // back to a fresh empty map at instantiation time passes the entire
+    // existing suite (nothing else exercises this path) and only crashes
+    // (SIGSEGV) when this exact session actually runs -- the gap this test
+    // closes.
+    // 'T is a plain passthrough (dropped last, via `swap drop`, so this
+    // still instantiates via `eval_poly_def`/`lower_instantiation` rather
+    // than the monomorphic path): the value under test is the *computed*
+    // sum, deliberately not just "did this crash" -- a wrong dispatch here
+    // is undefined-behaviour pointer arithmetic on aggregate operands,
+    // which is not guaranteed to fault every run; asserting the exact
+    // arithmetic result (which a wrong dispatch has no real chance of
+    // reproducing by accident) is the reliable discriminator, and it still
+    // reliably segfaults when mutated back to an empty map.
+    let transcript = repl_error(
+        "type: Vec2 x i64 y i64 ;\n\
+         : + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+         : vsum ( 'T Vec2 Vec2 -- i64 ) + Vec2> + swap drop ;\n\
+         42 1 2 Vec2 3 4 Vec2 vsum\n",
+    );
+    assert_eq!(
+        transcript, "defined type Vec2\ndefined +\ndefined vsum\nstack: 10\n",
+        "vsum should compute (1+3)+(2+4)=10 through the user overload, not crash: {transcript}"
+    );
+}
+
 // -- criterion 18 (phase 4): dogfood, the combinator rewrite ------------------
 
 #[test]
