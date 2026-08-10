@@ -435,10 +435,10 @@ export function :Q0 $mk.2d.h.2d.push() {
 	ret %v1
 }
 
-export function :Vm $mk.2d.h.2d.push__quot0(:Vm %v0) {
+export function :Vm $mk.2d.h.2d.push__quot0(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.push(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.push(:Vm %v0)
+	ret %v2
 }
 
 export function :arr_3 $build.2d.table() {
@@ -643,52 +643,52 @@ export function :arr_3 $build.2d.table() {
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot0(:Vm %v0) {
+export function :Vm $build.2d.table__quot0(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.add(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.add(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot1(:Vm %v0) {
+export function :Vm $build.2d.table__quot1(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.sub(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.sub(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot2(:Vm %v0) {
+export function :Vm $build.2d.table__quot2(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.mul(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.mul(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot3(:Vm %v0) {
+export function :Vm $build.2d.table__quot3(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.load(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.load(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot4(:Vm %v0) {
+export function :Vm $build.2d.table__quot4(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.store(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.store(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot5(:Vm %v0) {
+export function :Vm $build.2d.table__quot5(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.jz(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.jz(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot6(:Vm %v0) {
+export function :Vm $build.2d.table__quot6(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.jmp(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.jmp(:Vm %v0)
+	ret %v2
 }
 
-export function :Vm $build.2d.table__quot7(:Vm %v0) {
+export function :Vm $build.2d.table__quot7(:Vm %v0, l %v1) {
 @start
-	%v1 =:Vm call $h.2d.halt(:Vm %v0)
-	ret %v1
+	%v2 =:Vm call $h.2d.halt(:Vm %v0)
+	ret %v2
 }
 
 export function l $dispatch(:Vm %v0, :arr_3 %v1) {
@@ -735,8 +735,10 @@ export function l $dispatch(:Vm %v0, :arr_3 %v1) {
 	blit %v25, %v26, 16
 	%v27 =l add %v26, 0
 	%v28 =l loadl %v27
-	%v29 =:Vm call %v28(:Vm %v10)
-	blit %v29, %v3, 320
+	%v29 =l add %v26, 8
+	%v30 =l loadl %v29
+	%v31 =:Vm call %v28(:Vm %v10, l %v30)
+	blit %v31, %v3, 320
 	blit %v3, %v2, 320
 	jmp @blk1
 @blk4

@@ -1,0 +1,24 @@
+\ Dogfood: Phase 4 slice 7b (capturing closures). A dispatch table of two
+\ same-frame capturing closures (T-dispatch's shape): each closure captures
+\ the shared frame borrow `r = &arr` and reads a different element, stored
+\ into distinct array slots (in-frame boundaries, R21) and indexed-and-`call`ed.
+\ Its hand-spliced twin `examples/capturing_dispatch_hand.sth` reads the same
+\ elements directly with no closure at all; the golden pins both to the same
+\ output.
+
+: seed ( -- [ -- i64 ] ) [ 0 ] ;
+
+: main ( -- )
+  7 3 fill | arr |
+  &!arr 1 >usize &!> 8 !
+  &!arr 2 >usize &!> 9 !
+  &arr | r |
+  seed 3 fill | tbl |
+  &!tbl 0 >usize &!> [ r 0 >usize &> @ ] !
+  &!tbl 1 >usize &!> [ r 1 >usize &> @ ] !
+  &!tbl 2 >usize &!> [ r 2 >usize &> @ ] !
+  &tbl 0 &> @ call .
+  &tbl 1 &> @ call .
+  &tbl 2 &> @ call .
+  tbl drop
+  arr drop ;
