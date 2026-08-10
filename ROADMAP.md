@@ -1897,65 +1897,46 @@ then find out what the compiler owes it.
    — with rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
    overlap each a located error, and no definition left silently unreachable.
 
-   **8b — `drop` obeys the 8a table, plus 8a's own operator module-scoping gap.** This slice's
-   original design — a `disposal: close` clause on `type:`, a program-wide unique named word,
-   import-by-name, a destructure ban tied to that name — went through a brief, a spec, and
-   three review rounds (`docs/phase4-slice8b-brief.md`, `docs/phase4-slice8b-spec.md`) and was
-   **abandoned before implementation**, on a paper pre-check that hand-wrote the design's own
-   dogfood before touching the compiler. Putting the destructor on the *composite* (`File`) is
-   what forced every one of those rules; putting it on a **one-field leaf wrapper** where the
-   resource enters the language (`type: Fd n i64 ; : drop ( Fd -- ) ... ;`, with `File` holding
-   an undeclared `Fd` field) needs none of them — `examples/resources.sth` rewritten that way
-   builds and runs unchanged (`aaafa91`, `39bb8cf`), `close ( File -- ) drop` is an ordinary
-   word, and transfer-out (`File>fd`) is free instead of inexpressible, which the named-word
-   design made a real hole (its destructure ban was scoped to the disposal word's own body, so
-   nothing let a resource's handle move out of its owner). No new `type:` surface, no
-   named-word uniqueness beyond what `drop_overload_struct_id` already enforces, no by-name
-   import rule, no orphan-override tension to resolve — the apparatus existed to make a *name*
-   work, and there is no longer a name.
-   **What survives, unrelated to the naming question and unaffected by which design won:**
-   - **8a's module-scoped bare-name gap**, measured in the abandoned brief (recon 3) and left
-     exactly as found: a module's own operator overload is unreachable from its own module the
-     moment a second module joins the closure (`resolve::mangle` renames the declaration to
-     `+__m1` while the own-module fix in `resolve.rs` leaves the call site bare, so
-     byte-identical single-file source compiles and runs), and a selectively imported operator
-     still hijacks unrelated bare uses of that name in the importing module. The qualified form
-     (`v::+`) already resolves correctly — bare names should resolve the way qualified ones do,
-     per call site, against candidates visible to the calling module.
-   - **`drop` is not import-scoped today, and that is the implicit behaviour the magicless
-     decision rejects independent of naming.** `check_shuffle`/`lower_call` intercept `drop`
-     before any `env` lookup, overrides live in a `StructId`-keyed registry `env` never sees,
-     and `mangle` exempts `drop` — so a module can dispose an imported resource whose
-     destructor it never imported, and the golden `imported_linear_type_is_disposed_by_drop`
-     (`tests/phase4_modules.rs:384`) proves it live: `lib.sth` exports `mk`/`Res`, never `drop`,
-     and the consumer's bare `drop` still runs `lib`'s destructor. Retiring the interception
-     arms and folding `drop` into 8a's table — an always-visible generic row (any `'T` with no
+   **8b — `drop` obeys the 8a table, plus 8a's own operator module-scoping gap.** Disposal for
+   a resource lives on a one-field leaf wrapper where the resource enters the language
+   (`type: Fd n i64 ; : drop ( Fd -- ) ... ;`); a composite like `File` holds an undeclared
+   `Fd` field and inherits disposal structurally, with no `type:` surface and no named-word
+   declaration — `close ( File -- ) drop` is an ordinary word, and `examples/resources.sth`
+   already ships this shape. Supersedes the `disposal: close` design in
+   `docs/phase4-slice8b-brief.md`/`docs/phase4-slice8b-spec.md`, not implemented. Three things
+   remain, none of them about naming:
+   - **8a's module-scoped bare-name gap.** A module's own operator overload is unreachable
+     from its own module the moment a second module joins the closure (`resolve::mangle`
+     renames the declaration to `+__m1` while the own-module fix in `resolve.rs` leaves the
+     call site bare, so byte-identical single-file source compiles and runs), and a
+     selectively imported operator hijacks unrelated bare uses of that name in the importing
+     module. The qualified form (`v::+`) already resolves correctly — bare names should
+     resolve the way qualified ones do, per call site, against candidates visible to the
+     calling module.
+   - **`drop` is not import-scoped, which is the implicit behaviour the magicless decision
+     rejects.** `check_shuffle`/`lower_call` intercept `drop` before any `env` lookup,
+     overrides live in a `StructId`-keyed registry `env` never sees, and `mangle` exempts
+     `drop` — so a module can dispose an imported resource whose destructor it never
+     imported, proven by the golden `imported_linear_type_is_disposed_by_drop`
+     (`tests/phase4_modules.rs:384`): `lib.sth` exports `mk`/`Res`, never `drop`, and the
+     consumer's bare `drop` still runs `lib`'s destructor. Retiring the interception arms and
+     folding `drop` into 8a's table — an always-visible generic row (any `'T` with no
      override) plus per-type override rows gated by rule 3's import requirement — fixes this
-     the same way rule 3 fixes it for `+`, now applied to a leaf wrapper's `drop`, not to a name
-     invented for the occasion. It also dissolves the generics worry the abandoned design
-     created: since nothing is ever renamed, a generic `drop ( 'T -- )` caller never fails to
-     resolve at a concrete site the way it would have against a type declaring
-     `disposal: close`. DESIGN.md's slice 5a paragraph ("disposal crosses the export boundary
-     for free", "a destructor runs without being named") is the design being reversed and is
-     amended here (`DESIGN.md:547`), as is slice 5a's Criterion 17 golden above, which asserts
-     today's behaviour and inverts.
-   - **The destructure-bypass hole, measured and pre-existing, verified again after the
-     reshape.** `type: R tag i64 ; : drop ( R -- ) ... ;` then `r R>tag .` prints the field and
-     never runs the destructor — confirmed live, 2026-08-10. Rust closes exactly this with
-     E0509 (cannot move out of a type implementing `Drop`); Sooth has no such rule. The
-     leaf-handle convention shrinks its surface rather than removing it: a composite like
-     `File` has no override to bypass (`File>fd` moving the still-linear `Fd` out is correct,
-     not a hole), so the guard is only needed where a type both owns a resource and declares
-     `drop` — leaf wrappers, by construction. Still belongs here: same question as before,
-     *what counts as discharging a linear obligation*, just asked of a smaller type
-     population.
-   **Not this slice's problem, and no longer citable as one:** the abandoned design's "disposal
-   may require inputs beyond the value" question (a named word taking an allocator, e.g.) dies
-   with the named word — every disposal word left in this design is `drop ( 'T -- )`. Whether
-   *derived* disposal of a composite holding a resource that itself needs extra runtime inputs
-   (a `Vec['T 'A]` field disposed via `free ( &!'A Vec['T 'A] -- )`, not `drop`) is even
-   possible remains completely open, and is now purely a Phase 6 allocator-rework question
-   (below) — nothing in this narrower slice answers it, where the abandoned design would have.
+     the same way rule 3 fixes it for `+`. A generic `drop ( 'T -- )` caller is unaffected,
+     since no disposal word is ever renamed. DESIGN.md's slice 5a paragraph ("disposal
+     crosses the export boundary for free", "a destructor runs without being named") is
+     amended here (`DESIGN.md:547`), as is slice 5a's Criterion 17 golden above.
+   - **Destructuring bypasses a `drop` override entirely.** `type: R tag i64 ; : drop
+     ( R -- ) ... ;` then `r R>tag .` prints the field and never runs the destructor. Rust
+     closes exactly this with E0509 (cannot move out of a type implementing `Drop`); Sooth has
+     no such rule. Scoped to leaf wrappers only: a composite like `File` has no override to
+     bypass (`File>fd` moving the still-linear `Fd` out is correct, not a hole), so the guard
+     is only needed where a type both owns a resource and declares `drop`.
+   **Not this slice's problem:** whether *derived* disposal of a composite holding a resource
+   that itself needs extra runtime inputs (a `Vec['T 'A]` field disposed via
+   `free ( &!'A Vec['T 'A] -- )`, not `drop`) is possible at all remains open, and belongs to
+   Phase 6's allocator-rework question (below); every disposal word in this design is
+   `drop ( 'T -- )`, so nothing here answers it.
    **Exit:** `drop` overloads ride the 8a table and obey rule 3's import requirement (the
    golden above inverts to require the import), a generic `drop ( 'T -- )` still dispatches
    correctly by monomorphization, destructuring a type that declares `drop` is a located error,
@@ -2171,12 +2152,11 @@ an allocator explicit without the parameter appearing at every use site, and the
 `fixed` / `alloc` split bounds where it can appear at all. Retrofitting it onto collections
 specified without it is the mistake Rust's `allocator_api` is still paying for, and this is
 the only moment it is cheap. Two prerequisites: whether *derived* disposal can thread an
-allocator down to a nested resource field at all, which is open, not answered by Phase 4
-Slice 8 — that slice's `disposal:` design would have answered it via a named word's richer
-signature, and was abandoned for a leaf-wrapper convention where every disposal word stays
-`( 'T -- )`, so this phase's own brief has to answer it fresh — and Slice 2's parked rework
-of the compiler-emitted `malloc`/`free` shim into ordinary bound foreign words, since a
-user-supplied allocator cannot be a backend special case. Ambient context (Odin/Jai-style)
+allocator down to a nested resource field at all, which is open — every disposal word in
+Phase 4 Slice 8's design is `drop ( 'T -- )`, so nothing there answers it, and this phase's
+own brief has to answer it fresh — and Slice 2's parked rework of the compiler-emitted
+`malloc`/`free` shim into ordinary bound foreign words, since a user-supplied allocator
+cannot be a backend special case. Ambient context (Odin/Jai-style)
 is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
 rather than the allocation site, which converts a compile error into a runtime one in the
 language whose point is the opposite.
