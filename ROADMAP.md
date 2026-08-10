@@ -585,11 +585,14 @@ own scan exactly like one it binds — dying at its own last use in an execute-o
 pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
 prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
 
-**Next action: Phase 4 Slice 9.** 7b (capturing closures) is done (see "7b — capturing
-closures is implemented" above). 8a (ad-hoc dispatch: static overloading, the mechanism) is
-also done on `main` (`e20c52f`), though its own "is implemented" exit marker was never added
-to this file's 8a heading below — a pre-existing gap, not fixed here. Slice 9's
-implementation is already in progress in `impl/phase4_slice9_spec-2608100454`.
+**Next action: Phase 4 Slice 8b.** 7b (capturing closures) and 8a (ad-hoc dispatch: static
+overloading, the mechanism) are both done on `main`, though 8a's own "is implemented" exit
+marker was never added to this file's 8a heading below — a pre-existing gap, not fixed here.
+Slice 9 shipped P1–P2 only (`Bool` as a library enum, merged at `c5db035`); its `if`/`cond`
+half (P3–P5) needs a row variable inside a quotation's declared effect, which does not parse
+before slice 10a, and is split out as slice 9b (`docs/phase4-slice9b-brief.md`), blocked on
+10a. 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
+left open (see 8b's heading below).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1897,6 +1900,35 @@ then find out what the compiler owes it.
    table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
    that currently run before any env lookup (explicitly parked here since Phase 3 slice 8b,
    "`drop` becoming fully polymorphic is still Phase 4").
+   **Also absorbs the module-scoped bare-name gap 8a left open, which the brief measured to be
+   an active 8a regression rather than a latent one** (`docs/phase4-slice8b-brief.md`, recon 3).
+   Every non-operator name is already module-unique, since `resolve::mangle` renames decls to
+   `name__m{module}`; the ~20 `is_operator_dispatch_name` names are the carve-out, their call
+   sites left bare for operand-type dispatch while their declarations are mangled like any
+   other. The two halves no longer meet: a module's own operator overload is unreachable from
+   its own module the moment a second module joins the closure (byte-identical single-file
+   source compiles and runs), and a selectively imported operator still hijacks unrelated bare
+   uses of that name in the importing module. The qualified form (`v::+`) already resolves
+   correctly, so the target semantics exist — bare names should resolve the way qualified ones
+   do, per call site, against candidates visible to the calling module.
+   **The brief also found the disposal half's premise to be false as written, and it is the
+   slice's first design question rather than an inherited decision.** Disposal today never
+   reaches the word environment at all (`check_shuffle`/`lower_call` intercept `drop`; overrides
+   live in a `StructId`-keyed registry excluded from `env`; `mangle` exempts `drop`), so
+   importing a resource type without its disposal word, declaring an orphan override in the
+   importing module, and disposing inside a module that cannot see the override **all dispatch
+   correctly today** — and linearity propagates program-wide with them. **Decided on the brief:
+   that convenience is the implicit behaviour the language rejects, and this slice deletes it.**
+   `drop` is explicitly defined and explicitly imported, so it rides the 8a table under rule 3,
+   and the structural fallback survives only where it emits no user-declared word (a plain data
+   struct disposes with no declaration and no import; a struct owning a resource requires that
+   resource's disposal word in scope at the outer disposal site). That also settles the
+   container-boundary question below **against** implicit threading: generated traversal may
+   call a named disposal word, but may never conjure inputs it needs — which is the rule
+   explicit allocators require. DESIGN.md's slice 5a paragraph ("disposal crosses the export
+   boundary for free", "a destructor runs without being named") is the design being reversed and
+   is amended by this slice, as is slice 5a's Criterion 17 golden
+   (`tests/phase4_modules.rs:384`), which asserts today's behaviour and inverts.
    **One constraint from the destructor side, which the polymorphic `drop` must not
    violate: it cannot be structurally total.** A generic `drop ( 'T -- )` that accepts a
    resource type discharges the linear obligation while leaking the resource, turning
@@ -2018,6 +2050,14 @@ then find out what the compiler owes it.
    `Vec[File]` reports the same error at the container's disposal site; and the
    container-boundary decision is recorded and, if implicit, exercised by a generated traversal
    that calls a non-`drop` disposal word.
+   **Two of those are unwritable as stated** (brief, recon 2): there is no container of
+   resources to dispose — linear array elements are still rejected and `Vec` is Phase 6, so the
+   only container holding a resource is a struct with a linear field, which already disposes
+   correctly through generated traversal — and the two import-scope criteria exist only under
+   the table answer to the design question above. The operator half adds its own exit: a
+   module's own operator overload is reachable from its own module in a ≥2-module build, and a
+   selectively imported operator no longer hijacks unrelated bare uses of that name, with the
+   single-module corpus unchanged.
 9. **`Bool` as a library enum. ✅ done** (brief + spec: `docs/phase4-slice9-brief.md`,
    `docs/phase4-slice9-spec.md`). `type: Bool | False | True ;` replaces the primitive, via a
    **general** zero-payload-enum → scalar-discriminant layout rule (`Bool` is that rule's
