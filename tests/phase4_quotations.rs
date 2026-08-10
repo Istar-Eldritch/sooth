@@ -83,6 +83,28 @@ fn materialized_quot_params(src: &str) -> Vec<IrType> {
     mats.remove(0).params.clone()
 }
 
+/// Every `Alloc` size (bytes) in the named lowered function -- the witness a
+/// multi-capture materialization stack-allocates an env bundle (R16), distinct
+/// from the one-word inline env a single capture keeps.
+fn alloc_sizes(src: &str, func: &str) -> Vec<u32> {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = sooth::ir::lower(&module).expect("lower should succeed");
+    ir.funcs
+        .iter()
+        .find(|f| f.name == func)
+        .unwrap_or_else(|| panic!("function `{func}` should exist"))
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::Alloc(_, size, _) => Some(*size),
+            _ => None,
+        })
+        .collect()
+}
+
 // -- T-field: a quotation stored in a struct field, called back out ----------
 
 #[test]
@@ -391,6 +413,232 @@ fn times_over_erased_quotation_runs_constant_stack() {
         count_call_indirect(src),
         1,
         "a `times`-erased loop has exactly one indirect call, in the body"
+    );
+}
+
+// -- T-dispatch: an array of same-frame capturing closures, indexed and called
+
+#[test]
+fn dispatch_table_of_capturing_closures_runs() {
+    // Two closures, each capturing the shared frame borrow `r = &arr`, stored
+    // into distinct array slots (in-frame boundaries, R21) and indexed-and-
+    // `call`ed. Each reads a different element, so the table dispatches to the
+    // same values the spliced form would: `arr = [7, 8]` -> `7`, `8`.
+    let src = ": seed ( -- [ -- i64 ] ) [ 0 ] ;\n\
+               : main ( -- )\n\
+               7 2 fill | arr |\n\
+               &!arr 1 >usize &!> 8 !\n\
+               &arr | r |\n\
+               seed 2 fill | tbl |\n\
+               &!tbl 0 >usize &!> [ r 0 >usize &> @ ] !\n\
+               &!tbl 1 >usize &!> [ r 1 >usize &> @ ] !\n\
+               &tbl 0 &> @ call .\n\
+               &tbl 1 &> @ call .\n\
+               tbl drop\n\
+               arr drop ;\n";
+    let (stdout, code) = run_src("qdispatch", src);
+    assert_eq!(stdout, "7\n8\n");
+    assert_eq!(code, 0);
+    assert!(
+        emits_call_indirect(src),
+        "a dispatch through an erased capturing closure is an indirect call"
+    );
+}
+
+// -- T-lateread: a struct-stored closure observes a later mutation (D4) -------
+
+#[test]
+fn struct_stored_closure_observes_later_mutation() {
+    // The closure captures the mutable borrow `r = &!arr`, is erased into a
+    // struct field, then `arr` is mutated *through the same borrow* before the
+    // `call`. R20 keeps `r` live across the store, so the mutation is admitted
+    // and the late read observes it: the field is `9`, not the initial `0`.
+    let src = "type: Holder q [ -- i64 ] ;\n\
+               : main ( -- )\n\
+               0 2 fill | arr |\n\
+               &!arr | r |\n\
+               [ r 0 >usize &!> @ ] Holder | h |\n\
+               r 0 >usize &!> 9 !\n\
+               h Holder>q call .\n\
+               arr drop ;\n";
+    let (stdout, code) = run_src("qlateread", src);
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+    assert!(
+        emits_call_indirect(src),
+        "a fetch-and-call through the stored closure is an indirect call"
+    );
+}
+
+// -- T-lastuse: a captured referent killed before the call is past-last-use ---
+
+#[test]
+fn captured_reference_read_past_last_use_is_error() {
+    // The closure captures `r = &!arr`, erased into a struct field (R20 keeps
+    // `r` live to the `call`). A *separate* `&!arr` exclusive re-borrow before
+    // the call would read the referent through a stale borrow, so it is
+    // rejected: past-last-use (R24), naming `r`.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : main ( -- )\n\
+         0 2 fill | arr |\n\
+         &!arr | r |\n\
+         [ r 0 >usize &!> @ ] Holder | h |\n\
+         &!arr 0 >usize &!> 9 !\n\
+         h Holder>q call .\n\
+         arr drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: a captured reference to `r` is read after its last use (line 6)"
+    );
+    // Contrast (probe P4 `lateread_known`): the *same* mutation with the
+    // closure kept `Known` (never erased) is rejected as it is today -- a
+    // conflicting-borrow error, not the new past-last-use wording.
+    let known = check_error(
+        ": main ( -- )\n\
+         0 2 fill | arr |\n\
+         &!arr | r |\n\
+         [ r 0 >usize &!> @ ] | h |\n\
+         &!arr 0 >usize &!> 9 !\n\
+         h call .\n\
+         arr drop ;\n",
+    );
+    assert!(
+        known.contains("conflicts with a live borrow of `arr`"),
+        "the Known-closure contrast keeps the conflicting-borrow wording: {known}"
+    );
+    assert!(
+        !known.contains("read after its last use"),
+        "the Known contrast must not reach the past-last-use path: {known}"
+    );
+}
+
+// -- T-bundle: a two-capture in-frame closure stack-allocates its env bundle --
+
+#[test]
+fn materialized_multi_capture_builds_stack_bundle() {
+    // Two captures (`ra`, `rb`) cannot ride the one-word inline env, so the
+    // materialization stack-allocates a two-word bundle and points `env` at it
+    // (R16). Witness: `main` gains exactly one 16-byte `Alloc` over the
+    // otherwise-identical single-capture program (the quotation value and the
+    // `Holder` shell are the same 16 bytes in both; only the bundle is new).
+    // The run confirms both words are read back: `10 + 20 = 30`.
+    let two = "type: Holder q [ -- i64 ] ;\n\
+               : main ( -- )\n\
+               10 1 fill | a |\n\
+               20 1 fill | b |\n\
+               &a | ra |\n\
+               &b | rb |\n\
+               [ ra 0 >usize &> @ rb 0 >usize &> @ + ] Holder | h |\n\
+               h Holder>q call .\n\
+               a drop b drop ;\n";
+    let one = "type: Holder q [ -- i64 ] ;\n\
+               : main ( -- )\n\
+               10 1 fill | a |\n\
+               &a | ra |\n\
+               [ ra 0 >usize &> @ ] Holder | h |\n\
+               h Holder>q call .\n\
+               a drop ;\n";
+    let (stdout, code) = run_src("qbundle", two);
+    assert_eq!(stdout, "30\n");
+    assert_eq!(code, 0);
+    assert_eq!(
+        materialized_quot_params(two),
+        vec![IrType::Ptr],
+        "the two-capture body still takes one trailing Ptr env param (the bundle pointer)"
+    );
+    let bundles = |src| {
+        alloc_sizes(src, "main")
+            .into_iter()
+            .filter(|&s| s == 16)
+            .count()
+    };
+    assert_eq!(
+        bundles(two),
+        bundles(one) + 1,
+        "two captures add exactly one 16-byte env bundle alloc over one capture"
+    );
+}
+
+// -- T-carrier: a frame capture escaping through a returned struct is caught --
+
+#[test]
+fn frame_capture_escaping_via_struct_is_past_owning_frame() {
+    // The closure borrows `r = &arr`, a *frame* local of `make`, is stored into
+    // a `Holder` and the `Holder` is returned. The frame capture would outlive
+    // its storage, so the word-output escape guard (R22, walking the surviving
+    // set the carrier holds -- `contains_reference` is blind to the env)
+    // rejects it: past-owning-frame (R24), naming `r`.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : make ( -- Holder )\n\
+         0 2 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder ;\n\
+         : main ( -- ) make Holder>q call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure captures `r`, a local of this frame, whose storage does not survive the return (line 5)"
+    );
+}
+
+// -- T-join: two capturing arms join, the union rides the erased slot ---------
+
+#[test]
+fn join_of_two_capturing_arms_unions_capture_sets() {
+    // Two differing capturing literals joined and stored through a `&!Holder>q`
+    // referent (an in-frame boundary that types the erased join). Both arms
+    // capture `r = &arr`, so the merged closure reads it and, called, yields
+    // `arr[0] = 10`; the join dispatch is indirect.
+    let src = "type: Holder q [ -- i64 ] ;\n\
+               : main ( -- )\n\
+               10 2 fill | a |\n\
+               &a | r |\n\
+               [ 0 ] Holder | h |\n\
+               &!h &!Holder>q true if [ r 0 >usize &> @ ] else [ r 1 >usize &> @ ] end !\n\
+               h Holder>q call .\n\
+               a drop ;\n";
+    let (stdout, code) = run_src("qjoinunion", src);
+    assert_eq!(stdout, "10\n");
+    assert_eq!(code, 0);
+    assert!(
+        emits_call_indirect(src),
+        "the merged branch-join closure is indirect-called"
+    );
+}
+
+// -- T-join-union: killing *either* arm's referent is past-last-use -----------
+
+#[test]
+fn join_capture_union_kills_either_arm_referent_is_past_last_use() {
+    // Each arm captures a *distinct* borrow (`ra`, `rb`). The join interns the
+    // union of both (R23), so killing *either* referent before the `call` is a
+    // past-last-use. Both variants must fire: a "keep one arm's set" bug
+    // survives killing the kept arm but is caught by killing the other.
+    let program = |kill: &str| {
+        format!(
+            "type: Holder q [ -- i64 ] ;\n\
+             : main ( -- )\n\
+             10 2 fill | a |\n\
+             20 2 fill | b |\n\
+             &a | ra |\n\
+             &b | rb |\n\
+             [ 0 ] Holder | h |\n\
+             &!h &!Holder>q true if [ ra 0 >usize &> @ ] else [ rb 0 >usize &> @ ] end !\n\
+             &!{kill} 0 >usize &!> 9 !\n\
+             h Holder>q call .\n\
+             a drop b drop ;\n"
+        )
+    };
+    assert_eq!(
+        check_error(&program("a")),
+        "error: a captured reference to `ra` is read after its last use (line 9)"
+    );
+    assert_eq!(
+        check_error(&program("b")),
+        "error: a captured reference to `rb` is read after its last use (line 9)"
     );
 }
 

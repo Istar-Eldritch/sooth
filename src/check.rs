@@ -90,6 +90,27 @@ enum QuotRef {
     Known(QuotId),
 }
 
+/// 7b/R19: a `Copy` handle into `Provenance::surviving_sets`, the side table
+/// of capture sets that outlive erasure. When a capturing literal materialises
+/// at a boundary its `QuotRef::Known` marker is dropped (`quot: None`), so the
+/// aggregate/borrow captures whose referents must stay live past the call ride
+/// this id on the erased `Slot`/`Binding` instead. `Copy` (a `u32`, exactly as
+/// `QuotId`), so it does not cost `Slot` its `Copy` derive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SurvivingCaptureSetId(u32);
+
+/// 7b/R19: one member of a surviving capture set -- a captured aggregate-value
+/// or borrow name whose referent must outlive the closure's calls. A scalar
+/// snapshot is never a member (D4 amendment: a snapshot has no referent that
+/// can go dead). `frame_rooted` is the R15 classification: a capture rooted in
+/// a current-frame local (its storage dies at return), driving the R22
+/// word-output escape guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurvivingCapture {
+    name: String,
+    frame_rooted: bool,
+}
+
 /// One interned quotation literal: its body terms (spliced at `call`/`times`)
 /// and the literal's span, for a located diagnostic.
 #[derive(Debug, Clone)]
@@ -119,6 +140,12 @@ struct Slot {
     /// accepts rides alongside it; a shuffle forwards this verbatim (`Slot` is
     /// `Copy`), and `call`/`times` consume it by splicing the body.
     quot: Option<QuotRef>,
+    /// 7b/R19: the surviving capture set of an *erased* capturing quotation
+    /// (`quot: None`, `ty == Type::Quotation`), or of an aggregate carrying
+    /// one (a struct/array field holds a stored closure). `None` for every
+    /// non-quotation, non-carrier value. Forwarded verbatim by a shuffle
+    /// (`Slot` is `Copy`) and across a bind, exactly like `quot`.
+    surviving: Option<SurvivingCaptureSetId>,
 }
 
 impl Slot {
@@ -132,6 +159,7 @@ impl Slot {
             alias: None,
             deriv: None,
             quot: None,
+            surviving: None,
         }
     }
 
@@ -435,6 +463,13 @@ struct Provenance {
     /// is actually still live is a separate, per-query question answered by
     /// `capture_alive_names`, not baked in here.
     quotation_captures: Vec<HashSet<String>>,
+    /// 7b/R19: the side table of surviving capture sets, keyed by
+    /// `SurvivingCaptureSetId`, mirroring how `quotation_captures` stores
+    /// capture sets by `QuotId`. An erased capturing quotation's aggregate and
+    /// borrow captures (never its scalar snapshots) ride here so
+    /// `capture_alive_names` (R20) and the R22 escape guard can read them past
+    /// erasure, when the `QuotRef::Known` marker is gone.
+    surviving_sets: Vec<Vec<SurvivingCapture>>,
     /// R6/R14: the self-tail combinator currently being spliced (its name and
     /// its declared input arity), set for the duration of that body splice. A
     /// tail-position call to that same name reached inside the spliced body is
@@ -543,6 +578,42 @@ impl Provenance {
     /// The free names cached for quotation `id` at intern time (`capture_names`).
     fn quotation_captures(&self, id: QuotId) -> &HashSet<String> {
         &self.quotation_captures[id.0]
+    }
+
+    /// 7b/R19: the surviving capture set behind `id`.
+    fn surviving_set(&self, id: SurvivingCaptureSetId) -> &[SurvivingCapture] {
+        &self.surviving_sets[id.0 as usize]
+    }
+
+    /// 7b/R19: intern a surviving capture set, or `None` if it is empty (a
+    /// closure that snapshots only scalars keeps no `SurvivingCaptureSetId`).
+    fn intern_surviving_set(
+        &mut self,
+        mut members: Vec<SurvivingCapture>,
+    ) -> Option<SurvivingCaptureSetId> {
+        members.sort_by(|a, b| a.name.cmp(&b.name));
+        members.dedup();
+        if members.is_empty() {
+            return None;
+        }
+        let id = SurvivingCaptureSetId(self.surviving_sets.len() as u32);
+        self.surviving_sets.push(members);
+        Some(id)
+    }
+
+    /// 7b/R23: a fresh interned set holding the union of two surviving sets
+    /// (either or both may be absent). Never mutates an existing set in place,
+    /// so a joined value's set is independent of its arms'.
+    fn union_surviving(
+        &mut self,
+        a: Option<SurvivingCaptureSetId>,
+        b: Option<SurvivingCaptureSetId>,
+    ) -> Option<SurvivingCaptureSetId> {
+        let mut members: Vec<SurvivingCapture> = Vec::new();
+        for id in [a, b].into_iter().flatten() {
+            members.extend_from_slice(self.surviving_set(id));
+        }
+        self.intern_surviving_set(members)
     }
 
     fn add(&mut self, deriv: Deriv) -> DerivId {
@@ -700,6 +771,10 @@ struct Binding {
     /// bind is a *second*, explicit forwarding site: this field carries the
     /// marker across the bind and back onto the reconstructed slot.
     quot: Option<QuotRef>,
+    /// 7b/R19: the surviving capture set an erased quotation (or an aggregate
+    /// carrying one) holds, carried across the bind exactly like `quot` so a
+    /// stored-closure binding keeps its captures' referents live (R20).
+    surviving: Option<SurvivingCaptureSetId>,
 }
 
 impl Scope {
@@ -737,6 +812,7 @@ impl Scope {
             aliases,
             deriv: slot.deriv,
             quot: slot.quot,
+            surviving: slot.surviving,
         });
     }
 
@@ -1051,12 +1127,30 @@ fn releasable_into(
 ///
 /// Only ever *extends* what `live_derivs`/`aliasing_origin` already treat as
 /// live; it is never consulted to shorten anything (D1: monotone).
+/// 7b/R20: the same rule extended past erasure. A `Known` marker's captures
+/// come from `quotation_captures`; an *erased* closure (or an aggregate
+/// carrying one) has no marker, so `include_surviving` unions the names from
+/// its `surviving` set (R19) instead -- keeping a captured borrow's referent
+/// live exactly as the `Known` case does. `include_surviving = false` yields
+/// the pre-erasure (marker-only) view the R24 past-last-use check diffs
+/// against, so that check fires only for captures the surviving set added.
 fn capture_alive_names(
     stack: &[Slot],
     scope: &Scope,
     prov: &Provenance,
     live: &Liveness,
     at: usize,
+) -> HashSet<String> {
+    capture_alive_names_impl(stack, scope, prov, live, at, true)
+}
+
+fn capture_alive_names_impl(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    include_surviving: bool,
 ) -> HashSet<String> {
     let mut alive: HashSet<String> = HashSet::new();
     let mut changed = true;
@@ -1070,21 +1164,71 @@ fn capture_alive_names(
                     }
                 }
             }
+            // A stack-resident value is unconditionally live: an erased
+            // closure (or carrier) there keeps its surviving captures alive.
+            if include_surviving {
+                if let Some(set) = slot.surviving {
+                    for member in prov.surviving_set(set) {
+                        if alive.insert(member.name.clone()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
         for b in &scope.bound {
             let base_alive = !live.dead(&b.name, at);
-            if let (true, Some(QuotRef::Known(id))) =
-                (base_alive || alive.contains(&b.name), b.quot)
-            {
+            let alive_here = base_alive || alive.contains(&b.name);
+            if let (true, Some(QuotRef::Known(id))) = (alive_here, b.quot) {
                 for name in prov.quotation_captures(id) {
                     if alive.insert(name.clone()) {
                         changed = true;
                     }
                 }
             }
+            if include_surviving && alive_here {
+                if let Some(set) = b.surviving {
+                    for member in prov.surviving_set(set) {
+                        if alive.insert(member.name.clone()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
         }
     }
     alive
+}
+
+/// 7b/R24: if the reference-local holding derivation `id` is dead by ordinary
+/// liveness (its last syntactic use is past) and is kept alive *only* by an
+/// erased closure's surviving-set union (R20) -- not by a still-`Known` marker
+/// -- return its name. This is the signal that a conflicting borrow/consume of
+/// its referent is reading a captured reference past its last use, so the
+/// past-last-use wording (R24) applies instead of the generic
+/// conflicting-borrow one. Dropping R20's union empties the `full` set, so this
+/// returns `None` and the rejection disappears entirely (mutation test M2).
+fn past_last_use_capture(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    id: DerivId,
+) -> Option<String> {
+    let holder = scope.bound.iter().find(|b| b.deriv == Some(id))?;
+    if !live.dead(&holder.name, at) {
+        return None;
+    }
+    let full = capture_alive_names_impl(stack, scope, prov, live, at, true);
+    if !full.contains(&holder.name) {
+        return None;
+    }
+    let known = capture_alive_names_impl(stack, scope, prov, live, at, false);
+    if known.contains(&holder.name) {
+        return None;
+    }
+    Some(holder.name.clone())
 }
 
 /// Every derivation still live — held by a slot on the virtual stack, or by
@@ -3691,6 +3835,23 @@ fn check_terms_word(
             }
         }
     }
+    // R22: the word-output escape guard. A returned *carrier* -- a struct or
+    // array whose surviving set (R19) picked up a frame-rooted capture at an
+    // in-frame store -- would let that capture's frame storage die at return
+    // while the stored closure still points into it. `contains_reference`
+    // (`check.rs:285`) is a shallow structural walk blind to the erased env, so
+    // this is a targeted walk over each returned slot's surviving set. A
+    // directly-returned closure with a frame capture never reaches here: its
+    // "be returned" boundary already raised past-owning-frame (escaping).
+    if let Some(exit) = terms.last().map(|t| t.span) {
+        for slot in &final_stack {
+            if let Some(set) = slot.surviving {
+                if let Some(member) = prov.surviving_set(set).iter().find(|m| m.frame_rooted) {
+                    return Err(past_owning_frame_error(&ctx, exit, &member.name));
+                }
+            }
+        }
+    }
     dropped.append(&mut prov.dropped);
 
     check_outputs(word, &final_stack, &declared, line, structs, enums, arrays)?;
@@ -6207,6 +6368,19 @@ fn past_owning_frame_error(ctx: &Ctx, span: Span, name: &str) -> String {
     )
 }
 
+/// R24: a captured reference is read after its referent's last use -- the
+/// referent is consumed or exclusively re-borrowed while an erased closure
+/// still holds a borrow of it (kept live past the store by R20's surviving-set
+/// union). Fires only for a capture the surviving set added; a still-`Known`
+/// closure or a genuinely-live borrow keeps `conflicting_borrow_error`.
+fn past_last_use_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    let _ = ctx;
+    format!(
+        "error: a captured reference to `{name}` is read after its last use (line {})",
+        span.line,
+    )
+}
+
 /// R18: an escaping closure captures more than one value. Phase 1 stores a
 /// single word-sized capture inline in the `env` slot; a 2+-capture escaping
 /// closure needs a heap env, deferred with the rest of the heap-env case.
@@ -6225,17 +6399,6 @@ fn captured_quotation_name_deferred_error(ctx: &Ctx, span: Span) -> String {
     let _ = ctx;
     format!(
         "error: capturing a quotation value by name is deferred (line {})",
-        span.line,
-    )
-}
-
-/// A same-frame aggregate/borrow capture at an *in-frame* boundary: admissible
-/// only under Phase 2's surviving-capture-set liveness (R21), deferred here in
-/// the Phase-1 floor (which builds no surviving set).
-fn same_frame_capture_deferred_error(ctx: &Ctx, span: Span, name: &str) -> String {
-    let _ = ctx;
-    format!(
-        "error: capturing `{name}`, a local of this frame, in a stored closure is deferred (line {})",
         span.line,
     )
 }
@@ -6289,28 +6452,34 @@ fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) -> CaptureCla
 /// on capture kind (D3's cached free-name set is the source, no new analysis):
 /// a scalar snapshot admits everywhere; an outer-rooted aggregate/borrow admits
 /// everywhere; a frame-rooted one is past-owning-frame at a word-output
-/// boundary and deferred to Phase 2 at an in-frame one; a captured
-/// quotation-typed name is deferred everywhere. Phase 1's inline env holds a
-/// single word, so a 2+-capture closure is deferred.
+/// boundary (R24) and admitted at an in-frame one (R21, Phase 2); a captured
+/// quotation-typed name is deferred everywhere (case 4). An escaping closure's
+/// inline env holds one word, so a 2+-capture escaping closure is deferred
+/// (R18); an in-frame one takes a stack bundle (R16), so 2+ is admitted.
+///
+/// Returns the interned surviving capture set (R19): the admitted
+/// aggregate/borrow captures whose referents must outlive the closure's calls,
+/// each tagged frame-rooted (for the R22 escape guard). A scalar-only closure
+/// returns `None` -- a snapshot has no referent that can go dead.
 fn check_capture_admission(
     id: QuotId,
     escaping: bool,
     span: Span,
     ctx: &Ctx,
-    prov: &Provenance,
+    prov: &mut Provenance,
     scope: &Scope,
-) -> Result<(), String> {
+) -> Result<Option<SurvivingCaptureSetId>, String> {
     // Only names bound in the enclosing scope are real captures; a free global
     // word resolves at the call and needs no env.
-    let mut names: Vec<&str> = prov
+    let mut names: Vec<String> = prov
         .quotation_captures(id)
         .iter()
         .filter(|n| scope.local(n).is_some())
-        .map(|n| n.as_str())
+        .cloned()
         .collect();
     names.sort_unstable();
     if names.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     // Case 4: a captured quotation-typed name (a `Known` literal, `quot.is_some()`,
     // or an already-erased `Type::Quotation`) is deferred at every boundary.
@@ -6320,18 +6489,37 @@ fn check_capture_admission(
             return Err(captured_quotation_name_deferred_error(ctx, span));
         }
     }
-    // Phase 1's env holds one word inline; 2+ captures need the bundle (in-frame,
-    // Phase 2) or a heap env (escaping, deferred).
-    if names.len() >= 2 {
+    // Classify each capture and, for an aggregate/borrow one, record it as a
+    // surviving-set member (R19). A scalar snapshot is never a member (D4
+    // amendment); a frame-rooted capture escaping a word-output boundary is
+    // rejected here (R24) before any set is built (make-a).
+    let mut members: Vec<SurvivingCapture> = Vec::new();
+    for name in &names {
+        let b = scope.local(name).expect("filtered to a bound name");
+        match classify_capture(b, prov, scope) {
+            CaptureClass::Scalar => {}
+            CaptureClass::FrameRooted => {
+                if escaping {
+                    return Err(past_owning_frame_error(ctx, span, name));
+                }
+                members.push(SurvivingCapture {
+                    name: name.clone(),
+                    frame_rooted: true,
+                });
+            }
+            CaptureClass::OuterRooted => members.push(SurvivingCapture {
+                name: name.clone(),
+                frame_rooted: false,
+            }),
+        }
+    }
+    // R18: an escaping closure's inline env holds one word; a 2+-capture
+    // escaping closure needs a heap env, deferred. An in-frame one takes the
+    // stack bundle (R16), so any count is admitted.
+    if escaping && names.len() >= 2 {
         return Err(multi_capture_escaping_error(ctx, span));
     }
-    let name = names[0];
-    let b = scope.local(name).expect("filtered to a bound name");
-    match classify_capture(b, prov, scope) {
-        CaptureClass::Scalar | CaptureClass::OuterRooted => Ok(()),
-        CaptureClass::FrameRooted if escaping => Err(past_owning_frame_error(ctx, span, name)),
-        CaptureClass::FrameRooted => Err(same_frame_capture_deferred_error(ctx, span, name)),
-    }
+    Ok(prov.intern_surviving_set(members))
 }
 
 /// R7/R15/D4: a materialization boundary. Materialize a non-capturing `Known`
@@ -6360,14 +6548,22 @@ fn materialize_quotation_at_boundary(
 ) -> Result<Slot, String> {
     let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let body = prov.quotations[id.0].body.clone();
-    if body_captures_enclosing(&body, &enclosing) {
+    let surviving = if body_captures_enclosing(&body, &enclosing) {
         let escaping = matches!(boundary, "be returned" | "be left on a branch");
-        check_capture_admission(id, escaping, span, ctx, prov, scope)?;
-    }
+        check_capture_admission(id, escaping, span, ctx, prov, scope)?
+    } else {
+        None
+    };
     check_literal_against_declared_effect(
         id, eff, word, span, ctx, env, arrays, cells, refs, prov, scope, poly,
     )?;
-    Ok(Slot::computed(Type::Quotation(eff)))
+    // R19: the erased slot carries the surviving capture set in place of the
+    // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
+    // R22 escape guard read once the identity is gone.
+    Ok(Slot {
+        surviving,
+        ..Slot::computed(Type::Quotation(eff))
+    })
 }
 
 /// R10/R21: a quotation parameter position whose argument is not a quotation
@@ -6723,6 +6919,7 @@ fn check_term(
                 alias: None,
                 deriv: None,
                 quot: None,
+                surviving: None,
             });
             Ok(stack)
         }
@@ -6764,8 +6961,13 @@ fn check_term(
         }
         TermKind::Call(name) => {
             if let Some(binding) = scope.local(name) {
-                let (ty, aliases, held, quot) =
-                    (binding.ty, binding.aliases, binding.deriv, binding.quot);
+                let (ty, aliases, held, quot, surviving) = (
+                    binding.ty,
+                    binding.aliases,
+                    binding.deriv,
+                    binding.quot,
+                    binding.surviving,
+                );
                 match ref_parts(ty, refs) {
                     // Naming a reference local is a reborrow, not a move.
                     // A mutable one suspends its place: a second reborrow while
@@ -6828,6 +7030,10 @@ fn check_term(
                         stack.push(Slot {
                             alias: aliases.map(|set| Alias { set, span }),
                             quot,
+                            // 7b/R19: forward a stored closure's (or its
+                            // carrier's) surviving set across the read so the
+                            // captured referents stay live to the call.
+                            surviving,
                             ..Slot::computed(ty)
                         });
                     }
@@ -7053,6 +7259,23 @@ fn check_term(
                         )?;
                     }
                 }
+                // R19/R22: storing an erased closure through a `&!` referent
+                // makes the referent's owning aggregate its carrier -- the
+                // surviving set rides onto that root binding so the captures
+                // stay live to a later fetch-and-`call` (R20) and cannot
+                // silently escape by returning the aggregate (R22).
+                if let Some(set) = stack[vi].surviving {
+                    let root = stack[vi - 1]
+                        .deriv
+                        .and_then(|did| prov.deriv(did).owned_root.clone());
+                    if let Some(root) = root {
+                        let existing = scope.local(&root).and_then(|b| b.surviving);
+                        let unioned = prov.union_surviving(existing, Some(set));
+                        if let Some(b) = scope.bound.iter_mut().find(|b| b.name == root) {
+                            b.surviving = unioned;
+                        }
+                    }
+                }
             }
             if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
                 return Ok(stack);
@@ -7207,8 +7430,26 @@ fn check_term(
                 check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
             }
+            // R19/R22: a struct/enum constructor consuming an erased closure
+            // becomes its carrier -- the surviving capture set rides onto the
+            // aggregate output so the captures stay live (R20) and the
+            // word-output escape guard (R22) can see a frame capture leaving
+            // through the carrier. The union is `None` for the overwhelming
+            // majority of calls (no closure argument), a no-op there.
+            let carried = (base..stack.len())
+                .fold(None, |acc, i| prov.union_surviving(acc, stack[i].surviving));
             stack.truncate(base);
-            stack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
+            for ty in &sig.outputs {
+                let surviving = if carried.is_some() && ty.is_aggregate() {
+                    carried
+                } else {
+                    None
+                };
+                stack.push(Slot {
+                    surviving,
+                    ..Slot::computed(*ty)
+                });
+            }
             Ok(stack)
         }
         TermKind::If {
@@ -7315,38 +7556,58 @@ fn check_term(
                 // placeholder makes an arm's real `Cstr` compare equal to a
                 // quotation, so the ordinary `ty` mismatch below never catches
                 // the one-quotation shape; this guard has both phrasings.
-                let (quot, erased_ty) = match (t_then.quot, t_else.quot) {
-                    (None, None) => (None, None),
+                let (quot, erased_ty, surviving) = match (t_then.quot, t_else.quot) {
+                    (None, None) => (
+                        None,
+                        None,
+                        prov.union_surviving(t_then.surviving, t_else.surviving),
+                    ),
                     (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
-                        (Some(QuotRef::Known(a)), None)
+                        (Some(QuotRef::Known(a)), None, None)
                     }
                     (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) => {
                         // R11 ordering pin: the capture admission runs before
                         // the id/expected-type resolution, so a rejected
                         // capturing arm raises R15 rather than falling through
-                        // to `different_quotations_at_join_error`. A join feeds
-                        // the declared word output, so it is an escaping
-                        // boundary (R15).
+                        // to `different_quotations_at_join_error`. `escaping`
+                        // is true only at a word-body tail (the join feeds the
+                        // declared output); an in-frame join whose expected
+                        // type comes from a consumer is not escaping.
+                        let escaping = tail;
                         let enclosing: HashSet<String> =
                             scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
+                        let mut arm_sets: Vec<SurvivingCaptureSetId> = Vec::new();
                         for id in [a, b] {
                             let body = prov.quotations[id.0].body.clone();
                             if body_captures_enclosing(&body, &enclosing) {
                                 let span = prov.quotations[id.0].span;
-                                check_capture_admission(id, true, span, ctx, prov, scope)?;
+                                if let Some(set) =
+                                    check_capture_admission(id, escaping, span, ctx, prov, scope)?
+                                {
+                                    arm_sets.push(set);
+                                }
                             }
                         }
                         // The expected quotation type threaded from the
-                        // enclosing declared context: at a word-body tail the
+                        // enclosing declared context. At a word-body tail the
                         // merged slot maps to the declared output at index `i`.
-                        // Without one the join cannot give the erased value a
-                        // type, so it stays a located error.
+                        // Otherwise the join may feed an in-frame store
+                        // `&!ref if..end !`, whose `&!Quotation` referent sits
+                        // directly below the merged slot and gives the erased
+                        // value its type (the "or field" the diagnostic
+                        // promises); an in-frame boundary is not escaping, so
+                        // the R21 admission above already ran with `escaping =
+                        // tail = false`. Without either the join cannot type the
+                        // erased value, so it stays a located error.
                         let expected = if tail {
                             ctx.declared_outputs()
                                 .and_then(|outs| outs.get(i))
                                 .map(|slot| slot.ty)
                         } else {
-                            None
+                            i.checked_sub(1)
+                                .and_then(|below| ref_parts(then_stack[below].ty, refs))
+                                .map(|(referent, _)| referent)
+                                .filter(|t| matches!(t, Type::Quotation(_)))
                         };
                         match expected {
                             Some(Type::Quotation(eff)) => {
@@ -7361,9 +7622,16 @@ fn check_term(
                                     b, eff, word, b_span, ctx, env, arrays, cells, refs, prov,
                                     scope, poly,
                                 )?;
+                                // R23: the merged erased slot's surviving set is
+                                // the union of both arms' -- a fresh interned
+                                // set, never a mutation of either arm's (keeps
+                                // the field `Copy`-compatible).
+                                let merged_set = arm_sets
+                                    .into_iter()
+                                    .fold(None, |acc, s| prov.union_surviving(acc, Some(s)));
                                 // Erased: a runtime `(code, env)` value with a
                                 // real `Type::Quotation`, no `Known` marker.
-                                (None, Some(Type::Quotation(eff)))
+                                (None, Some(Type::Quotation(eff)), merged_set)
                             }
                             _ => return Err(different_quotations_at_join_error(ctx, span)),
                         }
@@ -7429,6 +7697,8 @@ fn check_term(
                     deriv,
                     // R7: only a marker both arms agree on survives the join.
                     quot,
+                    // R23: the union of both arms' surviving capture sets.
+                    surviving,
                 });
             }
             Ok(merged)
@@ -8354,6 +8624,15 @@ fn check_reference_word(
             if let Some(id) = live_deriv(stack, scope, prov, live, at, |d| {
                 d.owned_root.as_deref() == Some(rest) && (mutable || d.mutable)
             }) {
+                // R24: if the conflicting borrow is live *only* because an
+                // erased closure's surviving set keeps its holder alive past
+                // its last syntactic use (R20), this borrow reads a captured
+                // reference past that last use -> past-last-use, naming the
+                // captured reference. A still-`Known` closure or a genuinely
+                // live borrow keeps the conflicting-borrow wording.
+                if let Some(captured) = past_last_use_capture(stack, scope, prov, live, at, id) {
+                    return Err(past_last_use_error(ctx, span, &captured));
+                }
                 return Err(conflicting_borrow_error(
                     ctx,
                     span,
@@ -9227,6 +9506,7 @@ mod tests {
             aliases: None,
             deriv,
             quot: None,
+            surviving: None,
         }
     }
 
@@ -9317,33 +9597,40 @@ mod tests {
         let span = Span { line: 1, col: 1 };
         let mut arrays: Vec<ArrayDecl> = Vec::new();
         let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
-        let admit = |prov: &Provenance, escaping, scope: &Scope| {
+        let admit = |prov: &mut Provenance, escaping, scope: &Scope| {
             check_capture_admission(QuotId(0), escaping, span, &ctx, prov, scope)
         };
 
         // No real capture: an empty set, and a free global not in scope, both
         // admit (a free word resolves at the call and needs no env).
-        assert!(admit(&prov_with(&[]), true, &Scope::default()).is_ok());
-        assert!(admit(&prov_with(&["some-word"]), true, &Scope::default()).is_ok());
+        assert!(admit(&mut prov_with(&[]), true, &Scope::default()).is_ok());
+        assert!(admit(&mut prov_with(&["some-word"]), true, &Scope::default()).is_ok());
 
-        // A single scalar capture admits at every boundary.
+        // A single scalar capture admits at every boundary and, being a
+        // snapshot, contributes no surviving-set member (R19 / D4 amendment).
         let mut scope = Scope::default();
         scope.bound.push(capture_binding("x", Type::I64, None));
-        assert!(admit(&prov_with(&["x"]), true, &scope).is_ok());
+        assert_eq!(admit(&mut prov_with(&["x"]), true, &scope), Ok(None));
 
-        // A frame-rooted aggregate is past-owning-frame when escaping, and
-        // deferred to Phase 2 at an in-frame store.
+        // A frame-rooted aggregate is past-owning-frame when escaping (R24),
+        // and admitted in-frame (R21) with a frame-rooted surviving member.
         let mut scope = Scope::default();
         scope.bound.push(capture_binding("arr", arr_ty, None));
-        let escaping = admit(&prov_with(&["arr"]), true, &scope).unwrap_err();
+        let escaping = admit(&mut prov_with(&["arr"]), true, &scope).unwrap_err();
         assert!(
             escaping.contains("`arr`") && escaping.contains("does not survive the return"),
             "escaping frame-rooted capture is past-owning-frame: {escaping}"
         );
-        let in_frame = admit(&prov_with(&["arr"]), false, &scope).unwrap_err();
+        let mut prov = prov_with(&["arr"]);
+        let set = admit(&mut prov, false, &scope)
+            .expect("in-frame frame capture admits (R21)")
+            .expect("an aggregate capture is a surviving-set member");
+        let members = prov.surviving_set(set);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "arr");
         assert!(
-            in_frame.contains("`arr`") && in_frame.contains("in a stored closure is deferred"),
-            "in-frame frame-rooted capture is deferred: {in_frame}"
+            members[0].frame_rooted,
+            "an in-frame aggregate is frame-rooted"
         );
 
         // Case 4: a quotation-typed name is deferred at every boundary.
@@ -9354,22 +9641,28 @@ mod tests {
             aliases: None,
             deriv: None,
             quot: Some(QuotRef::Known(QuotId(0))),
+            surviving: None,
         });
-        let quot_name = admit(&prov_with(&["q"]), true, &scope).unwrap_err();
+        let quot_name = admit(&mut prov_with(&["q"]), true, &scope).unwrap_err();
         assert!(
             quot_name.contains("capturing a quotation value by name is deferred"),
             "a captured quotation-typed name is deferred: {quot_name}"
         );
 
-        // Two captures need a bundle/heap env, deferred in Phase 1's one-word
-        // inline env.
+        // Two scalar captures escaping need a heap env, deferred (R18); the
+        // same two admit in-frame as a stack bundle (R16, R21).
         let mut scope = Scope::default();
         scope.bound.push(capture_binding("x", Type::I64, None));
         scope.bound.push(capture_binding("y", Type::I64, None));
-        let multi = admit(&prov_with(&["x", "y"]), true, &scope).unwrap_err();
+        let multi = admit(&mut prov_with(&["x", "y"]), true, &scope).unwrap_err();
         assert!(
             multi.contains("at most one reference"),
             "a 2+-capture escaping closure is deferred: {multi}"
+        );
+        assert_eq!(
+            admit(&mut prov_with(&["x", "y"]), false, &scope),
+            Ok(None),
+            "two scalar captures admit in-frame with no surviving members"
         );
     }
 
