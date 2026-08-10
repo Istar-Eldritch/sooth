@@ -99,25 +99,59 @@ combinator today relies on that as an unstated guarantee. `~` states it, which t
 row-bearing quotation must never reach an erasure boundary" from a rule bolted onto four
 call sites into a structural impossibility.
 
-**Representation: the poly layer only. No new `Type` variant.** `~` is recorded on
-`PolyType::Quotation` (`src/ast.rs:622`) and a `~` effect **never folds to
-`Concrete(Type::Quotation)`** — the fold at `src/parser.rs:1362` is suppressed for it even
-when the effect is fully concrete. `Type` therefore never grows a `~` case, and the three
-`materialize_quotation_at_boundary` call sites plus the one `if`-join erasure site all key
-on `Type::Quotation`, so none of them can fire on a `~` value. That is R2's "unreachable by
-construction", obtained without touching a single one of the 62 `Type::Quotation` match
-sites in `src/check.rs` or the 34 in `src/ir.rs`.
+**Representation: a distinct `Type` variant, `Type::InlineQuotation(&'static QuotEffect)`,
+mirroring `Type::Quotation` (`src/ast.rs:821`).** `PolyType::Quotation` carries a `~` flag
+and grounds to `InlineQuotation` instead of `Quotation`.
 
-The alternative representations were both rejected: a flag *inside* `Type::Quotation` still
-matches every `matches!(_, Type::Quotation(_))` guard, so the erasure sites would need the
-bolted-on runtime check R2 forbids; a separate `Type` variant delivers the guarantee but
-turns all 96 existing match sites into silent non-matches, where a guard stops firing with
-no error and no failing test — the exact under-delivery shape this project has shipped
-before.
+*Two earlier designs were tried and both are dead; recording why, because the reasoning is
+the requirement.*
 
-The `~` parameter's stack slot follows the existing quotation-marker idiom (`Slot.quot`,
-`src/check.rs:213-218`): the marker carries the identity of the literal body, and splicing
-consumes it. This is how quotation parameters already work; `~` adds no new slot mechanism.
+The first was **poly-layer-only** — record `~` on `PolyType` and suppress the fold to
+`Concrete(Type::Quotation)`, so `Type` never grows a case and no existing match site is
+touched. It is **false**. `check_poly_combinator_standalone` (`src/check.rs:4856-4917`)
+checks a poly combinator's body by calling `apply_subst` on every declared input, quotation
+ones included (`:4877-4881`), and hands the result to the ordinary monomorphic `check_word`
+via a stand-in `WordDef` with `poly: None` (`:4901`). `apply_subst`'s Quotation arm returns
+`crate::ast::quotation_type(...)` — a real `Type::Quotation` (`:5989-5998`). So a `~`
+parameter *does* get a concrete `Type`, on exactly the path this slice lives on: checking a
+combinator's own body at its definition, which is R8 context 3. The `WordDef.poly`/`effect`
+invariant (`src/ast.rs:565-576`) governs a word's *declared* effect, not the synthetic one
+this function manufactures.
+
+The second was a **value-level `inline_only` flag on `Slot`**, beside `quot`/`surviving`.
+Rejected because it fails in the wrong direction: the flag is lost by any `Slot`
+construction that does not forward it — and `Slot::computed` is used everywhere — so a
+dropped flag silently turns a `~` into an ordinary quotation, with no error and no failing
+test. That is the exact defect this codebase has already hit twice with `surviving`
+(`d1b3f0a`, `bee407c`, plus the aggregate-carrier gap R13 guards). It also leaves **R3 with
+no structural enforcement at all**, since type equality cannot see a slot flag, so
+"an ordinary `[ ... ]` must not become a `~`" would have to be hand-checked at every type
+comparison — a surface that is not enumerable, and one where `match_slot`'s `Exact` path
+already accepts an erased quotation by plain equality (`:8556-8558`).
+
+The distinct variant was rejected earlier on a cost estimate of "96 silent non-match
+sites". That estimate was wrong by a factor of thirty, measured by adding the variant and
+compiling: **three** errors, all in exhaustive matches, all arms worth writing anyway —
+`Type::name()` (`src/ast.rs:1067`, the `~[ ... ]` spelling R9 needs), `type_node()`
+(`src/check.rs:3316`, `None`: a `~` is never a field), and `ir_type_of()`
+(`src/ir.rs:219`, `unreachable!()`: a `~` never reaches the backend, so this becomes a loud
+leak detector rather than silent wrong codegen).
+
+What the variant buys, and neither alternative could: **R3 free and exact**, because `Type`
+derives structural `PartialEq` (`src/ast.rs:820`), so `InlineQuotation(e) != Quotation(e)`
+and every existing equality check rejects the mix without being told; and **R2 genuinely
+structural**, because the materialize sites fire on `if let Type::Quotation(eff) = *want`
+(`:4489`, `:8552`), which a `~` value cannot satisfy, so it is rejected by type inequality
+*before* the boundary rather than at it.
+
+The cost is an audit of the ~21 `matches!`/`if let` sites on `Type::Quotation` in
+`src/check.rs`, which become silent non-matches. They split three ways and phase 1 must
+dispose of each explicitly: the **enabling** sites must be extended to accept `~` and break
+loudly if missed (`call` `:8165`, the `times` path `:8220`, the abstract-forward arms
+`:7115`/`:7275`); the **erasure** sites fail closed and are left alone (`:4489`, `:8552`,
+`:8773`, `:8776`, `:8797`); and the **aggregate-field rejections** are the genuine fail-open
+risk, where a `~` declared as a struct field or array element would slip past a check naming
+only `Type::Quotation` (`:1873`, `:1899`, `:1925`, `:1942`, `:1947`, `:2032`).
 
 **Adjacency is required.** `~[` is a single lexer token. `~` is not currently a delimiter
 (`is_delimiter`, `src/lexer.rs:25`), so without a token `~[` would arrive as `Word("~")`
@@ -174,18 +208,22 @@ moves — re-anchor before editing.
 | Concern | Location | Notes |
 | --- | --- | --- |
 | Lexer delimiters | `is_delimiter` `src/lexer.rs:25` | `~` is not one; R1 adds the `~[` token here. |
-| Poly quotation parse | `parse_poly_quotation` `src/parser.rs:1251` (opens with `expect(LBracket)` `:1252`); called from `:1253`/`:1255`; `RawTy::Quotation` declared `:641`, constructed `:1257` | Serves polymorphic signatures. |
+| Poly quotation parse | `parse_poly_quotation` `src/parser.rs:1251` (opens with `expect(LBracket)` `:1252`); called from `:1253`/`:1255`; `RawTy::Quotation` declared `:641`, constructed `:1257` | Serves polymorphic signatures. The `~[` token has already eaten the bracket, so R1 needs an inner entry point. |
+| **Poly/mono routing** | `effect_has_variable` `src/parser.rs:1138-1149` | Scans for a `Token::Word` starting with `'` or `..`. A `~[` token matches **neither**, so R1 must extend it or a `~`-only signature falls to the mono parser. |
 | **Concrete** quotation parse | `parse_quotation_type_expr` `src/parser.rs:1451` | The **second** parse path: mono signatures, struct fields, ref/cell referents, externs. R1 covers both. |
 | Nested slot parse | `parse_poly_slot` `src/parser.rs:1208` | Where the `~` sigil is dispatched, and where the row `..` branch is added (R4). |
 | Top-level row parse | `parse_poly_slots` `src/parser.rs:1178`; `PolyBuilder` `:662` (`row_in` `:669`, `row_out` `:670`); `set_row` `:676`; `row_var_misplaced_error` `:747`, fired `:1197` | A later `..` in a slot list is already a located error. |
-| Raw → poly fold | `raw_to_poly_type` `src/parser.rs:1346`, Quotation arm `:1362`; `RawTy` `:634` | A fully-concrete effect folds to `Concrete(Type::Quotation)`. **Suppressed for `~`** (R1). |
+| Raw → poly fold | `raw_to_poly_type` `src/parser.rs:1346`, Quotation arm `:1362`; `RawTy` `:634` | A fully-concrete effect folds to `Concrete(Type::Quotation)`; a `~` one folds to `Concrete(Type::InlineQuotation)` (R1). |
 | Poly representation | `PolyType::Quotation` `src/ast.rs:622`; `PolySig` `:629` (`row_in` `:631`, `row_out` `:636`, `row_var_names` `:640`); `QuotEffect` `:889`; `Bound` `:594` | Where both `~` and the row live. `QuotEffect` needs no row field (recon 5). |
+| **`Type` and its exhaustive matches** | `Type` `src/ast.rs:821` (derives `Copy, PartialEq, Eq` `:820`); `Type::Quotation` the last variant. Adding `InlineQuotation` breaks exactly three: `Type::name()` `src/ast.rs:1067`, `type_node()` `src/check.rs:3316`, `ir_type_of()` `src/ir.rs:219` | Measured by compiling, not estimated. R1's representation. |
+| **Silent `Type::Quotation` sites (~21)** | enabling: `:8165` (`call`), `:8220` (`times`), `:7115`/`:7275` (abstract forward). erasure, fail closed: `:4489`, `:8552`, `:8773`, `:8776`, `:8797`. aggregate-field rejections, fail **open**: `:1873`, `:1899`, `:1925`, `:1942`, `:1947`, `:2032`. misc: `:5696`, `:6937`, `:7591`, `:8478`, `:8605`, `:1947`, `:2032` | Phase 1's explicit audit list (R2). `matches!`/`if let` forms the compiler cannot flag. |
 | Pointwise unify | `unify_poly_input` `src/check.rs:5845`, Quotation arm `:5912`, arity check `:5922` | Row must be excluded from the pairwise arity. |
 | Grounding a declared effect | `apply_subst` `src/check.rs:5963`, Quotation arm `:5989`; `quotation_type` `src/ast.rs:895` | Returns an **interned** `&'static QuotEffect`. Not the place to splice a caller region (R8). |
 | Splice-site checks | `check_poly_combinator_args` `src/check.rs:7226` (`n` `:7240`, `base` `:7244`, Pass 2 `:7262-7289`, `apply_subst` `:7267`, literal check `:7272`, abstract arm `matches!` `:7275`, comparison `:7280`); `check_literal_against_declared_effect` `:7301` (`fresh` sub-stack `:7331`, exit row `:7367`) | The caller holds `stack` and `base`; the callee does not. R8's plumbing point is the **callee**. |
 | Mono declared-parameter path | `src/check.rs:7102-7118` (`:7112` the non-poly caller) | Handles quotation parameters without going through `check_poly_combinator_args`. R8 context 4. |
 | Combinator dispatch | `check_term` `src/check.rs:8000`; `is_combinator` `:6921`; `has_self_tail_call` `:3943`; `check_combinator_cycles` `:6966`; `inline_combinator` `:7076` | Combinators mint no `IrFunc`; spliced per call site, so a row is concrete at every splice. |
-| Self-tail back-edge | `SelfTailMarker` `src/check.rs:648`; set `:7178`; matched `:8452-8456`; arm `:8441-8484`; **`outs` construction `:8476-8480`** | Phase 4 rewrites `:8476-8480`. |
+| Self-tail back-edge | `SelfTailMarker` `src/check.rs:647-651` (carries only `name`, `input_count`); set in `inline_combinator` `:7175-7180`; matched `:8452-8456`; arm `:8441-8484`; **`outs` construction `:8476-8480`** | Phase 4 rewrites `:8476-8480` and **extends the marker** with the ground outputs and index map (R10). |
+| Sources for the ground outputs | standalone stand-in `effect.outputs` already ground `src/check.rs:4882-4886`; poly splice `Subst` computed `:7249` and **discarded** | R10 must return the `Subst` rather than drop it. |
 | Back-edge guards | `check_linear_across_back_edge` `src/check.rs:6762` (invoked `:8469`); `check_reference_across_back_edge` `:6741` (invoked `:8471`) | Run unchanged (**R12**). |
 | Erasure boundaries (4) | `materialize_quotation_at_boundary` def `src/check.rs:7644`, called at `:4492` (word output), `:8357` (`!`/`+!` store through a ref), `:8554` (declared parameter); `if`-join erasure `:8797-8806` | The complete audit list for R2. All four key on `Type::Quotation`. |
 | Surviving set | `Slot` `src/check.rs:194`, `quot` `:213-218`, `surviving` `:219-224`; `Slot::computed` `:224-234` (sets `quot: None, surviving: None`); `union_surviving` `:844` (called from the join `:8726`); `intern_surviving_set` `:826` | Phase 5's subject. Forwarding pattern to follow: `d1b3f0a`, `bee407c`. |
@@ -208,34 +246,50 @@ declared signature, per the project's diagnostics-are-behaviour convention.
 `Type`, and forces its word poly.** A signature mentioning `~` sets
 `WordDef.poly = Some(..)` and leaves `WordDef.effect` empty, exactly as a signature
 mentioning a row variable already does (`src/ast.rs:565-576`) and for exactly the same
-reason: neither a row nor a `~` can be forced into a concrete `Type` slot. This is what
-makes the rest of R1 consistent — a `~` never needs a `Type` because a `~`-bearing word
-never takes a concrete path.
+reason as its effect: it is part of the declared contract, not provenance of one value.
 
-*Detail:* Add `~[` to the lexer (`src/lexer.rs:25`) so adjacency is required and
-`~ [` is a parse error. Recognise it in both `parse_poly_slot` (`src/parser.rs:1208`,
-dispatching to `parse_poly_quotation`) **and** `parse_quotation_type_expr` (`:1451`, the
-concrete path serving mono signatures, struct fields, ref/cell referents, externs). Record
-`~` on `PolyType::Quotation` and **suppress the fold to `Concrete(Type::Quotation)`** at
-`src/parser.rs:1362` for a `~` effect, including a fully concrete one. No new `Type`
-variant; no change to any existing `Type::Quotation` match site.
+*Detail.* Add `~[` to the lexer (`src/lexer.rs:25`) as a **single token**, so adjacency is
+required and `~ [` is a parse error. Recognise it on both parse paths: `parse_poly_slot`
+(`src/parser.rs:1208`) and `parse_quotation_type_expr` (`:1451`, the concrete path serving
+mono signatures, struct fields, ref/cell referents, externs). Note that
+`parse_poly_quotation` (`:1251`) opens with `expect(Token::LBracket)` (`:1252`), which the
+new token has already consumed — split off an inner entry point that assumes the bracket is
+eaten rather than calling it directly. Record `~` on `PolyType::Quotation`; ground it to
+`Type::InlineQuotation` in `apply_subst`'s Quotation arm (`src/check.rs:5989-5998`) and in
+the concrete fold (`src/parser.rs:1362`).
+
+*Routing hazard, load-bearing.* `effect_has_variable` (`src/parser.rs:1138-1149`) decides
+between the poly and mono parsers by scanning for a `Token::Word` beginning with `'` or
+`..`. A `~[` **token** matches neither, so a `~`-bearing signature with no other variable
+would fall to the mono `parse_effect()` path. Extend that scan to recognise the `~[` token.
+This is the single routing site the whole design depends on, and it is one line.
 
 **R2 — `~` bans materialization, not invocation.** `call` on a `~`-typed value is accepted
-and is statically always a splice. The four erasure boundaries — `materialize_quotation_at_boundary`
-at `src/check.rs:4492` (word output), `:8357` (`!`/`+!` store through a ref), `:8554`
-(declared parameter), and the `if`-join erasure at `:8797-8806` — are unreachable for a `~`
-value **because R1 keeps it out of `Type`**, and all four key on `Type::Quotation`. The
-guarantee rests on an existing invariant, not a new one: a `~`-bearing word is poly, and a
-poly word's concrete paths are already skipped (`src/ast.rs:565-576`). Phase 1
-delivers one test per boundary demonstrating a `~` value cannot reach it. Every remaining
-materializing use — declaring a `~` as a word output, a struct/array/cell field, or an
-`extern` parameter — is a **located error** naming the type and the position. No runtime
-check is added at any of the four boundaries; if the implementer finds one is genuinely
-required, that is a spec defect to escalate, not to absorb.
+and is statically always a splice (`src/check.rs:8165`). The four erasure boundaries —
+`materialize_quotation_at_boundary` at `:4492` (word output), `:8357` (`!`/`+!` store
+through a ref), `:8554` (declared parameter), and the `if`-join erasure at `:8797-8806` —
+all fire on a `Type::Quotation` target, which a `Type::InlineQuotation` value cannot
+satisfy, so each is rejected by type inequality *before* the boundary rather than at it.
+No runtime check is added at any of them.
+
+Phase 1 delivers **five** tests here: one per boundary showing a `~` value is rejected
+before reaching it, plus one showing `call` on a `~` is still **accepted** — without the
+fifth, an over-eager check silently breaks S1 and no test notices.
+
+Every remaining materializing use — declaring a `~` as a word output, a struct/array/cell
+field, or an `extern` parameter — is a **located error** naming the type and the position.
+The field cases are the fail-open risk identified in the representation section: the
+rejections at `:1873`, `:1899`, `:1925`, `:1942`, `:1947`, `:2032` name only
+`Type::Quotation` today and must be extended, each with its own golden.
 
 **R3 — an ordinary `[ ... ]` does not become `~`, and vice versa.** No implicit widening or
-narrowing in either direction; a mismatch is a located error naming both types. Ordinary
-first-class quotations (7b's capturing closures) are entirely unaffected by this slice.
+narrowing in either direction; a mismatch is a located error naming both types. This falls
+out of the representation rather than needing enforcement: `Type` derives structural
+`PartialEq` (`src/ast.rs:820`), so `InlineQuotation(e) != Quotation(e)` at every existing
+equality site, including `match_slot`'s `Exact` path (`:8556-8558`), which under a
+value-level marker would have accepted the mix. The requirement is therefore to **pin** the
+behaviour with goldens in both directions, and to confirm no site coerces between them.
+Ordinary first-class quotations (7b's capturing closures) are unaffected by this slice.
 
 ### Rows in a quotation effect
 
@@ -282,6 +336,22 @@ prepends it to the `fresh` sub-stack it builds (`:7331`), and requires it back o
 row (`:7367`). The caller already holds it: `check_poly_combinator_args` computes
 `base` at `:7244`, so the region is `stack[..base]`.
 
+*The prepended region is type-only.* Prepend `Slot::computed(ty)` copies, **not** the
+caller's real slots. `check_literal_against_declared_effect` runs two provenance guards over
+the sub-stack it builds — the move-state diff (`:7325-7345`) and the borrow check over the
+exit row (`:7346-7356`), which errors on any result slot whose `deriv` traces to an
+enclosing local. Prepending real slots would make a caller borrow riding untouched in the
+row report as `quotation borrows place`: a false positive on correct code. Type-only copies
+are also exactly what R15 already declares the grounding semantics to be. Pinned by a test
+whose caller row holds a live borrow.
+
+*Five callers, not one.* The new parameter touches every caller of
+`check_literal_against_declared_effect`: `:7112` (mono declared parameter), `:7272` (the
+poly path above), `:7666` (inside `materialize_quotation_at_boundary`), and `:8780`/`:8784`
+(the `if`-join). The four besides `:7272` pass an **empty** region — their effects are
+`QuotEffect`s, which carry no row — but they are enumerated here so phase 3 does not
+discover the signature change mid-flight.
+
 The four contexts, all covered explicitly:
 
 1. **Known-literal splice** — the path above.
@@ -296,12 +366,13 @@ The four contexts, all covered explicitly:
    is the context 10a's own exit repro fires in first.
 4. **Mono declared parameter** — `src/check.rs:7102-7118`, which handles a quotation
    parameter for a non-poly word without going through `check_poly_combinator_args`. This
-   context is **unreachable for a `~`**, and by an existing rule rather than a new one: a
-   signature mentioning `~` sets `WordDef.poly = Some(..)` (R1), and for such a word
-   `WordDef.effect` is left empty while "every concrete path (env registration, monomorphic
-   body checking, bundle interning) skips such a word" (`src/ast.rs:565-576`). Phase 3 pins
-   this with a test asserting a `~`-bearing mono-looking signature is routed poly and never
-   reaches `:7112`, so the unreachability is checked rather than assumed.
+   context is **unreachable for a `~`**, but for a narrower reason than an earlier draft
+   claimed: `collect_combinators` registers only monomorphic words (`:2173-2178`), so a
+   `~`-taking word is never the `comb` at `:7102-7118`. The routing rests on
+   `effect_has_variable`/`collect_combinators`, **not** on the `WordDef.poly`/`effect`
+   invariant at `src/ast.rs:565-576` — that invariant governs a word's declared effect and
+   does not survive `check_poly_combinator_standalone`, as the representation section
+   explains. Phase 3 pins the unreachability with a test rather than assuming it.
 
 No abstract row unification, no `Subst` extension (it stays `ty`+`len`), no mangling impact.
 
@@ -322,13 +393,32 @@ outputs" — holds only for the state-threading shape (`while`) and is false for
 consumes its counters, which is why the recon-4 `my-times` fails today with a spurious
 `` `if` branches leave different stack depths (then: 3, else: 1) ``.
 
+*The ground outputs are not reachable from the arm today, and supplying them is the real
+work of this phase.* `SelfTailMarker` (`src/check.rs:647-651`) carries only `name` and
+`input_count`; the back-edge arm has no `sig`, no `Subst` and no `arrays`, so "the ground
+declared outputs via `apply_subst`" cannot simply be evaluated there. The marker therefore
+grows the ground outputs **and** the index map below, computed at its set site
+(`inline_combinator`, `:7175-7180`). Two sources feed that site: the standalone check, where
+the stand-in's `effect.outputs` are already ground (`:4882-4886`), and a real poly splice,
+where `check_poly_combinator_args` computes a `Subst` at `:7249` and currently **discards
+it** — it must be returned instead. None of this is optional plumbing; without it R10 cannot
+be implemented at all, and it was invisible in an earlier draft of this plan.
+
 Today the positional correspondence "i-th declared output ↔ i-th non-quotation input" is
 *implicit* in building `outs` from `stack[base..]`. The rewrite destroys it, and R13 needs
-it. So the rewrite **builds an explicit source-index map**: walk the declared outputs
-against the ordered non-quotation declared inputs, carrying each output's source index (or
-`None` where it has no input counterpart). R13 forwards along that map. Without it an
-implementer must re-invent a convention, and a wrong guess forwards *another slot's* capture
-set, which is worse than dropping it.
+it. So the rewrite **builds an explicit source-index map**, and the rule is pinned here
+rather than left to the implementer, because R13 forwards a capture set along it and a wrong
+guess forwards *another slot's* set — worse than dropping it:
+
+> Declared output *i* maps to non-quotation declared input *i*, **counting from the deepest
+> slot**. The source is `None` when *i* is at or beyond the input count, or when the two
+> types differ.
+
+Bottom-aligned, not top-aligned: the two agree for `while ( 'a [ 'a -- 'a bool ] -- 'a )`
+(1↔1, identical to today's implicit rule) and are vacuous for `times`-shape (zero fixed
+outputs, as R13 notes), but they disagree for any asymmetric shape such as
+`( ..s i64 i64 ~[ .. ] -- ..s i64 )`, where bottom-aligned gives output 0 ← `from` and
+top-aligned gives output 0 ← `to`. A unit test covers a differing-count shape.
 
 **R11 — the self-call's arguments are checked against the ground declared inputs.**
 Replacing the fiction removes the transitive check the `if`-join got from it, so the
@@ -365,8 +455,10 @@ it are all vacuous or masked:
 
 Therefore, all four of the following, or the requirement is not met:
 
-1. **Extract the `outs` construction into a named, callable function.** It is currently
-   inline in `check_term`, so there is no addressable target to assert on before the join.
+1. **The `outs` construction is a named, callable function** rather than inline in
+   `check_term`, so there is an addressable target to assert on before the join. The
+   extraction itself belongs to **phase 4** (see R13a), since phase 4 already rewrites that
+   block and phase 4's own `#[ignore]`d test must compile against it.
 2. **The witness slot is an aggregate carrying an erased quotation** — `ty` a struct,
    `surviving: Some(..)`, `quot: None` — not a bare quotation.
 3. **A white-box unit test asserts the forwarded `SurvivingCaptureSetId` on the produced
@@ -377,11 +469,17 @@ Therefore, all four of the following, or the requirement is not met:
 The phase does not exit on "no witness exists, so the risk stays documented." If that
 genuinely turns out to be the case, it is escalated, not absorbed.
 
-**R13a — phase 4 lands R13's test `#[ignore]`d.** Phase 4 lands green by construction: with
-the masking above, a missing forward is undetectable end to end, so CI cannot notice phase 5
-being skipped and only exit-criteria prose would guard it. Phase 4 therefore lands the
-phase-5 white-box test itself, `#[ignore]`d with a reason naming phase 5. Phase 5's
-deliverable becomes "un-ignore it and make it pass", and its absence is visible in the tree.
+**R13a — phase 4 extracts the function and lands R13's test `#[ignore]`d.** Phase 4 lands
+green by construction: with the masking above, a missing forward is undetectable end to end,
+so CI cannot notice phase 5 being skipped and only exit-criteria prose would guard it. Phase
+4 therefore lands the phase-5 white-box test itself, `#[ignore]`d with a reason naming phase
+5. Phase 5's deliverable becomes "un-ignore it and make it pass", and its absence is visible
+in the tree.
+
+This forces the extraction in R13.1 into phase 4 as well: `#[ignore]` skips *execution*, not
+*compilation*, so a test calling a function that phase 5 would later extract simply would not
+build. Phase 4 extracts and lands the ignored test; phase 5 forwards, un-ignores, and
+supplies the mutation evidence.
 
 ### Exit witnesses
 
@@ -443,11 +541,11 @@ reading does not catch them.
 
 | Req | Traces to | Phase |
 | --- | --- | --- |
-| R1, R2, R3 | `~` decision; D1 (representation), D2 (adjacency) | 1 |
+| R1, R2, R3 | `~` decision; D1 (representation: `Type::InlineQuotation`, after two rejected designs), D2 (adjacency) | 1 |
 | R4, R5, R6, R7 | brief decisions 1–2; open q4 | 2 |
 | R8 | brief recon 5 **corrected**; open q1; review B3 | 3 |
 | R9 | review finding (renderer gap) | 2 (row), 3 (grounding messages) |
-| R10, R11 | brief decision 3; recon 4; review B2 | 4 |
+| R10, R11 | brief decision 3; recon 4; review B2 + marker-unreachability finding | 4 |
 | R12 | brief decision 4 | 4 |
 | R13, R13a | brief decision 5; recon 7; review (vacuity, masking, placebo, skip-risk) | 5 (R13a lands in 4) |
 | R14–R18 | brief exit criteria | 6 |
@@ -455,15 +553,25 @@ reading does not catch them.
 
 ## Phased delivery plan
 
-**Phase 1 — the inline-only quotation type.** *(R1, R2, R3)* Add the `~[` lexer token;
-recognise it on both parse paths; record `~` on `PolyType::Quotation`; suppress the concrete
-fold; reject every materializing declaration with a located error; land one test per erasure
-boundary showing a `~` value cannot reach it. First, because the target signature cannot be
-spelled until `~` parses. Unit tests beside the parser/type changes: the token round-trips,
-the spaced form `~ [` is a parse error, `call` on a `~` value is accepted, each materializing
-use is rejected, and no implicit conversion exists in either direction. Standard difficulty:
-the representation decision that would have made this wide is settled (poly layer only), so
-no existing `Type::Quotation` match site is touched.
+**Phase 1 — the inline-only quotation type.** *(R1, R2, R3)* Add `Type::InlineQuotation`
+and fix the three exhaustive matches the compiler flags; add the `~[` lexer token; recognise
+it on both parse paths and extend `effect_has_variable`'s routing scan; record `~` on
+`PolyType::Quotation` and ground it to the new variant; reject every materializing
+declaration with a located error. First, because the target signature cannot be spelled
+until `~` parses.
+
+The defining deliverable is the **audit of the ~21 silent `Type::Quotation` sites** listed
+in the codebase map: each is dispositioned in writing as enabling (extend), erasure (leave;
+it now fails closed), or aggregate-field rejection (extend, with a golden). A site left
+undispositioned is the failure mode this phase exists to prevent — the compiler cannot flag
+any of them.
+
+Unit tests: the token round-trips; the spaced form `~ [` is a parse error; a `~`-only
+signature routes to the poly parser; `call` on a `~` value is **accepted**; each of the four
+erasure boundaries rejects a `~` before reaching materialization; each materializing
+declaration is rejected; and no implicit conversion exists in either direction. **Hard**:
+the widest blast radius in the slice, and the one place where a missed site fails silently
+rather than loudly.
 
 **Phase 2 — rows inside a quotation effect.** *(R4, R5, R6, R7; R9's row half)* Grow
 `PolyType::Quotation` with row fields mirroring `PolySig`; add the `..` branch to the nested
@@ -484,21 +592,25 @@ with the `:7280` comparison still intact, a definition-site check with an empty 
 and the mono path. **Hard**: the type-checking core, and the requirement whose premise review
 falsified.
 
-**Phase 4 — back-edge ground declared outputs.** *(R10, R11, R12, R13a)* Rewrite
-`src/check.rs:8476-8480` to the ground declared outputs, building the explicit source-index
-map R13 needs; add the explicit unify of `stack[base..]` against the ground declared inputs
-with a located diagnostic; confirm the two back-edge guards are untouched; pin `while`
-unchanged; land phase 5's white-box test `#[ignore]`d. Unit tests: `while` byte-identical; a
+**Phase 4 — back-edge ground declared outputs.** *(R10, R11, R12, R13a)* Extend
+`SelfTailMarker` with the ground declared outputs and the bottom-aligned source-index map,
+computed at its set site — which requires returning `check_poly_combinator_args`'s `Subst`
+instead of discarding it (`:7249`) and reading the stand-in's already-ground outputs on the
+standalone path (`:4882-4886`). Only then can `src/check.rs:8476-8480` be rewritten to the
+ground declared outputs. Add the explicit unify of `stack[base..]` against the ground
+declared inputs with a located diagnostic; confirm the two back-edge guards are untouched;
+pin `while` unchanged. Extract the `outs` construction into a named function and land phase
+5's white-box test against it, `#[ignore]`d. Unit tests: `while` byte-identical; a
 `times`-shaped self-tail combinator that type-checks where it did not before; the
-argument-mismatch rejection. **Hard**: rewriting the exact block 7b's review flagged.
+argument-mismatch rejection; the index map on a differing-count shape. **Hard**: rewriting
+the exact block 7b's review flagged, plus the marker plumbing that makes it reachable at all.
 
-**Phase 5 — the surviving-set gate.** *(R13)* Extract the `outs` construction into a
-callable function; forward `surviving`/`quot` along phase 4's index map, following
-`d1b3f0a`/`bee407c`; un-ignore phase 4's test and make it pass with an aggregate-carrying
-witness slot; record the mutation evidence that it fails when the forward is reverted. A
-separate phase, with its own commit and its own review, precisely so it cannot be quietly
-folded into phase 4 and shortchanged. **Hard**: a correctness obligation whose obvious
-reading is vacuous and whose natural witness is masked.
+**Phase 5 — the surviving-set gate.** *(R13)* Forward `surviving`/`quot` along phase 4's
+index map, following `d1b3f0a`/`bee407c`; un-ignore phase 4's test and make it pass with an
+aggregate-carrying witness slot; record the mutation evidence that it fails when the forward
+is reverted. A separate phase, with its own commit and its own review, precisely so it cannot
+be quietly folded into phase 4 and shortchanged. **Hard**: a correctness obligation whose
+obvious reading is vacuous and whose natural witness is masked.
 
 **Phase 6 — exit witnesses and mutation audit.** *(R14–R19)* The 10a golden suite: the
 user-space `my-times` sum and its 1M-iteration constant-stack run, the pinned grounding
@@ -510,8 +622,10 @@ mechanism, but the witnesses that decide whether the slice is real.
 ## Exit criteria
 
 10a exits when: `~[` is a single token whose spaced form is a parse error, recognised on
-both parse paths, never folding into `Type`, with all four erasure boundaries shown
-unreachable and every materializing declaration rejected (R1–R3); a row parses, represents,
+both parse paths and by the poly/mono routing scan, grounding to `Type::InlineQuotation`,
+with every silent `Type::Quotation` site dispositioned in writing, all four erasure
+boundaries rejecting a `~` before materialization, `call` on a `~` still accepted, and every
+materializing declaration rejected (R1–R3); a row parses, represents,
 renders, and unifies correctly inside a quotation effect, with all three rejections
 golden-tested at exact text (R4–R7, R9); grounding works in all four contexts via the
 settled callee-side mechanism (R8); the back-edge produces ground declared outputs along an
@@ -530,7 +644,7 @@ failing (R19).
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "inline only quotation type", "difficulty": "standard" },
+    { "phase": 1, "focus": "inline only quotation type", "difficulty": "hard" },
     { "phase": 2, "focus": "rows in quotation effects", "difficulty": "standard" },
     { "phase": 3, "focus": "row grounding at check sites", "difficulty": "hard" },
     { "phase": 4, "focus": "back edge ground declared outputs", "difficulty": "hard" },
