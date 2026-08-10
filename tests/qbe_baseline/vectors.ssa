@@ -14,7 +14,7 @@ data $strfmt = { b "%.*s", b 0 }
 type :Vec2 = { l, l }
 type :Segment = { :Vec2, :Vec2 }
 
-export function :Vec2 $sub(:Vec2 %v0, :Vec2 %v1) {
+export function :Vec2 $sub__m0(:Vec2 %v0, :Vec2 %v1) {
 @start
 	%v2 =l add %v0, 0
 	%v3 =l loadl %v2
@@ -34,7 +34,7 @@ export function :Vec2 $sub(:Vec2 %v0, :Vec2 %v1) {
 	ret %v12
 }
 
-export function l $len2(:Vec2 %v0) {
+export function l $len2__m0(:Vec2 %v0) {
 @start
 	%v1 =l add %v0, 0
 	%v2 =l loadl %v1
@@ -50,15 +50,15 @@ export function l $len2(:Vec2 %v0) {
 	ret %v11
 }
 
-export function :Vec2 $span(:Segment %v0) {
+export function :Vec2 $span__m0(:Segment %v0) {
 @start
 	%v1 =l add %v0, 0
 	%v2 =l add %v0, 16
-	%v3 =:Vec2 call $sub(:Vec2 %v2, :Vec2 %v1)
+	%v3 =:Vec2 call $sub__m0(:Vec2 %v2, :Vec2 %v1)
 	ret %v3
 }
 
-export function :Vec2 $shift.2d.x(:Vec2 %v0, l %v1) {
+export function :Vec2 $shift.2d.x__m0(:Vec2 %v0, l %v1) {
 @start
 	%v2 =l add %v0, 0
 	%v3 =l loadl %v2
@@ -91,8 +91,8 @@ export function $sooth_main() {
 	blit %v2, %v11, 16
 	%v12 =l add %v10, 16
 	blit %v7, %v12, 16
-	%v13 =:Vec2 call $span(:Segment %v10)
-	%v14 =l call $len2(:Vec2 %v13)
+	%v13 =:Vec2 call $span__m0(:Segment %v10)
+	%v14 =l call $len2__m0(:Vec2 %v13)
 	call $printf(l $fmt, l %v14, ...)
 	%v15 =l copy 5
 	%v16 =l copy 6
@@ -102,7 +102,7 @@ export function $sooth_main() {
 	%v19 =l add %v17, 8
 	storel %v16, %v19
 	%v20 =l copy 1
-	%v21 =:Vec2 call $shift.2d.x(:Vec2 %v17, l %v20)
+	%v21 =:Vec2 call $shift.2d.x__m0(:Vec2 %v17, l %v20)
 	%v22 =l add %v21, 0
 	%v23 =l loadl %v22
 	call $printf(l $fmt, l %v23, ...)

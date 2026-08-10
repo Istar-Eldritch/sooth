@@ -12,7 +12,7 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 
-export function d $mean(l %v0, l %v1) {
+export function d $mean__m0(l %v0, l %v1) {
 @start
 	%v2 =d sltof %v0
 	%v3 =d sltof %v1
@@ -24,7 +24,7 @@ export function $sooth_main() {
 @start
 	%v0 =l copy 10
 	%v1 =l copy 4
-	%v2 =d call $mean(l %v0, l %v1)
+	%v2 =d call $mean__m0(l %v0, l %v1)
 	call $printf(l $ffmt, d %v2, ...)
 	ret
 }

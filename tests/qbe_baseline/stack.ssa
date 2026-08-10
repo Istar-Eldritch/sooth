@@ -15,7 +15,7 @@ type :arr_0 = align 8 { b 128 }
 type :Stack = { :arr_0, l }
 type :__ret_1 = { :Stack, l }
 
-export function :Stack $empty() {
+export function :Stack $empty__m0() {
 @start
 	%v0 =l copy 0
 	%v1 =l copy 16
@@ -62,7 +62,7 @@ export function :Stack $empty() {
 	ret %v21
 }
 
-export function :Stack $push(:Stack %v0, l %v1) {
+export function :Stack $push__m0(:Stack %v0, l %v1) {
 @start
 	%v2 =l add %v0, 128
 	%v3 =l loadl %v2
@@ -91,7 +91,7 @@ export function :Stack $push(:Stack %v0, l %v1) {
 	ret %v15
 }
 
-export function :__ret_1 $pop(:Stack %v0) {
+export function :__ret_1 $pop__m0(:Stack %v0) {
 @start
 	%v1 =l add %v0, 128
 	%v2 =l loadl %v1
@@ -123,7 +123,7 @@ export function :__ret_1 $pop(:Stack %v0) {
 	ret %v15
 }
 
-export function :__ret_1 $peek(:Stack %v0) {
+export function :__ret_1 $peek__m0(:Stack %v0) {
 @start
 	%v1 =l add %v0, 128
 	%v2 =l loadl %v1
@@ -153,29 +153,29 @@ export function :__ret_1 $peek(:Stack %v0) {
 
 export function $sooth_main() {
 @start
-	%v0 =:Stack call $empty()
+	%v0 =:Stack call $empty__m0()
 	%v1 =l copy 1
-	%v2 =:Stack call $push(:Stack %v0, l %v1)
+	%v2 =:Stack call $push__m0(:Stack %v0, l %v1)
 	%v3 =l copy 2
-	%v4 =:Stack call $push(:Stack %v2, l %v3)
+	%v4 =:Stack call $push__m0(:Stack %v2, l %v3)
 	%v5 =l copy 3
-	%v6 =:Stack call $push(:Stack %v4, l %v5)
-	%v7 =:__ret_1 call $peek(:Stack %v6)
+	%v6 =:Stack call $push__m0(:Stack %v4, l %v5)
+	%v7 =:__ret_1 call $peek__m0(:Stack %v6)
 	%v8 =l add %v7, 0
 	%v9 =l add %v7, 136
 	%v10 =l loadl %v9
 	call $printf(l $fmt, l %v10, ...)
-	%v11 =:__ret_1 call $pop(:Stack %v8)
+	%v11 =:__ret_1 call $pop__m0(:Stack %v8)
 	%v12 =l add %v11, 0
 	%v13 =l add %v11, 136
 	%v14 =l loadl %v13
 	call $printf(l $fmt, l %v14, ...)
-	%v15 =:__ret_1 call $pop(:Stack %v12)
+	%v15 =:__ret_1 call $pop__m0(:Stack %v12)
 	%v16 =l add %v15, 0
 	%v17 =l add %v15, 136
 	%v18 =l loadl %v17
 	call $printf(l $fmt, l %v18, ...)
-	%v19 =:__ret_1 call $peek(:Stack %v16)
+	%v19 =:__ret_1 call $peek__m0(:Stack %v16)
 	%v20 =l add %v19, 0
 	%v21 =l add %v19, 136
 	%v22 =l loadl %v21

@@ -14,7 +14,7 @@ data $strfmt = { b "%.*s", b 0 }
 type :Shape = align 8 { b 24 }
 type :MaybeInt = align 8 { b 16 }
 
-export function d $area(:Shape %v0) {
+export function d $area__m0(:Shape %v0) {
 @start
 	%v2 =l add %v0, 0
 	%v1 =w loadw %v2
@@ -40,7 +40,7 @@ export function d $area(:Shape %v0) {
 	ret %v15
 }
 
-export function l $unwrap.2d.or(l %v0, :MaybeInt %v1) {
+export function l $unwrap.2d.or__m0(l %v0, :MaybeInt %v1) {
 @start
 	%v3 =l add %v1, 0
 	%v2 =w loadw %v3
@@ -67,7 +67,7 @@ export function $sooth_main() {
 	storew %v2, %v3
 	%v4 =l add %v1, 8
 	stored %v0, %v4
-	%v5 =d call $area(:Shape %v1)
+	%v5 =d call $area__m0(:Shape %v1)
 	call $printf(l $ffmt, d %v5, ...)
 	%v6 =d copy d_3
 	%v7 =d copy d_4
@@ -79,14 +79,14 @@ export function $sooth_main() {
 	stored %v6, %v11
 	%v12 =l add %v8, 16
 	stored %v7, %v12
-	%v13 =d call $area(:Shape %v8)
+	%v13 =d call $area__m0(:Shape %v8)
 	call $printf(l $ffmt, d %v13, ...)
 	%v14 =l copy 5
 	%v15 =l alloc8 16
 	%v16 =w copy 0
 	%v17 =l add %v15, 0
 	storew %v16, %v17
-	%v18 =l call $unwrap.2d.or(l %v14, :MaybeInt %v15)
+	%v18 =l call $unwrap.2d.or__m0(l %v14, :MaybeInt %v15)
 	call $printf(l $fmt, l %v18, ...)
 	%v19 =l copy 5
 	%v20 =l copy 7
@@ -96,7 +96,7 @@ export function $sooth_main() {
 	storew %v22, %v23
 	%v24 =l add %v21, 8
 	storel %v20, %v24
-	%v25 =l call $unwrap.2d.or(l %v19, :MaybeInt %v21)
+	%v25 =l call $unwrap.2d.or__m0(l %v19, :MaybeInt %v21)
 	call $printf(l $fmt, l %v25, ...)
 	ret
 }

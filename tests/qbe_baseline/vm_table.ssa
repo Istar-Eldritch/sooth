@@ -22,7 +22,7 @@ type :Fetched = { :Vm, :Op }
 type :VmPop = { :Vm, l }
 type :Decoded = { :Vm, l }
 
-export function :Vm $vm.2d.push(:Vm %v0, l %v1) {
+export function :Vm $vm.2d.push__m0(:Vm %v0, l %v1) {
 @start
 	%v2 =l add %v0, 280
 	%v3 =l loadl %v2
@@ -51,7 +51,7 @@ export function :Vm $vm.2d.push(:Vm %v0, l %v1) {
 	ret %v15
 }
 
-export function :VmPop $vm.2d.pop(:Vm %v0) {
+export function :VmPop $vm.2d.pop__m0(:Vm %v0) {
 @start
 	%v1 =l add %v0, 280
 	%v2 =l loadl %v1
@@ -83,7 +83,7 @@ export function :VmPop $vm.2d.pop(:Vm %v0) {
 	ret %v15
 }
 
-export function :Vm $bump.2d.pc(:Vm %v0) {
+export function :Vm $bump.2d.pc__m0(:Vm %v0) {
 @start
 	%v1 =l alloc8 320
 	blit %v0, %v1, 320
@@ -98,7 +98,7 @@ export function :Vm $bump.2d.pc(:Vm %v0) {
 	ret %v6
 }
 
-export function :Fetched $fetch(:Vm %v0) {
+export function :Fetched $fetch__m0(:Vm %v0) {
 @start
 	%v1 =l add %v0, 208
 	%v2 =l loadl %v1
@@ -125,7 +125,7 @@ export function :Fetched $fetch(:Vm %v0) {
 	ret %v11
 }
 
-export function :Decoded $decode(:Vm %v0, :Op %v1) {
+export function :Decoded $decode__m0(:Vm %v0, :Op %v1) {
 @start
 	%v3 =l add %v1, 0
 	%v2 =w loadw %v3
@@ -163,8 +163,8 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 @blk1
 	%v20 =l add %v1, 8
 	%v21 =l loadl %v20
-	%v22 =:Vm call $vm.2d.push(:Vm %v0, l %v21)
-	%v23 =:Vm call $bump.2d.pc(:Vm %v22)
+	%v22 =:Vm call $vm.2d.push__m0(:Vm %v0, l %v21)
+	%v23 =:Vm call $bump.2d.pc__m0(:Vm %v22)
 	%v24 =l copy 0
 	%v25 =l copy %v24
 	%v26 =l alloc8 328
@@ -174,7 +174,7 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	storel %v25, %v28
 	jmp @blk17
 @blk2
-	%v29 =:Vm call $bump.2d.pc(:Vm %v0)
+	%v29 =:Vm call $bump.2d.pc__m0(:Vm %v0)
 	%v30 =l copy 1
 	%v31 =l copy %v30
 	%v32 =l alloc8 328
@@ -184,7 +184,7 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	storel %v31, %v34
 	jmp @blk17
 @blk3
-	%v35 =:Vm call $bump.2d.pc(:Vm %v0)
+	%v35 =:Vm call $bump.2d.pc__m0(:Vm %v0)
 	%v36 =l copy 2
 	%v37 =l copy %v36
 	%v38 =l alloc8 328
@@ -194,7 +194,7 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	storel %v37, %v40
 	jmp @blk17
 @blk4
-	%v41 =:Vm call $bump.2d.pc(:Vm %v0)
+	%v41 =:Vm call $bump.2d.pc__m0(:Vm %v0)
 	%v42 =l copy 3
 	%v43 =l copy %v42
 	%v44 =l alloc8 328
@@ -207,8 +207,8 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	%v47 =l add %v1, 8
 	%v48 =l loadl %v47
 	%v49 =l copy %v48
-	%v50 =:Vm call $vm.2d.push(:Vm %v0, l %v49)
-	%v51 =:Vm call $bump.2d.pc(:Vm %v50)
+	%v50 =:Vm call $vm.2d.push__m0(:Vm %v0, l %v49)
+	%v51 =:Vm call $bump.2d.pc__m0(:Vm %v50)
 	%v52 =l copy 4
 	%v53 =l copy %v52
 	%v54 =l alloc8 328
@@ -221,8 +221,8 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	%v57 =l add %v1, 8
 	%v58 =l loadl %v57
 	%v59 =l copy %v58
-	%v60 =:Vm call $vm.2d.push(:Vm %v0, l %v59)
-	%v61 =:Vm call $bump.2d.pc(:Vm %v60)
+	%v60 =:Vm call $vm.2d.push__m0(:Vm %v0, l %v59)
+	%v61 =:Vm call $bump.2d.pc__m0(:Vm %v60)
 	%v62 =l copy 5
 	%v63 =l copy %v62
 	%v64 =l alloc8 328
@@ -235,8 +235,8 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	%v67 =l add %v1, 8
 	%v68 =l loadl %v67
 	%v69 =l copy %v68
-	%v70 =:Vm call $vm.2d.push(:Vm %v0, l %v69)
-	%v71 =:Vm call $bump.2d.pc(:Vm %v70)
+	%v70 =:Vm call $vm.2d.push__m0(:Vm %v0, l %v69)
+	%v71 =:Vm call $bump.2d.pc__m0(:Vm %v70)
 	%v72 =l copy 6
 	%v73 =l copy %v72
 	%v74 =l alloc8 328
@@ -249,8 +249,8 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	%v77 =l add %v1, 8
 	%v78 =l loadl %v77
 	%v79 =l copy %v78
-	%v80 =:Vm call $vm.2d.push(:Vm %v0, l %v79)
-	%v81 =:Vm call $bump.2d.pc(:Vm %v80)
+	%v80 =:Vm call $vm.2d.push__m0(:Vm %v0, l %v79)
+	%v81 =:Vm call $bump.2d.pc__m0(:Vm %v80)
 	%v82 =l copy 7
 	%v83 =l copy %v82
 	%v84 =l alloc8 328
@@ -260,7 +260,7 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	storel %v83, %v86
 	jmp @blk17
 @blk9
-	%v87 =:Vm call $bump.2d.pc(:Vm %v0)
+	%v87 =:Vm call $bump.2d.pc__m0(:Vm %v0)
 	%v88 =l copy 8
 	%v89 =l copy %v88
 	%v90 =l alloc8 328
@@ -274,59 +274,59 @@ export function :Decoded $decode(:Vm %v0, :Op %v1) {
 	ret %v93
 }
 
-export function :Vm $h.2d.push(:Vm %v0) {
+export function :Vm $h.2d.push__m0(:Vm %v0) {
 @start
 	ret %v0
 }
 
-export function :Vm $h.2d.add(:Vm %v0) {
+export function :Vm $h.2d.add__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
-	%v5 =:VmPop call $vm.2d.pop(:Vm %v2)
+	%v5 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
 	%v6 =l add %v5, 0
 	%v7 =l add %v5, 320
 	%v8 =l loadl %v7
 	%v9 =l add %v8, %v4
-	%v10 =:Vm call $vm.2d.push(:Vm %v6, l %v9)
+	%v10 =:Vm call $vm.2d.push__m0(:Vm %v6, l %v9)
 	ret %v10
 }
 
-export function :Vm $h.2d.sub(:Vm %v0) {
+export function :Vm $h.2d.sub__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
-	%v5 =:VmPop call $vm.2d.pop(:Vm %v2)
+	%v5 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
 	%v6 =l add %v5, 0
 	%v7 =l add %v5, 320
 	%v8 =l loadl %v7
 	%v9 =l sub %v8, %v4
-	%v10 =:Vm call $vm.2d.push(:Vm %v6, l %v9)
+	%v10 =:Vm call $vm.2d.push__m0(:Vm %v6, l %v9)
 	ret %v10
 }
 
-export function :Vm $h.2d.mul(:Vm %v0) {
+export function :Vm $h.2d.mul__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
-	%v5 =:VmPop call $vm.2d.pop(:Vm %v2)
+	%v5 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
 	%v6 =l add %v5, 0
 	%v7 =l add %v5, 320
 	%v8 =l loadl %v7
 	%v9 =l mul %v8, %v4
-	%v10 =:Vm call $vm.2d.push(:Vm %v6, l %v9)
+	%v10 =:Vm call $vm.2d.push__m0(:Vm %v6, l %v9)
 	ret %v10
 }
 
-export function :Vm $h.2d.load(:Vm %v0) {
+export function :Vm $h.2d.load__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
@@ -345,18 +345,18 @@ export function :Vm $h.2d.load(:Vm %v0) {
 	%eoff0 =l mul %v5, 8
 	%v12 =l add %v7, %eoff0
 	%v13 =l loadl %v12
-	%v14 =:Vm call $vm.2d.push(:Vm %v2, l %v13)
+	%v14 =:Vm call $vm.2d.push__m0(:Vm %v2, l %v13)
 	ret %v14
 }
 
-export function :Vm $h.2d.store(:Vm %v0) {
+export function :Vm $h.2d.store__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
 	%v5 =l copy %v4
-	%v6 =:VmPop call $vm.2d.pop(:Vm %v2)
+	%v6 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
 	%v7 =l add %v6, 0
 	%v8 =l add %v6, 320
 	%v9 =l loadl %v8
@@ -377,14 +377,14 @@ export function :Vm $h.2d.store(:Vm %v0) {
 	ret %v7
 }
 
-export function :Vm $h.2d.jz(:Vm %v0) {
+export function :Vm $h.2d.jz__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
 	%v5 =l copy %v4
-	%v6 =:VmPop call $vm.2d.pop(:Vm %v2)
+	%v6 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
 	%v7 =l add %v6, 0
 	%v8 =l add %v6, 320
 	%v9 =l loadl %v8
@@ -404,9 +404,9 @@ export function :Vm $h.2d.jz(:Vm %v0) {
 	ret %v14
 }
 
-export function :Vm $h.2d.jmp(:Vm %v0) {
+export function :Vm $h.2d.jmp__m0(:Vm %v0) {
 @start
-	%v1 =:VmPop call $vm.2d.pop(:Vm %v0)
+	%v1 =:VmPop call $vm.2d.pop__m0(:Vm %v0)
 	%v2 =l add %v1, 0
 	%v3 =l add %v1, 320
 	%v4 =l loadl %v3
@@ -418,15 +418,15 @@ export function :Vm $h.2d.jmp(:Vm %v0) {
 	ret %v6
 }
 
-export function :Vm $h.2d.halt(:Vm %v0) {
+export function :Vm $h.2d.halt__m0(:Vm %v0) {
 @start
 	ret %v0
 }
 
-export function :Q0 $mk.2d.h.2d.push() {
+export function :Q0 $mk.2d.h.2d.push__m0() {
 @start
 	%v1 =l alloc8 16
-	%v2 =l copy $mk.2d.h.2d.push__quot0
+	%v2 =l copy $mk.2d.h.2d.push__m0__quot0
 	%v3 =l add %v1, 0
 	storel %v2, %v3
 	%v4 =l copy 0
@@ -435,15 +435,15 @@ export function :Q0 $mk.2d.h.2d.push() {
 	ret %v1
 }
 
-export function :Vm $mk.2d.h.2d.push__quot0(:Vm %v0, l %v1) {
+export function :Vm $mk.2d.h.2d.push__m0__quot0(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.push(:Vm %v0)
+	%v2 =:Vm call $h.2d.push__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :arr_3 $build.2d.table() {
+export function :arr_3 $build.2d.table__m0() {
 @start
-	%v0 =:Q0 call $mk.2d.h.2d.push()
+	%v0 =:Q0 call $mk.2d.h.2d.push__m0()
 	%v1 =l copy 9
 	%v2 =l alloc8 144
 	%v3 =l add %v2, 0
@@ -479,7 +479,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff0 =l mul %v14, 16
 	%v19 =l add %v12, %eoff0
 	%v21 =l alloc8 16
-	%v22 =l copy $build.2d.table__quot0
+	%v22 =l copy $build.2d.table__m0__quot0
 	%v23 =l add %v21, 0
 	storel %v22, %v23
 	%v24 =l copy 0
@@ -501,7 +501,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff1 =l mul %v28, 16
 	%v33 =l add %v26, %eoff1
 	%v35 =l alloc8 16
-	%v36 =l copy $build.2d.table__quot1
+	%v36 =l copy $build.2d.table__m0__quot1
 	%v37 =l add %v35, 0
 	storel %v36, %v37
 	%v38 =l copy 0
@@ -523,7 +523,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff2 =l mul %v42, 16
 	%v47 =l add %v40, %eoff2
 	%v49 =l alloc8 16
-	%v50 =l copy $build.2d.table__quot2
+	%v50 =l copy $build.2d.table__m0__quot2
 	%v51 =l add %v49, 0
 	storel %v50, %v51
 	%v52 =l copy 0
@@ -545,7 +545,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff3 =l mul %v56, 16
 	%v61 =l add %v54, %eoff3
 	%v63 =l alloc8 16
-	%v64 =l copy $build.2d.table__quot3
+	%v64 =l copy $build.2d.table__m0__quot3
 	%v65 =l add %v63, 0
 	storel %v64, %v65
 	%v66 =l copy 0
@@ -567,7 +567,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff4 =l mul %v70, 16
 	%v75 =l add %v68, %eoff4
 	%v77 =l alloc8 16
-	%v78 =l copy $build.2d.table__quot4
+	%v78 =l copy $build.2d.table__m0__quot4
 	%v79 =l add %v77, 0
 	storel %v78, %v79
 	%v80 =l copy 0
@@ -589,7 +589,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff5 =l mul %v84, 16
 	%v89 =l add %v82, %eoff5
 	%v91 =l alloc8 16
-	%v92 =l copy $build.2d.table__quot5
+	%v92 =l copy $build.2d.table__m0__quot5
 	%v93 =l add %v91, 0
 	storel %v92, %v93
 	%v94 =l copy 0
@@ -611,7 +611,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff6 =l mul %v98, 16
 	%v103 =l add %v96, %eoff6
 	%v105 =l alloc8 16
-	%v106 =l copy $build.2d.table__quot6
+	%v106 =l copy $build.2d.table__m0__quot6
 	%v107 =l add %v105, 0
 	storel %v106, %v107
 	%v108 =l copy 0
@@ -633,7 +633,7 @@ export function :arr_3 $build.2d.table() {
 	%eoff7 =l mul %v112, 16
 	%v117 =l add %v110, %eoff7
 	%v119 =l alloc8 16
-	%v120 =l copy $build.2d.table__quot7
+	%v120 =l copy $build.2d.table__m0__quot7
 	%v121 =l add %v119, 0
 	storel %v120, %v121
 	%v122 =l copy 0
@@ -643,55 +643,55 @@ export function :arr_3 $build.2d.table() {
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot0(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot0(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.add(:Vm %v0)
+	%v2 =:Vm call $h.2d.add__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot1(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot1(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.sub(:Vm %v0)
+	%v2 =:Vm call $h.2d.sub__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot2(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot2(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.mul(:Vm %v0)
+	%v2 =:Vm call $h.2d.mul__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot3(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot3(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.load(:Vm %v0)
+	%v2 =:Vm call $h.2d.load__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot4(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot4(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.store(:Vm %v0)
+	%v2 =:Vm call $h.2d.store__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot5(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot5(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.jz(:Vm %v0)
+	%v2 =:Vm call $h.2d.jz__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot6(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot6(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.jmp(:Vm %v0)
+	%v2 =:Vm call $h.2d.jmp__m0(:Vm %v0)
 	ret %v2
 }
 
-export function :Vm $build.2d.table__quot7(:Vm %v0, l %v1) {
+export function :Vm $build.2d.table__m0__quot7(:Vm %v0, l %v1) {
 @start
-	%v2 =:Vm call $h.2d.halt(:Vm %v0)
+	%v2 =:Vm call $h.2d.halt__m0(:Vm %v0)
 	ret %v2
 }
 
-export function l $dispatch(:Vm %v0, :arr_3 %v1) {
+export function l $dispatch__m0(:Vm %v0, :arr_3 %v1) {
 @start
 	%v2 =l alloc8 320
 	%v3 =l alloc8 320
@@ -702,10 +702,10 @@ export function l $dispatch(:Vm %v0, :arr_3 %v1) {
 	%v26 =l alloc8 16
 	jmp @blk1
 @blk1
-	%v6 =:Fetched call $fetch(:Vm %v2)
+	%v6 =:Fetched call $fetch__m0(:Vm %v2)
 	%v7 =l add %v6, 0
 	%v8 =l add %v6, 320
-	%v9 =:Decoded call $decode(:Vm %v7, :Op %v8)
+	%v9 =:Decoded call $decode__m0(:Vm %v7, :Op %v8)
 	%v10 =l add %v9, 0
 	%v11 =l add %v9, 320
 	%v12 =l loadl %v11
@@ -714,7 +714,7 @@ export function l $dispatch(:Vm %v0, :arr_3 %v1) {
 	%v15 =w ceql %v12, %v14
 	jnz %v15, @blk2, @blk3
 @blk2
-	%v16 =:VmPop call $vm.2d.pop(:Vm %v10)
+	%v16 =:VmPop call $vm.2d.pop__m0(:Vm %v10)
 	%v17 =l add %v16, 0
 	%v18 =l add %v16, 320
 	%v19 =l loadl %v18
@@ -745,7 +745,7 @@ export function l $dispatch(:Vm %v0, :arr_3 %v1) {
 	ret %v19
 }
 
-export function :arr_0 $build() {
+export function :arr_0 $build__m0() {
 @start
 	%v0 =l alloc8 16
 	%v1 =w copy 8
@@ -1051,7 +1051,7 @@ export function :arr_0 $build() {
 
 export function $sooth_main() {
 @start
-	%v0 =:arr_0 call $build()
+	%v0 =:arr_0 call $build__m0()
 	%v1 =l copy 0
 	%v2 =l copy %v1
 	%v3 =l copy 0
@@ -1113,8 +1113,8 @@ export function $sooth_main() {
 	storel %v15, %v36
 	%v37 =l add %v32, 288
 	blit %v18, %v37, 32
-	%v38 =:arr_3 call $build.2d.table()
-	%v39 =l call $dispatch(:Vm %v32, :arr_3 %v38)
+	%v38 =:arr_3 call $build.2d.table__m0()
+	%v39 =l call $dispatch__m0(:Vm %v32, :arr_3 %v38)
 	call $printf(l $fmt, l %v39, ...)
 	ret
 }

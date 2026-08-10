@@ -12,16 +12,16 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 
-export function w $pos(l %v0) {
+export function w $pos__m0(l %v0) {
 @start
 	%v1 =l copy 0
 	%v2 =w csgtl %v0, %v1
 	ret %v2
 }
 
-export function l $classify(l %v0) {
+export function l $classify__m0(l %v0) {
 @start
-	%v1 =w call $pos(l %v0)
+	%v1 =w call $pos__m0(l %v0)
 	jnz %v1, @blk1, @blk2
 @blk1
 	%v2 =l copy 1
@@ -37,7 +37,7 @@ export function l $classify(l %v0) {
 export function $sooth_main() {
 @start
 	%v0 =l copy 7
-	%v1 =l call $classify(l %v0)
+	%v1 =l call $classify__m0(l %v0)
 	call $printf(l $fmt, l %v1, ...)
 	ret
 }

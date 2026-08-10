@@ -12,7 +12,7 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 
-export function l $lerp(l %v0, l %v1, l %v2) {
+export function l $lerp__m0(l %v0, l %v1, l %v2) {
 @start
 	%v3 =l sub %v1, %v0
 	%v4 =l mul %v3, %v2
@@ -25,7 +25,7 @@ export function $sooth_main() {
 	%v0 =l copy 0
 	%v1 =l copy 10
 	%v2 =l copy 3
-	%v3 =l call $lerp(l %v0, l %v1, l %v2)
+	%v3 =l call $lerp__m0(l %v0, l %v1, l %v2)
 	call $printf(l $fmt, l %v3, ...)
 	ret
 }

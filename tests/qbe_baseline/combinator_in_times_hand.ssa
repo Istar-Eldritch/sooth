@@ -13,7 +13,7 @@ data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 
 data $strfmt = { b "%.*s", b 0 }
 type :arr_0 = align 8 { b 24 }
 
-export function :arr_0 $mk(l %v0) {
+export function :arr_0 $mk__m0(l %v0) {
 @start
 	%v1 =l copy 0
 	%v2 =l copy 3
@@ -86,7 +86,7 @@ export function $sooth_main() {
 	%v4 =w csltl %v3, %v0
 	jnz %v4, @blk2, @blk3
 @blk2
-	%v5 =:arr_0 call $mk(l %v3)
+	%v5 =:arr_0 call $mk__m0(l %v3)
 	%v6 =l copy 3
 	%v8 =l copy 0
 	jmp @blk4

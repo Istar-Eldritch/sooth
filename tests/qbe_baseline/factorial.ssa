@@ -12,7 +12,7 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 
-export function l $factorial(l %v0) {
+export function l $factorial__m0(l %v0) {
 @start
 	%v1 =l copy 0
 	%v2 =w ceql %v0, %v1
@@ -23,7 +23,7 @@ export function l $factorial(l %v0) {
 @blk2
 	%v4 =l copy 1
 	%v5 =l sub %v0, %v4
-	%v6 =l call $factorial(l %v5)
+	%v6 =l call $factorial__m0(l %v5)
 	%v7 =l mul %v0, %v6
 	jmp @blk3
 @blk3
@@ -34,7 +34,7 @@ export function l $factorial(l %v0) {
 export function $sooth_main() {
 @start
 	%v0 =l copy 5
-	%v1 =l call $factorial(l %v0)
+	%v1 =l call $factorial__m0(l %v0)
 	call $printf(l $fmt, l %v1, ...)
 	ret
 }

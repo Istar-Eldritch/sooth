@@ -15,7 +15,7 @@ type :arr_0 = align 8 { b 32 }
 type :AccC = { :arr_0 }
 type :AccL = { :arr_0 }
 
-export function :arr_0 $input() {
+export function :arr_0 $input__m0() {
 @start
 	%v0 =l copy 0
 	%v1 =l copy 4
@@ -95,7 +95,7 @@ export function :arr_0 $input() {
 	ret %v2
 }
 
-export function :AccC $prefix.2d.copy(:arr_0 %v0, :AccC %v1) {
+export function :AccC $prefix.2d.copy__m0(:arr_0 %v0, :AccC %v1) {
 @start
 	%v2 =l add %v1, 0
 	%v3 =l add %v2, 0
@@ -144,7 +144,7 @@ export function :AccC $prefix.2d.copy(:arr_0 %v0, :AccC %v1) {
 	ret %v1
 }
 
-export function :AccL $prefix.2d.linear(:arr_0 %v0, :AccL %v1) {
+export function :AccL $prefix.2d.linear__m0(:arr_0 %v0, :AccL %v1) {
 @start
 	%v2 =l add %v1, 0
 	%v3 =l add %v2, 0
@@ -195,7 +195,7 @@ export function :AccL $prefix.2d.linear(:arr_0 %v0, :AccL %v1) {
 
 export function $sooth_main() {
 @start
-	%v0 =:arr_0 call $input()
+	%v0 =:arr_0 call $input__m0()
 	%v1 =l copy 0
 	%v2 =l copy 4
 	%v3 =l alloc8 32
@@ -210,7 +210,7 @@ export function $sooth_main() {
 	%v8 =l alloc8 32
 	%v9 =l add %v8, 0
 	blit %v3, %v9, 32
-	%v10 =:AccC call $prefix.2d.copy(:arr_0 %v0, :AccC %v8)
+	%v10 =:AccC call $prefix.2d.copy__m0(:arr_0 %v0, :AccC %v8)
 	%v11 =l copy 4
 	%v13 =l copy 0
 	jmp @blk1
@@ -240,7 +240,7 @@ export function $sooth_main() {
 	jmp @blk1
 @blk3
 	%v27 =l add %v10, 0
-	%v28 =:arr_0 call $input()
+	%v28 =:arr_0 call $input__m0()
 	%v29 =l copy 0
 	%v30 =l copy 4
 	%v31 =l alloc8 32
@@ -255,7 +255,7 @@ export function $sooth_main() {
 	%v36 =l alloc8 32
 	%v37 =l add %v36, 0
 	blit %v31, %v37, 32
-	%v38 =:AccL call $prefix.2d.linear(:arr_0 %v28, :AccL %v36)
+	%v38 =:AccL call $prefix.2d.linear__m0(:arr_0 %v28, :AccL %v36)
 	%v39 =l copy 4
 	%v41 =l copy 0
 	jmp @blk6

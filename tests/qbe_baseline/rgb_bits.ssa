@@ -12,7 +12,7 @@ data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
 
-export function w $pack(w %v0, w %v1, w %v2) {
+export function w $pack__m0(w %v0, w %v1, w %v2) {
 @start
 	%v3 =w extub %v0
 	%v4 =l copy 16
@@ -26,7 +26,7 @@ export function w $pack(w %v0, w %v1, w %v2) {
 	ret %v11
 }
 
-export function w $green(w %v0) {
+export function w $green__m0(w %v0) {
 @start
 	%v1 =l copy 8
 	%v2 =w sar %v0, %v1
@@ -45,10 +45,10 @@ export function $sooth_main() {
 	%v3 =w and %v2, 255
 	%v4 =l copy 30
 	%v5 =w and %v4, 255
-	%v6 =w call $pack(w %v1, w %v3, w %v5)
+	%v6 =w call $pack__m0(w %v1, w %v3, w %v5)
 	%v7 =l extsw %v6
 	call $printf(l $fmt, l %v7, ...)
-	%v8 =w call $green(w %v6)
+	%v8 =w call $green__m0(w %v6)
 	%v9 =l extub %v8
 	call $printf(l $fmt, l %v9, ...)
 	ret

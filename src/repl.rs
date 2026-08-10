@@ -1661,7 +1661,7 @@ impl Session {
         // cwd; every transitive import inside the closure keeps 5a's
         // importer-relative rule (inside `discover_closure`).
         let closure = driver::discover_closure(Path::new(&import.path))?;
-        let mut module = driver::assemble_module(&closure)?;
+        let mut module = driver::assemble_module(&closure, false)?;
         check::check(&mut module)?;
         // R14/D4: an imported closure declaring `main` (in any of its files,
         // not only module 0) is rejected before any codegen, naming the file
@@ -3741,7 +3741,7 @@ mod tests {
         let d = LibDir::new("u3");
         let lib = d.write("lib.sth", ": w ( -- i64 ) 42 ;\nexport: w ;\n");
         let closure = driver::discover_closure(&lib).expect("closure resolves");
-        let mut module = driver::assemble_module(&closure).expect("assembles");
+        let mut module = driver::assemble_module(&closure, false).expect("assembles");
         check::check(&mut module).expect("checks");
         assert!(module.words.iter().any(|w| w.name == "w"));
     }
@@ -3982,7 +3982,7 @@ mod tests {
             ": helper ( -- i64 ) 1 ;\n: main ( -- ) ;\nexport: helper ;\n",
         );
         let closure = driver::discover_closure(&lib).expect("closure resolves");
-        let mut module = driver::assemble_module(&closure).expect("assembles");
+        let mut module = driver::assemble_module(&closure, false).expect("assembles");
         check::check(&mut module).expect("checks");
         let err = driver::check_no_main_in_closure(&module, &closure, None).unwrap_err();
         assert!(err.contains("main"), "names the word: {err}");

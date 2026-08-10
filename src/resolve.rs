@@ -286,10 +286,14 @@ pub(crate) fn not_exported_error(name: &str, qualifier: &str, span: Span) -> Str
 }
 
 /// Mangle every decl name for a multi-module closure and rewrite every body to
-/// match. A no-op below two modules, so a single-file program is unchanged
-/// (R22).
-pub fn resolve_modules(module: &mut Module) -> Result<(), String> {
-    if module.modules.len() < 2 {
+/// match. Below two modules the pass is a no-op *unless* `always_mangle` is set
+/// (R22): the REPL import path leaves a single-file closure raw and does its own
+/// epoch renaming, while the native build path forces mangling even for one
+/// module so a user word whose bare name equals a libc symbol (`close`) or a
+/// runtime shim's callee (`free`, called from `sooth_free`) becomes `close__m0`
+/// / `free__m0` and can no longer hijack that symbol at link time.
+pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), String> {
+    if module.modules.len() < 2 && !always_mangle {
         return Ok(());
     }
     let tables = NameTables::build(module);
@@ -341,7 +345,22 @@ pub fn resolve_modules(module: &mut Module) -> Result<(), String> {
     for e in &mut module.enums {
         e.name = mangle(&e.name, e.module);
     }
+    // A forced single-module closure (the native build path's hijack fix) has
+    // no qualified calls, so an operator-named overload is only ever reached by
+    // a bare call, which the rewrite above deliberately left unmangled for
+    // `check_operator`'s operand-type dispatch (over the candidate set keyed by
+    // the bare name). Its decl must therefore stay bare too, or that lookup
+    // would miss it and fall through to the builtin, rejecting struct operands.
+    // A genuine multi-module closure keeps mangling operator decls: a qualified
+    // `v::+` *is* rewritten to `+__m1` (a cross-module use names one module's
+    // overload directly), so the decl it targets must carry the same mangled
+    // name. An operator symbol never collides with a libc name (`qbe_name`
+    // escapes `+` to `.2b.`), so leaving it bare here reintroduces no hijack.
+    let single = module.modules.len() < 2;
     for w in &mut module.words {
+        if single && is_operator_dispatch_name(&w.name) {
+            continue;
+        }
         w.name = mangle(&w.name, w.module);
     }
     for x in &mut module.externs {
@@ -587,7 +606,7 @@ mod tests {
             ": p ( -- i64 ) 1 ; : main ( -- ) lib::p drop p drop ;",
             ": p ( -- i64 ) 2 ;\nexport: p ;",
         );
-        resolve_modules(&mut module).unwrap();
+        resolve_modules(&mut module, false).unwrap();
         let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
         assert!(names.contains(&"p__m0"), "module 0's p mangled: {names:?}");
         assert!(names.contains(&"p__m1"), "module 1's p mangled: {names:?}");
@@ -621,7 +640,7 @@ mod tests {
              acc drop ;",
             ": noop ( -- ) ;",
         );
-        resolve_modules(&mut module).unwrap();
+        resolve_modules(&mut module, false).unwrap();
         let main = module.words.iter().find(|w| w.name == "main").unwrap();
         let calls = call_names(&main.body);
         assert!(
@@ -648,7 +667,7 @@ mod tests {
              : main ( -- ) &!dst drop ;",
             ": noop ( -- ) ;",
         );
-        resolve_modules(&mut module).unwrap();
+        resolve_modules(&mut module, false).unwrap();
         let main = module.words.iter().find(|w| w.name == "main").unwrap();
         let calls = call_names(&main.body);
         assert!(
@@ -657,11 +676,40 @@ mod tests {
         );
     }
 
+    /// The native build path forces mangling even for one module, so a user
+    /// word whose bare name equals a libc symbol (`close`) can no longer be
+    /// emitted as the bare symbol and hijack it: it becomes `close__m0`, while
+    /// `main` (the C entry) and `drop` (dispatched by literal name) are left
+    /// alone exactly as in a multi-module closure. The call site to `close` is
+    /// rewritten in step so the definition and its callers still agree.
+    #[test]
+    fn single_module_forced_mangle_renames_libc_named_word() {
+        let tokens = lex(": close ( -- ) ; : main ( -- ) close ;").unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        resolve_modules(&mut module, true).unwrap();
+        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
+        assert!(
+            names.contains(&"close__m0"),
+            "user close mangled: {names:?}"
+        );
+        assert!(
+            !names.contains(&"close"),
+            "bare close no longer emitted: {names:?}"
+        );
+        assert!(names.contains(&"main"), "main is never mangled: {names:?}");
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        assert_eq!(
+            call_names(&main.body),
+            vec!["close__m0".to_string()],
+            "the call site is rewritten to match the mangled definition"
+        );
+    }
+
     #[test]
     fn single_module_closure_is_left_unchanged() {
         let tokens = lex(": p ( -- i64 ) 1 ; : main ( -- ) p drop ;").unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
-        resolve_modules(&mut module).unwrap();
+        resolve_modules(&mut module, false).unwrap();
         let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
         assert_eq!(names, vec!["p", "main"]);
         let main = module.words.iter().find(|w| w.name == "main").unwrap();

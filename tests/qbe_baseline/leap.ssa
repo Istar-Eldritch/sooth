@@ -39,7 +39,7 @@ export function $.2e.(w %v0) {
 	ret
 }
 
-export function w $leap(l %v0) {
+export function w $leap__m0(l %v0) {
 @start
 	%v1 =l copy 4
 	%v2 =l rem %v0, %v1
@@ -63,13 +63,13 @@ export function w $leap(l %v0) {
 export function $sooth_main() {
 @start
 	%v0 =l copy 2000
-	%v1 =w call $leap(l %v0)
+	%v1 =w call $leap__m0(l %v0)
 	call $.2e.(w %v1)
 	%v2 =l copy 1900
-	%v3 =w call $leap(l %v2)
+	%v3 =w call $leap__m0(l %v2)
 	call $.2e.(w %v3)
 	%v4 =l copy 2024
-	%v5 =w call $leap(l %v4)
+	%v5 =w call $leap__m0(l %v4)
 	call $.2e.(w %v5)
 	ret
 }

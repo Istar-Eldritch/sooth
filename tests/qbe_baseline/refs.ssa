@@ -16,7 +16,7 @@ type :arr_0 = align 1 { b 64 }
 type :Buf = { l, l }
 type :Popped = { :List, l }
 
-export function :Buf $new() {
+export function :Buf $new__m0() {
 @start
 	%v0 =l copy 0
 	%v1 =w and %v0, 255
@@ -163,7 +163,7 @@ export function :Buf $new() {
 	ret %v72
 }
 
-export function $push.2d.byte(l %v0, w %v1) {
+export function $push.2d.byte__m0(l %v0, w %v1) {
 @start
 	%v2 =l add %v0, 8
 	%v3 =l loadl %v2
@@ -189,7 +189,7 @@ export function $push.2d.byte(l %v0, w %v1) {
 	ret
 }
 
-export function w $byte.2d.at(l %v0, l %v1) {
+export function w $byte.2d.at__m0(l %v0, l %v1) {
 @start
 	%v2 =l add %v0, 0
 	%v3 =l loadl %v2
@@ -208,37 +208,37 @@ export function w $byte.2d.at(l %v0, l %v1) {
 	ret %v9
 }
 
-export function $copy.2d.byte(l %v0, l %v1, l %v2) {
+export function $copy.2d.byte__m0(l %v0, l %v1, l %v2) {
 @start
-	%v3 =w call $byte.2d.at(l %v1, l %v2)
-	call $push.2d.byte(l %v0, w %v3)
+	%v3 =w call $byte.2d.at__m0(l %v1, l %v2)
+	call $push.2d.byte__m0(l %v0, w %v3)
 	ret
 }
 
 export function $sooth_main() {
 @start
-	%v0 =:Buf call $new()
-	%v1 =:Buf call $new()
+	%v0 =:Buf call $new__m0()
+	%v1 =:Buf call $new__m0()
 	%v2 =l add %v0, 0
 	%v3 =l copy 72
 	%v4 =w and %v3, 255
-	call $push.2d.byte(l %v2, w %v4)
+	call $push.2d.byte__m0(l %v2, w %v4)
 	%v5 =l add %v1, 0
 	%v6 =l copy 90
 	%v7 =w and %v6, 255
-	call $push.2d.byte(l %v5, w %v7)
+	call $push.2d.byte__m0(l %v5, w %v7)
 	%v8 =l add %v0, 0
 	%v9 =l add %v1, 0
 	%v10 =l copy 0
-	call $copy.2d.byte(l %v8, l %v9, l %v10)
+	call $copy.2d.byte__m0(l %v8, l %v9, l %v10)
 	%v11 =l add %v0, 0
 	%v12 =l copy 0
-	%v13 =w call $byte.2d.at(l %v11, l %v12)
+	%v13 =w call $byte.2d.at__m0(l %v11, l %v12)
 	%pw0 =l extuw %v13
 	call $printf(l $ufmt, l %pw0, ...)
 	%v14 =l add %v0, 0
 	%v15 =l copy 1
-	%v16 =w call $byte.2d.at(l %v14, l %v15)
+	%v16 =w call $byte.2d.at__m0(l %v14, l %v15)
 	%pw1 =l extuw %v16
 	call $printf(l $ufmt, l %pw1, ...)
 	%v17 =l add %v0, 0
@@ -252,10 +252,10 @@ export function $sooth_main() {
 	%v22 =w copy 0
 	%v23 =l add %v21, 0
 	storew %v22, %v23
-	%v24 =:List call $build(l %v20, :List %v21)
+	%v24 =:List call $build__m0(l %v20, :List %v21)
 	%v25 =l add %v24, 0
-	call $walk(l %v25)
-	%v26 =:Popped call $pop(:List %v24)
+	call $walk__m0(l %v25)
+	%v26 =:Popped call $pop__m0(:List %v24)
 	%v27 =l add %v26, 0
 	%v28 =l add %v26, 24
 	%v29 =l loadl %v28
@@ -264,7 +264,7 @@ export function $sooth_main() {
 	ret
 }
 
-export function :List $push.2d.front(:List %v0, l %v1) {
+export function :List $push.2d.front__m0(:List %v0, l %v1) {
 @start
 	%v2 =l copy 24
 	%v3 =l call $sooth_alloc(l %v2)
@@ -280,7 +280,7 @@ export function :List $push.2d.front(:List %v0, l %v1) {
 	ret %v4
 }
 
-export function :List $build(l %v0, :List %v1) {
+export function :List $build__m0(l %v0, :List %v1) {
 @start
 	%v3 =l alloc8 24
 	%v4 =l alloc8 24
@@ -296,7 +296,7 @@ export function :List $build(l %v0, :List %v1) {
 @blk3
 	%v7 =l copy 1
 	%v8 =l sub %v2, %v7
-	%v9 =:List call $push.2d.front(:List %v3, l %v2)
+	%v9 =:List call $push.2d.front__m0(:List %v3, l %v2)
 	blit %v9, %v4, 24
 	blit %v4, %v3, 24
 	jmp @blk1
@@ -304,7 +304,7 @@ export function :List $build(l %v0, :List %v1) {
 	ret %v3
 }
 
-export function :Popped $pop(:List %v0) {
+export function :Popped $pop__m0(:List %v0) {
 @start
 	%v2 =l add %v0, 0
 	%v1 =w loadw %v2
@@ -343,7 +343,7 @@ export function :Popped $pop(:List %v0) {
 	ret %v21
 }
 
-export function $walk(l %v0) {
+export function $walk__m0(l %v0) {
 @start
 	jmp @blk1
 @blk1

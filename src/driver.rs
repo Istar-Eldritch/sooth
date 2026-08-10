@@ -160,9 +160,14 @@ impl Closure {
 /// R3/R11: assemble the discovered closure into one `Module`. Runs the shared
 /// type pre-pass across every file into one merged registry, parses each file's
 /// bodies module-aware against that shared registry, then hands the merged
-/// module to the resolver to mangle same-named decls apart (a no-op for a
-/// single-file closure, R22).
-pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
+/// module to the resolver to mangle same-named decls apart.
+///
+/// `always_mangle` forces the resolver to mangle even a single-file closure: the
+/// native build path sets it so a user word named like a libc symbol (`close`)
+/// or a runtime shim's callee (`free`) cannot be emitted as that bare symbol and
+/// hijack it at link time. The REPL import path leaves it unset, keeping the R22
+/// single-file no-op (it renames imported words to epoch symbols itself).
+pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<Module, String> {
     let mut structs = Vec::new();
     // R2 (slice 9): the builtin `bool` enum occupies the reserved head of the
     // merged registry (`BOOL_ENUM_ID`) ahead of every file's user enums, so
@@ -271,7 +276,7 @@ pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
     // R20/R21: validate selective imports (each name exported by its source,
     // no collision) on the raw, pre-mangle module.
     check::check_selective_imports(&module, &selective_by_module)?;
-    resolve::resolve_modules(&mut module)?;
+    resolve::resolve_modules(&mut module, always_mangle)?;
     Ok(module)
 }
 
@@ -313,7 +318,7 @@ pub(crate) fn check_no_main_in_closure(
 /// builtin-table refactor.
 pub fn emit_ssa(path: &Path) -> Result<String, String> {
     let closure = discover_closure(path)?;
-    let mut module = assemble_module(&closure)?;
+    let mut module = assemble_module(&closure, true)?;
     check::check(&mut module)?;
     // R14/D4 (native-build fix): only the entry file (module 0) may declare
     // `main`; an imported file that also declares one is rejected here,
@@ -527,7 +532,7 @@ mod tests {
             "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
-        let mut module = assemble_module(&closure).expect("assembles");
+        let mut module = assemble_module(&closure, true).expect("assembles");
         check::check(&mut module).expect("checks");
         check_no_main_in_closure(&module, &closure, Some(0))
             .expect("module 0's own `main` is allowed");
@@ -548,7 +553,7 @@ mod tests {
             "import: l \"lib.sth\" ;\n: main ( -- ) l::helper drop ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
-        let mut module = assemble_module(&closure).expect("assembles");
+        let mut module = assemble_module(&closure, true).expect("assembles");
         check::check(&mut module).expect("checks");
         let err = check_no_main_in_closure(&module, &closure, Some(0)).unwrap_err();
         assert!(err.contains("main"), "names the word: {err}");

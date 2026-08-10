@@ -17,17 +17,17 @@ export function $sooth_main() {
 	%v0 =l copy 2
 	%v1 =l copy 5
 	%v2 =l copy 9
-	%v3 =l call $sooth_mono_mymax3__t0_i64(l %v0, l %v1, l %v2)
+	%v3 =l call $sooth_mono_mymax3__m0__t0_i64(l %v0, l %v1, l %v2)
 	call $printf(l $fmt, l %v3, ...)
 	%v4 =d copy d_2
 	%v5 =d copy d_5
 	%v6 =d copy d_9
-	%v7 =d call $sooth_mono_mymax3__t0_f64(d %v4, d %v5, d %v6)
+	%v7 =d call $sooth_mono_mymax3__m0__t0_f64(d %v4, d %v5, d %v6)
 	call $printf(l $ffmt, d %v7, ...)
 	ret
 }
 
-export function d $sooth_mono_mymax3__t0_f64(d %v0, d %v1, d %v2) {
+export function d $sooth_mono_mymax3__m0__t0_f64(d %v0, d %v1, d %v2) {
 @start
 	%v3 =w cgtd %v0, %v1
 	jnz %v3, @blk1, @blk2
@@ -56,7 +56,7 @@ export function d $sooth_mono_mymax3__t0_f64(d %v0, d %v1, d %v2) {
 	ret %v8
 }
 
-export function l $sooth_mono_mymax3__t0_i64(l %v0, l %v1, l %v2) {
+export function l $sooth_mono_mymax3__m0__t0_i64(l %v0, l %v1, l %v2) {
 @start
 	%v3 =w csgtl %v0, %v1
 	jnz %v3, @blk1, @blk2
