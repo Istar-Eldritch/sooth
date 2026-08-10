@@ -607,10 +607,13 @@ impl Provenance {
         self.surviving_sets[id.0 as usize].bundle
     }
 
-    /// 7b/R19: intern a surviving capture set, or `None` if it is empty (a
-    /// closure that snapshots only scalars keeps no `SurvivingCaptureSetId`,
-    /// regardless of `bundle` -- a scalar copy has no referent that can go
-    /// dead, so nothing to guard even when the env it lives in is a bundle).
+    /// 7b/R19: intern a surviving capture set, or `None` if it holds nothing
+    /// the R22 word-output guard must watch. That is empty members *and* no
+    /// bundle: a closure snapshotting only scalars into an inline env has no
+    /// referent and no bundle storage that can go dead. But an all-scalar 2+
+    /// capture still allocates a *stack* env bundle (R16) whose own storage
+    /// dies at return, so it must keep a set (empty members, `bundle = true`)
+    /// to carry that signal onto a carrier for R22 to reject.
     fn intern_surviving_set(
         &mut self,
         mut members: Vec<SurvivingCapture>,
@@ -618,7 +621,7 @@ impl Provenance {
     ) -> Option<SurvivingCaptureSetId> {
         members.sort_by(|a, b| a.name.cmp(&b.name));
         members.dedup();
-        if members.is_empty() {
+        if members.is_empty() && !bundle {
             return None;
         }
         let id = SurvivingCaptureSetId(self.surviving_sets.len() as u32);
@@ -9707,10 +9710,20 @@ mod tests {
             multi.contains("at most one reference"),
             "a 2+-capture escaping closure is deferred: {multi}"
         );
-        assert_eq!(
-            admit(&mut prov_with(&["x", "y"]), false, &scope),
-            Ok(None),
-            "two scalar captures admit in-frame with no surviving members"
+        // In-frame, the same two admit -- but as a stack bundle (R16), so the
+        // interned set has no members yet must survive with `bundle = true`,
+        // else the bundle-escape-via-carrier signal is lost before R22.
+        let mut prov = prov_with(&["x", "y"]);
+        let set = admit(&mut prov, false, &scope)
+            .expect("two scalar captures admit in-frame (R21)")
+            .expect("an all-scalar stack bundle keeps a set to carry the bundle signal");
+        assert!(
+            prov.surviving_set(set).is_empty(),
+            "a scalar snapshot is never a surviving member (D4)"
+        );
+        assert!(
+            prov.surviving_set_is_bundle(set),
+            "the all-scalar 2-capture stack bundle marks its set as a bundle"
         );
     }
 

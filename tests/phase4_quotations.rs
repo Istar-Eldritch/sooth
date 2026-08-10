@@ -636,6 +636,30 @@ fn scalar_and_ref_bundle_escaping_via_carrier_is_rejected_deferred() {
     );
 }
 
+#[test]
+fn scalar_only_bundle_escaping_via_carrier_is_rejected_deferred() {
+    // Both captures (`x`, `y`) are scalars, so the surviving set has *zero*
+    // members (a scalar snapshot is never a member, D4). But two total captures
+    // still allocate a 2-word stack bundle (R16) in `make`'s frame; that
+    // bundle's own storage dies at return. Storing the closure into `Holder`
+    // is an in-frame boundary (admitted, R21), and returning `Holder` must be
+    // rejected. This is the empty-member edge: without the bundle marker
+    // riding the interned set, the interned set would be `None` and R22 would
+    // never fire, leaving a dangling stack bundle at runtime.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : make ( -- Holder )\n\
+         10 | x |\n\
+         20 | y |\n\
+         [ x y + ] Holder ;\n\
+         : main ( -- ) make Holder>q call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure may capture at most one reference (a heap env is deferred) (line 5)"
+    );
+}
+
 // -- T-join: two capturing arms join, the union rides the erased slot ---------
 
 #[test]
