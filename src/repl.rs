@@ -566,7 +566,7 @@ pub fn format_stack(
                         f32::from_bits(v as u64 as u32).to_string()
                     }
                     Type::Float(_) => f64::from_bits(v as u64).to_string(),
-                    Type::Bool => if v != 0 { "true" } else { "false" }.to_string(),
+                    Type::BOOL => if v != 0 { "true" } else { "false" }.to_string(),
                     Type::Int(it) if !it.signed() => (v as u64).to_string(),
                     Type::Usize => (v as u64).to_string(),
                     Type::Isize => v.to_string(),
@@ -3328,7 +3328,7 @@ mod tests {
     fn format_stack_bool_slot_displays_as_true_or_false() {
         // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
         assert_eq!(
-            format_stack(&[1, 0], &[Type::Bool, Type::Bool], &[], &[], &[]),
+            format_stack(&[1, 0], &[Type::BOOL, Type::BOOL], &[], &[], &[]),
             "stack: true false"
         );
     }

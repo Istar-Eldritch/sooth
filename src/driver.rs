@@ -164,7 +164,10 @@ impl Closure {
 /// single-file closure, R22).
 pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
     let mut structs = Vec::new();
-    let mut enums = Vec::new();
+    // R2 (slice 9): the builtin `bool` enum occupies the reserved head of the
+    // merged registry (`BOOL_ENUM_ID`) ahead of every file's user enums, so
+    // each module's `enum_base` offset already accounts for it.
+    let mut enums = vec![crate::ast::bool_enum_decl()];
     let mut struct_base = Vec::with_capacity(closure.nodes.len());
     let mut enum_base = Vec::with_capacity(closure.nodes.len());
     for (m, node) in closure.nodes.iter().enumerate() {

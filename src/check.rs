@@ -345,7 +345,7 @@ fn float_types() -> Vec<Type> {
 /// cross-checked against the `Instr::Print` codegen arms).
 fn printable_types() -> Vec<Type> {
     let mut v = numeric_types();
-    v.push(Type::Bool);
+    v.push(Type::BOOL);
     v.push(Type::Str);
     v.push(Type::Cstr);
     v
@@ -381,7 +381,7 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
             (">=", CmpOp::Ge),
             ("<>", CmpOp::Ne),
         ] {
-            row(op, vec![ty, ty], vec![Type::Bool], BuiltinLower::Cmp(cmp));
+            row(op, vec![ty, ty], vec![Type::BOOL], BuiltinLower::Cmp(cmp));
         }
     }
     for ty in float_types() {
@@ -403,23 +403,23 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
     // bitwise-on-0/1 and logical coincide.
     row(
         "and",
-        vec![Type::Bool, Type::Bool],
-        vec![Type::Bool],
+        vec![Type::BOOL, Type::BOOL],
+        vec![Type::BOOL],
         BuiltinLower::And,
     );
     row(
         "or",
-        vec![Type::Bool, Type::Bool],
-        vec![Type::Bool],
+        vec![Type::BOOL, Type::BOOL],
+        vec![Type::BOOL],
         BuiltinLower::Or,
     );
     row(
         "xor",
-        vec![Type::Bool, Type::Bool],
-        vec![Type::Bool],
+        vec![Type::BOOL, Type::BOOL],
+        vec![Type::BOOL],
         BuiltinLower::Xor,
     );
-    row("not", vec![Type::Bool], vec![Type::Bool], BuiltinLower::Not);
+    row("not", vec![Type::BOOL], vec![Type::BOOL], BuiltinLower::Not);
     for ty in printable_types() {
         row(".", vec![ty], vec![], BuiltinLower::Print);
     }
@@ -2271,7 +2271,7 @@ fn is_extern_boundary_scalar(ty: Type) -> bool {
         ty,
         Type::Int(_)
             | Type::Float(_)
-            | Type::Bool
+            | Type::BOOL
             | Type::Usize
             | Type::Isize
             | Type::Ref(..)
@@ -3138,9 +3138,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // every field position
         // anyway.
         Type::Ref(..) => None,
+        // `bool` is `Type::Enum` and so caught by the arm above; a zero-payload
+        // enum has no fields, hence no containment edges, so it is a leaf.
         Type::Int(_)
         | Type::Float(_)
-        | Type::Bool
         | Type::Usize
         | Type::Isize
         | Type::Str
@@ -4846,7 +4847,6 @@ fn poly_term(
     match &term.kind {
         TermKind::IntLit(_) => stack.push(PolyType::Concrete(Type::I64)),
         TermKind::FloatLit(_) => stack.push(PolyType::Concrete(Type::F64)),
-        TermKind::BoolLit(_) => stack.push(PolyType::Concrete(Type::Bool)),
         TermKind::StrLit(_) => stack.push(PolyType::Concrete(Type::Str)),
         TermKind::Bind(names) => {
             if stack.len() < names.len() {
@@ -4890,9 +4890,9 @@ fn poly_term(
             let cond = stack
                 .pop()
                 .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
-            if cond != PolyType::Concrete(Type::Bool) {
+            if cond != PolyType::Concrete(Type::BOOL) {
                 return Err(match cond {
-                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::Bool, t),
+                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::BOOL, t),
                     other => poly_op_on_variable_error(ctx, span, "if", &other, sig),
                 });
             }
@@ -5087,7 +5087,7 @@ fn poly_call_term(
                     _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
                 }
                 stack.truncate(n - 2);
-                stack.push(PolyType::Concrete(Type::Bool));
+                stack.push(PolyType::Concrete(Type::BOOL));
                 return Ok(stack);
             }
         }
@@ -7631,10 +7631,6 @@ fn check_term(
             stack.push(Slot::computed(Type::F64));
             Ok(stack)
         }
-        TermKind::BoolLit(_) => {
-            stack.push(Slot::computed(Type::Bool));
-            Ok(stack)
-        }
         TermKind::StrLit(_) => {
             stack.push(Slot::computed(Type::Str));
             Ok(stack)
@@ -8165,8 +8161,8 @@ fn check_term(
             if cond.quot.is_some() {
                 return Err(reject_quotation_operand(ctx, span, "if"));
             }
-            if cond.ty != Type::Bool {
-                return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
+            if cond.ty != Type::BOOL {
+                return Err(type_mismatch_error(ctx, span, "if", Type::BOOL, cond.ty));
             }
             // R14: each arm advances its own copy of the move-state; the join
             // reconciles them into `MaybeMoved` wherever they disagree. R2:
@@ -8663,7 +8659,7 @@ fn check_operator(
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
-            stack.push(Slot::computed(Type::Bool));
+            stack.push(Slot::computed(Type::BOOL));
         }
         // R12 (S6): `max ( 'T 'T -- 'T )`, an internal `Ord` bound resolved
         // against the integer tower (`is_int`, which already includes
@@ -10812,7 +10808,7 @@ mod tests {
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect::<Vec<Type>>(),
-            vec![Type::I64, Type::Bool]
+            vec![Type::I64, Type::BOOL]
         );
     }
 
@@ -11755,9 +11751,9 @@ mod tests {
         // block-end firing site reports. `bind`'s `linear` flag is passed
         // explicitly by the caller (not derived from the `Type` via
         // `is_copy`), so any type distinct from `a`'s suffices here.
-        scope.bind("s", Slot::computed(Type::Bool), true, prov);
+        scope.bind("s", Slot::computed(Type::BOOL), true, prov);
         let leaked = scope.leave(depth).expect("an unconsumed linear local");
-        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Bool));
+        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::BOOL));
         assert_eq!(leaked.2, MoveState::Live);
     }
 
@@ -12619,21 +12615,21 @@ mod tests {
         // `bool` (eager evaluation makes bitwise-on-0/1 coincide with
         // logical), so their domain is `int_types()` plus one `bool` row.
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_homogeneous_binary_rows("and", want, BuiltinLower::And);
     }
 
     #[test]
     fn builtin_table_or_has_a_row_per_int_type_plus_bool() {
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_homogeneous_binary_rows("or", want, BuiltinLower::Or);
     }
 
     #[test]
     fn builtin_table_xor_has_a_row_per_int_type_plus_bool() {
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_homogeneous_binary_rows("xor", want, BuiltinLower::Xor);
     }
 
@@ -12644,7 +12640,7 @@ mod tests {
         let table = builtin_table();
         let rows = table.get("not").expect("`not` is a builtin operator");
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_eq!(rows.len(), want.len(), "row count for `not`");
         let mut got: Vec<Type> = rows
             .iter()
@@ -12721,7 +12717,7 @@ mod tests {
             let mut got: Vec<Type> = rows
                 .iter()
                 .map(|r| {
-                    assert_eq!(r.outputs, vec![Type::Bool], "`{op}` produces `bool`");
+                    assert_eq!(r.outputs, vec![Type::BOOL], "`{op}` produces `bool`");
                     assert_eq!(r.inputs.len(), 2, "`{op}` is binary");
                     assert_eq!(r.inputs[0], r.inputs[1], "a `{op}` row is homogeneous");
                     assert_eq!(
@@ -12786,7 +12782,7 @@ mod tests {
             infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
             vec![Type::from_name("u8").unwrap()]
         );
-        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::Bool]);
+        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::BOOL]);
         assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
     }
 
@@ -12842,7 +12838,7 @@ mod tests {
     #[test]
     fn infer_line_carries_slot_types_expected() {
         // A comparison line leaves a `bool` on the carried stack.
-        assert_eq!(infer_src("5 3 >", &[]).unwrap(), vec![Type::Bool]);
+        assert_eq!(infer_src("5 3 >", &[]).unwrap(), vec![Type::BOOL]);
     }
 
     #[test]
@@ -13962,7 +13958,7 @@ mod tests {
         let mut refs = Vec::new();
         let a = intern_ref_type(&mut refs, Type::I64, true);
         let b = intern_ref_type(&mut refs, Type::I64, true);
-        let c = intern_ref_type(&mut refs, Type::Bool, true);
+        let c = intern_ref_type(&mut refs, Type::BOOL, true);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(refs.len(), 2);

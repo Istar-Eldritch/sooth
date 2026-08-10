@@ -330,7 +330,9 @@ pub fn prepass_and_register(
 
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut structs = Vec::new();
-    let mut enums = Vec::new();
+    // Slice 9 (R2): the builtin `bool` enum occupies the reserved head of the
+    // registry (`BOOL_ENUM_ID`) ahead of any user enum this file declares.
+    let mut enums = vec![crate::ast::bool_enum_decl()];
     prepass_and_register(tokens, 0, &mut structs, &mut enums)?;
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
@@ -351,9 +353,10 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
     }
+    // The user enums start after the injected `bool` at `BOOL_ENUM_ID`.
     for (idx, variant_fields) in bodies.enum_fields_by_decl.into_iter().enumerate() {
         for (vidx, fields) in variant_fields.into_iter().enumerate() {
-            enums[idx].variants[vidx].fields = fields;
+            enums[crate::ast::BOOL_ENUM_ID.index() + 1 + idx].variants[vidx].fields = fields;
         }
     }
     Ok(Module {
@@ -1971,12 +1974,15 @@ impl<'t> Parser<'t> {
                 kind: TermKind::StrLit(s),
                 span,
             }),
+            // Slice 9 (D-D/R2): `true`/`false` stay accepted surface spellings
+            // but now construct the `True`/`False` variants of the builtin
+            // `bool` enum; there is no distinct boolean literal term.
             Token::Word(w) if w == "true" => Ok(Term {
-                kind: TermKind::BoolLit(true),
+                kind: TermKind::Call("True".to_string()),
                 span,
             }),
             Token::Word(w) if w == "false" => Ok(Term {
-                kind: TermKind::BoolLit(false),
+                kind: TermKind::Call("False".to_string()),
                 span,
             }),
             Token::Word(w) if w == "if" => {
@@ -2205,8 +2211,8 @@ mod tests {
         let module = parse_src(": w ( i64 bool -- bool ) drop ;").unwrap();
         let w = &module.words[0];
         assert_eq!(w.effect.inputs[0].ty, Type::I64);
-        assert_eq!(w.effect.inputs[1].ty, Type::Bool);
-        assert_eq!(w.effect.outputs[0].ty, Type::Bool);
+        assert_eq!(w.effect.inputs[1].ty, Type::BOOL);
+        assert_eq!(w.effect.outputs[0].ty, Type::BOOL);
     }
 
     #[test]
@@ -2229,11 +2235,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_true_false_are_bool_literals() {
+    fn parse_true_false_construct_bool_variants() {
         let module = parse_src(": w ( -- bool bool ) true false ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(body[0].kind, TermKind::BoolLit(true)));
-        assert!(matches!(body[1].kind, TermKind::BoolLit(false)));
+        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "True"));
+        assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
     }
 
     #[test]

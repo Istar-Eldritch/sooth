@@ -222,7 +222,7 @@ pub fn ir_type_of(ty: Type) -> IrType {
             signed: it.signed(),
         },
         Type::Float(ft) => IrType::Float { bits: ft.bits() },
-        Type::Bool => IrType::Bool,
+        Type::BOOL => IrType::Bool,
         // The layout lives in the module's `StructLayout` registry; the
         // `IrType` carries only the `StructId` so it stays `Copy`.
         Type::Struct(id, _) => IrType::Struct(id),
@@ -3019,11 +3019,6 @@ impl<'a> FuncBuilder<'a> {
             TermKind::FloatLit(x) => {
                 let v = self.fresh_value(IrType::Float { bits: 64 });
                 self.push_instr(Instr::ConstF(v, *x));
-                self.stack.push(v);
-            }
-            TermKind::BoolLit(b) => {
-                let v = self.fresh_value(IrType::Bool);
-                self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
             TermKind::StrLit(s) => {
@@ -6464,7 +6459,7 @@ mod tests {
                 "mapping {name}"
             );
         }
-        assert_eq!(ir_type_of(Type::Bool), IrType::Bool);
+        assert_eq!(ir_type_of(Type::BOOL), IrType::Bool);
     }
 
     #[test]
@@ -8469,7 +8464,7 @@ mod tests {
         );
         assert_ne!(
             ir,
-            ir_type_of(quotation_type(vec![Type::I64], vec![Type::Bool])),
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::BOOL])),
             "structurally different effects are distinct `IrType`s"
         );
         let layout = quotation_layout(WORD_WIDTH);
