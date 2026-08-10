@@ -1,15 +1,20 @@
-extern: open  ( cstr i64 -- i64 )              "open" ;
-extern: read  ( i64 &![u8 64] usize -- isize ) "read" ;
-extern: close ( i64 -- i64 )                   "close" ;
+extern: open     ( cstr i64 -- i64 )              "open" ;
+extern: read     ( i64 &![u8 64] usize -- isize ) "read" ;
+extern: close-fd ( i64 -- i64 )                   "close" ;
 
-type: File fd i64 ;
+\ The resource enters the language as a one-field leaf wrapper: `Fd` owns the
+\ raw handle, and its `drop` is where the fd is closed.
+type: Fd n i64 ;
+: drop ( Fd -- ) | h | h Fd>n close-fd drop ;
 
-: drop ( File -- )
-  | f | f File>fd close drop ;
+\ `File` wraps the leaf and needs no destructor: its derived glue disposes the
+\ `Fd` field through `Fd`'s own `drop`, so no new rule and no annotation.
+type: File fd Fd ;
+
+: close ( File -- ) drop ;
 
 : main ( -- )
-  "examples/resource_fixture.txt" cstr 0 open | fd |
-  fd File | f |
+  "examples/resource_fixture.txt" cstr 0 open Fd File | f |
   0 >u8 64 fill | buf |
-  f File|>fd &!buf 64 >usize read . | file |
-  file drop ;
+  &f &File>fd &Fd>n @ &!buf 64 >usize read .
+  f close ;
