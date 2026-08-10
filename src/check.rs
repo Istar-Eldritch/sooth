@@ -111,6 +111,21 @@ struct SurvivingCapture {
     frame_rooted: bool,
 }
 
+/// 7b/R19 + review fix: one interned surviving capture set. `bundle` is R16's
+/// env-shape signal -- 2+ *total* captures (scalar or not) build a
+/// stack-allocated bundle rather than an inline single-word env -- carried
+/// separately from `members`, because a scalar+reference bundle has only one
+/// surviving member: member count alone cannot recover it. Drives the R22
+/// word-output escape guard for a carrier whose closure needed a bundle,
+/// independent of any member's `frame_rooted` classification (the bundle
+/// storage itself is frame-local even when every capture it holds is
+/// outer-rooted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SurvivingSet {
+    members: Vec<SurvivingCapture>,
+    bundle: bool,
+}
+
 /// One interned quotation literal: its body terms (spliced at `call`/`times`)
 /// and the literal's span, for a located diagnostic.
 #[derive(Debug, Clone)]
@@ -469,7 +484,7 @@ struct Provenance {
     /// borrow captures (never its scalar snapshots) ride here so
     /// `capture_alive_names` (R20) and the R22 escape guard can read them past
     /// erasure, when the `QuotRef::Known` marker is gone.
-    surviving_sets: Vec<Vec<SurvivingCapture>>,
+    surviving_sets: Vec<SurvivingSet>,
     /// R6/R14: the self-tail combinator currently being spliced (its name and
     /// its declared input arity), set for the duration of that body splice. A
     /// tail-position call to that same name reached inside the spliced body is
@@ -582,14 +597,24 @@ impl Provenance {
 
     /// 7b/R19: the surviving capture set behind `id`.
     fn surviving_set(&self, id: SurvivingCaptureSetId) -> &[SurvivingCapture] {
-        &self.surviving_sets[id.0 as usize]
+        &self.surviving_sets[id.0 as usize].members
+    }
+
+    /// Review fix: whether the closure behind `id` needed a stack-allocated
+    /// env bundle (2+ total captures, R16) rather than an inline single-word
+    /// env. Read by the R22 word-output escape guard alongside `frame_rooted`.
+    fn surviving_set_is_bundle(&self, id: SurvivingCaptureSetId) -> bool {
+        self.surviving_sets[id.0 as usize].bundle
     }
 
     /// 7b/R19: intern a surviving capture set, or `None` if it is empty (a
-    /// closure that snapshots only scalars keeps no `SurvivingCaptureSetId`).
+    /// closure that snapshots only scalars keeps no `SurvivingCaptureSetId`,
+    /// regardless of `bundle` -- a scalar copy has no referent that can go
+    /// dead, so nothing to guard even when the env it lives in is a bundle).
     fn intern_surviving_set(
         &mut self,
         mut members: Vec<SurvivingCapture>,
+        bundle: bool,
     ) -> Option<SurvivingCaptureSetId> {
         members.sort_by(|a, b| a.name.cmp(&b.name));
         members.dedup();
@@ -597,7 +622,7 @@ impl Provenance {
             return None;
         }
         let id = SurvivingCaptureSetId(self.surviving_sets.len() as u32);
-        self.surviving_sets.push(members);
+        self.surviving_sets.push(SurvivingSet { members, bundle });
         Some(id)
     }
 
@@ -610,10 +635,12 @@ impl Provenance {
         b: Option<SurvivingCaptureSetId>,
     ) -> Option<SurvivingCaptureSetId> {
         let mut members: Vec<SurvivingCapture> = Vec::new();
+        let mut bundle = false;
         for id in [a, b].into_iter().flatten() {
             members.extend_from_slice(self.surviving_set(id));
+            bundle |= self.surviving_set_is_bundle(id);
         }
-        self.intern_surviving_set(members)
+        self.intern_surviving_set(members, bundle)
     }
 
     fn add(&mut self, deriv: Deriv) -> DerivId {
@@ -3843,11 +3870,25 @@ fn check_terms_word(
     // this is a targeted walk over each returned slot's surviving set. A
     // directly-returned closure with a frame capture never reaches here: its
     // "be returned" boundary already raised past-owning-frame (escaping).
+    //
+    // Review fix: a second, independent hazard shares this guard. A 2+-total-
+    // capture closure materializes a *stack-allocated* env bundle (R16) in
+    // the frame that builds it, even when every individual capture is
+    // outer-rooted -- the bundle's own storage still dies at return. Built
+    // in-frame (a struct/array store), that closure has `escaping = false`,
+    // so R18's direct multi-capture rejection never runs; only surfaces once
+    // the carrier holding it is itself returned. `surviving_set_is_bundle`
+    // carries that signal (independent of `frame_rooted`: a scalar+reference
+    // bundle has only one surviving member, so member count cannot recover
+    // it) and is checked here, second.
     if let Some(exit) = terms.last().map(|t| t.span) {
         for slot in &final_stack {
             if let Some(set) = slot.surviving {
                 if let Some(member) = prov.surviving_set(set).iter().find(|m| m.frame_rooted) {
                     return Err(past_owning_frame_error(&ctx, exit, &member.name));
+                }
+                if prov.surviving_set_is_bundle(set) {
+                    return Err(multi_capture_escaping_error(&ctx, exit));
                 }
             }
         }
@@ -6384,6 +6425,9 @@ fn past_last_use_error(ctx: &Ctx, span: Span, name: &str) -> String {
 /// R18: an escaping closure captures more than one value. Phase 1 stores a
 /// single word-sized capture inline in the `env` slot; a 2+-capture escaping
 /// closure needs a heap env, deferred with the rest of the heap-env case.
+/// Review fix: also fires at R22 when a 2+-capture closure's stack-allocated
+/// env bundle (R16) escapes transitively through a returned carrier -- the
+/// bundle's storage dies at return exactly as the direct-return case would.
 fn multi_capture_escaping_error(ctx: &Ctx, span: Span) -> String {
     let _ = ctx;
     format!(
@@ -6515,11 +6559,15 @@ fn check_capture_admission(
     }
     // R18: an escaping closure's inline env holds one word; a 2+-capture
     // escaping closure needs a heap env, deferred. An in-frame one takes the
-    // stack bundle (R16), so any count is admitted.
-    if escaping && names.len() >= 2 {
+    // stack bundle (R16), so any count is admitted here -- but review fix:
+    // the bundle marker rides onto the interned set regardless, since the
+    // in-frame admission is only sound until this closure escapes through a
+    // later carrier, which the R22 guard checks at the word-output boundary.
+    let bundle = names.len() >= 2;
+    if escaping && bundle {
         return Err(multi_capture_escaping_error(ctx, span));
     }
-    Ok(prov.intern_surviving_set(members))
+    Ok(prov.intern_surviving_set(members, bundle))
 }
 
 /// R7/R15/D4: a materialization boundary. Materialize a non-capturing `Known`

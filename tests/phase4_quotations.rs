@@ -584,6 +584,58 @@ fn frame_capture_escaping_via_struct_is_past_owning_frame() {
     );
 }
 
+// -- T-bundle-carrier: a 2+-capture stack bundle escaping via a carrier is ----
+// -- rejected even when no individual capture is frame-rooted (review fix) ---
+
+#[test]
+fn outer_rooted_bundle_escaping_via_carrier_is_rejected_deferred() {
+    // `ra`/`rb` are both outer-rooted (`&[i64 2]` parameters, `deriv: None`),
+    // so R22's frame-rooted walk sees no frame-rooted member and would have
+    // wrongly admitted this before the fix. The closure still needs a
+    // 2-capture stack bundle (R16), built in `make`'s frame; storing it into
+    // `Holder` is an in-frame boundary (admitted, R21), but returning `Holder`
+    // lets that bundle's own storage die at return regardless of who the
+    // bundle's references point to.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : make ( &[i64 2] &[i64 2] -- Holder )\n\
+         | ra rb |\n\
+         [ ra 0 >usize &> @ rb 0 >usize &> @ + ] Holder ;\n\
+         : main ( -- )\n\
+         10 2 fill | a |\n\
+         20 2 fill | b |\n\
+         &a &b make Holder>q call .\n\
+         a drop b drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure may capture at most one reference (a heap env is deferred) (line 4)"
+    );
+}
+
+#[test]
+fn scalar_and_ref_bundle_escaping_via_carrier_is_rejected_deferred() {
+    // A scalar (`n`) plus an outer-rooted reference (`ra`) is still a
+    // 2-*total*-capture bundle (R16), even though the surviving set has only
+    // *one* member (`ra` -- a scalar snapshot is never a member, D4). Member
+    // count alone cannot recover the bundle signal; this pins that the guard
+    // tracks total capture count separately.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : make ( &[i64 3] i64 -- Holder )\n\
+         | ra n |\n\
+         [ ra 0 >usize &> @ n + ] Holder ;\n\
+         : main ( -- )\n\
+         10 3 fill | a |\n\
+         &a 5 make Holder>q call .\n\
+         a drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure may capture at most one reference (a heap env is deferred) (line 4)"
+    );
+}
+
 // -- T-join: two capturing arms join, the union rides the erased slot ---------
 
 #[test]
