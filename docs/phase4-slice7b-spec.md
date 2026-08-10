@@ -132,6 +132,10 @@ Prove each guard fails by reverting it in a **throwaway copy** (not a shared wor
 - **M4 (R17 — T-makeb/T-dispatch).** Force the body to ignore its env param → tests go red/panic. Proves env is built and read.
 - **M5 (R26 — 7a pins).** Mutate a `Known`-literal `call` to emit `CallIndirect` → pins flip red. Proves the env param didn't reroute splicing.
 
+## Known residual risk (found in post-implementation review, not a scope decision)
+
+`inline_combinator`'s self-tail back-edge still builds its carried-state `outs` as bare `Slot::computed`, dropping any `surviving` set exactly as the getter/array/cell paths did before the review-2 fix. No working adversarial program was found: every self-tail combinator shape the standard library actually uses (e.g. `while`) exits through a conditional join, and `union_surviving` reconstructs the dropped set from the pass-through sibling arm, masking the gap. The one shape that would expose it — a self-tail combinator with no conditional exit at all — hits an unrelated, pre-existing IR-lowering panic (`ir.rs:3119`, `attempt to subtract with overflow` in `Bind`'s `split_off`) that reproduces identically on a closure-free instantiation and predates this slice. Left unfixed: no live exploit, and guess-fixing an unreachable path isn't warranted. Revisit if a future slice adds a self-tail combinator with no conditional exit, or if the unrelated `Bind`/`split_off` panic is ever fixed (which would make this path reachable).
+
 ## Sanctioned files
 
 - `src/check.rs` — R14, R15, R19, R20, R21, R22, R23, R24, unit tests.
