@@ -6,6 +6,7 @@
 
 use std::fmt::Write;
 
+use crate::ast::BOOL_ENUM_ID;
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
     QuotSigLayout, StructLayout, Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL,
@@ -89,8 +90,15 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     // outer struct's `type` line (QBE resolves aggregate names in one pass,
     // no forward references); `topo_sorted_structs` emits them in containment
     // order rather than assuming source-declaration order already is one.
+    // Slice 9 (R1/R3): a zero-payload enum (`Bool`, generally) never needs
+    // its own aggregate type -- it is a bare scalar, nowhere spelled as `:name`
+    // (`qbe_abi_ty`/`member_ty` route it to a register width instead), so
+    // emitting its declaration here would be a dead, byte-for-byte-breaking
+    // addition to every program's QBE text.
     for layout in &ir.enums {
-        emit_enum_type(&mut out, layout);
+        if !layout.is_scalar {
+            emit_enum_type(&mut out, layout);
+        }
     }
     for (idx, layout) in ir.arrays.iter().enumerate() {
         emit_array_type(&mut out, idx, layout);
@@ -257,7 +265,7 @@ fn label(id: BlockId) -> String {
 /// `64`; a float is `s` (32) or `d` (64); `Ptr` is the 8-byte `l` used by the
 /// buffer and C ABI. This is the only place the `s`/`d` register class is
 /// spelled (NF2).
-fn width(ty: IrType) -> &'static str {
+fn width(ty: IrType, layouts: Layouts) -> &'static str {
     match ty {
         IrType::Bool => "w",
         IrType::Int { bits, .. } => {
@@ -282,6 +290,11 @@ fn width(ty: IrType) -> &'static str {
         // An owning cell is its heap pointer in a register; only the frontend
         // distinguishes it (to emit the free on `drop`).
         IrType::OwnedCell(_) => "l",
+        // Slice 9 (R1/R3): a zero-payload enum (`Bool`, generally) is a bare
+        // scalar discriminant, not a memory aggregate -- it runs at the same
+        // `w` register class the retired primitive `Bool` used, so `Cmp`/
+        // `Jnz`/bitwise codegen stays byte-for-byte.
+        IrType::Enum(id) if layouts.enums[id.index()].is_scalar => "w",
         // A struct/enum/array value is a pointer in a register (`l`); its
         // aggregate `:S`/`:E`/`:A` type is only spelled in ABI positions.
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => "l",
@@ -297,14 +310,17 @@ fn width(ty: IrType) -> &'static str {
 
 /// The QBE type spelled in an ABI position (a function param/return or a call
 /// argument): a struct is its aggregate `:Name` (so QBE applies its C-ABI
-/// by-value classification); every scalar is its register `width`.
+/// by-value classification); every scalar is its register `width`, including a
+/// zero-payload enum (Slice 9, R1/R8): it is never passed/returned as an
+/// aggregate, so a returned `Bool` stays a scalar ABI value.
 fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
     match ty {
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
+        IrType::Enum(id) if layouts.enums[id.index()].is_scalar => width(ty, layouts).to_string(),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
-        _ => width(ty).to_string(),
+        _ => width(ty, layouts).to_string(),
     }
 }
 
@@ -326,6 +342,9 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         IrType::Str | IrType::Cstr => "l".to_string(),
         // A code slot is one opaque pointer, `l` like `Ptr`.
         IrType::Code => "l".to_string(),
+        // Slice 9 (R1): a zero-payload-enum field is a scalar byte, matching
+        // the retired primitive `Bool`'s own member spelling.
+        IrType::Enum(id) if layouts.enums[id.index()].is_scalar => "b".to_string(),
         IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
         IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
@@ -333,7 +352,7 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
     }
 }
 
-fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
+fn field_load_op(ty: IrType, layouts: Layouts) -> (&'static str, &'static str) {
     match ty {
         IrType::Bool => ("w", "loadub"),
         IrType::Int {
@@ -357,13 +376,15 @@ fn field_load_op(ty: IrType) -> (&'static str, &'static str) {
         IrType::Str | IrType::Cstr => ("l", "loadl"),
         // A quotation's `code` slot is one opaque pointer, loaded at `l`.
         IrType::Code => ("l", "loadl"),
+        // Slice 9 (R1): a zero-payload enum loads exactly like `Bool` did.
+        IrType::Enum(id) if layouts.enums[id.index()].is_scalar => ("w", "loadub"),
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-loaded")
         }
     }
 }
 
-fn field_store_op(ty: IrType) -> &'static str {
+fn field_store_op(ty: IrType, layouts: Layouts) -> &'static str {
     match ty {
         IrType::Bool => "storeb",
         IrType::Int { bits: 8, .. } => "storeb",
@@ -379,6 +400,8 @@ fn field_store_op(ty: IrType) -> &'static str {
         IrType::Str | IrType::Cstr => "storel",
         // A quotation's `code` slot is one opaque pointer, stored at `l`.
         IrType::Code => "storel",
+        // Slice 9 (R1): a zero-payload enum stores exactly like `Bool` did.
+        IrType::Enum(id) if layouts.enums[id.index()].is_scalar => "storeb",
         IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
             unreachable!("an aggregate field is copied by blit, not scalar-stored")
         }
@@ -441,13 +464,14 @@ fn emit_conv(
     dst: Value,
     src: Value,
     value_types: &[IrType],
+    layouts: Layouts,
     ext_id: &mut u32,
 ) -> std::fmt::Result {
     let src_ty = norm_scalar(ty_of(value_types, src));
     let dst_ty = norm_scalar(ty_of(value_types, dst));
     match (src_ty, dst_ty) {
         (IrType::Int { .. }, IrType::Int { .. }) => {
-            emit_conv_int(out, dst, src, value_types, ext_id)
+            emit_conv_int(out, dst, src, value_types, layouts, ext_id)
         }
         (
             IrType::Int {
@@ -461,7 +485,7 @@ fn emit_conv(
             // selects the target float width. A sub-word source is already
             // canonical in its `w` carrier (R15), so `swtof`/`uwtof` read it
             // directly. Exact when representable, else round to nearest.
-            let dw = width(dst_ty);
+            let dw = width(dst_ty, layouts);
             let op = match (sb <= 32, ss) {
                 (true, true) => "swtof",
                 (true, false) => "uwtof",
@@ -473,7 +497,7 @@ fn emit_conv(
         (IrType::Float { bits: sb }, IrType::Float { bits: db }) => {
             // float -> float: widen is exact (`exts`), narrow rounds to nearest
             // (`truncd`); a same-width `>fN` on its own type is a bit relabel.
-            let dw = width(dst_ty);
+            let dw = width(dst_ty, layouts);
             let m = if db > sb {
                 "exts"
             } else if db < sb {
@@ -503,7 +527,7 @@ fn emit_conv(
                     emit_canonicalize(out, &val(dst), &tmp, "w", bits, signed)
                 }
                 None => {
-                    let dw = width(dst_ty);
+                    let dw = width(dst_ty, layouts);
                     writeln!(out, "\t{} ={dw} {op} {}", val(dst), val(src))
                 }
             }
@@ -530,6 +554,7 @@ fn emit_conv_int(
     dst: Value,
     src: Value,
     value_types: &[IrType],
+    layouts: Layouts,
     ext_id: &mut u32,
 ) -> std::fmt::Result {
     let dst_ty = norm_scalar(ty_of(value_types, dst));
@@ -542,7 +567,7 @@ fn emit_conv_int(
         IrType::Int { bits, signed } => (bits, signed),
         other => unreachable!("conversion source is always an integer, got {other:?}"),
     };
-    let dw = width(dst_ty);
+    let dw = width(dst_ty, layouts);
     if db > sb {
         // Widen: sign-/zero-extend from the source width by the source sign.
         let ext = match (sb, ss) {
@@ -788,7 +813,7 @@ fn emit_instr(
 ) {
     match instr {
         Instr::Const(v, n) => {
-            let w = width(ty_of(value_types, *v));
+            let w = width(ty_of(value_types, *v), layouts);
             writeln!(out, "\t{} ={w} copy {n}", val(*v))
         }
         Instr::StrLit(v, content) => {
@@ -799,7 +824,7 @@ fn emit_instr(
             // QBE float constants carry an `s_`/`d_` prefix; Rust's `f64`
             // `Display` renders round-trippable text QBE parses (R14).
             let ty = ty_of(value_types, *v);
-            let w = width(ty);
+            let w = width(ty, layouts);
             let prefix = if matches!(ty, IrType::Float { bits: 32 }) {
                 "s_"
             } else {
@@ -818,7 +843,7 @@ fn emit_instr(
             // instead of at the type's bit width (Rust `wrapping_shl`/`shr`
             // semantics for both literal and runtime counts).
             let ty = ty_of(value_types, *v);
-            let w = width(ty);
+            let w = width(ty, layouts);
             let signed = matches!(norm_scalar(ty), IrType::Int { signed: true, .. });
             let m = match op {
                 BinOp::Shl => "shl",
@@ -852,7 +877,7 @@ fn emit_instr(
             // The op runs at the result's register width; a sub-word result can
             // overflow its width, so canonicalize it (R15) via the shared point.
             let ty = ty_of(value_types, *v);
-            let w = width(ty);
+            let w = width(ty, layouts);
             let m = match op {
                 BinOp::Add => "add",
                 BinOp::Sub => "sub",
@@ -885,10 +910,10 @@ fn emit_instr(
             // signedness-agnostic (`ceq`). The mnemonic's width suffix is the
             // operand width.
             let operand = ty_of(value_types, *a);
-            let ow = width(operand);
+            let ow = width(operand, layouts);
             let is_float = matches!(operand, IrType::Float { .. });
             let signed = matches!(norm_scalar(operand), IrType::Int { signed: true, .. });
-            let w = width(ty_of(value_types, *v));
+            let w = width(ty_of(value_types, *v), layouts);
             // QBE's amd64 backend lowers `ceq{s,d}`/`clt{s,d}`/`cle{s,d}`/
             // `cne{s,d}` straight to `comis{s,d}` + `sete`/`setb`/`setbe`/
             // `setne`, but x86's unordered (NaN) result sets both ZF and CF,
@@ -1024,7 +1049,11 @@ fn emit_instr(
         // adding target selection. Same shape in `sooth_oom_trap`'s `dprintf`
         // and `sooth_trace_event`'s `printf`.
         Instr::Print(v) => match ty_of(value_types, *v) {
-            IrType::Bool => {
+            // Slice 9: `Bool` is `IrType::Enum(BOOL_ENUM_ID)` now, still
+            // routed to the same `$boolstrs` table -- `.`'s primitive `bool`
+            // printable row is deleted in P2 (R6), not this phase, so `.` on
+            // `Bool` must keep working identically through P1.
+            IrType::Bool | IrType::Enum(BOOL_ENUM_ID) => {
                 // No branch needed: widen the canonical 0/1 to an index into
                 // the 2-entry `$boolstrs` pointer table and print the
                 // selected string via `%s`.
@@ -1132,11 +1161,11 @@ fn emit_instr(
             writeln!(out, "\tblit {}, {}, {size}", val(*src), val(*dst))
         }
         Instr::FieldLoad(dst, ptr) => {
-            let (w, op) = field_load_op(ty_of(value_types, *dst));
+            let (w, op) = field_load_op(ty_of(value_types, *dst), layouts);
             writeln!(out, "\t{} ={w} {op} {}", val(*dst), val(*ptr))
         }
         Instr::FieldStore(ptr, v) => {
-            let op = field_store_op(ty_of(value_types, *v));
+            let op = field_store_op(ty_of(value_types, *v), layouts);
             writeln!(out, "\t{op} {}, {}", val(*v), val(*ptr))
         }
         // `src`'s carried length is the descriptor's second word: this file
@@ -1176,7 +1205,7 @@ fn emit_instr(
             match ty {
                 IrType::Float { bits: 32 } => writeln!(out, "\tstores {}, {}", val(*v), val(*ptr)),
                 IrType::Float { .. } => writeln!(out, "\tstored {}, {}", val(*v), val(*ptr)),
-                _ if width(ty) == "w" => {
+                _ if width(ty, layouts) == "w" => {
                     let signed = matches!(ty, IrType::Int { signed: true, .. });
                     let ext_op = if signed { "extsw" } else { "extuw" };
                     let ext = format!("%ext{ext_id}");
@@ -1187,13 +1216,13 @@ fn emit_instr(
                 _ => writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr)),
             }
         }
-        Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types, ext_id),
+        Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types, layouts, ext_id),
         Instr::Phi(r, arms) => {
             let a: Vec<String> = arms
                 .iter()
                 .map(|(b, v)| format!("{} {}", label(*b), val(*v)))
                 .collect();
-            let w = width(ty_of(value_types, *r));
+            let w = width(ty_of(value_types, *r), layouts);
             writeln!(out, "\t{} ={w} phi {}", val(*r), a.join(", "))
         }
     }
@@ -1222,6 +1251,14 @@ mod tests {
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
+
+    fn empty_layouts() -> Layouts<'static> {
+        Layouts {
+            structs: &[],
+            enums: &[],
+            quot_sigs: &[],
+        }
+    }
 
     fn emit_src(src: &str) -> String {
         let tokens = lex(src).unwrap();
@@ -1677,21 +1714,21 @@ mod tests {
 
     #[test]
     fn qbe_width_u8_is_w_expected() {
-        assert_eq!(width(int(8, false)), "w");
-        assert_eq!(width(int(16, true)), "w");
-        assert_eq!(width(int(32, false)), "w");
+        assert_eq!(width(int(8, false), empty_layouts()), "w");
+        assert_eq!(width(int(16, true), empty_layouts()), "w");
+        assert_eq!(width(int(32, false), empty_layouts()), "w");
     }
 
     #[test]
     fn qbe_width_i64_is_l_expected() {
-        assert_eq!(width(int(64, true)), "l");
-        assert_eq!(width(int(64, false)), "l");
+        assert_eq!(width(int(64, true), empty_layouts()), "l");
+        assert_eq!(width(int(64, false), empty_layouts()), "l");
     }
 
     #[test]
     fn qbe_width_float_is_s_and_d_expected() {
-        assert_eq!(width(IrType::Float { bits: 32 }), "s");
-        assert_eq!(width(IrType::Float { bits: 64 }), "d");
+        assert_eq!(width(IrType::Float { bits: 32 }, empty_layouts()), "s");
+        assert_eq!(width(IrType::Float { bits: 64 }, empty_layouts()), "d");
     }
 
     #[test]

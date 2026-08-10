@@ -2507,8 +2507,11 @@ mod tests {
     fn parse_typedef_enum_with_leading_pipe_registers_variants() {
         let module = parse_src("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
         assert!(module.structs.is_empty());
-        assert_eq!(module.enums.len(), 1);
-        let shape = &module.enums[0];
+        // Slice 9 (R2): `bool` occupies the reserved head of every module's
+        // enum registry (`BOOL_ENUM_ID`), so a source module's first
+        // declared enum lands at index 1, not 0.
+        assert_eq!(module.enums.len(), 2);
+        let shape = &module.enums[1];
         assert_eq!(shape.name, "Shape");
         assert_eq!(shape.variants.len(), 2);
         assert_eq!(shape.variants[0].name, "Circle");
@@ -2523,8 +2526,9 @@ mod tests {
     #[test]
     fn parse_typedef_enum_without_leading_pipe_registers_first_variant() {
         let module = parse_src("type: MaybeInt None | Some v i64 ;").unwrap();
-        assert_eq!(module.enums.len(), 1);
-        let maybe = &module.enums[0];
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        assert_eq!(module.enums.len(), 2);
+        let maybe = &module.enums[1];
         assert_eq!(maybe.variants.len(), 2);
         assert_eq!(maybe.variants[0].name, "None");
         assert!(maybe.variants[0].fields.is_empty());
@@ -2534,10 +2538,11 @@ mod tests {
 
     #[test]
     fn parse_typedef_enum_single_variant_newtype_ok() {
-        // M3: a single-variant enum is allowed.
+        // M3: a single-variant enum is allowed. Slice 9 (R2): `bool` is the
+        // reserved index-0 entry, so `Id` lands at index 1.
         let module = parse_src("type: Id | Wrap v i64 ;").unwrap();
-        assert_eq!(module.enums.len(), 1);
-        assert_eq!(module.enums[0].variants.len(), 1);
+        assert_eq!(module.enums.len(), 2);
+        assert_eq!(module.enums[1].variants.len(), 1);
     }
 
     #[test]
@@ -2578,8 +2583,9 @@ mod tests {
     #[test]
     fn parse_typedef_enum_self_referential_field_resolves_to_own_type() {
         let module = parse_src("type: Loop | Next n Loop | Stop ;").unwrap();
-        assert_eq!(module.enums.len(), 1);
-        match module.enums[0].variants[0].fields[0].1 {
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        assert_eq!(module.enums.len(), 2);
+        match module.enums[1].variants[0].fields[0].1 {
             Type::Enum(_, name) => assert_eq!(name, "Loop"),
             other => panic!("expected Type::Enum(Loop), got {other:?}"),
         }
@@ -2602,8 +2608,9 @@ mod tests {
                 .unwrap();
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
-        assert_eq!(module.enums.len(), 1);
-        assert_eq!(module.enums[0].name, "Shape");
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        assert_eq!(module.enums.len(), 2);
+        assert_eq!(module.enums[1].name, "Shape");
     }
 
     /// The `Clause` list of a `WordBody::Clauses`; panics on a term body.
@@ -2735,7 +2742,8 @@ mod tests {
     fn parse_typedef_enum_variant_array_field_resolves() {
         let module = parse_src("type: Shape | Poly pts [f64 3] ;").unwrap();
         assert_eq!(module.arrays.len(), 1);
-        match module.enums[0].variants[0].fields[0].1 {
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        match module.enums[1].variants[0].fields[0].1 {
             Type::Array(_, name) => assert_eq!(name, "[f64 3]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
@@ -2891,7 +2899,8 @@ mod tests {
     #[test]
     fn parse_owning_cell_type_resolves_in_enum_variant_field_position() {
         let module = parse_src("type: Shape | Boxed b ^i64 ;").unwrap();
-        match module.enums[0].variants[0].fields[0].1 {
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        match module.enums[1].variants[0].fields[0].1 {
             Type::OwnedCell(_, name) => assert_eq!(name, "^i64"),
             other => panic!("expected Type::OwnedCell, got {other:?}"),
         }

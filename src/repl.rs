@@ -199,6 +199,15 @@ fn remap_type(
 ) -> Type {
     match ty {
         Type::Struct(id, n) => Type::Struct(StructId::from_index(id.index() + struct_base), n),
+        // Slice 9 (R2): `bool` occupies the reserved `BOOL_ENUM_ID` in every
+        // module's own registry (parser.rs's `parse`, `driver.rs`'s
+        // `assemble_module`), including the imported module's -- it is the
+        // same builtin type everywhere, not a per-module declaration, so it
+        // must stay pinned to the *session's* `BOOL_ENUM_ID`, never shifted
+        // by `enum_base` into a distinct, non-equal id. (`splice_import`
+        // still appends the imported module's own redundant `bool` entry
+        // below; it is simply never referenced by any remapped `Type`.)
+        Type::Enum(id, _) if id == crate::ast::BOOL_ENUM_ID => Type::BOOL,
         Type::Enum(id, n) => Type::Enum(EnumId::from_index(id.index() + enum_base), n),
         Type::Array(id, n) => Type::Array(ArrayId::from_index(id.index() + array_base), n),
         Type::OwnedCell(id, n) => {
@@ -522,6 +531,15 @@ pub fn format_stack(
     let mut vals = Vec::with_capacity(types.len());
     for ty in types {
         match ty {
+            // Slice 9 (D-D): `Bool` is `Type::Enum(BOOL_ENUM_ID, "bool")`
+            // structurally, but the REPL still renders it as `true`/`false`
+            // rather than the generic `<TypeName>` enum placeholder below --
+            // this arm must precede the general `Type::Enum` one to win.
+            _ if *ty == Type::BOOL => {
+                let v = buf[cell];
+                vals.push(if v != 0 { "true" } else { "false" }.to_string());
+                cell += 1;
+            }
             Type::Struct(id, name) => {
                 vals.push(format!("<{name}>"));
                 let size = layouts[id.index()].size as usize;
@@ -566,7 +584,6 @@ pub fn format_stack(
                         f32::from_bits(v as u64 as u32).to_string()
                     }
                     Type::Float(_) => f64::from_bits(v as u64).to_string(),
-                    Type::BOOL => if v != 0 { "true" } else { "false" }.to_string(),
                     Type::Int(it) if !it.signed() => (v as u64).to_string(),
                     Type::Usize => (v as u64).to_string(),
                     Type::Isize => v.to_string(),
@@ -942,7 +959,12 @@ impl Session {
         Session {
             env: HashMap::new(),
             structs: Vec::new(),
-            enums: Vec::new(),
+            // Slice 9 (R2): the builtin `bool` enum occupies the reserved
+            // head of the registry (`BOOL_ENUM_ID`), mirroring `assemble_module`/
+            // `parser::parse` -- a REPL `true`/`false`/`bool` reference needs
+            // it present from the session's first line, not just a compiled
+            // program's.
+            enums: vec![crate::ast::bool_enum_decl()],
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
@@ -1808,7 +1830,16 @@ impl Session {
         // R9: append every enum with remapped variant-field ids and module id.
         // No aliases are built this phase (enums are out of phase-1 fixtures),
         // but the ids must still remap so a later reference stays consistent.
-        for (i, e) in module.enums.iter().enumerate() {
+        //
+        // Slice 9 (R2): index 0 is always the imported module's own copy of
+        // the builtin `bool` (`BOOL_ENUM_ID`, injected identically by every
+        // `parse`/`assemble_module`), never a real per-module declaration.
+        // Skip it: the session already has its own canonical `bool` at its
+        // own `BOOL_ENUM_ID`, and appending a second "bool" here would
+        // re-register `True`/`False` a second time, shadowing the session's
+        // own constructor words (a HashMap env, last write wins) and making
+        // every subsequent `true`/`false` construct the wrong enum.
+        for (i, e) in module.enums.iter().enumerate().skip(1) {
             let variants = e
                 .variants
                 .iter()
@@ -1824,7 +1855,7 @@ impl Session {
                 })
                 .collect();
             self.enums.push(EnumDecl {
-                name: format!("{}__import{epoch}__e{}", e.name_static, enum_base + i),
+                name: format!("{}__import{epoch}__e{}", e.name_static, enum_base + i - 1),
                 name_static: e.name_static,
                 variants,
                 span: e.span,
@@ -3472,6 +3503,7 @@ mod tests {
                     }],
                 },
             ],
+            is_scalar: false,
             is_linear: false,
             drop_generation: None,
         }];

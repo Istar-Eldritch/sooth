@@ -2415,6 +2415,15 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
 /// it could even be named here), and a primitive/array/etc. names no
 /// declared type at all.
 fn private_type_name(ty: Type, owner_module: u32, module: &Module) -> Option<&'static str> {
+    // Slice 9 (R2): `bool` is the builtin zero-payload enum injected
+    // identically (with `module: 0`) into every assembled module's registry
+    // (`bool_enum_decl`, `BOOL_ENUM_ID`); it is never a user-declared,
+    // ownable type, so it can never trip the private-type export rule --
+    // otherwise any module whose own `owner_module` happens to be `0` would
+    // wrongly see its own builtin `bool` usage as an unexported private type.
+    if ty == Type::BOOL {
+        return None;
+    }
     let (decl_module, name) = match ty {
         Type::Struct(id, name) => (module.structs[id.index()].module, name),
         Type::Enum(id, name) => (module.enums[id.index()].module, name),
@@ -12808,6 +12817,10 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
+        // session seeds this at index 0 (`Session::new`); this bare-line
+        // helper mirrors that so a `bool`-producing comparison resolves.
+        let bool_enums = [crate::ast::bool_enum_decl()];
         infer_line(
             &terms,
             entry,
@@ -12816,7 +12829,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &[],
-            &[],
+            &bool_enums,
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -13560,9 +13573,13 @@ mod tests {
 
     #[test]
     fn is_copy_every_scalar_is_copy_and_a_drop_overloaded_struct_is_not() {
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): its registry
+        // entry must be present, exactly as `assemble_module`/the REPL
+        // session seed it, for `is_copy`'s enum arm to resolve it.
+        let bool_enums = [crate::ast::bool_enum_decl()];
         for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
             assert!(
-                is_copy(Type::from_name(name).unwrap(), &[], &[], &[]),
+                is_copy(Type::from_name(name).unwrap(), &[], &bool_enums, &[]),
                 "{name} is Copy"
             );
         }
