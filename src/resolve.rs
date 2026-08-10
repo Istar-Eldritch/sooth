@@ -35,6 +35,36 @@ fn mangle(name: &str, module: u32) -> String {
     format!("{name}__m{module}")
 }
 
+/// `check::builtin_table`'s keys, mirrored by hand (that table's own
+/// `check_operator::is_operator` list carries the same warning): the
+/// arithmetic/comparison/`max`/`max-total`/`.` names a bare call must reach
+/// `check_operator`'s operand-type dispatch for, never a static rewrite. Keep
+/// in sync when a table operator is added.
+fn is_operator_dispatch_name(name: &str) -> bool {
+    matches!(
+        name,
+        "+" | "-"
+            | "*"
+            | "/"
+            | "mod"
+            | "and"
+            | "or"
+            | "xor"
+            | "not"
+            | "shl"
+            | "shr"
+            | "="
+            | "<"
+            | ">"
+            | "<="
+            | ">="
+            | "<>"
+            | "max"
+            | "max-total"
+            | "."
+    )
+}
+
 /// Recover a word's source spelling for a *diagnostic*: strip the single
 /// trailing `__m{digits}` group `mangle` appended (`w__m0` -> `w`). A user
 /// diagnostic must never show the compiler-internal mangled spelling; it shows
@@ -196,7 +226,21 @@ impl NameTables {
                 suffix
             )));
         }
-        if word_ok && suffix.is_empty() && self.words[module as usize].contains(core) {
+        // A bare call to one of `check::builtin_table`'s operator names stays
+        // unrewritten even when this module declares a same-named overload:
+        // mangling it here would force *every* bare use inside the declaring
+        // module onto that overload's declared signature, including ones
+        // whose operands plainly mean the builtin (the overload's own body
+        // summing two `i64` fields with `+`, say). Left bare, `check_operator`
+        // still runs its own per-call-site, operand-type-directed dispatch
+        // between the builtin and the overload, exactly as it does in a
+        // single-module build (where this pass is a no-op and the name is
+        // never touched at all).
+        if word_ok
+            && suffix.is_empty()
+            && !is_operator_dispatch_name(core)
+            && self.words[module as usize].contains(core)
+        {
             return Ok(Some(format!("{sigil}{}", mangle(core, module))));
         }
         // R20/R15c: own module first, then a selectively imported name. The

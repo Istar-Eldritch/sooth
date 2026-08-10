@@ -525,6 +525,33 @@ fn selective_import_of_builtin_name_with_mismatched_arity_is_error() {
 }
 
 #[test]
+fn qualified_call_to_builtin_named_overload_dispatches_to_user_word() {
+    // A module-boundary counterpart to slice 8a's builtin-name overloading:
+    // `lib` overloads `+` on `Vec2` and its own body sums the two fields with
+    // the plain `i64` `+` -- a bare use of the builtin from *inside* the
+    // overload's own declaring module. The resolver must leave that bare use
+    // unrewritten (deferring to `check_operator`'s operand-type dispatch) even
+    // though it eagerly rewrites `main`'s qualified `v::+` to the mangled
+    // overload; rewriting the bare use too would force it onto the `Vec2`
+    // signature and misreport the `i64` operands as a type mismatch.
+    let c = Closure::new("qualified-builtin-overload");
+    c.write(
+        "lib.sth",
+        "export: Vec2 + ;\n\
+         type: Vec2 x i64 y i64 ;\n\
+         : + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: v | Vec2 | \"lib.sth\" ;\n\
+         : main ( -- ) 1 2 Vec2 3 4 Vec2 v::+ Vec2>x . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "4\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn selective_type_import_member_collision_is_error() {
     // Criterion 21b: two modules each expose a `Point`; selectively importing
     // both collides on the base name (and thus on every generated member),
