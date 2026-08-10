@@ -1902,9 +1902,7 @@ then find out what the compiler owes it.
    (`type: Fd n i64 ; : drop ( Fd -- ) ... ;`); a composite like `File` holds an undeclared
    `Fd` field and inherits disposal structurally, with no `type:` surface and no named-word
    declaration — `close ( File -- ) drop` is an ordinary word, and `examples/resources.sth`
-   already ships this shape. Supersedes the `disposal: close` design in
-   `docs/phase4-slice8b-brief.md`/`docs/phase4-slice8b-spec.md`, not implemented. Three things
-   remain, none of them about naming:
+   already ships this shape. Three things remain, none of them about naming:
    - **8a's module-scoped bare-name gap.** A module's own operator overload is unreachable
      from its own module the moment a second module joins the closure (`resolve::mangle`
      renames the declaration to `+__m1` while the own-module fix in `resolve.rs` leaves the
