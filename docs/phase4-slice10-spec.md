@@ -204,8 +204,15 @@ declared signature, per the project's diagnostics-are-behaviour convention.
 
 ### The `~` type
 
-**R1 — `~[` is a single token, recognised on both parse paths, and never folds to a
-concrete `Type`.** Add `~[` to the lexer (`src/lexer.rs:25`) so adjacency is required and
+**R1 — `~[` is a single token, recognised on both parse paths, never folds to a concrete
+`Type`, and forces its word poly.** A signature mentioning `~` sets
+`WordDef.poly = Some(..)` and leaves `WordDef.effect` empty, exactly as a signature
+mentioning a row variable already does (`src/ast.rs:565-576`) and for exactly the same
+reason: neither a row nor a `~` can be forced into a concrete `Type` slot. This is what
+makes the rest of R1 consistent — a `~` never needs a `Type` because a `~`-bearing word
+never takes a concrete path.
+
+*Detail:* Add `~[` to the lexer (`src/lexer.rs:25`) so adjacency is required and
 `~ [` is a parse error. Recognise it in both `parse_poly_slot` (`src/parser.rs:1208`,
 dispatching to `parse_poly_quotation`) **and** `parse_quotation_type_expr` (`:1451`, the
 concrete path serving mono signatures, struct fields, ref/cell referents, externs). Record
@@ -217,7 +224,9 @@ variant; no change to any existing `Type::Quotation` match site.
 and is statically always a splice. The four erasure boundaries — `materialize_quotation_at_boundary`
 at `src/check.rs:4492` (word output), `:8357` (`!`/`+!` store through a ref), `:8554`
 (declared parameter), and the `if`-join erasure at `:8797-8806` — are unreachable for a `~`
-value **because R1 keeps it out of `Type`**, and all four key on `Type::Quotation`. Phase 1
+value **because R1 keeps it out of `Type`**, and all four key on `Type::Quotation`. The
+guarantee rests on an existing invariant, not a new one: a `~`-bearing word is poly, and a
+poly word's concrete paths are already skipped (`src/ast.rs:565-576`). Phase 1
 delivers one test per boundary demonstrating a `~` value cannot reach it. Every remaining
 materializing use — declaring a `~` as a word output, a struct/array/cell field, or an
 `extern` parameter — is a **located error** naming the type and the position. No runtime
@@ -286,9 +295,13 @@ The four contexts, all covered explicitly:
    `: passthru ( ..s i64 -- ..s ) drop ;` compiles today and `shrinks-row` does not, and it
    is the context 10a's own exit repro fires in first.
 4. **Mono declared parameter** — `src/check.rs:7102-7118`, which handles a quotation
-   parameter for a non-poly word without going through `check_poly_combinator_args`. R1
-   suppresses the concrete fold for `~`, so a `~[ i64 -- i64 ]` no longer lands here as a
-   `Concrete`; state explicitly what this path does with a `~` and test it.
+   parameter for a non-poly word without going through `check_poly_combinator_args`. This
+   context is **unreachable for a `~`**, and by an existing rule rather than a new one: a
+   signature mentioning `~` sets `WordDef.poly = Some(..)` (R1), and for such a word
+   `WordDef.effect` is left empty while "every concrete path (env registration, monomorphic
+   body checking, bundle interning) skips such a word" (`src/ast.rs:565-576`). Phase 3 pins
+   this with a test asserting a `~`-bearing mono-looking signature is routed poly and never
+   reaches `:7112`, so the unreachability is checked rather than assumed.
 
 No abstract row unification, no `Subst` extension (it stays `ty`+`len`), no mangling impact.
 
