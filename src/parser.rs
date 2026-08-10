@@ -840,11 +840,7 @@ impl<'t> Parser<'t> {
     }
 
     fn eof_error(&self, expected: &str) -> String {
-        let span = self
-            .tokens
-            .last()
-            .map(|(_, s)| *s)
-            .unwrap_or(Span { line: 0, col: 0 });
+        let span = self.tokens.last().map(|(_, s)| *s).unwrap_or_default();
         format!(
             "parse error: unexpected end of input, expected {expected} (last token at line {}, col {})",
             span.line, span.col
@@ -1495,8 +1491,8 @@ impl<'t> Parser<'t> {
             // point at the remainder's own column so the error names and
             // locates the same text.
             let remainder_span = Span {
-                line: span.line,
                 col: span.col + run_len as u32,
+                ..span
             };
             self.resolve_type(remainder, remainder_span)?
         };
@@ -1518,8 +1514,8 @@ impl<'t> Parser<'t> {
         let mutable = sigil_len == 2;
         let remainder = &word[sigil_len..];
         let remainder_span = Span {
-            line: span.line,
             col: span.col + sigil_len as u32,
+            ..span
         };
         let referent = if remainder.is_empty() {
             if matches!(self.peek(), Some((Token::Word(w), _)) if w == "--") {

@@ -496,7 +496,11 @@ mod tests {
         imports.insert("q".to_string(), 1u32);
         let exports = vec![Vec::new(), Vec::new()]; // module 1 exports nothing
         let scope = HashSet::new();
-        let span = Span { line: 1, col: 1 };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
 
         let no_selective = std::collections::HashMap::new();
         let unexported = tables.rewrite(
@@ -541,10 +545,21 @@ mod tests {
         imports.insert("geo".to_string(), 1u32);
         let exports = vec![
             Vec::new(),
-            vec![("Point".to_string(), Span { line: 1, col: 1 })],
+            vec![(
+                "Point".to_string(),
+                Span {
+                    line: 1,
+                    col: 1,
+                    module: 0,
+                },
+            )],
         ];
         let scope = HashSet::new();
-        let span = Span { line: 2, col: 3 };
+        let span = Span {
+            line: 2,
+            col: 3,
+            module: 0,
+        };
 
         for spelling in [
             "geo::Point",    // constructor

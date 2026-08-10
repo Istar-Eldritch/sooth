@@ -35,10 +35,17 @@ pub(crate) struct Closure {
 
 /// Read, lex, and scan one file's imports into a `FileNode` (R2). The path is
 /// already canonical, so its parent is a stable directory to resolve this
-/// file's own relative imports against.
-fn make_node(canon: PathBuf) -> Result<FileNode, String> {
+/// file's own relative imports against. `module` is this file's permanent id
+/// in the closure being built (the caller already knows it, since `id_of`
+/// assigns it before calling); every token's span is stamped with it here, so
+/// two files' tokens landing on the identical (line, col) by coincidence
+/// never collide once merged into one `Module` (`Span`'s doc comment).
+fn make_node(canon: PathBuf, module: u32) -> Result<FileNode, String> {
     let src = std::fs::read_to_string(&canon).map_err(|e| format!("reading {canon:?}: {e}"))?;
-    let tokens = lexer::lex(&src)?;
+    let mut tokens = lexer::lex(&src)?;
+    for (_, span) in &mut tokens {
+        span.module = module;
+    }
     let imports = parser::scan_imports(&tokens)?;
     let dir = canon.parent().unwrap_or(Path::new(".")).to_path_buf();
     Ok(FileNode {
@@ -73,7 +80,7 @@ pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
         std::fs::canonicalize(entry).map_err(|e| format!("reading {}: {e}", entry.display()))?;
     let mut id_of: HashMap<PathBuf, u32> = HashMap::new();
     id_of.insert(entry_canon.clone(), 0);
-    let mut nodes: Vec<FileNode> = vec![make_node(entry_canon)?];
+    let mut nodes: Vec<FileNode> = vec![make_node(entry_canon, 0)?];
 
     let mut i = 0;
     while i < nodes.len() {
@@ -89,7 +96,7 @@ pub(crate) fn discover_closure(entry: &Path) -> Result<Closure, String> {
                 None => {
                     let id = nodes.len() as u32;
                     id_of.insert(canon.clone(), id);
-                    nodes.push(make_node(canon)?);
+                    nodes.push(make_node(canon, id)?);
                     id
                 }
             };

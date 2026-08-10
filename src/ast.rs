@@ -1,10 +1,17 @@
 //! Sooth AST. Skeleton for Phase 0; grows as the language does.
 
-/// A source location, 1-based (line, col).
+/// A source location, 1-based (line, col), plus the id of the file it came
+/// from within its assembled `Module` (0 for a single-file program or REPL
+/// line, where the field is never read). Load-bearing beyond diagnostics:
+/// `Module::instantiations`/`Module::builtin_overloads` key a whole build's
+/// per-call-site records by `Span` alone, and two files' tokens can land on
+/// the identical (line, col) by coincidence, so `module` is what keeps two
+/// unrelated calls in different files from colliding on one entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
     pub line: u32,
     pub col: u32,
+    pub module: u32,
 }
 
 #[derive(Debug, Default)]

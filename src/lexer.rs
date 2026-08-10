@@ -60,6 +60,11 @@ fn is_float_literal(text: &str) -> bool {
     !exp_digits.is_empty() && exp_digits.chars().all(|c| c.is_ascii_digit())
 }
 
+/// Every emitted `Span`'s `module` is `0`: the lexer sees one file in
+/// isolation and has no closure-wide id to stamp. `driver::make_node`
+/// overwrites it on every token with the file's real id right after this
+/// returns; a caller that skips that step (a REPL line, a unit test) is
+/// always the single-file case, where `0` for every span is already correct.
 pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
     let mut tokens = Vec::new();
     let mut chars = src.chars().peekable();
@@ -78,7 +83,11 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 }
             }
             ';' | '(' | ')' | '|' | '[' | ']' => {
-                let span = Span { line, col };
+                let span = Span {
+                    line,
+                    col,
+                    module: 0,
+                };
                 let tok = match c {
                     ';' => Token::Semicolon,
                     '(' => Token::LParen,
@@ -93,7 +102,11 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 tokens.push((tok, span));
             }
             '"' => {
-                let start = Span { line, col };
+                let start = Span {
+                    line,
+                    col,
+                    module: 0,
+                };
                 chars.next();
                 col += 1;
                 let mut s = String::new();
@@ -143,7 +156,11 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                 tokens.push((Token::Str(s), start));
             }
             _ => {
-                let start = Span { line, col };
+                let start = Span {
+                    line,
+                    col,
+                    module: 0,
+                };
                 let mut text = String::new();
                 while let Some(&c) = chars.peek() {
                     // `S|>fi` peek-word glue: `|` joins the current word only

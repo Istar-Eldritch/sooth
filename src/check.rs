@@ -10004,7 +10004,11 @@ mod tests {
                 name: name.to_string(),
                 qualifier: qualifier.to_string(),
                 target,
-                span: Span { line, col: 1 },
+                span: Span {
+                    line,
+                    col: 1,
+                    module: 0,
+                },
             }
         }
 
@@ -10151,7 +10155,11 @@ mod tests {
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
                 module,
-                span: Span { line, col: 1 },
+                span: Span {
+                    line,
+                    col: 1,
+                    module: 0,
+                },
             }
         }
         fn word(name: &str, module: u32) -> WordDef {
@@ -10203,7 +10211,11 @@ mod tests {
         };
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
-        let span = Span { line: 1, col: 1 };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
         let marker = Some(QuotRef::Known(QuotId(0)));
         let quot = Slot {
             quot: marker,
@@ -14007,7 +14019,11 @@ mod tests {
         // `Provenance` transform in between), so this asserts that directly.
         let mut prov = Provenance::default();
         let mut scope = Scope::default();
-        let span = Span { line: 1, col: 1 };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
         let fresh = prov.borrow("v", true, span);
         let reborrow = prov.reborrow("r", Some(fresh), true, span);
         let projected = prov.project(Some(reborrow)).expect("a projection");
@@ -14042,7 +14058,11 @@ mod tests {
         // root, so keying the join on `owned_root` alone would make two arms
         // reborrowing two different parameters look identical.
         let mut prov = Provenance::default();
-        let span = Span { line: 1, col: 1 };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
         let p = prov.reborrow("p", None, true, span);
         let q = prov.reborrow("q", None, true, span);
         assert_eq!(prov.deriv(p).owned_root, prov.deriv(q).owned_root);

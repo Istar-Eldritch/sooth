@@ -638,3 +638,36 @@ type: Vec2 x i64 y i64 ;\n\
         "unexpected message: {err}"
     );
 }
+
+#[test]
+fn unused_import_with_a_colliding_span_does_not_swallow_a_later_print() {
+    // A poly instantiation site is recorded keyed by its call site's `Span`
+    // alone; without a `module` id in that key, an imported (but never
+    // called) library's own poly call site can land on the identical
+    // (line, col) as an unrelated call in the importing file, and lowering
+    // then misreads the importer's call through the library's instantiation
+    // record instead of the importer's own dispatch. `lib.sth`'s `1.5 q` sits
+    // at line 4, col 7; `main.sth`'s `7 p . ;` is laid out so its `.` lands at
+    // the same (line 4, col 7) -- column-for-column identical to `lib.sth`'s
+    // `q`, in a different file. `useq` (the only imported name) is never
+    // called; only the local, unrelated poly word `p` is.
+    let c = Closure::new("unused-import-span-collision");
+    c.write(
+        "lib.sth",
+        ": q ( 'T -- 'T ) ;\n\
+         \n\
+         : useq ( -- f64 )\n\
+         \x20 1.5 q ;\n\
+         export: useq ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib | useq | \"lib.sth\" ;\n\
+         : p ( 'T -- 'T ) ;\n\
+         : main ( -- )\n\
+         \x20 7 p . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "7\n");
+    assert_eq!(code, 0);
+}

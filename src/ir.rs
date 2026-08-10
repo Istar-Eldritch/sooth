@@ -5415,7 +5415,15 @@ mod tests {
         let saved_header = b.header;
         let saved_entry = b.entry_block;
         let saved_alloca_home = b.alloca_home;
-        b.lower_call("times", Span { line: 1, col: 1 }, false);
+        b.lower_call(
+            "times",
+            Span {
+                line: 1,
+                col: 1,
+                module: 0,
+            },
+            false,
+        );
 
         assert_eq!(b.header, saved_header, "header restored");
         assert_eq!(b.entry_block, saved_entry, "entry_block restored");
