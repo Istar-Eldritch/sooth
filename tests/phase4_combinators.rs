@@ -388,7 +388,7 @@ fn quotation_literal_capturing_linear_local_is_error() {
     let src = format!(
         "{SPY_DEF}\
          : apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-         : main ( -- ) 7 Spy | s | 3 [ s Spy>tag + ] apply . ;\n"
+         : main ( -- ) 7 Spy | s | 3 [ s drop 0 + ] apply . ;\n"
     );
     let err = check_error(&src);
     assert!(
@@ -2132,7 +2132,7 @@ fn r12_capture_diagnostic_shows_unmangled_word() {
         "m0-r12",
         &format!(
             "{SPY_DEF}: c ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-             : main ( -- ) 7 Spy | s | 3 [ s Spy>tag + ] c . ;\n"
+             : main ( -- ) 7 Spy | s | 3 [ s drop 0 + ] c . ;\n"
         ),
     );
     assert!(

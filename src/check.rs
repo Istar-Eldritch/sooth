@@ -8484,6 +8484,11 @@ fn check_term(
             {
                 return Ok(stack);
             }
+            // D3 (slice 8b): ahead of both the aggregate-field getter below
+            // and the ordinary env call path further down, so it catches a
+            // moving accessor of a drop-overloaded struct regardless of the
+            // extracted field's own type.
+            check_destructure_drop_guard(name, span, ctx)?;
             if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
                 return Ok(stack);
             }
@@ -10479,6 +10484,60 @@ fn drop_import_visibility_error(
     }
 }
 
+/// D3 (slice 8b): a struct's destructure (`S>`) or field getter (`S>f`) moves
+/// fields out of `S`, bypassing whatever `drop` override `S` owns -- the value
+/// never reaches a bare `drop` call site for D1's gate to see. `name` is
+/// checked as-parsed (mangled in a >=2-module build, matching
+/// `struct_generated_sigs`'s own keys), so this runs ahead of both
+/// `check_struct_get_word` (which alone claims an aggregate-typed field) and
+/// the ordinary `env` call path (every other field type, and the full
+/// destructure), catching the accessor before either applies its signature.
+/// The functional setter (`S<f`) has no `>` in its name and never matches
+/// here; it returns the struct itself, so the value stays live.
+fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(), String> {
+    // A word literally named `drop` can only be the recognized override for
+    // the one struct its declared effect names (`find_drop_overloads`
+    // rejects any other shape before body checking ever starts), so its own
+    // body is exactly where moving that struct's fields out implements
+    // disposal (`examples/resources.sth`'s `Fd>n` inside `: drop`). The guard
+    // exists to stop *other* callers from bypassing the destructor.
+    if ctx.mangled_name() == Some("drop") {
+        return Ok(());
+    }
+    let Some((struct_name, field_name)) = name.split_once('>') else {
+        return Ok(());
+    };
+    let Some(decl) = ctx.structs().iter().find(|d| d.name == struct_name) else {
+        return Ok(());
+    };
+    if !decl.has_drop_overload {
+        return Ok(());
+    }
+    let is_destructure = field_name.is_empty();
+    let is_field_move = decl.fields.iter().any(|(f, _)| f == field_name);
+    if is_destructure || is_field_move {
+        return Err(destructure_drop_overloaded_error(ctx, span, decl));
+    }
+    Ok(())
+}
+
+/// R11 (slice 8b, D3): the located diagnostic for destructuring a type whose
+/// `drop` override would otherwise be skipped.
+fn destructure_drop_overloaded_error(ctx: &Ctx, span: Span, decl: &StructDecl) -> String {
+    let source = crate::resolve::demangle_word(&decl.name);
+    let note = "\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out";
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: cannot destructure `{source}` in `{name}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
+            span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot destructure `{source}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
+            span.line
+        ),
+    }
+}
+
 fn check_shuffle(
     name: &str,
     span: Span,
@@ -11087,6 +11146,50 @@ mod tests {
         assert!(drop_res(&structs, None, 1).is_ok());
     }
 
+    /// D3's leaf resource: one field, a `drop` override implemented exactly
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// inside `drop`'s own body -- exempted, since a word literally named
+    /// `drop` can only be the recognized override for the struct its declared
+    /// effect names).
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+
+    #[test]
+    fn destructure_of_drop_overloaded_type_is_error() {
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn field_move_of_drop_overloaded_type_is_error() {
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd>n . ;\n")).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn field_move_of_composite_holding_resource_is_ok() {
+        // `File` has no override of its own; moving the still-linear `Fd`
+        // out of it is unguarded -- D3 fires on `Fd.has_drop_overload`, not
+        // on `File`'s. The extracted `Fd` is disposed by an ordinary bare
+        // `drop`, unrelated to D3.
+        check_src(&format!(
+            "{FD_DEF}type: File fd Fd ;\n: main ( -- ) 7 Fd File File>fd drop ;\n"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn setter_on_drop_overloaded_type_is_not_guarded() {
+        // The functional setter returns `Fd` itself (the value stays live),
+        // and its name has no `>`, so it never matches the guard.
+        check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd 8 Fd<n drop ;\n")).unwrap();
+    }
+
     fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
         Binding {
             name: name.to_string(),
@@ -11286,7 +11389,7 @@ mod tests {
         // (1) Move-state identity: consuming an outer linear local is rejected,
         // named, with the repeated-disposal reason.
         let consume = check_src(&format!(
-            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | s Spy>tag + ] times . ;\n"
+            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | i s drop + ] times . ;\n"
         ))
         .expect_err("consuming a linear local should be rejected");
         assert!(
