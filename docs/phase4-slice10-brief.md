@@ -98,10 +98,14 @@ a loop that *consumes* its counters. Verified with no row anywhere in sight:
     from f call
     from 1 + to f my-times
   end ;
-: main ( -- ) 0 0 5 [ bump ] my-times . ;
-=> error: stack effect mismatch in `my-times` (line 4)
+: main ( -- ) 0 0 5 [ + ] my-times . ;
+=> error: stack effect mismatch in `my-times` (line 3)
      `if` branches leave different stack depths (then: 3, else: 1)
 ```
+
+(Corrected 2026-08-10: the body previously called an undefined `bump`, and the quoted
+line number only reproduced if `bump` happened to be defined. As pasted above it is line
+3. The diagnostic text is otherwise verbatim.)
 
 The then-arm "leaves" `from+1 to` (the carried counters, minus the filtered quotation),
 the else-arm leaves the declared output. So even a fully concrete `times`-shaped self-tail
@@ -205,17 +209,29 @@ from a manufactured type instead of a live slot. See decision 7.
    code it was scoped against; 10a must either close the gap here or explicitly re-verify,
    against the rewritten code, that the same masking condition 7b documented (no self-tail
    combinator lacking a conditional exit exists in the corpus) still holds.
-6. ~~**The index type stays `i64`.**~~ **Superseded 2026-08-10: the index becomes `usize`.**
-   The reasoning below is unchanged and still holds — admitting *several* index types is 8a
-   overload territory, not row machinery — but it argued about widening, not about which
-   single type is right, and `usize` is. `len` already returns `usize` (`src/check.rs:5261`),
-   so every library combinator converts it down with `>i64` purely to satisfy `times` and
-   converts each index back up per iteration (twice in one body in
-   `examples/array_totals_hand.sth:20` and `examples/inplace_fold.sth:33`); a count cannot be
-   negative; literals already coerce into a `usize` parameter; and `IrType::Usize` is the same
-   QBE register as 64-bit `Int` (`"l"`, `src/backend/qbe.rs:298`). Widening the loop counter to
-   other integer types is overload territory (8a's table, one `times` candidate per index type
-   if ever wanted), not row machinery. Out of scope here.
+6. **The index type stays `i64` in 10a and 10b. The end state is `'T: Int`.**
+   *(Briefly superseded on 2026-08-10 in favour of `usize`, then restored the same day. The
+   original reasoning below — admitting several index types is 8a overload territory, not row
+   machinery — was an argument about widening, not about which single type is right, so it did
+   not actually establish its own conclusion. The conclusion is right anyway, for a better
+   reason.)*
+
+   The corpus observation that motivated `usize` is real: `len` returns `usize`
+   (`src/check.rs:5261`), so the four count-taking library combinators convert it down with
+   `>i64` to satisfy `times` and convert each index back up per iteration, twice in one body in
+   `examples/array_totals_hand.sth:20` and `examples/inplace_fold.sth:33`. But `usize` only
+   moves the cost: a `usize` index cannot be added to a computed `i64`, so it deletes a
+   conversion at every indexing site and adds one in every body that accumulates the index —
+   including 10a's own summing witness.
+
+   The real fix is a bounded type variable, `times ( ..s 'T: Int ~[ ..s 'T -- ..s ] -- ..s )`,
+   so an indexing caller instantiates at `usize` and an arithmetic caller at `i64` with no
+   conversion either way. That needs an `Int` bound (`Bound` is `{ Copy, Ord }`,
+   `src/ast.rs:594`), arithmetic on bound type variables (`<` works today, `+` does not),
+   per-instantiation monomorphization, and a diagnostic fix — its own slice, sequenced after
+   10b. Migrating to `usize` first would only have to be re-migrated. So the loop counter is
+   left alone until that slice: not because widening is overload territory, but because the
+   honest fix is a bound and this is not the slice that adds one.
 7. **10a does not touch the intrinsic; 10b deletes it.** 10a exits on a user-space
    `my-times` living beside the intrinsic. 10b then: `times` written in
    `lib/combinators.sth`, the `check_term` interception arm, `check_abstract_quotation_times`,
@@ -273,10 +289,10 @@ follows 10a alone.
 ## Exit
 
 **10a:** the recon-4 `my-times`, with the row restored to its signature
-(`( ..s i64 i64 [ ..s i64 -- ..s ] -- ..s )`), compiles from user source beside the
+(`( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )`), compiles from user source beside the
 intrinsic and:
 
-- sums correctly through a literal (`0 0 5 [ bump ] my-times .` prints `10`);
+- sums correctly through a literal (`0 0 5 [ + ] my-times .` prints `10`);
 - runs 1M iterations to completion at `ulimit -s 1024` (constant stack, exit 0);
 - carries a struct through the row with per-iteration dependence and prints the
   arithmetically correct fields (aliasing witness);

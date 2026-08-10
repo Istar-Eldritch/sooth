@@ -592,7 +592,7 @@ Slice 9 shipped P1–P2 only (`Bool` as a library enum, merged at `c5db035`); it
 half (P3–P5) needs a row variable inside a quotation's declared effect, which does not parse
 before slice 10a, and is split out as **slice 10c** (`docs/phase4-slice10c-brief.md`),
 renumbered into slice 10's lineage since it extends 10a's row mechanism and gates on 10a
-phases 1–2 (not on 10b). 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
+phases 1–3 (not on 10b). 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
 left open (see 8b's heading below).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -2078,6 +2078,7 @@ then find out what the compiler owes it.
    dispatch is an independent primitive; the old `clause_bodied_quotation_word_error` guard
    blocking a quotation-taking clause body is stale, its own comment naming slice 7 — now
    shipped — as the intended lift), but its necessary signature,
+   `: if ( ..i Bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o )`,
    needs a row variable inside a *quotation's declared effect*, which does not parse before
    slice 10a (below). So `if`/`cond`-as-words is split out as **slice 10c** — numbered into
    slice 10's lineage, not slice 9's, because what it depends on is 10a's row mechanism (this
@@ -2098,14 +2099,14 @@ then find out what the compiler owes it.
     `times` itself into `lib/combinators.sth`, 8c-shaped lightweight process; **10c** is
     `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
     9b), which extends 10a's row representation to a row that legitimately differs between a
-    quotation's input and output side, and gates on 10a phases 1–2 only — not on 10b, and not
-    on 10a's back-edge fix, since `if` has no back-edge.
+    quotation's input and output side, and gates on 10a phases 1–3 only (`~`, rows, grounding)
+    — not on 10b, and not on 10a's back-edge fix, since `if` has no back-edge.
     **`~[ ... ]`, the inline-only quotation type, lands in 10a rather than 10c.** A row-bearing
     quotation parameter *must* be spliced — `QuotEffect` has no row field and a row's size
     isn't known at runtime — so every combinator today relies on that as an unstated
     guarantee. `~` states it: no runtime representation, not storable, unreachable by the
     runtime `call` path, which also makes a row-bearing quotation reaching an erasure boundary
-    structurally impossible rather than a rule bolted onto three call sites. It belongs to 10a
+    structurally impossible rather than a rule bolted onto four call sites. It belongs to 10a
     because if the guarantee holds for every combinator parameter, `~[ ..s i64 -- ..s ]` is the
     honest declaration for `times`'s own parameter, and shipping `times` with a type that then
     has to change is the expensive order. Two questions 10a's spec must settle: whether `call`
@@ -2118,8 +2119,9 @@ then find out what the compiler owes it.
     Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
     smaller half of the gap: at every check point a combinator's row is concrete (combinators
     are spliced per call site and mint no `IrFunc`, per slice 6's R18/R20), so there is no
-    abstract row unification or `Subst` change, only per-splice depth arithmetic the
-    intrinsic's own `check_abstract_quotation_times` already prototypes. The bigger,
+    abstract row unification or `Subst` change, only per-splice depth arithmetic (which the
+    intrinsic's `check_abstract_quotation_times` does *not* prototype — see the correction
+    below). The bigger,
     row-independent bug the brief's paper pre-check found: the self-tail back-edge arm
     (`src/check.rs`) models its result as the combinator's non-quotation inputs, true only
     for `while`'s state-threading shape and false for any loop that consumes its counters —
@@ -2132,7 +2134,18 @@ then find out what the compiler owes it.
     the brief's "the intrinsic already prototypes the depth arithmetic" claim above does not
     survive reading `check_abstract_quotation_times`, which checks declared-effect
     self-similarity and pointwise-matches only the top slots rather than decomposing a row —
-    so phase 2 derives its grounding rather than generalising a prototype.
+    so phase 3 derives its grounding rather than generalising a prototype. A second review
+    round then rejected the draft on three blockers (the `~` representation was left to the
+    implementer while one requirement demanded an outcome only one choice delivers; the
+    back-edge rewrite destroyed the positional correspondence the surviving-set forward needs;
+    and the grounding mechanism offered two plumbings, one unworkable against an interned
+    `QuotEffect`). All three are now settled in the spec: `~` lives in the poly layer only and
+    never folds into `Type`, `~[` is a single token so adjacency is required, the rewrite
+    builds an explicit source-index map, and grounding is done callee-side in
+    `check_literal_against_declared_effect`. The loop counter stays `i64`: an interim move to
+    `usize` was reverted, since the honest fix is a bounded `'T: Int` (no `Int` bound exists —
+    `Bound` is `{ Copy, Ord }` — and `+` on a bound type variable is unsupported), which is
+    its own slice sequenced after 10b.
 
 ### Phase 5 — Errors as values  `[S]`
 

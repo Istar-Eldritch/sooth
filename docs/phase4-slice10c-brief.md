@@ -6,12 +6,17 @@ continued slice 9's `Bool`-as-enum change. It doesn't: `Bool`-as-enum shipped
 `if`-as-a-word is slice 10's row mechanism, whose representation and grounding
 code this work directly extends, so it is renumbered into that lineage.
 
-**Gates on 10a phases 1–2 only** (rows parsed and represented inside a nested
-quotation effect, plus grounding at the splice site). It does **not** gate on
-10a phase 3 (the self-tail back-edge rewrite: `if` has no back-edge) nor on 10b
+**Gates on 10a phases 1–3 only**: phase 1 (`~`, the inline-only quotation type),
+phase 2 (rows parsed and represented inside a nested quotation effect), and
+phase 3 (grounding at the check sites). It does **not** gate on 10a phase 4 (the
+self-tail back-edge rewrite: `if` has no back-edge), nor phase 5, nor on 10b
 (`times` moving to the library). The letter ordering implies more sequence than
 exists; 10b first is a preference (shake the mechanism out on a real migration
 before extending it to a second shape), not a dependency.
+
+*(Renumbered 2026-08-10: `~` was inserted as 10a's phase 1, shifting every later
+phase by one. This gate previously read "phases 1–2", which under the current
+numbering would omit grounding — the part 10c most needs.)*
 
 ## Why the original signature couldn't work, and what replaced it
 
