@@ -2018,17 +2018,25 @@ then find out what the compiler owes it.
    `Vec[File]` reports the same error at the container's disposal site; and the
    container-boundary decision is recorded and, if implicit, exercised by a generated traversal
    that calls a non-`drop` disposal word.
-9. **`if` as an ordinary combinator + `Bool` as a library enum.** `cond [ then ] [ else ] if`
-   Factor-style, `if` stops being a keyword, a multi-way `cond` combinator lands alongside,
-   and `type: Bool | False | True ;` replaces the primitive. Near the end because it is the
-   cleanup the other eight enable, not because anything later depends on it: it needs
-   quotations (slice 4) for `if` to be a word at all, and dispatch (slice 8a specifically —
-   see above) so `Bool`'s type-directed printing becomes an ordinary overload instead of a
-   re-added special case — which is the whole point of waiting, per the bundle note above.
-   Mechanically it is a large migration rather than a design problem: `bool` has been in the
-   test suite since Phase 2 Slice 1, so this is 8c-shaped work (delete the special cases, let
-   the exhaustiveness checker find the arms, migrate the call sites) and should run 8c's
-   lightweight process.
+9. **`Bool` as a library enum. ✅ done** (brief + spec: `docs/phase4-slice9-brief.md`,
+   `docs/phase4-slice9-spec.md`). `type: Bool | False | True ;` replaces the primitive, via a
+   **general** zero-payload-enum → scalar-discriminant layout rule (`Bool` is that rule's
+   first client, not a carve-out), so `Cmp`/`Jnz`/bitwise/internal-condition codegen stays
+   register-resident and byte-for-byte. `.`'s `bool` row is retired in favour of a library
+   `: . ( Bool -- ) ;` reached through 8a's dispatch — the concrete case the ROADMAP always
+   cited as the reason to wait on 8a.
+   **This entry previously said the whole slice, `if`-as-word included, was "8c-shaped
+   delete-the-special-cases work" with dispatch as its only real dependency. Both halves of
+   that were wrong, found by attempting it.** `Bool`-as-enum was genuinely
+   8c-shaped (mechanical once the layout question was settled) and is the part that shipped.
+   `if`-as-word is not: an ordinary clause-bodied word can dispatch on `Bool` today (clause
+   dispatch is an independent primitive; the old `clause_bodied_quotation_word_error` guard
+   blocking a quotation-taking clause body is stale, its own comment naming slice 7 — now
+   shipped — as the intended lift), but its necessary signature,
+   `( [ ..a -- ..b ] [ ..a -- ..b ] Bool -- ..b )`, needs a row variable inside a *quotation's
+   declared effect*, which does not parse before slice 10a (below). So `if`/`cond`-as-words
+   is split out as **slice 9b**, blocked on 10a, not on anything this entry originally named;
+   findings recorded in `docs/phase4-slice9b-brief.md`.
 
 10. **Rows in quotation effects: `times` stops being a compiler intrinsic.** The self-tail-
     call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6) are both
