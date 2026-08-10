@@ -343,6 +343,27 @@ fn capturing_literal_spliced_still_works() {
     );
 }
 
+// -- T-reg (R26): the env parameter (Phase 1) must not regress a spliced ------
+// -- capturing literal into an indirect call, including through a combinator --
+
+#[test]
+fn capturing_literal_spliced_through_combinator_stays_splice() {
+    // 7b makes a capturing literal legal at a materialization boundary, but a
+    // force-inlined combinator (`times`, 6a's D2) still *splices* it: the body
+    // `[ + x + ]` reads the enclosing local `x` in place per iteration, so
+    // adding the env parameter to the materialized path (R17) must leave this
+    // splice path bit-identical -- no materialization, no `CallIndirect`.
+    // acc over i=0..4 of (acc + i + x=10): 10, 21, 33, 46, 60.
+    let src = ": main ( -- ) 10 | x | 0 5 [ + x + ] times . ;\n";
+    let (stdout, code) = run_src("qcaptimes", src);
+    assert_eq!(stdout, "60\n");
+    assert_eq!(code, 0);
+    assert!(
+        !emits_call_indirect(src),
+        "a capturing literal driven by a combinator is spliced, never indirect-called"
+    );
+}
+
 // -- T-join: two differing quotation arms materialize against the declared ---
 // -- output row and are indirect-called ---------------------------------------
 
