@@ -260,7 +260,7 @@ export function $sooth_main() {
 	%v28 =l add %v26, 24
 	%v29 =l loadl %v28
 	call $printf(l $fmt, l %v29, ...)
-	call $sooth_enum_drop_0(:List %v27)
+	call $sooth_enum_drop_1(:List %v27)
 	ret
 }
 
@@ -379,11 +379,11 @@ export function $sooth_struct_drop_0(:Buf %v0) {
 export function $sooth_struct_drop_1(:Popped %v0) {
 @start
 	%v1 =l add %v0, 0
-	call $sooth_enum_drop_0(:List %v1)
+	call $sooth_enum_drop_1(:List %v1)
 	ret
 }
 
-export function $sooth_enum_drop_0(:List %v0) {
+export function $sooth_enum_drop_1(:List %v0) {
 @start
 	%v8 =l alloc8 24
 	jmp @blk1
@@ -418,7 +418,7 @@ export function $sooth_cell_drop_1(l %v0) {
 	blit %v0, %v1, 24
 	%v2 =l copy 24
 	call $sooth_free(l %v0, l %v2)
-	call $sooth_enum_drop_0(:List %v1)
+	call $sooth_enum_drop_1(:List %v1)
 	ret
 }
 

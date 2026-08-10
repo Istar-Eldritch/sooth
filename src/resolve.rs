@@ -436,10 +436,7 @@ fn rewrite_terms(
             TermKind::Quotation(inner) => {
                 rewrite_terms(inner, module, imports, selective, tables, scope, exports)?;
             }
-            TermKind::IntLit(_)
-            | TermKind::FloatLit(_)
-            | TermKind::BoolLit(_)
-            | TermKind::StrLit(_) => {}
+            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::StrLit(_) => {}
         }
     }
     truncate_scope(scope, base, &added);

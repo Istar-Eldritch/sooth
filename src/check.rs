@@ -335,7 +335,7 @@ pub struct BuiltinRow {
 /// The codegen a resolved builtin row emits: one variant per distinct
 /// instruction the type-directed `check_operator` arms produced. This is why
 /// a row is not a `Sig` (Q-A): several rows for one name share the
-/// `(inputs, outputs)` shape but differ here (`.`'s 15 rows all lower a
+/// `(inputs, outputs)` shape but differ here (`.`'s 14 rows all lower a
 /// `Print`; a future user `.` lowers a `Call`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinLower {
@@ -383,12 +383,14 @@ fn float_types() -> Vec<Type> {
         .collect()
 }
 
-/// The 15 printable types `.` dispatches over: every numeric type plus
-/// `bool`, `str`, and `cstr` (the `check_operator` `"."` predicate,
-/// cross-checked against the `Instr::Print` codegen arms).
+/// The 14 printable types `.` dispatches over: every numeric type plus
+/// `str` and `cstr` (the `check_operator` `"."` predicate, cross-checked
+/// against the `Instr::Print` codegen arms). `bool` is no longer among them
+/// (slice 9 R6): its `.` overload is the library word
+/// `bool_print_word_def` injected into every module, reached through 8a's
+/// `builtin_overloads` dispatch on a builtin-row exact miss, not a row here.
 fn printable_types() -> Vec<Type> {
     let mut v = numeric_types();
-    v.push(Type::Bool);
     v.push(Type::Str);
     v.push(Type::Cstr);
     v
@@ -424,7 +426,7 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
             (">=", CmpOp::Ge),
             ("<>", CmpOp::Ne),
         ] {
-            row(op, vec![ty, ty], vec![Type::Bool], BuiltinLower::Cmp(cmp));
+            row(op, vec![ty, ty], vec![Type::BOOL], BuiltinLower::Cmp(cmp));
         }
     }
     for ty in float_types() {
@@ -446,23 +448,23 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
     // bitwise-on-0/1 and logical coincide.
     row(
         "and",
-        vec![Type::Bool, Type::Bool],
-        vec![Type::Bool],
+        vec![Type::BOOL, Type::BOOL],
+        vec![Type::BOOL],
         BuiltinLower::And,
     );
     row(
         "or",
-        vec![Type::Bool, Type::Bool],
-        vec![Type::Bool],
+        vec![Type::BOOL, Type::BOOL],
+        vec![Type::BOOL],
         BuiltinLower::Or,
     );
     row(
         "xor",
-        vec![Type::Bool, Type::Bool],
-        vec![Type::Bool],
+        vec![Type::BOOL, Type::BOOL],
+        vec![Type::BOOL],
         BuiltinLower::Xor,
     );
-    row("not", vec![Type::Bool], vec![Type::Bool], BuiltinLower::Not);
+    row("not", vec![Type::BOOL], vec![Type::BOOL], BuiltinLower::Not);
     for ty in printable_types() {
         row(".", vec![ty], vec![], BuiltinLower::Print);
     }
@@ -2445,7 +2447,7 @@ fn is_extern_boundary_scalar(ty: Type) -> bool {
         ty,
         Type::Int(_)
             | Type::Float(_)
-            | Type::Bool
+            | Type::BOOL
             | Type::Usize
             | Type::Isize
             | Type::Ref(..)
@@ -2589,6 +2591,15 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
 /// it could even be named here), and a primitive/array/etc. names no
 /// declared type at all.
 fn private_type_name(ty: Type, owner_module: u32, module: &Module) -> Option<&'static str> {
+    // Slice 9 (R2): `bool` is the builtin zero-payload enum injected
+    // identically (with `module: 0`) into every assembled module's registry
+    // (`bool_enum_decl`, `BOOL_ENUM_ID`); it is never a user-declared,
+    // ownable type, so it can never trip the private-type export rule --
+    // otherwise any module whose own `owner_module` happens to be `0` would
+    // wrongly see its own builtin `bool` usage as an unexported private type.
+    if ty == Type::BOOL {
+        return None;
+    }
     let (decl_module, name) = match ty {
         Type::Struct(id, name) => (module.structs[id.index()].module, name),
         Type::Enum(id, name) => (module.enums[id.index()].module, name),
@@ -3312,9 +3323,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         // every field position
         // anyway.
         Type::Ref(..) => None,
+        // `bool` is `Type::Enum` and so caught by the arm above; a zero-payload
+        // enum has no fields, hence no containment edges, so it is a leaf.
         Type::Int(_)
         | Type::Float(_)
-        | Type::Bool
         | Type::Usize
         | Type::Isize
         | Type::Str
@@ -5041,7 +5053,6 @@ fn poly_term(
     match &term.kind {
         TermKind::IntLit(_) => stack.push(PolyType::Concrete(Type::I64)),
         TermKind::FloatLit(_) => stack.push(PolyType::Concrete(Type::F64)),
-        TermKind::BoolLit(_) => stack.push(PolyType::Concrete(Type::Bool)),
         TermKind::StrLit(_) => stack.push(PolyType::Concrete(Type::Str)),
         TermKind::Bind(names) => {
             if stack.len() < names.len() {
@@ -5085,9 +5096,9 @@ fn poly_term(
             let cond = stack
                 .pop()
                 .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
-            if cond != PolyType::Concrete(Type::Bool) {
+            if cond != PolyType::Concrete(Type::BOOL) {
                 return Err(match cond {
-                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::Bool, t),
+                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::BOOL, t),
                     other => poly_op_on_variable_error(ctx, span, "if", &other, sig),
                 });
             }
@@ -5282,7 +5293,7 @@ fn poly_call_term(
                     _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
                 }
                 stack.truncate(n - 2);
-                stack.push(PolyType::Concrete(Type::Bool));
+                stack.push(PolyType::Concrete(Type::BOOL));
                 return Ok(stack);
             }
         }
@@ -6523,10 +6534,11 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
     }
 }
 
-/// `.` applied to a non-printable value. Every current frontend `Type` (the
-/// integer tower, the float tower, `bool`) is printable, so this path has no
-/// reachable golden yet; it exists for the day a non-printable scalar (e.g. a
-/// future `Ptr`) enters the type system.
+/// `.` applied to a non-printable value. Every current primitive `Type` (the
+/// integer tower, the float tower) is printable via a builtin row, and `bool`
+/// is printable via the library overload injected by `bool_print_word_def`,
+/// so this path has no reachable golden yet; it exists for the day a
+/// non-printable scalar (e.g. a future `Ptr`) enters the type system.
 fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
@@ -8024,10 +8036,6 @@ fn check_term(
             stack.push(Slot::computed(Type::F64));
             Ok(stack)
         }
-        TermKind::BoolLit(_) => {
-            stack.push(Slot::computed(Type::Bool));
-            Ok(stack)
-        }
         TermKind::StrLit(_) => {
             stack.push(Slot::computed(Type::Str));
             Ok(stack)
@@ -8621,8 +8629,8 @@ fn check_term(
             if cond.quot.is_some() {
                 return Err(reject_quotation_operand(ctx, span, "if"));
             }
-            if cond.ty != Type::Bool {
-                return Err(type_mismatch_error(ctx, span, "if", Type::Bool, cond.ty));
+            if cond.ty != Type::BOOL {
+                return Err(type_mismatch_error(ctx, span, "if", Type::BOOL, cond.ty));
             }
             // R14: each arm advances its own copy of the move-state; the join
             // reconciles them into `MaybeMoved` wherever they disagree. R2:
@@ -8899,11 +8907,12 @@ fn check_term(
 /// `shl`/`shr` take an integer value and always an `i64` shift count,
 /// producing the value's type. `<= >= <>` generalise the same way as `= < >`:
 /// numeric-only (never `bool`), same type, producing `bool`. `.` is
-/// type-directed over any printable scalar (every integer width, either
-/// float width, or `bool`): pops one, produces nothing; the concrete type
-/// picks the print codegen (signed/unsigned decimal, `%g` float, or
-/// `true`/`false`) at the call site, same dispatch shape as the rest of this
-/// function.
+/// type-directed over any primitive printable scalar (every integer width or
+/// either float width): pops one, produces nothing; the concrete type picks
+/// the print codegen (signed/unsigned decimal, or `%g` float) at the call
+/// site. `bool` is not a row here (slice 9 R6): `true .`/`false .` fall
+/// through to the injected library overload below, which prints
+/// `true`/`false` by delegating to the `str` row.
 /// The outcome of resolving an operator name against `BUILTIN_TABLE` and, on a
 /// builtin-row exact miss, an optional same-named user overload (slice 8a
 /// phase 2, R6). The single resolution entry point both `check_term`'s probe
@@ -9147,7 +9156,7 @@ fn check_operator(
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
-            stack.push(Slot::computed(Type::Bool));
+            stack.push(Slot::computed(Type::BOOL));
         }
         // R12 (S6): `max ( 'T 'T -- 'T )`, an internal `Ord` bound resolved
         // against the integer tower (`is_int`, which already includes
@@ -11546,7 +11555,7 @@ mod tests {
                 .iter()
                 .map(|(_, ty)| *ty)
                 .collect::<Vec<Type>>(),
-            vec![Type::I64, Type::Bool]
+            vec![Type::I64, Type::BOOL]
         );
     }
 
@@ -12489,9 +12498,9 @@ mod tests {
         // block-end firing site reports. `bind`'s `linear` flag is passed
         // explicitly by the caller (not derived from the `Type` via
         // `is_copy`), so any type distinct from `a`'s suffices here.
-        scope.bind("s", Slot::computed(Type::Bool), true, prov);
+        scope.bind("s", Slot::computed(Type::BOOL), true, prov);
         let leaked = scope.leave(depth).expect("an unconsumed linear local");
-        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::Bool));
+        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::BOOL));
         assert_eq!(leaked.2, MoveState::Live);
     }
 
@@ -13353,21 +13362,21 @@ mod tests {
         // `bool` (eager evaluation makes bitwise-on-0/1 coincide with
         // logical), so their domain is `int_types()` plus one `bool` row.
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_homogeneous_binary_rows("and", want, BuiltinLower::And);
     }
 
     #[test]
     fn builtin_table_or_has_a_row_per_int_type_plus_bool() {
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_homogeneous_binary_rows("or", want, BuiltinLower::Or);
     }
 
     #[test]
     fn builtin_table_xor_has_a_row_per_int_type_plus_bool() {
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_homogeneous_binary_rows("xor", want, BuiltinLower::Xor);
     }
 
@@ -13378,7 +13387,7 @@ mod tests {
         let table = builtin_table();
         let rows = table.get("not").expect("`not` is a builtin operator");
         let mut want = int_types();
-        want.push(Type::Bool);
+        want.push(Type::BOOL);
         assert_eq!(rows.len(), want.len(), "row count for `not`");
         let mut got: Vec<Type> = rows
             .iter()
@@ -13455,7 +13464,7 @@ mod tests {
             let mut got: Vec<Type> = rows
                 .iter()
                 .map(|r| {
-                    assert_eq!(r.outputs, vec![Type::Bool], "`{op}` produces `bool`");
+                    assert_eq!(r.outputs, vec![Type::BOOL], "`{op}` produces `bool`");
                     assert_eq!(r.inputs.len(), 2, "`{op}` is binary");
                     assert_eq!(r.inputs[0], r.inputs[1], "a `{op}` row is homogeneous");
                     assert_eq!(
@@ -13487,12 +13496,13 @@ mod tests {
 
     #[test]
     fn builtin_table_has_a_row_per_printable_type_for_print() {
-        // Rule 6: `.` dispatches over 15 printable types, each a `(T -- )` row
+        // Rule 6: `.` dispatches over 14 printable types, each a `(T -- )` row
         // lowering a `Print`. Mutation-check: dropping the printable loop or a
-        // `push` in `printable_types` fails this.
+        // `push` in `printable_types` fails this. `bool` is not among them
+        // (slice 9 R6): it dispatches through the injected library overload.
         let table = builtin_table();
         let rows = table.get(".").expect("`.` is a builtin operator");
-        assert_eq!(rows.len(), 15, "15 printable rows");
+        assert_eq!(rows.len(), 14, "14 printable rows");
         let mut got: Vec<Type> = rows
             .iter()
             .map(|r| {
@@ -13520,7 +13530,7 @@ mod tests {
             infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
             vec![Type::from_name("u8").unwrap()]
         );
-        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::Bool]);
+        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::BOOL]);
         assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
     }
 
@@ -13546,6 +13556,10 @@ mod tests {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
+        // session seeds this at index 0 (`Session::new`); this bare-line
+        // helper mirrors that so a `bool`-producing comparison resolves.
+        let bool_enums = [crate::ast::bool_enum_decl()];
         infer_line(
             &terms,
             entry,
@@ -13554,7 +13568,7 @@ mod tests {
             &mut Vec::new(),
             &mut Vec::new(),
             &[],
-            &[],
+            &bool_enums,
             &HashMap::new(),
             &HashMap::new(),
         )
@@ -13576,7 +13590,7 @@ mod tests {
     #[test]
     fn infer_line_carries_slot_types_expected() {
         // A comparison line leaves a `bool` on the carried stack.
-        assert_eq!(infer_src("5 3 >", &[]).unwrap(), vec![Type::Bool]);
+        assert_eq!(infer_src("5 3 >", &[]).unwrap(), vec![Type::BOOL]);
     }
 
     #[test]
@@ -14298,9 +14312,13 @@ mod tests {
 
     #[test]
     fn is_copy_every_scalar_is_copy_and_a_drop_overloaded_struct_is_not() {
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): its registry
+        // entry must be present, exactly as `assemble_module`/the REPL
+        // session seed it, for `is_copy`'s enum arm to resolve it.
+        let bool_enums = [crate::ast::bool_enum_decl()];
         for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
             assert!(
-                is_copy(Type::from_name(name).unwrap(), &[], &[], &[]),
+                is_copy(Type::from_name(name).unwrap(), &[], &bool_enums, &[]),
                 "{name} is Copy"
             );
         }
@@ -14696,7 +14714,7 @@ mod tests {
         let mut refs = Vec::new();
         let a = intern_ref_type(&mut refs, Type::I64, true);
         let b = intern_ref_type(&mut refs, Type::I64, true);
-        let c = intern_ref_type(&mut refs, Type::Bool, true);
+        let c = intern_ref_type(&mut refs, Type::BOOL, true);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(refs.len(), 2);

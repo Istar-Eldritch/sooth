@@ -222,12 +222,16 @@ pub fn ir_type_of(ty: Type) -> IrType {
             signed: it.signed(),
         },
         Type::Float(ft) => IrType::Float { bits: ft.bits() },
-        Type::Bool => IrType::Bool,
         // The layout lives in the module's `StructLayout` registry; the
         // `IrType` carries only the `StructId` so it stays `Copy`.
         Type::Struct(id, _) => IrType::Struct(id),
         // The tagged layout lives in the module's `EnumLayout` registry; the
-        // `IrType` carries only the `EnumId` so it stays `Copy`.
+        // `IrType` carries only the `EnumId` so it stays `Copy`. `Bool` is
+        // `Type::Enum(BOOL_ENUM_ID, "bool")` and flows through this arm like
+        // any other enum (Slice 9, D-A): whether its *value* ends up
+        // register-resident or a memory aggregate is the general
+        // zero-payload-enum rule in `EnumLayout`/`ensure_enum`, not a
+        // hard-coded arm here (which cannot consult the registry anyway).
         Type::Enum(id, _) => IrType::Enum(id),
         // The element stride/size lives in the module's `ArrayLayout`
         // registry; the `IrType` carries only the `ArrayId` so it stays `Copy`.
@@ -449,6 +453,13 @@ pub struct EnumLayout {
     pub size: u32,
     pub align: u32,
     pub variants: Vec<VariantLayout>,
+    /// Slice 9 (D-A/R1): general zero-payload-enum scalar layout. Set when
+    /// every variant's field list is empty; such an enum's value is a bare
+    /// scalar discriminant (register-resident, `size`/`align` = 1, no
+    /// payload region), never a memory aggregate. `Bool` is the first client
+    /// (`type: Bool | False | True ;`), but this is computed generally from
+    /// the variant shape, not keyed on any particular `EnumId`.
+    pub is_scalar: bool,
     /// R7/R12 (Phase 4): whether this enum is linear (any variant's payload
     /// field is, transitively). A variant field's own `is_linear` is already
     /// resolved by the time this is computed (`place_fields` -> `size_align`
@@ -870,6 +881,34 @@ impl LayoutBuilder<'_> {
             return;
         }
         let enums = self.enums;
+        // Slice 9 (D-A/R1): general zero-payload-enum scalar layout. An enum
+        // every variant of which declares no fields needs no payload region
+        // at all -- the discriminant *is* the value -- so it lowers to a
+        // bare 1-byte scalar (matching the old primitive `Bool`'s own
+        // `scalar_size_align_ww` width), not the tagged aggregate below.
+        // `Bool` is this rule's first client, not a carve-out of it: any
+        // all-unit-variant user enum gets the same layout.
+        let is_scalar = enums[idx].variants.iter().all(|v| v.fields.is_empty());
+        if is_scalar {
+            let variants = enums[idx]
+                .variants
+                .iter()
+                .map(|_| VariantLayout { fields: Vec::new() })
+                .collect();
+            self.enum_memo[idx] = Some(EnumLayout {
+                name: enums[idx].name_static,
+                tag_offset: 0,
+                tag_ty: IrType::Bool,
+                payload_offset: 0,
+                size: 1,
+                align: 1,
+                variants,
+                is_scalar: true,
+                is_linear: false,
+                drop_generation: None,
+            });
+            return;
+        }
         // The tag is a fixed i32 (M1), placed first; the payload follows at the
         // largest variant's alignment, so a tag narrower than that align gets
         // padded up to `payload_offset` (the round-up criterion 2 exercises).
@@ -904,6 +943,7 @@ impl LayoutBuilder<'_> {
             size,
             align,
             variants,
+            is_scalar: false,
             is_linear,
             // R11: the build path never suffixes a destructor symbol; the
             // REPL sets this from its own override epoch after the build.
@@ -1201,6 +1241,29 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // overloaded call reaches its candidate through the checker's per-span
     // record, which carries the same symbol.
     let symbols = crate::ast::overload_symbols(&module.words);
+    // Slice 9 phase 2 (R3/R18): `bool_print_word_def` is injected into every
+    // assembled module regardless of whether the program ever prints a
+    // `bool` (R6/R7 need it resolvable everywhere `.` is called), but R3
+    // demands the *unused* case stay byte-for-byte QBE -- an always-emitted
+    // `IrFunc` for it would add a function and two string constants to every
+    // build that never touches it. Recognized by its unmistakable synthetic
+    // span (no real source token ever parses to `Span::default()`, R2's
+    // `bool_enum_decl` uses the same tell); excluded from both `env` and
+    // `funcs` below unless some call site's `builtin_overloads` entry
+    // actually names its lowering symbol.
+    // Matched by its synthetic span alone, not by name: a multi-file closure
+    // mangles every module-0 word (`resolve::resolve_modules`) to `{name}__m0`,
+    // so `.` becomes `.__m0` there -- the span survives that rewrite unchanged.
+    let unused_bool_print_idx = module
+        .words
+        .iter()
+        .position(|w| w.span == Span::default() && w.name.starts_with('.'))
+        .filter(|&idx| {
+            !module
+                .builtin_overloads
+                .values()
+                .any(|s| s == &symbols[idx])
+        });
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -1209,6 +1272,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             !drop_overload_indices.contains(idx)
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
+                && Some(*idx) != unused_bool_print_idx
         })
         .map(|(idx, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
@@ -1259,6 +1323,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             !drop_overload_indices.contains(idx)
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
+                && Some(*idx) != unused_bool_print_idx
         })
         .flat_map(|(idx, w)| {
             // A word sharing its name with another candidate is not self-tail
@@ -1988,6 +2053,13 @@ pub fn lower_line(
                 }
                 stack.push(dst);
             }
+            // Slice 9 (R1): a zero-payload enum's carried slot loads as a
+            // scalar, exactly like the retired `Bool` arm below.
+            IrType::Enum(id) if b.enums.layouts[id.index()].is_scalar => {
+                let v = b.fresh_value(slot_ty);
+                b.push_instr(Instr::Load(v, ptr));
+                stack.push(v);
+            }
             IrType::Enum(id) => {
                 let dst = b.alloc_enum(id);
                 let size = b.enums.layouts[id.index()].size;
@@ -2071,6 +2143,11 @@ pub fn lower_line(
                 if size > 0 {
                     b.push_instr(Instr::Blit(*v, ptr, size));
                 }
+            }
+            // Slice 9 (R1): a zero-payload enum's carried slot stores as a
+            // scalar; fall to the `_` scalar arm below.
+            IrType::Enum(id) if b.enums.layouts[id.index()].is_scalar => {
+                b.push_instr(Instr::Store(ptr, *v));
             }
             IrType::Enum(id) => {
                 let size = b.enums.layouts[id.index()].size;
@@ -2546,11 +2623,15 @@ fn empty_combinators() -> &'static HashMap<String, Vec<Term>> {
     EMPTY.get_or_init(HashMap::new)
 }
 
-fn is_aggregate(ty: IrType) -> bool {
-    matches!(
-        ty,
-        IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_)
-    )
+fn is_aggregate(ty: IrType, enums: &Enums) -> bool {
+    match ty {
+        // Slice 9 (R1): a zero-payload enum's value is a bare scalar, not an
+        // address-having aggregate -- it takes the header-`Phi` path below
+        // like any other scalar, never the stable-slot staging.
+        IrType::Enum(id) => !enums.layouts[id.index()].is_scalar,
+        IrType::Struct(_) | IrType::Array(_) | IrType::Quotation(_) => true,
+        _ => false,
+    }
 }
 
 /// 7b/R16: the lowering twin of the checker's `capture_names`/`call_local`
@@ -3036,7 +3117,7 @@ impl<'a> FuncBuilder<'a> {
         let mut outs = Vec::with_capacity(params.len());
         for &p in params {
             let ty = self.value_type(p);
-            if stage_aggregates && is_aggregate(ty) {
+            if stage_aggregates && is_aggregate(ty, self.enums) {
                 // R1: one stable slot (the pointer the body reads) and one
                 // staging temp per aggregate slot; both route through
                 // `push_alloc` into the invariant alloca home.
@@ -3156,11 +3237,6 @@ impl<'a> FuncBuilder<'a> {
             TermKind::FloatLit(x) => {
                 let v = self.fresh_value(IrType::Float { bits: 64 });
                 self.push_instr(Instr::ConstF(v, *x));
-                self.stack.push(v);
-            }
-            TermKind::BoolLit(b) => {
-                let v = self.fresh_value(IrType::Bool);
-                self.push_instr(Instr::Const(v, if *b { 1 } else { 0 }));
                 self.stack.push(v);
             }
             TermKind::StrLit(s) => {
@@ -3470,6 +3546,11 @@ impl<'a> FuncBuilder<'a> {
                         }
                         self.stack.push(copy);
                     }
+                    // Slice 9 (R1): a zero-payload enum's value is a bare
+                    // scalar -- `Copy` like any other, reuse the value id.
+                    IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                        self.stack.push(top);
+                    }
                     IrType::Enum(id) => {
                         let copy = self.alloc_enum(id);
                         let size = self.enums.layouts[id.index()].size;
@@ -3543,7 +3624,16 @@ impl<'a> FuncBuilder<'a> {
                 // give -1/-2, not 0/1.
                 let operand = self.stack.pop().expect("not: operand");
                 let ty = self.value_type(operand);
-                let mask: i64 = if ty == IrType::Bool { 1 } else { -1 };
+                // `not`'s builtin row is `int_types() + Bool` only (checker-
+                // guaranteed, R4): the operand is never anything else, so
+                // "not an int" identifies the `Bool` case exactly, whatever
+                // `Bool`'s own `IrType` migration makes it (Slice 9: it is
+                // `IrType::Enum(BOOL_ENUM_ID)`, not the retired `IrType::Bool`).
+                let mask: i64 = if matches!(ty, IrType::Int { .. }) {
+                    -1
+                } else {
+                    1
+                };
                 let mask_v = self.fresh_value(ty);
                 self.push_instr(Instr::Const(mask_v, mask));
                 let v = self.fresh_value(ty);
@@ -3841,6 +3931,14 @@ impl<'a> FuncBuilder<'a> {
                 let ptr = self.stack.pop().expect("@: reference");
                 let referent = self.referent_of(ptr);
                 match referent {
+                    // Slice 9 (R1): a reference to a zero-payload enum reads
+                    // a scalar (a width-exact `FieldLoad`), not the
+                    // interior-pointer aggregate view below.
+                    IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                        let v = self.fresh_value(referent);
+                        self.push_instr(Instr::FieldLoad(v, ptr));
+                        self.stack.push(v);
+                    }
                     IrType::Struct(_)
                     | IrType::Enum(_)
                     | IrType::Array(_)
@@ -3868,6 +3966,11 @@ impl<'a> FuncBuilder<'a> {
                 // phantom `val` becomes a real `(code, env)` aggregate first.
                 let val = self.materialize_if_phantom(val, referent);
                 match referent {
+                    // Slice 9 (R1): a reference to a zero-payload enum stores
+                    // as a scalar.
+                    IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                        self.push_instr(Instr::FieldStore(ptr, val));
+                    }
                     IrType::Struct(_)
                     | IrType::Enum(_)
                     | IrType::Array(_)
@@ -3978,6 +4081,10 @@ impl<'a> FuncBuilder<'a> {
     /// element. `fill`'s unrolled stores are the only caller.
     fn store_elem(&mut self, fptr: Value, val: Value, elem: IrType) {
         match elem {
+            // Slice 9 (R1): a zero-payload-enum element is a bare scalar.
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                self.push_instr(Instr::FieldStore(fptr, val));
+            }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
                 let size = self.value_size(elem);
                 if size > 0 {
@@ -4061,6 +4168,12 @@ impl<'a> FuncBuilder<'a> {
     /// dangling interior pointer.
     fn load_owned_payload(&mut self, cell_ptr: Value, payload_ty: IrType) -> Value {
         match payload_ty {
+            // Slice 9 (R1): a zero-payload-enum payload is a bare scalar.
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                let v = self.fresh_value(payload_ty);
+                self.push_instr(Instr::FieldLoad(v, cell_ptr));
+                v
+            }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 let dst = self.alloc_aggregate(payload_ty);
                 let size = self.value_size(payload_ty);
@@ -4187,7 +4300,7 @@ impl<'a> FuncBuilder<'a> {
     fn emit_branch(&mut self, node: Value, id: EnumId, variants: &[Option<Vec<PathStep>>]) {
         let payload_offset = self.enums.layouts[id.index()].payload_offset;
         let layouts = self.enums.layouts[id.index()].variants.clone();
-        let blocks = self.dispatch_on_tag(node, id);
+        let blocks = self.dispatch_on_tag(node, id, false);
         for (vi, &block) in blocks.iter().enumerate() {
             self.start_block(block);
             self.terminated = false;
@@ -4216,6 +4329,10 @@ impl<'a> FuncBuilder<'a> {
     /// zero-sized payload writes nothing.
     fn store_owned_payload(&mut self, cell_ptr: Value, val: Value, payload_ty: IrType) {
         match payload_ty {
+            // Slice 9 (R1): a zero-payload-enum payload is a bare scalar.
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                self.push_instr(Instr::FieldStore(cell_ptr, val));
+            }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) => {
                 let size = self.value_size(payload_ty);
                 if size > 0 {
@@ -4341,6 +4458,12 @@ impl<'a> FuncBuilder<'a> {
     fn store_field(&mut self, fptr: Value, val: Value, field: FieldLayout) {
         let val = self.materialize_if_phantom(val, field.ty);
         match field.ty {
+            // Slice 9 (R1): a zero-payload-enum field is a bare scalar, not
+            // an aggregate to blit -- a width-exact `FieldStore`, like `Bool`
+            // was before this migration.
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                self.push_instr(Instr::FieldStore(fptr, val));
+            }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
                 if field.size > 0 {
                     self.push_instr(Instr::Blit(val, fptr, field.size));
@@ -4355,6 +4478,14 @@ impl<'a> FuncBuilder<'a> {
     /// getter reads a stored quotation back out as a runtime value).
     fn field_value(&mut self, base: Value, field: FieldLayout) -> Value {
         match field.ty {
+            // Slice 9 (R1): a zero-payload-enum field loads as a scalar, not
+            // as the interior-pointer aggregate view below.
+            IrType::Enum(id) if self.enums.layouts[id.index()].is_scalar => {
+                let fptr = self.field_ptr(base, field.offset);
+                let v = self.fresh_value(field.ty);
+                self.push_instr(Instr::FieldLoad(v, fptr));
+                v
+            }
             IrType::Struct(_) | IrType::Enum(_) | IrType::Array(_) | IrType::Quotation(_) => {
                 self.field_aggregate_value(base, field.offset, field.ty)
             }
@@ -4590,7 +4721,19 @@ impl<'a> FuncBuilder<'a> {
     /// variant in declaration order. Shared by `lower_clauses` (a clause
     /// word's scrutinee) and `synthesize_enum_destructor` (the same shape,
     /// only what each variant block does next differs).
-    fn dispatch_on_tag(&mut self, scrutinee: Value, id: EnumId) -> Vec<BlockId> {
+    ///
+    /// `scrutinee_is_value` (Slice 9): whether `scrutinee` already *is* the
+    /// discriminant (a zero-payload enum's bare scalar value) rather than a
+    /// pointer to tagged storage needing a `FieldLoad`. A linear enum is
+    /// never scalar (zero fields implies `is_linear == false`), so
+    /// `synthesize_enum_destructor`'s call is always the pointer case; a
+    /// non-reference clause scrutinee of a scalar enum is the value case.
+    fn dispatch_on_tag(
+        &mut self,
+        scrutinee: Value,
+        id: EnumId,
+        scrutinee_is_value: bool,
+    ) -> Vec<BlockId> {
         let (tag_ty, tag_offset, n) = {
             let l = &self.enums.layouts[id.index()];
             (l.tag_ty, l.tag_offset, l.variants.len())
@@ -4599,9 +4742,14 @@ impl<'a> FuncBuilder<'a> {
         if n == 1 {
             self.seal_block(Terminator::Jmp(variant_ids[0]));
         } else {
-            let tag = self.fresh_value(tag_ty);
-            let tag_ptr = self.field_ptr(scrutinee, tag_offset);
-            self.push_instr(Instr::FieldLoad(tag, tag_ptr));
+            let tag = if scrutinee_is_value {
+                scrutinee
+            } else {
+                let tag = self.fresh_value(tag_ty);
+                let tag_ptr = self.field_ptr(scrutinee, tag_offset);
+                self.push_instr(Instr::FieldLoad(tag, tag_ptr));
+                tag
+            };
             for vi in 0..n - 1 {
                 let idx_val = self.fresh_value(tag_ty);
                 self.push_instr(Instr::Const(idx_val, vi as i64));
@@ -4786,6 +4934,17 @@ impl<'a> FuncBuilder<'a> {
     fn lower_enum_word(&mut self, ew: EnumWord) {
         match ew {
             EnumWord::Construct(id, variant_idx) => {
+                // Slice 9 (D-A/R1/R2): a zero-payload enum's constructor
+                // needs no memory at all -- the discriminant is the value --
+                // so `True`/`False` (and any other all-unit-variant enum's
+                // constructors) lower to a bare `Const`, register-resident,
+                // exactly the retired `TermKind::BoolLit`'s shape.
+                if self.enums.layouts[id.index()].is_scalar {
+                    let v = self.fresh_value(IrType::Enum(id));
+                    self.push_instr(Instr::Const(v, variant_idx as i64));
+                    self.stack.push(v);
+                    return;
+                }
                 let (tag_ty, tag_offset, payload_offset, fields) = {
                     let layout = &self.enums.layouts[id.index()];
                     (
@@ -5019,10 +5178,18 @@ impl<'a> FuncBuilder<'a> {
         let payload_offset = self.enums.layouts[scrut_id.index()].payload_offset;
         let n = self.enums.layouts[scrut_id.index()].variants.len();
 
+        // Slice 9 (R1/R5): a non-reference scrutinee of a zero-payload enum
+        // (`Bool`, generally any all-unit-variant enum) is already the bare
+        // discriminant, not a pointer to tagged storage; a reference
+        // scrutinee is always a pointer regardless of the referent's own
+        // representation, so it still needs the `FieldLoad`.
+        let scrutinee_is_value =
+            ref_mutable.is_none() && self.enums.layouts[scrut_id.index()].is_scalar;
+
         // Map each variant index to the clause handling it (checker-guaranteed
         // exact coverage), so dispatch on tag == variant_index lands correctly
         // regardless of clause source order.
-        let clause_ids = self.dispatch_on_tag(scrutinee, scrut_id);
+        let clause_ids = self.dispatch_on_tag(scrutinee, scrut_id, scrutinee_is_value);
         let join_id = self.fresh_block();
         let mut clause_for_variant: Vec<Option<&Clause>> = vec![None; n];
         for clause in clauses {
@@ -5110,7 +5277,7 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::Line;
+    use crate::ast::{Line, BOOL_ENUM_ID};
     use crate::check::check;
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
@@ -6564,17 +6731,46 @@ mod tests {
     }
 
     #[test]
-    fn lower_bool_literal_is_bool_typed() {
-        let ir = lower_src(": w ( -- bool ) true ;");
-        let w = &ir.funcs[0];
-        let v = instrs(w)
+    fn bool_enum_true_false_construct_0_and_1() {
+        // Slice 9 (R2): `True`/`False` replace `TermKind::BoolLit`, lowering
+        // to the same `0`/`1` scalar discriminant a bare `Const` produced
+        // before this migration -- no memory aggregate, `IrType::Enum`
+        // carrying `BOOL_ENUM_ID` (R1's general zero-payload-enum scalar
+        // rule, not `IrType::Bool` directly).
+        // Single-output words each, so neither triggers R10's bundle-return
+        // packing (which would add its own, unrelated `Instr::Alloc` for the
+        // bundle struct and muddy the "no aggregate" assertion below).
+        let ir = lower_src(": t ( -- bool ) true ; : f ( -- bool ) false ;");
+        let t = ir.funcs.iter().find(|f| f.name == "t").unwrap();
+        let f = ir.funcs.iter().find(|f| f.name == "f").unwrap();
+        assert_eq!(
+            instrs(t).iter().find_map(|i| match i {
+                Instr::Const(_, n) => Some(*n),
+                _ => None,
+            }),
+            Some(1),
+            "true -> 1"
+        );
+        assert_eq!(
+            instrs(f).iter().find_map(|i| match i {
+                Instr::Const(_, n) => Some(*n),
+                _ => None,
+            }),
+            Some(0),
+            "false -> 0"
+        );
+        assert!(
+            !instrs(t).iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "a zero-payload enum construct must not allocate a memory aggregate"
+        );
+        let v = instrs(t)
             .iter()
             .find_map(|i| match i {
                 Instr::Const(v, 1) => Some(*v),
                 _ => None,
             })
             .expect("a const 1 for `true`");
-        assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+        assert_eq!(t.value_types[v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
     }
 
     #[test]
@@ -6682,7 +6878,12 @@ mod tests {
                 "mapping {name}"
             );
         }
-        assert_eq!(ir_type_of(Type::Bool), IrType::Bool);
+        // Slice 9 (R1/R2): `Bool` is `Type::Enum(BOOL_ENUM_ID, "bool")`, and
+        // flows through the general enum arm above like any other enum --
+        // whether its value ends up scalar or a memory aggregate is decided
+        // by `EnumLayout::is_scalar`, not by a hard-coded arm here (which has
+        // no registry access to consult).
+        assert_eq!(ir_type_of(Type::BOOL), IrType::Enum(BOOL_ENUM_ID));
     }
 
     #[test]
@@ -6810,7 +7011,7 @@ mod tests {
                 _ => None,
             })
             .expect("a xor bin op");
-        assert_eq!(w.value_types[xor_v.0 as usize], IrType::Bool);
+        assert_eq!(w.value_types[xor_v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
         let mask_const = is.iter().find_map(|i| match i {
             Instr::Const(v, n) if *v == mask_operand => Some(*n),
             _ => None,
@@ -6832,7 +7033,7 @@ mod tests {
                     _ => None,
                 })
                 .unwrap_or_else(|| panic!("expected a {op:?} bin op"));
-            assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+            assert_eq!(w.value_types[v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
         }
     }
 
@@ -7052,15 +7253,29 @@ mod tests {
     }
 
     #[test]
-    fn enum_layout_all_zero_field_variants_is_tag_only() {
-        // Every variant zero-field: payload align 1, payload_offset 4, no
-        // payload, so size = 4, align = 4 (the tag's).
+    fn zero_payload_enum_lowers_to_scalar_discriminant() {
+        // R1 (D-A): the general rule -- any enum whose every variant carries
+        // an empty payload lowers to a bare 1-byte scalar discriminant, no
+        // payload region, no memory aggregate. Exercised on a *non-`Bool`*
+        // enum, so this proves the rule is general, not a `Bool` carve-out.
         let e = enums_of("type: Dir | N | E | S | W ;");
         let d = enum_layout(&e, "Dir");
-        assert_eq!(d.payload_offset, 4);
-        assert_eq!((d.size, d.align), (4, 4));
+        assert!(d.is_scalar);
+        assert_eq!(d.payload_offset, 0);
+        assert_eq!((d.size, d.align), (1, 1));
         assert_eq!(d.variants.len(), 4);
         assert!(d.variants.iter().all(|v| v.fields.is_empty()));
+    }
+
+    #[test]
+    fn payload_bearing_enum_layout_unchanged() {
+        // R1: an enum with at least one payload-bearing variant keeps the
+        // pre-existing tagged-aggregate layout untouched by the scalar rule.
+        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ;");
+        let s = enum_layout(&e, "Shape");
+        assert!(!s.is_scalar);
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
     }
 
     #[test]
@@ -7178,11 +7393,14 @@ mod tests {
     fn carried_slot_bytes_enum_is_aligned_aggregate() {
         // R17: a carried enum slot occupies its size rounded up to a multiple
         // of 8. Shape is 24 bytes (already a multiple of 8); a tag-only enum
-        // (4 bytes) rounds up to one 8-byte cell.
+        // (4 bytes pre-Slice-9, now a 1-byte scalar) rounds up to one 8-byte
+        // cell either way. `enums_of` parses through the full pipeline, so
+        // `bool` occupies the reserved index 0 (Slice 9, R2) ahead of the
+        // source's own `Shape`/`Dir`.
         let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Dir | N | S ;");
         assert_eq!(
             carried_slot_bytes(
-                IrType::Enum(EnumId::from_index(0)),
+                IrType::Enum(EnumId::from_index(1)),
                 &Structs::default(),
                 &e,
                 &Arrays::default()
@@ -7191,7 +7409,7 @@ mod tests {
         );
         assert_eq!(
             carried_slot_bytes(
-                IrType::Enum(EnumId::from_index(1)),
+                IrType::Enum(EnumId::from_index(2)),
                 &Structs::default(),
                 &e,
                 &Arrays::default()
@@ -7221,7 +7439,8 @@ mod tests {
         };
         let env = HashMap::new();
         let resolve = |name: &str| name.to_string();
-        let shape = Type::Enum(EnumId::from_index(0), "Shape");
+        // `bool` occupies the reserved index 0 (Slice 9, R2), so `Shape` is 1.
+        let shape = Type::Enum(EnumId::from_index(1), "Shape");
         let (func, _q, m, out_bytes) = lower_line(
             0,
             &line_terms(""),
@@ -7425,8 +7644,8 @@ mod tests {
     fn clause_tails_share_one_header() {
         // R9: a `|`-clause self-tail-recursive word gets a single header; each
         // clause's terminal self-call is one back-edge into it. Both clauses
-        // here tail-recurse, so each of the two header phis has three arms
-        // (entry + two back-edges) and no `Instr::Call` to self remains.
+        // here tail-recurse, so each header phi has three arms (entry + two
+        // back-edges) and no `Instr::Call` to self remains.
         let ir = lower_src(
             "type: Flag | Go | Stop ; \
              : loop2 ( i64 Flag -- i64 ) | Go 1 - Go loop2 | Stop 1 + Stop loop2 ;",
@@ -7434,9 +7653,11 @@ mod tests {
         let f = ir.funcs.iter().find(|f| f.name == "loop2").unwrap();
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
-        // R2: the `Flag` (enum) slot loses its header phi under the aggregate-
-        // staging transform, leaving only the `i64` scalar phi (was 2).
-        assert_eq!(phis.len(), 1, "only the i64 scalar slot keeps a header phi");
+        // Slice 9 (R1): `Flag` is zero-payload, so the general scalar-enum
+        // rule makes it register-resident -- it never enters the aggregate-
+        // staging path, so it keeps a header phi just like the `i64` slot
+        // (both scalar): 2 phis, not 1.
+        assert_eq!(phis.len(), 2, "both the i64 and the scalar Flag slot phi");
         assert!(phis.iter().all(|arms| arms.len() == 3));
         assert_eq!(jmps_to(f, header), 3, "entry + two clause back-edges");
         assert_eq!(count(f, is_call_instr), 0);
@@ -7456,8 +7677,9 @@ mod tests {
         let header = loop_header(f);
         let hb = header_block(f, header);
         let hphis = header_phis(hb);
-        // R2: the `Flag` (enum) slot loses its header phi, leaving the i64 one.
-        assert_eq!(hphis.len(), 1);
+        // Slice 9 (R1): `Flag` is zero-payload, hence scalar, hence it also
+        // keeps a header phi alongside the `i64` one (2, not 1).
+        assert_eq!(hphis.len(), 2);
         // header preds: entry arm + the one Go back-edge.
         assert!(hphis.iter().all(|arms| arms.len() == 2));
         assert!(
@@ -7492,14 +7714,17 @@ mod tests {
     #[test]
     fn clause_tail_call_alloc_is_hoisted_to_entry_not_loop_body() {
         // A clause self-tail-call rebuilds its enum scrutinee on every
-        // back-edge (`Go`/`Stop` above are payload-free, but the tag store
-        // still needs a slot). If that `Alloc` stayed in the loop body, QBE's
-        // `alloc*` would bump the frame pointer every iteration and blow the
-        // stack well before Phase 4's N >= 1_000_000 golden. It must land in
-        // the entry block instead, so the loop body has none.
+        // back-edge. `Stop` carries a payload here (Slice 9, R1: a
+        // zero-payload variant's construct no longer allocs at all -- it is a
+        // bare scalar `Const` -- so this test needs a payload-bearing variant
+        // to keep exercising the alloc-hoisting invariant it is named for).
+        // If that `Alloc` stayed in the loop body, QBE's `alloc*` would bump
+        // the frame pointer every iteration and blow the stack well before
+        // Phase 4's N >= 1_000_000 golden. It must land in the entry block
+        // instead, so the loop body has none.
         let ir = lower_src(
-            "type: Flag | Go | Stop ; \
-             : run ( i64 Flag -- i64 ) | Go 1 - Stop run | Stop ;",
+            "type: Flag | Go | Stop n i64 ; \
+             : run ( i64 Flag -- i64 ) | Go 1 - dup Stop run | Stop drop ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
         let header = loop_header(f);
@@ -7681,10 +7906,12 @@ mod tests {
              type: List | Nil | Cons v Res next ^List ;\n\
              : w ( -- ) ;",
         );
+        // Slice 9 (R2): `bool` occupies the reserved `EnumId(0)`, so `List`
+        // (this source's only other enum) lands at `EnumId(1)`.
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_enum_drop_0")
+            .find(|f| f.name == "sooth_enum_drop_1")
             .expect("a fused destructor was synthesized for the recursive enum");
         let header = loop_header(dtor);
         let phis = header_phis(header_block(dtor, header));
@@ -8115,10 +8342,12 @@ mod tests {
         // of loading a tag and comparing it (the `n == 1` branch of
         // `dispatch_on_tag`, otherwise unreached by the 2-variant goldens).
         let ir = lower_src(&format!("{SPY_DEF}type: Box | Full v Spy ; : w ( -- ) ;"));
+        // Slice 9 (R2): `bool` occupies the reserved `EnumId(0)`, so `Box`
+        // lands at `EnumId(1)`.
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_enum_drop_0")
+            .find(|f| f.name == "sooth_enum_drop_1")
             .expect("a destructor was synthesized for the linear enum");
         assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 0);
         assert_eq!(
@@ -8146,10 +8375,12 @@ mod tests {
         let ir = lower_src(&format!(
             "{SPY_DEF}type: Item | Empty | Full v Spy | Named n i64 ; : w ( -- ) ;"
         ));
+        // Slice 9 (R2): `bool` occupies the reserved `EnumId(0)`, so `Item`
+        // lands at `EnumId(1)`.
         let dtor = ir
             .funcs
             .iter()
-            .find(|f| f.name == "sooth_enum_drop_0")
+            .find(|f| f.name == "sooth_enum_drop_1")
             .expect("a destructor was synthesized for the linear enum");
         assert_eq!(dtor.blocks.len(), 5, "2 compares + 3 variant blocks");
         assert_eq!(count(dtor, |i| matches!(i, Instr::Cmp(..))), 2);
@@ -8182,7 +8413,7 @@ mod tests {
         assert_eq!(
             p.path(list),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(0),
+                enum_id: EnumId::from_index(1),
                 variants: vec![
                     None,
                     Some(vec![
@@ -8206,7 +8437,7 @@ mod tests {
                     cell: p.cell(list),
                 },
                 PathStep::Branch {
-                    enum_id: EnumId::from_index(0),
+                    enum_id: EnumId::from_index(1),
                     variants: vec![None, Some(vec![PathStep::Project { field: 0 }])],
                 },
             ])
@@ -8223,7 +8454,7 @@ mod tests {
         assert_eq!(
             p.path(l),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(0),
+                enum_id: EnumId::from_index(1),
                 variants: vec![
                     None,
                     Some(vec![
@@ -8251,7 +8482,7 @@ mod tests {
         assert_eq!(
             p.path(a),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(0),
+                enum_id: EnumId::from_index(1),
                 variants: vec![
                     None,
                     Some(vec![
@@ -8275,7 +8506,7 @@ mod tests {
                     cell: p.cell(a),
                 },
                 PathStep::Branch {
-                    enum_id: EnumId::from_index(0),
+                    enum_id: EnumId::from_index(1),
                     variants: vec![
                         None,
                         Some(vec![PathStep::Unwrap {
@@ -8333,7 +8564,7 @@ mod tests {
         assert_eq!(
             p.path(t),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(0),
+                enum_id: EnumId::from_index(1),
                 variants: vec![None, Some(step.clone()), Some(step)],
             }])
         );
@@ -8349,7 +8580,7 @@ mod tests {
         assert_eq!(
             p.path(a),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(0),
+                enum_id: EnumId::from_index(1),
                 variants: vec![
                     None,
                     Some(vec![
@@ -8358,7 +8589,7 @@ mod tests {
                             cell: p.cell(b),
                         },
                         PathStep::Branch {
-                            enum_id: EnumId::from_index(1),
+                            enum_id: EnumId::from_index(2),
                             variants: vec![
                                 None,
                                 Some(vec![PathStep::Unwrap {
@@ -8466,7 +8697,7 @@ mod tests {
         assert_eq!(
             p.path(e),
             Some(vec![PathStep::Branch {
-                enum_id: EnumId::from_index(0),
+                enum_id: EnumId::from_index(1),
                 variants: vec![
                     None,
                     Some(vec![PathStep::Unwrap {
@@ -8687,7 +8918,7 @@ mod tests {
         );
         assert_ne!(
             ir,
-            ir_type_of(quotation_type(vec![Type::I64], vec![Type::Bool])),
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::BOOL])),
             "structurally different effects are distinct `IrType`s"
         );
         let layout = quotation_layout(WORD_WIDTH);

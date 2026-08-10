@@ -213,7 +213,29 @@ removed from the type layer; `bool` parses as a spelling of `Type::Enum(Bool)`.
 lowers to the same scalar (R1), every `Cmp`, every `and/or/xor/not`, `Jnz`, the
 bounds-check guard (`ir.rs` near :4163), and the loop back-edge test keep their
 current QBE verbatim. First-class exit: the `tests/qbe_baseline*` goldens are
-**unchanged** after P1–P2, `countdown.sth` included.
+**unchanged** after P1, `countdown.sth` included. R3 scopes byte-for-byte to
+*internal-boolean codegen* and to every baseline whose source prints no `Bool`;
+P2's R6 necessarily reroutes the *print call sites* of the bool-printing baseline
+(`leap.ssa`), recorded as an accepted deviation under R6. The condition-computing
+code (`Cmp`/`Jnz`/bitwise, and `$leap`'s own body) stays byte-for-byte through
+P1–P2.
+
+**Accepted deviation (P1, cycle-1 review).** Two baselines moved: `list.ssa` and
+`refs.ssa` renumber `sooth_enum_drop_0` → `sooth_enum_drop_1` everywhere. This is a
+behaviourally-inert symbol rename, not a codegen change: no instruction, block, or
+shape differs; `countdown.ssa`, `gcd.ssa`, `bool_abi.ssa`, `shapes.ssa`, `vm.ssa`
+are byte-identical; `corpus_qbe_stays_byte_identical_to_baseline` is re-anchored and
+passes; runtime output is identical. Cause: reserving `BOOL_ENUM_ID = EnumId(0)`
+(fixed so `Type::from_name("bool")` resolves with no registry access) occupies
+registry slot 0, shifting every user enum's id up by one, so `List`'s destructor
+symbol renumbers. The alternative — numbering *enum* drops to skip the no-drop
+`bool` slot so `List` stays `drop_0` — was rejected: it breaks the documented
+"one uniform naming scheme" shared by the `struct`/`enum`/`cell` drop symbols
+(`ir.rs` `enum_drop_symbol`), carries blast radius into the epoch/REPL/cross-module
+drop paths, and re-introduces a `bool`-shaped carve-out D-A rejects on principle.
+R3's byte-for-byte requirement therefore holds for every instruction and for every
+payload-bearing baseline; the sole delta is this enum-drop symbol ordinal, forced
+by a fixed `BOOL_ENUM_ID`.
 
 **R4 — `and`/`or`/`xor`/`not` keep their `Bool` rows through 8a's table.** The four
 explicit `Type::Bool` rows in `builtin_table` (`check.rs` :346–431) continue to
@@ -236,6 +258,17 @@ shipped and reached through 8a's overload dispatch: the checker records the site
 (`ir.rs` :3139). Output for `true .` / `false .` is unchanged
 (`tests/phase3_strings.rs` :163 expects `true`).
 
+**Accepted deviation (P2, cycle-1 review).** One baseline moved: `leap.ssa`
+(`leap.sth` prints three `Bool`s). Its three print sites change from the inline
+`$boolstrs`-index sequence to `call $.2e.(w %vN)`, and the file gains the injected
+`$.2e.` word plus its two `$strb`/`$strd` literals. This is R6's mandate, not a
+codegen regression: `$leap`'s own function body is byte-for-byte identical, no
+back-edge or condition codegen changed, and runtime output (`false`/`true` lines)
+is unchanged. Every bool-print-free baseline (`gcd.ssa`, `countdown.ssa`,
+`shapes.ssa`, `vm.ssa`, `list.ssa`, `refs.ssa`) is byte-identical to its P1 state.
+The reroute is exactly what "ship `.` as a library call" means; a baseline that
+prints a `Bool` cannot both route through the library word and stay byte-for-byte.
+
 **R7 — Verify 8a's dispatch wiring before relying on it.** Confirm on merged `main`
 that `Module::builtin_overloads` is read by `lower_call` on **every** path:
 `check_term`'s chain, `poly_delegate_op` (records at `check.rs` :7973/:8082), and
@@ -248,6 +281,15 @@ not an assumption.
 `Bool` across a call) and a REPL carried-`Bool` line keep identical output; the
 returned `Bool` stays a scalar ABI value (D-A), so this guards against an
 accidental aggregate-return regression rather than adding machinery.
+
+**Follow-up, not this phase's scope:** R6 makes the `IrType::Bool` `Print` codegen
+arm and the unconditionally-emitted `$boolstrs`/`$true_str`/`$false_str` QBE header
+(`qbe.rs`) dead from surface code; nothing in `.sth` source can reach them anymore
+since the primitive row is gone. Retaining them here is correct (removing either
+now would break R3's byte-for-byte guarantee across every baseline). Deleting the
+dead arm and header, and retiring the codegen test that exercises them
+(`emit_print_on_bool_indexes_boolstrs_via_sfmt`), is a later-phase cleanup once
+something depends on the header's absence rather than its presence.
 
 ### P3 — The clause-word generalisations (keyword `if` still in place)
 
@@ -365,7 +407,12 @@ quotations-in-collections and stays out of scope.
    constructors at discriminants 0/1, `true`/`false`/`bool` still accepted
    spellings, primitive `Type::Bool` gone from the type layer.
 3. **Internal-boolean codegen byte-for-byte after P1–P2** (R3): every
-   `tests/qbe_baseline*` golden unchanged, `countdown.sth` included.
+   `tests/qbe_baseline*` golden unchanged, `countdown.sth` included, save two
+   accepted deviations — the behaviourally-inert enum-drop symbol renumber recorded
+   under R3 (`list.ssa`/`refs.ssa`: `sooth_enum_drop_0`→`_1`, P1) and the
+   bool-print call-site reroute recorded under R6 (`leap.ssa`: inline `$boolstrs`
+   index → `call $.2e.`, P2). Both leave condition codegen and runtime output
+   unchanged.
 4. **`.` is a library overload**: the primitive `bool` row is gone,
    `: . ( Bool -- ) ;` dispatches through 8a's `builtin_overloads` on the native
    **and** REPL paths (no segfault, R7), `true .`/`false .` print `true`/`false`.

@@ -330,7 +330,9 @@ pub fn prepass_and_register(
 
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut structs = Vec::new();
-    let mut enums = Vec::new();
+    // Slice 9 (R2): the builtin `bool` enum occupies the reserved head of the
+    // registry (`BOOL_ENUM_ID`) ahead of any user enum this file declares.
+    let mut enums = vec![crate::ast::bool_enum_decl()];
     prepass_and_register(tokens, 0, &mut structs, &mut enums)?;
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
@@ -351,9 +353,10 @@ pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
     for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
     }
+    // The user enums start after the injected `bool` at `BOOL_ENUM_ID`.
     for (idx, variant_fields) in bodies.enum_fields_by_decl.into_iter().enumerate() {
         for (vidx, fields) in variant_fields.into_iter().enumerate() {
-            enums[idx].variants[vidx].fields = fields;
+            enums[crate::ast::BOOL_ENUM_ID.index() + 1 + idx].variants[vidx].fields = fields;
         }
     }
     Ok(Module {
@@ -1971,12 +1974,15 @@ impl<'t> Parser<'t> {
                 kind: TermKind::StrLit(s),
                 span,
             }),
+            // Slice 9 (D-D/R2): `true`/`false` stay accepted surface spellings
+            // but now construct the `True`/`False` variants of the builtin
+            // `bool` enum; there is no distinct boolean literal term.
             Token::Word(w) if w == "true" => Ok(Term {
-                kind: TermKind::BoolLit(true),
+                kind: TermKind::Call("True".to_string()),
                 span,
             }),
             Token::Word(w) if w == "false" => Ok(Term {
-                kind: TermKind::BoolLit(false),
+                kind: TermKind::Call("False".to_string()),
                 span,
             }),
             Token::Word(w) if w == "if" => {
@@ -2205,8 +2211,8 @@ mod tests {
         let module = parse_src(": w ( i64 bool -- bool ) drop ;").unwrap();
         let w = &module.words[0];
         assert_eq!(w.effect.inputs[0].ty, Type::I64);
-        assert_eq!(w.effect.inputs[1].ty, Type::Bool);
-        assert_eq!(w.effect.outputs[0].ty, Type::Bool);
+        assert_eq!(w.effect.inputs[1].ty, Type::BOOL);
+        assert_eq!(w.effect.outputs[0].ty, Type::BOOL);
     }
 
     #[test]
@@ -2229,11 +2235,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_true_false_are_bool_literals() {
+    fn parse_true_false_construct_bool_variants() {
         let module = parse_src(": w ( -- bool bool ) true false ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(body[0].kind, TermKind::BoolLit(true)));
-        assert!(matches!(body[1].kind, TermKind::BoolLit(false)));
+        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "True"));
+        assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
     }
 
     #[test]
@@ -2501,8 +2507,11 @@ mod tests {
     fn parse_typedef_enum_with_leading_pipe_registers_variants() {
         let module = parse_src("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
         assert!(module.structs.is_empty());
-        assert_eq!(module.enums.len(), 1);
-        let shape = &module.enums[0];
+        // Slice 9 (R2): `bool` occupies the reserved head of every module's
+        // enum registry (`BOOL_ENUM_ID`), so a source module's first
+        // declared enum lands at index 1, not 0.
+        assert_eq!(module.enums.len(), 2);
+        let shape = &module.enums[1];
         assert_eq!(shape.name, "Shape");
         assert_eq!(shape.variants.len(), 2);
         assert_eq!(shape.variants[0].name, "Circle");
@@ -2517,8 +2526,9 @@ mod tests {
     #[test]
     fn parse_typedef_enum_without_leading_pipe_registers_first_variant() {
         let module = parse_src("type: MaybeInt None | Some v i64 ;").unwrap();
-        assert_eq!(module.enums.len(), 1);
-        let maybe = &module.enums[0];
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        assert_eq!(module.enums.len(), 2);
+        let maybe = &module.enums[1];
         assert_eq!(maybe.variants.len(), 2);
         assert_eq!(maybe.variants[0].name, "None");
         assert!(maybe.variants[0].fields.is_empty());
@@ -2528,10 +2538,11 @@ mod tests {
 
     #[test]
     fn parse_typedef_enum_single_variant_newtype_ok() {
-        // M3: a single-variant enum is allowed.
+        // M3: a single-variant enum is allowed. Slice 9 (R2): `bool` is the
+        // reserved index-0 entry, so `Id` lands at index 1.
         let module = parse_src("type: Id | Wrap v i64 ;").unwrap();
-        assert_eq!(module.enums.len(), 1);
-        assert_eq!(module.enums[0].variants.len(), 1);
+        assert_eq!(module.enums.len(), 2);
+        assert_eq!(module.enums[1].variants.len(), 1);
     }
 
     #[test]
@@ -2572,8 +2583,9 @@ mod tests {
     #[test]
     fn parse_typedef_enum_self_referential_field_resolves_to_own_type() {
         let module = parse_src("type: Loop | Next n Loop | Stop ;").unwrap();
-        assert_eq!(module.enums.len(), 1);
-        match module.enums[0].variants[0].fields[0].1 {
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        assert_eq!(module.enums.len(), 2);
+        match module.enums[1].variants[0].fields[0].1 {
             Type::Enum(_, name) => assert_eq!(name, "Loop"),
             other => panic!("expected Type::Enum(Loop), got {other:?}"),
         }
@@ -2596,8 +2608,9 @@ mod tests {
                 .unwrap();
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
-        assert_eq!(module.enums.len(), 1);
-        assert_eq!(module.enums[0].name, "Shape");
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        assert_eq!(module.enums.len(), 2);
+        assert_eq!(module.enums[1].name, "Shape");
     }
 
     /// The `Clause` list of a `WordBody::Clauses`; panics on a term body.
@@ -2729,7 +2742,8 @@ mod tests {
     fn parse_typedef_enum_variant_array_field_resolves() {
         let module = parse_src("type: Shape | Poly pts [f64 3] ;").unwrap();
         assert_eq!(module.arrays.len(), 1);
-        match module.enums[0].variants[0].fields[0].1 {
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        match module.enums[1].variants[0].fields[0].1 {
             Type::Array(_, name) => assert_eq!(name, "[f64 3]"),
             other => panic!("expected Type::Array, got {other:?}"),
         }
@@ -2885,7 +2899,8 @@ mod tests {
     #[test]
     fn parse_owning_cell_type_resolves_in_enum_variant_field_position() {
         let module = parse_src("type: Shape | Boxed b ^i64 ;").unwrap();
-        match module.enums[0].variants[0].fields[0].1 {
+        // Slice 9 (R2): `bool` is the reserved index-0 entry.
+        match module.enums[1].variants[0].fields[0].1 {
             Type::OwnedCell(_, name) => assert_eq!(name, "^i64"),
             other => panic!("expected Type::OwnedCell, got {other:?}"),
         }

@@ -295,6 +295,82 @@ impl EnumId {
     }
 }
 
+/// Slice 9 (R2): the reserved registry position of the builtin `bool` enum.
+/// Injected at index 0 of every assembled module's enum registry ahead of any
+/// user enum (`bool_enum_decl`), so `Type::from_name("bool")` resolves to one
+/// fixed `Type::Enum` without threading the registry through a pure resolver.
+pub const BOOL_ENUM_ID: EnumId = EnumId(0);
+
+/// Slice 9 (R2): the builtin `bool` enum declaration, `type: Bool | False | True ;`,
+/// injected at `BOOL_ENUM_ID` in every assembled module. `False` is variant 0
+/// and `True` variant 1 by declaration order, so their discriminants are the
+/// `0`/`1` the retired `TermKind::BoolLit` produced (and the order the print
+/// table `$boolstrs` indexes). Both variants carry an empty payload, so the
+/// general zero-payload-enum layout rule lowers it to a bare scalar.
+pub fn bool_enum_decl() -> EnumDecl {
+    EnumDecl {
+        name: "bool".to_string(),
+        name_static: "bool",
+        variants: vec![
+            VariantDecl {
+                name: "False".to_string(),
+                name_static: "False",
+                fields: Vec::new(),
+                span: Span::default(),
+            },
+            VariantDecl {
+                name: "True".to_string(),
+                name_static: "True",
+                fields: Vec::new(),
+                span: Span::default(),
+            },
+        ],
+        span: Span::default(),
+        module: 0,
+    }
+}
+
+/// Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected into
+/// every assembled module's `words` (and REPL session at startup) exactly as
+/// `bool_enum_decl` injects the enum itself. Clause-matches `False`/`True` and
+/// prints `false`/`true` including the trailing newline the retired
+/// primitive `bool` printable row used to emit, by delegating to the still-
+/// primitive `str` row -- reached at call sites through 8a's
+/// `builtin_overloads` dispatch, not a checker builtin row.
+pub fn bool_print_word_def() -> WordDef {
+    fn clause(variant: &str, text: &str) -> Clause {
+        Clause {
+            variant: variant.to_string(),
+            locals: Vec::new(),
+            body: vec![
+                Term {
+                    kind: TermKind::StrLit(text.to_string()),
+                    span: Span::default(),
+                },
+                Term {
+                    kind: TermKind::Call(".".to_string()),
+                    span: Span::default(),
+                },
+            ],
+            span: Span::default(),
+        }
+    }
+    WordDef {
+        name: ".".to_string(),
+        effect: StackEffect {
+            inputs: vec![TypedSlot {
+                name: None,
+                ty: Type::BOOL,
+            }],
+            outputs: Vec::new(),
+        },
+        body: WordBody::Clauses(vec![clause("False", "false\n"), clause("True", "true\n")]),
+        poly: None,
+        module: 0,
+        span: Span::default(),
+    }
+}
+
 /// A registered array type: its element type, compile-time count, and the
 /// leaked `&'static str` spelling `[T N]` every `Type::Array` naming it
 /// carries directly (mirrors `StructDecl::name_static`). Interned and deduped
@@ -745,7 +821,6 @@ pub struct TypedSlot {
 pub enum Type {
     Int(IntType),
     Float(FloatType),
-    Bool,
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
     Array(ArrayId, &'static str),
@@ -902,10 +977,19 @@ impl Type {
     /// Sugar for the default float-literal type (`f64`, D5).
     pub const F64: Type = Type::Float(FloatType { bits: 64 });
 
+    /// Slice 9 (D-A/R2): `bool` is no longer a primitive scalar type but the
+    /// two-variant zero-payload enum `type: Bool | False | True ;`, injected
+    /// at the reserved head of every module's enum registry (`BOOL_ENUM_ID`).
+    /// `Type::from_name("bool")` and every checker/IR spelling of the boolean
+    /// type is this one canonical `Type::Enum`; its representation stays a
+    /// register-resident scalar through the general zero-payload-enum layout
+    /// rule (`ir::EnumLayout::scalar`), never a per-`Bool` carve-out.
+    pub const BOOL: Type = Type::Enum(BOOL_ENUM_ID, "bool");
+
     /// Resolve a source type-name word to a `Type`, or `None` if unknown.
     pub fn from_name(name: &str) -> Option<Type> {
         if name == "bool" {
-            return Some(Type::Bool);
+            return Some(Type::BOOL);
         }
         if name == "usize" {
             return Some(Type::Usize);
@@ -950,9 +1034,9 @@ impl Type {
         self.is_int() || self.is_float()
     }
 
-    /// Whether this type is `bool`.
+    /// Whether this type is `bool` (the reserved zero-payload enum).
     pub fn is_bool(&self) -> bool {
-        matches!(self, Type::Bool)
+        *self == Type::BOOL
     }
 
     /// Whether this type is a reference (`&T` or `&!T`).
@@ -964,6 +1048,13 @@ impl Type {
     /// temporary: the four shapes that have an address, and so the four that
     /// can be borrowed or denoted by a second name.
     pub fn is_aggregate(&self) -> bool {
+        // `bool` is an enum at the surface but a register-resident scalar in
+        // its representation (the general zero-payload-enum layout rule), so
+        // it has no address and is not borrowable, exactly as the retired
+        // primitive `Type::Bool` was not.
+        if *self == Type::BOOL {
+            return false;
+        }
         matches!(
             self,
             Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
@@ -972,7 +1063,6 @@ impl Type {
 
     pub fn name(&self) -> &'static str {
         match self {
-            Type::Bool => "bool",
             Type::Int(IntType { bits, signed }) => INT_TYPES
                 .iter()
                 .find(|(_, b, s)| b == bits && s == signed)
@@ -1025,7 +1115,6 @@ pub struct Term {
 pub enum TermKind {
     IntLit(i64),
     FloatLit(f64),
-    BoolLit(bool),
     /// A `"..."` string literal (R6): type `str`, decoded content already
     /// escape-resolved by the lexer.
     StrLit(String),
@@ -1210,7 +1299,7 @@ mod tests {
                 "resolving {name}"
             );
         }
-        assert_eq!(Type::from_name("bool"), Some(Type::Bool));
+        assert_eq!(Type::from_name("bool"), Some(Type::BOOL));
     }
 
     #[test]
@@ -1293,7 +1382,7 @@ mod tests {
         assert!(Type::from_name("f64").unwrap().is_numeric());
         assert!(Type::from_name("i64").unwrap().is_numeric());
         assert!(!Type::from_name("i64").unwrap().is_float());
-        assert!(!Type::Bool.is_numeric());
+        assert!(!Type::BOOL.is_numeric());
     }
 
     fn module_with_struct(name: &str, fields: Vec<(String, Type)>) -> Module {
@@ -1531,8 +1620,8 @@ mod tests {
     #[test]
     fn intern_bundle_struct_same_tuple_dedups_expected() {
         let mut structs = Vec::new();
-        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
-        let b = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL]);
+        let b = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL]);
         assert_eq!(a, b);
         assert_eq!(structs.len(), 1);
         assert!(structs[0].is_bundle);
@@ -1540,7 +1629,7 @@ mod tests {
             structs[0].fields,
             vec![
                 ("f0".to_string(), Type::I64),
-                ("f1".to_string(), Type::Bool)
+                ("f1".to_string(), Type::BOOL)
             ]
         );
     }
@@ -1550,9 +1639,9 @@ mod tests {
         // Two outputs of the same types in the other order are a different
         // bundle: the tuple is ordered, deepest output first.
         let mut structs = Vec::new();
-        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool]);
-        let b = intern_bundle_struct(&mut structs, &[Type::Bool, Type::I64]);
-        let c = intern_bundle_struct(&mut structs, &[Type::I64, Type::Bool, Type::I64]);
+        let a = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL]);
+        let b = intern_bundle_struct(&mut structs, &[Type::BOOL, Type::I64]);
+        let c = intern_bundle_struct(&mut structs, &[Type::I64, Type::BOOL, Type::I64]);
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_eq!(structs.len(), 3);

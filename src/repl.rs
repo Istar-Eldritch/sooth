@@ -199,6 +199,15 @@ fn remap_type(
 ) -> Type {
     match ty {
         Type::Struct(id, n) => Type::Struct(StructId::from_index(id.index() + struct_base), n),
+        // Slice 9 (R2): `bool` occupies the reserved `BOOL_ENUM_ID` in every
+        // module's own registry (parser.rs's `parse`, `driver.rs`'s
+        // `assemble_module`), including the imported module's -- it is the
+        // same builtin type everywhere, not a per-module declaration, so it
+        // must stay pinned to the *session's* `BOOL_ENUM_ID`, never shifted
+        // by `enum_base` into a distinct, non-equal id. (`splice_import`
+        // still appends the imported module's own redundant `bool` entry
+        // below; it is simply never referenced by any remapped `Type`.)
+        Type::Enum(id, _) if id == crate::ast::BOOL_ENUM_ID => Type::BOOL,
         Type::Enum(id, n) => Type::Enum(EnumId::from_index(id.index() + enum_base), n),
         Type::Array(id, n) => Type::Array(ArrayId::from_index(id.index() + array_base), n),
         Type::OwnedCell(id, n) => {
@@ -522,6 +531,15 @@ pub fn format_stack(
     let mut vals = Vec::with_capacity(types.len());
     for ty in types {
         match ty {
+            // Slice 9 (D-D): `Bool` is `Type::Enum(BOOL_ENUM_ID, "bool")`
+            // structurally, but the REPL still renders it as `true`/`false`
+            // rather than the generic `<TypeName>` enum placeholder below --
+            // this arm must precede the general `Type::Enum` one to win.
+            _ if *ty == Type::BOOL => {
+                let v = buf[cell];
+                vals.push(if v != 0 { "true" } else { "false" }.to_string());
+                cell += 1;
+            }
             Type::Struct(id, name) => {
                 vals.push(format!("<{name}>"));
                 let size = layouts[id.index()].size as usize;
@@ -566,7 +584,6 @@ pub fn format_stack(
                         f32::from_bits(v as u64 as u32).to_string()
                     }
                     Type::Float(_) => f64::from_bits(v as u64).to_string(),
-                    Type::Bool => if v != 0 { "true" } else { "false" }.to_string(),
                     Type::Int(it) if !it.signed() => (v as u64).to_string(),
                     Type::Usize => (v as u64).to_string(),
                     Type::Isize => v.to_string(),
@@ -939,10 +956,15 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session {
+        let mut session = Session {
             env: HashMap::new(),
             structs: Vec::new(),
-            enums: Vec::new(),
+            // Slice 9 (R2): the builtin `bool` enum occupies the reserved
+            // head of the registry (`BOOL_ENUM_ID`), mirroring `assemble_module`/
+            // `parser::parse` -- a REPL `true`/`false`/`bool` reference needs
+            // it present from the session's first line, not just a compiled
+            // program's.
+            enums: vec![crate::ast::bool_enum_decl()],
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
@@ -965,7 +987,17 @@ impl Session {
             import_selective_module: HashMap::new(),
             import_exports: Vec::new(),
             rich_stack: false,
-        }
+        };
+        // Slice 9 phase 2 (R6/R7): the library `.` overload for `bool`,
+        // defined through the ordinary `eval_def` path exactly as a user
+        // definition would be, so it dlopen's like any other REPL word and
+        // resolves through the same `builtin_overloads` dispatch a native
+        // module's injected copy uses -- no fall-through to a deleted
+        // builtin arm.
+        session
+            .eval_def(crate::ast::bool_print_word_def(), &mut std::io::sink())
+            .expect("the injected `bool` print word always checks and compiles");
+        session
     }
 
     /// D2 (Slice 3): switch this session's residual-stack rendering to the
@@ -1808,7 +1840,16 @@ impl Session {
         // R9: append every enum with remapped variant-field ids and module id.
         // No aliases are built this phase (enums are out of phase-1 fixtures),
         // but the ids must still remap so a later reference stays consistent.
-        for (i, e) in module.enums.iter().enumerate() {
+        //
+        // Slice 9 (R2): index 0 is always the imported module's own copy of
+        // the builtin `bool` (`BOOL_ENUM_ID`, injected identically by every
+        // `parse`/`assemble_module`), never a real per-module declaration.
+        // Skip it: the session already has its own canonical `bool` at its
+        // own `BOOL_ENUM_ID`, and appending a second "bool" here would
+        // re-register `True`/`False` a second time, shadowing the session's
+        // own constructor words (a HashMap env, last write wins) and making
+        // every subsequent `true`/`false` construct the wrong enum.
+        for (i, e) in module.enums.iter().enumerate().skip(1) {
             let variants = e
                 .variants
                 .iter()
@@ -1824,7 +1865,7 @@ impl Session {
                 })
                 .collect();
             self.enums.push(EnumDecl {
-                name: format!("{}__import{epoch}__e{}", e.name_static, enum_base + i),
+                name: format!("{}__import{epoch}__e{}", e.name_static, enum_base + i - 1),
                 name_static: e.name_static,
                 variants,
                 span: e.span,
@@ -1887,6 +1928,15 @@ impl Session {
                 || w.poly.is_some()
                 || w.name == "main"
                 || w.name == "drop"
+                // Slice 9 phase 2 (R6): `.` is `bool_print_word_def`,
+                // injected identically into every module 0 (including the
+                // session's own, `Session::new`) -- not a real per-file
+                // private word. Binding it as `q::.__importN` here would
+                // leak a redundant, un-aliased entry into completion for no
+                // benefit: a call to bare `.` inside a retained combinator's
+                // body already resolves through the session's own identical
+                // copy with no rename needed.
+                || w.name == "."
                 || check::word_declares_quotation_parameter(w)
             {
                 continue;
@@ -1936,7 +1986,12 @@ impl Session {
         let body_rename: HashMap<String, String> = module
             .words
             .iter()
-            .filter(|w| w.module == 0 && w.name != "main" && w.name != "drop")
+            // Slice 9 phase 2 (R6): `.` is excluded for the same reason the
+            // env-splice loop above skips it -- a spliced combinator's call
+            // to bare `.` resolves against the session's own identical
+            // injected copy with no rename needed, and no `q::.__importN`
+            // env row exists to rename it to.
+            .filter(|w| w.module == 0 && w.name != "main" && w.name != "drop" && w.name != ".")
             .map(|w| {
                 let raw = if multi {
                     w.name.strip_suffix("__m0").unwrap_or(&w.name)
@@ -3328,7 +3383,7 @@ mod tests {
     fn format_stack_bool_slot_displays_as_true_or_false() {
         // Matches `.`'s print semantics: `true`/`false`, not the raw 0/1.
         assert_eq!(
-            format_stack(&[1, 0], &[Type::Bool, Type::Bool], &[], &[], &[]),
+            format_stack(&[1, 0], &[Type::BOOL, Type::BOOL], &[], &[], &[]),
             "stack: true false"
         );
     }
@@ -3472,6 +3527,7 @@ mod tests {
                     }],
                 },
             ],
+            is_scalar: false,
             is_linear: false,
             drop_generation: None,
         }];
