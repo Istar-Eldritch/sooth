@@ -67,20 +67,25 @@ which is why disposal is whole-program and type-directed today (brief recon 1, A
   (one input, zero outputs) and returns the struct id; matches **only** `Type::Struct`
   (`src/check.rs:1770`), so enums/cells/arrays/scalars are rejected
   (`drop_overload_non_struct_input_error`).
-- `StructLayout::has_drop_overload` — set at `src/check.rs:2051`, read at
-  `src/check.rs:493`, `:6581`, and in `src/ir.rs` (`has_drop_overload || any linear field`);
-  the boolean that D1's resolution replaces with a *named* word.
-- Recognized `drop` overloads are excluded from the concrete env — `src/check.rs:2116`
+- `StructDecl::has_drop_overload` — set at `src/check.rs:2051`, read at
+  `src/check.rs:493`, `:6580`–`6581` (`cannot_copy_error`'s `defines_drop`), and in `src/ir.rs`
+  (`has_drop_overload || any linear field`); the boolean that D1's resolution replaces with a
+  *named* word. `StructLayout::has_drop_overload` (`src/ir.rs:279`) is a separate, IR-side copy
+  of the same fact, populated at `src/ir.rs:859`–`867` for lowering to read.
+- Recognized `drop` overloads are excluded from the concrete env — the exclusion set
+  (`drop_overload_indices`) is built at `src/check.rs:2045` and applied at `src/check.rs:2132`
   (env declared at `src/check.rs:2068` as `HashMap<String, Vec<Overload>>`).
-- `resolve::mangle` — `src/resolve.rs:37` — exempts `main` and `drop` from `name__m{module}`
-  mangling (the exemption comment is `src/resolve.rs:31`); everything else is mangled at
-  `src/resolve.rs:345`.
+- `resolve::mangle` — `fn mangle` at `src/resolve.rs:31`, the `main`/`drop` exemption check at
+  `src/resolve.rs:32`–`34` — exempts `main` and `drop` from `name__m{module}` mangling;
+  everything else is mangled in the sibling loops at `src/resolve.rs:338`–`349` (structs,
+  enums, words, externs each get their own loop; `:344` is the words loop specifically).
 
-Sibling hole (destructuring bypasses the override): the consuming field-extraction / `S>`
-destructure discharges the linear obligation without invoking the disposal word. The
-recursion check already names `S>` as the sanctioned decomposition inside a `drop` body
-(`src/check.rs:4362`), and the linear-field peek diagnostic points at `S>` too
-(`src/check.rs:9242`); `S|>`/`^|>` are the non-consuming peeks (`src/check.rs:9242`, `:9268`).
+Sibling hole (destructuring bypasses the override): the consuming `{Struct}>`/`{Struct}>{field}`
+field-extraction discharges the linear obligation without invoking the disposal word (exact
+surface verified in R6). The recursion check already names `S>` as the sanctioned decomposition
+inside a `drop` body (`src/check.rs:4362`), and the linear-field peek diagnostic points at
+`S>` too (`src/check.rs:9242`); `S|>`/`^|>` are the non-consuming peeks (`src/check.rs:9242`,
+`:9268`).
 
 Operator half:
 
@@ -97,10 +102,10 @@ Corpus / goldens / design that this slice touches:
   (single file; must stay byte-for-byte).
 - `tests/phase3_resources.rs` — single-file drop-override goldens (must stay unchanged).
 - `tests/phase4_modules.rs:384` — `imported_linear_type_is_disposed_by_drop` (slice 5a
-  Criterion 17): the multi-module program D1 reverses; **inverted, not deleted** (R10).
+  Criterion 17): the multi-module program D1 reverses; **inverted, not deleted** (R9).
 - `DESIGN.md:547` — the slice-5a paragraph "Disposal crosses the export boundary for free…"
   and its "a destructor runs without being named" sentence: the design being reversed;
-  amended in this slice (R10).
+  amended in this slice (R9).
 
 ---
 
@@ -131,6 +136,9 @@ type: File fd i64 disposal: close ;
   (`src/check.rs:1763`), generalized to key off *the declared name* instead of the literal
   `"drop"`. A `disposal: close` naming a word that is absent, or whose shape is wrong, is a
   located error at the `type:` declaration naming the word and the shape it must have.
+  **Scoped, not general:** this shape rule is exactly what this slice needs; R10's `free
+  ( &!'A ^T -- )` example has two inputs and is Phase 6's concern (explicit allocators) —
+  generalizing the shape rule to admit an allocator input is not attempted here.
 
 **Back-compat — the implicit `: drop` path is retained.** A `: drop ( T -- )` word with no
 `disposal:` clause on `T` continues to declare `T`'s disposal word (the "declared disposal
@@ -141,8 +149,9 @@ words for one type; program-wide uniqueness, R7).
 
 **What a non-`drop` disposal name does to `drop` at a call site: a located error naming the
 real word — not an alias.** `drop` applied to a value whose type declares a disposal word
-named `close` is a located error at the `drop` site: `error:`File` is disposed by `close`,
-not`drop`(line N)`. `drop` is *not* aliased to `close`.
+named `close` is a located error at the `drop` site:
+``error: `File` is disposed by `close`, not `drop` (line N)``. `drop` is *not* aliased to
+`close`.
 
 *Rationale.* Aliasing `drop`→`close` would reintroduce exactly the magic the slice removes
 ("a destructor runs without being named"): the reader sees `drop` and a `close` fires. Under
@@ -156,9 +165,19 @@ not called `drop`; both leave the bit `false`, and the second must reject struct
 
 `drop_overload_struct_id` keeps its `Type::Struct`-only restriction (`src/check.rs:1770`):
 a **user-declared** disposal word may be declared only for a `type:`-declared struct. A
-`disposal:` clause on an enum, or a `: drop ( E -- )` / `: close ( E -- )` on any non-struct,
-stays the existing located error (`drop_overload_non_struct_input_error`), reworded to name
-the declared word rather than the literal `drop`.
+`: drop ( E -- )` / `: close ( E -- )` on any non-struct stays the existing located error
+(`drop_overload_non_struct_input_error`, `src/check.rs:1800`), reworded to name the declared
+word rather than the literal `drop`.
+
+**A `disposal:` clause on an enum is a parser-level rejection, not `drop_overload_struct_id`'s
+error.** Enums parse through `parse_enum_typedef` (`src/parser.rs:1786`, selected by
+`current_typedef_is_enum` at `src/parser.rs:1776`), a different production from `parse_typedef`
+(`src/parser.rs:1652`) where R1 adds `disposal:` clause-reading. `parse_enum_typedef` must
+also recognize the `disposal:` marker and reject it with a located error naming the enum and
+pointing at the clause — the same class of rejection as R1's absent-field-name check
+(`expect_field_type_token`) — rather than falling through to a generic "unexpected token"
+parse error, which would name neither the enum nor the reason. This is one small addition to
+the enum production (recognize-then-reject), not new clause semantics for enums.
 
 *Rationale, with the reachability analysis so it is not rediscovered.* Recon 2.2 frames this
 correctly: `drop` already disposes **any** `'T` at a call site correctly; the only thing
@@ -193,7 +212,9 @@ value is resolved the way `+` is: against candidates visible to the calling modu
 - **A value whose type declares a disposal word `W`, disposed without `W` in scope at the
   disposal site, is a located error naming `W` to import** — 8a rule 3 applied to disposal.
   This is the observable D1 behaviour. "Disposed" means `drop` on it, the named word on it,
-  destructuring it (R6), or disposing a container that holds it (R4).
+  destructuring it (R6), or disposing a container that holds it (R4). Message shape:
+  ``error: `File` is disposed by `close` (line N), which is not in scope; import it`` (mirrors
+  8a R3's existing "missing import" phrasing for ordinary overloads).
 - **Importing the type, holding it, forwarding it, storing it, and `&`-reading it all still
   compile.** The error fires only at a disposal site, never at import; a module that only
   forwards a resource never needs its disposal word in scope. (This is the shape D1 is careful
@@ -214,8 +235,14 @@ linear`), but the checker requires every user disposal word that generated trave
 call to be visible at the site that triggers the traversal.
 
 - `type: Wrapper f File n i64 ;` then `w drop` where `File` declares `close`: located error at
-  the `w drop` site naming `close`, unless `close`/`File` is in scope.
+  the `w drop` site naming `close`, unless `close`/`File` is in scope. Message shape:
+  ``error: disposing `Wrapper` (line N) requires `close` in scope: it owns a `File`, which is
+  disposed by `close``` (mirrors R1's "disposed by" phrasing).
 - A plain data struct (all-`Copy`, or nesting only plain data structs) requires nothing.
+- **References are not traversed.** A field behind a reference (`&File`) imposes no inner-word
+  requirement on the outer disposal site: the outer struct does not own what the reference
+  points at, so disposing the outer value never disposes through the reference, and there is
+  nothing generated traversal would call there.
 
 *Rationale.* This is the line between "derived" and "implicit" (D2). The stricter alternative
 (no generated traversal at all for a type owning a declared-disposal type, forcing every
@@ -225,8 +252,8 @@ call visible in the source.
 
 ### R5 — A disposal word is imported by name, never carried by its type (answers open question 5)
 
-Under D1 the `resolve::mangle`/env exemptions for `drop` (`src/resolve.rs:37`,
-`src/check.rs:2116`) die. The question is what `import: lib | drop |` means when several
+Under D1 the `resolve::mangle`/env exemptions for `drop` (`src/resolve.rs:31`–`34`,
+`src/check.rs:2045`/`:2132`) die. The question is what `import: lib | drop |` means when several
 modules each export a `drop` overload for their own type. **Answer: the importer names the
 word.** (This reverses an earlier draft of R5, which had the disposal word travel with its
 type; the author rejected that reading — importing `File` and never writing `close` anywhere
@@ -252,28 +279,46 @@ flagship case behaving exactly as it does today.)
   imported from wherever it is declared, an orphan disposal word (declared in a module other
   than the type's, R7) obeys the identical rule and R3's diagnostic names a word and its
   module, never "import the type". One rule covers both shapes.
+- **Precedence between the builtin structural `drop` row, an own-module `: drop`, and an
+  imported disposal word is moot.** R7's program-wide uniqueness means a given concrete type
+  has at most one disposal word in the whole program — there is never more than one real
+  candidate for that type, only the question of whether it (or the plain-data builtin row,
+  D2) is in scope at the site.
 
-**R5a — exporting a declared-disposal type without exporting its disposal word is a located
-error at the `export:` declaration.** Otherwise a library can hand out a type no consumer can
-ever dispose: legal under D1 (the error fires at the disposal site, not at import) but a
-guaranteed dead end discovered late, and it is ROADMAP's own "whatever `drop` cannot dispose, a
-module must export a disposal word for" line made checkable. Same site and same shape as slice
-5a's existing rejection of an exported word naming a private type of its own module. *This
-requirement is additive to the author's decision, not implied by it — strike it if unwanted.*
+**Struck: an earlier draft of this spec added "R5a", rejecting `export:` of a
+declared-disposal type that does not also export its disposal word. The author declined it —
+not implied by D1/D2/D3, and out of scope for this slice.** No exit criterion, test, or phase
+focus in this document should reference it; if you find one, it is this spec's own residue
+and should be removed.
 
 ### R6 — Destructuring a declared-disposal type is a located error (answers open question 3)
 
-Destructuring the value of a type that has a declared disposal word — the consuming `S>`
-destructure and any consuming field-extraction that discharges the aggregate's linear
-obligation by decomposing it — is a located error (Rust-E0509-shaped), **unconditional on the
-type**, not "only when a linear field would be left unaccounted".
+Destructuring the value of a type that has a declared disposal word — the consuming
+`{Struct}>` (full destructure, all fields) and `{Struct}>{field}` (single-field getter) forms
+— is a located error (Rust-E0509-shaped), **unconditional on the type**, not "only when a
+linear field would be left unaccounted".
 
-- **Boundary.** `&`-reading the value and the non-consuming peeks (`S|>`, `^|>`,
-  `src/check.rs:9242`/`:9268`) still compile: they do not discharge the obligation.
+**The exhaustive surface, verified against `struct_generated_sigs` (`src/check.rs:3437`): it is
+only these two, and nothing else.** `struct_generated_sigs` generates, per struct, exactly four
+word families: the constructor, the bare `{Struct}>` full-destructure (pops the struct, pushes
+every field), `{Struct}>{field}` per field (pops the struct, pushes one field, silently
+dropping the rest — the exact shape recon 2.1 exploited), and `{Struct}<{field}` (a
+struct-to-struct setter: takes the struct plus one field's replacement value, returns the
+*same aggregate type* — nothing is decomposed, so it is not part of this guard's surface).
+Enums are also out of scope for this guard: matching an enum hands you a still-linear payload
+(R2), it never decomposes a struct down to raw fields the way `{Struct}>`/`{Struct}>{field}`
+do. Cell unwrap (`^>`/`^|>`) is likewise unaffected — cells can never wrap a declared-disposal
+type as *their own* type (R2 restricts declared disposal to `Type::Struct`), and unwrapping a
+cell moves its payload out whole, decomposing nothing.
+
+- **Boundary.** `&`-reading the value and the non-consuming peek `{Struct}|>{field}`
+  (`src/check.rs:9242`) still compile: they do not discharge the obligation. (`^|>`,
+  `src/check.rs:9268`, is the cell peek, irrelevant here per above.)
 - **Remedy named by the diagnostic:** call the type's declared disposal word (`close`/`drop`),
-  not `S>`. Message shape, at the destructure site:
-  `error: cannot destructure`File`, which declares the disposal word`close`(line N)`
-  ` destructuring discharges the linear obligation without running `close`; dispose it with`close``.
+  not `{Struct}>`/`{Struct}>{field}`. Message shape, at the destructure site:
+  ``error: cannot destructure `File`, which declares the disposal word `close` (line N)``
+  `` destructuring discharges the linear obligation without running `close`; dispose it with
+  `close` ``.
 - **Exception — the type's own disposal word body.** Within the body of `T`'s declared
   disposal word, destructuring the receiver is permitted: it is the sanctioned means of
   reaching fields for disposal, and the recursion check already points a `drop` body at `S>`
@@ -356,8 +401,9 @@ root instead of layering a filter on top of it.
   not brought into `main`'s scope) is a located error at the `drop` site naming `Res`'s
   disposal word to import. Rewrite the test to assert that error, rename it to reflect the
   inverted behaviour (e.g. `imported_linear_type_disposed_without_its_word_in_scope_is_error`),
-  and add a positive companion asserting that importing the type (R5) makes the same
-  disposal compile and run.
+  and add a positive companion asserting that importing **the disposal word by name** (R5 —
+  not the type; importing the type alone is exactly what the negative case shows staying
+  rejected) makes the same disposal compile and run.
 - **Record slice 5a Criterion 17 as superseded in `ROADMAP.md`'s slice 5a entry** — a slice-5a
   exit criterion reversed by a later slice must not happen silently.
 - **Amend `DESIGN.md:547`** — the paragraph "Disposal crosses the export boundary for free, so
@@ -365,8 +411,10 @@ root instead of layering a filter on top of it.
   "the ROADMAP's hypothesized 'an exported linear type must also export its discharging word'
   rule has nothing to fire on yet." Rewrite it to record that 8b reverses this: disposal is
   import-scoped, the disposal word must be in scope at the disposal site, and a destructor
-  never runs in a module that did not name it (via importing its type, R5). A stale DESIGN.md
-  is what put the two documents in conflict; amending it is in scope.
+  never runs in a module that did not name its disposal word (R5) — the destructor becomes
+  callable only when the disposing module imports that word itself, never merely by holding or
+  importing a value of the type. A stale DESIGN.md is what put the two documents in conflict;
+  amending it is in scope.
 
 ### R10 — The container boundary ships as a stated rule with a struct-field witness (carries D3)
 
@@ -386,15 +434,24 @@ mechanism.
 
 - The `StructId`-keyed override registry (`find_drop_overloads`, `src/check.rs:1736`), its
   `check_duplicate_word_names` exemption (retained through 8a specifically to die here), the
-  `resolve::mangle` `drop` exemption (`src/resolve.rs:37`), and the env exclusion
-  (`src/check.rs:2116`) are all removed; disposal words become ordinary rows in 8a's table,
+  `resolve::mangle` `drop` exemption (`fn mangle`/exemption check, `src/resolve.rs:31`–`34`),
+  and the env exclusion (`drop_overload_indices`, built `src/check.rs:2045`, applied
+  `src/check.rs:2132`) are all removed; disposal words become ordinary rows in 8a's table,
   keyed by `(module, name, input_types)`, with the `StructId → declared-word` association
   living where the table's candidate resolution can read it. ROADMAP's stated goal of retiring
   the bespoke registry is met by this migration.
-- `StructLayout::has_drop_overload` (the boolean, `src/check.rs:493`/`:2051`/`:6581`) is
-  superseded by "does this struct have a declared disposal word" carrying the *word*, not a
-  bit — the checker requires the named word (R1/R3) and lowering still reads linearity for
-  traversal (`has_drop_overload || any field is linear`) off the presence of a declared word.
+- `StructDecl::has_drop_overload` (the boolean, `src/check.rs:493`/`:2051`/`:6580`–`6581`, with
+  the IR-side copy `StructLayout::has_drop_overload` at `src/ir.rs:279`) is superseded by "does
+  this struct have a declared disposal word" carrying the *word*, not a bit — the checker
+  requires the named word (R1/R3) and lowering still reads linearity for traversal
+  (`has_drop_overload || any field is linear`) off the presence of a declared word.
+- **Non-struct disposal must not regress.** `check_shuffle`/`lower_call`'s hardcoded `"drop"`
+  arms today dispatch `drop` on *any* `'T` — scalars, cells, plain enums, not just structs —
+  via `emit_drop`'s `IrType`-based dispatch (R2's whole safety argument rests on this already
+  being true). Retiring those arms into table rows must not narrow that: the universal
+  structural `drop` survives as an always-visible builtin table row (R5), so `drop` on a
+  scalar/cell/plain-enum with no declared disposal word keeps resolving and lowering exactly
+  as it does today, with no import required (D2).
 - Phase 3 slice 8b's overrides, REPL retention, epoch-suffixed destructor symbols, and
   `examples/resources.sth` all read unchanged as "a declared disposal word that happens to be
   named `drop`" (R1 back-compat). This reinterpretation is load-bearing and is stated, not
@@ -408,13 +465,13 @@ mechanism.
 
 1. A type declares its disposal word (`disposal:` clause, or the back-compat `: drop`), and
    the checker requires *that word* rather than `has_drop_overload`'s boolean (R1, R11).
+1b. `drop` on a scalar, cell, or plain enum with no declared disposal word still compiles and
+   dispenses with it structurally, with no import, exactly as before the table migration (R11).
 2. Disposing a value whose type declares a disposal word, without that word in scope, is a
    located error at the disposal site naming the word to import (R3/D1) — and importing the
    *type* alone does not discharge it (R5): the word is imported by name, or disposal is
    rejected. Holding, forwarding, and `&`-reading such a value all still compile, as does
    importing the type without the word.
-2b. Exporting a type that declares a disposal word, without exporting that word, is a located
-   error at the `export:` declaration (R5a).
 3. Disposing a struct holding such a type reports the same error at the outer disposal site
    (R4/D2), and a plain data struct still disposes with no declaration and no import.
 4. `drop` applied to a value whose declared disposal word is not named `drop` is a located
@@ -455,13 +512,19 @@ placebo tests before). Key tests:
   `forward_imported_resource_without_word_compiles`, `read_imported_resource_through_ref_compiles`,
   `two_modules_drop_overloads_do_not_collide`,
   `orphan_disposal_word_imported_from_its_own_module` (R7 × R5).
-- Export rule (R5a): `exporting_disposal_type_without_its_word_is_error`.
 - Traversal (R4/R10): `dispose_struct_holding_resource_requires_inner_word_at_outer_site`,
-  `plain_data_struct_disposes_with_no_import`.
-- Destructure (R6): `destructure_type_with_disposal_word_is_error`,
-  `destructure_in_own_disposal_body_is_allowed`, `peek_and_ref_of_disposal_type_compile`.
-- Uniqueness (R7): `two_disposal_words_for_one_type_program_wide_is_error`,
+  `plain_data_struct_disposes_with_no_import`, `dispose_through_ref_field_requires_nothing`
+  (R4's reference-boundary rule).
+- Destructure (R6): `destructure_full_of_disposal_type_is_error` (bare `{Struct}>`),
+  `destructure_field_getter_of_disposal_type_is_error` (`{Struct}>{field}`),
+  `destructure_in_own_disposal_body_is_allowed`, `peek_and_ref_of_disposal_type_compile`,
+  `struct_setter_of_disposal_type_is_not_a_destructure` (`{Struct}<{field}` stays legal, since
+  nothing is decomposed).
+- Uniqueness (R7): `two_disposal_words_for_one_type_program_wide_is_error` (asserts the
+  existing `duplicate_drop_overload_error` message with the declared name substituted for the
+  literal `drop` — no new message text to design here),
   `orphan_disposal_override_in_importing_module_is_allowed`.
+- Non-regression (R11): `drop_on_plain_scalar_and_enum_unaffected_by_table_migration`.
 - Operator half (R8): `own_module_operator_overload_reachable_in_two_module_build`,
   `selective_operator_import_does_not_hijack_bare_use`,
   single-module operator goldens unchanged.
@@ -498,17 +561,22 @@ placebo tests before). Key tests:
     },
     {
       "phase": 2,
-      "focus": "Declared disposal word mechanism: parse the type: disposal: clause, generalize drop_overload_struct_id off the literal name (struct-only, R2), retire find_drop_overloads and the drop mangle/env exemptions into 8a table rows, keep the : drop back-compat reading and the non-drop-name call-site error (R1, R11); single-file corpus byte-for-byte, no import-scope enforcement yet",
+      "focus": "Declared disposal word mechanism: parse the type: disposal: clause (parse_typedef, reject it in parse_enum_typedef with a located error), generalize drop_overload_struct_id off the literal name (struct-only, R2), keep the : drop back-compat reading and the non-drop-name call-site error (R1); do NOT retire find_drop_overloads or the drop mangle/env exemptions yet -- that migration is phase 3's, alongside import-scope enforcement, so that tests/phase4_modules.rs:384's still-unmodified cross-module assertion keeps passing unchanged; single-file corpus byte-for-byte, no import-scope enforcement yet",
       "difficulty": "hard"
     },
     {
       "phase": 3,
-      "focus": "Import-scoped disposal and nested traversal: require a value's declared disposal word in scope at every disposal site (R3/D1), require inner words at the outer site for structs holding resources (R4/D2), make the disposal word an ordinary by-name importable word that a type does NOT carry - importing the type alone does not bring it, and `drop` becomes importable by name when it is a type's declared disposal word (R5) - reject exporting a declared-disposal type without its word (R5a), enforce program-wide uniqueness (R7), record the D3 container rule with the struct-field witness (R10); invert tests/phase4_modules.rs:384 with a positive companion, record slice 5a Criterion 17 superseded in ROADMAP, and amend DESIGN.md's slice-5a disposal paragraph (R9)",
+      "focus": "Import-scoped disposal core: retire find_drop_overloads, the resolve::mangle drop exemption, and the env exclusion into 8a table rows keyed by (module, name, input_types) (R11), preserving drop's existing any-'T dispatch as an always-visible builtin row so scalars/cells/plain-enums are unaffected; require a value's declared disposal word in scope at every disposal site, with importing the type alone insufficient -- the word must be imported by name (R3/R5); enforce program-wide uniqueness of a type's disposal word (R7); invert tests/phase4_modules.rs:384 with a positive companion importing the word by name, record slice 5a Criterion 17 superseded in ROADMAP, and amend DESIGN.md's slice-5a disposal paragraph (R9)",
       "difficulty": "hard"
     },
     {
       "phase": 4,
-      "focus": "Destructure guard: an E0509-shaped located error rejecting the consuming destructure/field-extraction of any type with a declared disposal word, with the type's own disposal-word body exempt and the diagnostic naming the disposal word as the remedy (R6)",
+      "focus": "Nested traversal and container boundary: require the inner disposal word in scope at the outer disposal site when a struct owns a declared-disposal type, riding the existing is_linear/has_drop_overload structural fold to find which inner words generated traversal would call rather than a new transitive-ownership pass (R4/D2); references are not traversed; record the D3 container-boundary rule (generated traversal may call a named disposal word but may never conjure inputs) exercised by the Wrapper f File struct-field witness, with the Vec[File] criterion recorded unwritable (R10)",
+      "difficulty": "hard"
+    },
+    {
+      "phase": 5,
+      "focus": "Destructure guard: an E0509-shaped located error rejecting the exhaustive consuming-decomposition surface of a type with a declared disposal word -- struct_generated_sigs' bare `{Struct}>` full destructure and `{Struct}>{field}` per-field getter, and no other form (the setter `{Struct}<{field}` and all peeks stay legal) -- with the type's own disposal-word body exempt and the diagnostic naming the disposal word as the remedy (R6)",
       "difficulty": "standard"
     }
   ]

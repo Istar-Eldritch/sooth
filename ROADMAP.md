@@ -1912,8 +1912,9 @@ then find out what the compiler owes it.
    uses of that name in the importing module. The qualified form (`v::+`) already resolves
    correctly, so the target semantics exist — bare names should resolve the way qualified ones
    do, per call site, against candidates visible to the calling module.
-   **The brief also found the disposal half's premise to be false as written, and it is the
-   slice's first design question rather than an inherited decision.** Disposal today never
+   **The brief also found the disposal half's premise to be false as written, which made it
+   the slice's first design question rather than an inherited decision — now resolved on the
+   brief, not left open.** Disposal today never
    reaches the word environment at all (`check_shuffle`/`lower_call` intercept `drop`; overrides
    live in a `StructId`-keyed registry excluded from `env`; `mangle` exempts `drop`), so
    importing a resource type without its disposal word, declaring an orphan override in the
@@ -1962,12 +1963,13 @@ then find out what the compiler owes it.
    **The disposal-scope invariant: structural disposal must never silently substitute for a
    type's real disposal word.** 8a rule 3 makes overloads imported rather than carried by the
    type, and `drop` cannot inherit that rule as written. For `+`, a missing import is a
-   resolution error: no candidate matches, compile fails, you import it. For `drop` a
-   structural fallback always exists and always type-checks, so a module importing `File`
-   without its disposal word would pop the `i64` and never `close` — the same leak the
-   structural-totality constraint above exists to prevent, arriving by scope rather than by
-   derivation. Optional overloads can be import-scoped; a non-optional obligation cannot,
-   unless its absence is made an error.
+   resolution error: no candidate matches, compile fails, you import it. For `drop` today,
+   disposal never reaches `env` at all (recon, above) — a module importing `File` without its
+   disposal word does not leak, it still runs `close` correctly, dispatched through a path the
+   importing module's scope never touches. That is not a soundness hole; it is exactly the
+   implicit behaviour the magicless-language decision above rejects. Optional overloads can be
+   import-scoped by absence-is-an-error; `drop`'s structural fallback needs the opposite move,
+   since it never fails on its own.
 
    **Resolution: the type declares its disposal word, and `drop` stops being the universal
    disposal verb.** Making `drop` the tracked slot and trusting an override to do the right
@@ -2004,11 +2006,12 @@ then find out what the compiler owes it.
    `find_drop_overloads`' existing *program-wide* uniqueness stays program-wide even though
    callability becomes scope-local, because scope-local uniqueness alone would let two modules
    declare disposal for one `File`, never collide, and dispose the same value two different
-   ways. **Open sub-question:** nothing today requires an override to live in the module
+   ways. **Settled by the spec (R7):** nothing today requires an override to live in the module
    declaring the type (`drop_overload_struct_id` derives the id from the input type, no
-   same-module check), so orphan overrides are legal and made safe only by that uniqueness
-   check. Restricting disposal to the declaring module is optional; uniqueness is the
-   load-bearing part.
+   same-module check), so orphan overrides stay legal, made safe only by that uniqueness
+   check; restricting disposal to the declaring module was considered and not taken —
+   uniqueness is the load-bearing part, and the by-name import rule (R5) makes an orphan word
+   import like any other.
 
    **What this costs, so the brief does not discover it.** It needs a way to declare the word
    on the type, which is new surface on `type:` — the brief's question, and the only genuinely
@@ -2047,15 +2050,15 @@ then find out what the compiler owes it.
    type declaring a disposal word (`File`/`close`) rejects the generic path at the call site,
    naming that word; destructuring such a type is a located error; disposing one without its
    declared word in scope is a located error *at the disposal site* naming the word to import,
-   while importing the type, forwarding it, and `&`-reading it all still compile; disposing a
-   `Vec[File]` reports the same error at the container's disposal site; and the
+   while importing the type, forwarding it, and `&`-reading it all still compile; and the
    container-boundary decision is recorded and, if implicit, exercised by a generated traversal
    that calls a non-`drop` disposal word.
-   **Two of those are unwritable as stated** (brief, recon 2): there is no container of
-   resources to dispose — linear array elements are still rejected and `Vec` is Phase 6, so the
-   only container holding a resource is a struct with a linear field, which already disposes
-   correctly through generated traversal — and the two import-scope criteria exist only under
-   the table answer to the design question above. The operator half adds its own exit: a
+   **The `Vec[File]` form of that container criterion is unwritable as stated** (brief, recon
+   2): linear array elements are still rejected and `Vec` is Phase 6, so no container of
+   resources is constructible yet — the only container holding a resource today is a struct
+   with a linear field, exercised instead by a struct-field witness. The two import-scope
+   criteria exist only under the table answer to the design question above. The operator half
+   adds its own exit: a
    module's own operator overload is reachable from its own module in a ≥2-module build, and a
    selectively imported operator no longer hijacks unrelated bare uses of that name, with the
    single-module corpus unchanged.

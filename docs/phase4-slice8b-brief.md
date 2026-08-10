@@ -46,8 +46,10 @@ Same lib without the override, `: drop ( R -- )` in `main` instead => `closing 7
 The mechanism, read rather than inferred: `drop` is intercepted in `check_shuffle`'s `"drop"`
 arm (`check.rs:10389`) and `lower_call`'s (`ir.rs:3573`) before any env lookup; overrides live
 in a registry keyed by `StructId`, never by name (`find_drop_overloads`, `check.rs:1736`), are
-explicitly excluded from `env` (`check.rs:2116`), and are the one name `resolve::mangle`
-refuses to touch (`resolve.rs:31`). Dispatch happens in `emit_drop` (`ir.rs:4779`) off the
+explicitly excluded from `env` (the exclusion set built at `check.rs:2045`, applied at
+`check.rs:2132`), and are the one name `resolve::mangle` refuses to touch (`fn mangle` at
+`resolve.rs:31`, the exemption check at `resolve.rs:32`–`34`). Dispatch happens in `emit_drop`
+(`ir.rs:4779`) off the
 value's `IrType` and the layout's `is_linear`/`drop_generation`. Nothing in that path can ask
 what a module imported, which is exactly why A–D behave as they do.
 
@@ -98,15 +100,17 @@ shape as 8a's exit criterion that had to be amended mid-implementation. Decide t
 container-boundary question on paper if it is worth deciding early; do not exit on it.
 
 **4. "Disposal may require inputs beyond the value" has no consumer yet.** `free ( &!'A ^T
--- )` needs plural allocators, which arrive in Phase 6 (`qbe.rs` has exactly one global
-allocator behind `allocate`/`free` today). Settling the *general form* here is defensible
+-- )` needs plural allocators, which arrive in Phase 6 (`src/backend/qbe.rs` has exactly one
+global allocator today, `emit_alloc_shim`/`emit_free_shim` at `qbe.rs:759`/`:777` — lowering-side
+shim names, not Sooth words). Settling the *general form* here is defensible
 because Phase 6's rework is the logged consumer; shipping mechanism for it here is not.
 
 ## Recon 3: the operator half is a live 8a regression, not just the logged gap
 
 `env` is `HashMap<String, Vec<Overload>>` (`check.rs:2068`), threaded through 21 function
 signatures. But it is **already module-scoped in practice**: `resolve::mangle` renames every
-decl to `name__m{module}` (`resolve.rs:345`) and rewrites call sites to match. The exception
+word decl to `name__m{module}` (the words loop, `resolve.rs:344`; structs/enums/externs get
+their own sibling loops, `resolve.rs:338`–`349`) and rewrites call sites to match. The exception
 is the ~20 names in `is_operator_dispatch_name` (`resolve.rs:43`), whose *call sites* are
 deliberately left bare so `check_operator`'s operand-type dispatch can run — while their
 *declarations* are mangled like everything else. Bare call site, mangled definition: the two
@@ -221,7 +225,7 @@ silently.
    module at `check_operator`. The first is a resolve.rs change with a check.rs lookup change;
    the second is check.rs-only but leaves two modules' `+` overloads sharing one env key.
 5. **How `drop`'s own import spells itself.** `drop` is currently unmangled and unimportable
-   by name (`resolve.rs:31`, `check.rs:2116`); under D1 a disposal word is an ordinary
+   by name (`resolve.rs:31`–`34`, `check.rs:2045`/`:2132`); under D1 a disposal word is an ordinary
    importable name, so the exemption dies — but the spec must say what `import: lib | drop |`
    means when several modules export a `drop` overload for their own types, given 8a rule 4
    (one arity per name in scope) and rule 1 (no shadowing) now apply to it.
