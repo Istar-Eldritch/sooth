@@ -215,6 +215,23 @@ bounds-check guard (`ir.rs` near :4163), and the loop back-edge test keep their
 current QBE verbatim. First-class exit: the `tests/qbe_baseline*` goldens are
 **unchanged** after P1–P2, `countdown.sth` included.
 
+**Accepted deviation (P1, cycle-1 review).** Two baselines moved: `list.ssa` and
+`refs.ssa` renumber `sooth_enum_drop_0` → `sooth_enum_drop_1` everywhere. This is a
+behaviourally-inert symbol rename, not a codegen change: no instruction, block, or
+shape differs; `countdown.ssa`, `gcd.ssa`, `bool_abi.ssa`, `shapes.ssa`, `vm.ssa`
+are byte-identical; `corpus_qbe_stays_byte_identical_to_baseline` is re-anchored and
+passes; runtime output is identical. Cause: reserving `BOOL_ENUM_ID = EnumId(0)`
+(fixed so `Type::from_name("bool")` resolves with no registry access) occupies
+registry slot 0, shifting every user enum's id up by one, so `List`'s destructor
+symbol renumbers. The alternative — numbering *enum* drops to skip the no-drop
+`bool` slot so `List` stays `drop_0` — was rejected: it breaks the documented
+"one uniform naming scheme" shared by the `struct`/`enum`/`cell` drop symbols
+(`ir.rs` `enum_drop_symbol`), carries blast radius into the epoch/REPL/cross-module
+drop paths, and re-introduces a `bool`-shaped carve-out D-A rejects on principle.
+R3's byte-for-byte requirement therefore holds for every instruction and for every
+payload-bearing baseline; the sole delta is this enum-drop symbol ordinal, forced
+by a fixed `BOOL_ENUM_ID`.
+
 **R4 — `and`/`or`/`xor`/`not` keep their `Bool` rows through 8a's table.** The four
 explicit `Type::Bool` rows in `builtin_table` (`check.rs` :346–431) continue to
 resolve, now keyed on `Type::Enum(Bool)`, behaving identically (bitwise coincides
@@ -365,7 +382,9 @@ quotations-in-collections and stays out of scope.
    constructors at discriminants 0/1, `true`/`false`/`bool` still accepted
    spellings, primitive `Type::Bool` gone from the type layer.
 3. **Internal-boolean codegen byte-for-byte after P1–P2** (R3): every
-   `tests/qbe_baseline*` golden unchanged, `countdown.sth` included.
+   `tests/qbe_baseline*` golden unchanged, `countdown.sth` included, save the one
+   accepted, behaviourally-inert enum-drop symbol renumber recorded under R3
+   (`list.ssa`/`refs.ssa`: `sooth_enum_drop_0`→`_1`).
 4. **`.` is a library overload**: the primitive `bool` row is gone,
    `: . ( Bool -- ) ;` dispatches through 8a's `builtin_overloads` on the native
    **and** REPL paths (no segfault, R7), `true .`/`false .` print `true`/`false`.
