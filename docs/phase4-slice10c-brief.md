@@ -6,17 +6,19 @@ continued slice 9's `Bool`-as-enum change. It doesn't: `Bool`-as-enum shipped
 `if`-as-a-word is slice 10's row mechanism, whose representation and grounding
 code this work directly extends, so it is renumbered into that lineage.
 
-**Gates on 10a phases 1–3 only**: phase 1 (`~`, the inline-only quotation type),
-phase 2 (rows parsed and represented inside a nested quotation effect), and
-phase 3 (grounding at the check sites). It does **not** gate on 10a phase 4 (the
-self-tail back-edge rewrite: `if` has no back-edge), nor phase 5, nor on 10b
-(`times` moving to the library). The letter ordering implies more sequence than
-exists; 10b first is a preference (shake the mechanism out on a real migration
-before extending it to a second shape), not a dependency.
+**Gates on 10a phases 1–4 only**: phases 1–2 (`~`, the inline-only quotation
+type: its `Type` variant, the site audit, and its surface syntax), phase 3 (rows
+parsed and represented inside a nested quotation effect), and phase 4 (grounding
+at the check sites). It does **not** gate on 10a phase 5 (the self-tail back-edge
+rewrite: `if` has no back-edge), nor phase 6, nor on 10b (`times` moving to the
+library). The letter ordering implies more sequence than exists; 10b first is a
+preference (shake the mechanism out on a real migration before extending it to a
+second shape), not a dependency.
 
-*(Renumbered 2026-08-10: `~` was inserted as 10a's phase 1, shifting every later
-phase by one. This gate previously read "phases 1–2", which under the current
-numbering would omit grounding — the part 10c most needs.)*
+*(Renumbered twice on 2026-08-10 as 10a's own phase plan changed: first when `~`
+was inserted ahead of the row work, then when `~` split into a type-variant phase
+and a surface-syntax phase. Always read the gate as "everything up to and
+including grounding, and nothing after" rather than trusting a phase number.)*
 
 ## Why the original signature couldn't work, and what replaced it
 

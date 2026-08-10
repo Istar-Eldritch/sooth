@@ -592,7 +592,7 @@ Slice 9 shipped P1–P2 only (`Bool` as a library enum, merged at `c5db035`); it
 half (P3–P5) needs a row variable inside a quotation's declared effect, which does not parse
 before slice 10a, and is split out as **slice 10c** (`docs/phase4-slice10c-brief.md`),
 renumbered into slice 10's lineage since it extends 10a's row mechanism and gates on 10a
-phases 1–3 (not on 10b). 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
+phases 1–4, i.e. everything up to and including grounding (not on 10b). 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
 left open (see 8b's heading below).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -2099,8 +2099,9 @@ then find out what the compiler owes it.
     `times` itself into `lib/combinators.sth`, 8c-shaped lightweight process; **10c** is
     `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
     9b), which extends 10a's row representation to a row that legitimately differs between a
-    quotation's input and output side, and gates on 10a phases 1–3 only (`~`, rows, grounding)
-    — not on 10b, and not on 10a's back-edge fix, since `if` has no back-edge.
+    quotation's input and output side, and gates on 10a phases 1–4 only (the `~` type, its
+    surface syntax, rows, and grounding) — not on 10b, and not on 10a's back-edge fix, since
+    `if` has no back-edge.
     **`~[ ... ]`, the inline-only quotation type, lands in 10a rather than 10c.** A row-bearing
     quotation parameter *must* be spliced — `QuotEffect` has no row field and a row's size
     isn't known at runtime — so every combinator today relies on that as an unstated
@@ -2109,13 +2110,12 @@ then find out what the compiler owes it.
     structurally impossible rather than a rule bolted onto four call sites. It belongs to 10a
     because if the guarantee holds for every combinator parameter, `~[ ..s i64 -- ..s ]` is the
     honest declaration for `times`'s own parameter, and shipping `times` with a type that then
-    has to change is the expensive order. Two questions 10a's spec must settle: whether `call`
-    is banned on a `~` value (invocation by bare mention, since pushing a `~` as a value is
-    impossible) or whether the ban is narrowly on storage/escape — the former is more in
-    keeping with distinct syntax per mechanism and rewrites `f call` throughout
-    `lib/combinators.sth`; and whether `~` retypes only `times` or every combinator parameter
-    in the library, making it the explicit combinator/closure boundary with ordinary
-    `[ ... ]` reserved for genuinely first-class capturing quotations (7b's territory).
+    has to change is the expensive order. Two questions the spec posed are now settled:
+    `call` **stays** the invocation syntax (a `call` on a `~` is statically always a splice,
+    so the ban is on materialization, not invocation, and `lib/combinators.sth` needs no
+    rewrite); and `~` retypes **only** `times`'s shape in 10a, leaving whether the rest of
+    the library becomes the explicit combinator/closure boundary — with ordinary `[ ... ]`
+    reserved for genuinely first-class capturing quotations (7b's territory) — to 10b.
     Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
     smaller half of the gap: at every check point a combinator's row is concrete (combinators
     are spliced per call site and mint no `IrFunc`, per slice 6's R18/R20), so there is no
@@ -2139,13 +2139,24 @@ then find out what the compiler owes it.
     implementer while one requirement demanded an outcome only one choice delivers; the
     back-edge rewrite destroyed the positional correspondence the surviving-set forward needs;
     and the grounding mechanism offered two plumbings, one unworkable against an interned
-    `QuotEffect`). All three are now settled in the spec: `~` lives in the poly layer only and
-    never folds into `Type`, `~[` is a single token so adjacency is required, the rewrite
-    builds an explicit source-index map, and grounding is done callee-side in
-    `check_literal_against_declared_effect`. The loop counter stays `i64`: an interim move to
-    `usize` was reverted, since the honest fix is a bounded `'T: Int` (no `Int` bound exists —
-    `Bound` is `{ Copy, Ord }` — and `+` on a bound type variable is unsupported), which is
-    its own slice sequenced after 10b.
+    `QuotEffect`). A fourth round then falsified the representation itself and found three
+    ICE-class routing gaps. Settled state after four rounds: `~` is a **distinct `Type`
+    variant** (`Type::InlineQuotation`), reached after two dead designs — poly-layer-only,
+    falsified because `check_poly_combinator_standalone` grounds every declared input through
+    `apply_subst` and hands a `poly: None` stand-in to the monomorphic checker; and a
+    value-level `Slot` flag, rejected for failing open when any `Slot` construction drops it.
+    The variant was originally rejected on an estimate of 96 affected match sites; measured by
+    compiling, it breaks **three**, and it makes the no-widening rule free via structural type
+    inequality. `~[` is a single lexer token so adjacency is required; the back-edge rewrite
+    builds an explicit bottom-aligned source-index map and extends `SelfTailMarker`, since the
+    arm cannot otherwise reach the ground outputs; and grounding is done callee-side in
+    `check_literal_against_declared_effect` with a type-only region. The loop counter stays
+    `i64`: an interim move to `usize` was reverted, since the honest fix is a bounded
+    `'T: Int` (no `Int` bound exists — `Bound` is `{ Copy, Ord }` — and `+` on a bound type
+    variable is unsupported), which is its own slice sequenced after 10b. The plan is seven
+    phases; the audit of every silent `Type::Quotation` site is phase 1's deliverable and is
+    pinned to a pasted grep, since four rounds established that enumerating those sites on
+    paper does not converge.
 
 ### Phase 5 — Errors as values  `[S]`
 

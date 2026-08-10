@@ -101,5 +101,5 @@ slice 10a's mechanism. Findings, the exact repro, and what survives unchanged
 are recorded in `docs/phase4-slice10c-brief.md` — including why that brief's
 original target signature (`[ ..a -- ..b ]`, two rows differing per side) was
 itself wrong, and the `~[ ..i -- ..o ]` inline-only-quotation direction that
-replaced it. Do not re-derive them; 10c gates on 10a phases 1–2, not on
-anything in this document.
+replaced it. Do not re-derive them; 10c gates on 10a phases 1–4 (everything up to
+and including grounding), not on anything in this document.
