@@ -1955,11 +1955,11 @@ then find out what the compiler owes it.
    `drop ( 'T -- )` is the whole disposal interface, and the container boundary above is one
    question, not two: whether generated traversal of a `Vec[Box['A]]` may thread the
    allocator down is the same decision as whether traversal of a `List[File]` may call
-   `close`. Settle the general form here, where the constraint system is being designed —
-   what a disposal word may require, how the constraint records it, how generated traversal
-   supplies it — rather than inferring it from the single resource case and reopening it in
-   Phase 6, whose *Generic struct declarations* item and Slice 2 allocator rework are the
-   consumers waiting on the answer.
+   `close`. The spec (R10/D3) settles the *rule* here — generated traversal may call a named
+   disposal word but may never conjure inputs it needs — and ships it as a stated rule, not a
+   mechanism: the constraint-system machinery that would let a disposal word declare and thread
+   an allocator input is Phase 6's, whose *Generic struct declarations* item and Slice 2
+   allocator rework are the consumers waiting on the answer.
 
    **The disposal-scope invariant: structural disposal must never silently substitute for a
    type's real disposal word.** 8a rule 3 makes overloads imported rather than carried by the
@@ -2052,8 +2052,8 @@ then find out what the compiler owes it.
    naming that word; destructuring such a type is a located error; disposing one without its
    declared word in scope is a located error *at the disposal site* naming the word to import,
    while importing the type, forwarding it, and `&`-reading it all still compile; and the
-   container-boundary decision is recorded and, if implicit, exercised by a generated traversal
-   that calls a non-`drop` disposal word.
+   container-boundary decision is recorded (D3: settled against implicit threading) and
+   exercised by a generated traversal that calls a non-`drop` disposal word.
    **The `Vec[File]` form of that container criterion is unwritable as stated** (brief, recon
    2): linear array elements are still rejected and `Vec` is Phase 6, so no container of
    resources is constructible yet — the only container holding a resource today is a struct

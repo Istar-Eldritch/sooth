@@ -130,12 +130,22 @@ type: File fd i64 disposal: close ;
   reading fields, the word `disposal:` switches to reading exactly one word (the disposal
   word's name), then `;` is required. `disposal:` becomes a reserved word that cannot be a
   field name (same class as `type:`/`:` already rejected by `expect_field_type_token`,
-  `src/parser.rs`).
+  `src/parser.rs:1701`).
 - The named word must be defined as `: close ( File -- ) ;` — exactly one input equal to the
   declaring type, zero outputs. This is `drop_overload_struct_id`'s existing shape rule
   (`src/check.rs:1763`), generalized to key off *the declared name* instead of the literal
   `"drop"`. A `disposal: close` naming a word that is absent, or whose shape is wrong, is a
   located error at the `type:` declaration naming the word and the shape it must have.
+- **Resolution is by unmangled name and input type, program-wide — never by a mangled name
+  derived from the declaring type's module.** `disposal: close` records the pair (`File`,
+  `"close"`); the checker's table-building pass then finds the word declaration, anywhere in
+  the build closure, whose *unmangled* name is `"close"` and whose single input type is
+  `File`, exactly as `find_drop_overloads` already does today (`src/check.rs:1736`, no
+  same-module check). This is what makes R7's orphan overrides work at all: `close` can be
+  mangled to `close__m3` while `File` is declared in module 1, and the association still
+  resolves, because it was never keyed by module in the first place. Mangling (R11) changes
+  what a *call site* resolves `close` to when it is in scope — it does not change how this
+  type-to-word association is built.
   **Scoped, not general:** this shape rule is exactly what this slice needs; R10's `free
   ( &!'A ^T -- )` example has two inputs and is Phase 6's concern (explicit allocators) —
   generalizing the shape rule to admit an allocator input is not attempted here.
@@ -215,9 +225,12 @@ value is resolved the way `+` is: against candidates visible to the calling modu
 - **A value whose type declares a disposal word `W`, disposed without `W` in scope at the
   disposal site, is a located error naming `W` to import** — 8a rule 3 applied to disposal.
   This is the observable D1 behaviour. "Disposed" means `drop` on it, the named word on it,
-  destructuring it (R6), or disposing a container that holds it (R4). Message shape:
-  ``error: `File` is disposed by `close` (line N), which is not in scope; import it`` (mirrors
-  8a R3's existing "missing import" phrasing for ordinary overloads).
+  or disposing a container that holds it (R4). Message shape:
+  ``error: `File` is disposed by `close` (line N), which is not in scope; import it``.
+- **Destructuring is never this error — R6 preempts it unconditionally.** R6's guard fires on
+  *any* destructure of a declared-disposal type regardless of whether its word is in scope,
+  so a destructure never reaches R3's scope check: R6 is the only diagnostic a destructure can
+  produce.
 - **Importing the type, holding it, forwarding it, storing it, and `&`-reading it all still
   compile.** The error fires only at a disposal site, never at import; a module that only
   forwards a resource never needs its disposal word in scope. (This is the shape D1 is careful
@@ -258,10 +271,10 @@ call visible in the source.
 Under D1 the `resolve::mangle`/env exemptions for `drop` (`src/resolve.rs:31`–`34`,
 `src/check.rs:2045`/`:2132`) die. The question is what `import: lib | drop |` means when several
 modules each export a `drop` overload for their own type. **Answer: the importer names the
-word.** (This reverses an earlier draft of R5, which had the disposal word travel with its
-type; the author rejected that reading — importing `File` and never writing `close` anywhere
-leaves the destructor running at a distance, which is the magic D1 removes, and it left the
-flagship case behaving exactly as it does today.)
+word — the disposal word does not travel with its type.** Importing `File` and never writing
+`close` anywhere would leave the destructor running at a distance the moment the type is
+imported, which is the magic D1 removes: the flagship case (recon 1.A) would keep behaving
+exactly as it does today, with nothing observably changed.
 
 - **A declared disposal word is an ordinary exported word, imported by name.** Qualified
   (`import: lib "lib.sth"` → `lib::close`) or selective (`import: lib | File close |`). It is
@@ -276,8 +289,8 @@ flagship case behaving exactly as it does today.)
   not a name any module owns), so disposing a plain data struct still needs no import (D2).
 - **Several modules exporting a `drop` overload never collide.** Candidates key by
   `(module, name, input_types)` under 8a R1 with *distinct* input types (`R` vs `S`), so no
-  shadowing (R1) fires; all disposal words are arity 1, so R4 (one arity per name in scope) is
-  satisfied; dispatch selects by operand type, as for any overloaded name.
+  shadowing (8a R1) fires; all disposal words are arity 1, so 8a R4 (one arity per name in
+  scope) is satisfied; dispatch selects by operand type, as for any overloaded name.
 - **This dissolves the R5/R7 orphan tension rather than papering over it.** Because the word is
   imported from wherever it is declared, an orphan disposal word (declared in a module other
   than the type's, R7) obeys the identical rule and R3's diagnostic names a word and its
@@ -325,7 +338,10 @@ scope for this guard: matching an enum hands you a still-linear payload (R2), it
 decomposes a struct down to raw fields the way `{Struct}>`/`{Struct}>{field}` do.
 
 - **Boundary.** `&`-reading the value and the non-consuming peek `{Struct}|>{field}`
-  (`src/check.rs:9242`) still compile: they do not discharge the obligation. (`^|>`,
+  (`check_struct_peek_word`, `src/check.rs:10252`) still compile: they do not discharge the
+  obligation. Peeking a field that is itself linear is already rejected on unrelated grounds
+  (`peek_of_linear_field_error`, `src/check.rs:9242`) — a disposal-type test of this boundary
+  must peek a `Copy` field, or it fails for that reason instead of the one being tested. (`^|>`,
   `src/check.rs:9268`, is the cell peek, irrelevant here per above.)
 - **Remedy named by the diagnostic:** call the type's declared disposal word (`close`/`drop`),
   not `{Struct}>`/`{Struct}>{field}`. Message shape, at the destructure site:
@@ -590,7 +606,7 @@ placebo tests before). Key tests:
     },
     {
       "phase": 2,
-      "focus": "Declared disposal word mechanism: parse the type: disposal: clause (parse_typedef, reject it in parse_enum_typedef with a located error), generalize drop_overload_struct_id off the literal name (struct-only, R2), keep the : drop back-compat reading and the non-drop-name call-site error (R1); do NOT retire find_drop_overloads or the drop mangle/env exemptions yet -- that migration is phase 3's, alongside import-scope enforcement, so that tests/phase4_modules.rs:384's still-unmodified cross-module assertion keeps passing unchanged; single-file corpus byte-for-byte, no import-scope enforcement yet",
+      "focus": "Declared disposal word mechanism: parse the type: disposal: clause (parse_typedef, reject it in parse_enum_typedef with a located error), generalize drop_overload_struct_id off the literal name (struct-only, R2), keep the : drop back-compat reading and the non-drop-name call-site error (R1); do NOT retire find_drop_overloads or the drop mangle/env exemptions yet -- that migration is phase 3's, alongside import-scope enforcement, so that tests/phase4_modules.rs:384's still-unmodified cross-module assertion keeps passing unchanged; single-file corpus byte-for-byte, no import-scope enforcement yet; a disposal: close type is declarable but not yet disposable via close (the interception arms are still hardcoded on the literal drop until phase 3), so phase 2's tests are registration and negative cases only, no dispose-and-run e2e",
       "difficulty": "hard"
     },
     {

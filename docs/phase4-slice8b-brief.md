@@ -233,7 +233,7 @@ silently.
 ## Out of scope
 
 - **`Vec`, growable containers, plural allocators** — Phase 6. The `free ( &!'A ^T -- )` shape
-  informs the general form (open question 1) but ships nothing here.
+  informs D3 (the container boundary) but ships nothing here.
 - **Lifting the linear-array-element restriction.** It is what makes the container case
   untestable, and it is its own slice of work (an element-wise drop loop in the synthesized
   destructor), not a subordinate step of this one.
