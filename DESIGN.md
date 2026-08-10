@@ -544,16 +544,19 @@ not half-fix it with a partial guard: the honest fix is a Rust-E0509-style rule
 checker, independent of modules, and it is recorded against Phase 4 Slice 8 rather than
 grown here.
 
-**Disposal crosses the export boundary for free, so this slice adds no new disposal
-rule.** `drop` is compiler-known and dispatches on the concrete type (Slice 3/8b), so a
-consumer disposes an imported linear value with a bare `drop` whichever destructor glue
-runs whether or not that glue was named in `export:` — "a destructor runs without being
-named." Combined with transparent types' second route (destructuring to `Copy` leaves),
-no case in this slice lets a consumer hold an undisposable imported value, so the
-ROADMAP's hypothesized "an exported linear type must also export its discharging word"
-rule has nothing to fire on yet. It only becomes a live question once a polymorphic
-`drop ( 'T -- )` could be structurally total — exactly what Slice 8's own constraint
-forbids — so enforcement is deferred there, not decided here.
+**Disposing an imported resource type requires that type to be visible to the disposing
+module.** `drop` is compiler-known and dispatches on the concrete type (Slice 3/8b), but
+a bare `drop` on an imported linear value runs a destructor the *owning* module declared,
+so the calling module must have that type in scope — imported by name, or declared
+locally — the same visibility a bare use of any other name from that module needs. A
+qualified-only import that never names the type is a located error at the `drop`, naming
+the remedy (add the type to the import, or dispose it in a module that declares it). A
+consumer that has imported the type by name can always discharge it, so the ROADMAP's
+hypothesized "an exported linear type must also export its discharging word" rule has
+nothing to fire on: the discharging word is `drop` itself, reached through the type's own
+visibility. It only becomes a live question once a polymorphic `drop ( 'T -- )` could be
+structurally total — exactly what Slice 8's own constraint forbids — so enforcement is
+deferred there, not decided here.
 
 **Declaration-site and selective-import rules round out encapsulation.** An exported
 word whose stack effect names a private, non-primitive type of its own module is

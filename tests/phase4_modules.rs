@@ -381,11 +381,12 @@ fn exported_word_naming_exported_type_is_accepted() {
 }
 
 #[test]
-fn imported_linear_type_is_disposed_by_drop() {
-    // Criterion 17: `Res` is linear (a `drop` overload) and exported; the
-    // consumer disposes one with a bare `drop`, whose destructor glue runs
-    // whether or not it was itself exported (D6/R19).
-    let c = Closure::new("imported-linear-drop");
+fn imported_linear_type_dropped_without_importing_it_is_error() {
+    // Slice 8b, R6 (supersedes slice 5a Criterion 17): disposing an imported
+    // resource type with a bare `drop` runs a destructor declared in another
+    // module, so under a qualified-only import it is a located error naming the
+    // remedy -- importing the type by name.
+    let c = Closure::new("imported-linear-drop-ungated");
     c.write(
         "lib.sth",
         "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
@@ -394,8 +395,67 @@ fn imported_linear_type_is_disposed_by_drop() {
         "main.sth",
         "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
     );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("cannot `drop` a value of type `lib::Res` in `main`"),
+        "names the type, qualifier, and caller: {err}"
+    );
+    assert!(
+        err.contains("declared in module `lib`, which this module has not imported by name"),
+        "names the declaring module and the cause: {err}"
+    );
+    assert!(
+        err.contains("add `Res` to the import (`import: lib | Res | \"...\"`)"),
+        "names the remedy: {err}"
+    );
+}
+
+#[test]
+fn imported_linear_type_dropped_after_selective_import_ok() {
+    // Slice 8b, R6 (positive companion): importing `Res` by name makes its
+    // override visible, so a bare `drop` runs `lib`'s destructor (prints `7`).
+    let c = Closure::new("imported-linear-drop-selective");
+    c.write(
+        "lib.sth",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib | Res | \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
+    );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "7\n", "the module's own destructor observably ran");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn imported_resource_qualified_only_non_disposal_uses_compile() {
+    // Slice 8b, R7: only a bare `drop` reaches the gate. Under a qualified-only
+    // import, naming the type in an effect, holding a value, forwarding it to
+    // another word, and `&`-reading a field all still compile -- the value is
+    // disposed in `lib`, which declares `Res`.
+    let c = Closure::new("imported-linear-nondisposal");
+    c.write(
+        "lib.sth",
+        concat!(
+            "type: Res n i64 ;\n",
+            ": mk ( -- Res ) 7 Res ;\n",
+            ": sink ( Res -- ) drop ;\n",
+            ": peek ( &Res -- i64 ) &Res>n @ ;\n",
+            ": drop ( Res -- ) | r | r Res>n . ;\n",
+            "export: mk Res sink peek ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: lib \"lib.sth\" ;\n",
+            ": hold ( -- lib::Res ) lib::mk ;\n",
+            ": main ( -- ) hold | r | &r lib::peek . r lib::sink ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "7\n7\n", "the borrow reads, then `lib` disposes it");
     assert_eq!(code, 0);
 }
 
