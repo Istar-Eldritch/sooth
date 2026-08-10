@@ -47,9 +47,18 @@ Same rejection with a fresh name (`..t`), so it is structural, not a scoping acc
 fields. This is the boundary Slice 6a drew deliberately (its R2/R28: "a row variable `..s`
 inside is out of scope").
 
-**2. The top-level row already works, as emergent pass-through.** Nothing in the checker
+**2. The top-level row already works, as emergent pass-through.** ~~Nothing in the checker
 reads `PolySig.row_in`/`row_out` (grep: only `src/repl.rs:2305,2895` for signature
-printing and the REPL multi-output gate). The pass-through falls out of unification only
+printing and the REPL multi-output gate).~~ **Corrected 2026-08-10: stale.**
+`poly_sig_shape_eq` reads both (`src/check.rs:3188`/`:3191`) and `poly_sig_str`'s
+`render_row` prints them (`:3231-3232`); the repl sites are `:2407` and `:3010`/`:3015`.
+This helps rather than hurts — because `poly_sig_shape_eq` drives overload dedup, growing
+`PolyType::Quotation` with row fields makes candidates differing only by row
+distinguishable for free. Also note what the top-level row does **not** do: it is
+untouched-pass-through only, modelled as size-zero during the word's own body check, so
+`: shrinks-row ( ..a i64 -- ..b ) drop drop ;` fails with `` `drop` needs 1 values, but the
+stack holds 0 ``. Differing `row_in`/`row_out` names parse but nothing verifies they differ
+semantically. The pass-through falls out of unification only
 touching `sig.inputs.len()` slots. Verified:
 
 ```
@@ -99,9 +108,15 @@ the else-arm leaves the declared output. So even a fully concrete `times`-shaped
 combinator is unwritable today. 10a must fix this to exit, row or no row.
 
 **5. Row-effect reasoning exists, intrinsic-only, and the general case is *easier* than
-the intrinsic's.** `check_abstract_quotation_times` (`src/check.rs:6840`) already
+the intrinsic's.** ~~`check_abstract_quotation_times` (`src/check.rs:6840`) already
 implements "pop the declared fixed inputs above an opaque row, require the row restored"
-for the one blessed signature. The general splice-site paths
+for the one blessed signature.~~ **Corrected 2026-08-10, by review against the body: it
+does not.** `check_abstract_quotation_times` (`:6855-6872`) requires the *declared effect*
+be self-similar (`inputs == outputs ++ [i64]`) and then pointwise-matches the declared
+outputs against the **top** `outputs.len()` slots; there is no fixed-inputs-above-a-row
+decomposition and the row is never inspected — everything below is untouched by
+construction. So there is no prototype to generalise, and the spec derives the grounding
+instead (see `docs/phase4-slice10-spec.md`'s R8). The rest of this recon item stands. The general splice-site paths
 (`check_literal_against_declared_effect` `:7301`, `check_poly_combinator_args` `:7226`)
 ground a declared effect with no row concept. The architectural fact that bounds this
 work: combinators mint no `IrFunc` and are term-spliced per call site (`inline_combinator`
@@ -190,9 +205,17 @@ from a manufactured type instead of a live slot. See decision 7.
    code it was scoped against; 10a must either close the gap here or explicitly re-verify,
    against the rewritten code, that the same masking condition 7b documented (no self-tail
    combinator lacking a conditional exit exists in the corpus) still holds.
-6. **The index type stays `i64`.** Widening the loop counter to other integer types is
-   overload territory (8a's table, one `times` candidate per index type if ever wanted),
-   not row machinery. Out of scope here.
+6. ~~**The index type stays `i64`.**~~ **Superseded 2026-08-10: the index becomes `usize`.**
+   The reasoning below is unchanged and still holds — admitting *several* index types is 8a
+   overload territory, not row machinery — but it argued about widening, not about which
+   single type is right, and `usize` is. `len` already returns `usize` (`src/check.rs:5261`),
+   so every library combinator converts it down with `>i64` purely to satisfy `times` and
+   converts each index back up per iteration (twice in one body in
+   `examples/array_totals_hand.sth:20` and `examples/inplace_fold.sth:33`); a count cannot be
+   negative; literals already coerce into a `usize` parameter; and `IrType::Usize` is the same
+   QBE register as 64-bit `Int` (`"l"`, `src/backend/qbe.rs:298`). Widening the loop counter to
+   other integer types is overload territory (8a's table, one `times` candidate per index type
+   if ever wanted), not row machinery. Out of scope here.
 7. **10a does not touch the intrinsic; 10b deletes it.** 10a exits on a user-space
    `my-times` living beside the intrinsic. 10b then: `times` written in
    `lib/combinators.sth`, the `check_term` interception arm, `check_abstract_quotation_times`,
