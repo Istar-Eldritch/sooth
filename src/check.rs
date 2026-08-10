@@ -6477,6 +6477,19 @@ fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) -> CaptureCla
         // Case 2: an aggregate value read directly (no deriv). A scope-bound
         // aggregate is owned by (and dies with) this frame; a global aggregate
         // is not in scope and never reaches here.
+        //
+        // Review note (deliberate narrowing, not a bug): R15 case 2 also names
+        // a by-value aggregate PARAMETER or global as outer-rooted (its
+        // storage belongs to the caller, not this frame), which this arm does
+        // not distinguish from a locally-constructed aggregate -- both reach
+        // here with `deriv: None`, and telling them apart would need a new
+        // provenance tag threaded from `check_terms_word`'s initial stack
+        // through every bind/shuffle (the same weight as `Deriv` tracking for
+        // `Type::Ref`, case 3's own mechanism). Unbuilt: this arm always
+        // returns `FrameRooted`, so an aggregate parameter capture is
+        // over-rejected at an escaping boundary rather than admitted -- sound
+        // (it never under-rejects), just more conservative than case 2's full
+        // rule. See `docs/phase4-slice7b-spec.md`'s R15 section.
         Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..) => {
             CaptureClass::FrameRooted
         }
