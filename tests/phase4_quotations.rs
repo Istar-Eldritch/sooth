@@ -189,7 +189,7 @@ fn capturing_scalar_through_nested_quotation_snapshots() {
 // -- T-makeb: an outer-rooted reference capture (a `&T` parameter) is admitted -
 
 #[test]
-fn make_b_captures_outer_rooted_reference_admits() {
+fn escaping_closure_over_param_ref_compiles_and_runs() {
     // `make-b`'s closure captures `r`, a `&[i64 4]` *parameter*: its referent
     // is rooted outside `make-b`'s frame (in `main`'s `a`, still live at the
     // call), so the escaping capture is admitted. The env holds the reference;
@@ -206,9 +206,21 @@ fn make_b_captures_outer_rooted_reference_admits() {
         1,
         "call through the captured closure is an indirect call"
     );
-    // T-env-inline: the materialized body takes the declared `i64` input plus
-    // one trailing `Ptr` env parameter (R17). Dropping the env param would
-    // shorten this list and the reference could not reach the body.
+}
+
+// -- T-env-inline: a one-capture materialized body takes one trailing Ptr env -
+
+#[test]
+fn materialized_single_capture_builds_inline_env() {
+    // The inline single-capture env (R16/R17): `make-b`'s materialized body
+    // gains exactly one trailing `Ptr` env parameter alongside its declared
+    // `i64` input, and that pointer *is* the captured reference passed inline.
+    // There is no `Alloc` bundle to assert against here -- bundle synthesis is
+    // Phase 2's multi-capture path and does not exist yet, so asserting its
+    // absence would be a placebo; the discriminating witness is the param
+    // shape, which goes red if the env param (R17) is dropped.
+    let src = ": make-b ( &[i64 4] -- [ i64 -- i64 ] ) | r | [ r 0 >usize &> @ + ] ;\n\
+               : main ( -- ) 5 4 fill | a | &a make-b 4 swap call . ;\n";
     assert_eq!(
         materialized_quot_params(src),
         vec![
@@ -225,7 +237,7 @@ fn make_b_captures_outer_rooted_reference_admits() {
 // -- T-makea: a frame-rooted capture escaping its owning frame is rejected ----
 
 #[test]
-fn make_a_captures_frame_local_past_owning_frame_error() {
+fn escaping_closure_over_frame_local_is_past_owning_frame() {
     // `make-a`'s closure borrows `arr`, a `[i64 4]` bound *inside* `make-a`;
     // returning the closure would let it outlive `arr`'s storage. Unlike
     // `make-b`'s parameter, this is frame-rooted, so the escaping boundary is a
@@ -243,7 +255,7 @@ fn make_a_captures_frame_local_past_owning_frame_error() {
 // -- T-makea-ref: a frame-rooted *borrow* (case 3, not case 2) is rejected ---
 
 #[test]
-fn make_a_captures_frame_local_borrow_past_owning_frame_error() {
+fn escaping_closure_over_frame_local_borrow_is_past_owning_frame() {
     // `make-a` above captures `arr` itself (case 2, the aggregate). This
     // pins case 3: `r` is a *bound borrow* (`&arr | r |`) whose `owned_root`
     // is `arr`, a local of this frame -- the `owned_root`-in-scope test in
@@ -262,7 +274,7 @@ fn make_a_captures_frame_local_borrow_past_owning_frame_error() {
 // -- T-quot-cap-deferred: capturing a quotation-typed name is deferred --------
 
 #[test]
-fn capturing_quotation_typed_name_is_deferred() {
+fn capturing_quotation_typed_name_is_rejected_deferred() {
     // The outer `[ q call ]` captures `q`, itself a quotation local. A
     // quotation env slot is two words and needs a recursive surviving-set fold
     // (R15 case 4), so it is deferred at every boundary rather than admitted.
@@ -279,7 +291,7 @@ fn capturing_quotation_typed_name_is_deferred() {
 // -- T-multi-esc: a 2+-capture escaping closure is deferred (single-word env) -
 
 #[test]
-fn escaping_closure_with_two_captures_is_deferred() {
+fn multi_capture_escaping_closure_is_rejected_deferred() {
     // Phase 1's inline env holds one word; `[ x y + + ]` captures two scalars,
     // which needs a heap env (R18), deferred.
     let err = check_error(
