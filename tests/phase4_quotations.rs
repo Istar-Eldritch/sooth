@@ -691,6 +691,146 @@ fn frame_capture_escaping_via_struct_is_past_owning_frame() {
     );
 }
 
+// -- T-carrier-store/getter/cell: the surviving set (R19) must propagate -----
+// -- through every value-producing path, not just the three the guard --------
+// -- originally covered (constructor, store-onto-root-binding, if-join), so --
+// -- R22/the store guard actually see a closure smuggled through a getter, --
+// -- an array, or a heap cell (round-2 review fix) ---------------------------
+
+#[test]
+fn frame_capture_escaping_via_struct_carrier_stored_through_param_ref_is_past_owning_frame() {
+    // `install`'s closure borrows `r = &arr`, a *frame* local of `install`, and
+    // is wrapped into a `Holder` (an in-frame carrier, R21) before being
+    // stored into `out`, a `&!Holder` *parameter* rooted outside `install`'s
+    // frame. The store-boundary guard (da42294) only checked a still-literal
+    // `Known` quotation before ever looking at escaping; `h` is no longer one
+    // (the constructor already erased it), so the guard never ran at all
+    // before this fix and the store compiled clean.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : install ( &!Holder -- )\n\
+         | out |\n\
+         4242 4 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder | h |\n\
+         out h !\n\
+         arr drop ;\n\
+         : main ( -- )\n\
+         [ 7 ] Holder | box |\n\
+         &!box install\n\
+         box Holder>q call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure captures `r`, a local of this frame, whose storage does not survive the return (line 7)"
+    );
+}
+
+#[test]
+fn frame_capture_escaping_via_struct_field_getter_return_is_past_owning_frame() {
+    // `Holder>q`'s field type is `Quotation`, not `is_aggregate`, so the
+    // consuming getter falls to the generic env-based call dispatch, whose
+    // constructor-output propagation gate required `is_aggregate` and so
+    // dropped `h`'s surviving set even though `q` legitimately carries the
+    // same closure onward. Before the fix `q`'s return skipped R22 entirely.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : make ( -- [ -- i64 ] )\n\
+         4242 4 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder | h |\n\
+         h Holder>q | q |\n\
+         arr drop\n\
+         q ;\n\
+         : clobber ( -- ) 987654 8 fill | z | &z 0 >usize &> @ drop z drop ;\n\
+         : main ( -- ) make | q | clobber q call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure captures `r`, a local of this frame, whose storage does not survive the return (line 8)"
+    );
+}
+
+#[test]
+fn frame_capture_escaping_via_heap_cell_return_is_past_owning_frame() {
+    // `^` (owning-cell alloc) pushed a bare `Slot::computed`, dropping the
+    // wrapped `Holder`'s surviving set; `c`'s return from `make` then skipped
+    // R22 entirely, exactly as the struct/getter cases above did.
+    let err = check_error(
+        "type: Holder q [ -- i64 ] ;\n\
+         : make ( -- ^Holder )\n\
+         4242 4 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder ^ | c |\n\
+         arr drop\n\
+         c ;\n\
+         : clobber ( -- )\n\
+         987654 4 fill | z |\n\
+         &z 0 >usize &> @ drop\n\
+         z drop ;\n\
+         : main ( -- )\n\
+         make | c |\n\
+         clobber\n\
+         c ^> Holder>q call . ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure captures `r`, a local of this frame, whose storage does not survive the return (line 7)"
+    );
+}
+
+// -- T-propagate-getter/array/cell: the same three paths, but a genuinely ----
+// -- in-frame closure (never escaping) still compiles and runs correctly -----
+// -- after forwarding surviving through them (regression coverage) ----------
+
+#[test]
+fn same_frame_closure_through_struct_field_getter_runs() {
+    let (stdout, code) = run_src(
+        "getter-inframe",
+        "type: Holder q [ -- i64 ] ;\n\
+         : main ( -- )\n\
+         4242 4 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder | h |\n\
+         h Holder>q call .\n\
+         arr drop ;\n",
+    );
+    assert_eq!(stdout, "4242\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn same_frame_closure_through_array_element_access_runs() {
+    let (stdout, code) = run_src(
+        "array-inframe",
+        "type: Holder q [ -- i64 ] ;\n\
+         : main ( -- )\n\
+         4242 4 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder 1 fill | tbl |\n\
+         &tbl 0 >usize &> @ Holder>q call .\n\
+         arr drop tbl drop ;\n",
+    );
+    assert_eq!(stdout, "4242\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn same_frame_closure_through_heap_cell_runs() {
+    let (stdout, code) = run_src(
+        "cell-inframe",
+        "type: Holder q [ -- i64 ] ;\n\
+         : main ( -- )\n\
+         4242 4 fill | arr |\n\
+         &arr | r |\n\
+         [ r 0 >usize &> @ ] Holder ^ | c |\n\
+         c ^> Holder>q call .\n\
+         arr drop ;\n",
+    );
+    assert_eq!(stdout, "4242\n");
+    assert_eq!(code, 0);
+}
+
 // -- T-bundle-carrier: a 2+-capture stack bundle escaping via a carrier is ----
 // -- rejected even when no individual capture is frame-rooted (review fix) ---
 
