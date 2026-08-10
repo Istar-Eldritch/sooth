@@ -495,6 +495,36 @@ fn selective_import_of_type_exposes_members_unqualified() {
 }
 
 #[test]
+fn selective_import_of_builtin_name_with_mismatched_arity_is_error() {
+    // Phase 4 slice 8a, R4 (import mirror): `lib` overloads `+` unary on
+    // `Vec2`, but the builtin `+` is binary; nothing else forbids this
+    // import outright (no local `+`, no other selective import of `+`), so
+    // the arity mismatch against the builtin is the only thing left to
+    // reject it, at the import site rather than surfacing as an ambiguity
+    // at a call site.
+    let c = Closure::new("selective-arity-clash");
+    c.write(
+        "lib.sth",
+        "type: Vec2 x i64 y i64 ;\n: + ( Vec2 -- Vec2 ) ;\nexport: + Vec2 ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib | + | \"lib.sth\" ;\n: main ( -- ) ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("selective import of `+`") && err.contains("lib"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("takes 1 input")
+            && err.contains("the builtin `+` takes 2")
+            && err.contains("agree on input count"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
 fn selective_type_import_member_collision_is_error() {
     // Criterion 21b: two modules each expose a `Point`; selectively importing
     // both collides on the base name (and thus on every generated member),
@@ -525,4 +555,59 @@ fn modules_example_builds_and_runs() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(String::from_utf8(output.stdout).unwrap(), "4\n52\n");
     assert_eq!(output.status.code().unwrap(), 0);
+}
+
+#[test]
+fn unrelated_modules_generic_and_concrete_same_name_do_not_collide() {
+    // Slice 8a fix 3 (R5, module-scoped): a poly word in one module and an
+    // unrelated concrete word of the same name and arity in a *different*
+    // module that does not import it must not trip the generic/concrete
+    // overlap check -- it was keyed by name alone before this fix, global
+    // across the whole program. `main` imports both `g` and `c`, but `g` and
+    // `c` do not import each other.
+    //
+    // This is a shape check, not the guard: it stays green with the fix
+    // reverted, because `resolve::mangle` is unconditional per-module, so two
+    // modules' bare `bump`s never collide by string in a real multi-file
+    // build and the global key could not fire here. The discriminating test
+    // is the direct `WordDef`-construction unit test in `check.rs`, which
+    // does fail when reverted. Kept because it pins the user-visible
+    // behaviour end to end.
+    let c = Closure::new("overlap-unrelated-modules");
+    c.write("g.sth", ": bump ( 'T -- 'T ) ;\nexport: bump ;\n");
+    c.write(
+        "c.sth",
+        "type: Vec2 x i64 y i64 ;\n: bump ( Vec2 -- Vec2 ) ;\nexport: bump Vec2 ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: g \"g.sth\" ;\nimport: c \"c.sth\" ;\n: main ( -- ) 5 g::bump . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn same_module_generic_and_concrete_overlap_still_rejected_across_files() {
+    // Slice 8a fix 3 (R5, module-scoped): the module-scoping in the fix above
+    // must not weaken a genuine same-module collision -- a poly `bump` and a
+    // concrete `bump` of the same arity declared in the *same* module (here,
+    // the importer's own `main.sth`) are still rejected, even though the
+    // program also spans an unrelated second file.
+    let c = Closure::new("overlap-same-module");
+    c.write("lib.sth", ": p ( -- i64 ) 1 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n\
+type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T -- 'T ) ;\n\
+: main ( -- ) lib::p . ;\n",
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("generic overload") && err.contains("overlaps a concrete overload of `bump`"),
+        "unexpected message: {err}"
+    );
 }

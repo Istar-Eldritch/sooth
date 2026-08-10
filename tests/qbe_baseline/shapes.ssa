@@ -1,0 +1,155 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+type :Shape = align 8 { b 24 }
+type :MaybeInt = align 8 { b 16 }
+
+export function d $area(:Shape %v0) {
+@start
+	%v2 =l add %v0, 0
+	%v1 =w loadw %v2
+	%v3 =w copy 0
+	%v4 =w ceqw %v1, %v3
+	jnz %v4, @blk1, @blk2
+@blk1
+	%v5 =l add %v0, 8
+	%v6 =d loadd %v5
+	%v7 =d mul %v6, %v6
+	%v8 =d copy d_3.14159
+	%v9 =d mul %v7, %v8
+	jmp @blk3
+@blk2
+	%v10 =l add %v0, 8
+	%v11 =d loadd %v10
+	%v12 =l add %v0, 16
+	%v13 =d loadd %v12
+	%v14 =d mul %v11, %v13
+	jmp @blk3
+@blk3
+	%v15 =d phi @blk1 %v9, @blk2 %v14
+	ret %v15
+}
+
+export function l $unwrap.2d.or(l %v0, :MaybeInt %v1) {
+@start
+	%v3 =l add %v1, 0
+	%v2 =w loadw %v3
+	%v4 =w copy 0
+	%v5 =w ceqw %v2, %v4
+	jnz %v5, @blk1, @blk2
+@blk1
+	jmp @blk3
+@blk2
+	%v6 =l add %v1, 8
+	%v7 =l loadl %v6
+	jmp @blk3
+@blk3
+	%v8 =l phi @blk1 %v0, @blk2 %v7
+	ret %v8
+}
+
+export function $sooth_main() {
+@start
+	%v0 =d copy d_2
+	%v1 =l alloc8 24
+	%v2 =w copy 0
+	%v3 =l add %v1, 0
+	storew %v2, %v3
+	%v4 =l add %v1, 8
+	stored %v0, %v4
+	%v5 =d call $area(:Shape %v1)
+	call $printf(l $ffmt, d %v5, ...)
+	%v6 =d copy d_3
+	%v7 =d copy d_4
+	%v8 =l alloc8 24
+	%v9 =w copy 1
+	%v10 =l add %v8, 0
+	storew %v9, %v10
+	%v11 =l add %v8, 8
+	stored %v6, %v11
+	%v12 =l add %v8, 16
+	stored %v7, %v12
+	%v13 =d call $area(:Shape %v8)
+	call $printf(l $ffmt, d %v13, ...)
+	%v14 =l copy 5
+	%v15 =l alloc8 16
+	%v16 =w copy 0
+	%v17 =l add %v15, 0
+	storew %v16, %v17
+	%v18 =l call $unwrap.2d.or(l %v14, :MaybeInt %v15)
+	call $printf(l $fmt, l %v18, ...)
+	%v19 =l copy 5
+	%v20 =l copy 7
+	%v21 =l alloc8 16
+	%v22 =w copy 1
+	%v23 =l add %v21, 0
+	storew %v22, %v23
+	%v24 =l add %v21, 8
+	storel %v20, %v24
+	%v25 =l call $unwrap.2d.or(l %v19, :MaybeInt %v21)
+	call $printf(l $fmt, l %v25, ...)
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

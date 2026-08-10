@@ -1,0 +1,113 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+
+export function w $leap(l %v0) {
+@start
+	%v1 =l copy 4
+	%v2 =l rem %v0, %v1
+	%v3 =l copy 0
+	%v4 =w ceql %v2, %v3
+	%v5 =l copy 100
+	%v6 =l rem %v0, %v5
+	%v7 =l copy 0
+	%v8 =w ceql %v6, %v7
+	%v9 =w copy 1
+	%v10 =w xor %v8, %v9
+	%v11 =w and %v4, %v10
+	%v12 =l copy 400
+	%v13 =l rem %v0, %v12
+	%v14 =l copy 0
+	%v15 =w ceql %v13, %v14
+	%v16 =w or %v11, %v15
+	ret %v16
+}
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 2000
+	%v1 =w call $leap(l %v0)
+	%pidx0 =l extuw %v1
+	%poff1 =l mul %pidx0, 8
+	%paddr2 =l add $boolstrs, %poff1
+	%pptr3 =l loadl %paddr2
+	call $printf(l $sfmt, l %pptr3, ...)
+	%v2 =l copy 1900
+	%v3 =w call $leap(l %v2)
+	%pidx4 =l extuw %v3
+	%poff5 =l mul %pidx4, 8
+	%paddr6 =l add $boolstrs, %poff5
+	%pptr7 =l loadl %paddr6
+	call $printf(l $sfmt, l %pptr7, ...)
+	%v4 =l copy 2024
+	%v5 =w call $leap(l %v4)
+	%pidx8 =l extuw %v5
+	%poff9 =l mul %pidx8, 8
+	%paddr10 =l add $boolstrs, %poff9
+	%pptr11 =l loadl %paddr10
+	call $printf(l $sfmt, l %pptr11, ...)
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

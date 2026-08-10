@@ -248,6 +248,7 @@ pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
         refs,
         externs,
         instantiations: HashMap::new(),
+        builtin_overloads: HashMap::new(),
         modules,
     };
     // R18: checked on the raw, pre-mangle module -- a word's name and its
@@ -293,8 +294,11 @@ pub(crate) fn check_no_main_in_closure(
     ))
 }
 
-/// Compile a source file to a native binary. Returns the binary's path.
-pub fn build(path: &Path) -> Result<PathBuf, String> {
+/// Compile a source file's whole import closure to emitted QBE IL text: the
+/// exact bytes `build` hands to `qbe`, produced without shelling out. The R9
+/// baseline golden asserts this stays byte-identical across the slice-8a
+/// builtin-table refactor.
+pub fn emit_ssa(path: &Path) -> Result<String, String> {
     let closure = discover_closure(path)?;
     let mut module = assemble_module(&closure)?;
     check::check(&mut module)?;
@@ -303,7 +307,12 @@ pub fn build(path: &Path) -> Result<PathBuf, String> {
     // mirroring the REPL import path's own scan.
     check_no_main_in_closure(&module, &closure, Some(0))?;
     let ir = ir::lower(&module)?;
-    let ssa = backend::qbe::emit(&ir)?;
+    backend::qbe::emit(&ir)
+}
+
+/// Compile a source file to a native binary. Returns the binary's path.
+pub fn build(path: &Path) -> Result<PathBuf, String> {
+    let ssa = emit_ssa(path)?;
 
     let dir = tempfile_dir()?;
     let ssa_path = dir.join("out.ssa");

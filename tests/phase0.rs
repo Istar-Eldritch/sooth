@@ -3518,12 +3518,14 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
     // replace every character outside `[A-Za-z0-9_.]` with a bare `_`, so
     // two distinct word names built entirely of such characters could
     // collapse onto the identical symbol. `+` and `-` are both ordinary `:`
-    // definitions -- accepted and lowered today even though dispatch cannot
-    // yet reach them -- and both used to sanitize to `_`, failing at the
-    // assembler with `symbol `_' is already defined` well before either
-    // word could ever be called.
-    let src = ": + ( i64 i64 -- i64 ) drop ;\n\
-: - ( i64 i64 -- i64 ) drop ;\n\
+    // definitions, overloading the builtin operators on a struct type (so
+    // R1's builtin-collision check, slice 8a, does not itself reject them --
+    // the point here is purely the symbol sanitizer) -- and both used to
+    // sanitize to `_`, failing at the assembler with `symbol `_' is already
+    // defined` well before either word could ever be called.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: - ( Vec2 Vec2 -- Vec2 ) drop ;\n\
 : main ( -- ) ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-qbe-name-injective-{}.sth",
@@ -3537,4 +3539,367 @@ fn distinct_symbol_named_words_no_longer_collide_at_the_assembler() {
         built.is_ok(),
         "two colliding-under-the-old-scheme word names should build cleanly: {built:?}"
     );
+}
+
+// -- slice 8a fix 1 (R7): lowering dispatches builtin overloads -------------
+
+/// Write, build, and run `src`, returning `(stdout, exit_code)`. `tag`
+/// distinguishes the temp source (and its emitted binary) per test.
+fn run_overload_src(tag: &str, src: &str) -> (String, i32) {
+    let path =
+        std::env::temp_dir().join(format!("sooth-overload-{tag}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    let output = std::process::Command::new(&binary)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&binary).ok();
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        output.status.code().expect("process exits normally"),
+    )
+}
+
+#[test]
+fn a_tail_call_to_a_builtin_is_not_an_edge_to_its_overload() {
+    // `foo` ends in the builtin `<` on two `i64`s. The tail-call cycle pass
+    // runs before any body is checked, so it saw only the name and credited
+    // an edge `foo -> <` to the `Vec2` overload, closing a cycle with that
+    // overload's tail call to `foo` and rejecting this valid program as
+    // `mutual tail recursion`.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: foo ( i64 i64 -- bool ) < ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x foo ;\n\
+: main ( -- ) 1 0 Vec2 5 0 Vec2 < . ;\n";
+    let (stdout, code) = run_overload_src("tail-cycle-builtin", src);
+    assert_eq!(stdout, "true\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_tail_call_to_an_overloaded_ordinary_name_is_not_a_fabricated_cycle() {
+    // `p`'s tail call means the i64 `show` (a leaf); `show(Vec2)`'s tail call
+    // to `p` is the only real edge. name_to_idx previously mapped the shared
+    // name `show` to a single word index via `.collect()`, silently keeping
+    // whichever candidate was indexed last, so `p`'s tail call landed on
+    // `show(Vec2)` instead and closed a cycle that does not exist.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: show ( i64 -- ) . ;\n\
+: p ( Vec2 -- ) | v | v Vec2>x show ;\n\
+: show ( Vec2 -- ) | v | v p ;\n\
+: main ( -- ) 3 4 Vec2 show ;\n";
+    let (stdout, code) = run_overload_src("tail-cycle-ordinary-overload", src);
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn mutual_tail_recursion_between_ordinary_words_is_still_an_error() {
+    // The guard above must not have disarmed the pass for ordinary names,
+    // which is the case it exists for.
+    let src = ": a ( i64 -- i64 ) b ;\n: b ( i64 -- i64 ) a ;\n: main ( -- ) 1 a . ;\n";
+    let path = std::env::temp_dir().join(format!("sooth-tail-cycle-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("mutual tail recursion") && err.contains("`a`") && err.contains("`b`"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn overloads_of_a_combinator_name_are_both_reachable() {
+    // main rejects two same-name `apply` combinators outright. R1's widened
+    // key admits them as distinct definitions once their concrete parameter
+    // types differ, but collect_combinators stayed a bare-name-keyed
+    // single-value map, so the second candidate silently displaced the first
+    // exactly as env's Sig did before B1 (and poly_env did for a poly word).
+    let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+: apply ( bool [ bool -- bool ] -- bool ) call ;\n\
+: main ( -- ) 5 [ 2 * ] apply . true [ not ] apply . ;\n";
+    let (stdout, code) = run_overload_src("combinator-overload", src);
+    assert_eq!(stdout, "10\nfalse\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_combinator_call_matching_no_overload_names_the_candidates() {
+    let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+: apply ( bool [ bool -- bool ] -- bool ) call ;\n\
+: main ( -- ) \"x\" [ drop \"y\" ] apply drop ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-combinator-overload-nomatch-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("no overload of `apply`") && err.contains("accepts these operands"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("candidate: `i64`") && err.contains("candidate: `bool`"),
+        "expected both candidates listed: {err}"
+    );
+}
+
+#[test]
+fn overloads_of_a_polymorphic_word_name_are_both_reachable() {
+    // main rejects two same-name poly words outright (`duplicate word`); R1
+    // widened the concrete-word key but poly_env stayed a bare-name-keyed
+    // single-value map, so the second candidate silently displaced the first
+    // exactly as env's Sig did before B1.
+    let src = ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'T bool -- 'T ) drop ;\n\
+: main ( -- ) 1 2 idpair . 7 true idpair . ;\n";
+    let (stdout, code) = run_overload_src("poly-overload", src);
+    assert_eq!(stdout, "1\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_polymorphic_call_matching_no_candidate_names_the_signatures() {
+    let src = ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'T bool -- 'T ) drop ;\n\
+: main ( -- ) 1 2.5 idpair . ;\n";
+    let path = std::env::temp_dir().join(format!(
+        "sooth-poly-overload-nomatch-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("no overload of `idpair`") && err.contains("accepts these operands"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("candidate: : idpair ( 'T 'T -- 'T )")
+            && err.contains("candidate: : idpair ( 'T bool -- 'T )"),
+        "expected both candidate signatures listed: {err}"
+    );
+}
+
+#[test]
+fn two_poly_words_declaring_the_same_signature_is_a_duplicate_error() {
+    // Deferred from round 3: unlike a genuinely different second candidate
+    // (the two tests above), a *second* poly word declaring the exact same
+    // signature as the first has no legitimate reason to exist -- it would
+    // silently resolve to the first, forever, the second dead code rather
+    // than a reachable overload.
+    let path = std::env::temp_dir().join(format!(
+        "sooth-poly-dup-signature-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'T 'T -- 'T ) drop drop ;\n\
+: main ( -- ) 1 2 idpair . ;\n",
+    )
+    .expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("duplicate overload") && err.contains(": idpair ( 'T 'T -- 'T )"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn two_poly_words_declaring_an_alpha_equivalent_signature_is_a_duplicate_error() {
+    // Same shape as the test above, spelled with a different variable name
+    // (`'U` instead of `'T`) -- a variable's id is assigned by
+    // first-appearance order per signature (`PolySig`'s own doc), so this is
+    // structurally the same signature, not a different one, and must still
+    // be caught rather than passing because the surface spelling differs.
+    let path = std::env::temp_dir().join(format!(
+        "sooth-poly-dup-signature-alpha-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(
+        &path,
+        ": idpair ( 'T 'T -- 'T ) drop ;\n\
+: idpair ( 'U 'U -- 'U ) drop drop ;\n\
+: main ( -- ) 1 2 idpair . ;\n",
+    )
+    .expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("duplicate overload"),
+        "unexpected message: {err}"
+    );
+}
+
+#[test]
+fn overloads_of_an_ordinary_word_name_are_both_reachable() {
+    // R1 widened the duplicate-word key to admit these two definitions, but
+    // the checking env held one `Sig` per name, so the second silently
+    // displaced the first: the call `42 show` then failed against the `bool`
+    // signature and the `i64` body was unreachable code. Both candidates must
+    // resolve, which is what makes the widened key mean anything.
+    let src = ": show ( i64 -- ) . ;\n\
+: show ( bool -- ) . ;\n\
+: main ( -- ) 42 show true show ;\n";
+    let (stdout, code) = run_overload_src("user-name-overloads", src);
+    assert_eq!(stdout, "42\ntrue\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overloads_of_an_ordinary_word_name_get_distinct_symbols() {
+    // Each candidate's body is minted under its own symbol
+    // (`ast::overload_symbols`); sharing one would collide at the assembler
+    // exactly as two symbol-named words did before the `qbe_name` fix. Both
+    // bodies here are distinguishable at runtime, so a collision that kept
+    // only one body would print the wrong pair.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: mag ( i64 -- i64 ) 10 * ;\n\
+: mag ( Vec2 -- i64 ) | v | v Vec2>x v Vec2>y + ;\n\
+: main ( -- ) 7 mag . 3 4 Vec2 mag . ;\n";
+    let (stdout, code) = run_overload_src("user-name-symbols", src);
+    assert_eq!(stdout, "70\n7\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn a_call_matching_no_overload_names_the_candidates() {
+    // R3: the resolution failure is located and lists what the name does
+    // accept, rather than reporting a mismatch against whichever candidate
+    // happened to be stored last.
+    let src = ": show ( i64 -- ) . ;\n\
+: show ( bool -- ) . ;\n\
+: main ( -- ) 1.5 show ;\n";
+    let path =
+        std::env::temp_dir().join(format!("sooth-overload-nomatch-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    assert!(
+        err.contains("no overload of `show`") && err.contains("accepts these operands"),
+        "unexpected message: {err}"
+    );
+    assert!(
+        err.contains("candidate: `i64`") && err.contains("candidate: `bool`"),
+        "expected both candidates listed: {err}"
+    );
+}
+
+#[test]
+fn overload_vec2_plus_dispatches_to_user_word() {
+    // `Module::builtin_overloads` records this call site's resolution to the
+    // user `+` overload, but before the fix `lower_call`'s name-directed
+    // `"+" | "-" | ...` arm never consulted it, so it always emitted
+    // `Instr::Bin(Add)` on the two `Vec2` struct pointers (an address add),
+    // producing a garbage pointer that segfaulted on the following field
+    // reads. `lower_call` must check `builtin_overloads` first and emit an
+    // `Instr::Call` to the user word instead.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 + dup Vec2>x . Vec2>y . ;\n";
+    let (stdout, code) = run_overload_src("plus", src);
+    assert_eq!(stdout, "4\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_vec2_minus_dispatches_to_user_word() {
+    // Same bug, `-`: unfixed, `Instr::Bin(Sub)` on the two struct pointers
+    // subtracts addresses rather than fields, yielding a bogus pointer whose
+    // field reads then segfault.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: - ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x - a Vec2>y b Vec2>y - Vec2 ;\n\
+: main ( -- ) 5 6 Vec2 1 2 Vec2 - dup Vec2>x . Vec2>y . ;\n";
+    let (stdout, code) = run_overload_src("minus", src);
+    assert_eq!(stdout, "4\n4\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_vec2_lt_dispatches_to_user_word() {
+    // Same bug, `<`: unfixed, `Instr::Cmp(Lt)` compares the two struct
+    // pointers' addresses rather than dispatching to the user overload, so
+    // the printed boolean tracks allocation order, not the operands' values.
+    // Negative coordinates whose semantic sum is negative (so the correct
+    // answer is `false`) still allocate `a` before `b` (a lower address), so
+    // the old pointer-compare silently printed `true` here.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + + 0 > ;\n\
+: main ( -- ) -3 -4 Vec2 -1 -2 Vec2 < . ;\n";
+    let (stdout, code) = run_overload_src("lt", src);
+    assert_eq!(stdout, "false\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_ending_in_its_own_builtin_name_calls_the_builtin_not_itself() {
+    // The tail term `<` shares the enclosing word's name but resolves to the
+    // *builtin* `<` on two `i64` fields, not to a recursive call. Before the
+    // fix `has_self_tail_call` matched on the bare name, so the word was
+    // treated as self-tail-recursive: lowering opened loop machinery, the
+    // back-edge pushed the two `i64`s as phi operands for a header expecting
+    // two `Vec2`s, and the compiler panicked on the missing header block
+    // (`expect("header block")`) rather than emitting a comparison.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n\
+: main ( -- ) 1 2 Vec2 3 4 Vec2 < . ;\n";
+    let (stdout, code) = run_overload_src("lt-tail-self-name", src);
+    assert_eq!(stdout, "true\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn print_overload_ending_in_its_own_builtin_name_compiles_and_prints() {
+    // The same defect on `.`, the shape the slice's own review first hit: a
+    // `Vec2` print overload naturally ends by printing its last field with
+    // the builtin `.`, which is also its own name.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: . ( Vec2 -- ) | v | v Vec2>x . v Vec2>y . ;\n\
+: main ( -- ) 3 4 Vec2 . ;\n";
+    let (stdout, code) = run_overload_src("print-tail-self-name", src);
+    assert_eq!(stdout, "3\n4\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_from_poly_body_dispatches_to_user_word() {
+    // Slice 8a fix 2: a genuinely polymorphic word (`pair-sum`, generic in
+    // `'T` for an unrelated passthrough slot) whose body calls `+` on two
+    // *concretely*-typed `Vec2` operands from its own signature. Before the
+    // fix, `poly_call_term`'s env-based dispatch intercepted `+` by name
+    // alone and never recorded the call site, so lowering fell through to
+    // the builtin `Instr::Bin(Add)` arm on the two struct pointers and
+    // segfaulted, identically to the monomorphic bug fix 1 addresses.
+    let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+: pair-sum ( 'T Vec2 Vec2 -- 'T Vec2 ) + ;\n\
+: main ( -- ) 42 1 2 Vec2 3 4 Vec2 pair-sum swap drop dup Vec2>x . Vec2>y . ;\n";
+    let (stdout, code) = run_overload_src("poly-plus", src);
+    assert_eq!(stdout, "4\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn overload_exact_type_beats_numeric_coercion_at_the_call_site() {
+    // R2: the resolver runs an exact-input-type pass across every candidate
+    // (builtin rows and user overloads) before numeric coercion ever runs.
+    // `+ ( usize i64 -- usize )` is a legal overload (its mixed input types
+    // match no homogeneous builtin row, R1), and `5 >usize 3 +` presents
+    // exactly those operand types (a `usize` and an unconverted `i64`
+    // literal) -- without this overload, that same call site would coerce
+    // the literal into the builtin homogeneous `usize +` (`unify_pair`'s
+    // literal-coercion arm) and print `8`. The overload must win instead:
+    // if a later addition ever let coercion run first, or ran it whenever an
+    // exact candidate merely *exists* without checking the operands first,
+    // this site would silently start printing `8` instead of the
+    // overload's sentinel.
+    let src = ": + ( usize i64 -- usize ) drop drop 999 ;\n\
+: main ( -- ) 5 >usize 3 + . ;\n";
+    let (stdout, code) = run_overload_src("exact-beats-coercion", src);
+    assert_eq!(stdout, "999\n");
+    assert_eq!(code, 0);
 }

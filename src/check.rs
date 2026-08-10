@@ -33,6 +33,54 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
     }
 }
 
+/// Slice 8a fix 1 (R1): one candidate registered under a name that may carry
+/// more than one -- an overload set. The word env's value type widened from a
+/// single `Sig` to `Vec<Overload>` so a name with several same-arity,
+/// differing-input-type candidates (R1/R4 already guarantee at most one can
+/// match a given call's operand types) keeps every one of them reachable,
+/// rather than the env's old bare `HashMap<String, Vec<Overload>>` silently keeping
+/// only the last inserted. `symbol` is the distinct lowering symbol this
+/// candidate's body was minted under (`ast::overload_symbols`): equal to the
+/// surface name unless this name has more than one candidate in scope.
+/// The per-call-site records a body walk fills: `CallInst` per polymorphic
+/// instantiation (R14) and, since slice 8a, the resolved candidate's lowering
+/// symbol per overloaded call (R7). Lowering reads both keyed by `Span`.
+type ResolvedCalls = (HashMap<Span, CallInst>, HashMap<Span, String>);
+
+/// `ResolvedCalls` plus the residual stack a REPL line leaves behind.
+type InferredLine = (Vec<Type>, HashMap<Span, CallInst>, HashMap<Span, String>);
+
+/// R5/R14: every candidate registered under one polymorphic-word name, its
+/// `PolySig` paired with the REPL generation it was retained at (`None` on
+/// the native/module path, which has no generations). `check_poly_call`
+/// resolves a bare call by trial unification across candidates, the same
+/// shape as `Overload`'s exact-match resolution for concrete words -- a
+/// name-keyed single-value map here would silently shadow a second
+/// polymorphic overload exactly as env's `Sig` did before B1.
+pub(crate) type PolyEnv = HashMap<String, Vec<(PolySig, Option<u64>)>>;
+
+/// R18/R6a: every quotation-taking word registered under one name. A name
+/// can carry more than one candidate exactly as an ordinary overloaded word
+/// can (R1); resolving which one a call splices needs the live stack's
+/// operand types, the same shape as `Overload`/poly-candidate resolution --
+/// a single-value map here would silently shadow a second combinator
+/// overload exactly as env's `Sig` did before B1.
+pub(crate) type CombinatorEnv<'a> = HashMap<String, Vec<Combinator<'a>>>;
+
+#[derive(Debug, Clone)]
+pub struct Overload {
+    pub sig: Sig,
+    pub symbol: String,
+}
+
+/// R1/R2: the one candidate among `candidates` whose declared inputs exactly
+/// match `operands`, if any. R1's widened duplicate-word key guarantees at
+/// most one: two candidates registered under one name in scope never share
+/// input types.
+fn resolve_overload<'a>(candidates: &'a [Overload], operands: &[Type]) -> Option<&'a Overload> {
+    candidates.iter().find(|o| o.sig.inputs == operands)
+}
+
 /// R5/R14: the polymorphic-call context threaded through the monomorphic body
 /// walk: the `PolySig`s of every polymorphic word (looked up before the
 /// concrete `env`), and the instantiation table each unified call site writes
@@ -45,14 +93,21 @@ pub fn sig_of(effect: &StackEffect) -> Sig {
 /// `check_poly_call`'s mint reads both from one lookup with no second
 /// channel.
 struct PolyCtx<'a> {
-    env: &'a HashMap<String, (PolySig, Option<u64>)>,
+    env: &'a PolyEnv,
     insts: &'a mut HashMap<Span, CallInst>,
+    /// Slice 8a phase 2 (R7): the call sites this walk resolved to a user
+    /// overload of a builtin-named word (`Vec2 +` -> the user `+`), span ->
+    /// resolved callee name, relayed onto `Module::builtin_overloads` so
+    /// lowering emits an `Instr::Call` there instead of the builtin
+    /// instruction. Scratch (discarded) on the REPL/combinator paths, which do
+    /// not lower a builtin overload (out of scope this slice).
+    builtin_overloads: &'a mut HashMap<Span, String>,
     /// Slice 6a (R18): the monomorphic quotation-taking words, keyed by name,
     /// so a call to one is intercepted and its body spliced against the live
     /// stack (the compiler's only inliner) rather than lowered to an
     /// `Instr::Call` to a word that mints no `IrFunc` (R20). Empty on the REPL
     /// paths, where defining such a word is rejected up front (R23).
-    combinators: &'a HashMap<String, Combinator<'a>>,
+    combinators: &'a CombinatorEnv<'a>,
 }
 
 /// Slice 6a (R18): one monomorphic quotation-taking word available to inline.
@@ -215,15 +270,167 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
     }
 }
 
-/// The builtin word -> typed-effect table, as the seed of a checking env.
-/// Every builtin is handled directly in `check_term`
-/// (`check_shuffle`/`check_operator`): the stack shuffles, the numeric-tower
-/// operators, and `.` (type-directed over any printable scalar, not a fixed
-/// `( i64 -- )`) all dispatch on the concrete operand type rather than a fixed
-/// signature, so this table is empty.
-pub fn builtin_table() -> HashMap<String, Sig> {
-    HashMap::new()
+/// One builtin overload candidate (slice 8a, Q-A): the concrete input types
+/// it matches (deepest-first), the concrete outputs it produces, and the
+/// codegen a call resolving to it emits.
+///
+/// Only `inputs`/`outputs` are load-bearing: they are what the checker's
+/// dispatch reads. `lower` records which instruction each row's retired
+/// `check_operator` arm produced, but nothing consumes it -- lowering reaches
+/// a builtin through `lower_call`'s name-directed arms and an overload
+/// through the per-`Span` resolved-symbol record, neither of which consults
+/// this table. It is unused weight kept only because it documents the
+/// name-to-codegen mapping; delete it, and the unit tests that only assert
+/// its shape, unless a table-driven lowering actually arrives to want it.
+#[derive(Debug, Clone)]
+pub struct BuiltinRow {
+    pub inputs: Vec<Type>,
+    pub outputs: Vec<Type>,
+    pub lower: BuiltinLower,
 }
+
+/// The codegen a resolved builtin row emits: one variant per distinct
+/// instruction the type-directed `check_operator` arms produced. This is why
+/// a row is not a `Sig` (Q-A): several rows for one name share the
+/// `(inputs, outputs)` shape but differ here (`.`'s 15 rows all lower a
+/// `Print`; a future user `.` lowers a `Call`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinLower {
+    Add,
+    Sub,
+    Mul,
+    DivFloat,
+    Mod,
+    And,
+    Or,
+    Xor,
+    Not,
+    Shl,
+    Shr,
+    Cmp(crate::ir::CmpOp),
+    Max,
+    MaxTotal,
+    Print,
+}
+
+/// The numeric types the arithmetic tower and comparisons range over (the
+/// eight fixed-width ints, `usize`/`isize`, and the two floats): `is_numeric`
+/// made concrete as a list so the table below is generated by iteration
+/// rather than hand-typed per row.
+fn numeric_types() -> Vec<Type> {
+    [
+        "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize", "f32", "f64",
+    ]
+    .iter()
+    .map(|n| Type::from_name(n).expect("a builtin numeric type name"))
+    .collect()
+}
+
+/// The integer subset (the eight widths plus `usize`/`isize`, D7): the domain
+/// of `mod`/`and`/`or`/`xor`/`not`/`shl`/`shr`/`max`.
+fn int_types() -> Vec<Type> {
+    numeric_types().into_iter().filter(|t| t.is_int()).collect()
+}
+
+/// The two float types: the domain of `/` and `max-total`.
+fn float_types() -> Vec<Type> {
+    numeric_types()
+        .into_iter()
+        .filter(|t| t.is_float())
+        .collect()
+}
+
+/// The 15 printable types `.` dispatches over: every numeric type plus
+/// `bool`, `str`, and `cstr` (the `check_operator` `"."` predicate,
+/// cross-checked against the `Instr::Print` codegen arms).
+fn printable_types() -> Vec<Type> {
+    let mut v = numeric_types();
+    v.push(Type::Bool);
+    v.push(Type::Str);
+    v.push(Type::Cstr);
+    v
+}
+
+/// The builtin overload table (slice 8a, Q-A): every concrete row a builtin
+/// operator resolves to, keyed by operator name, each name carrying one row
+/// per operand-type shape it accepts. `check_operator` does an exact-type
+/// lookup here first (so a user overload of a builtin name can shadow a call
+/// site, phase 2); the numeric operand-class coercion and its per-operator
+/// diagnostics remain a hand-written fallback reached only on an exact miss
+/// (Q-B). The generic builtins (`len`/`fill`/`cstr`, the `>T` conversions,
+/// the shuffles) are carved out and stay in their own dispatchers (Q-A, R0).
+pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
+    use crate::ir::CmpOp;
+    let mut table: HashMap<String, Vec<BuiltinRow>> = HashMap::new();
+    let mut row = |name: &str, inputs: Vec<Type>, outputs: Vec<Type>, lower: BuiltinLower| {
+        table.entry(name.to_string()).or_default().push(BuiltinRow {
+            inputs,
+            outputs,
+            lower,
+        });
+    };
+    for ty in numeric_types() {
+        row("+", vec![ty, ty], vec![ty], BuiltinLower::Add);
+        row("-", vec![ty, ty], vec![ty], BuiltinLower::Sub);
+        row("*", vec![ty, ty], vec![ty], BuiltinLower::Mul);
+        for (op, cmp) in [
+            ("=", CmpOp::Eq),
+            ("<", CmpOp::Lt),
+            (">", CmpOp::Gt),
+            ("<=", CmpOp::Le),
+            (">=", CmpOp::Ge),
+            ("<>", CmpOp::Ne),
+        ] {
+            row(op, vec![ty, ty], vec![Type::Bool], BuiltinLower::Cmp(cmp));
+        }
+    }
+    for ty in float_types() {
+        row("/", vec![ty, ty], vec![ty], BuiltinLower::DivFloat);
+        row("max-total", vec![ty, ty], vec![ty], BuiltinLower::MaxTotal);
+    }
+    for ty in int_types() {
+        row("mod", vec![ty, ty], vec![ty], BuiltinLower::Mod);
+        row("and", vec![ty, ty], vec![ty], BuiltinLower::And);
+        row("or", vec![ty, ty], vec![ty], BuiltinLower::Or);
+        row("xor", vec![ty, ty], vec![ty], BuiltinLower::Xor);
+        row("not", vec![ty], vec![ty], BuiltinLower::Not);
+        row("shl", vec![ty, Type::I64], vec![ty], BuiltinLower::Shl);
+        row("shr", vec![ty, Type::I64], vec![ty], BuiltinLower::Shr);
+        row("max", vec![ty, ty], vec![ty], BuiltinLower::Max);
+    }
+    // `and`/`or`/`xor`/`not` are logical on `bool` as well as bitwise on the
+    // integers: a stack language evaluates both operands eagerly, so
+    // bitwise-on-0/1 and logical coincide.
+    row(
+        "and",
+        vec![Type::Bool, Type::Bool],
+        vec![Type::Bool],
+        BuiltinLower::And,
+    );
+    row(
+        "or",
+        vec![Type::Bool, Type::Bool],
+        vec![Type::Bool],
+        BuiltinLower::Or,
+    );
+    row(
+        "xor",
+        vec![Type::Bool, Type::Bool],
+        vec![Type::Bool],
+        BuiltinLower::Xor,
+    );
+    row("not", vec![Type::Bool], vec![Type::Bool], BuiltinLower::Not);
+    for ty in printable_types() {
+        row(".", vec![ty], vec![], BuiltinLower::Print);
+    }
+    table
+}
+
+/// The builtin table, built once. `check_operator` consults it on every
+/// operator occurrence; `builtin_table()` itself rebuilds a fresh map for the
+/// callers that own theirs (the REPL, the tests).
+static BUILTIN_TABLE: std::sync::LazyLock<HashMap<String, Vec<BuiltinRow>>> =
+    std::sync::LazyLock::new(builtin_table);
 
 /// R2/R7: whether `ty` is `Copy` (freely duplicated and discarded) rather than
 /// linear (used exactly once, disposed by `drop`). A struct or enum is linear
@@ -1680,12 +1887,16 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // see it, so R7's `unreachable!` mangling/`IrType` arms stay unreached.
     audit_quotation_type_positions(module)?;
 
-    let mut env = builtin_table();
+    // Builtins are resolved by table (`BUILTIN_TABLE`) inside `check_operator`,
+    // not by env lookup, so the concrete env holds only user/generated words.
+    let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
     for (name, sig) in struct_generated_sigs(&module.structs) {
-        env.insert(name, sig);
+        let symbol = name.clone();
+        env.insert(name, vec![Overload { sig, symbol }]);
     }
     for (name, sig) in enum_generated_sigs(&module.enums) {
-        env.insert(name, sig);
+        let symbol = name.clone();
+        env.insert(name, vec![Overload { sig, symbol }]);
     }
 
     // R1: an `extern:` declaration is registered into the same word
@@ -1701,13 +1912,29 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         &module.arrays,
     )?;
     for decl in &module.externs {
-        env.insert(decl.name.clone(), sig_of(&decl.effect));
+        let symbol = decl.name.clone();
+        env.insert(
+            decl.name.clone(),
+            vec![Overload {
+                sig: sig_of(&decl.effect),
+                symbol,
+            }],
+        );
     }
 
     // A duplicate word name in one module is rejected here, before the
     // population loop below would otherwise silently keep only the last one
     // seen and let both bodies reach codegen.
     check_duplicate_word_names(&module.words)?;
+    // R5: a generic candidate overlapping a concrete one of the same name and
+    // arity (a builtin row or a local monomorphic word) is rejected here too,
+    // before either enters `poly_env`/`env` below -- there is no ranking that
+    // could otherwise pick between them.
+    check_generic_concrete_overlap(&module.words)?;
+    // Two poly words (or two poly combinators) declaring the exact same
+    // signature under one name are rejected before either enters `poly_env`
+    // below -- unresolvable ambiguity, not a legitimate second overload.
+    check_duplicate_poly_signatures(&module.words)?;
 
     // R1: a recognized `drop` overload is excluded from the ordinary word
     // environment -- registering it under the literal name `"drop"` would be
@@ -1719,15 +1946,26 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // not concrete `Sig` types); it lives in `poly_env` instead, and a call
     // site is intercepted there before the concrete lookup, where its
     // `PolySig` is unified against the concrete stack.
-    let mut poly_env: HashMap<String, (PolySig, Option<u64>)> = HashMap::new();
+    let mut poly_env: PolyEnv = HashMap::new();
+    // Slice 8a fix 1 (R1): each word's distinct lowering symbol, aligned by
+    // index -- equal to its own name unless it shares that name with another
+    // word in this module (an overload set), in which case each candidate's
+    // `Overload::symbol` diverges from the bare name it is looked up under.
+    let symbols = crate::ast::overload_symbols(&module.words);
     for (idx, word) in module.words.iter().enumerate() {
         if drop_overload_indices.contains(&idx) {
             continue;
         }
         if let Some(sig) = &word.poly {
-            poly_env.insert(word.name.clone(), ((**sig).clone(), None));
+            poly_env
+                .entry(word.name.clone())
+                .or_default()
+                .push(((**sig).clone(), None));
         } else {
-            env.insert(word.name.clone(), sig_of(&word.effect));
+            env.entry(word.name.clone()).or_default().push(Overload {
+                sig: sig_of(&word.effect),
+                symbol: symbols[idx].clone(),
+            });
         }
     }
 
@@ -1749,6 +1987,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         refs,
         externs: _,
         instantiations: _,
+        builtin_overloads: _,
         modules: _,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
@@ -1776,6 +2015,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // Slice 8a phase 2 (R7): the builtin-name overload dispatch sites, filled
+    // as each monomorphic body's operator calls resolve, then relayed to the
+    // module for lowering (empty for the whole corpus, so its lowering is
+    // untouched byte-for-byte).
+    let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
     for word in words.iter() {
         let mut sites = Vec::new();
         if let Some(sig) = &word.poly {
@@ -1789,9 +2033,11 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // by term-splice at its concrete call sites, so the
                 // instantiation records it produces here are scratch.
                 let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+                let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
                 let mut poly = PolyCtx {
                     env: &poly_env,
                     insts: &mut scratch,
+                    builtin_overloads: &mut scratch_overloads,
                     combinators: &combinators,
                 };
                 check_poly_combinator_standalone(
@@ -1809,12 +2055,21 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 // R7: a polymorphic body is checked over a `PolyType` stack by
                 // a dedicated pass, deliberately separate from the concrete
                 // walk.
-                check_poly_body(word, sig, &env, structs, enums, arrays)?;
+                check_poly_body(
+                    word,
+                    sig,
+                    &env,
+                    structs,
+                    enums,
+                    arrays,
+                    &mut builtin_overloads,
+                )?;
             }
         } else {
             let mut poly = PolyCtx {
                 env: &poly_env,
                 insts: &mut insts,
+                builtin_overloads: &mut builtin_overloads,
                 combinators: &combinators,
             };
             check_word(
@@ -1866,6 +2121,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         }
     }
     module.instantiations = insts;
+    module.builtin_overloads = builtin_overloads;
     Ok(())
 }
 
@@ -1901,7 +2157,7 @@ fn intern_output_bundles(module: &mut Module) {
 fn check_extern_decls(
     externs: &[ExternDecl],
     words: &[WordDef],
-    existing: &HashMap<String, Sig>,
+    existing: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
@@ -2209,6 +2465,7 @@ pub fn check_selective_imports(
     module: &Module,
     selective_by_module: &[Vec<SelectiveName>],
 ) -> Result<(), String> {
+    let builtins = builtin_table();
     for (m, entries) in selective_by_module.iter().enumerate() {
         let locals = local_decl_names(module, m as u32);
         // name -> the qualifier that first exposed it, for R21's both-sources error.
@@ -2236,6 +2493,31 @@ pub fn check_selective_imports(
                     &entry.qualifier,
                     entry.span,
                 ));
+            }
+            // R4 (import mirror): a selective import naming a builtin
+            // operator must agree with it on input count. The other two
+            // collision checks above already forbid an import from sharing a
+            // name with a local decl or with another selective import
+            // outright, so a builtin row is the only candidate this site can
+            // still silently disagree with.
+            if let Some(rows) = builtins.get(entry.name.as_str()) {
+                let builtin_arity = rows[0].inputs.len();
+                if let Some(imported) = module
+                    .words
+                    .iter()
+                    .find(|w| w.module == entry.target && w.name == entry.name && w.poly.is_none())
+                {
+                    let arity = imported.effect.inputs.len();
+                    if arity != builtin_arity {
+                        return Err(selective_arity_clash_error(
+                            &entry.name,
+                            &entry.qualifier,
+                            entry.span,
+                            arity,
+                            builtin_arity,
+                        ));
+                    }
+                }
             }
         }
     }
@@ -2296,6 +2578,26 @@ fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) 
     format!(
         "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
         span.line, span.col
+    )
+}
+
+/// R4 (import mirror): a selective import of a builtin-named word whose input
+/// count disagrees with the builtin's -- the arity clash rejected at the
+/// second candidate's site (`overload_arity_clash_error`'s local twin), here
+/// the import site rather than a definition site.
+fn selective_arity_clash_error(
+    name: &str,
+    qualifier: &str,
+    span: Span,
+    arity: usize,
+    builtin_arity: usize,
+) -> String {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) takes {arity} input{} but the builtin `{name}` takes {builtin_arity}; all overloads of a name must agree on input count",
+        span.line,
+        span.col,
+        plural(arity),
     )
 }
 
@@ -2491,13 +2793,36 @@ fn check_duplicate_type_names(structs: &[StructDecl], enums: &[EnumDecl]) -> Res
 /// false positive. `main` gets no such carve-out: nothing else validates a
 /// repeat `main` within one module, so it is an ordinary word for this check.
 fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
-    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
+    let builtins = builtin_table();
+    // R1: keyed by `(module, name, input_types)`, widened from `(module, name)`
+    // so two overloads of one name that differ in input type no longer
+    // collide; two with identical inputs still hit the existing `duplicate
+    // word` message byte-for-byte. Linear (not hashed): `Type` carries no
+    // `Hash`, and a module's word count never approaches a scale where that
+    // matters.
+    let mut seen: Vec<(u32, &str, Vec<Type>, Span)> = Vec::new();
+    // R4: one arity per name in scope. Seeded with each builtin row's arity
+    // (rows for one name already agree on arity, `builtin_table`'s own
+    // invariant), since a builtin candidate is always in scope; a local
+    // overload is the "second candidate" the moment it disagrees.
+    let mut arities: HashMap<(u32, &str), (usize, Span)> = HashMap::new();
     for word in words {
         if word.name == "drop" {
             continue;
         }
+        // R5 owns generic/concrete overlap; a poly word's `effect` is empty
+        // by construction (its signature lives in `poly`), so it has no
+        // concrete input types to key or count here.
+        if word.poly.is_some() {
+            continue;
+        }
         let span = word_span(word);
-        if let Some(first) = seen.insert((word.module, word.name.as_str()), span) {
+        let input_types: Vec<Type> = word.effect.inputs.iter().map(|s| s.ty).collect();
+        if let Some((.., first)) = seen
+            .iter()
+            .find(|(m, n, ins, _)| *m == word.module && *n == word.name && *ins == input_types)
+        {
+            let first = *first;
             return Err(format!(
                 "error: duplicate word `{}` (line {}, col {}); first defined at line {}, col {}",
                 crate::resolve::demangle_word(&word.name),
@@ -2507,8 +2832,226 @@ fn check_duplicate_word_names(words: &[WordDef]) -> Result<(), String> {
                 first.col
             ));
         }
+        if let Some(rows) = builtins.get(word.name.as_str()) {
+            if rows.iter().any(|r| r.inputs == input_types) {
+                return Err(overload_matches_builtin_error(
+                    &word.name,
+                    span,
+                    &input_types,
+                ));
+            }
+        }
+        let arity = input_types.len();
+        if let Some(&(first_arity, _)) = arities.get(&(word.module, word.name.as_str())) {
+            if first_arity != arity {
+                return Err(overload_arity_clash_error(
+                    &word.name,
+                    span,
+                    arity,
+                    first_arity,
+                ));
+            }
+        } else {
+            let builtin_arity = builtins
+                .get(word.name.as_str())
+                .map(|rows| rows[0].inputs.len());
+            if let Some(builtin_arity) = builtin_arity {
+                if builtin_arity != arity {
+                    return Err(overload_arity_clash_error(
+                        &word.name,
+                        span,
+                        arity,
+                        builtin_arity,
+                    ));
+                }
+            }
+            arities.insert((word.module, word.name.as_str()), (arity, span));
+        }
+        seen.push((word.module, word.name.as_str(), input_types, span));
     }
     Ok(())
+}
+
+/// R1: a definition whose `(name, input_types)` exactly matches a builtin
+/// row. Distinct from the plain `duplicate word` message: there is no first
+/// *definition* to cite, only the builtin's operand types.
+fn overload_matches_builtin_error(name: &str, span: Span, input_types: &[Type]) -> String {
+    let types = input_types
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        "error: overload of `{}` (line {}, col {}) has the same input types ({}) as a builtin",
+        crate::resolve::demangle_word(name),
+        span.line,
+        span.col,
+        types
+    )
+}
+
+/// R4: two candidates for one name (local overloads, or a local overload
+/// against a builtin row) that disagree on input count. Rejected at the
+/// second candidate's site, never resolved by call-site ranking; the other
+/// candidate may be a builtin, which has no declaration site to cite, so the
+/// message names it rather than locating it.
+fn overload_arity_clash_error(name: &str, span: Span, arity: usize, other_arity: usize) -> String {
+    let name = crate::resolve::demangle_word(name);
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    format!(
+        "error: overload of `{name}` (line {}, col {}) takes {arity} input{} but another `{name}` takes {other_arity}; all overloads of a name must agree on input count",
+        span.line,
+        span.col,
+        plural(arity),
+    )
+}
+
+/// R5: a name with both a generic (poly) candidate and a concrete candidate
+/// (a builtin row or a local monomorphic word) of the same input arity is
+/// rejected -- there is no specialization ordering that could otherwise pick
+/// between `: + ( 'T 'T -- 'T )` and `: + ( i64 i64 -- i64 )` (or a builtin
+/// concrete row) at a call site. A poly word's `effect` is empty by
+/// construction, so R1's textual key never sees it; this is why the check is
+/// separate rather than folded into `check_duplicate_word_names`.
+///
+/// Module-scoped like `check_duplicate_word_names`' `(module, name)` key: a
+/// builtin candidate is in scope everywhere (no module), but a local concrete
+/// candidate only overlaps a poly candidate declared in *its own* module. An
+/// unrelated same-named concrete word in a different, non-importing module is
+/// invisible here by construction; a selectively-imported name that collides
+/// with a local poly word is already rejected generically by
+/// `check_selective_imports`' local-collision check, regardless of poly vs.
+/// concrete, so that case needs no mirror here.
+fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), String> {
+    let builtins = builtin_table();
+    let mut builtin_arity: HashMap<&str, usize> = HashMap::new();
+    for (name, rows) in builtins.iter() {
+        builtin_arity.insert(name.as_str(), rows[0].inputs.len());
+    }
+    let mut concrete_arity: HashMap<(u32, &str), usize> = HashMap::new();
+    for word in words {
+        if word.name != "drop" && word.poly.is_none() {
+            concrete_arity
+                .entry((word.module, word.name.as_str()))
+                .or_insert_with(|| word.effect.inputs.len());
+        }
+    }
+    for word in words {
+        let Some(sig) = &word.poly else { continue };
+        let arity = sig.inputs.len();
+        let overlaps = builtin_arity.get(word.name.as_str()) == Some(&arity)
+            || concrete_arity.get(&(word.module, word.name.as_str())) == Some(&arity);
+        if overlaps {
+            return Err(generic_concrete_overlap_error(
+                &word.name,
+                sig,
+                word_span(word),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Deferred from round 3's slice 8a review: two poly words (or two poly
+/// combinators -- `is_combinator` doesn't discriminate mono vs poly) sharing
+/// a name and declaring the exact same signature were legal to define, and
+/// resolved to whichever was declared first, the second silently dead rather
+/// than reachable-but-wrong. Unlike every other duplicate/overlap case
+/// R1/R4/R5 already cover, that traded a clear error for a confusing one --
+/// the exact failure this whole slice exists to close. Module-scoped like
+/// R5's own key: a poly word only collides with an identically-signed poly
+/// word in its own module.
+///
+/// Structural, not textual: a signature's variable id space is per-signature
+/// (`PolySig`'s own doc), and `intern_ty_var`/`intern_len_var` number a
+/// variable by first-appearance order, so two declarations spelling an
+/// otherwise-identical shape with different variable names (`'T 'T -- 'T`
+/// vs. `'U 'U -- 'U`) still produce identical ids and compare equal here --
+/// alpha-equivalence, not merely textual identity. `*_var_names` (surface
+/// spelling only, irrelevant to what the signature actually accepts) is
+/// deliberately excluded from the comparison. Scoped to the native build
+/// path only, matching `check_generic_concrete_overlap`'s own existing
+/// scope: neither runs at the REPL, where per-definition poly checking
+/// stays out of this slice's exit criteria (crashing was never licensed;
+/// a missing duplicate-signature diagnostic there is a pre-existing gap
+/// this slice doesn't widen).
+fn check_duplicate_poly_signatures(words: &[WordDef]) -> Result<(), String> {
+    let mut seen: Vec<(u32, &str, &PolySig, Span)> = Vec::new();
+    for word in words {
+        let Some(sig) = &word.poly else { continue };
+        if let Some((.., first)) = seen
+            .iter()
+            .find(|(m, n, s, _)| *m == word.module && *n == word.name && poly_sig_shape_eq(s, sig))
+        {
+            let first = *first;
+            return Err(duplicate_poly_signature_error(
+                &word.name,
+                sig,
+                word_span(word),
+                first,
+            ));
+        }
+        seen.push((word.module, word.name.as_str(), sig, word_span(word)));
+    }
+    Ok(())
+}
+
+/// The comparison `check_duplicate_poly_signatures` needs: every field that
+/// determines what the signature actually accepts (not `*_var_names`, the
+/// surface spelling).
+fn poly_sig_shape_eq(a: &PolySig, b: &PolySig) -> bool {
+    a.row_in == b.row_in
+        && a.inputs == b.inputs
+        && a.outputs == b.outputs
+        && a.row_out == b.row_out
+        && a.bounds == b.bounds
+}
+
+fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: Span) -> String {
+    format!(
+        "error: duplicate overload `{}` (line {}, col {}); another overload of `{}` already declares this exact signature at line {}, col {}",
+        poly_sig_str(name, sig),
+        span.line,
+        span.col,
+        crate::resolve::demangle_word(name),
+        first.line,
+        first.col,
+    )
+}
+
+/// R5: render the poly candidate's whole declared signature (`: + ( 'T 'T --
+/// 'T )`), naming it and the concrete overload it overlaps.
+fn generic_concrete_overlap_error(name: &str, sig: &PolySig, span: Span) -> String {
+    format!(
+        "error: generic overload `{}` (line {}, col {}) overlaps a concrete overload of `{}`; a name cannot mix a generic and a concrete candidate",
+        poly_sig_str(name, sig),
+        span.line,
+        span.col,
+        crate::resolve::demangle_word(name),
+    )
+}
+
+/// Render a poly word's whole declared signature for a diagnostic (R5's
+/// overlap error is the only caller that needs the full `( ins -- outs )`
+/// shape rather than one `PolyType`, which `poly_type_str` already renders).
+fn poly_sig_str(name: &str, sig: &PolySig) -> String {
+    let render_row = |types: &[PolyType], row_var: Option<u32>| {
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(v) = row_var {
+            parts.push(sig.row_var_names[v as usize].clone());
+        }
+        parts.extend(types.iter().map(|t| poly_type_str(t, sig)));
+        parts.join(" ")
+    };
+    let ins = render_row(&sig.inputs, sig.row_in);
+    let outs = render_row(&sig.outputs, sig.row_out);
+    let body = match (ins.is_empty(), outs.is_empty()) {
+        (true, true) => "--".to_string(),
+        (true, false) => format!("-- {outs}"),
+        (false, true) => format!("{ins} --"),
+        (false, false) => format!("{ins} -- {outs}"),
+    };
+    format!(": {} ( {body} )", crate::resolve::demangle_word(name))
 }
 
 /// Whether a struct's field-type graph node has been visited by
@@ -2774,20 +3317,22 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
 /// Check a single word definition against an external env, seeding the env with
 /// the word's own signature so self-recursion type-checks. `enums` is the
 /// registry the clause-style checks (coverage, scrutinee type, variant-name
-/// collision) consult.
+/// collision) consult. Also returns this body's recorded overload-dispatch
+/// call sites (item 3), so the REPL definition path can thread them into
+/// lowering instead of discarding them.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_def(
     word: &WordDef,
     enums: &[EnumDecl],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
-) -> Result<HashMap<Span, CallInst>, String> {
-    let (_sites, insts) = check_def_collecting_drop_sites(
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
+) -> Result<ResolvedCalls, String> {
+    let (_sites, insts, overloads) = check_def_collecting_drop_sites(
         word,
         enums,
         env,
@@ -2798,7 +3343,7 @@ pub(crate) fn check_def(
         poly_env,
         combinators,
     )?;
-    Ok(insts)
+    Ok((insts, overloads))
 }
 
 /// R6/R11: `check_def`'s own body-check, but returning this one word's
@@ -2810,26 +3355,44 @@ pub(crate) fn check_def(
 /// `drop` call site's resolved operand type does not change once recorded;
 /// only whether that type is *currently* overridden can, and that question
 /// is answered fresh, from `structs`, every time the graph is built.
+///
+/// Item 3 (slice 8a fix): also returns this body's recorded overload-dispatch
+/// sites (span -> resolved symbol). `eval_def`'s caller threads them into
+/// `ir::lower_word` so a REPL definition dispatches an overloaded call
+/// exactly like a native one; `compile_drop_overload` (a `drop` override body)
+/// has no such threading yet and discards them, an accepted, narrower gap
+/// than this fix's crash (see the item 3 report).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn check_def_collecting_drop_sites(
     word: &WordDef,
     enums: &[EnumDecl],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
-) -> Result<(Vec<Type>, HashMap<Span, CallInst>), String> {
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
+) -> Result<InferredLine, String> {
     let mut env = env.clone();
-    env.insert(word.name.clone(), sig_of(&word.effect));
+    let symbol = word.name.clone();
+    env.insert(
+        word.name.clone(),
+        vec![Overload {
+            sig: sig_of(&word.effect),
+            symbol,
+        }],
+    );
     let mut sites = Vec::new();
     // R5 (Slice 2): the session poly-env threads through so a defined word's
     // own body can call a retained polymorphic word; the REPL drop-overload
     // collector passes the empty map (a `drop` overload is never polymorphic),
     // keeping the reachability walk byte-identical on the concrete path (D2).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // Item 3: this body's resolved-overload call sites, relayed to the
+    // caller so lowering can dispatch through them instead of
+    // `empty_builtin_overloads()`.
+    let mut overloads: HashMap<Span, String> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // defined word's body can call one and have it inlined, exactly as native
     // inlines one drawn from `module.words`. The build path and unit tests
@@ -2837,12 +3400,13 @@ pub(crate) fn check_def_collecting_drop_sites(
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
+        builtin_overloads: &mut overloads,
         combinators,
     };
     check_word(
         word, enums, &env, arrays, cells, refs, structs, &mut sites, &mut poly,
     )?;
-    Ok((sites, insts))
+    Ok((sites, insts, overloads))
 }
 
 /// R6/R11: the REPL's own whole-session call to `check_drop_overload_recursion`,
@@ -2877,15 +3441,15 @@ pub fn check_drop_overload_reachability(
 pub(crate) fn infer_line(
     terms: &[Term],
     entry_stack: &[Type],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
-) -> Result<(Vec<Type>, HashMap<Span, CallInst>), String> {
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
+) -> Result<InferredLine, String> {
     let initial: Vec<Slot> = entry_stack.iter().map(|ty| Slot::computed(*ty)).collect();
     // A line is one block: names it binds die with it, so its end is a scope
     // end like any other. It is not a word body, so nothing in it is in tail
@@ -2898,12 +3462,17 @@ pub(crate) fn infer_line(
     // relayed to the caller for lowering. A `build`-path caller passes the
     // empty map (Slice 1's D2 behaviour).
     let mut insts: HashMap<Span, CallInst> = HashMap::new();
+    // Item 3: this line's resolved-overload call sites, relayed to the
+    // caller so lowering can dispatch through them instead of
+    // `empty_builtin_overloads()`.
+    let mut overloads: HashMap<Span, String> = HashMap::new();
     // R3 (Slice 6c): the session's retained combinators thread through so a
     // bare line can call one and have it inlined, exactly as native inlines one
     // drawn from `module.words`. The build path and unit tests pass empty.
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut insts,
+        builtin_overloads: &mut overloads,
         combinators,
     };
     let final_stack = check_terms(
@@ -2932,7 +3501,11 @@ pub(crate) fn infer_line(
             slot.ty
         ));
     }
-    Ok((final_stack.into_iter().map(|s| s.ty).collect(), insts))
+    Ok((
+        final_stack.into_iter().map(|s| s.ty).collect(),
+        insts,
+        overloads,
+    ))
 }
 
 /// `main` is the program's entry point: nothing in the program calls it, so
@@ -3159,15 +3732,30 @@ fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
 /// R2 (M1): whether a word contains at least one tail-position call to itself.
 /// The lowerer uses this to decide whether to build the loop shape at all.
 ///
-/// A `drop` overload never self-tail-calls, whatever its body's last term is:
-/// `drop` is intercepted as a builtin before any name resolution, at both
-/// check and lowering, so a trailing `drop` in a `: drop ( T -- )` body is a
-/// disposal of whatever is on top (typically some `Copy` scalar), not a call
-/// to the enclosing word. Without this, the dogfood's own
-/// `| f | f File>fd close drop ;` would lower to a back-edge loop instead of
-/// closing the fd.
+/// A word whose own name is a builtin's never self-tail-calls on a bare name
+/// match. A builtin name in tail position resolves against the builtin table
+/// first, so it need not mean the enclosing word: `: drop ( T -- )`'s trailing
+/// `drop` disposes whatever is on top (the dogfood's own
+/// `| f | f File>fd close drop ;` closes the fd rather than looping), and since
+/// slice 8a made every builtin name overloadable the same applies throughout,
+/// e.g. `: < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;` ends in the
+/// *builtin* `<` on two `i64`s. Treating either as a back-edge opens loop
+/// machinery whose phi operands never arrive, and lowering then panics on the
+/// missing header.
+///
+/// A genuine self-recursive overload keeps its meaning but loses its loop: it
+/// lowers as an ordinary recursive `Instr::Call`, so it computes the right
+/// answer and then overflows the stack once driven deep (measured: a segfault
+/// around 1e6 frames, where the identical body under a non-builtin name loops
+/// in constant space). Renaming a word to a builtin name therefore changes its
+/// depth behaviour silently, which is a poor fit for a language whose point is
+/// turning Forth's silent failures into errors. Telling the two apart needs
+/// the call site's resolved operand types: the checker does have those in
+/// `check_term`, so a diagnostic (or a resolution-aware self-call test) is
+/// reachable future work; this syntactic pass, which runs over a `WordDef`
+/// alone, is simply the wrong place for it.
 pub fn has_self_tail_call(word: &WordDef) -> bool {
-    word.name != "drop"
+    !is_builtin_word_name(&word.name)
         && tail_position_calls(&word.body)
             .iter()
             .any(|&callee| callee == word.name)
@@ -3195,10 +3783,52 @@ fn check_tail_call_cycles(
     // otherwise register a tail call *to* the overload and fabricate a cycle.
     // Keyed by registry membership, not the literal name, matching every
     // other exclusion in this pass.
+    //
+    // Slice 8a generalizes that to every builtin name, for the same reason
+    // `drop` needed it: this pass runs before any body is checked, so it has
+    // only names, and a tail-position `<` is far more often the builtin on two
+    // scalars than a call to a `Vec2 <` overload that happens to share the
+    // name. Crediting it as an edge rejects valid programs outright -- a word
+    // ending in `<` beside any `<` overload was reported as `mutual tail
+    // recursion`. The cost is that a real mutual cycle between two
+    // builtin-named overloads is no longer rejected here; it compiles as
+    // ordinary mutual recursion (correct, but without the tier-1 loop shape,
+    // so it will overflow the stack when driven deep), which is the same
+    // trade `has_self_tail_call` documents. Deciding these apart needs each
+    // call site's resolved candidate, which exists only after the body walk
+    // this pass precedes.
+    //
+    // The identical hazard exists for an *ordinary* overloaded name once R1
+    // admits two candidates sharing it: `name_to_idx` maps a name to one word
+    // index, so building it via a plain `.collect()` over every non-builtin
+    // word silently kept only the last-indexed candidate, and a tail call
+    // meant for the other candidate was credited as an edge to it instead --
+    //   : show ( i64 -- ) . ;
+    //   : p ( Vec2 -- ) | v | v Vec2>x show ;   -- tail-calls show(i64), a leaf
+    //   : show ( Vec2 -- ) | v | v p ;          -- tail-calls p
+    // has no real cycle (`show(i64)` calls nothing further), but the fabricated
+    // edge `p -> show(Vec2) -> p` reported `mutual tail recursion`. Any name
+    // with more than one non-drop-overload candidate is excluded from
+    // `name_to_idx` for the same reason a builtin name is: which candidate a
+    // bare tail call reaches cannot be decided here. The same accepted cost
+    // applies -- a genuine mutual cycle purely between two candidates of one
+    // overloaded name is no longer caught by this pass -- and for the same
+    // reason: the call site's resolved candidate exists only after the body
+    // walk this pass precedes.
+    let mut name_counts: HashMap<&str, usize> = HashMap::new();
+    for (i, w) in words.iter().enumerate() {
+        if !drop_overload_indices.contains(&i) {
+            *name_counts.entry(w.name.as_str()).or_insert(0) += 1;
+        }
+    }
     let name_to_idx: HashMap<&str, usize> = words
         .iter()
         .enumerate()
-        .filter(|(i, _)| !drop_overload_indices.contains(i))
+        .filter(|(i, w)| {
+            !drop_overload_indices.contains(i)
+                && !is_builtin_word_name(&w.name)
+                && name_counts.get(w.name.as_str()) == Some(&1)
+        })
         .map(|(i, w)| (w.name.as_str(), i))
         .collect();
 
@@ -3556,7 +4186,7 @@ fn recursive_drop_overload_error(
 fn check_word(
     word: &WordDef,
     enums: &[EnumDecl],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -3621,7 +4251,7 @@ fn check_terms_word(
     word: &WordDef,
     enums: &[EnumDecl],
     terms: &[Term],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -3705,7 +4335,7 @@ fn check_clause_word(
     word: &WordDef,
     enums: &[EnumDecl],
     clauses: &[Clause],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -3823,7 +4453,7 @@ fn check_clause_body(
     below: &[Type],
     variant: &VariantDecl,
     declared: &[Type],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -4020,7 +4650,7 @@ fn check_poly_combinator_standalone(
     word: &WordDef,
     sig: &PolySig,
     enums: &[EnumDecl],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -4091,18 +4721,20 @@ pub(crate) fn check_poly_combinator_repl(
     word: &WordDef,
     sig: &PolySig,
     enums: &[EnumDecl],
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
-    poly_env: &HashMap<String, (PolySig, Option<u64>)>,
-    combinators: &HashMap<String, Combinator>,
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
 ) -> Result<(), String> {
     let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+    let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
     let mut poly = PolyCtx {
         env: poly_env,
         insts: &mut scratch,
+        builtin_overloads: &mut scratch_overloads,
         combinators,
     };
     check_poly_combinator_standalone(
@@ -4123,10 +4755,11 @@ pub(crate) fn check_poly_combinator_repl(
 pub fn check_poly_body(
     word: &WordDef,
     sig: &PolySig,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
     let ctx = word_ctx(word, structs, enums);
     let terms = match &word.body {
@@ -4141,7 +4774,16 @@ pub fn check_poly_body(
     let stack = sig.inputs.clone();
     let mut scope = PolyScope::default();
     let residual = poly_walk(
-        terms, stack, &mut scope, sig, &ctx, env, structs, enums, arrays,
+        terms,
+        stack,
+        &mut scope,
+        sig,
+        &ctx,
+        env,
+        structs,
+        enums,
+        arrays,
+        builtin_overloads,
     )?;
     if residual != sig.outputs {
         return Err(poly_output_mismatch_error(word, sig, &residual));
@@ -4164,13 +4806,25 @@ fn poly_walk(
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolyType>, String> {
     for term in terms {
-        stack = poly_term(term, stack, scope, sig, ctx, env, structs, enums, arrays)?;
+        stack = poly_term(
+            term,
+            stack,
+            scope,
+            sig,
+            ctx,
+            env,
+            structs,
+            enums,
+            arrays,
+            builtin_overloads,
+        )?;
     }
     Ok(stack)
 }
@@ -4182,10 +4836,11 @@ fn poly_term(
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolyType>, String> {
     let span = term.span;
     match &term.kind {
@@ -4258,6 +4913,7 @@ fn poly_term(
                 structs,
                 enums,
                 arrays,
+                builtin_overloads,
             )?;
             let then_token = if else_span.is_some() { "else" } else { "end" };
             then_scope.leave_arm(&before, then_token, ctx, span, sig)?;
@@ -4271,6 +4927,7 @@ fn poly_term(
                 structs,
                 enums,
                 arrays,
+                builtin_overloads,
             )?;
             else_scope.leave_arm(&before, "end", ctx, span, sig)?;
             scope.moves = Moves::join(then_scope.moves, else_scope.moves);
@@ -4293,7 +4950,17 @@ fn poly_term(
         }
         TermKind::Call(name) => {
             return poly_call_term(
-                name, span, stack, scope, sig, ctx, env, structs, enums, arrays,
+                name,
+                span,
+                stack,
+                scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+                builtin_overloads,
             );
         }
         // R5p: a quotation in a polymorphic body is rejected eagerly at the
@@ -4321,10 +4988,11 @@ fn poly_call_term(
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Vec<PolyType>, String> {
     // A named local reads back its bound `PolyType`. A non-`Copy` local is
     // consumed on read (R3/D2): a second read is use-after-move, exactly as
@@ -4426,39 +5094,72 @@ fn poly_call_term(
     }
     // A monomorphic word: its concrete inputs must be met by concrete slots;
     // a bare variable passed to a concrete-typed argument is a located error.
-    if let Some(msig) = env.get(name) {
+    // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
+    // of an operator, e.g. `+`) does not intercept here on a *mismatch* --
+    // unlike an ordinary word, a builtin name also has `BUILTIN_TABLE` to
+    // fall back to, so a mismatched candidate defers to `poly_delegate_op`
+    // below instead of erroring outright. An exact match still wins here
+    // (R2, same priority as any other env candidate), but the call site is
+    // recorded for lowering (R7): the literal name would otherwise hit the
+    // builtin's own hardcoded `Instr::Bin`/`Instr::Cmp`/`Instr::Print` arm.
+    // R1/R2: resolve among this name's candidates by exact operand match; a
+    // lone candidate is the ordinary case and is used as-is, matching the
+    // single-signature behaviour this path had before overloading.
+    let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
+        [only] => Some(only),
+        _ => candidates.iter().find(|o| {
+            stack.len() >= o.sig.inputs.len()
+                && stack[stack.len() - o.sig.inputs.len()..]
+                    .iter()
+                    .zip(&o.sig.inputs)
+                    .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp))
+        }),
+    });
+    if let Some(chosen) = chosen {
+        let msig = &chosen.sig;
         let n_in = msig.inputs.len();
-        if stack.len() < n_in {
-            return Err(need(n_in, stack.len()));
-        }
-        let base = stack.len() - n_in;
-        for (i, inp) in msig.inputs.iter().enumerate() {
-            match &stack[base + i] {
-                PolyType::Concrete(t) if t == inp => {}
-                PolyType::Var(v) => {
-                    return Err(poly_var_to_concrete_error(
-                        ctx,
-                        span,
-                        name,
-                        &sig.ty_var_names[*v as usize],
-                        *inp,
-                    ));
-                }
-                other => {
-                    return Err(poly_op_on_variable_error(ctx, span, name, other, sig));
+        let is_builtin_name = BUILTIN_TABLE.contains_key(name);
+        let exact = stack.len() >= n_in
+            && stack[stack.len() - n_in..]
+                .iter()
+                .zip(&msig.inputs)
+                .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp));
+        if exact || !is_builtin_name {
+            if stack.len() < n_in {
+                return Err(need(n_in, stack.len()));
+            }
+            let base = stack.len() - n_in;
+            for (i, inp) in msig.inputs.iter().enumerate() {
+                match &stack[base + i] {
+                    PolyType::Concrete(t) if t == inp => {}
+                    PolyType::Var(v) => {
+                        return Err(poly_var_to_concrete_error(
+                            ctx,
+                            span,
+                            name,
+                            &sig.ty_var_names[*v as usize],
+                            *inp,
+                        ));
+                    }
+                    other => {
+                        return Err(poly_op_on_variable_error(ctx, span, name, other, sig));
+                    }
                 }
             }
+            stack.truncate(base);
+            for out in &msig.outputs {
+                stack.push(PolyType::Concrete(*out));
+            }
+            if exact && (is_builtin_name || chosen.symbol != name) {
+                builtin_overloads.insert(span, chosen.symbol.clone());
+            }
+            return Ok(stack);
         }
-        stack.truncate(base);
-        for out in &msig.outputs {
-            stack.push(PolyType::Concrete(*out));
-        }
-        return Ok(stack);
     }
     // Everything else is an ordinary operator over concrete operands. Extract
     // the maximal concrete suffix, run the concrete check, reflect it back; a
     // variable operand (a too-short suffix) surfaces as the op's own error.
-    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx)? {
+    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
         return Ok(next);
     }
     Err(unknown_word_error(ctx, span, name))
@@ -4524,6 +5225,8 @@ fn poly_delegate_op(
     span: Span,
     stack: &mut Vec<PolyType>,
     ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<Option<Vec<PolyType>>, String> {
     let mut split = stack.len();
     while split > 0 {
@@ -4540,14 +5243,35 @@ fn poly_delegate_op(
             _ => unreachable!("suffix is all concrete by construction"),
         })
         .collect();
-    let handled = if let Some(s) = check_operator(name, span, &mut cstack, ctx)? {
-        cstack = s;
-        true
-    } else if let Some(s) = check_str_word(name, span, &mut cstack, ctx)? {
-        cstack = s;
-        true
-    } else {
-        false
+    let handled = match check_operator(name, span, &mut cstack, ctx, env.get(name).map(|v| &v[..]))?
+    {
+        OpDispatch::Builtin(s) => {
+            cstack = s;
+            true
+        }
+        // R6/R7: a builtin-row exact miss whose operands exactly match one of
+        // this name's env candidates dispatches to that user word, same as
+        // `check_term`'s call site: apply the chosen candidate's own outputs
+        // (the resolver already confirmed its inputs equal the operands).
+        OpDispatch::UserOverload(symbol) => {
+            let sig = &env
+                .get(name)
+                .and_then(|c| c.iter().find(|o| o.symbol == symbol))
+                .expect("check_operator resolved this symbol from this env candidate set")
+                .sig;
+            cstack.truncate(cstack.len() - sig.inputs.len());
+            cstack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
+            builtin_overloads.insert(span, symbol);
+            true
+        }
+        OpDispatch::NotOperator => {
+            if let Some(s) = check_str_word(name, span, &mut cstack, ctx)? {
+                cstack = s;
+                true
+            } else {
+                false
+            }
+        }
     };
     if !handled {
         return Ok(None);
@@ -4567,6 +5291,258 @@ fn poly_delegate_op(
 /// pass-through: the stack beneath the fixed inputs is untouched, so `θ`
 /// carries no row types and the word's ABI never sees the caller's deeper
 /// stack (S2 rejected the carried runtime stack).
+/// R5/R14 (Slice 8a): the outcome of resolving a name with more than one
+/// polymorphic candidate. Kept distinct from a plain `None` so the caller can
+/// still raise R9p's specific rejection (a quotation operand disqualifies
+/// every candidate the same way, since binding `'T` to the placeholder would
+/// monomorphize a call over a phantom) rather than a generic no-match message
+/// that would misdescribe the reason.
+enum PolyOverloadMiss {
+    Quotation,
+    NoMatch,
+}
+
+/// The first candidate among `candidates` whose declared inputs unify against
+/// the tail of `stack`, tried in declaration order -- the same shape as
+/// `resolve_overload`'s exact-match resolution for concrete words, adapted to
+/// unification since a poly input may be a type variable rather than a fixed
+/// `Type`. Only reached with 2+ candidates; the caller keeps the exact
+/// existing single-candidate path (and its position-specific diagnostics)
+/// untouched. Bounds (R6) are checked only against the chosen candidate by
+/// the caller, matching the single-candidate path: they gate a resolved
+/// instantiation, not resolution itself.
+fn resolve_poly_overload(
+    candidates: &[(PolySig, Option<u64>)],
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Result<(PolySig, Option<u64>), PolyOverloadMiss> {
+    let mut saw_quotation = false;
+    for (sig, generation) in candidates {
+        let n_in = sig.inputs.len();
+        if stack.len() < n_in {
+            continue;
+        }
+        let base = stack.len() - n_in;
+        if stack[base..].iter().any(|s| s.quot.is_some()) {
+            saw_quotation = true;
+            continue;
+        }
+        if poly_sig_unifies(sig, stack, name, span, ctx, arrays) {
+            return Ok((sig.clone(), *generation));
+        }
+    }
+    Err(if saw_quotation {
+        PolyOverloadMiss::Quotation
+    } else {
+        PolyOverloadMiss::NoMatch
+    })
+}
+
+/// R5/R14: a named call matching no polymorphic candidate's declared inputs,
+/// listing each candidate's whole signature (`poly_sig_str`) the way
+/// `no_overload_matches_error` lists concrete candidates' input shapes.
+fn no_poly_overload_matches_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    candidates: &[(PolySig, Option<u64>)],
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|(sig, _)| poly_sig_str(name, sig))
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{demangled}` accepts these operands{listed}")
+        }
+    }
+}
+
+/// Whether `sig`'s declared inputs unify against the tail of `stack`,
+/// without committing any successful bindings past this call: a fresh
+/// `Subst` per attempt, discarded either way. The shared predicate behind
+/// resolving an overloaded polymorphic word (`resolve_poly_overload`) and an
+/// overloaded polymorphic combinator (`resolve_combinator_overload`) alike --
+/// unlike `resolve_poly_overload`'s own caller, a combinator's declared
+/// inputs legitimately include a quotation type, so this makes no R9p
+/// judgement about one; that stays the caller's decision.
+fn poly_sig_unifies(
+    sig: &PolySig,
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> bool {
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return false;
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    (0..n_in).all(|i| {
+        unify_poly_input(
+            sig,
+            &sig.inputs[i],
+            stack[base + i].ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )
+        .is_ok()
+    })
+}
+
+/// Whether `sig`'s declared inputs *could* match the tail of `stack`, for
+/// selecting among 2+ poly combinator candidates only. A declared quotation
+/// position (`poly_input_is_quotation`) contributes no constraint and is
+/// skipped: a stack slot standing for a quotation carries a placeholder `ty`
+/// (`Slot::quot`'s own doc -- "no user op accepts" it) rather than the
+/// literal's real effect until `inline_combinator` materializes it, and
+/// checking that for real means running the literal's body, which this
+/// selection step must not do speculatively once per candidate (unlike a
+/// concrete type or a bare `'T`, a quotation's real effect is not known
+/// without side-effecting work). Every other declared position unifies for
+/// real. Whichever candidate this selects still has every declared position,
+/// quotation included, validated for real exactly once by the existing
+/// single-candidate path this only decides which candidate reaches.
+fn poly_sig_could_match(
+    sig: &PolySig,
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> bool {
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return false;
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    (0..n_in).all(|i| {
+        if poly_input_is_quotation(&sig.inputs[i]) {
+            return true;
+        }
+        unify_poly_input(
+            sig,
+            &sig.inputs[i],
+            stack[base + i].ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )
+        .is_ok()
+    })
+}
+
+/// The first candidate among `candidates` whose declared shape matches the
+/// tail of `stack`, tried in declaration order: exact type match for a mono
+/// candidate (the same exact-match philosophy `resolve_overload` uses for an
+/// ordinary word, R2), a could-match probe for a poly one. `inline_combinator`
+/// already branches the same way for the sole-candidate case; this only
+/// decides which candidate reaches that branch. A declared quotation
+/// position never distinguishes a mono candidate either, for the identical
+/// placeholder-`ty` reason `poly_sig_could_match` skips one -- treated as a
+/// wildcard on both branches. Only reached with 2+ candidates sharing one
+/// name.
+///
+/// Accepted narrowing: two candidates identical in every *non*-quotation
+/// position, differing only in a declared quotation's effect, are
+/// indistinguishable here; the first declared wins, the same trade
+/// `resolve_poly_overload` already accepts on an ambiguous unification.
+fn resolve_combinator_overload<'a>(
+    candidates: &[Combinator<'a>],
+    stack: &[Slot],
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Option<Combinator<'a>> {
+    for comb in candidates {
+        let matched = match comb.word.poly.as_ref() {
+            Some(sig) => {
+                poly_sig_could_match(sig, stack, comb.word.name.as_str(), span, ctx, arrays)
+            }
+            None => {
+                let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
+                let n = inputs.len();
+                stack.len() >= n
+                    && stack[stack.len() - n..]
+                        .iter()
+                        .zip(inputs.iter())
+                        .all(|(s, want)| matches!(want, Type::Quotation(_)) || s.ty == *want)
+            }
+        };
+        if matched {
+            return Some(*comb);
+        }
+    }
+    None
+}
+
+/// R18: a call to an overloaded combinator name matching no candidate's
+/// declared shape, listing each candidate the way an ordinary overload's miss
+/// does -- a rendered signature for a poly candidate, input types for a mono
+/// one.
+fn no_combinator_overload_matches_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    candidates: &[Combinator],
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|comb| match comb.word.poly.as_ref() {
+            Some(sig) => poly_sig_str(name, sig),
+            None => {
+                let inputs: Vec<String> = comb
+                    .word
+                    .effect
+                    .inputs
+                    .iter()
+                    .map(|s| format!("`{}`", s.ty))
+                    .collect();
+                match inputs.is_empty() {
+                    true => "no operands".to_string(),
+                    false => inputs.join(" "),
+                }
+            }
+        })
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{demangled}` accepts these operands{listed}")
+        }
+    }
+}
+
 fn check_poly_call(
     name: &str,
     span: Span,
@@ -4575,11 +5551,19 @@ fn check_poly_call(
     arrays: &mut Vec<ArrayDecl>,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
-    let (sig, generation) = poly
-        .env
-        .get(name)
-        .expect("caller checked membership")
-        .clone();
+    let candidates = poly.env.get(name).expect("caller checked membership");
+    let (sig, generation) = match candidates.as_slice() {
+        [(sig, generation)] => (sig.clone(), *generation),
+        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays) {
+            Ok(chosen) => chosen,
+            Err(PolyOverloadMiss::Quotation) => {
+                return Err(reject_quotation_argument(ctx, span, name))
+            }
+            Err(PolyOverloadMiss::NoMatch) => {
+                return Err(no_poly_overload_matches_error(ctx, span, name, candidates))
+            }
+        },
+    };
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
         return Err(underflow_error(ctx, span, name, n_in, stack.len()));
@@ -5130,6 +6114,37 @@ fn unknown_word_error(ctx: &Ctx, span: Span, name: &str) -> String {
     }
 }
 
+/// R3: no candidate of an overloaded name accepts the operands on the stack.
+/// Names every candidate's inputs, since the useful question at this call site
+/// is which shapes the name does accept.
+fn no_overload_matches_error(ctx: &Ctx, span: Span, name: &str, candidates: &[Overload]) -> String {
+    let name = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|o| {
+            let inputs: Vec<String> = o.sig.inputs.iter().map(|t| format!("`{t}`")).collect();
+            match inputs.is_empty() {
+                true => "no operands".to_string(),
+                false => inputs.join(" "),
+            }
+        })
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{name}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{name}` accepts these operands{listed}")
+        }
+    }
+}
+
 fn underflow_error(ctx: &Ctx, span: Span, op: &str, needs: usize, holds: usize) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
@@ -5656,14 +6671,16 @@ fn check_abstract_quotation_times(
 /// call to one is intercepted and its body spliced (the inliner) rather than
 /// lowered to a call to a word that mints no `IrFunc` (R20). `inline_combinator`
 /// branches on `word.poly` internally to pick the mono or poly splice path.
-fn collect_combinators(words: &[WordDef]) -> HashMap<String, Combinator<'_>> {
-    let mut map = HashMap::new();
+fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
+    let mut map: CombinatorEnv<'_> = HashMap::new();
     for word in words {
         if !is_combinator(word) {
             continue;
         }
         if let WordBody::Terms { terms } = &word.body {
-            map.insert(word.name.clone(), Combinator { word, terms });
+            map.entry(word.name.clone())
+                .or_default()
+                .push(Combinator { word, terms });
         }
     }
     map
@@ -5739,15 +6756,22 @@ fn poly_input_is_quotation(p: &PolyType) -> bool {
 /// count exceeds `tail_position_calls` count) keeps its self-edge and stays a
 /// cycle error, and every cycle of length >= 2 (a mutual cycle) is untouched.
 /// Reuses `check_tail_call_cycles`'s 3-colour DFS shape (recon 8).
-pub(crate) fn check_combinator_cycles(
-    combinators: &HashMap<String, Combinator>,
-) -> Result<(), String> {
-    let members: Vec<&Combinator> = combinators.values().collect();
-    let idx: HashMap<&str, usize> = members
-        .iter()
-        .enumerate()
-        .map(|(i, c)| (c.word.name.as_str(), i))
-        .collect();
+pub(crate) fn check_combinator_cycles(combinators: &CombinatorEnv) -> Result<(), String> {
+    let members: Vec<&Combinator> = combinators.values().flatten().collect();
+    // Slice 8a: two combinators may now share a name (an overload set, R1),
+    // so a bare callee name can name more than one node. Unlike
+    // `check_tail_call_cycles`'s diagnostic -- where treating an ambiguous
+    // name as no edge at all merely costs a runtime optimization on the rare
+    // program that hits it -- a missed edge here is not a missed diagnostic,
+    // it is the inliner splicing a real cycle forever. So this pass
+    // over-approximates: an ambiguous name is an edge to *every* candidate
+    // that shares it, never to none, which can only reject a cycle-free
+    // program that happens to share a combinator name (rare, and equivalent
+    // to renaming one of the two), never miss a real one.
+    let mut idx: HashMap<&str, Vec<usize>> = HashMap::new();
+    for (i, c) in members.iter().enumerate() {
+        idx.entry(c.word.name.as_str()).or_default().push(i);
+    }
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); members.len()];
     for (i, c) in members.iter().enumerate() {
         let self_name = c.word.name.as_str();
@@ -5763,7 +6787,10 @@ pub(crate) fn check_combinator_cycles(
         // and at least one) is permitted -- the loop transform makes it finite.
         let tail_only_self = self_all > 0 && self_all == self_tail;
         for callee in all_calls(&c.word.body) {
-            if let Some(&j) = idx.get(callee) {
+            let Some(targets) = idx.get(callee) else {
+                continue;
+            };
+            for &j in targets {
                 if i == j && tail_only_self {
                     continue;
                 }
@@ -5844,7 +6871,7 @@ fn inline_combinator(
     span: Span,
     mut stack: Vec<Slot>,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -5995,7 +7022,7 @@ fn check_poly_combinator_args(
     stack: &[Slot],
     name: &str,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -6070,7 +7097,7 @@ fn check_literal_against_declared_effect(
     word: &str,
     span: Span,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -6225,7 +7252,7 @@ fn materialize_quotation_at_boundary(
     word: &str,
     span: Span,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -6483,7 +7510,7 @@ fn check_terms(
     terms: &[Term],
     stack: Vec<Slot>,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -6522,7 +7549,7 @@ fn check_terms_relaxed(
     terms: &[Term],
     mut stack: Vec<Slot>,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -6570,7 +7597,7 @@ fn check_term(
     term: &Term,
     mut stack: Vec<Slot>,
     ctx: &Ctx,
-    env: &HashMap<String, Sig>,
+    env: &HashMap<String, Vec<Overload>>,
     arrays: &mut Vec<ArrayDecl>,
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
@@ -6933,8 +7960,19 @@ fn check_term(
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
-            if let Some(stack) = check_operator(name, span, &mut stack, ctx)? {
-                return Ok(stack);
+            match check_operator(name, span, &mut stack, ctx, env.get(name).map(|v| &v[..]))? {
+                OpDispatch::Builtin(stack) => return Ok(stack),
+                // Slice 8a phase 2 (R6/R7): a builtin operator name whose
+                // operands match a user overload exactly dispatches to the
+                // user word. Record the site so lowering emits an `Instr::Call`
+                // here (R7), then fall through: the operands stay on the stack
+                // and the ordinary `env` word-call path below performs the
+                // dispatch (arity/type checks, move/borrow discipline, output
+                // push) exactly as for any user word.
+                OpDispatch::UserOverload(symbol) => {
+                    poly.builtin_overloads.insert(span, symbol);
+                }
+                OpDispatch::NotOperator => {}
             }
             if let Some(stack) = check_str_word(name, span, &mut stack, ctx)? {
                 return Ok(stack);
@@ -6997,14 +8035,24 @@ fn check_term(
                 stack.extend(outs);
                 return Ok(stack);
             }
-            // R18: a call to a monomorphic quotation-taking word is inlined
-            // (term-splice) rather than looked up in `env` and lowered to a
-            // call: it mints no `IrFunc` (R20). Copy the `Combinator` out of
-            // the borrowed map first (it is two pointers) so `poly` can be
-            // reborrowed mutably for the splice.
-            if let Some(comb) = poly.combinators.get(name).copied() {
+            // R18: a call to a quotation-taking word is inlined (term-splice)
+            // rather than looked up in `env` and lowered to a call: it mints
+            // no `IrFunc` (R20). One name can carry several candidates
+            // exactly as an ordinary overloaded word can (R1); a single one
+            // resolves exactly as before, a set resolves against the live
+            // stack. Copy the chosen `Combinator` out of the borrowed map
+            // first (it is two pointers) so `poly` can be reborrowed mutably
+            // for the splice.
+            if let Some(candidates) = poly.combinators.get(name) {
+                let chosen = match candidates.as_slice() {
+                    [only] => *only,
+                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays)
+                        .ok_or_else(|| {
+                            no_combinator_overload_matches_error(ctx, span, name, candidates)
+                        })?,
+                };
                 return inline_combinator(
-                    &comb, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
                 );
             }
             // R5/R14: a call to a polymorphic word is intercepted before the
@@ -7013,9 +8061,29 @@ fn check_term(
             if poly.env.contains_key(name) {
                 return check_poly_call(name, span, &mut stack, ctx, arrays, poly);
             }
-            let sig = env
+            // R1/R2: one name can carry several candidates. A single one is
+            // the ordinary case and resolves by name at lowering exactly as
+            // before; an overload set resolves by exact operand match here and
+            // records the chosen candidate's symbol, so lowering calls that
+            // definition rather than whichever body the name alone would find.
+            let candidates = env
                 .get(name)
                 .ok_or_else(|| unknown_word_error(ctx, span, name))?;
+            let chosen = match &candidates[..] {
+                [only] => only,
+                _ => {
+                    let operands: Vec<Type> = stack.iter().map(|s| s.ty).collect();
+                    let hit = candidates.iter().find(|o| {
+                        operands.len() >= o.sig.inputs.len()
+                            && operands[operands.len() - o.sig.inputs.len()..] == o.sig.inputs[..]
+                    });
+                    let chosen =
+                        hit.ok_or_else(|| no_overload_matches_error(ctx, span, name, candidates))?;
+                    poly.builtin_overloads.insert(span, chosen.symbol.clone());
+                    chosen
+                }
+            };
+            let sig = &chosen.sig;
             let n = sig.inputs.len();
             if stack.len() < n {
                 return Err(underflow_error(ctx, span, name, n, stack.len()));
@@ -7352,17 +8420,43 @@ fn check_term(
 /// picks the print codegen (signed/unsigned decimal, `%g` float, or
 /// `true`/`false`) at the call site, same dispatch shape as the rest of this
 /// function.
+/// The outcome of resolving an operator name against `BUILTIN_TABLE` and, on a
+/// builtin-row exact miss, an optional same-named user overload (slice 8a
+/// phase 2, R6). The single resolution entry point both `check_term`'s probe
+/// chain and `poly_delegate_op` route through.
+enum OpDispatch {
+    /// Resolved to a builtin row (or the `>T` conversion), carrying the new
+    /// stack; the caller pushes nothing further.
+    Builtin(Vec<Slot>),
+    /// A user overload of this builtin name matched the operands exactly and
+    /// beats the numeric coercion fallback (R2). Carries the candidate's
+    /// lowering symbol, which the caller records for the site (R7) before
+    /// dispatching through the ordinary `env` word-call path; the stack is
+    /// left untouched here.
+    UserOverload(String),
+    /// The name is not a table operator (nor a `>T` conversion): fall through
+    /// to the next probe in the chain.
+    NotOperator,
+}
+
 fn check_operator(
     name: &str,
     span: Span,
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
-) -> Result<Option<Vec<Slot>>, String> {
+    user_overload: Option<&[Overload]>,
+) -> Result<OpDispatch, String> {
     // R11: every operator this function handles reads the top slot, so a
     // quotation on top is always an operand of it. Guard once, gated on the
     // name being one we handle (else fall through so a later dispatcher can
     // claim it), before the type-directed reads that would otherwise spell the
     // `Cstr` placeholder into a mismatch.
+    // This name list mirrors `BUILTIN_TABLE`'s keys (plus the `>T` conversions,
+    // which are name-parsed, not table rows). Keep it in sync when a table
+    // operator is added. It is not derived from `BUILTIN_TABLE.contains_key`
+    // on purpose: the guard must also cover `>T`, and `is_unary` below can't be
+    // read off row arity without changing `>=` (which the `>`-prefix test
+    // already treats as unary here).
     let is_operator = matches!(
         name,
         "+" | "-"
@@ -7412,6 +8506,63 @@ fn check_operator(
             PairMatch::Mismatch => Err(None),
         }
     };
+
+    // Slice 8a (R6/Q-A): dispatch selection is table-driven. Every operator
+    // this function handles has one or more concrete rows in `BUILTIN_TABLE`;
+    // a call resolves by an exact operand-type lookup there first, so a user
+    // overload of the name can later shadow a call site (phase 2). Only on an
+    // exact miss does the numeric operand-class guard + `unify_pair` coercion
+    // below run, as a hand-written fallback whose diagnostics are preserved
+    // byte-for-byte (Q-B). `not`'s in-place identity became a `(T -- T)` row,
+    // so the exact hit pushes a fresh slot; the corpus never feeds a literal
+    // `not` to a compile-time count, so the dropped literal flag is invisible.
+    let Some(rows) = BUILTIN_TABLE.get(name) else {
+        // Not a table operator: the `>T` numeric conversions stay hand-written
+        // (R0), dispatched by parsing the target type out of the name rather
+        // than keyed on operand type, so no row can hold them.
+        let Some(rest) = name.strip_prefix('>').filter(|r| !r.is_empty()) else {
+            return Ok(OpDispatch::NotOperator);
+        };
+        let target = match Type::from_name(rest) {
+            Some(ty) if ty.is_numeric() => ty,
+            _ => return Err(conversion_unknown_type_error(ctx, span, rest)),
+        };
+        let source = *stack.last().ok_or_else(|| need(name, 1, stack.len()))?;
+        if !source.ty.is_numeric() {
+            return Err(conversion_source_error(ctx, span, name, source.ty));
+        }
+        stack.pop();
+        stack.push(Slot::computed(target));
+        return Ok(OpDispatch::Builtin(std::mem::take(stack)));
+    };
+    // Every row for one name agrees on arity (R4), so the first row's input
+    // count is the operand count to read.
+    let arity = rows[0].inputs.len();
+    if stack.len() < arity {
+        return Err(need(name, arity, stack.len()));
+    }
+    let base = stack.len() - arity;
+    let operands: Vec<Type> = stack[base..].iter().map(|s| s.ty).collect();
+    if let Some(hit) = rows.iter().find(|r| r.inputs == operands) {
+        stack.truncate(base);
+        stack.extend(hit.outputs.iter().map(|ty| Slot::computed(*ty)));
+        return Ok(OpDispatch::Builtin(std::mem::take(stack)));
+    }
+
+    // Slice 8a phase 2 (R2/R6): a user overload of this builtin name whose
+    // inputs match the operands exactly beats the numeric coercion fallback
+    // below, so a call the builtin already answers is untouched (corpus
+    // byte-for-byte, since no corpus word overloads a builtin name) while a
+    // `Vec2 +` site is redirected to the user word. Checked only on a
+    // builtin-row exact miss. Both callers pass their candidate set, so a
+    // poly body's delegated operator resolves an overload the same way a
+    // monomorphic call site does.
+    if let Some(candidates) = user_overload {
+        if let Some(chosen) = resolve_overload(candidates, &operands) {
+            return Ok(OpDispatch::UserOverload(chosen.symbol.clone()));
+        }
+    }
+
     match name {
         "+" | "-" | "*" => {
             let n = stack.len();
@@ -7568,23 +8719,9 @@ fn check_operator(
             }
             stack.truncate(n - 1);
         }
-        _ => {
-            let Some(rest) = name.strip_prefix('>').filter(|r| !r.is_empty()) else {
-                return Ok(None);
-            };
-            let target = match Type::from_name(rest) {
-                Some(ty) if ty.is_numeric() => ty,
-                _ => return Err(conversion_unknown_type_error(ctx, span, rest)),
-            };
-            let source = *stack.last().ok_or_else(|| need(name, 1, stack.len()))?;
-            if !source.ty.is_numeric() {
-                return Err(conversion_source_error(ctx, span, name, source.ty));
-            }
-            stack.pop();
-            stack.push(Slot::computed(target));
-        }
+        _ => unreachable!("BUILTIN_TABLE holds only these operator names"),
     }
-    Ok(Some(std::mem::take(stack)))
+    Ok(OpDispatch::Builtin(std::mem::take(stack)))
 }
 
 /// An array word (`fill`/`len`) applied to a non-array operand: names the
@@ -8799,6 +9936,7 @@ mod tests {
             refs: Vec::new(),
             externs: Vec::new(),
             instantiations: HashMap::new(),
+            builtin_overloads: HashMap::new(),
             modules: vec![ModuleInfo {
                 imports: HashMap::new(),
                 exports: vec![("mk".to_string(), Span::default())],
@@ -8857,6 +9995,7 @@ mod tests {
                 refs: Vec::new(),
                 externs: Vec::new(),
                 instantiations: HashMap::new(),
+                builtin_overloads: HashMap::new(),
                 modules,
             }
         }
@@ -9742,6 +10881,221 @@ mod tests {
     }
 
     #[test]
+    fn overload_exact_input_match_is_error() {
+        // R1: two definitions with identical `(module, name, input_types)`
+        // still hit the `duplicate word` message, byte-for-byte.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 0 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 1 ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("duplicate word `dist`"),
+            "unexpected message: {err}"
+        );
+
+        // R1: an overload whose input types exactly match a builtin row is a
+        // located error too, naming the operand types.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( i64 i64 -- i64 ) drop ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `+`") && err.contains("as a builtin"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("i64 i64"), "names the operand types: {err}");
+
+        // Mutation check: two overloads of one name with *different* input
+        // types no longer collide as a duplicate (the whole reason for R1's
+        // widened key).
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 0 ;\n\
+: dist ( Vec2 -- i64 ) drop 0 ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            !err.contains("duplicate word"),
+            "different input types must not collide as a duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn overload_arity_clash_is_error() {
+        // R4: a local overload of `+` whose arity disagrees with the
+        // builtin's is rejected at its own definition site.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 -- Vec2 ) ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `+`")
+                && err.contains("takes 1 input but another `+` takes 2")
+                && err.contains("must agree on input count"),
+            "unexpected message: {err}"
+        );
+
+        // R4: two local overloads of a non-builtin name disagreeing on
+        // arity, rejected at the second's site.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `bump`") && err.contains("takes 2 input"),
+            "unexpected message: {err}"
+        );
+
+        // Mutation check: two overloads agreeing on arity (even with
+        // different input types) never hit this check.
+        let ok = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( i64 -- i64 ) ;\n\
+: main ( -- ) ;\n";
+        check_src(ok).expect("same-arity overloads must not trip the arity check");
+    }
+
+    #[test]
+    fn overload_generic_and_concrete_overlap_is_error() {
+        // R5: a poly candidate overlapping the builtin `+` of the same
+        // arity is rejected -- no specialization ordering.
+        let src = ": + ( 'T 'T -- 'T ) drop ;\n: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("generic overload") && err.contains("overlaps a concrete overload of `+`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains(": + ( 'T 'T -- 'T )"),
+            "renders the poly signature: {err}"
+        );
+
+        // R5: a poly candidate overlapping a *local* concrete overload of
+        // the same name and arity.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T -- 'T ) ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `bump`"),
+            "unexpected message: {err}"
+        );
+
+        // Mutation check: a poly candidate of a *different* arity than
+        // every concrete candidate for the name never trips the check.
+        let ok = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T 'T -- 'T ) drop ;\n\
+: main ( -- ) ;\n";
+        check_src(ok).expect("a differing-arity poly candidate must not trip the overlap check");
+    }
+
+    /// Fix 3 (R5, module-scoped): `check_generic_concrete_overlap` operates
+    /// directly on `WordDef`s carrying pre-mangle bare names and hand-set
+    /// module ids -- unlike a `check_src` scenario (always module 0), this
+    /// exercises the cross-module key `resolve::mangle` would otherwise
+    /// disambiguate before `check` ever ran on a real multi-file program, so
+    /// the two candidates' bare names can actually collide by string here.
+    #[test]
+    fn overload_generic_and_concrete_overlap_is_module_scoped() {
+        fn concrete_word(name: &str, module: u32, arity: usize) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect {
+                    inputs: (0..arity)
+                        .map(|_| TypedSlot {
+                            name: None,
+                            ty: Type::I64,
+                        })
+                        .collect(),
+                    outputs: Vec::new(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+                span: Span::default(),
+            }
+        }
+        fn poly_word(name: &str, module: u32, arity: usize) -> WordDef {
+            let sig = PolySig {
+                row_in: None,
+                inputs: (0..arity as u32).map(PolyType::Var).collect(),
+                outputs: Vec::new(),
+                row_out: None,
+                bounds: Vec::new(),
+                ty_var_names: (0..arity).map(|i| format!("'T{i}")).collect(),
+                len_var_names: Vec::new(),
+                row_var_names: Vec::new(),
+            };
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect {
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: Some(Box::new(sig)),
+                module,
+                span: Span::default(),
+            }
+        }
+
+        // R5, module-scoped: an unrelated concrete `bump` in module 1 does
+        // not overlap a poly `bump` of the same arity declared in module 0 --
+        // pre-fix, both were keyed by the bare name alone, globally, so this
+        // combination was rejected even though nothing imports across the
+        // two modules.
+        let words = vec![concrete_word("bump", 1, 1), poly_word("bump", 0, 1)];
+        check_generic_concrete_overlap(&words)
+            .expect("an unrelated same-name concrete word in a different module must not overlap");
+
+        // Mutation check: the *same*-module case must still be rejected --
+        // module-scoping narrows the key, it does not disable the check.
+        let words = vec![concrete_word("bump", 0, 1), poly_word("bump", 0, 1)];
+        let err = check_generic_concrete_overlap(&words).unwrap_err();
+        assert!(
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `bump`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn overload_missing_at_call_site_is_error() {
+        // R3: a builtin operator's exact-match miss falls back to its
+        // existing operand-class diagnostic, byte-for-byte, even when a
+        // *different* struct's overload of the same name exists in the
+        // module (importing `Vec2` does not bring `+` for it, and a local
+        // `Vec2 +` overload does not answer an `i64 bool` call site
+        // either).
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) 1 true + drop ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("requires two operands of the same numeric type")
+                && err.contains("`i64`")
+                && err.contains("`bool`"),
+            "unexpected message: {err}"
+        );
+
+        // R3: a user-overloaded, non-operator name called with operands
+        // that match no candidate names the operand types, the same as any
+        // ordinary word call.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: describe ( Vec2 -- ) drop ;\n\
+: main ( -- ) 1 describe ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("expected `Vec2`") && err.contains("found `i64`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
     fn check_extern_shadowing_a_builtin_does_not_change_its_meaning() {
         // R1's reason for existing: before the gate, this compiled, and `dup`
         // at the call site still meant the builtin with no diagnostic at all.
@@ -9873,12 +11227,18 @@ mod tests {
         let module = crate::parser::parse(&tokens).unwrap();
         let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
         let overload_indices: HashSet<usize> = registry.values().copied().collect();
-        let mut env: HashMap<String, Sig> = HashMap::new();
+        let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
         for (idx, word) in module.words.iter().enumerate() {
             if overload_indices.contains(&idx) {
                 continue;
             }
-            env.insert(word.name.clone(), sig_of(&word.effect));
+            env.insert(
+                word.name.clone(),
+                vec![Overload {
+                    sig: sig_of(&word.effect),
+                    symbol: word.name.clone(),
+                }],
+            );
         }
         assert!(
             !env.contains_key("drop"),
@@ -9994,7 +11354,7 @@ mod tests {
         let err = infer_line(
             &terms,
             &[struct_ty(&module, "File")],
-            &builtin_table(),
+            &HashMap::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -11152,6 +12512,273 @@ mod tests {
     }
 
     #[test]
+    fn builtin_table_plus_has_a_row_per_numeric_type() {
+        // Q-A: `+` resolves by exact operand type, so the table carries one
+        // homogeneous `(T T -- T)` row for every numeric type and nothing
+        // else. Anchored to the literal count (12: eight fixed-width ints,
+        // usize/isize, two floats) rather than `numeric_types()` itself, so
+        // shrinking that function can't shrink both sides of the comparison
+        // together and hide a wiring bug.
+        let table = builtin_table();
+        let rows = table.get("+").expect("`+` is a builtin operator");
+        assert_eq!(rows.len(), 12, "12 numeric rows");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], r.outputs[0]],
+                    "a `+` row is homogeneous `(T T -- T)`"
+                );
+                assert_eq!(r.lower, BuiltinLower::Add);
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = numeric_types();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `+` row per numeric type, no more");
+    }
+
+    /// Assert `name`'s rows are exactly a homogeneous `(T T -- T)` set, one
+    /// per type in `want`, all lowering `lower`. Shared shape for the
+    /// binary numeric-tower operators, mirroring
+    /// `builtin_table_plus_has_a_row_per_numeric_type`.
+    fn assert_homogeneous_binary_rows(name: &str, want: Vec<Type>, lower: BuiltinLower) {
+        let table = builtin_table();
+        let rows = table
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is a builtin operator"));
+        assert_eq!(rows.len(), want.len(), "row count for `{name}`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], r.outputs[0]],
+                    "a `{name}` row is homogeneous `(T T -- T)`"
+                );
+                assert_eq!(r.lower, lower, "`{name}` lowers `{lower:?}`");
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = want;
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `{name}` row per expected type, no more");
+    }
+
+    #[test]
+    fn builtin_table_sub_has_a_row_per_numeric_type() {
+        assert_homogeneous_binary_rows("-", numeric_types(), BuiltinLower::Sub);
+    }
+
+    #[test]
+    fn builtin_table_mul_has_a_row_per_numeric_type() {
+        assert_homogeneous_binary_rows("*", numeric_types(), BuiltinLower::Mul);
+    }
+
+    #[test]
+    fn builtin_table_div_has_a_row_per_float_type() {
+        // `/` is float-only (D7): the integer tower divides via a separate
+        // hand-written path this table does not cover.
+        assert_homogeneous_binary_rows("/", float_types(), BuiltinLower::DivFloat);
+    }
+
+    #[test]
+    fn builtin_table_mod_has_a_row_per_int_type() {
+        assert_homogeneous_binary_rows("mod", int_types(), BuiltinLower::Mod);
+    }
+
+    #[test]
+    fn builtin_table_max_has_a_row_per_int_type() {
+        // `max` is integer-only: `max-total` is the float twin (D7).
+        assert_homogeneous_binary_rows("max", int_types(), BuiltinLower::Max);
+    }
+
+    #[test]
+    fn builtin_table_max_total_has_a_row_per_float_type() {
+        assert_homogeneous_binary_rows("max-total", float_types(), BuiltinLower::MaxTotal);
+    }
+
+    #[test]
+    fn builtin_table_and_has_a_row_per_int_type_plus_bool() {
+        // `and`/`or`/`xor` are bitwise on every integer width and logical on
+        // `bool` (eager evaluation makes bitwise-on-0/1 coincide with
+        // logical), so their domain is `int_types()` plus one `bool` row.
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_homogeneous_binary_rows("and", want, BuiltinLower::And);
+    }
+
+    #[test]
+    fn builtin_table_or_has_a_row_per_int_type_plus_bool() {
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_homogeneous_binary_rows("or", want, BuiltinLower::Or);
+    }
+
+    #[test]
+    fn builtin_table_xor_has_a_row_per_int_type_plus_bool() {
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_homogeneous_binary_rows("xor", want, BuiltinLower::Xor);
+    }
+
+    #[test]
+    fn builtin_table_not_has_a_row_per_int_type_plus_bool() {
+        // `not` is unary, so it does not fit `assert_homogeneous_binary_rows`
+        // (a `(T -- T)` shape, not `(T T -- T)`).
+        let table = builtin_table();
+        let rows = table.get("not").expect("`not` is a builtin operator");
+        let mut want = int_types();
+        want.push(Type::Bool);
+        assert_eq!(rows.len(), want.len(), "row count for `not`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(r.inputs, vec![r.outputs[0]], "a `not` row is `(T -- T)`");
+                assert_eq!(r.lower, BuiltinLower::Not);
+                r.outputs[0]
+            })
+            .collect();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `not` row per int type plus `bool`, no more");
+    }
+
+    /// Assert `name`'s rows are the irregular `(T, i64 -- T)` shape (the
+    /// shift-amount operand is always `i64` regardless of `T`), one per
+    /// `int_types()`, lowering `lower`. Nothing before slice 8a fix 4 checked
+    /// that the *second* input type is right: a row wrongly shaped `(T, T --
+    /// T)` would still pass `builtin_table_plus_has_a_row_per_numeric_type`-
+    /// style checks that only compare `inputs[0]`/`inputs[1]` against
+    /// `outputs[0]`.
+    fn assert_shift_rows(name: &str, lower: BuiltinLower) {
+        let table = builtin_table();
+        let rows = table
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is a builtin operator"));
+        let want = int_types();
+        assert_eq!(rows.len(), want.len(), "row count for `{name}`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], Type::I64],
+                    "a `{name}` row is `(T, i64 -- T)`, the count is always `i64`"
+                );
+                assert_eq!(r.lower, lower, "`{name}` lowers `{lower:?}`");
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = want;
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `{name}` row per int type, no more");
+    }
+
+    #[test]
+    fn builtin_table_shl_rows_take_an_i64_count_regardless_of_element_type() {
+        assert_shift_rows("shl", BuiltinLower::Shl);
+    }
+
+    #[test]
+    fn builtin_table_shr_rows_take_an_i64_count_regardless_of_element_type() {
+        assert_shift_rows("shr", BuiltinLower::Shr);
+    }
+
+    #[test]
+    fn builtin_table_comparisons_have_a_row_per_numeric_type() {
+        use crate::ir::CmpOp;
+        let table = builtin_table();
+        for (op, cmp) in [
+            ("=", CmpOp::Eq),
+            ("<", CmpOp::Lt),
+            (">", CmpOp::Gt),
+            ("<=", CmpOp::Le),
+            (">=", CmpOp::Ge),
+            ("<>", CmpOp::Ne),
+        ] {
+            let rows = table
+                .get(op)
+                .unwrap_or_else(|| panic!("`{op}` is a builtin operator"));
+            let want = numeric_types();
+            assert_eq!(rows.len(), want.len(), "row count for `{op}`");
+            let mut got: Vec<Type> = rows
+                .iter()
+                .map(|r| {
+                    assert_eq!(r.outputs, vec![Type::Bool], "`{op}` produces `bool`");
+                    assert_eq!(r.inputs.len(), 2, "`{op}` is binary");
+                    assert_eq!(r.inputs[0], r.inputs[1], "a `{op}` row is homogeneous");
+                    assert_eq!(
+                        r.lower,
+                        BuiltinLower::Cmp(cmp),
+                        "`{op}` lowers `Cmp({cmp:?})`"
+                    );
+                    r.inputs[0]
+                })
+                .collect();
+            let mut want = want;
+            got.sort_by_key(|t| t.name());
+            want.sort_by_key(|t| t.name());
+            assert_eq!(got, want, "one `{op}` row per numeric type, no more");
+        }
+    }
+
+    #[test]
+    fn check_not_on_literal_count_is_not_a_literal_for_fill() {
+        // The retired hand-written `not` arm left its operand slot in place,
+        // preserving `literal`/`int_val` (so a `not`'d literal fed to `fill`
+        // would have used the *pre-negation* value, silently wrong). The
+        // table row it was replaced with emits `Slot::computed`, so `fill`
+        // now correctly refuses a `not`'d literal as a non-literal count
+        // instead of miscounting.
+        let err = check_src(": w ( -- ) 0 4 not fill drop ;").unwrap_err();
+        assert!(err.contains("literal count"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn builtin_table_has_a_row_per_printable_type_for_print() {
+        // Rule 6: `.` dispatches over 15 printable types, each a `(T -- )` row
+        // lowering a `Print`. Mutation-check: dropping the printable loop or a
+        // `push` in `printable_types` fails this.
+        let table = builtin_table();
+        let rows = table.get(".").expect("`.` is a builtin operator");
+        assert_eq!(rows.len(), 15, "15 printable rows");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(r.outputs, Vec::<Type>::new(), "`.` produces nothing");
+                assert_eq!(r.lower, BuiltinLower::Print);
+                assert_eq!(r.inputs.len(), 1, "`.` is unary");
+                r.inputs[0]
+            })
+            .collect();
+        let mut want = printable_types();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn operator_dispatch_resolves_the_exact_row_type() {
+        // Guards that resolution yields the right stack-effect type: a
+        // homogeneous op over `u8` yields `u8`, a comparison yields `bool`,
+        // `.` yields nothing. Note these all resolve identically through the
+        // numeric fallback too, so this does *not* prove the table pass is
+        // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
+        // guard that the exact-match table row actually drives dispatch.
+        assert_eq!(
+            infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
+            vec![Type::from_name("u8").unwrap()]
+        );
+        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::Bool]);
+        assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
+    }
+
+    #[test]
     fn check_print_accepts_str_and_cstr() {
         // `.`'s printable-scalar guard also accepts `str`/`cstr` (R9), matched
         // by name rather than `is_numeric`/`is_bool`, since neither is numeric.
@@ -11176,7 +12803,7 @@ mod tests {
         infer_line(
             &terms,
             entry,
-            &builtin_table(),
+            &HashMap::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
@@ -11185,7 +12812,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
         )
-        .map(|(stack, _insts)| stack)
+        .map(|(stack, _insts, _overloads)| stack)
     }
 
     #[test]
@@ -11850,6 +13477,20 @@ mod tests {
     fn tail_position_trailing_drop_is_not_tail() {
         let w = first_word(": rec ( i64 -- i64 ) rec drop ;");
         assert_eq!(tail_position_calls(&w.body), vec!["drop"]);
+        assert!(!has_self_tail_call(&w));
+    }
+
+    #[test]
+    fn tail_position_builtin_named_word_trailing_its_own_name_is_not_self_tail() {
+        // Slice 8a made every builtin name overloadable, so a builtin-named
+        // word ending in that same name is resolving against the builtin
+        // table, not recursing: `<` here compares the two extracted `i64`s.
+        // `tail_position_calls` still reports the name (it is syntactic);
+        // only the self-call conclusion changes.
+        let w = first_word(
+            "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;",
+        );
+        assert_eq!(tail_position_calls(&w.body), vec!["<"]);
         assert!(!has_self_tail_call(&w));
     }
 

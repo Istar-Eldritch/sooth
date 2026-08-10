@@ -844,6 +844,55 @@ fn non_tail_combinator_self_call_is_still_a_cycle_error() {
 }
 
 #[test]
+fn mutual_combinator_cycle_through_an_ambiguous_overloaded_name_is_still_caught() {
+    // Slice 8a: `a` now carries two candidates sharing the name. A bare
+    // callee name can't say which one `b`'s call to `a` reaches statically,
+    // so this pass must not resolve it to a *single* index the way it did
+    // pre-8a -- doing so could point at the wrong candidate (or, worse,
+    // silently miss the real cycle through the other one, which would have
+    // the inliner splice forever rather than merely mis-detect a runtime
+    // optimization the way the tail-call cycle guard's analogous narrowing
+    // does). `b`'s own operand types mean it really does resolve to the
+    // `bool` candidate of `a`, closing a genuine cycle: a(bool) -> b -> a(bool).
+    // Declared with the cycling candidate *first* and the unrelated one
+    // last: a name-to-single-index map built by plain `.collect()` keeps
+    // whichever candidate is declared last, so it would point `b`'s edge at
+    // the i64 candidate (a leaf, no edge back to `b`) and miss the cycle
+    // through the bool one entirely -- accepting a program that should be
+    // rejected, rather than merely detecting the wrong optimization
+    // opportunity the way the tail-call cycle guard's analogous narrowing
+    // does.
+    let err = check_error(
+        ": a ( bool [ bool -- bool ] -- bool ) b ;\n\
+         : a ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+         : b ( bool [ bool -- bool ] -- bool ) a ;\n\
+         : main ( -- ) ;\n",
+    );
+    assert!(
+        err.contains("`a`") && err.contains("`b`") && err.contains("recursive"),
+        "a mutual cycle through an overloaded combinator name should still be a located rejection, got: {err}"
+    );
+}
+
+#[test]
+fn two_poly_combinators_declaring_the_same_signature_is_a_duplicate_error() {
+    // Deferred from round 3, the combinator half of the same gap fixed for
+    // ordinary poly words: `is_combinator` doesn't discriminate poly vs.
+    // mono, so a poly combinator sharing a name with an identically-signed
+    // poly combinator has the same route to silently resolving to whichever
+    // is declared first, forever.
+    let err = check_error(
+        ": apply ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+         : apply ( 'T [ 'T -- 'T ] -- 'T ) call call ;\n\
+         : main ( -- ) 5 [ 2 * ] apply . ;\n",
+    );
+    assert!(
+        err.contains("duplicate overload") && err.contains("apply"),
+        "a second poly combinator declaring the same signature should be a duplicate error, got: {err}"
+    );
+}
+
+#[test]
 fn mutual_combinator_cycle_is_still_an_error() {
     // Criterion 6 (R4, load-bearing): a two-combinator mutual cycle is
     // untouched by the relaxation (which skips only a *self*-edge, i==j), so
@@ -1621,6 +1670,46 @@ fn repl_cross_line_combinator_cycle_is_error() {
     assert!(
         transcript.starts_with("defined a\ndefined b\n"),
         "the non-cyclic prefix defines cleanly: {transcript}"
+    );
+}
+
+#[test]
+fn repl_poly_word_calling_a_builtin_named_overload_does_not_segfault() {
+    // Round 3 (slice 8a): the REPL analogue of `overload_from_poly_body_
+    // dispatches_to_user_word` (tests/phase0.rs). `eval_poly_def`/
+    // `lower_instantiation` froze an *empty* overloads map onto every
+    // REPL-defined poly word, explicitly marked out of scope for this slice
+    // at the time -- so `vsum`'s body called `+` on two `Vec2` operands, the
+    // checker correctly resolved that to the user overload, but lowering
+    // fell into the builtin numeric `Instr::Bin(Add)` arm on the two struct
+    // pointers regardless, segfaulting the whole session (`run`/`build`
+    // threaded the real record from the start and never had this bug).
+    // Fixed by freezing the body's already-computed resolved-overload
+    // record into `PolyWordEntry` alongside `resolver`/`ir_lower_env`.
+    //
+    // Mutation-tested: reverting `PolyWordEntry`'s `builtin_overloads` field
+    // back to a fresh empty map at instantiation time passes the entire
+    // existing suite (nothing else exercises this path) and only crashes
+    // (SIGSEGV) when this exact session actually runs -- the gap this test
+    // closes.
+    // 'T is a plain passthrough (dropped last, via `swap drop`, so this
+    // still instantiates via `eval_poly_def`/`lower_instantiation` rather
+    // than the monomorphic path): the value under test is the *computed*
+    // sum, deliberately not just "did this crash" -- a wrong dispatch here
+    // is undefined-behaviour pointer arithmetic on aggregate operands,
+    // which is not guaranteed to fault every run; asserting the exact
+    // arithmetic result (which a wrong dispatch has no real chance of
+    // reproducing by accident) is the reliable discriminator, and it still
+    // reliably segfaults when mutated back to an empty map.
+    let transcript = repl_error(
+        "type: Vec2 x i64 y i64 ;\n\
+         : + ( Vec2 Vec2 -- Vec2 ) | a b | a Vec2>x b Vec2>x + a Vec2>y b Vec2>y + Vec2 ;\n\
+         : vsum ( 'T Vec2 Vec2 -- i64 ) + Vec2> + swap drop ;\n\
+         42 1 2 Vec2 3 4 Vec2 vsum\n",
+    );
+    assert_eq!(
+        transcript, "defined type Vec2\ndefined +\ndefined vsum\nstack: 10\n",
+        "vsum should compute (1+3)+(2+4)=10 through the user overload, not crash: {transcript}"
     );
 }
 

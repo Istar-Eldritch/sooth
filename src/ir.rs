@@ -1194,6 +1194,13 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // same as `check`'s own env (`check.rs::check`): its body is compiled
     // under the struct's destructor symbol, never called by the literal
     // name `"drop"`.
+    // Slice 8a (R1/R7): keyed by each word's distinct lowering symbol rather
+    // than its surface name, so an overload set does not collapse to whichever
+    // candidate was inserted last. A name with one candidate keys under itself,
+    // which is every corpus word, so lookups by name are unchanged; an
+    // overloaded call reaches its candidate through the checker's per-span
+    // record, which carries the same symbol.
+    let symbols = crate::ast::overload_symbols(&module.words);
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -1203,10 +1210,10 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
         })
-        .map(|(_, w)| {
+        .map(|(idx, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
-                w.name.clone(),
+                symbols[idx].clone(),
                 (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
             )
         })
@@ -1253,12 +1260,16 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
         })
-        .flat_map(|(_, w)| {
-            let self_tail = crate::check::has_self_tail_call(w);
+        .flat_map(|(idx, w)| {
+            // A word sharing its name with another candidate is not self-tail
+            // recursive on a bare name match: the same name in its body may
+            // resolve to the other candidate, the same reasoning that excludes
+            // builtin-named words in `has_self_tail_call`.
+            let self_tail = crate::check::has_self_tail_call(w) && symbols[idx] == w.name;
             // R9: a word plus every quotation literal it materialized (element
             // 0 is the word itself).
             lower_word_parts(
-                &w.name,
+                &symbols[idx],
                 &w.effect,
                 &w.body,
                 self_tail,
@@ -1266,6 +1277,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
                 &resolve,
                 regs,
                 &module.instantiations,
+                &module.builtin_overloads,
                 &poly_arities,
                 &combinator_bodies,
             )
@@ -1325,6 +1337,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             &resolve,
             regs,
             &module.instantiations,
+            &module.builtin_overloads,
             &poly_arities,
             &combinator_bodies,
         ));
@@ -1784,6 +1797,7 @@ fn synthesize_struct_destructor_override(
         resolve,
         regs,
         empty_instantiations(),
+        empty_builtin_overloads(),
         empty_poly_arities(),
         combinators,
     );
@@ -1923,12 +1937,17 @@ pub fn lower_line(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> (IrFunc, Vec<IrFunc>, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
     let mut b = FuncBuilder::new(env, resolve, regs, String::new());
+    // R7: a line calling an overloaded word dispatches through the checker's
+    // per-span record, exactly as a compiled body does; without it the call
+    // falls into the name-directed builtin arm and miscompiles.
+    b.builtin_overloads = builtin_overloads;
     // R7 (Slice 2): a call to a retained polymorphic word resolves through the
     // instantiation table keyed by its call-site span, not the name-keyed env.
     b.instantiations = instantiations;
@@ -2093,6 +2112,7 @@ pub fn lower_line(
         resolve,
         regs,
         instantiations,
+        builtin_overloads,
         poly_arities,
         combinators,
     );
@@ -2183,6 +2203,7 @@ pub(crate) fn lower_word(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
@@ -2196,6 +2217,7 @@ pub(crate) fn lower_word(
         resolve,
         regs,
         instantiations,
+        builtin_overloads,
         poly_arities,
         combinators,
     )
@@ -2212,6 +2234,7 @@ pub(crate) fn lower_word(
 pub(crate) fn lower_instantiation(
     symbol: &str,
     sig: &PolySig,
+    builtin_overloads: &HashMap<Span, String>,
     subst: &Subst,
     body: &WordBody,
     env: &HashMap<String, Arity>,
@@ -2230,6 +2253,7 @@ pub(crate) fn lower_instantiation(
         resolve,
         regs,
         empty_instantiations(),
+        builtin_overloads,
         empty_poly_arities(),
         combinators,
     )
@@ -2250,6 +2274,7 @@ fn lower_word_parts(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
@@ -2259,6 +2284,7 @@ fn lower_word_parts(
 
     let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
     b.instantiations = instantiations;
+    b.builtin_overloads = builtin_overloads;
     b.poly_arities = poly_arities;
     b.combinators = combinators;
     // R11: the declared output row's `IrType`s, so a tail branch join can find
@@ -2355,6 +2381,7 @@ fn lower_word_parts(
         resolve,
         regs,
         instantiations,
+        builtin_overloads,
         poly_arities,
         combinators,
     ));
@@ -2373,6 +2400,7 @@ fn lower_materialized(
     resolve: Resolver,
     regs: Registries,
     instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
     combinators: &HashMap<String, Vec<Term>>,
 ) -> Vec<IrFunc> {
@@ -2402,6 +2430,7 @@ fn lower_materialized(
             resolve,
             regs,
             instantiations,
+            builtin_overloads,
             poly_arities,
             combinators,
         ));
@@ -2415,6 +2444,14 @@ fn lower_materialized(
 /// threading one.
 fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(HashMap::new)
+}
+
+/// Slice 8a phase 2: the builtin-overload companion of `empty_instantiations`,
+/// handed to every lowering path with no user builtin overloads (the REPL,
+/// destructor synthesis, unit tests, and every corpus program).
+fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
+    static EMPTY: std::sync::OnceLock<HashMap<Span, String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
 
@@ -2442,8 +2479,19 @@ fn is_aggregate(ty: IrType) -> bool {
 /// R10: whether a combinator body has a tail-position call to itself, the
 /// lowering twin of the checker's `tail_position_calls`/`has_self_tail_call`
 /// (which take a `&WordBody` this splice site does not hold). The syntactic
-/// tail rule is identical: the final term of the body, or the final term of
+/// tail rule is the same: the final term of the body, or the final term of
 /// either arm of a terminal `if`, recursively.
+///
+/// The *conclusion* drawn from it no longer is. Since slice 8a,
+/// `has_self_tail_call` additionally refuses a builtin-named word, because
+/// the same name in tail position may resolve to the builtin rather than to
+/// the enclosing word; this function still decides on the bare name. The two
+/// only agree today because a builtin-named combinator cannot exist: a
+/// combinator takes a quotation operand, and `check_operator`'s R11 guard
+/// rejects a quotation operand to any builtin name before the env combinator
+/// lookup runs. Nothing pins that, so if the R11 guard ever narrows, this
+/// needs the same refusal or check and lowering will disagree about whether a
+/// splice is a loop.
 fn body_tail_calls_self(body: &[Term], name: &str) -> bool {
     match body.last().map(|t| &t.kind) {
         Some(TermKind::Call(n)) => n == name,
@@ -2511,6 +2559,13 @@ struct FuncBuilder<'a> {
     /// entry's mangled symbol and per-θ output shape, not the name-keyed
     /// `env`/`resolve`. Empty on the REPL/destructor/test paths.
     instantiations: &'a HashMap<Span, CallInst>,
+    /// Slice 8a phase 2 (R7): the call sites the checker resolved to a user
+    /// overload of a builtin-named word, span -> resolved callee name.
+    /// Consulted before the name-directed builtin dispatch in `lower_call`, so
+    /// a recorded `Vec2 +` site emits an `Instr::Call` to the user word
+    /// instead of `Bin(Add)`. Empty on every corpus/REPL/test path (the
+    /// checker records nothing there), so their lowering is byte-for-byte.
+    builtin_overloads: &'a HashMap<Span, String>,
     /// R14: the fixed input arity of each polymorphic word, name-keyed. How
     /// many args a polymorphic call pops (the `CallInst` carries the output
     /// shape, but the input count is name-constant across θ, so it lives here).
@@ -2655,6 +2710,7 @@ impl<'a> FuncBuilder<'a> {
             cells,
             refs,
             instantiations: empty_instantiations(),
+            builtin_overloads: empty_builtin_overloads(),
             poly_arities: empty_poly_arities(),
             combinators: empty_combinators(),
             cur_word_name,
@@ -3070,6 +3126,40 @@ impl<'a> FuncBuilder<'a> {
         let line = span.line;
         if let Some(&(_, value)) = self.locals.iter().find(|(n, _)| n == name) {
             self.stack.push(value); // i64 is Copy; reuse the value id.
+            return;
+        }
+        // Slice 8a phase 4 (R7): a call site the checker resolved to a user
+        // overload of a builtin-named word must dispatch to that word, not
+        // the name-directed builtin arms below (a literal name match like
+        // "+" would otherwise always win) nor the self-tail/back-edge checks
+        // further down (a word named `.` overloading print must not be
+        // miscategorized as a self-tail call on `.`). Same env-lookup +
+        // resolve + bundle-unpack shape as the ordinary user-word path in the
+        // `_` arm below, since this *is* that path, reached early.
+        if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
+            let (in_arity, out_arity, ret_ty) = *self
+                .env
+                .get(&sym_name)
+                .expect("checked user overload exists");
+            let split = self.stack.len() - in_arity;
+            let args = self.stack.split_off(split);
+            let bundle = match ret_ty {
+                Some(IrType::Struct(id)) if self.structs.layouts[id.index()].bundle => Some(id),
+                _ => None,
+            };
+            let ret = if out_arity == 1 || bundle.is_some() {
+                Some(self.fresh_value(ret_ty.unwrap_or(IrType::I64)))
+            } else {
+                None
+            };
+            let sym = (self.resolve)(&sym_name);
+            self.push_instr(Instr::Call(ret, sym, args));
+            if let Some(v) = ret {
+                self.stack.push(v);
+            }
+            if let Some(id) = bundle {
+                self.unpack_bundle(id);
+            }
             return;
         }
         // R10: a tail-position self-call inside a self-tail combinator splice
@@ -5702,6 +5792,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -5730,6 +5821,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6071,6 +6163,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6106,6 +6199,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6144,6 +6238,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6188,6 +6283,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6227,6 +6323,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6315,6 +6412,7 @@ mod tests {
                 refs: &Refs::default(),
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );
@@ -6913,6 +7011,7 @@ mod tests {
                 refs: &refs,
             },
             empty_instantiations(),
+            empty_builtin_overloads(),
             empty_poly_arities(),
             empty_combinators(),
         );

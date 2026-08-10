@@ -124,13 +124,25 @@ struct PolyWordEntry {
     word: WordDef,
     resolver: HashMap<String, String>,
     ir_lower_env: HashMap<String, ir::Arity>,
+    /// The defining-line body's resolved-overload record (R7), frozen
+    /// alongside `resolver`/`ir_lower_env`: a later instantiation lowers this
+    /// word's own body, so it must dispatch a builtin-overloaded call site the
+    /// same way the definition-time check resolved it, not the empty map.
+    /// Omitting this compiled the call and then lowered it as the builtin,
+    /// which crashed rather than merely mis-dispatched (segfault, not a wrong
+    /// answer) on pointer/aggregate operands.
+    builtin_overloads: HashMap<Span, String>,
 }
 
 /// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
 /// input/output counts and the output `IrType`, not the full typed effect.
-fn ir_arity_env(env: &HashMap<String, Sig>) -> HashMap<String, ir::Arity> {
+/// The REPL's env never carries more than one candidate per name (its
+/// redefinition model keeps exactly one live binding), so the sole candidate
+/// answers.
+fn ir_arity_env(env: &HashMap<String, Vec<check::Overload>>) -> HashMap<String, ir::Arity> {
     env.iter()
-        .map(|(name, sig)| {
+        .map(|(name, overloads)| {
+            let sig = &overloads[0].sig;
             let ret = sig.outputs.first().map(|&ty| ir::ir_type_of(ty));
             (name.clone(), (sig.inputs.len(), sig.outputs.len(), ret))
         })
@@ -142,10 +154,10 @@ fn ir_arity_env(env: &HashMap<String, Sig>) -> HashMap<String, ir::Arity> {
 /// `WordDef`. A free function over the one field rather than a `&self` method,
 /// so a caller can still borrow `self.arrays`/`self.owned_cells`/`self.refs`
 /// mutably alongside it (disjoint fields).
-fn checker_combinators(store: &HashMap<String, WordDef>) -> HashMap<String, check::Combinator<'_>> {
+fn checker_combinators(store: &HashMap<String, WordDef>) -> check::CombinatorEnv<'_> {
     store
         .iter()
-        .filter_map(|(name, word)| check::combinator_of(word).map(|c| (name.clone(), c)))
+        .filter_map(|(name, word)| check::combinator_of(word).map(|c| (name.clone(), vec![c])))
         .collect()
 }
 
@@ -1121,7 +1133,7 @@ impl Session {
         // R4 (Slice 6c): a `:type` line may name a retained combinator, so its
         // inference sees the session's inline view like any bare line.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, _insts) = check::infer_line(
+        let (net_stack, _insts, _overloads) = check::infer_line(
             &terms,
             &self.types,
             &env,
@@ -1138,16 +1150,33 @@ impl Session {
 
     /// The checker's typed env: builtins, the generated struct words, the
     /// variant-constructor words, plus every successfully-defined user word.
-    fn typed_env(&self) -> HashMap<String, Sig> {
-        let mut env = check::builtin_table();
+    /// Slice 8a fix 1: every entry is a single-candidate overload set (the
+    /// REPL's redefinition model keeps exactly one live binding per name, so
+    /// unlike a native module's `env` this one never grows a second
+    /// candidate); each candidate's `symbol` is its own bare name, matching
+    /// the bare-name keys `ir_arity_env`/the REPL's own `resolve` closures
+    /// already use, so a resolved overload record threaded into lowering
+    /// (item 3) needs no extra translation step.
+    fn typed_env(&self) -> HashMap<String, Vec<check::Overload>> {
+        // Builtins are table-resolved in the checker, not held in the env.
+        let mut env: HashMap<String, Vec<check::Overload>> = HashMap::new();
         for (name, sig) in check::struct_generated_sigs(&self.structs) {
-            env.insert(name, sig);
+            let symbol = name.clone();
+            env.insert(name, vec![check::Overload { sig, symbol }]);
         }
         for (name, sig) in check::enum_generated_sigs(&self.enums) {
-            env.insert(name, sig);
+            let symbol = name.clone();
+            env.insert(name, vec![check::Overload { sig, symbol }]);
         }
         for (name, entry) in &self.env {
-            env.insert(name.clone(), entry.sig.clone());
+            let symbol = name.clone();
+            env.insert(
+                name.clone(),
+                vec![check::Overload {
+                    sig: entry.sig.clone(),
+                    symbol,
+                }],
+            );
         }
         env
     }
@@ -1157,7 +1186,7 @@ impl Session {
     /// generation it was retained at (so `check_poly_call` mints the
     /// generation-stamped symbol, R2/R2b). Kept out of `typed_env` because a
     /// polymorphic word never enters the concrete env (R3).
-    fn poly_env(&self) -> HashMap<String, (PolySig, Option<u64>)> {
+    fn poly_env(&self) -> check::PolyEnv {
         self.poly_words
             .iter()
             .map(|(name, entry)| {
@@ -1167,7 +1196,7 @@ impl Session {
                     .as_deref()
                     .expect("a poly_words entry always has a polymorphic signature")
                     .clone();
-                (name.clone(), (sig, Some(entry.generation)))
+                (name.clone(), vec![(sig, Some(entry.generation))])
             })
             .collect()
     }
@@ -1248,6 +1277,7 @@ impl Session {
             funcs.extend(ir::lower_instantiation(
                 &inst.symbol,
                 sig,
+                &entry.builtin_overloads,
                 &inst.subst,
                 &entry.word.body,
                 &entry.ir_lower_env,
@@ -2199,7 +2229,11 @@ impl Session {
         // so its site collection sees the session's inline view. The poly-env
         // stays empty above (a `drop` overload is never polymorphic).
         let combinators = checker_combinators(&self.combinators);
-        let (sites, _insts) = check::check_def_collecting_drop_sites(
+        // Item 3: a `drop` override body's own resolved-overload sites are
+        // discarded here, same as `_insts` -- `synthesize_aggregate_destructors`
+        // below has no threading for them yet (a narrower, pre-existing gap
+        // than the crash item 3 fixes; see its call site).
+        let (sites, _insts, _overloads) = check::check_def_collecting_drop_sites(
             &self.drop_overloads[&id].1,
             &self.enums,
             &env,
@@ -2293,7 +2327,20 @@ impl Session {
         // multi-output gate below only ever sees a body that already
         // type-checked (`: twice ( 'T -- 'T 'T ) dup ;` fails the `Copy` gate
         // here as X1, never reaching the gate despite its two outputs).
-        check::check_poly_body(&word, &sig, &env, &self.structs, &self.enums, &self.arrays)?;
+        // R7: this body's resolved-overload call sites, frozen into
+        // `PolyWordEntry` alongside the resolver/arity snapshot below, so a
+        // later instantiation's lowering dispatches through them instead of
+        // an empty map.
+        let mut builtin_overloads: HashMap<Span, String> = HashMap::new();
+        check::check_poly_body(
+            &word,
+            &sig,
+            &env,
+            &self.structs,
+            &self.enums,
+            &self.arrays,
+            &mut builtin_overloads,
+        )?;
 
         // R3/R7/X3: a body resolving to two or more concrete outputs, or an
         // output row variable, is a clean located deferral. REPL lowering
@@ -2345,6 +2392,7 @@ impl Session {
                 word,
                 resolver,
                 ir_lower_env,
+                builtin_overloads,
             },
         );
         writeln!(writer, "defined {name}").map_err(|e| format!("writing stdout: {e}"))?;
@@ -2373,7 +2421,7 @@ impl Session {
         // definee, which outlives the check calls below.
         let mut combinators = checker_combinators(&self.combinators);
         if let Some(c) = check::combinator_of(&word) {
-            combinators.insert(name.clone(), c);
+            combinators.insert(name.clone(), vec![c]);
         }
         // R8: reject a cycle formed *across lines* (define `a`; define `b`
         // calling `a`; redefine `a` calling `b`) as the same located
@@ -2477,7 +2525,11 @@ impl Session {
         // combinator; thread the session's inline view so it inlines exactly as
         // native inlines one drawn from `module.words`.
         let combinators = checker_combinators(&self.combinators);
-        let insts = check::check_def(
+        // Item 3: `overloads` is this body's own resolved overload-dispatch
+        // call sites, threaded into `ir::lower_word` below so it dispatches an
+        // overloaded call exactly as a native word body does, rather than
+        // silently mis-lowering through the name-directed builtin arm.
+        let (insts, overloads) = check::check_def(
             &word,
             &self.enums,
             &env,
@@ -2501,7 +2553,13 @@ impl Session {
         // whatever generation `env` still holds for `name`; seed the definee's
         // own signature so ir derives its return type. The arity map for ir is
         // derived from the typed env (RK2): ir needs only counts + output type.
-        env.insert(name.clone(), sig.clone());
+        env.insert(
+            name.clone(),
+            vec![check::Overload {
+                sig: sig.clone(),
+                symbol: name.clone(),
+            }],
+        );
         let ir_lower_env = ir_arity_env(&env);
         let (mut structs, mut enums, arrays, mut cells, refs) = ir::build_registries(
             &self.structs,
@@ -2531,6 +2589,7 @@ impl Session {
                 &resolve,
                 regs,
                 &insts,
+                &overloads,
                 &poly_arities,
                 &combinator_bodies(&self.combinators),
             );
@@ -2661,7 +2720,7 @@ impl Session {
         // R4 (Slice 6c): a bare line may call a retained combinator; thread the
         // session's inline view so it inlines like native's `module.words` one.
         let combinators = checker_combinators(&self.combinators);
-        let (net_stack, insts) = check::infer_line(
+        let (net_stack, insts, line_overloads) = check::infer_line(
             terms,
             &self.types,
             &env,
@@ -2710,6 +2769,7 @@ impl Session {
                 &resolve,
                 regs,
                 &insts,
+                &line_overloads,
                 &poly_arities,
                 &bodies,
             );

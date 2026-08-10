@@ -1,0 +1,247 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+type :List = align 8 { b 24 }
+type :Popped = { :List, l }
+type :Summed = { :List, l }
+
+export function :List $push.2d.front(:List %v0, l %v1) {
+@start
+	%v2 =l copy 24
+	%v3 =l call $sooth_alloc(l %v2)
+	blit %v0, %v3, 24
+	%v4 =l alloc8 24
+	%v5 =w copy 1
+	%v6 =l add %v4, 0
+	storew %v5, %v6
+	%v7 =l add %v4, 8
+	storel %v1, %v7
+	%v8 =l add %v4, 16
+	storel %v3, %v8
+	ret %v4
+}
+
+export function :List $build(l %v0, :List %v1) {
+@start
+	%v3 =l alloc8 24
+	%v4 =l alloc8 24
+	blit %v1, %v3, 24
+	jmp @blk1
+@blk1
+	%v2 =l phi @start %v0, @blk3 %v8
+	%v5 =l copy 0
+	%v6 =w ceql %v2, %v5
+	jnz %v6, @blk2, @blk3
+@blk2
+	jmp @blk4
+@blk3
+	%v7 =l copy 1
+	%v8 =l sub %v2, %v7
+	%v9 =:List call $push.2d.front(:List %v3, l %v2)
+	blit %v9, %v4, 24
+	blit %v4, %v3, 24
+	jmp @blk1
+@blk4
+	ret %v3
+}
+
+export function :Popped $pop(:List %v0) {
+@start
+	%v2 =l add %v0, 0
+	%v1 =w loadw %v2
+	%v3 =w copy 0
+	%v4 =w ceqw %v1, %v3
+	jnz %v4, @blk1, @blk2
+@blk1
+	%v5 =l alloc8 24
+	%v6 =w copy 0
+	%v7 =l add %v5, 0
+	storew %v6, %v7
+	%v8 =l copy 0
+	%v9 =l alloc8 32
+	%v10 =l add %v9, 0
+	blit %v5, %v10, 24
+	%v11 =l add %v9, 24
+	storel %v8, %v11
+	jmp @blk3
+@blk2
+	%v12 =l add %v0, 8
+	%v13 =l loadl %v12
+	%v14 =l add %v0, 16
+	%v15 =l loadl %v14
+	%v16 =l alloc8 24
+	blit %v15, %v16, 24
+	%v17 =l copy 24
+	call $sooth_free(l %v15, l %v17)
+	%v18 =l alloc8 32
+	%v19 =l add %v18, 0
+	blit %v16, %v19, 24
+	%v20 =l add %v18, 24
+	storel %v13, %v20
+	jmp @blk3
+@blk3
+	%v21 =l phi @blk1 %v9, @blk2 %v18
+	ret %v21
+}
+
+export function :Summed $sum.2d.first(:List %v0, l %v1, l %v2) {
+@start
+	%v3 =l alloc8 24
+	%v4 =l alloc8 24
+	blit %v0, %v3, 24
+	%v9 =l alloc8 32
+	jmp @blk1
+@blk1
+	%v5 =l phi @start %v1, @blk3 %v18
+	%v6 =l phi @start %v2, @blk3 %v16
+	%v7 =l copy 0
+	%v8 =w ceql %v5, %v7
+	jnz %v8, @blk2, @blk3
+@blk2
+	%v10 =l add %v9, 0
+	blit %v3, %v10, 24
+	%v11 =l add %v9, 24
+	storel %v6, %v11
+	jmp @blk4
+@blk3
+	%v12 =:Popped call $pop(:List %v3)
+	%v13 =l add %v12, 0
+	%v14 =l add %v12, 24
+	%v15 =l loadl %v14
+	%v16 =l add %v15, %v6
+	%v17 =l copy 1
+	%v18 =l sub %v5, %v17
+	blit %v13, %v4, 24
+	blit %v4, %v3, 24
+	jmp @blk1
+@blk4
+	ret %v9
+}
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 10
+	%v1 =l alloc8 24
+	%v2 =w copy 0
+	%v3 =l add %v1, 0
+	storew %v2, %v3
+	%v4 =:List call $build(l %v0, :List %v1)
+	%v5 =l copy 3
+	%v6 =l copy 0
+	%v7 =:Summed call $sum.2d.first(:List %v4, l %v5, l %v6)
+	%v8 =l add %v7, 0
+	%v9 =l add %v7, 24
+	%v10 =l loadl %v9
+	call $printf(l $fmt, l %v10, ...)
+	call $sooth_enum_drop_0(:List %v8)
+	ret
+}
+
+export function $sooth_struct_drop_0(:Popped %v0) {
+@start
+	%v1 =l add %v0, 0
+	call $sooth_enum_drop_0(:List %v1)
+	ret
+}
+
+export function $sooth_struct_drop_1(:Summed %v0) {
+@start
+	%v1 =l add %v0, 0
+	call $sooth_enum_drop_0(:List %v1)
+	ret
+}
+
+export function $sooth_enum_drop_0(:List %v0) {
+@start
+	%v8 =l alloc8 24
+	jmp @blk1
+@blk1
+	%v1 =l phi @start %v0, @blk3 %v8
+	%v3 =l add %v1, 0
+	%v2 =w loadw %v3
+	%v4 =w copy 0
+	%v5 =w ceqw %v2, %v4
+	jnz %v5, @blk2, @blk3
+@blk2
+	ret
+@blk3
+	%v6 =l add %v1, 16
+	%v7 =l loadl %v6
+	blit %v7, %v8, 24
+	%v9 =l copy 24
+	call $sooth_free(l %v7, l %v9)
+	jmp @blk1
+}
+
+export function $sooth_cell_drop_0(l %v0) {
+@start
+	%v1 =l alloc8 24
+	blit %v0, %v1, 24
+	%v2 =l copy 24
+	call $sooth_free(l %v0, l %v2)
+	call $sooth_enum_drop_0(:List %v1)
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

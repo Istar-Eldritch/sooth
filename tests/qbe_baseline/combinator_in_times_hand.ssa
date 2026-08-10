@@ -1,0 +1,175 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+type :arr_0 = align 8 { b 24 }
+
+export function :arr_0 $mk(l %v0) {
+@start
+	%v1 =l copy 0
+	%v2 =l copy 3
+	%v3 =l alloc8 24
+	%v4 =l add %v3, 0
+	storel %v1, %v4
+	%v5 =l add %v3, 8
+	storel %v1, %v5
+	%v6 =l add %v3, 16
+	storel %v1, %v6
+	%v7 =l add %v3, 0
+	%v8 =l copy 0
+	%v9 =l copy %v8
+	%v10 =l copy 3
+	%v11 =w cultl %v9, %v10
+	jnz %v11, @blk1, @blk2
+@blk2
+	%v12 =l copy 11
+	%v13 =l copy 3
+	call $sooth_oob_trap(l %v12, l %v9, l %v13)
+	jmp @blk1
+@blk1
+	%eoff0 =l mul %v9, 8
+	%v14 =l add %v7, %eoff0
+	storel %v0, %v14
+	%v15 =l add %v3, 0
+	%v16 =l copy 1
+	%v17 =l copy %v16
+	%v18 =l copy 3
+	%v19 =w cultl %v17, %v18
+	jnz %v19, @blk3, @blk4
+@blk4
+	%v20 =l copy 12
+	%v21 =l copy 3
+	call $sooth_oob_trap(l %v20, l %v17, l %v21)
+	jmp @blk3
+@blk3
+	%eoff1 =l mul %v17, 8
+	%v22 =l add %v15, %eoff1
+	%v23 =l copy 1
+	%v24 =l add %v0, %v23
+	storel %v24, %v22
+	%v25 =l add %v3, 0
+	%v26 =l copy 2
+	%v27 =l copy %v26
+	%v28 =l copy 3
+	%v29 =w cultl %v27, %v28
+	jnz %v29, @blk5, @blk6
+@blk6
+	%v30 =l copy 13
+	%v31 =l copy 3
+	call $sooth_oob_trap(l %v30, l %v27, l %v31)
+	jmp @blk5
+@blk5
+	%eoff2 =l mul %v27, 8
+	%v32 =l add %v25, %eoff2
+	%v33 =l copy 2
+	%v34 =l add %v0, %v33
+	storel %v34, %v32
+	ret %v3
+}
+
+export function $sooth_main() {
+@start
+	%v0 =l copy 3
+	%v2 =l copy 0
+	jmp @blk1
+@blk1
+	%v3 =l phi @start %v2, @blk6 %v22
+	%v4 =w csltl %v3, %v0
+	jnz %v4, @blk2, @blk3
+@blk2
+	%v5 =:arr_0 call $mk(l %v3)
+	%v6 =l copy 3
+	%v8 =l copy 0
+	jmp @blk4
+@blk4
+	%v9 =l phi @blk2 %v8, @blk7 %v20
+	%v10 =w csltl %v9, %v6
+	jnz %v10, @blk5, @blk6
+@blk5
+	%v11 =l add %v5, 0
+	%v12 =l copy %v9
+	%v13 =l copy 3
+	%v14 =w cultl %v12, %v13
+	jnz %v14, @blk7, @blk8
+@blk8
+	%v15 =l copy 18
+	%v16 =l copy 3
+	call $sooth_oob_trap(l %v15, l %v12, l %v16)
+	jmp @blk7
+@blk7
+	%eoff0 =l mul %v12, 8
+	%v17 =l add %v11, %eoff0
+	%v18 =l loadl %v17
+	call $printf(l $fmt, l %v18, ...)
+	%v19 =l copy 1
+	%v20 =l add %v9, %v19
+	jmp @blk4
+@blk6
+	%v21 =l copy 1
+	%v22 =l add %v3, %v21
+	jmp @blk1
+@blk3
+	ret
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}
