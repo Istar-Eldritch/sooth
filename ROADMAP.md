@@ -585,10 +585,11 @@ own scan exactly like one it binds — dying at its own last use in an execute-o
 pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
 prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
 
-**Next action: Phase 4 Slice 8a (ad-hoc dispatch: static overloading, the mechanism).** 7b
-(capturing closures) is done (see "7b — capturing closures is implemented" above); 8a retires
-the hardcoded operator/`.`/`len` dispatch match arms into a real overload table (brief written,
-`docs/phase4-slice8a-brief.md`).
+**Next action: Phase 4 Slice 9.** 7b (capturing closures) is done (see "7b — capturing
+closures is implemented" above). 8a (ad-hoc dispatch: static overloading, the mechanism) is
+also done on `main` (`e20c52f`), though its own "is implemented" exit marker was never added
+to this file's 8a heading below — a pre-existing gap, not fixed here. Slice 9's
+implementation is already in progress in `impl/phase4_slice9_spec-2608100454`.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
