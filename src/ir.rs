@@ -2241,11 +2241,17 @@ pub(crate) fn lower_instantiation(
 }
 
 /// 7b/R16/R17: turn the env `word` holding capture `cap` into the value the
-/// lowered body binds. A reference capture *is* the pointer (carry its referent
-/// shape across); a scalar snapshot reinterprets the word back to the scalar's
-/// own type (`Ptr` is neither arithmetic nor printable) with a typed add-of-
-/// zero. QBE accepts the reinterpret today; a future WASM lowering where `env`
-/// is a linear-memory offset would route it through an explicit reinterpret.
+/// lowered body binds. A reference capture *is* the pointer (carry its
+/// referent shape across); a scalar snapshot reinterprets the word back to
+/// the scalar's own type (`Ptr` is neither arithmetic nor printable) via a
+/// one-word scratch slot: `FieldStore` the received `Ptr`-typed word (its full
+/// width, matching the env slot `build_env` wrote the capture's own bytes
+/// into) then `FieldLoad` it back at `cap.ty`'s own width/class. A typed
+/// add-of-zero previously stood in for this -- correct only when `cap.ty`
+/// shared `Ptr`'s width and register class (an integer), wrong for `bool`
+/// (narrower, silently read garbage upper bytes) and any float (a mismatched-
+/// class `add` the backend rejects outright). The memory round-trip is
+/// class-agnostic and needs no assumption about `Ptr`'s concrete width (NF1).
 fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value {
     match cap.referent {
         Some(referent) => {
@@ -2253,10 +2259,11 @@ fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value
             word
         }
         None => {
-            let zero = b.fresh_value(cap.ty);
-            b.push_instr(Instr::Const(zero, 0));
+            let slot = b.fresh_value(IrType::Ptr);
+            b.push_alloc(Instr::Alloc(slot, WORD_WIDTH, WORD_WIDTH));
+            b.push_instr(Instr::FieldStore(slot, word));
             let v = b.fresh_value(cap.ty);
-            b.push_instr(Instr::Bin(v, BinOp::Add, word, zero));
+            b.push_instr(Instr::FieldLoad(v, slot));
             v
         }
     }

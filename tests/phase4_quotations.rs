@@ -208,6 +208,66 @@ fn capturing_scalar_through_nested_quotation_snapshots() {
     assert_eq!(code, 0);
 }
 
+// -- T-repoint-bool/f32/f64/ints: every scalar type R15 case 1 admits --------
+// -- round-trips correctly through the one-word env slot (B2 review fix) -----
+
+#[test]
+fn capturing_bool_scalar_snapshots_into_env() {
+    // `x` is a captured `bool`, snapshotted into the env and read back. Before
+    // the fix, reinterpreting the one-word env slot with a typed add-of-zero
+    // segfaulted for `bool` (narrower than the env slot's own width, so the
+    // add read garbage upper bytes); the fix round-trips through a scratch
+    // slot at each type's own width instead.
+    let src = "type: BoolHolder q [ -- bool ] ;\n\
+               : main ( -- ) true | x | [ x ] BoolHolder BoolHolder>q call . ;\n";
+    let (stdout, code) = run_src("qcapbool", src);
+    assert_eq!(stdout, "true\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn capturing_f32_scalar_snapshots_into_env() {
+    // `x` is a captured `f32`; the QBE backend previously hard-failed here
+    // (`invalid type for first operand ... in add`, a `d`/`l`-class mismatch)
+    // since a float capture cannot share `Ptr`'s add-of-zero reinterpret.
+    // 2.5 + 4.0 = 6.5, widened to `f64` by `.`.
+    let src = "type: F32Holder q [ f32 -- f32 ] ;\n\
+               : main ( -- ) 2.5 >f32 | x | [ x + ] F32Holder F32Holder>q 4.0 >f32 swap call . ;\n";
+    let (stdout, code) = run_src("qcapf32", src);
+    assert_eq!(stdout, "6.5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn capturing_f64_scalar_snapshots_into_env() {
+    // The `f64` sibling of the `f32` case above, same backend failure mode.
+    // 2.5 + 4.0 = 6.5.
+    let src = "type: Holder q [ f64 -- f64 ] ;\n\
+               : main ( -- ) 2.5 | x | [ x + ] Holder Holder>q 4.0 swap call . ;\n";
+    let (stdout, code) = run_src("qcapf64", src);
+    assert_eq!(stdout, "6.5\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn capturing_i32_u32_and_usize_scalars_snapshot_into_env() {
+    // Spot-check the narrower/unsigned integer captures the review flagged as
+    // untested: `i32`, `u32`, `usize` each round-trip through the env
+    // correctly (they already shared `Ptr`'s register class under the old
+    // add-of-zero reinterpret, so these were not expected to regress, but were
+    // never actually pinned by a golden). 10 + 4 = 14, 20 + 4 = 24, 30 + 4 = 34.
+    let src = "type: I32Holder q [ i32 -- i32 ] ;\n\
+               type: U32Holder q [ u32 -- u32 ] ;\n\
+               type: UsizeHolder q [ usize -- usize ] ;\n\
+               : main ( -- )\n\
+               10 >i32 | a | [ a + ] I32Holder I32Holder>q 4 >i32 swap call .\n\
+               20 >u32 | b | [ b + ] U32Holder U32Holder>q 4 >u32 swap call .\n\
+               30 >usize | c | [ c + ] UsizeHolder UsizeHolder>q 4 >usize swap call . ;\n";
+    let (stdout, code) = run_src("qcapints", src);
+    assert_eq!(stdout, "14\n24\n34\n");
+    assert_eq!(code, 0);
+}
+
 // -- T-makeb: an outer-rooted reference capture (a `&T` parameter) is admitted -
 
 #[test]
