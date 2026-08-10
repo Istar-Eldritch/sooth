@@ -293,6 +293,32 @@ fn escaping_closure_over_frame_local_borrow_is_past_owning_frame() {
     );
 }
 
+// -- T-makea-param-store: a frame capture escaping via a store through a -----
+// -- parameter-rooted reference is rejected (B1 review fix) -------------------
+
+#[test]
+fn frame_capture_escaping_via_store_through_param_ref_is_past_owning_frame() {
+    // `install`'s closure borrows `r = &arr`, a *frame* local of `install`, and
+    // is stored into an element of `tbl` reached through the `&![...]`
+    // *parameter* reference. `tbl` itself is owned by `main`, outside
+    // `install`'s frame, so the store boundary must be treated as escaping
+    // (the same as returning the closure directly) even though the store
+    // syntax looks like the in-frame R21 case. Before the fix this compiled
+    // clean and stored a dangling reference into `tbl`.
+    let err = check_error(
+        ": seed ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n\
+         : install ( &![ [ i64 -- i64 ] 2 ] -- )\n\
+         5 4 fill | arr |\n\
+         &arr | r |\n\
+         0 >usize &!> [ r 0 >usize &> @ + ] ! ;\n\
+         : main ( -- ) seed 2 fill | tbl | &!tbl install &tbl 0 &> @ 4 swap call . tbl drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: an escaping closure captures `r`, a local of this frame, whose storage does not survive the return (line 5)"
+    );
+}
+
 // -- T-quot-cap-deferred: capturing a quotation-typed name is deferred --------
 
 #[test]

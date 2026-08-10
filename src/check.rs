@@ -3848,19 +3848,8 @@ fn check_terms_word(
             if let Some(QuotRef::Known(id)) = final_stack.get(i).and_then(|s| s.quot) {
                 let span = prov.quotations[id.0].span;
                 final_stack[i] = materialize_quotation_at_boundary(
-                    id,
-                    eff,
-                    "be returned",
-                    &word.name,
-                    span,
-                    &ctx,
-                    env,
-                    arrays,
-                    cells,
-                    refs,
-                    &mut prov,
-                    &mut scope,
-                    poly,
+                    id, eff, true, &word.name, span, &ctx, env, arrays, cells, refs, &mut prov,
+                    &mut scope, poly,
                 )?;
             }
         }
@@ -6464,6 +6453,21 @@ enum CaptureClass {
     OuterRooted,
 }
 
+/// Whether a reference's root names a *current-frame* local -- the same
+/// frame-vs-outer test `classify_capture`'s `Type::Ref` arm applies, reused so
+/// a `!`/`+!` store through a reference computes its own escaping boundary
+/// the same way (a store through a reference rooted outside the frame is a
+/// materialization boundary the closure can outlive, exactly like a return).
+fn ref_root_is_in_frame(deriv: Option<DerivId>, prov: &Provenance, scope: &Scope) -> bool {
+    match deriv {
+        Some(id) => match &prov.deriv(id).owned_root {
+            Some(place) => scope.local(place).is_some(),
+            None => false,
+        },
+        None => false,
+    }
+}
+
 /// R15: classify a captured name by its binding (case 4 quotation-typed names
 /// are peeled off before this runs). The frame-rooted/outer-rooted split reuses
 /// the exact `owned_root`-vs-current-frame test the R12 exit-row check
@@ -6480,13 +6484,13 @@ fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) -> CaptureCla
         // local is frame-rooted; a `&T` parameter carries no deriv (or a
         // reborrow with no owned root) and is outer-rooted by construction,
         // matching `check_reference_across_back_edge`'s own `deriv` handling.
-        Type::Ref(..) => match b.deriv {
-            Some(id) => match &prov.deriv(id).owned_root {
-                Some(place) if scope.local(place).is_some() => CaptureClass::FrameRooted,
-                _ => CaptureClass::OuterRooted,
-            },
-            None => CaptureClass::OuterRooted,
-        },
+        Type::Ref(..) => {
+            if ref_root_is_in_frame(b.deriv, prov, scope) {
+                CaptureClass::FrameRooted
+            } else {
+                CaptureClass::OuterRooted
+            }
+        }
         // Case 1: any other local is a scalar.
         _ => CaptureClass::Scalar,
     }
@@ -6576,16 +6580,19 @@ fn check_capture_admission(
 /// R7/R15/D4: a materialization boundary. Materialize a non-capturing `Known`
 /// literal into a runtime quotation value, or run the R15 admission rule on a
 /// capturing one. (i) run the boolean capture gate (R6); (ii) if it captures,
-/// admit or reject per R15 (`escaping` from `boundary`'s wording); (iii)
-/// confirm the literal against the boundary's expected `Type::Quotation(eff)`
-/// via `check_literal_against_declared_effect`, and return the slot *erased*
+/// admit or reject per R15 against the caller-computed `escaping` (true at a
+/// word-output/branch-join boundary the closure cannot outlive its call from,
+/// or at a store through a reference rooted outside the current frame; false
+/// at a genuinely in-frame boundary); (iii) confirm the literal against the
+/// boundary's expected `Type::Quotation(eff)` via
+/// `check_literal_against_declared_effect`, and return the slot *erased*
 /// (`quot: None`, a real `Type::Quotation`) -- the signal `call`/`times` read
 /// to emit an indirect call rather than a splice.
 #[allow(clippy::too_many_arguments)]
 fn materialize_quotation_at_boundary(
     id: QuotId,
     eff: &'static QuotEffect,
-    boundary: &str,
+    escaping: bool,
     word: &str,
     span: Span,
     ctx: &Ctx,
@@ -6600,7 +6607,6 @@ fn materialize_quotation_at_boundary(
     let enclosing: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let body = prov.quotations[id.0].body.clone();
     let surviving = if body_captures_enclosing(&body, &enclosing) {
-        let escaping = matches!(boundary, "be returned" | "be left on a branch");
         check_capture_admission(id, escaping, span, ctx, prov, scope)?
     } else {
         None
@@ -7285,28 +7291,24 @@ fn check_term(
             // materialization boundary (an array element or a struct field via
             // reference). Materialize a `Known` literal in place before
             // `check_access_word` (whose bare-quotation store guard would else
-            // reject it), running the R15 admission rule on a capturing one (a
-            // store is an in-frame boundary). The referent's declared effect is
-            // the boundary's expected effect.
+            // reject it), running the R15 admission rule on a capturing one.
+            // The store is only an in-frame boundary when the `&!` referent's
+            // own root is a local of *this* frame (R21) -- a `&!` reached
+            // through a parameter/global-rooted reference chain writes into
+            // storage this frame does not own, so a frame-rooted capture
+            // stored there escapes exactly as if it had been returned (B1:
+            // otherwise a closure over a frame-local borrow, stored through a
+            // `&!` parameter, would outlive the frame that owns its referent).
+            // The referent's declared effect is the boundary's expected effect.
             if matches!(name.as_str(), "!" | "+!") && stack.len() >= 2 {
                 let vi = stack.len() - 1;
                 if let Some(QuotRef::Known(id)) = stack[vi].quot {
                     if let Some((Type::Quotation(eff), _)) = ref_parts(stack[vi - 1].ty, refs) {
                         let qspan = prov.quotations[id.0].span;
+                        let escaping = !ref_root_is_in_frame(stack[vi - 1].deriv, prov, scope);
                         stack[vi] = materialize_quotation_at_boundary(
-                            id,
-                            eff,
-                            "be stored",
-                            name,
-                            qspan,
-                            ctx,
-                            env,
-                            arrays,
-                            cells,
-                            refs,
-                            prov,
-                            scope,
-                            poly,
+                            id, eff, escaping, name, qspan, ctx, env, arrays, cells, refs, prov,
+                            scope, poly,
                         )?;
                     }
                 }
@@ -7438,18 +7440,7 @@ fn check_term(
                 if let Type::Quotation(eff) = *want {
                     if let Some(QuotRef::Known(id)) = found.quot {
                         stack[base + i] = materialize_quotation_at_boundary(
-                            id,
-                            eff,
-                            "be stored",
-                            name,
-                            span,
-                            ctx,
-                            env,
-                            arrays,
-                            cells,
-                            refs,
-                            prov,
-                            scope,
+                            id, eff, false, name, span, ctx, env, arrays, cells, refs, prov, scope,
                             poly,
                         )?;
                         continue;
