@@ -7325,12 +7325,33 @@ fn check_term(
                         )?;
                     }
                 }
-                // R19/R22: storing an erased closure through a `&!` referent
-                // makes the referent's owning aggregate its carrier -- the
-                // surviving set rides onto that root binding so the captures
-                // stay live to a later fetch-and-`call` (R20) and cannot
-                // silently escape by returning the aggregate (R22).
+                // Review fix: the gate above only fires for a value that is
+                // still a literal `Known` quotation. A value already erased
+                // into a struct/array/cell carrier (its `surviving` set is
+                // non-empty but `quot` is `None`) escapes exactly the same
+                // way if the store's referent is rooted outside this frame --
+                // check that here, before the carried set is ever unioned
+                // onto anything. Guarded on `ref_parts` succeeding so a
+                // malformed non-reference operand still falls through to
+                // `check_access_word`'s ordinary type-mismatch diagnostic.
                 if let Some(set) = stack[vi].surviving {
+                    if ref_parts(stack[vi - 1].ty, refs).is_some()
+                        && !ref_root_is_in_frame(stack[vi - 1].deriv, prov, scope)
+                    {
+                        if let Some(member) =
+                            prov.surviving_set(set).iter().find(|m| m.frame_rooted)
+                        {
+                            return Err(past_owning_frame_error(ctx, span, &member.name));
+                        }
+                        if prov.surviving_set_is_bundle(set) {
+                            return Err(multi_capture_escaping_error(ctx, span));
+                        }
+                    }
+                    // R19/R22: storing an erased closure through a `&!` referent
+                    // makes the referent's owning aggregate its carrier -- the
+                    // surviving set rides onto that root binding so the captures
+                    // stay live to a later fetch-and-`call` (R20) and cannot
+                    // silently escape by returning the aggregate (R22).
                     let root = stack[vi - 1]
                         .deriv
                         .and_then(|did| prov.deriv(did).owned_root.clone());
@@ -7343,7 +7364,9 @@ fn check_term(
                     }
                 }
             }
-            if let Some(stack) = check_access_word(name, span, &mut stack, ctx, arrays, refs)? {
+            if let Some(stack) =
+                check_access_word(name, span, &mut stack, ctx, arrays, refs, scope, prov)?
+            {
                 return Ok(stack);
             }
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
@@ -7491,11 +7514,20 @@ fn check_term(
             // word-output escape guard (R22) can see a frame capture leaving
             // through the carrier. The union is `None` for the overwhelming
             // majority of calls (no closure argument), a no-op there.
+            //
+            // Review fix: this same generic dispatch also handles a struct
+            // field getter whose field type is `Quotation` (not `is_aggregate`)
+            // -- e.g. `Holder>q`, left to the env path because
+            // `check_struct_get_word` only claims an aggregate-typed field. A
+            // quotation-typed output legitimately carries the closure onward
+            // exactly as an aggregate output does, so it forwards too.
             let carried = (base..stack.len())
                 .fold(None, |acc, i| prov.union_surviving(acc, stack[i].surviving));
             stack.truncate(base);
             for ty in &sig.outputs {
-                let surviving = if carried.is_some() && ty.is_aggregate() {
+                let surviving = if carried.is_some()
+                    && (ty.is_aggregate() || matches!(ty, Type::Quotation(_)))
+                {
                     carried
                 } else {
                     None
@@ -8718,6 +8750,7 @@ fn check_reference_word(
 /// to a `Copy` referent, which covers a Copy *aggregate* as well as a Copy
 /// scalar; `@` is typed for both `&T` and `&!T` directly, so there is no
 /// `&!T -> &T` demotion coercion to write.
+#[allow(clippy::too_many_arguments)]
 fn check_access_word(
     name: &str,
     span: Span,
@@ -8725,6 +8758,8 @@ fn check_access_word(
     ctx: &Ctx,
     arrays: &[ArrayDecl],
     refs: &[RefDecl],
+    scope: &Scope,
+    prov: &Provenance,
 ) -> Result<Option<Vec<Slot>>, String> {
     let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
     match name {
@@ -8748,8 +8783,25 @@ fn check_access_word(
             if !is_copy(referent, ctx.structs(), ctx.enums(), arrays) {
                 return Err(access_of_linear_referent_error(ctx, span, "@", referent));
             }
+            // Review fix: `@` reads an *element* of an aggregate the
+            // reference roots into (an array slot, a struct field), not the
+            // whole named place, so it never sees a `surviving` set that
+            // rides on a `Slot` directly (only a store onto the root binding,
+            // R20, records one). Look the root binding up by the reference's
+            // own provenance (`owned_root`, generic over array/struct/cell
+            // chains) and forward its surviving set (if any) onto the
+            // fetched value -- the same fetch-side half of the store-side
+            // union `!`/`+!` already performs.
+            let surviving = stack[n - 1]
+                .deriv
+                .and_then(|id| prov.deriv(id).owned_root.clone())
+                .and_then(|root| scope.local(&root))
+                .and_then(|b| b.surviving);
             stack.truncate(n - 1);
-            stack.push(Slot::computed(referent));
+            stack.push(Slot {
+                surviving,
+                ..Slot::computed(referent)
+            });
         }
         "!" | "+!" => {
             let n = stack.len();
@@ -8970,9 +9022,17 @@ fn check_owned_cell_word(
                     payload,
                 ));
             }
+            // Review fix: forward the payload's surviving set (R19) onto the
+            // cell -- `^` allocating a closure-carrying value must keep it
+            // visible to R22's return guard exactly as a struct/enum
+            // constructor does.
+            let surviving = stack[n - 1].surviving;
             let cell_ty = intern_owned_cell_type(cells, payload);
             stack.truncate(n - 1);
-            stack.push(Slot::computed(cell_ty));
+            stack.push(Slot {
+                surviving,
+                ..Slot::computed(cell_ty)
+            });
         }
         "^>" => {
             let n = stack.len();
@@ -8987,9 +9047,15 @@ fn check_owned_cell_word(
                     stack[n - 1].ty,
                 ));
             };
+            // Review fix: forward the cell's own surviving set onto the
+            // extracted payload -- the inverse of `^`'s forward above.
+            let surviving = stack[n - 1].surviving;
             let payload = cells[id.index()].payload;
             stack.truncate(n - 1);
-            stack.push(Slot::computed(payload));
+            stack.push(Slot {
+                surviving,
+                ..Slot::computed(payload)
+            });
         }
         "^|>" => {
             let n = stack.len();
@@ -9007,7 +9073,12 @@ fn check_owned_cell_word(
                 ));
             }
             // Non-consuming: the cell stays, the payload copy is pushed atop it.
-            stack.push(Slot::computed(payload));
+            // Review fix: forward the cell's surviving set (R19) onto the
+            // peeked copy too, same as `^>`'s consuming fetch.
+            stack.push(Slot {
+                surviving: stack[n - 1].surviving,
+                ..Slot::computed(payload)
+            });
         }
         _ => return Ok(None),
     }
@@ -9062,8 +9133,12 @@ fn check_struct_peek_word(
     // The peek is non-consuming and pushes the field's *interior address*,
     // so two peeks of one field of one struct are two names for one region.
     let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
+    // Review fix: forward the struct operand's surviving set (R19) onto the
+    // peeked field -- a closure the struct carries stays visible through a
+    // peek exactly as it would through the consuming getter below.
     stack.push(Slot {
         alias,
+        surviving: top.surviving,
         ..Slot::computed(field_ty)
     });
     Ok(Some(std::mem::take(stack)))
@@ -9117,8 +9192,13 @@ fn check_struct_get_word(
     }
     let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
     stack.truncate(n - 1);
+    // Review fix: forward the struct operand's surviving set (R19) onto the
+    // extracted field -- an aggregate field carrying a closure (a nested
+    // struct/array/cell) must keep that closure visible to R22's return
+    // guard past this getter.
     stack.push(Slot {
         alias,
+        surviving: top.surviving,
         ..Slot::computed(field_ty)
     });
     Ok(Some(std::mem::take(stack)))
