@@ -585,10 +585,10 @@ own scan exactly like one it binds — dying at its own last use in an execute-o
 pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
 prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
 
-**Next action: Phase 4 Slice 7b (capturing closures).** 7a (non-capturing quotations as values)
-is done; 7b inherits both 6f's settled last-use rule and the capture-propagation obligation
-noted above — re-ground it against whatever escape rule 7b settles on, once a quotation can
-escape the block that binds it, rather than inheriting it unexamined.
+**Next action: Phase 4 Slice 8a (ad-hoc dispatch: static overloading, the mechanism).** 7b
+(capturing closures) is done (see "7b — capturing closures is implemented" above); 8a retires
+the hardcoded operator/`.`/`len` dispatch match arms into a real overload table (brief written,
+`docs/phase4-slice8a-brief.md`).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
