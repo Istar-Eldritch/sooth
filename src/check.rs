@@ -8966,8 +8966,16 @@ fn check_array_word(
                 return Err(fill_of_linear_element_error(ctx, span, element.ty));
             }
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
+            // Review fix: forward the element's surviving set (R19) onto the
+            // array -- `fill` replicates one closure-carrying element N
+            // times, so the array as a whole is that closure's carrier
+            // exactly as a struct/enum constructor's output is.
+            let surviving = element.surviving;
             stack.truncate(n - 2);
-            stack.push(Slot::computed(array_ty));
+            stack.push(Slot {
+                surviving,
+                ..Slot::computed(array_ty)
+            });
         }
         "len" => {
             let n = stack.len();
