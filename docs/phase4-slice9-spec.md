@@ -6,8 +6,10 @@ slice — `Bool`-as-enum and `if`-as-word together — as a mechanical migration
 That was true for the `Bool` half, which is what this document now describes.
 It was false for the `if` half: making `if` an ordinary word turned out to need
 a row variable inside a quotation's declared effect, which does not parse
-before ROADMAP slice 10a. That half is split out as slice 9b
-(`docs/phase4-slice9b-brief.md`), blocked on 10a, not attempted here.
+before ROADMAP slice 10a. That half is split out as **slice 10c**
+(`docs/phase4-slice10c-brief.md`) — numbered into slice 10's lineage rather than
+slice 9's, because it extends 10a's row mechanism and depends on nothing this
+slice shipped beyond `Bool` being an enum. Not attempted here.
 
 The original brief (`docs/phase4-slice9-brief.md`) is the discovery document and
 remains the record of why the ROADMAP's framing was wrong on both halves.
@@ -92,10 +94,12 @@ clean, 1,664 tests pass (0 failed), including
 `if` as an ordinary clause-bodied word and `cond` as a fixed-arity combinator
 built from it. The dispatch half is sound (clause dispatch on `Bool` is an
 independent primitive, no circularity, and the guard currently blocking a
-quotation-taking clause body is stale — see the brief), but the signature
-`( [ ..a -- ..b ] [ ..a -- ..b ] Bool -- ..b )` cannot be declared today: a row
-variable is legal at a word's own top level but not inside a nested quotation's
-declared effect, which is ROADMAP slice 10a's mechanism. Findings, the exact
-repro, and what survives unchanged into the next spec are recorded in
-`docs/phase4-slice9b-brief.md`. Do not re-derive them; slice 9b is blocked on
-10a landing, not on anything in this document.
+quotation-taking clause body is stale — see the brief), but the signature it
+needs cannot be declared today: a row variable is legal at a word's own top
+level but not inside a nested quotation's declared effect, which is ROADMAP
+slice 10a's mechanism. Findings, the exact repro, and what survives unchanged
+are recorded in `docs/phase4-slice10c-brief.md` — including why that brief's
+original target signature (`[ ..a -- ..b ]`, two rows differing per side) was
+itself wrong, and the `~[ ..i -- ..o ]` inline-only-quotation direction that
+replaced it. Do not re-derive them; 10c gates on 10a phases 1–2, not on
+anything in this document.

@@ -590,8 +590,9 @@ overloading, the mechanism) are both done on `main`, though 8a's own "is impleme
 marker was never added to this file's 8a heading below — a pre-existing gap, not fixed here.
 Slice 9 shipped P1–P2 only (`Bool` as a library enum, merged at `c5db035`); its `if`/`cond`
 half (P3–P5) needs a row variable inside a quotation's declared effect, which does not parse
-before slice 10a, and is split out as slice 9b (`docs/phase4-slice9b-brief.md`), blocked on
-10a. 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
+before slice 10a, and is split out as **slice 10c** (`docs/phase4-slice10c-brief.md`),
+renumbered into slice 10's lineage since it extends 10a's row mechanism and gates on 10a
+phases 1–2 (not on 10b). 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
 left open (see 8b's heading below).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
@@ -2073,22 +2074,44 @@ then find out what the compiler owes it.
    dispatch is an independent primitive; the old `clause_bodied_quotation_word_error` guard
    blocking a quotation-taking clause body is stale, its own comment naming slice 7 — now
    shipped — as the intended lift), but its necessary signature,
-   `( [ ..a -- ..b ] [ ..a -- ..b ] Bool -- ..b )`, needs a row variable inside a *quotation's
-   declared effect*, which does not parse before slice 10a (below). So `if`/`cond`-as-words
-   is split out as **slice 9b**, blocked on 10a, not on anything this entry originally named;
-   findings recorded in `docs/phase4-slice9b-brief.md`.
+   needs a row variable inside a *quotation's declared effect*, which does not parse before
+   slice 10a (below). So `if`/`cond`-as-words is split out as **slice 10c** — numbered into
+   slice 10's lineage, not slice 9's, because what it depends on is 10a's row mechanism (this
+   slice's `Bool` half is shipped and no longer a gate) and it extends that mechanism's own
+   representation and grounding code. Findings, including why the two-differing-rows shape
+   this entry first assumed was wrong, in `docs/phase4-slice10c-brief.md`.
 
 10. **Rows in quotation effects: `times` stops being a compiler intrinsic.** The self-tail-
     call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6) are both
     already general, keyword-free machinery; the one loop shape user code still cannot write
     is `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can be
     declared at a word's own top level but not inside a nested quotation's declared effect
-    (slice 6a's R2/R28, deliberately deferred). Split 10a/10b, the same shape as 6/7/8's
-    splits: 10a adds the mechanism (parsing and checking a row inside a quotation effect) and
-    exits on a user-space `my-times` compiling beside the untouched intrinsic; 10b then
-    deletes the intrinsic (`check_abstract_quotation_times`, the `check_term`/`ir.rs`
-    `"times"` arms) and moves `times` itself into `lib/combinators.sth`, 8c-shaped lightweight
-    process. Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
+    (slice 6a's R2/R28, deliberately deferred). Split 10a/10b/10c, the same shape as 6/7/8's
+    splits: 10a adds the mechanism (parsing and checking a row inside a quotation effect, plus
+    the `~` inline-only quotation type below) and exits on a user-space `my-times` compiling
+    beside the untouched intrinsic; 10b then deletes the intrinsic
+    (`check_abstract_quotation_times`, the `check_term`/`ir.rs` `"times"` arms) and moves
+    `times` itself into `lib/combinators.sth`, 8c-shaped lightweight process; **10c** is
+    `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
+    9b), which extends 10a's row representation to a row that legitimately differs between a
+    quotation's input and output side, and gates on 10a phases 1–2 only — not on 10b, and not
+    on 10a's back-edge fix, since `if` has no back-edge.
+    **`~[ ... ]`, the inline-only quotation type, lands in 10a rather than 10c.** A row-bearing
+    quotation parameter *must* be spliced — `QuotEffect` has no row field and a row's size
+    isn't known at runtime — so every combinator today relies on that as an unstated
+    guarantee. `~` states it: no runtime representation, not storable, unreachable by the
+    runtime `call` path, which also makes a row-bearing quotation reaching an erasure boundary
+    structurally impossible rather than a rule bolted onto three call sites. It belongs to 10a
+    because if the guarantee holds for every combinator parameter, `~[ ..s i64 -- ..s ]` is the
+    honest declaration for `times`'s own parameter, and shipping `times` with a type that then
+    has to change is the expensive order. Two questions 10a's spec must settle: whether `call`
+    is banned on a `~` value (invocation by bare mention, since pushing a `~` as a value is
+    impossible) or whether the ban is narrowly on storage/escape — the former is more in
+    keeping with distinct syntax per mechanism and rewrites `f call` throughout
+    `lib/combinators.sth`; and whether `~` retypes only `times` or every combinator parameter
+    in the library, making it the explicit combinator/closure boundary with ordinary
+    `[ ... ]` reserved for genuinely first-class capturing quotations (7b's territory).
+    Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
     smaller half of the gap: at every check point a combinator's row is concrete (combinators
     are spliced per call site and mint no `IrFunc`, per slice 6's R18/R20), so there is no
     abstract row unification or `Subst` change, only per-splice depth arithmetic the
@@ -2100,7 +2123,12 @@ then find out what the compiler owes it.
     mismatch between its `if` branches. 10a fixes that arm (ground declared outputs, plus an
     explicit unify of the self-call's arguments against the ground declared inputs)
     independent of whether rows land. Sequenced after 7b and 8a land (all three touch
-    `check_term`'s dispatch spine), not gated on 9.
+    `check_term`'s dispatch spine), not gated on 9. Spec written
+    (`docs/phase4-slice10-spec.md`); a first review round found real gaps — among them that
+    the brief's "the intrinsic already prototypes the depth arithmetic" claim above does not
+    survive reading `check_abstract_quotation_times`, which checks declared-effect
+    self-similarity and pointwise-matches only the top slots rather than decomposing a row —
+    so phase 2 derives its grounding rather than generalising a prototype.
 
 ### Phase 5 — Errors as values  `[S]`
 
