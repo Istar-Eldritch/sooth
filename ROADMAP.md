@@ -1942,12 +1942,13 @@ then find out what the compiler owes it.
    constraint system to that named word. A structural default is not on the menu. Note this
    is a hazard of the *destination*, not of what shipped: 8b's overrides are sound precisely
    because the user body substitutes for the derived glue rather than sitting beside it.
-   The residual decision is the container boundary — whether generated traversal of a
-   `List[File]` may call `close` implicitly (composability, some ambience) or must be
-   hand-written (neither) — probably the former, since that call sits inside
-   compiler-generated traversal nobody reads while direct code keeps `close` visible, but
-   decide it rather than inherit it. Slice 5's export rule depends on the answer: whatever
-   `drop` cannot dispose, a module must export a disposal word for.
+   The container boundary is settled above, against implicit threading (D3): generated
+   traversal of a `List[File]` may call a named disposal word like `close` (D2 makes it
+   visible, R4), but may never conjure inputs a disposal word needs — composability inside
+   compiler-generated traversal does not extend to inventing an allocator or other missing
+   argument. An export-mandate rule (whatever `drop` cannot dispose, a module must export a
+   disposal word for) was considered for slice 8b's spec and declined: not implied by
+   D1/D2/D3, and out of scope for that slice.
    **Answer that generally: disposal may require inputs beyond the value.** A resource needs
    a named consumer (`close`); a heap value under Phase 6's explicit allocators needs the
    allocator that owns it (`free ( &!'A ^T -- )`). Both break the assumption that

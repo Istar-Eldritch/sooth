@@ -8,8 +8,8 @@ and left open, folded in here. Both ride 8a's overload table and its six rules
 built, not with 8a's original plan (8a's own phase notes record where the plan and the
 delivery diverged, e.g. the `lower_call` read that was wired late).
 
-Anchors below were verified against the built tree at `d58b52d`; the brief's `file:line`
-citations were re-checked, not trusted.
+Anchors below were most recently re-verified against the built tree at `ceb2507`; the
+brief's `file:line` citations were re-checked, not trusted.
 
 ---
 
@@ -51,7 +51,7 @@ transparent).
 
 ---
 
-## Codebase map (verified anchors at `d58b52d`)
+## Codebase map (verified anchors at `ceb2507`)
 
 Disposal, as read rather than inferred — nothing on this path can ask what a module imported,
 which is why disposal is whole-program and type-directed today (brief recon 1, A–D):
@@ -111,9 +111,9 @@ Corpus / goldens / design that this slice touches:
 
 ## Requirements
 
-The five **"Open questions for the spec"** in the brief are answered as R1–R6/R8 below, each
-with a rationale. The remaining requirements (R7, R9–R11) carry D1/D2/D3 and the corpus
-contract into checkable rules.
+The five **"Open questions for the spec"** in the brief are answered by R1, R2, R5, R6, and
+R8 below, each with a rationale. The remaining requirements (R3, R4, R7, R9–R11) carry
+D1/D2/D3 and the corpus contract into checkable rules.
 
 ### R1 — The disposal-word declaration syntax (answers open question 2)
 
@@ -177,7 +177,10 @@ also recognize the `disposal:` marker and reject it with a located error naming 
 pointing at the clause — the same class of rejection as R1's absent-field-name check
 (`expect_field_type_token`) — rather than falling through to a generic "unexpected token"
 parse error, which would name neither the enum nor the reason. This is one small addition to
-the enum production (recognize-then-reject), not new clause semantics for enums.
+the enum production (recognize-then-reject), not new clause semantics for enums. Message
+shape, in the same "parse error: ..." voice as `expect_field_type_token`'s existing messages:
+``parse error: enum `Opt` cannot declare `disposal:` at line N, col C (declared disposal
+words are struct-only)``.
 
 *Rationale, with the reachability analysis so it is not rediscovered.* Recon 2.2 frames this
 correctly: `drop` already disposes **any** `'T` at a call site correctly; the only thing
@@ -287,9 +290,7 @@ flagship case behaving exactly as it does today.)
 
 **Struck: an earlier draft of this spec added "R5a", rejecting `export:` of a
 declared-disposal type that does not also export its disposal word. The author declined it —
-not implied by D1/D2/D3, and out of scope for this slice.** No exit criterion, test, or phase
-focus in this document should reference it; if you find one, it is this spec's own residue
-and should be removed.
+not implied by D1/D2/D3, and out of scope for this slice.**
 
 ### R6 — Destructuring a declared-disposal type is a located error (answers open question 3)
 
@@ -298,18 +299,30 @@ Destructuring the value of a type that has a declared disposal word — the cons
 — is a located error (Rust-E0509-shaped), **unconditional on the type**, not "only when a
 linear field would be left unaccounted".
 
-**The exhaustive surface, verified against `struct_generated_sigs` (`src/check.rs:3437`): it is
-only these two, and nothing else.** `struct_generated_sigs` generates, per struct, exactly four
-word families: the constructor, the bare `{Struct}>` full-destructure (pops the struct, pushes
-every field), `{Struct}>{field}` per field (pops the struct, pushes one field, silently
-dropping the rest — the exact shape recon 2.1 exploited), and `{Struct}<{field}` (a
-struct-to-struct setter: takes the struct plus one field's replacement value, returns the
-*same aggregate type* — nothing is decomposed, so it is not part of this guard's surface).
-Enums are also out of scope for this guard: matching an enum hands you a still-linear payload
-(R2), it never decomposes a struct down to raw fields the way `{Struct}>`/`{Struct}>{field}`
-do. Cell unwrap (`^>`/`^|>`) is likewise unaffected — cells can never wrap a declared-disposal
-type as *their own* type (R2 restricts declared disposal to `Type::Struct`), and unwrapping a
-cell moves its payload out whole, decomposing nothing.
+**The exhaustive surface: two of `struct_generated_sigs`'s four generated families consume,
+and nothing outside that table consumes either.** `struct_generated_sigs` (`src/check.rs:3437`)
+generates, per struct, exactly four word families: the constructor, the bare `{Struct}>`
+full-destructure (pops the struct, pushes every field), `{Struct}>{field}` per field (pops the
+struct, pushes one field, silently dropping the rest — the exact shape recon 2.1 exploited),
+and `{Struct}<{field}` (a struct-to-struct setter: takes the struct plus one field's
+replacement value, returns the *same aggregate type* — nothing is decomposed, so it is not
+part of this guard's surface). Only the destructure and the per-field getter consume the
+struct operand; the constructor takes no struct input and the setter returns one, so this
+guard's surface is those two forms, from that table.
+
+**The non-consuming peek `{Struct}|>{field}` (R10) bypasses `struct_generated_sigs` entirely
+by construction, not because it was pruned from it.** `check_struct_peek_word`
+(`src/check.rs:10252`) resolves it by splitting the call name on `|>` and looking it up
+against the struct registry directly — it is never registered as a `Sig` in that table at
+all. It stays outside this guard's surface because of what it actually does, verified
+independently of the table: its signature is `( S -- S field )`, and its implementation never
+pops the struct operand off the stack, only pushes the field's value alongside it, so the
+aggregate stays live and its linear obligation is untouched — there is nothing for this guard
+to reject. Cell unwrap (`^>`/`^|>`) is likewise unaffected — cells can never wrap a
+declared-disposal type as *their own* type (R2 restricts declared disposal to `Type::Struct`),
+and unwrapping a cell moves its payload out whole, decomposing nothing. Enums are also out of
+scope for this guard: matching an enum hands you a still-linear payload (R2), it never
+decomposes a struct down to raw fields the way `{Struct}>`/`{Struct}>{field}` do.
 
 - **Boundary.** `&`-reading the value and the non-consuming peek `{Struct}|>{field}`
   (`src/check.rs:9242`) still compile: they do not discharge the obligation. (`^|>`,
@@ -341,8 +354,11 @@ Two different scopes, and the spec states each rather than saying "scoped":
   program-wide uniqueness (`src/check.rs:1736`) survives the migration to table rows:
   scope-local uniqueness alone would let two modules declare disposal for one `File`, never
   collide, and dispose the same value two different ways. A second declared disposal word for
-  one type, anywhere in the closure, is a located error (the existing
-  `duplicate_drop_overload_error`, generalized off the name).
+  one type, anywhere in the closure, is a located error: the existing
+  `duplicate_drop_overload_error`, generalized off the name so it names the declared word
+  instead of the literal `drop` — today it reads ``error: `File` already defines its own
+  `drop` (line N, col C)``; generalized, it reads ``error: `File` already defines its own
+  `close` (line N, col C)`` when `close` is the type's declared word.
 - **Reachability (callability) of a disposal word is import-scoped** (R3/R5): the word must be
   in scope at the disposal site.
 - **Open sub-question, decided: orphan overrides stay legal.** Nothing today requires a
@@ -354,11 +370,16 @@ Two different scopes, and the spec states each rather than saying "scoped":
   needs no special case: an orphan word is imported from its own module exactly like any
   other, so uniqueness stays program-wide while reachability stays per-name.
 
-### R8 — The operator fix: mangle-consistent, module-aware operator dispatch (answers open question 4)
+### R8 — The operator fix: module-aware operator dispatch (answers open question 4)
 
-Take the first option in the brief: mangle operator declarations like every other name and
-give operator dispatch a **module-aware** lookup, rather than leaving decls bare and filtering
-by caller module in `check.rs` only.
+Take the first option in the brief: fix operator dispatch's `resolve.rs`/`check.rs` gaps so it
+becomes module-aware, rather than leaving decls bare and filtering by caller module in
+`check.rs` only. Operator *declarations* are already mangled like every other name — `mangle`
+(`src/resolve.rs:31`) exempts only `main` and `drop`, so the per-kind decl-mangling loops
+(`src/resolve.rs:338`–`349`) already rename a `: + ( Vec2 Vec2 -- Vec2 )` declaration the same
+as any other word; there is no mangling change to make here. What is missing is the
+`is_operator_dispatch_name` skip on the selective-import call-site rewrite, and a
+module-aware lookup at the call site itself:
 
 - **`resolve.rs`:** add the `is_operator_dispatch_name` skip to the selective-import branch at
   `src/resolve.rs:262`, mirroring the own-module branch at `src/resolve.rs:239`–`241`, so a
@@ -384,10 +405,11 @@ already uses, rather than special-casing them.
 *Rationale for option one over "check.rs-only, filter by caller module".* The check.rs-only
 option leaves two modules' `+` overloads sharing one `env` key, which is precisely the
 collision that makes own-module reachability fail in a ≥2-module build; it cannot distinguish
-module A's `Vec2 +` from module B's. Mangling operator decls (as everything else already is)
-plus a module-aware dispatch is a bounded change that reuses the module id `resolve::mangle`
-already computes, and it removes the "bare call site, mangled definition" mismatch at its
-root instead of layering a filter on top of it.
+module A's `Vec2 +` from module B's. Adding the `is_operator_dispatch_name` skip to the
+selective-import branch plus a module-aware `check_operator` lookup is a bounded change that
+reuses the module id `resolve::mangle` already computes for every declaration, and it removes
+the "bare call site, mangled definition" mismatch at its root instead of layering a filter on
+top of it.
 
 ### R9 — Single-file corpus byte-for-byte; the multi-module golden inverts; DESIGN.md amended
 
@@ -465,27 +487,33 @@ mechanism.
 
 1. A type declares its disposal word (`disposal:` clause, or the back-compat `: drop`), and
    the checker requires *that word* rather than `has_drop_overload`'s boolean (R1, R11).
-1b. `drop` on a scalar, cell, or plain enum with no declared disposal word still compiles and
+2. The `disposal:` clause is struct-only: a non-`drop`-named declared word is rejected on a
+   non-struct the same way `: drop` is today, and `parse_enum_typedef` rejects a `disposal:`
+   clause on an enum with a located error naming the enum, rather than falling through to a
+   generic parse error (R2).
+3. `drop` on a scalar, cell, or plain enum with no declared disposal word still compiles and
    dispenses with it structurally, with no import, exactly as before the table migration (R11).
-2. Disposing a value whose type declares a disposal word, without that word in scope, is a
+4. Disposing a value whose type declares a disposal word, without that word in scope, is a
    located error at the disposal site naming the word to import (R3/D1) — and importing the
    *type* alone does not discharge it (R5): the word is imported by name, or disposal is
    rejected. Holding, forwarding, and `&`-reading such a value all still compile, as does
    importing the type without the word.
-3. Disposing a struct holding such a type reports the same error at the outer disposal site
+5. A second declared disposal word for one type, anywhere in the build closure — not just
+   within one module — is a located error: uniqueness is program-wide, not scope-local (R7).
+6. Disposing a struct holding such a type reports the same error at the outer disposal site
    (R4/D2), and a plain data struct still disposes with no declaration and no import.
-4. `drop` applied to a value whose declared disposal word is not named `drop` is a located
+7. `drop` applied to a value whose declared disposal word is not named `drop` is a located
    error naming the real word (R1) — not an alias.
-5. Destructuring a type with a declared disposal word is a located error naming the word (R6),
+8. Destructuring a type with a declared disposal word is a located error naming the word (R6),
    with the type's own disposal-word body exempt.
-6. `examples/resources.sth` and `tests/phase3_resources.rs` (single-file) are unchanged;
+9. `examples/resources.sth` and `tests/phase3_resources.rs` (single-file) are unchanged;
    `tests/phase4_modules.rs:384` is inverted with a positive companion, slice 5a's Criterion
    17 is recorded superseded in ROADMAP, and `DESIGN.md:547` is amended (R9).
-7. A module's own operator overload is reachable from its own module in a ≥2-module build, and
-   a selectively imported operator no longer hijacks unrelated bare uses of that name in the
-   importing module — with the single-module corpus byte-for-byte unchanged (R8).
-8. The container-boundary rule (D3) is recorded and exercised by the `Wrapper f File`
-   struct-field witness (R10); the `Vec[File]` criterion is explicitly recorded as unwritable.
+10. A module's own operator overload is reachable from its own module in a ≥2-module build,
+    and a selectively imported operator no longer hijacks unrelated bare uses of that name in
+    the importing module — with the single-module corpus byte-for-byte unchanged (R8).
+11. The container-boundary rule (D3) is recorded and exercised by the `Wrapper f File`
+    struct-field witness (R10); the `Vec[File]` criterion is explicitly recorded as unwritable.
 
 Green throughout: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.
 
@@ -503,8 +531,7 @@ placebo tests before). Key tests:
   `disposal_and_drop_for_one_type_is_error`,
   `drop_on_type_with_named_disposal_word_is_error` (names the real word).
 - Struct-only (R2): `disposal_clause_on_enum_is_error`,
-  `drop_overload_on_enum_is_error` (reworded message);
-  `enum_holding_resource_struct_disposes_via_inner_word` (safety without enum user disposal).
+  `drop_overload_on_enum_is_error` (reworded message).
 - Import-scoping (R3/R5): `dispose_imported_type_without_its_word_in_scope_is_error`,
   `importing_type_alone_does_not_bring_its_disposal_word` (the flagship: the type is in scope,
   the word is not, disposal is rejected), `importing_disposal_word_by_name_allows_disposal`
@@ -513,6 +540,8 @@ placebo tests before). Key tests:
   `two_modules_drop_overloads_do_not_collide`,
   `orphan_disposal_word_imported_from_its_own_module` (R7 × R5).
 - Traversal (R4/R10): `dispose_struct_holding_resource_requires_inner_word_at_outer_site`,
+  `enum_holding_resource_struct_disposes_via_inner_word` (an enum's resource payload disposes
+  through the inner word without the enum itself declaring one, R2's safety argument),
   `plain_data_struct_disposes_with_no_import`, `dispose_through_ref_field_requires_nothing`
   (R4's reference-boundary rule).
 - Destructure (R6): `destructure_full_of_disposal_type_is_error` (bare `{Struct}>`),
@@ -556,7 +585,7 @@ placebo tests before). Key tests:
   "phases": [
     {
       "phase": 1,
-      "focus": "Module-scoped operator dispatch: mangle operator decls consistently, add the is_operator_dispatch_name skip to resolve.rs's selective-import branch, and thread the caller's module id into check_operator so operator candidates are keyed by (module, name); own-module overloads reachable in a >=2-module build and selective operator imports stop hijacking bare uses, single-module corpus byte-for-byte (R8)",
+      "focus": "Module-scoped operator dispatch: add the is_operator_dispatch_name skip to resolve.rs's selective-import branch (operator declarations are already mangled like every other name; only call-site dispatch is inconsistent), and thread the caller's module id into check_operator so operator candidates are keyed by (module, name); own-module overloads reachable in a >=2-module build and selective operator imports stop hijacking bare uses, single-module corpus byte-for-byte (R8)",
       "difficulty": "hard"
     },
     {
