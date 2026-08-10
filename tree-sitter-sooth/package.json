@@ -1,0 +1,15 @@
+{
+  "name": "tree-sitter-sooth",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for Sooth (syntax highlighting only, not a semantic parser)",
+  "main": "bindings/node",
+  "keywords": ["parser", "lexer", "sooth"],
+  "license": "MIT",
+  "tree-sitter": [
+    {
+      "scope": "source.sooth",
+      "file-types": ["sth"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

@@ -1,5 +1,9 @@
 /target
 
+# Compiled tree-sitter grammar (rebuild with `tree-sitter build`); parser.c
+# etc. are committed since they're what a C toolchain actually builds.
+/tree-sitter-sooth/*.so
+
 # Compiled example binaries land alongside their source (spec §9.2).
 /examples/*
 !/examples/*.sth
