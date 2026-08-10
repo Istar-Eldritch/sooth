@@ -79,8 +79,19 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     // `str`'s print format; see `Instr::Print`'s `IrType::Str` arm for why `%.*s`.
     out.push_str("data $strfmt = { b \"%.*s\", b 0 }\n");
     let str_lits = collect_str_literals(&ir.funcs);
-    for (content, idx) in &str_lits {
-        emit_str_literal(&mut out, *idx, content);
+    // Slice 9: emitted in `idx` order, not `HashMap` iteration order -- a
+    // module with two or more distinct string literals (previously never
+    // exercised by the corpus; the injected `bool` print overload's
+    // `"false\n"`/`"true\n"` literals are the first) produced nondeterministic
+    // `$strb{N}` declaration order across process runs otherwise, since each
+    // content's `idx` binding was already fixed but the printing loop wasn't.
+    let mut ordered_lits: Vec<(&String, usize)> = str_lits
+        .iter()
+        .map(|(content, idx)| (content, *idx))
+        .collect();
+    ordered_lits.sort_by_key(|(_, idx)| *idx);
+    for (content, idx) in ordered_lits {
+        emit_str_literal(&mut out, idx, content);
     }
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or

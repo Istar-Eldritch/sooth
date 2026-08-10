@@ -956,7 +956,7 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session {
+        let mut session = Session {
             env: HashMap::new(),
             structs: Vec::new(),
             // Slice 9 (R2): the builtin `bool` enum occupies the reserved
@@ -987,7 +987,17 @@ impl Session {
             import_selective_module: HashMap::new(),
             import_exports: Vec::new(),
             rich_stack: false,
-        }
+        };
+        // Slice 9 phase 2 (R6/R7): the library `.` overload for `bool`,
+        // defined through the ordinary `eval_def` path exactly as a user
+        // definition would be, so it dlopen's like any other REPL word and
+        // resolves through the same `builtin_overloads` dispatch a native
+        // module's injected copy uses -- no fall-through to a deleted
+        // builtin arm.
+        session
+            .eval_def(crate::ast::bool_print_word_def(), &mut std::io::sink())
+            .expect("the injected `bool` print word always checks and compiles");
+        session
     }
 
     /// D2 (Slice 3): switch this session's residual-stack rendering to the
@@ -1918,6 +1928,15 @@ impl Session {
                 || w.poly.is_some()
                 || w.name == "main"
                 || w.name == "drop"
+                // Slice 9 phase 2 (R6): `.` is `bool_print_word_def`,
+                // injected identically into every module 0 (including the
+                // session's own, `Session::new`) -- not a real per-file
+                // private word. Binding it as `q::.__importN` here would
+                // leak a redundant, un-aliased entry into completion for no
+                // benefit: a call to bare `.` inside a retained combinator's
+                // body already resolves through the session's own identical
+                // copy with no rename needed.
+                || w.name == "."
                 || check::word_declares_quotation_parameter(w)
             {
                 continue;
@@ -1967,7 +1986,12 @@ impl Session {
         let body_rename: HashMap<String, String> = module
             .words
             .iter()
-            .filter(|w| w.module == 0 && w.name != "main" && w.name != "drop")
+            // Slice 9 phase 2 (R6): `.` is excluded for the same reason the
+            // env-splice loop above skips it -- a spliced combinator's call
+            // to bare `.` resolves against the session's own identical
+            // injected copy with no rename needed, and no `q::.__importN`
+            // env row exists to rename it to.
+            .filter(|w| w.module == 0 && w.name != "main" && w.name != "drop" && w.name != ".")
             .map(|w| {
                 let raw = if multi {
                     w.name.strip_suffix("__m0").unwrap_or(&w.name)

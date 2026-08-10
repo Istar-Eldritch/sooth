@@ -189,7 +189,10 @@ pub(crate) fn assemble_module(closure: &Closure) -> Result<Module, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
-    let mut words = Vec::new();
+    // Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected
+    // ahead of every file's own words exactly as `bool_enum_decl` injects
+    // the enum it dispatches over.
+    let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
     let mut modules = Vec::with_capacity(closure.nodes.len());
     // R20/R21: every module's selective-import entries, kept with their source

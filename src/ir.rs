@@ -1241,6 +1241,29 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
     // overloaded call reaches its candidate through the checker's per-span
     // record, which carries the same symbol.
     let symbols = crate::ast::overload_symbols(&module.words);
+    // Slice 9 phase 2 (R3/R18): `bool_print_word_def` is injected into every
+    // assembled module regardless of whether the program ever prints a
+    // `bool` (R6/R7 need it resolvable everywhere `.` is called), but R3
+    // demands the *unused* case stay byte-for-byte QBE -- an always-emitted
+    // `IrFunc` for it would add a function and two string constants to every
+    // build that never touches it. Recognized by its unmistakable synthetic
+    // span (no real source token ever parses to `Span::default()`, R2's
+    // `bool_enum_decl` uses the same tell); excluded from both `env` and
+    // `funcs` below unless some call site's `builtin_overloads` entry
+    // actually names its lowering symbol.
+    // Matched by its synthetic span alone, not by name: a multi-file closure
+    // mangles every module-0 word (`resolve::resolve_modules`) to `{name}__m0`,
+    // so `.` becomes `.__m0` there -- the span survives that rewrite unchanged.
+    let unused_bool_print_idx = module
+        .words
+        .iter()
+        .position(|w| w.span == Span::default() && w.name.starts_with('.'))
+        .filter(|&idx| {
+            !module
+                .builtin_overloads
+                .values()
+                .any(|s| s == &symbols[idx])
+        });
     let mut env: HashMap<String, Arity> = module
         .words
         .iter()
@@ -1249,6 +1272,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             !drop_overload_indices.contains(idx)
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
+                && Some(*idx) != unused_bool_print_idx
         })
         .map(|(idx, w)| {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
@@ -1299,6 +1323,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             !drop_overload_indices.contains(idx)
                 && !poly_indices.contains(idx)
                 && !combinator_indices.contains(idx)
+                && Some(*idx) != unused_bool_print_idx
         })
         .flat_map(|(idx, w)| {
             // A word sharing its name with another candidate is not self-tail

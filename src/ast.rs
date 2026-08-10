@@ -330,6 +330,47 @@ pub fn bool_enum_decl() -> EnumDecl {
     }
 }
 
+/// Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected into
+/// every assembled module's `words` (and REPL session at startup) exactly as
+/// `bool_enum_decl` injects the enum itself. Clause-matches `False`/`True` and
+/// prints `false`/`true` including the trailing newline the retired
+/// primitive `bool` printable row used to emit, by delegating to the still-
+/// primitive `str` row -- reached at call sites through 8a's
+/// `builtin_overloads` dispatch, not a checker builtin row.
+pub fn bool_print_word_def() -> WordDef {
+    fn clause(variant: &str, text: &str) -> Clause {
+        Clause {
+            variant: variant.to_string(),
+            locals: Vec::new(),
+            body: vec![
+                Term {
+                    kind: TermKind::StrLit(text.to_string()),
+                    span: Span::default(),
+                },
+                Term {
+                    kind: TermKind::Call(".".to_string()),
+                    span: Span::default(),
+                },
+            ],
+            span: Span::default(),
+        }
+    }
+    WordDef {
+        name: ".".to_string(),
+        effect: StackEffect {
+            inputs: vec![TypedSlot {
+                name: None,
+                ty: Type::BOOL,
+            }],
+            outputs: Vec::new(),
+        },
+        body: WordBody::Clauses(vec![clause("False", "false\n"), clause("True", "true\n")]),
+        poly: None,
+        module: 0,
+        span: Span::default(),
+    }
+}
+
 /// A registered array type: its element type, compile-time count, and the
 /// leaked `&'static str` spelling `[T N]` every `Type::Array` naming it
 /// carries directly (mirrors `StructDecl::name_static`). Interned and deduped

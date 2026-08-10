@@ -340,12 +340,14 @@ fn float_types() -> Vec<Type> {
         .collect()
 }
 
-/// The 15 printable types `.` dispatches over: every numeric type plus
-/// `bool`, `str`, and `cstr` (the `check_operator` `"."` predicate,
-/// cross-checked against the `Instr::Print` codegen arms).
+/// The 14 printable types `.` dispatches over: every numeric type plus
+/// `str` and `cstr` (the `check_operator` `"."` predicate, cross-checked
+/// against the `Instr::Print` codegen arms). `bool` is no longer among them
+/// (slice 9 R6): its `.` overload is the library word
+/// `bool_print_word_def` injected into every module, reached through 8a's
+/// `builtin_overloads` dispatch on a builtin-row exact miss, not a row here.
 fn printable_types() -> Vec<Type> {
     let mut v = numeric_types();
-    v.push(Type::BOOL);
     v.push(Type::Str);
     v.push(Type::Cstr);
     v
@@ -8420,11 +8422,12 @@ fn check_term(
 /// `shl`/`shr` take an integer value and always an `i64` shift count,
 /// producing the value's type. `<= >= <>` generalise the same way as `= < >`:
 /// numeric-only (never `bool`), same type, producing `bool`. `.` is
-/// type-directed over any printable scalar (every integer width, either
-/// float width, or `bool`): pops one, produces nothing; the concrete type
-/// picks the print codegen (signed/unsigned decimal, `%g` float, or
-/// `true`/`false`) at the call site, same dispatch shape as the rest of this
-/// function.
+/// type-directed over any primitive printable scalar (every integer width or
+/// either float width): pops one, produces nothing; the concrete type picks
+/// the print codegen (signed/unsigned decimal, or `%g` float) at the call
+/// site. `bool` is not a row here (slice 9 R6): `true .`/`false .` fall
+/// through to the injected library overload below, which prints
+/// `true`/`false` by delegating to the `str` row.
 /// The outcome of resolving an operator name against `BUILTIN_TABLE` and, on a
 /// builtin-row exact miss, an optional same-named user overload (slice 8a
 /// phase 2, R6). The single resolution entry point both `check_term`'s probe
@@ -12758,12 +12761,13 @@ mod tests {
 
     #[test]
     fn builtin_table_has_a_row_per_printable_type_for_print() {
-        // Rule 6: `.` dispatches over 15 printable types, each a `(T -- )` row
+        // Rule 6: `.` dispatches over 14 printable types, each a `(T -- )` row
         // lowering a `Print`. Mutation-check: dropping the printable loop or a
-        // `push` in `printable_types` fails this.
+        // `push` in `printable_types` fails this. `bool` is not among them
+        // (slice 9 R6): it dispatches through the injected library overload.
         let table = builtin_table();
         let rows = table.get(".").expect("`.` is a builtin operator");
-        assert_eq!(rows.len(), 15, "15 printable rows");
+        assert_eq!(rows.len(), 14, "14 printable rows");
         let mut got: Vec<Type> = rows
             .iter()
             .map(|r| {
