@@ -1722,7 +1722,7 @@ then find out what the compiler owes it.
    golden still lowers to the same spliced tight loop with no per-element `Instr::Call`; and a
    *capturing* literal reaching a materialization boundary is a located error naming 7b.
 
-   **7b — capturing closures.**
+   **7b — capturing closures is implemented.**
    Points Phase 3 Slice 6's escape checking at the env-struct carrier 7a introduces, using
    6f's settled last-use rule rather than duplicating the whole-block one it would otherwise
    have to invent standalone. The env holds a reference to a captured aggregate rather than a
@@ -1752,6 +1752,25 @@ then find out what the compiler owes it.
    compiles and observes the same values the spliced form does; one captured past its last use
    (or, for an upward closure, past its owning frame) is rejected with a located error naming
    the capture; dropping a linear-capturing closure disposes its captures.
+   **Deliberate narrowing of the last clause.** The env holds only references (never a
+   snapshot of an aggregate, D4), so every closure this slice admits is Copy — there is no
+   owned capture and so nothing for a `drop` to dispose. "Dropping a linear-capturing closure
+   disposes its captures" is therefore vacuous here, not built; an owning `^Env` closure and
+   its linearity are deferred, along with `&q`/`&!q` reference-mode `call` and the
+   Fn/FnMut/FnOnce split. What shipped: the four materialization boundaries (struct field,
+   array element, word output, branch join) admit a capturing literal via a four-way
+   admission rule on capture kind (a scalar snapshots into the env unconditionally; an
+   outer-rooted aggregate or reference is admitted at any boundary; a frame-rooted one is
+   admitted only in-frame and rejected escaping with a located past-owning-frame error; a
+   captured quotation-typed name is rejected as deferred). A one-reference capture stores
+   inline in the `env` slot; two or more build a stack-allocated positional bundle, admissible
+   only in-frame (an escaping 2+-capture closure needs a heap env, deferred). A new surviving
+   capture set on the erased `Slot` keeps a same-frame capture's referent alive past erasure
+   through to its `call`, feeding the existing last-use liveness scan so a referent consumed or
+   exclusively re-borrowed before the call is a located past-last-use error; a differing-arm
+   join unions both arms' surviving sets. `examples/capturing_dispatch.sth` dogfoods a dispatch
+   table of same-frame capturing closures against a hand-spliced twin reading the same elements
+   directly.
 
 8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over

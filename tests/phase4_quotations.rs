@@ -794,3 +794,48 @@ fn vm_table_dispatch_matches_clause_version() {
         );
     }
 }
+
+// -- T-dogfood: examples/capturing_dispatch.sth matches its hand-spliced twin -
+
+#[test]
+fn capturing_dispatch_matches_spliced_version() {
+    // `examples/capturing_dispatch.sth` builds a dispatch table of two
+    // same-frame capturing closures (T-dispatch's shape), each capturing a
+    // shared borrow `r = &arr` and reading a different element; its
+    // hand-spliced twin `examples/capturing_dispatch_hand.sth` reads the same
+    // three elements directly, with no closure at all. Parity: same output.
+    let closure_binary = common::build_example("examples/capturing_dispatch.sth");
+    let closure_stdout = std::process::Command::new(&closure_binary)
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("capturing_dispatch binary should run")
+        .stdout;
+    std::fs::remove_file(&closure_binary).ok();
+
+    let hand_binary = common::build_example("examples/capturing_dispatch_hand.sth");
+    let hand_stdout = std::process::Command::new(&hand_binary)
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("capturing_dispatch_hand binary should run")
+        .stdout;
+    std::fs::remove_file(&hand_binary).ok();
+
+    assert_eq!(
+        closure_stdout, hand_stdout,
+        "the capturing-closure dispatch table must match its hand-spliced twin byte-for-byte"
+    );
+    assert_eq!(closure_stdout, b"7\n8\n9\n");
+
+    let src = std::fs::read_to_string("examples/capturing_dispatch.sth")
+        .expect("read capturing_dispatch.sth");
+    assert_eq!(
+        count_call_indirect(&src),
+        3,
+        "each of the three table-stored closures dispatches through its own indirect call"
+    );
+
+    // The parity check above is the real witness that the env is non-null: a
+    // closure reading through a null env could never observe `arr`'s distinct
+    // stored elements, so matching the hand-spliced twin's `7\n8\n9\n` proves
+    // each stored closure's reference capture is live and read.
+}
