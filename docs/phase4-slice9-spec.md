@@ -266,6 +266,15 @@ not an assumption.
 returned `Bool` stays a scalar ABI value (D-A), so this guards against an
 accidental aggregate-return regression rather than adding machinery.
 
+**Follow-up, not this phase's scope:** R6 makes the `IrType::Bool` `Print` codegen
+arm and the unconditionally-emitted `$boolstrs`/`$true_str`/`$false_str` QBE header
+(`qbe.rs`) dead from surface code; nothing in `.sth` source can reach them anymore
+since the primitive row is gone. Retaining them here is correct (removing either
+now would break R3's byte-for-byte guarantee across every baseline). Deleting the
+dead arm and header, and retiring the codegen test that exercises them
+(`emit_print_on_bool_indexes_boolstrs_via_sfmt`), is a later-phase cleanup once
+something depends on the header's absence rather than its presence.
+
 ### P3 — The clause-word generalisations (keyword `if` still in place)
 
 **R9 — A clause-bodied word may take quotation parameters.** Delete

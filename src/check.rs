@@ -292,7 +292,7 @@ pub struct BuiltinRow {
 /// The codegen a resolved builtin row emits: one variant per distinct
 /// instruction the type-directed `check_operator` arms produced. This is why
 /// a row is not a `Sig` (Q-A): several rows for one name share the
-/// `(inputs, outputs)` shape but differ here (`.`'s 15 rows all lower a
+/// `(inputs, outputs)` shape but differ here (`.`'s 14 rows all lower a
 /// `Print`; a future user `.` lowers a `Call`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinLower {
@@ -6339,10 +6339,11 @@ fn conversion_source_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Stri
     }
 }
 
-/// `.` applied to a non-printable value. Every current frontend `Type` (the
-/// integer tower, the float tower, `bool`) is printable, so this path has no
-/// reachable golden yet; it exists for the day a non-printable scalar (e.g. a
-/// future `Ptr`) enters the type system.
+/// `.` applied to a non-printable value. Every current primitive `Type` (the
+/// integer tower, the float tower) is printable via a builtin row, and `bool`
+/// is printable via the library overload injected by `bool_print_word_def`,
+/// so this path has no reachable golden yet; it exists for the day a
+/// non-printable scalar (e.g. a future `Ptr`) enters the type system.
 fn print_requires_printable_error(ctx: &Ctx, span: Span, found: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
