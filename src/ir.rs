@@ -2326,6 +2326,12 @@ fn lower_word_parts(
                 env
             }
             None => {
+                // D4: the env slot is one word wide, so a scalar snapshot is
+                // arithmetic on the value the `env` param types as `Ptr` (its
+                // only role here is a same-width bit container, not an
+                // address). QBE accepts this today; a future WASM lowering
+                // where `env` becomes a linear-memory offset needs this site
+                // to route through an explicit reinterpret instead.
                 let zero = b.fresh_value(cap.ty);
                 b.push_instr(Instr::Const(zero, 0));
                 let v = b.fresh_value(cap.ty);

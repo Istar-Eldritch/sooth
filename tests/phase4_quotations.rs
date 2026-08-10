@@ -199,6 +199,13 @@ fn make_b_captures_outer_rooted_reference_admits() {
     let (stdout, code) = run_src("qmakeb", src);
     assert_eq!(stdout, "9\n");
     assert_eq!(code, 0);
+    // The materialized closure is erased at `call`, so dispatch through it is
+    // an indirect call, not a compile-time splice.
+    assert_eq!(
+        count_call_indirect(src),
+        1,
+        "call through the captured closure is an indirect call"
+    );
     // T-env-inline: the materialized body takes the declared `i64` input plus
     // one trailing `Ptr` env parameter (R17). Dropping the env param would
     // shorten this list and the reference could not reach the body.
