@@ -204,11 +204,13 @@ names the concrete word/type, per CLAUDE.md's "diagnostics are behaviour."
   construct a value, `drop` it, assert the destructor's observable output and that the
   residual stack line is exactly empty (do not assert a `contains` on the residual — the
   REPL prints the whole residual stack per line). A second regression golden,
-  `repl_dispose_of_imported_override_without_selective_import_is_unaffected`, pins the
-  specific case that would panic if `None` were ever replaced by an empty `Some(&[])` instead
-  of a real opt-out: import a library's resource type into a session and dispose it with a
-  bare `drop` with no selective import, asserting it still runs the destructor exactly as
-  today (not the new R5 error — that error is native-only).
+  `repl_dispose_of_imported_override_without_selective_import_is_unaffected`, covers the
+  specific case of a bare `drop` on an imported (not selectively imported) resource type:
+  import a library's resource type into a session and dispose it with a bare `drop` with no
+  selective import, asserting it still runs the destructor exactly as today (not the new R5
+  error — that error is native-only). It does not pin a `None`→`Some(&[])` mutation: `Ctx::Line`
+  has no `modules` field to substitute one into, so the gate is structurally unreachable on the
+  REPL path, not merely opted out of at a call site.
 
 ### D3: destructuring bypasses a `drop` override
 

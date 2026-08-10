@@ -655,13 +655,14 @@ fn repl_modules_dogfood_session_runs() {
 #[test]
 fn repl_dispose_of_imported_override_without_selective_import_is_unaffected() {
     // Slice 8b, R8: the native `drop` import-visibility gate would reject a
-    // qualified-only imported resource type's bare `drop`, but the REPL path
-    // passes `modules: None`, so a session that imports a library's resource
-    // type (no selective clause) and disposes it with a bare `drop` still runs
-    // the retained destructor exactly as before this slice -- not the R5 error,
-    // which is native-only. Pins the `None` opt-out: were it ever replaced by
-    // an empty `Some(&[])`, the visibility primitive would index a nonexistent
-    // caller module and this would change.
+    // qualified-only imported resource type's bare `drop`, but a bare REPL
+    // `drop` line is checked through `infer_line` (`Ctx::Line`), which never
+    // reaches the gate at all -- not because it opts out with `None`, but
+    // because `Ctx::Line::modules()` has no module parameter to thread in the
+    // first place. So a session that imports a library's resource type (no
+    // selective clause) and disposes it with a bare `drop` still runs the
+    // retained destructor exactly as before this slice -- not the R5 error,
+    // which is native-only.
     let d = LibDir::new("imported-drop-unaffected");
     let lib = d.write(
         "lib.sth",

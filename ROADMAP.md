@@ -337,10 +337,11 @@ than a partial guard here). A qualified accessor (`q::Type>field`, `q::Type<fiel
 `q::Type|>field`) resolves by splitting on the *first* `::`, since `>` is not a
 delimiter. Using an unexported name qualified is a located `not exported` error,
 distinct from unknown-word; an exported word naming a private type of its own module
-is rejected at the `export:` declaration. Disposal crosses the boundary for free: a
-bare `drop` dispatches on the concrete type whether or not its destructor glue was
-exported, so this slice adds no export-site disposal rule (that waits on slice 8,
-where a polymorphic `drop` could first be structurally total). Selective import,
+is rejected at the `export:` declaration. Disposing an imported resource type
+requires that type to be visible to the disposing module (Phase 4 slice 8b): a bare
+`drop` on an imported linear value runs a destructor the owning module declared, so
+a qualified-only import that never names the type is a located error at the `drop`,
+naming the remedy. Selective import,
 `import: q | a b | "path.sth" ;`, additionally exposes the listed names unqualified
 (a type brings its generated words too); two selective imports of one name, or a
 collision with a local word, is a located error at the second, naming both. REPL
