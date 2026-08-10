@@ -1897,172 +1897,71 @@ then find out what the compiler owes it.
    — with rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
    overlap each a located error, and no definition left silently unreachable.
 
-   **8b — polymorphic `drop`, and the constraint it forces.** `drop` overloads ride the 8a
-   table; absorbing them means retiring the hardcoded interception arms in `check.rs`/`ir.rs`
-   that currently run before any env lookup (explicitly parked here since Phase 3 slice 8b,
-   "`drop` becoming fully polymorphic is still Phase 4").
-   **Also absorbs the module-scoped bare-name gap 8a left open, which the brief measured to be
-   an active 8a regression rather than a latent one** (`docs/phase4-slice8b-brief.md`, recon 3).
-   Every non-operator name is already module-unique, since `resolve::mangle` renames decls to
-   `name__m{module}`; the ~20 `is_operator_dispatch_name` names are the carve-out, their call
-   sites left bare for operand-type dispatch while their declarations are mangled like any
-   other. The two halves no longer meet: a module's own operator overload is unreachable from
-   its own module the moment a second module joins the closure (byte-identical single-file
-   source compiles and runs), and a selectively imported operator still hijacks unrelated bare
-   uses of that name in the importing module. The qualified form (`v::+`) already resolves
-   correctly, so the target semantics exist — bare names should resolve the way qualified ones
-   do, per call site, against candidates visible to the calling module.
-   **The brief also found the disposal half's premise to be false as written, which made it
-   the slice's first design question rather than an inherited decision — now resolved on the
-   brief, not left open.** Disposal today never
-   reaches the word environment at all (`check_shuffle`/`lower_call` intercept `drop`; overrides
-   live in a `StructId`-keyed registry excluded from `env`; `mangle` exempts `drop`), so
-   importing a resource type without its disposal word, declaring an orphan override in the
-   importing module, and disposing inside a module that cannot see the override **all dispatch
-   correctly today** — and linearity propagates program-wide with them. **Decided on the brief:
-   that convenience is the implicit behaviour the language rejects, and this slice deletes it.**
-   `drop` is explicitly defined and explicitly imported, so it rides the 8a table under rule 3,
-   and the structural fallback survives only where it emits no user-declared word (a plain data
-   struct disposes with no declaration and no import; a struct owning a resource requires that
-   resource's disposal word in scope at the outer disposal site). That also settles the
-   container-boundary question below **against** implicit threading: generated traversal may
-   call a named disposal word, but may never conjure inputs it needs — which is the rule
-   explicit allocators require. DESIGN.md's slice 5a paragraph ("disposal crosses the export
-   boundary for free", "a destructor runs without being named") is the design being reversed and
-   is amended by this slice, as is slice 5a's Criterion 17 golden
-   (`tests/phase4_modules.rs:384`), which asserts today's behaviour and inverts.
-   **One constraint from the destructor side, which the polymorphic `drop` must not
-   violate: it cannot be structurally total.** A generic `drop ( 'T -- )` that accepts a
-   resource type discharges the linear obligation while leaking the resource, turning
-   today's compile error into a silent leak. `type: File fd i32 ;` is structurally an
-   `i32`, so derived disposal pops it and never calls `close`, and the checker sees the
-   debt paid. Linearity buys use-exactly-once, not use-correctly. So either `drop` carries
-   a bound satisfied only by structurally-derivable types (declared-consumer types rejected
-   outright, disposed by their named word), or the resource case resolves through the
-   constraint system to that named word. A structural default is not on the menu. Note this
-   is a hazard of the *destination*, not of what shipped: 8b's overrides are sound precisely
-   because the user body substitutes for the derived glue rather than sitting beside it.
-   The container boundary is settled above, against implicit threading (D3): generated
-   traversal of a `List[File]` may call a named disposal word like `close` (D2 makes it
-   visible, R4), but may never conjure inputs a disposal word needs — composability inside
-   compiler-generated traversal does not extend to inventing an allocator or other missing
-   argument. An export-mandate rule (whatever `drop` cannot dispose, a module must export a
-   disposal word for) was considered for slice 8b's spec and declined: not implied by
-   D1/D2/D3, and out of scope for that slice.
-   **Answer that generally: disposal may require inputs beyond the value.** A resource needs
-   a named consumer (`close`); a heap value under Phase 6's explicit allocators needs the
-   allocator that owns it (`free ( &!'A ^T -- )`). Both break the assumption that
-   `drop ( 'T -- )` is the whole disposal interface, and the container boundary above is one
-   question, not two: whether generated traversal of a `Vec[Box['A]]` may thread the
-   allocator down is the same decision as whether traversal of a `List[File]` may call
-   `close`. The spec (R10/D3) settles the *rule* here — generated traversal may call a named
-   disposal word but may never conjure inputs it needs — and ships it as a stated rule, not a
-   mechanism: the constraint-system machinery that would let a disposal word declare and thread
-   an allocator input is Phase 6's, whose *Generic struct declarations* item and Slice 2
-   allocator rework are the consumers waiting on the answer.
-
-   **The disposal-scope invariant: structural disposal must never silently substitute for a
-   type's real disposal word.** 8a rule 3 makes overloads imported rather than carried by the
-   type, and `drop` cannot inherit that rule as written. For `+`, a missing import is a
-   resolution error: no candidate matches, compile fails, you import it. For `drop` today,
-   disposal never reaches `env` at all (recon, above) — a module importing `File` without its
-   disposal word does not leak, it still runs `close` correctly, dispatched through a path the
-   importing module's scope never touches. That is not a soundness hole; it is exactly the
-   implicit behaviour the magicless-language decision above rejects. Optional overloads can be
-   import-scoped by absence-is-an-error; `drop`'s structural fallback needs the opposite move,
-   since it never fails on its own.
-
-   **Resolution: the type declares its disposal word, and `drop` stops being the universal
-   disposal verb.** Making `drop` the tracked slot and trusting an override to do the right
-   thing is the weak part: nothing checks that a `drop` override actually calls `close`,
-   nothing gives `close`/`free` any status, and generated traversal only knows to call `drop`
-   — the operation that matters is invisible while a wrapper around it is what is enforced.
-   So `File` declares `close ( File -- )`, `Vec['T 'A]` declares `free ( &!'A Vec['T 'A] -- )`,
-   a plain struct declares nothing and is disposed structurally, and today's
-   `: drop ( File -- )` is the special case where the declared word happens to be named
-   `drop`. This is 8b's own "declared-consumer types … disposed by their named word" option
-   promoted from a coin flip to the design, the other option (a structurally-total generic
-   `drop`) having already been ruled out above.
-   Three things fall out of one mechanism, which is the argument for it: the checker gets a
-   *named* word to require rather than a boolean (`has_drop_overload` cannot distinguish a
-   plain struct from a resource whose disposal word is not called `drop` — both leave the bit
-   `false`, and the second must reject structural disposal); Phase 6's allocator case stops
-   being separate, since `free`'s extra `&!'A` input is just a declared disposal word with a
-   richer signature; and it answers 8b's own general question (what a disposal word may
-   require, how the constraint records it, how generated traversal supplies it) once instead
-   of per-resource-kind. It is additive to linearity rather than a change to it: `close`
-   already satisfies use-exactly-once as an ordinary consuming word today. The declaration
-   only supplies what inference cannot reach — generated disposal, and the import rule.
-
-   **The error fires at the disposal site, not at import.** Importing `File` without `close`
-   is legal, as is holding one, storing one, passing one onward, or reading it through
-   `&File`; a module that only forwards a resource never needs its disposal word in scope, and
-   an import-time rule would break that legitimate shape for no safety gain. What is an error
-   is *disposing* it by any path that would fall back to structural disposal — calling `drop`
-   on it, destructuring it (the sibling hole below, same error family), or disposing a
-   container that holds it — located at that site and naming the word to import. The container
-   case is where this composes and where the container-boundary question above bites: disposing
-   a `Vec[File]` requires `File`'s declared word in scope, reported at the `Vec`'s disposal
-   site.
-   `find_drop_overloads`' existing *program-wide* uniqueness stays program-wide even though
-   callability becomes scope-local, because scope-local uniqueness alone would let two modules
-   declare disposal for one `File`, never collide, and dispose the same value two different
-   ways. **Settled by the spec (R7):** nothing today requires an override to live in the module
-   declaring the type (`drop_overload_struct_id` derives the id from the input type, no
-   same-module check), so orphan overrides stay legal, made safe only by that uniqueness
-   check; restricting disposal to the declaring module was considered and not taken —
-   uniqueness is the load-bearing part, and the by-name import rule (R5) makes an orphan word
-   import like any other.
-
-   **What this costs, so the brief does not discover it.** It needs a way to declare the word
-   on the type, which is new surface on `type:` — the brief's question, and the only genuinely
-   new syntax in 8a/8b. It also *reinterprets* shipped machinery rather than extending it:
-   Phase 3 slice 8b's overrides, REPL retention, epoch-suffixed destructor symbols, and
-   `examples/resources.sth` as the Phase 3 exit dogfood all assume `drop` is the slot. Reading
-   a `drop` override as "declared disposal word, named `drop`" keeps every one of those working
-   unchanged, but that reading is load-bearing and should be stated, not discovered.
-   Two further notes for the allocator case, which the "disposal may require inputs beyond the
-   value" paragraph above does not capture. First, the set of affected types is **not** the heap
-   types but everything *transitively owning* heap storage: a `Record` holding a `String['A]`
-   is a stack value whose disposal frees heap, so the property propagates structurally exactly
-   as linearity already does (`ir.rs`: `has_drop_overload || any field is linear`), and it is
-   viral in the type parameter — such a `Record` either becomes generic over `'A` or pins one,
-   which is the tax `'A = Global` exists to blunt. Second, a type parameter names the allocator
-   *statically* while `free` needs the allocator *instance* at runtime, allocators being
-   stateful; so either the value carries a reference to its allocator (a word per allocation,
-   which Rust deliberately refuses) or the disposal site must have it in scope and pass it.
-   None of this is visible today because `src/backend/qbe.rs` has exactly one global allocator
-   behind `allocate(n)`/`free(ptr, n)`; Phase 6 making allocators plural is what creates the
-   input, and Slice 2's shim-to-FFI rework is the logged consumer.
-
-   **A sibling hole, measured and pre-existing: destructuring a type bypasses its `drop`
-   override entirely.** `type: R tag i64 ;` with a `drop` override, then `r R>tag .`, prints
-   the field and never runs the destructor. So today a `File` can have its fd extracted and the
-   linear obligation discharged with no `close` and no diagnostic. Rust closes exactly this with
-   E0509 (cannot move out of a type implementing `Drop`); Sooth has no such rule. It belongs
-   here rather than anywhere earlier because it is the same question as the constraint above,
-   asked of a different consumer: *what counts as discharging a linear obligation*, where a
-   structural answer silently drops the resource-specific one. Slice 5a's transparent type
-   export makes it reachable across a file boundary for the first time (its earlier
-   opaque-by-default draft would have papered over it, and only for types whose author chose
-   opacity), which is an argument for fixing it properly here rather than with a visibility
-   rule. Do not add a partial guard in an earlier slice that would foreclose the general form.
-   **Exit:** a polymorphic `drop` compiles and disposes any structurally-derivable `'T`; a
-   type declaring a disposal word (`File`/`close`) rejects the generic path at the call site,
-   naming that word; destructuring such a type is a located error; disposing one without its
-   declared word in scope is a located error *at the disposal site* naming the word to import,
-   while importing the type, forwarding it, and `&`-reading it all still compile; and the
-   container-boundary decision is recorded (D3: settled against implicit threading) and
-   exercised by a generated traversal that calls a non-`drop` disposal word.
-   **The `Vec[File]` form of that container criterion is unwritable as stated** (brief, recon
-   2): linear array elements are still rejected and `Vec` is Phase 6, so no container of
-   resources is constructible yet — the only container holding a resource today is a struct
-   with a linear field, exercised instead by a struct-field witness. The two import-scope
-   criteria exist only under the table answer to the design question above. The operator half
-   adds its own exit: a
-   module's own operator overload is reachable from its own module in a ≥2-module build, and a
-   selectively imported operator no longer hijacks unrelated bare uses of that name, with the
-   single-module corpus unchanged.
+   **8b — `drop` obeys the 8a table, plus 8a's own operator module-scoping gap.** This slice's
+   original design — a `disposal: close` clause on `type:`, a program-wide unique named word,
+   import-by-name, a destructure ban tied to that name — went through a brief, a spec, and
+   three review rounds (`docs/phase4-slice8b-brief.md`, `docs/phase4-slice8b-spec.md`) and was
+   **abandoned before implementation**, on a paper pre-check that hand-wrote the design's own
+   dogfood before touching the compiler. Putting the destructor on the *composite* (`File`) is
+   what forced every one of those rules; putting it on a **one-field leaf wrapper** where the
+   resource enters the language (`type: Fd n i64 ; : drop ( Fd -- ) ... ;`, with `File` holding
+   an undeclared `Fd` field) needs none of them — `examples/resources.sth` rewritten that way
+   builds and runs unchanged (`aaafa91`, `39bb8cf`), `close ( File -- ) drop` is an ordinary
+   word, and transfer-out (`File>fd`) is free instead of inexpressible, which the named-word
+   design made a real hole (its destructure ban was scoped to the disposal word's own body, so
+   nothing let a resource's handle move out of its owner). No new `type:` surface, no
+   named-word uniqueness beyond what `drop_overload_struct_id` already enforces, no by-name
+   import rule, no orphan-override tension to resolve — the apparatus existed to make a *name*
+   work, and there is no longer a name.
+   **What survives, unrelated to the naming question and unaffected by which design won:**
+   - **8a's module-scoped bare-name gap**, measured in the abandoned brief (recon 3) and left
+     exactly as found: a module's own operator overload is unreachable from its own module the
+     moment a second module joins the closure (`resolve::mangle` renames the declaration to
+     `+__m1` while the own-module fix in `resolve.rs` leaves the call site bare, so
+     byte-identical single-file source compiles and runs), and a selectively imported operator
+     still hijacks unrelated bare uses of that name in the importing module. The qualified form
+     (`v::+`) already resolves correctly — bare names should resolve the way qualified ones do,
+     per call site, against candidates visible to the calling module.
+   - **`drop` is not import-scoped today, and that is the implicit behaviour the magicless
+     decision rejects independent of naming.** `check_shuffle`/`lower_call` intercept `drop`
+     before any `env` lookup, overrides live in a `StructId`-keyed registry `env` never sees,
+     and `mangle` exempts `drop` — so a module can dispose an imported resource whose
+     destructor it never imported, and the golden `imported_linear_type_is_disposed_by_drop`
+     (`tests/phase4_modules.rs:384`) proves it live: `lib.sth` exports `mk`/`Res`, never `drop`,
+     and the consumer's bare `drop` still runs `lib`'s destructor. Retiring the interception
+     arms and folding `drop` into 8a's table — an always-visible generic row (any `'T` with no
+     override) plus per-type override rows gated by rule 3's import requirement — fixes this
+     the same way rule 3 fixes it for `+`, now applied to a leaf wrapper's `drop`, not to a name
+     invented for the occasion. It also dissolves the generics worry the abandoned design
+     created: since nothing is ever renamed, a generic `drop ( 'T -- )` caller never fails to
+     resolve at a concrete site the way it would have against a type declaring
+     `disposal: close`. DESIGN.md's slice 5a paragraph ("disposal crosses the export boundary
+     for free", "a destructor runs without being named") is the design being reversed and is
+     amended here (`DESIGN.md:547`), as is slice 5a's Criterion 17 golden above, which asserts
+     today's behaviour and inverts.
+   - **The destructure-bypass hole, measured and pre-existing, verified again after the
+     reshape.** `type: R tag i64 ; : drop ( R -- ) ... ;` then `r R>tag .` prints the field and
+     never runs the destructor — confirmed live, 2026-08-10. Rust closes exactly this with
+     E0509 (cannot move out of a type implementing `Drop`); Sooth has no such rule. The
+     leaf-handle convention shrinks its surface rather than removing it: a composite like
+     `File` has no override to bypass (`File>fd` moving the still-linear `Fd` out is correct,
+     not a hole), so the guard is only needed where a type both owns a resource and declares
+     `drop` — leaf wrappers, by construction. Still belongs here: same question as before,
+     *what counts as discharging a linear obligation*, just asked of a smaller type
+     population.
+   **Not this slice's problem, and no longer citable as one:** the abandoned design's "disposal
+   may require inputs beyond the value" question (a named word taking an allocator, e.g.) dies
+   with the named word — every disposal word left in this design is `drop ( 'T -- )`. Whether
+   *derived* disposal of a composite holding a resource that itself needs extra runtime inputs
+   (a `Vec['T 'A]` field disposed via `free ( &!'A Vec['T 'A] -- )`, not `drop`) is even
+   possible remains completely open, and is now purely a Phase 6 allocator-rework question
+   (below) — nothing in this narrower slice answers it, where the abandoned design would have.
+   **Exit:** `drop` overloads ride the 8a table and obey rule 3's import requirement (the
+   golden above inverts to require the import), a generic `drop ( 'T -- )` still dispatches
+   correctly by monomorphization, destructuring a type that declares `drop` is a located error,
+   and a module's own operator overload is reachable from its own module in a ≥2-module build
+   with a selectively imported operator no longer hijacking unrelated bare uses of that name in
+   the importer, single-module corpus unchanged.
 9. **`Bool` as a library enum. ✅ done** (brief + spec: `docs/phase4-slice9-brief.md`,
    `docs/phase4-slice9-spec.md`). `type: Bool | False | True ;` replaces the primitive, via a
    **general** zero-payload-enum → scalar-discriminant layout rule (`Bool` is that rule's
@@ -2271,10 +2170,13 @@ type parameter (`Vec['T 'A = Global]`, a zero-size handle in the default case) i
 an allocator explicit without the parameter appearing at every use site, and the `core` /
 `fixed` / `alloc` split bounds where it can appear at all. Retrofitting it onto collections
 specified without it is the mistake Rust's `allocator_api` is still paying for, and this is
-the only moment it is cheap. Two prerequisites, both already logged: Phase 4 Slice 8's
-general answer to what a disposal word may require beyond the value, and Slice 2's parked
-rework of the compiler-emitted `malloc`/`free` shim into ordinary bound foreign words, since
-a user-supplied allocator cannot be a backend special case. Ambient context (Odin/Jai-style)
+the only moment it is cheap. Two prerequisites: whether *derived* disposal can thread an
+allocator down to a nested resource field at all, which is open, not answered by Phase 4
+Slice 8 — that slice's `disposal:` design would have answered it via a named word's richer
+signature, and was abandoned for a leaf-wrapper convention where every disposal word stays
+`( 'T -- )`, so this phase's own brief has to answer it fresh — and Slice 2's parked rework
+of the compiler-emitted `malloc`/`free` shim into ordinary bound foreign words, since a
+user-supplied allocator cannot be a backend special case. Ambient context (Odin/Jai-style)
 is not on the menu: it makes disposal depend on dynamically-scoped state at the `drop` site
 rather than the allocation site, which converts a compile error into a runtime one in the
 language whose point is the opposite.
