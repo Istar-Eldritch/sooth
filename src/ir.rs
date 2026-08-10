@@ -257,6 +257,16 @@ pub fn ir_type_of(ty: Type) -> IrType {
         // same, ast.rs). The backend assigns each distinct effect a `:Q{n}`
         // symbol from `IrModule::quot_sigs`.
         Type::Quotation(eff) => IrType::Quotation(QuotSigId(eff)),
+        // Slice 10a (R1): a `~` cannot be materialized, so it never reaches the
+        // backend. Every materialization boundary rejects it by type inequality
+        // upstream (it is not `Type::Quotation`), and it is never a field,
+        // output, referent, or captured value, so lowering cannot construct a
+        // value of this type. Reaching here is a checker bug, not a legal input.
+        Type::InlineQuotation(_) => {
+            unreachable!(
+                "a `~` inline quotation never reaches the backend (it cannot be materialized)"
+            )
+        }
     }
 }
 

@@ -2018,12 +2018,15 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
         && w.effect
             .inputs
             .iter()
-            .any(|s| matches!(s.ty, Type::Quotation(_)))
+            .any(|s| crate::ast::is_quotation_type(s.ty).is_some())
     {
         return Err(clause_bodied_quotation_word_error(word));
     }
     for slot in &w.effect.inputs {
-        if let Type::Quotation(eff) = slot.ty {
+        // Slice 10a (R2): a `~` input is recognized here too (accessor), so a
+        // `~` to `main` and a quotation nested inside a `~` effect are rejected
+        // exactly as for an ordinary quotation parameter.
+        if let Some(eff) = crate::ast::is_quotation_type(slot.ty) {
             // `main` takes no quotation: it is an entry point, not a
             // combinator (D6/R28).
             if w.name == "main" {
@@ -2108,7 +2111,12 @@ fn clause_bodied_quotation_word_error(word: &str) -> String {
 
 /// R7a: reject `ty` if it is a quotation type, naming the position and slice 7.
 fn reject_quotation_type_position(ty: Type, position: &str) -> Result<(), String> {
-    if let Type::Quotation(eff) = ty {
+    // Slice 10a (R2): both variants are rejected here. An ordinary
+    // `Type::Quotation` reaches this only after the legal-position `continue`s
+    // above have skipped the field/output/array cases; a `~` never has such a
+    // legal position, so it always lands here. Accessor, not a second arm, so
+    // the `~` case cannot be silently dropped.
+    if let Some(eff) = crate::ast::is_quotation_type(ty) {
         return Err(format!(
             "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
             eff.name_static,
@@ -3415,7 +3423,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         | Type::Cstr
         // Slice 6a: a quotation type has no runtime layout (D6), so it is not
         // a value-containment node; like a reference it closes no size cycle.
-        | Type::Quotation(_) => None,
+        // Slice 10a: a `~` is never a field (it cannot be materialized), so it
+        // reaches this recursion graph only vacuously; it too is a leaf.
+        | Type::Quotation(_)
+        | Type::InlineQuotation(_) => None,
     }
 }
 
@@ -6028,7 +6039,10 @@ fn unify_poly_input(
         // `'T = i64`). Equal arity is required on both sides; else it is a
         // located mismatch, never a silent bind.
         PolyType::Quotation(ins, outs) => {
-            let Type::Quotation(eff) = slot_ty else {
+            // Slice 10a (R1): accept a `~` slot as well as an ordinary
+            // quotation slot (accessor), so a declared quotation parameter
+            // unifies against either.
+            let Some(eff) = crate::ast::is_quotation_type(slot_ty) else {
                 return Err(type_mismatch_error(
                     ctx,
                     span,
@@ -7052,7 +7066,7 @@ pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
             .effect
             .inputs
             .iter()
-            .any(|s| matches!(s.ty, Type::Quotation(_))),
+            .any(|s| crate::ast::is_quotation_type(s.ty).is_some()),
         Some(sig) => sig.inputs.iter().any(poly_input_is_quotation),
     }
 }
@@ -7061,10 +7075,16 @@ pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
 /// variable-bearing effect (`[ 'T -- ]`) or a fully-concrete one that folded
 /// to `Concrete(Type::Quotation)`.
 fn poly_input_is_quotation(p: &PolyType) -> bool {
-    matches!(
-        p,
-        PolyType::Quotation(..) | PolyType::Concrete(Type::Quotation(_))
-    )
+    match p {
+        PolyType::Quotation(..) => true,
+        // Slice 10a (R1): a fully-concrete `~` folds to `Concrete(~)` on the
+        // same footing as a fully-concrete ordinary quotation, so the accessor
+        // recognizes both. Failing to recognize a `~` here makes the word not a
+        // combinator, so it is lowered as an ordinary call and reaches
+        // `ir_type_of`'s `unreachable!` -- the ICE this predicate guards.
+        PolyType::Concrete(t) => crate::ast::is_quotation_type(*t).is_some(),
+        _ => false,
+    }
 }
 
 /// R22 (D5)/R4 (D5 relaxed): reject a cycle in the quotation-taking-word call
@@ -7225,12 +7245,12 @@ fn inline_combinator(
         let base = stack.len() - n;
         for (i, want) in inputs.iter().enumerate() {
             let found = stack[base + i];
-            if let Type::Quotation(eff) = want {
+            if let Some(eff) = crate::ast::is_quotation_type(*want) {
                 if let Some(QuotRef::Known(id)) = found.quot {
                     check_literal_against_declared_effect(
                         id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
                     )?;
-                } else if matches!(found.ty, Type::Quotation(_)) {
+                } else if crate::ast::is_quotation_type(found.ty).is_some() {
                     // R21: forwarding an abstract quotation parameter. `found`
                     // is itself a declared quotation parameter of the enclosing
                     // combinator (a `Type::Quotation` slot with no `Known`
@@ -7389,14 +7409,18 @@ fn check_poly_combinator_args(
         }
         let found = stack[base + i];
         let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays)?;
-        let Type::Quotation(eff) = concrete else {
-            unreachable!("a quotation input grounds to Type::Quotation (apply_subst)")
+        // Slice 10a (R1): `apply_subst` grounds an ordinary quotation parameter
+        // to `Type::Quotation` and (phase 2) a `~` parameter to
+        // `Type::InlineQuotation`; the accessor accepts both, so this let-else
+        // never becomes a spurious `unreachable!` once `~` grounding lands.
+        let Some(eff) = crate::ast::is_quotation_type(concrete) else {
+            unreachable!("a quotation input grounds to a quotation type (apply_subst)")
         };
         if let Some(QuotRef::Known(id)) = found.quot {
             check_literal_against_declared_effect(
                 id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
             )?;
-        } else if matches!(found.ty, Type::Quotation(_)) {
+        } else if crate::ast::is_quotation_type(found.ty).is_some() {
             // R21 (poly): a forwarded abstract quotation parameter, accepted
             // when its declared effect matches (the spliced body's own
             // `call`/`times` re-checks it, R8/R9).
@@ -7712,7 +7736,12 @@ fn check_capture_admission(
     // or an already-erased `Type::Quotation`) is deferred at every boundary.
     for name in &names {
         let b = scope.local(name).expect("filtered to a bound name");
-        if b.quot.is_some() || matches!(b.ty, Type::Quotation(_)) {
+        // Slice 10a (R2): the fifth materialization boundary. A `~` local is
+        // exactly a quotation-typed binding; without the accessor it passes
+        // this guard, is recorded in a surviving capture set, and lowering
+        // materializes it into an env bundle -- the one thing `~` forbids.
+        // Phase 2 replaces the message with a `~`-specific one plus a golden.
+        if b.quot.is_some() || crate::ast::is_quotation_type(b.ty).is_some() {
             return Err(captured_quotation_name_deferred_error(ctx, span));
         }
     }
@@ -8286,7 +8315,10 @@ fn check_term(
                 // checks against `f`'s declared effect exactly as an ordinary
                 // word call checks against its `Sig`, with no splice.
                 if top.quot.is_none() {
-                    if let Type::Quotation(eff) = top.ty {
+                    // Slice 10a (R2): `call` on a `~` is accepted and is
+                    // statically always a splice; the accessor treats a `~`
+                    // abstract parameter exactly like an ordinary one here.
+                    if let Some(eff) = crate::ast::is_quotation_type(top.ty) {
                         return check_abstract_quotation_call(eff, span, stack, ctx, "call");
                     }
                     return Err(call_needs_quotation_error(ctx, span));
@@ -8341,7 +8373,9 @@ fn check_term(
                 // the declared rows (a declared effect names no local and
                 // captures no borrow, so move/borrow identity hold trivially).
                 if top.quot.is_none() {
-                    if let Type::Quotation(eff) = top.ty {
+                    // Slice 10a (R2): a `~` abstract parameter is accepted by
+                    // `times` exactly like an ordinary quotation parameter.
+                    if let Some(eff) = crate::ast::is_quotation_type(top.ty) {
                         return check_abstract_quotation_times(eff, span, stack, ctx);
                     }
                     return Err(times_needs_quotation_error(ctx, span));
@@ -8614,7 +8648,7 @@ fn check_term(
                 // carries no quotation phantom in its phis (R10).
                 let outs: Vec<Slot> = stack[base..]
                     .iter()
-                    .filter(|s| s.quot.is_none() && !matches!(s.ty, Type::Quotation(_)))
+                    .filter(|s| s.quot.is_none() && crate::ast::is_quotation_type(s.ty).is_none())
                     .map(|s| Slot::computed(s.ty))
                     .collect();
                 stack.truncate(base);
@@ -10810,6 +10844,81 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
+    }
+
+    /// Slice 10a (R1): a fully-concrete `~` folds to `Concrete(InlineQuotation)`,
+    /// which the routing predicate must recognize -- else the word is not a
+    /// combinator, is lowered as an ordinary call, and reaches `ir_type_of`'s
+    /// `unreachable!`. Constructed directly, no parser.
+    #[test]
+    fn poly_input_is_quotation_recognizes_inline() {
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(poly_input_is_quotation(&PolyType::Concrete(inl)));
+        assert!(poly_input_is_quotation(&PolyType::Concrete(ord)));
+        assert!(!poly_input_is_quotation(&PolyType::Concrete(Type::I64)));
+    }
+
+    /// Slice 10a (R1): a monomorphic word whose input is a `~` still counts as
+    /// declaring a quotation parameter (accessor-routed), so it is inlined
+    /// rather than lowered to a call.
+    #[test]
+    fn word_declares_quotation_parameter_recognizes_inline() {
+        use crate::ast::TypedSlot;
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let w = WordDef {
+            name: "w".to_string(),
+            effect: StackEffect {
+                inputs: vec![TypedSlot {
+                    name: None,
+                    ty: inl,
+                }],
+                outputs: Vec::new(),
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+            span: Span::default(),
+        };
+        assert!(word_declares_quotation_parameter(&w));
+    }
+
+    /// Slice 10a (R2): the declaration-position rejection is no longer fail-open
+    /// for a `~` -- it used to return `Ok` (`if let Type::Quotation`), letting a
+    /// `~` slip past silently. Constructed directly.
+    #[test]
+    fn reject_quotation_type_position_rejects_inline() {
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let err = reject_quotation_type_position(inl, "a struct field").unwrap_err();
+        assert!(err.contains("~[ i64 -- ]"), "names the `~` type: {err}");
+        assert!(err.contains("a struct field"), "names the position: {err}");
+        // The ordinary quotation is still rejected in this position too.
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(reject_quotation_type_position(ord, "a struct field").is_err());
+    }
+
+    /// Slice 10a (R2): a word declaring a `~` *output* is rejected by the audit,
+    /// where a bare `Type::Quotation` output is allowed (a materialization
+    /// boundary). The `~` cannot be materialized, so it is never a legal output.
+    #[test]
+    fn audit_rejects_inline_quotation_output_but_allows_ordinary() {
+        use crate::ast::TypedSlot;
+        let mk = |ty: Type| WordDef {
+            name: "w".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: vec![TypedSlot { name: None, ty }],
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+            span: Span::default(),
+        };
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let err = audit_word_quotation_positions(&mk(inl)).unwrap_err();
+        assert!(err.contains("the output of `w`"), "locates it: {err}");
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(audit_word_quotation_positions(&mk(ord)).is_ok());
     }
 
     /// U7 (R18): the exported-signature helper flags a word whose effect

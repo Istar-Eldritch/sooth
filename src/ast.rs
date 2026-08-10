@@ -877,6 +877,17 @@ pub enum Type {
     /// this type never reaches the backend (the runtime representation is
     /// slice 7).
     Quotation(&'static QuotEffect),
+    /// Slice 10a (R1): the inline-only quotation type `~[ ... ]`. Same payload
+    /// as `Type::Quotation`, but it **cannot be materialized**: no runtime
+    /// representation, never stored in a field, returned, captured, widened to
+    /// an ordinary `[ ... ]`, nor reaching the backend. A `call` on it is
+    /// statically always a splice, never a runtime dispatch. Structural
+    /// `PartialEq` gives `InlineQuotation(e) != Quotation(e)` for free, so every
+    /// materialization boundary rejects a `~` by type inequality *before* the
+    /// boundary, and `ir_type_of` never sees one (its arm is `unreachable!`).
+    /// Its `name_static` carries the `~[ ... ]` spelling (see
+    /// `inline_quotation_type`), so the two variants also render distinctly.
+    InlineQuotation(&'static QuotEffect),
 }
 
 /// Slice 6a (R4): a declared quotation effect, the payload behind
@@ -905,6 +916,40 @@ pub fn quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
         name_static,
     }));
     Type::Quotation(eff)
+}
+
+/// Slice 10a (R1): build a `Type::InlineQuotation` for a declared `~` effect.
+/// Mirrors `quotation_type`, but the leaked spelling is prefixed with `~`, so
+/// the effect's `name_static` reads `~[ ... -- ... ]` and the two variants
+/// never share a `&'static QuotEffect` (their `name_static` fields differ), on
+/// top of already differing by variant tag.
+pub fn inline_quotation_type(inputs: Vec<Type>, outputs: Vec<Type>) -> Type {
+    let name = format!("~{}", render_quotation_effect(&inputs, &outputs));
+    let name_static: &'static str = Box::leak(name.into_boxed_str());
+    let eff: &'static QuotEffect = Box::leak(Box::new(QuotEffect {
+        inputs,
+        outputs,
+        name_static,
+    }));
+    Type::InlineQuotation(eff)
+}
+
+/// Slice 10a (R1): the effect behind either quotation type variant. Returns
+/// `Some(eff)` for both `Type::Quotation` and `Type::InlineQuotation`, so every
+/// enabling and routing site that must treat a `~` like an ordinary quotation
+/// routes through one accessor rather than a second pattern arm a later reader
+/// can forget. Two ICE-class defects were traced to exactly that omission, so
+/// the accessor is the version that cannot be missed a third time. It is
+/// deliberately **not** used at the four materialization boundaries (word
+/// output, `&!` store, declared parameter, `if`-join), which reject a `~` by
+/// type inequality; it **is** used at the declaration-position rejections and
+/// the capture-admission guard, which must actively reject a `~` (they fail
+/// open otherwise).
+pub fn is_quotation_type(ty: Type) -> Option<&'static QuotEffect> {
+    match ty {
+        Type::Quotation(eff) | Type::InlineQuotation(eff) => Some(eff),
+        _ => None,
+    }
 }
 
 /// Render a quotation effect's spelling `[ <in>... -- <out>... ]`. The nil
@@ -1083,6 +1128,9 @@ impl Type {
             Type::Str => "str",
             Type::Cstr => "cstr",
             Type::Quotation(eff) => eff.name_static,
+            // The `~[ ... ]` spelling is baked into `name_static` by
+            // `inline_quotation_type`, so this mirrors the `Quotation` arm.
+            Type::InlineQuotation(eff) => eff.name_static,
         }
     }
 }
@@ -1236,6 +1284,41 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Slice 10a (R1/R10): a `~` renders `~[ ... -- ... ]`, the ordinary
+    /// quotation renders `[ ... -- ... ]`, distinguished only by the sigil.
+    #[test]
+    fn inline_quotation_type_name_carries_the_tilde() {
+        let ord = quotation_type(vec![Type::I64], vec![Type::I64]);
+        let inl = inline_quotation_type(vec![Type::I64], vec![Type::I64]);
+        assert_eq!(ord.name(), "[ i64 -- i64 ]");
+        assert_eq!(inl.name(), "~[ i64 -- i64 ]");
+    }
+
+    /// Slice 10a (R1): the accessor sees through both quotation variants and
+    /// nothing else, so every enabling/routing site routes through one place.
+    #[test]
+    fn is_quotation_type_accepts_both_variants_only() {
+        let ord = quotation_type(vec![Type::I64], Vec::new());
+        let inl = inline_quotation_type(vec![Type::I64], Vec::new());
+        assert!(is_quotation_type(ord).is_some());
+        assert!(is_quotation_type(inl).is_some());
+        assert!(is_quotation_type(Type::I64).is_none());
+        assert!(is_quotation_type(Type::Str).is_none());
+    }
+
+    /// Slice 10a (R3): structural `PartialEq` makes a `~` and an ordinary
+    /// quotation of the *same rows* unequal, so no equality site coerces
+    /// between them -- the enforcement is free from the variant tag.
+    #[test]
+    fn inline_and_ordinary_quotation_are_never_equal() {
+        let ord = quotation_type(vec![Type::I64], vec![Type::I64]);
+        let inl = inline_quotation_type(vec![Type::I64], vec![Type::I64]);
+        assert_ne!(ord, inl);
+        // ...and each equals itself, so the inequality is the variant, not a
+        // per-call fresh leak of the payload.
+        assert_eq!(inl, inline_quotation_type(vec![Type::I64], vec![Type::I64]));
+    }
 
     /// U8 (slice 5b, R8d): `find_type_in_module` matches on `name_static` with
     /// module gating. A single-module lookup is unaffected, and two decls that
