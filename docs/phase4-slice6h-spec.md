@@ -1,233 +1,345 @@
-# Phase 4 Slice 6h spec: a raw array constructor `[ Type ; Count ]`
+# Phase 4 Slice 6h spec: a raw array constructor `[ Type ; Count ]` (concrete path)
 
-A body-level, statically-sized array constructor `[ Type ; Count ]`, reachable from both
-the concrete and the polymorphic checking path, lowering to a single O(1) `Alloc` with
-unspecified contents. It gives a polymorphic body its own fixed-size scratch array (which
-it could not construct before), and its O(1) lowering is the shape that closes a
-long-standing measured compile-cost defect.
+A body-level, statically-sized array constructor `[ Type ; Count ]` for the **concrete**
+checking path, lowering to one O(1) `Alloc` plus a fixed-size zero-init loop. `fill`'s own
+lowering is fixed the same way (one `Alloc` plus a runtime store loop, replacing its N
+unrolled stores). Together these close a long-standing measured compile-cost defect.
+
+**This slice does not deliver a polymorphic body's ability to construct its own array.**
+That was this slice's original motivating goal; round-1 review found it unbuildable as
+briefed (see "Deferred to a future slice" below) and the scope was narrowed in response.
+What ships here is: a new concrete-path constructor that needs no seed value (useful when
+a buffer will be immediately overwritten index-by-index), and the fix to `fill`'s
+compile-cost defect. Both are real, both are independently useful, neither reaches a
+polymorphic body.
 
 ## Correction to the brief (read this first)
 
 The brief's **D4 -- "demote `fill` to an ordinary Sooth-defined library word" -- is not
-implementable and is dropped.** This is a defect in the brief, not a scoping choice, and
-the spec states it plainly rather than working around it silently.
+implementable and is dropped.** This is a defect in the brief, not a scoping choice.
 
 Verified directly against the current binary:
 
 - `fill` requires a **literal** count and always has. Feeding it a runtime `usize` local
-  yields `error: fill requires a literal count, found a computed usize (no const-expr
-  eval)` (the `fill_count_not_literal_error` arm, `check.rs:9452`, reached from
-  `check_array_word`'s `"fill"` arm). So `fill`'s output array length is the *value* of its
-  count argument: `check_array_word`'s `"fill"` arm computes the result type ad hoc per call
-  site via `intern_array_type(arrays, element.ty, count_val as u32)` (`check.rs:10265`),
-  reading the literal's actual value, **not** through ordinary signature unification.
+  yields, in word context: `error: type mismatch in main (line 3)`, then
+  `` `fill` requires a literal count, found a computed `usize` (no const-expr eval)`` ,
+  then `note: declared ( -- )` -- the `fill_count_not_literal_error` arm, `check.rs:9452`,
+  reached from `check_array_word`'s `"fill"` arm at `check.rs:10244-10246`. (The doubled
+  `error: error:` prefix on native diagnostics is a pre-existing, repo-wide artifact,
+  documented and deliberately unfixed at `docs/phase4-slice6a-spec.md:358`, not a defect
+  in this citation.) So `fill`'s output array length is the *value* of its count argument:
+  `check_array_word`'s `"fill"` arm computes the result type ad hoc per call site via
+  `intern_array_type(arrays, element.ty, count_val as u32)` (`check.rs:10264`), reading the
+  literal's actual value, **not** through ordinary signature unification.
 - That makes `fill`'s type dependent on an argument's value, which no declared word
   signature can express. D4's own proposed signature `( 'T: Copy usize -- ['T 'N] )` has
-  an output-only `'N`. Probed on the current binary:
-  `: mk ( 'T: Copy usize -- ['T 'N] ) | v n | v drop n drop ;` fails with
-  `stack effect mismatch in 'mk' -- body leaves ``, but the declared outputs are ['T 'N]`.
-  This is the identical shape open-question-2 already cited. OQ2 answered "does `Count`
-  need `'N` on the *input* side" and concluded no; it missed that `fill`'s *output* needs
-  exactly that same output-only length-variable binding its own `mk` probe had already
-  falsified. `fill`'s rewrite does need the machinery OQ2 scoped out, so it cannot be an
-  ordinary word this slice (or without dependent types / const generics at all).
+  an output-only `'N`. The discriminating probe (the brief's original `mk` probe did not
+  discriminate this -- see the citations-review correction below) is a pair:
+  `` : mkn ( ['T: Copy 4] -- ['T 'N] ) ; `` fails with
+  `` body leaves `['T 4]`, but the declared outputs are `['T 'N]` ``, while
+  `` : mkn2 ( ['T: Copy 'N] -- ['T 'N] ) ; `` type-checks clean. A concrete length on the
+  stack does not bind an output-only length variable; `'N` on both sides is fine. `fill`'s
+  rewrite needs exactly the first shape (an output length bound from nothing but a runtime
+  count), which is unsatisfiable.
 - The two poly-check paths are disjoint (`check.rs:2298`): a quotation-taking poly word
   (a *combinator*, `is_combinator`, `check.rs:7039`) is monomorphized (`'T`->`i64`,
-  `'N`->`STANDALONE_LEN=4`) and checked by the ordinary concrete `check_word`
-  (`check_poly_combinator_standalone`, `check.rs:4951`), which *does* reach
+  `'N`->`STANDALONE_LEN=4`, `check.rs:4964/4971`) and checked by the ordinary concrete
+  `check_word` (`check_poly_combinator_standalone`, `check.rs:4951`), which *does* reach
   `check_array_word`; a non-combinator poly word like `fill` goes through
-  `check_poly_body`/`poly_walk` (`check.rs:5062`), which has no array dispatch at all.
-  `fill` has no quotation input, so it is the `poly_walk` path -- where both the missing
-  dispatch **and** the unsatisfiable output length would bite.
+  `check_poly_body`/`poly_walk` (`check.rs:5062`/`5115`), which has **no `check_array_word`
+  dispatch** (a `fill` call there falls through to `unknown_word_error` -- the poly path is
+  not blind to arrays generally: `poly_call_term`'s `"len"` arm does match
+  `PolyType::Array(..)` at `check.rs:5364`, and `poly_copy_gate` already recurses through
+  `PolyType::Array` at `check.rs:5526-5527`, which OQ3 below reuses). `fill` has no
+  quotation input, so it is the `poly_walk` path -- where the missing `check_array_word`
+  dispatch **and** the unsatisfiable output length both bite.
 
 **What replaces D4:** `fill` stays a compiler builtin, byte-for-byte unchanged in its
-type-checking (its `check_array_word` `"fill"` arm, its literal-count restriction, its
-Copy/no-reference/range gates are all untouched). Only its **lowering** changes: from N
-unrolled `alloc + store` instructions to one `Alloc` plus a small runtime counted loop
-storing the seed `N` times. That closes the compile-cost exit criterion on its own merits,
-independent of the new constructor.
+type-checking control flow. Only its **lowering** changes: from N unrolled `alloc + store`
+instructions to one `Alloc` plus a small runtime counted loop storing the seed `N` times.
+See D4 below.
 
-The genuine benefit D4 was reaching for -- "a polymorphic body can build its own array" --
-is delivered directly by the new constructor with a literal count (`[ 'T ; 4 ]` produces
-`['T 4]`, a concrete-length, variable-element array; confirmed satisfiable via the probe
-`: id4 ( ['T: Copy 4] -- ['T 4] ) ;`, which type-checks clean). `fill`'s dependent,
-literal-count form was never expressible in a poly body regardless of dispatch wiring.
+## Deferred to a future slice (do not resurrect here)
+
+Round-1 review found the polymorphic-body half of the original brief unbuildable as
+scoped, on independent grounds from two reviewers plus a third finding that undercuts its
+motivation. Recorded here so a future slice's design does not have to re-derive it:
+
+- **No interning route for a body-internal array shape in a poly body.** `ir.rs`'s
+  `subst_polytype` (`ir.rs:2245`) and `array_id_of` (`ir.rs:4048`) both *look up* an
+  already-interned array shape and panic (`.expect(...)`) otherwise. The only interning
+  sites are `parser.rs:1552` (concrete type positions), `check.rs:10264` (`fill`'s arm),
+  and `check.rs:6103` (`apply_subst`, which walks a **signature**, never a body). A poly
+  body that constructs an array whose shape does not already appear in its own declared
+  signature has nothing to intern against. A naive dogfood that returns the constructed
+  array (so its shape is the declared output, interned via the existing call-site
+  unification) would silently pass without exercising this gap at all -- exactly why this
+  is a real design problem and not just missing wiring.
+- **`poly_term`/`poly_walk`/`check_poly_body` hold `arrays: &[ArrayDecl]` immutably**
+  (`check.rs:5068`/`5122`/`5152`), and the representation invariant set by
+  `raw_to_poly_type` (`parser.rs:1356-1360`) folds a fully-concrete array shape straight to
+  `PolyType::Concrete`, never `PolyType::Array`. Threading `&mut Vec<ArrayDecl>` through
+  that call chain to let a poly body intern a genuinely new shape is a signature change
+  across a `pub(crate)` API also reached from `repl.rs:2390`.
+- **The combinator path (`sort`/`each`-shaped words) has no binding for `'T` at all.** A
+  combinator is never monomorphized into an `IrFunc`; it is term-spliced into the caller
+  (`is_combinator`, `check.rs:7039`), so at the splice site a type-variable element token
+  like `'T` has no concrete binding to resolve against (`subst_polytype`'s `Quotation` arm
+  is `unreachable!` for exactly this reason, `ir.rs:2266-2271`). A future slice needs an
+  explicit ruling here, not silent fallthrough to a confusing "unknown type `'T`" error.
+- **A literal-only `Count` does not serve the one real consumer in this repo.**
+  `lib/arrays.sth`'s own `sort` needs a scratch array whose length is the *caller's* array
+  length (`'N`), not a fixed literal such as 4 -- exactly the case a literal-only `Count`
+  excludes. A future slice reopening this needs `'N`-as-`Count` (bound-length-variable
+  support), which needs value-to-length-variable inference this slice still does not
+  build; a literal-only poly-body constructor would ship a capability nobody in this repo
+  can use.
+
+None of this affects the concrete path this slice actually delivers: `fill` and the new
+constructor remain exactly as reachable from a polymorphic body as they are today (not at
+all), unchanged from the status quo.
 
 ## Grounding facts (each verified against current source)
 
-- `check_array_word`'s `"fill"` arm: `src/check.rs:10226` (fn `check_array_word` at
-  `:10217`). Enforces a `Copy` seed (`fill_of_linear_element_error`, `:9485`), no bare
-  reference (`constructed_reference_error`, `:9815`; the arm's own comment: "a construction
-  site the declaration-site rule cannot reach"), and a literal count in `1..=u32::MAX`
-  (`fill_count_not_literal_error` `:9452`, `fill_count_out_of_range_error` `:9466`).
-  **Verified.**
+- `check_array_word`'s `"fill"` arm: `check.rs:10226` (fn `check_array_word` at `:10217`).
+  Enforces a `Copy` seed (`fill_of_linear_element_error`, `:9485`), no bare reference
+  (`constructed_reference_error`, `:9815`; the arm's own comment at `:10250-10252`: "a
+  construction site the declaration-site rule cannot reach"), and a literal count in
+  `1..=u32::MAX` (`fill_count_not_literal_error` `:9452`, `fill_count_out_of_range_error`
+  `:9466`). Element and count are read off the operand stack at `check.rs:10231-10232`;
+  the interned result type is pushed with the element's forwarded `surviving` set
+  (`check.rs:10265-10274`, comment "Review fix: forward the element's surviving set").
 - `is_copy(Type::Array(id, _))` derives an array's Copy-ness structurally from its element
-  (`src/check.rs:503`); it is a derivation, not a construction-time gate. **Verified.**
-- `check_array_word` is called only from the concrete `check_term` (`src/check.rs:8561`).
-  `poly_walk`/`poly_call_term` (`:5115`/`:5295`) have no array dispatch: a poly body's
-  `fill` falls through to `unknown_word_error`. **Verified** (grep across the poly range:
-  zero hits for `"fill"`/`check_array_word`).
-- `fill`'s lowering, `lower_array_word`'s `"fill"` arm (`src/ir.rs:4102`, "alloc + N
-  unrolled stores"): one straight-line block of `2N`-`3N` sequential instructions.
-  **Verified.**
+  (`check.rs:503`); it is a derivation, not a construction-time gate.
+- `check_array_word` is called only from the concrete `check_term` (`check.rs:8561`).
+- `fill`'s lowering, `lower_array_word`'s `"fill"` arm (`ir.rs:4102`): one straight-line
+  block of `2N`-`3N` sequential instructions (alloc + N unrolled `elem_addr`/store pairs).
 - The compile-cost defect is QBE-quadratic on one large straight-line block, not about
-  arrays. Reproduced this slice on a zero-array flat chain of N `1 +` calls:
-  N=5000 -> 0.13s, 10000 -> 0.33s, 20000 -> 0.98s -- superlinear (~2.5x-3x per doubling),
-  the exact shape the brief records. **Verified.**
-- `parse_field_type_expr` (`src/parser.rs:1680`) already parses `[ elem count ]`
-  (space-separated) in type position. **Verified.**
-- `parse_term`'s `Token::LBracket` arm (`src/parser.rs:2026`) is unconditional and always
-  starts a quotation literal. There is no `;` arm anywhere in `parse_term`'s match; a bare
-  `;` inside `[ ... ]` falls to the `other => Err(...)` arm. Probed:
-  `[ 1 ; 2 ]` in a body yields `parse error: unexpected token Semicolon`. A `;`-lookahead
-  before the matching `]` is therefore unambiguous against every existing `[`. **Verified.**
-- `alloc_array` (`src/ir.rs:4028`) emits one hoisted `Instr::Alloc`. The `times` loop
-  machinery (`begin_loop`/`Instr::Cmp`/`Terminator::Jnz`/`Jmp`/`finalize_loop`, with
-  `Alloc` hoisted into the invariant preheader) is at `src/ir.rs:3441`. **Verified**;
-  `fill`'s new loop reuses this shape.
+  arrays specifically. Reproduced this slice, twice independently (this document and
+  round-1 review), on a zero-array flat chain of N `1 +` calls: N=5000 -> 0.11-0.13s,
+  10000 -> 0.30-0.33s, 20000 -> 0.95-0.98s -- superlinear (~2.5x-3x per doubling), matching
+  the shape `docs/phase4-slice6a-spec.md:350-354` records for `fill` itself
+  (10k~0.36s, 100k~25s, 1M>300s, and explicitly retired the 1M case there because 1M `i64`
+  is 8 MB of stack before any loop frame exists -- this slice's own re-measurement stays
+  compile-time-only for the same reason, not a revival of criterion 14).
+- `parse_field_type_expr` (`parser.rs:1680`) already parses `[ elem count ]` (space
+  separated) in type position, and `Parser::resolve_type` (`parser.rs:1729`) is the
+  existing, already-used-elsewhere (five call sites, including `parse_field_type_expr`)
+  parse-time name-to-`Type` resolver: it calls `resolve_type_name_in_module` and the
+  qualified-name export check, exactly what a concrete `Type` slot needs, and needs no new
+  machinery in `check.rs`/`ir.rs`.
+- `parse_term`'s `Token::LBracket` arm (`parser.rs:2026`) is unconditional and always
+  starts a quotation literal; there is no `;` arm anywhere in `parse_term`'s match, a bare
+  `;` falls to the `other => Err(...)` arm at `parser.rs:2041`. Probed: `[ 1 ; 2 ]` in a
+  body yields `parse error: unexpected token Semicolon at line 1, col 19`. A `;`-lookahead
+  before the matching `]` is therefore unambiguous against every existing `[`.
+- A struct/enum construction word already lowers from a checked term that carries its own
+  `StructId`/`EnumId` directly, with no operand to read a type off (`StructWord::Construct(id)`
+  / `EnumWord::Construct(id, vi)`, `ir.rs:761-772`) -- the precedent this constructor's
+  lowering follows, since it likewise has no source operand for its element type.
+- `begin_loop`/`finalize_loop` (`ir.rs:3102`/`3167`) are the general-purpose loop-building
+  primitives; `elem_addr` (`ir.rs:4073`) computes a runtime index-to-pointer address;
+  `PtrOffset` (`ir.rs:1060`) and `Store`/`FieldStore` (`ir.rs:1071`/`1084`/`1088`) are
+  existing scalar-write ops. (`ir.rs:3441`, the `times` word's own arm, is *not* directly
+  reusable: it is driven by a quotation value on the stack via `quot_bodies`/
+  `lower_indirect_call`, `ir.rs:3479-3496`, which neither this constructor nor `fill` has.)
+- Zero-value soundness for D3: every enum's variant tags are assigned by declaration
+  order starting at 0 (`variants.iter().enumerate()`, `ir.rs:729`), so tag `0` always names
+  a real, declared variant for any non-empty enum. Recursively, an all-zero-bytes region
+  therefore decodes as a valid value for any type built only from scalars and enums (any
+  Copy, non-reference type this constructor's own gate already restricts elements to) --
+  including `Bool`, a scalar enum since slice 9.
 
 ## Decisions
 
-**D1 -- the constructor is a body-level term `[ Type ; Count ]`, a new `TermKind`.**
-`Type` is a single type-name token: a concrete type name (resolved via the module registry,
-`resolve_type_name`/`resolve_type_name_in_module`, read directly out of the term, no
-unification) or, inside a polymorphic body, a bound type-variable name matching the
-enclosing signature (`'T`). A compound/nested element type (`[ [i64 3] ; 4 ]`) is out of
-scope: one type-name token only. `Count` is a **literal integer** in `1..=u32::MAX`,
-**everywhere** -- both the concrete and the polymorphic path. A runtime-valued `Count` was
-never in scope for either path; a bound length-variable `Count` (`'N`) is out of scope
-(see open questions). Disambiguation: at `parse_term`'s existing `Token::LBracket` arm,
-add one lookahead (mirroring `quotation_type_ahead`'s style, `parser.rs:1564`) that scans
-for a top-depth `;` before the matching `]`. Present -> array constructor; absent ->
-quotation literal, exactly as today.
+**D1 -- the constructor is a body-level term `[ Type ; Count ]`, a new `TermKind`, concrete
+path only.** `Type` is a single type-name token, resolved to a `Type` **at parse time** via
+the existing `Parser::resolve_type` (`parser.rs:1729`) -- the same call already used for
+other type-position syntax, so the new `TermKind` carries a resolved `Type`, not a raw
+string, and needs no name-resolution step later in `check.rs`. A compound/nested element
+type (`[ [i64 3] ; 4 ]`) is out of scope: `Parser::resolve_type` expects a single name
+token, so this case is already a located parse error with no new rejection logic to write
+(the `;`-lookahead still fires on it correctly, since its scan sees `;` at depth 1; the
+element read then hits an unexpected `[` where a name token is expected -- this needs a
+test, not new code). `Count` is a **literal integer** in `1..=u32::MAX`. A bound
+type-variable element (`'T`) and a bound length-variable count (`'N`) are both out of
+scope this slice (see "Deferred to a future slice"). Disambiguation: at `parse_term`'s
+existing `Token::LBracket` arm, add one lookahead (mirroring `quotation_type_ahead`'s
+style, `parser.rs:1564`) that scans for a top-depth `;` before the matching `]`. Present ->
+array constructor; absent -> quotation literal, exactly as today, including the existing
+"unterminated quotation" fallback when no matching `]` exists at all.
 
-**D2 -- the constructor owns the construction-time gates in both paths.** The `Copy`-only
-and no-bare-reference restrictions live on the constructor's own check, enforced in *both*
-`check_term` (concrete) and `poly_walk`/`poly_term` (polymorphic). A linear-element or
-bare-reference-element array stays unconstructible; reaching that case, and building the
-disposal/move machinery it would need (which does not exist in `ir.rs`), is not this
-slice's job. This is the whole point of the slice: the gate must genuinely work in the poly
-path from day one.
+**D2 -- the constructor's construction-time gates are shared with `fill`'s, parameterized
+on the construction site.** The `Copy`-only and no-bare-reference restrictions
+(`contains_reference`/`is_copy` against `fill_of_linear_element_error`/
+`constructed_reference_error`, `check.rs:10253-10262`) and the count-range check
+(`fill_count_out_of_range_error`, `:9466`) are extracted into one small helper called from
+both `check_array_word`'s `"fill"` arm and the new constructor's `check_term` arm. Since
+`fill_of_linear_element_error` and `fill_count_out_of_range_error` currently hardcode the
+word `` `fill` `` in their rendered text, give both a `position: &str` parameter (mirroring
+`constructed_reference_error`'s existing pattern, `check.rs:9815`) so a rejection at the
+new constructor names the constructor, not `fill`; `fill`'s own call sites pass `"fill"`
+so its diagnostics are byte-for-byte unchanged. This is a diagnostic-constructor signature
+change, not a type-checking behavior change, and does not conflict with "`fill`'s
+type-checking is untouched" below. A linear-element or bare-reference-element array stays
+unconstructible either way; the disposal/move machinery that would let one exist does not
+exist in `ir.rs` and building it is not this slice's job.
 
-**D3 -- contents are unspecified; lowering is one `Alloc`, no loop, no store.** The
-constructor lowers to exactly one `Instr::Alloc` (via `alloc_array`), O(1) regardless of
-`Count`. Whatever populates the array afterward does so with an ordinary runtime loop.
+**D3 -- contents are zero-initialized via a fixed-size runtime loop, not "unspecified".**
+Round-1 review correctly flagged that "unspecified contents" is unsound: elements are
+gated `Copy`, which includes enums, and `Bool` is a scalar enum since slice 9, so an
+uninitialized `[ Bool ; 4 ]` would let the checker treat an arbitrary byte as a valid
+`Bool` -- exactly the class of silent failure this project exists to eliminate. The fix
+must stay O(1) in **code size** (a per-element unrolled zero-store would reintroduce the
+same QBE-quadratic defect this slice exists to close for `fill`), so it is a runtime loop,
+not an unrolled fill: one `Alloc` (`alloc_array`, `ir.rs:4028`, following the same
+"the term already carries its own type, no operand needed" precedent `StructWord::Construct`
+uses), then a `begin_loop`/`finalize_loop`-bounded loop writing a `Const(_, 0)` across the
+allocation's byte range via `PtrOffset`+`Store`/`FieldStore` -- a raw byte-range zero-fill,
+not a per-element `store_elem` call, so it needs no element-type-directed logic at all (an
+all-zero-bytes region is a valid value for every element type this constructor can
+construct, per the grounding fact above). The loop body's instruction count is fixed,
+independent of `Count`; only the loop's trip count varies.
 
-**D4 (replaced) -- `fill` stays a builtin; only its lowering changes.** See the correction
-section above. `lower_array_word`'s `"fill"` arm (`ir.rs:4102`) changes from N unrolled
-`alloc + store` to one `Alloc` plus a small runtime counted loop storing the seed `N`
-times, reusing the loop shape at `ir.rs:3441`. `check_array_word`'s `"fill"` arm is **not
-touched** -- same literal-count restriction, same Copy/no-reference/range gates, same
-surviving-set forwarding (`ir.rs`'s `store_elem`/closure-carrying element semantics must be
-preserved).
+**D4 (replaces the brief's D4) -- `fill` stays a builtin; only its lowering changes.**
+`lower_array_word`'s `"fill"` arm (`ir.rs:4102`) changes from N unrolled `alloc + store` to
+one `Alloc` plus a small `begin_loop`/`finalize_loop`-bounded runtime loop storing the seed
+value `N` times via `elem_addr` (`ir.rs:4073`) + `store_elem` (`ir.rs:4082`, which already
+handles a `Blit` for aggregate elements). `check_array_word`'s `"fill"` arm's
+type-checking is **not touched** beyond D2's diagnostic-constructor parameterization: same
+literal-count restriction, same Copy/no-reference/range gates, same `surviving`-set
+forwarding, and `fill`'s own rendered diagnostics are unchanged (D2 passes `"fill"` as the
+position). The loop-carried destination array must **not** be a `begin_loop` carried
+parameter: `begin_loop(&params, stage_aggregates: true)` (`ir.rs:3467`) routes carried
+aggregates through the back-edge staging blit built for loop-invariant-mutation safety
+(the slice-3 aggregate-aliasing fix); staging the array here would blit a stale copy over
+each iteration's store. The `Alloc` must be emitted before `begin_loop` (it already hoists
+to the function's `alloca_home` via `push_alloc`) and referenced directly by dominance from
+inside the loop body, exactly the same hazard D3's zero-init loop must also avoid.
 
 ## Open questions -- resolved
 
-- **Where `fill`'s rewritten definition lives (OQ1): dissolved.** D4 is dropped; `fill`
-  stays a builtin, so no new library file is created and `lib/arrays.sth`/
-  `lib/combinators.sth` are untouched. The slice's poly-body dogfood is a golden under
-  `examples/`, not a library word.
-- **Does `Count` accept a bound length-variable `'N` (OQ2): no.** Only a literal integer,
-  in both paths. A runtime-valued `Count` was never in scope for either path. Supporting
-  `'N`-as-`Count` needs value-to-length-variable inference this slice does not build, and
-  no in-scope consumer needs it: the achievable poly-body case is a literal count
-  (`[ 'T ; 4 ]` -> `['T 4]`, satisfiable per the `id4` probe). Grounding: `STANDALONE_LEN`
-  (`check.rs:4971`) pins every length variable to a sentinel during a combinator's
-  standalone check, and there is no value-to-length-variable binding path in the checker;
-  the `mk` probe confirms an output-only length variable is unsatisfiable.
-- **Is `check_destructure_drop_guard` the right template for the shared gate (OQ3):
-  partly.** Its *spirit* -- one free function reachable from both `check_term` and the poly
-  path -- is right, but `check_destructure_drop_guard` (`check.rs:10653`) is a **name**-
-  dispatched guard `(name, span, ctx)`, whereas the constructor's gate is **type**-directed
-  and spans two type representations (`Type` on the concrete `Vec<Slot>` stack vs
-  `PolyType` on the `Vec<PolyType>` stack). Conclusion: a **dedicated shared helper**
-  parameterized on a resolved element descriptor (concrete `Type`, or a poly type-variable
-  id plus the enclosing `sig`) rather than a name. It performs (a) the count-range check in
-  `1..=u32::MAX` and its diagnostic, and (b) the element gate: for a concrete `Type`,
-  `contains_reference` then `is_copy` (reusing the exact primitives `check_array_word`
-  uses, so the diagnostics are identical -- `constructed_reference_error` /
-  `fill_of_linear_element_error`); for a type variable, `poly_copy_gate` (`check.rs:5500`,
-  which reports `poly_copy_body_error` for an unbounded variable). Each path resolves its
-  element to that descriptor, then calls the one helper.
-- **Re-verify the QBE finding empirically (OQ4): done pre-implementation** (see grounding
-  facts; the zero-array `1 +` chain reproduces the superlinear shape). The
-  *post*-implementation re-measure of the 6a `fill` timings is an exit criterion below.
+- **Where `fill`'s rewritten definition would live: dissolved.** `fill` is not being
+  rewritten as a word (D4); no new library file, `lib/arrays.sth` untouched.
+- **Does `Count` accept a bound length-variable `'N`: no, and moot this slice.** There is
+  no polymorphic path in scope to make the question live; see "Deferred to a future
+  slice" for why a literal-only `Count` cannot serve `sort`'s scratch-array need, and why
+  this is recorded as a real gap rather than resolved away.
+- **Is a name-dispatched guard (`check_destructure_drop_guard`-style) the right template
+  for the shared gate: no, but the fix is simpler than the brief expected.** Only the
+  concrete path needs this gate now (no poly path in scope), so it is not a
+  type-representation-spanning helper -- a plain function taking `(ctx, span, position:
+  &str, element: Type, count: i64, arrays)` that runs the range check then
+  `contains_reference`/`is_copy`, called from both `check_array_word`'s `"fill"` arm and
+  the new constructor's `check_term` arm, is enough. `poly_copy_gate` (`check.rs:5500`) is
+  not touched or needed this slice (no poly path reached).
 
 ## Out of scope (do not resurrect)
 
+- The entire polymorphic checking path: neither the new constructor nor `fill` becomes
+  reachable from a poly body this slice (see "Deferred to a future slice"). This includes
+  the combinator/splice case.
+- A bound type-variable element (`'T`) or bound length-variable count (`'N`) anywhere.
 - Linear-element or bare-reference-element arrays (D2 keeps them unconstructible; the
   disposal/move machinery is not this slice's problem).
-- `lib/arrays.sth`'s own fate (`sort`/`bin_search`) -- a separate decision.
+- `lib/arrays.sth`'s own fate (`sort`/`bin_search`) -- a separate decision, though its
+  header comment is load-bearing evidence for why a literal-only `Count` does not close
+  the poly-body motivation (see "Deferred to a future slice").
 - Runtime/heap allocation. The constructor is a stack-frame `Alloc` exactly as `fill` is;
   nothing here is `Vec`/Phase 6's `alloc`/`free`.
-- A runtime-valued or `'N`-valued `Count`; a compound/nested element type.
-- Any change to `check_array_word`'s `"fill"` arm type-checking (only `fill`'s IR lowering
-  changes).
+- A compound/nested element type (`[ [i64 3] ; 4 ]`).
+- Any change to `check_array_word`'s `"fill"` arm's **type-checking control flow**; the
+  diagnostic-constructor parameterization in D2 is the one sanctioned exception, and
+  `fill`'s own rendered messages must stay byte-identical.
 
 ## Exit criteria
 
-- `[ i64 ; 10 ]` (concrete) compiles, runs, and produces a well-typed `Copy` `[i64 10]`
-  array (e.g. `len` folds to `10`).
-- `[ 'T ; 4 ]` inside a polymorphic body (`'T` bound by the enclosing word) compiles and
-  produces a well-typed `Copy` `['T 4]` array; a polymorphic word constructs its own
-  fixed-size array internally where it previously produced "unknown word" (dogfooded by at
-  least one such word using a **literal** count -- not a runtime `n`).
+- `[ i64 ; 10 ]` compiles, runs, and produces a well-typed `Copy` `[i64 10]` array with
+  every slot zero: assert both `len` folds to `10` **and** the value at index `9` (the
+  last slot, not just index `0`) reads as `0`, so the test cannot pass on a wrong-sized or
+  partially-zeroed allocation.
 - A linear element type and a bare-reference element type are each a **located** error at
-  the constructor, in **both** the concrete and the polymorphic path (asserting the specific
-  diagnostic, not merely that it fails). A count of `0` or `> u32::MAX` is a located range
-  error. A non-literal count is a located parse (or check) error.
+  the constructor (asserting the specific diagnostic text, naming the constructor's
+  construction site, not `fill`). A count of `0` or `> u32::MAX` is a located range error,
+  also naming the constructor. A non-literal count is a located **parse** error (Phase 1
+  makes `Count` a literal at the grammar level, so this is a parse-stage error, not a
+  check-stage one -- name the exact diagnostic). A compound element type
+  (`[ [i64 3] ; 4 ]`) is a located parse error.
+- The constructor's lowering is exactly one `Instr::Alloc` (correct size/align for the
+  element/count, not just "some `Alloc`") plus a zero-init loop whose **instruction count
+  is independent of `Count`**: lowering the same constructor at two different literal
+  counts (e.g. 4 and 64) must produce loop bodies of equal instruction count. This is the
+  automated proxy for the compile-cost claim; it must fail if the implementation reverts
+  to per-element unrolling.
+- `fill`'s re-lowering is exactly one `Alloc` plus a loop whose instruction count is
+  likewise independent of `N` (same two-count equal-instruction-count test as above,
+  applied to `fill`). Every existing `fill`-using example in the corpus produces
+  **identical program output** (not "byte-identical `.ssa`", which will differ) before and
+  after the re-lowering.
 - `docs/phase4-slice6a-spec.md`'s superlinear `fill`-compile-cost numbers (10k / 100k, and
-  1M if it completes within a reasonable bound) are re-measured and shown linear/flat, now
-  attributed to `fill`'s fixed **lowering** (one `Alloc` + runtime loop), not to demotion.
-- Every existing `fill`-using golden in the corpus is unchanged in observable behavior
-  (identical program output), `fill`'s type-checking untouched.
+  1M only as a compile-time-only measurement, per that spec's own retirement of a 1M
+  *runtime* claim) are re-measured and shown linear/flat, attributed to `fill`'s fixed
+  lowering.
 
 ## Test coverage (per CLAUDE.md conventions)
 
-- **Parser (unit, beside `parser.rs`):** `[ i64 ; 10 ]` parses to the new `TermKind`;
-  `[ 'T ; 4 ]` parses (element token carried verbatim); a quotation containing a bare `;`
-  still errors unchanged (regression on the disambiguation); `[ i64 ; ]` (missing count),
-  `[ i64 ; 5 6 ]` (extra token), and `[ i64 ; x ]` (non-literal count) each produce a
-  located parse error.
-- **Concrete check (unit, beside `check.rs`):** `[ i64 ; 10 ]` yields a `[i64 10]` slot;
-  `[ &i64 ; 4 ]` -> `constructed_reference_error` (located); a linear element ->
-  `fill_of_linear_element_error` (located); `[ i64 ; 0 ]` and a `> u32::MAX` count ->
-  range error (located).
-- **Poly check (unit, beside `check.rs`):** in a poly body, `[ 'T ; 4 ]` with `'T: Copy`
-  pushes `PolyType::Array(Var, Len::Concrete(4))`; `[ 'T ; 4 ]` with an **unbounded** `'T`
-  -> `poly_copy_body_error` (located); a concrete bare-reference element in a poly body ->
-  `constructed_reference_error` (located). These discriminate the shared gate on the poly
-  path directly (do not rely on an e2e build alone).
-- **Lowering (unit, beside `ir.rs`):** the constructor lowers to exactly one `Instr::Alloc`
-  and no `store`/`Blit` (assert the instruction shape, not just that it compiles) --
-  the mutation guard for D3. `fill`'s new lowering emits one `Alloc` and a single counted
-  loop body (a fixed instruction count independent of `N`), not `N` unrolled stores.
-- **Goldens:** (1) a concrete `[ i64 ; 10 ]` program (source -> output). (2) the poly-body
-  dogfood (a minimal generic constructor, e.g.
-  `: mkbuf ( 'T: Copy 'T -- ['T 4] ) drop [ 'T ; 4 ] ;` instantiated at `i64`, `len .`
-  prints `4`) -- proving construction from a poly body where `fill` previously produced
-  "unknown word". This golden must actually **build and run**, not merely type-check:
-  `poly_walk` is rarely exercised by the corpus, so the dogfood is also the check that the
-  poly path lowers. (3) a regression golden or corpus-wide `cargo test` proving every
-  existing `fill`-using example's output is byte-identical after `fill`'s re-lowering.
-- **Located-error goldens:** the linear-element and bare-reference-element rejections, in
-  both paths, as source-in -> diagnostic-out (diagnostics are behavior).
-- **Mutation discipline:** for each new guard/test, prove it can fail by deleting the
-  guard it protects (the constructor's Copy gate, the no-reference gate, the range gate,
-  the `;`-lookahead, the "one `Alloc`, no store" lowering assertion).
+- **Parser (unit, beside `parser.rs`):** `array_constructor_with_concrete_type_parses`;
+  `array_constructor_bare_semicolon_in_quotation_still_errors` (disambiguation
+  regression); `array_constructor_missing_count_is_parse_error`;
+  `array_constructor_extra_token_after_count_is_parse_error`;
+  `array_constructor_non_literal_count_is_parse_error`;
+  `array_constructor_compound_element_type_is_parse_error` (the `[ [i64 3] ; 4 ]` case --
+  confirms the existing single-name-token resolution already rejects it, per D1);
+  `unterminated_quotation_with_a_semicolon_inside_still_reports_unterminated` (a
+  regression pinning the existing "unterminated quotation" fallback when no matching `]`
+  exists, so a naive "any `;` before EOF" implementation of the lookahead is caught).
+- **Concrete check (unit, beside `check.rs`):** `array_constructor_i64_ten_yields_slot`;
+  `array_constructor_bare_reference_element_is_constructed_reference_error` (assert the
+  rendered text names the constructor's own site, not `fill`);
+  `array_constructor_linear_element_is_rejected` (assert the position-parameterized
+  message); `array_constructor_zero_count_is_range_error`;
+  `array_constructor_over_u32_max_count_is_range_error`;
+  `fill_diagnostics_unchanged_after_position_parameterization` (mutation guard: assert
+  `fill`'s own rendered error text is byte-identical to before D2's refactor).
+- **Lowering (unit, beside `ir.rs`):** `array_constructor_lowers_to_one_alloc_of_correct_size`
+  (assert the `Instr::Alloc`'s size/align operands, not just its presence);
+  `array_constructor_zero_init_loop_instruction_count_is_independent_of_count` (lower at
+  `Count=4` and `Count=64`, assert equal instruction counts -- the D3 mutation guard);
+  `fill_lowering_instruction_count_is_independent_of_n` (same shape, for D4);
+  `fill_lowering_preserves_copy_seed_and_surviving_set` (an aggregate/closure-carrying
+  seed element still forwards its `surviving` set through the new loop-based lowering).
+- **Goldens:** (1) `[ i64 ; 10 ]` builds and runs: `len` folds to `10`, index `9` reads
+  `0`. (2) A `[ Bool ; 4 ]` golden reading every slot: each reads a valid `Bool` (proves
+  D3's zero-init soundness argument empirically, not just by proof). (3) A regression
+  golden (or corpus-wide `cargo test`) proving every existing `fill`-using example's
+  output is unchanged after the re-lowering.
+- **Located-error goldens:** the linear-element, bare-reference-element, zero-count,
+  over-max-count, non-literal-count, and compound-element rejections, each as
+  source-in -> diagnostic-out (diagnostics are behavior, per CLAUDE.md).
+- **Mutation discipline:** for each new guard, prove it can fail by deleting the guard it
+  protects: the `;`-lookahead, the range check, the Copy gate, the reference gate, the
+  "one `Alloc` sized correctly" assertion, and both instruction-count-independent-of-N
+  assertions (D3's zero-init and D4's `fill`).
 
 ## Risks
 
-- `poly_walk` (`check.rs:5115`) is the least-exercised checker path; the poly dogfood may
-  surface an unrelated gap (borrow/`times`/output handling). Keep the dogfood minimal
-  (`drop [ 'T ; 4 ]`, no loop, no borrows) so the golden isolates the constructor. If a
-  richer dogfood (a fill-shaped `times` loop in a poly body) fails, that is a poly_walk
-  finding to record in this section, not a constructor bug -- do not widen scope to fix
-  poly_walk here.
-- `fill`'s re-lowering must preserve exact observable behavior including the seed's `Copy`
-  replication and the closure-carrying-element surviving-set forwarding (`ir.rs`
-  `store_elem` and the checker's `surviving` forward at `check.rs:10270`). The regression
-  golden across the whole `fill`-using corpus is the guard.
+- **The zero-init loop and `fill`'s loop must each avoid the aggregate-staging hazard
+  independently** (D3, D4): the destination array must be an invariant `Alloc` referenced
+  by dominance, never a `begin_loop` carried parameter, or the back-edge staging blit
+  built for loop-invariant mutation (slice 3) will blit a stale copy over live stores each
+  iteration. This is the most likely way either lowering produces silently wrong output
+  that a small-`Count`/small-`N` golden would still pass; the index-9/last-slot golden and
+  the two-count instruction-equality tests are the guards, not a golden at `Count=1`.
+- **`fill`'s re-lowering must preserve exact observable behavior**, including the seed's
+  `Copy` replication and the closure-carrying-element `surviving`-set forwarding
+  (`check.rs:10265-10269`; `store_elem`'s `Blit` path for aggregate elements,
+  `ir.rs:4082`). The corpus-wide regression golden is the guard.
+- **D2's diagnostic-constructor parameterization touches call sites inside
+  `check_array_word`'s `"fill"` arm.** Low risk (the change is purely a new parameter with
+  `fill`'s call sites passing the literal `"fill"`), but it is the one place this slice
+  legitimately edits code inside an arm the Out-of-scope section otherwise protects --
+  keep the diff to the parameter threading only, and the mutation guard above (byte-
+  identical `fill` diagnostics) catches any accidental behavior drift.
 
 ## Phases
 
@@ -236,22 +348,17 @@ preserved).
   "phases": [
     {
       "phase": 1,
-      "focus": "Parser: add the `[ Type ; Count ]` TermKind and the `;`-lookahead at parse_term's Token::LBracket arm (parser.rs:2026), mirroring quotation_type_ahead (parser.rs:1564). Element is one type-name token carried verbatim; Count is a single integer literal. Unit tests: constructor parses (concrete and 'T element); a quotation with a bare `;` still errors (disambiguation regression); missing/extra/non-literal count each a located parse error.",
+      "focus": "Parser: add the [ Type ; Count ] TermKind and the ;-lookahead at parse_term's Token::LBracket arm (parser.rs:2026), mirroring quotation_type_ahead (parser.rs:1564). Type resolves at parse time via the existing Parser::resolve_type (parser.rs:1729), so the TermKind carries a resolved Type, not a raw token. Count is a single integer literal. Unit tests: constructor parses to a Type-carrying term; a quotation with a bare semicolon still errors (disambiguation regression); an unterminated quotation containing a semicolon still reports unterminated (regression); missing/extra/non-literal count and a compound element type ([ [i64 3] ; 4 ]) each a located parse error.",
       "difficulty": "standard"
     },
     {
       "phase": 2,
-      "focus": "Concrete path: a new check_term arm resolves the element type via the module registry and gates it through a dedicated shared helper (count range 1..=u32::MAX, contains_reference then is_copy, reusing check_array_word's exact diagnostics), interns the array type and pushes the Slot; a new lower_term arm (ir.rs) emits exactly one Instr::Alloc via alloc_array, no store. Golden: `[ i64 ; 10 ]` builds and runs (len folds to 10). Located-error tests: bare-reference element, linear element, count 0 / > u32::MAX.",
+      "focus": "Shared gate + concrete check + lowering. Extract a shared helper from check_array_word's fill arm (check.rs:10217) covering the count-range check and the Copy/no-reference element gate, parameterized on a position: &str (mirroring constructed_reference_error's existing pattern) so fill_of_linear_element_error and fill_count_out_of_range_error name the actual construction site; fill's own call sites pass \"fill\" so its diagnostics are byte-identical. New check_term arm calls the shared helper, interns the array type (intern_array_type), pushes the Slot. New lower_term arm: one Instr::Alloc via alloc_array (ir.rs:4028, following the StructWord::Construct precedent of a term carrying its own type with no operand), then a begin_loop/finalize_loop-bounded loop zero-filling the allocation's byte range via PtrOffset+Store/FieldStore -- the Alloc must not be a begin_loop carried parameter (aggregate-staging hazard, see spec Risks). Goldens: [i64 ; 10] builds and runs (len folds to 10, index 9 reads 0); [Bool ; 4] reads a valid Bool at every slot. Located-error tests: bare-reference element, linear element, count 0 / > u32::MAX (each naming the constructor, not fill), fill's own diagnostics unchanged. Lowering tests: Alloc size/align correct; zero-init loop instruction count equal at Count=4 and Count=64.",
       "difficulty": "standard"
     },
     {
       "phase": 3,
-      "focus": "Polymorphic path: a new TermKind arm in poly_term (check.rs:5145) resolves the element against the enclosing signature's ty_var_names (bound 'T -> PolyType::Var) or the module registry (concrete), gates it via the same shared helper (poly_copy_gate for a variable, contains_reference/is_copy for a concrete element), and pushes PolyType::Array(elem, Len::Concrete(count)). Dogfood golden: a minimal generic constructor (e.g. `: mkbuf ( 'T: Copy 'T -- ['T 4] ) drop [ 'T ; 4 ] ;`) builds and RUNS at a concrete instantiation. Located-error tests on the poly path: unbounded-'T element (poly_copy_body_error), concrete bare-reference element (constructed_reference_error).",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 4,
-      "focus": "Re-lower fill only: change lower_array_word's `fill` arm (ir.rs:4102) from N unrolled alloc+store to one Alloc plus a single runtime counted loop storing the seed N times, reusing the loop shape at ir.rs:3441; leave check_array_word's `fill` arm and all its type-checking untouched, and preserve the Copy-seed replication and closure-carrying surviving-set semantics. Regression: every existing fill-using golden in the corpus is byte-identical in output (full cargo test). Re-measure docs/phase4-slice6a-spec.md's 10k/100k(/1M) fill timings and show them linear/flat, attributed to the fixed lowering.",
+      "focus": "Re-lower fill only: change lower_array_word's fill arm (ir.rs:4102) from N unrolled alloc+store to one Alloc plus a begin_loop/finalize_loop-bounded runtime loop storing the seed N times via elem_addr (ir.rs:4073) + store_elem (ir.rs:4082); the Alloc must not be a begin_loop carried parameter (same aggregate-staging hazard as phase 2). Leave check_array_word's fill arm's type-checking control flow untouched beyond phase 2's position parameter. Preserve the Copy-seed replication and closure-carrying surviving-set semantics (test: an aggregate/closure-carrying seed still forwards its surviving set). Lowering test: instruction count equal at N=4 and N=64. Regression: every existing fill-using golden in the corpus produces identical program output (full cargo test). Re-measure docs/phase4-slice6a-spec.md's 10k/100k(/1M compile-time-only) fill timings and show them linear/flat, attributed to the fixed lowering.",
       "difficulty": "hard"
     }
   ]
