@@ -8899,7 +8899,7 @@ mod tests {
         // the sibling `ir_type_of` guard, which now maps a quotation to a
         // runtime value; see `ir_type_of_quotation_is_two_slot_aggregate`.)
         use crate::ast::PolyType;
-        let poly_quot = PolyType::Quotation(vec![PolyType::Concrete(Type::I64)], Vec::new());
+        let poly_quot = PolyType::Quotation(vec![PolyType::Concrete(Type::I64)], Vec::new(), false);
         let subst = Subst::default();
         assert!(
             std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[])).is_err(),

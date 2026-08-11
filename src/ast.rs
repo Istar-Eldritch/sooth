@@ -618,8 +618,11 @@ pub enum PolyType {
     /// signature's type/length variables (`[ 'T -- ]` where `'T` is the
     /// element variable). Folds to `Concrete(Type::Quotation(..))` when fully
     /// concrete (`raw_to_poly_type`); only a variable-bearing effect stays
-    /// here.
-    Quotation(Vec<PolyType>, Vec<PolyType>),
+    /// here. The trailing `bool` is Slice 10a (R1): whether the effect was
+    /// declared with the `~` sigil, so the concrete fold and `apply_subst`
+    /// know to ground it to `Type::InlineQuotation` rather than
+    /// `Type::Quotation`.
+    Quotation(Vec<PolyType>, Vec<PolyType>, bool),
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature

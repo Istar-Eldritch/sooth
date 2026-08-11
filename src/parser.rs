@@ -638,7 +638,9 @@ enum RawTy {
     /// Slice 6a (R5): a quotation effect whose rows may mention the
     /// signature's variables, folded to `PolyType::Quotation` (or
     /// `Concrete(Type::Quotation)` when fully concrete) by `raw_to_poly_type`.
-    Quotation(Vec<RawTy>, Vec<RawTy>),
+    /// The trailing `bool` is Slice 10a (R1): whether the effect opened on a
+    /// `~[` token rather than a plain `[`.
+    Quotation(Vec<RawTy>, Vec<RawTy>, bool),
 }
 
 enum RawLen {
@@ -742,6 +744,19 @@ impl PolyBuilder {
             row_var_names: row_names,
         }
     }
+}
+
+/// Slice 10a (R2): a `~[` reached from a monomorphic type-expression
+/// context -- a struct/array/cell field, a ref/owning-cell referent, an
+/// `extern:` parameter, or a non-poly word's own slot. `~` is legal only as
+/// a poly combinator's own declared parameter, spelled through
+/// `parse_poly_slot`, never through `parse_type_expr`/`parse_slot`/
+/// `parse_field_type_expr`.
+fn tilde_quotation_position_error(span: Span) -> String {
+    format!(
+        "error: a `~` quotation cannot appear here at line {}, col {} (`~` is only legal as a word's own declared quotation parameter, never a field, output, referent, or extern parameter type)",
+        span.line, span.col
+    )
 }
 
 fn row_var_misplaced_error(name: &str, span: Span) -> String {
@@ -1135,11 +1150,16 @@ impl<'t> Parser<'t> {
     /// are not lexer delimiters, so each form arrives as one `Word` token; a
     /// `'`-led word is a type/length variable and a `..`-led word is the row
     /// variable. A no-variable effect takes the concrete path untouched (R2).
+    /// Slice 10a (R1): a `~[` token also routes to the poly parser -- a `~`
+    /// is poly-forced even when its effect is otherwise fully concrete, since
+    /// `WordDef.poly = Some(..)` is what R9 context 4's unreachability
+    /// depends on.
     fn effect_has_variable(&self) -> bool {
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
             match tok {
                 Token::RParen => return false,
+                Token::TildeLBracket => return true,
                 Token::Word(w) if w.starts_with('\'') || w.starts_with("..") => return true,
                 _ => {}
             }
@@ -1206,6 +1226,14 @@ impl<'t> Parser<'t> {
     /// variable), a type variable (with an optional bound at its binding
     /// occurrence), or a plain concrete type expression.
     fn parse_poly_slot(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+        // Slice 10a (R1): `~[` has already consumed the opening bracket as
+        // one token, so its entry point skips straight to the inner parse
+        // rather than going through `parse_poly_quotation`'s own
+        // `expect(LBracket)`.
+        if matches!(self.peek(), Some((Token::TildeLBracket, _))) {
+            self.pos += 1;
+            return self.parse_poly_quotation_inner(builder, true);
+        }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             if self.quotation_type_ahead() {
                 return self.parse_poly_quotation(builder);
@@ -1250,11 +1278,24 @@ impl<'t> Parser<'t> {
     /// is interned into `builder` exactly as it is in an ordinary slot.
     fn parse_poly_quotation(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
         self.expect(Token::LBracket)?;
+        self.parse_poly_quotation_inner(builder, false)
+    }
+
+    /// The body of a polymorphic quotation effect, positioned just past its
+    /// opening bracket -- which `parse_poly_quotation` consumes as a plain
+    /// `Token::LBracket` and `parse_poly_slot`'s `~[` arm consumes as part of
+    /// `Token::TildeLBracket` (Slice 10a R1). Split out so the token that
+    /// already ate the bracket has somewhere to resume.
+    fn parse_poly_quotation_inner(
+        &mut self,
+        builder: &mut PolyBuilder,
+        is_inline: bool,
+    ) -> Result<RawTy, String> {
         let inputs = self.parse_poly_quot_list(builder, true)?;
         self.expect_word("--")?;
         let outputs = self.parse_poly_quot_list(builder, false)?;
         self.expect(Token::RBracket)?;
-        Ok(RawTy::Quotation(inputs, outputs))
+        Ok(RawTy::Quotation(inputs, outputs, is_inline))
     }
 
     /// One side of a polymorphic quotation effect, stopping on the top-depth
@@ -1359,14 +1400,17 @@ impl<'t> Parser<'t> {
                     PolyType::Array(Box::new(elem), len)
                 }
             }
-            RawTy::Quotation(ins, outs) => {
+            RawTy::Quotation(ins, outs, is_inline) => {
                 let ins: Vec<PolyType> =
                     ins.into_iter().map(|r| self.raw_to_poly_type(r)).collect();
                 let outs: Vec<PolyType> =
                     outs.into_iter().map(|r| self.raw_to_poly_type(r)).collect();
                 // Fold a fully-concrete effect to `Concrete(Type::Quotation)`
                 // exactly as an array shape folds; only a variable-bearing
-                // effect stays `PolyType::Quotation` (R5).
+                // effect stays `PolyType::Quotation` (R5). Slice 10a (R1): a
+                // `~` effect folds to `Concrete(Type::InlineQuotation)`
+                // instead -- a fully-concrete `~` effect is representable as
+                // a `Type`, it just isn't `Type::Quotation`.
                 let concrete = |row: &[PolyType]| {
                     row.iter()
                         .map(|p| match p {
@@ -1376,8 +1420,12 @@ impl<'t> Parser<'t> {
                         .collect::<Option<Vec<Type>>>()
                 };
                 match (concrete(&ins), concrete(&outs)) {
-                    (Some(ci), Some(co)) => PolyType::Concrete(crate::ast::quotation_type(ci, co)),
-                    _ => PolyType::Quotation(ins, outs),
+                    (Some(ci), Some(co)) => PolyType::Concrete(if is_inline {
+                        crate::ast::inline_quotation_type(ci, co)
+                    } else {
+                        crate::ast::quotation_type(ci, co)
+                    }),
+                    _ => PolyType::Quotation(ins, outs, is_inline),
                 }
             }
         }
@@ -1396,6 +1444,13 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_slot(&mut self) -> Result<TypedSlot, String> {
+        // Slice 10a (R2): this is a monomorphic slot -- an `extern:` param or
+        // a non-poly word's own slot -- and `~` is only legal as a poly
+        // combinator's own declared parameter (`parse_poly_slot`), never
+        // reached here.
+        if let Some((Token::TildeLBracket, span)) = self.peek() {
+            return Err(tilde_quotation_position_error(*span));
+        }
         // An array type has no name of its own to lead with (`[i64 4]` opens
         // on `[`, not a word), so an unnamed array slot is recognised before
         // the usual name-then-optional-`:type` read (R3, R7).
@@ -1446,6 +1501,9 @@ impl<'t> Parser<'t> {
     /// (`elem` itself a type expression, nested arrays recurse), or a
     /// `^`-led owning-cell type (nested cells recurse the same way).
     fn parse_type_expr(&mut self) -> Result<Type, String> {
+        if let Some((Token::TildeLBracket, span)) = self.peek() {
+            return Err(tilde_quotation_position_error(*span));
+        }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             if self.quotation_type_ahead() {
                 self.parse_quotation_type_expr()
@@ -1678,6 +1736,9 @@ impl<'t> Parser<'t> {
     /// field-type word (rejecting `type:`/`:` as before via
     /// `expect_field_type_token`).
     fn parse_field_type_expr(&mut self) -> Result<Type, String> {
+        if let Some((Token::TildeLBracket, span)) = self.peek() {
+            return Err(tilde_quotation_position_error(*span));
+        }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             return if self.quotation_type_ahead() {
                 self.parse_quotation_type_expr()

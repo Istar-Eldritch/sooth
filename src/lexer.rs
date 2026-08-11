@@ -19,6 +19,12 @@ pub enum Token {
     /// A `"..."` string literal (R6), already escape-decoded: the raw
     /// content a `str` value carries, never the source spelling.
     Str(String),
+    /// `~[`, glued with **zero** intervening whitespace (Slice 10a R1): the
+    /// inline-only quotation type's opening sigil-plus-bracket. `~` is not a
+    /// delimiter and `[` is, so without this glue `~[` and `~ [` both lex as
+    /// `Word("~")` + `LBracket`, discarding adjacency; this token makes `~ [`
+    /// a parse error instead of a silently-accepted spaced form.
+    TildeLBracket,
 }
 
 fn is_delimiter(c: char) -> bool {
@@ -185,6 +191,13 @@ pub fn lex(src: &str) -> Result<Vec<(Token, Span)>, String> {
                     text.push(c);
                     chars.next();
                     col += 1;
+                }
+
+                if text == "~" && chars.peek() == Some(&'[') {
+                    chars.next();
+                    col += 1;
+                    tokens.push((Token::TildeLBracket, start));
+                    continue;
                 }
 
                 if text == "\\" {
@@ -515,6 +528,26 @@ mod tests {
         assert_eq!(
             words(&lex("&!^List").unwrap()),
             vec![Token::Word("&!^List".into())]
+        );
+    }
+
+    #[test]
+    fn lex_tilde_bracket_glued_is_one_token() {
+        // Slice 10a R1: `~[` with zero intervening whitespace is a single
+        // `TildeLBracket`, so adjacency survives into the token stream.
+        let tokens = lex("~[").unwrap();
+        assert_eq!(words(&tokens), vec![Token::TildeLBracket]);
+    }
+
+    #[test]
+    fn lex_tilde_bracket_spaced_stays_two_tokens() {
+        // Slice 10a R1: a space between `~` and `[` drops the glue, so `~ [`
+        // lexes as the plain `Word("~")` + `LBracket` it always did — which
+        // the parser then rejects, since nothing declares a bare `~` word.
+        let tokens = lex("~ [").unwrap();
+        assert_eq!(
+            words(&tokens),
+            vec![Token::Word("~".into()), Token::LBracket]
         );
     }
 }

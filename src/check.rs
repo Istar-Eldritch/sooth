@@ -2064,7 +2064,7 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
 /// -- is rejected.
 fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String> {
     match pt {
-        PolyType::Quotation(ins, outs) => {
+        PolyType::Quotation(ins, outs, _) => {
             for t in ins.iter().chain(outs) {
                 reject_poly_quotation_anywhere(t, sig, "nested inside a quotation effect")?;
             }
@@ -2667,7 +2667,7 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         // Slice 6a (R5): a declared quotation effect's rows may name concrete
         // types (`[ i64 -- ]`); collect them so export-privacy still sees a
         // private type mentioned inside an effect.
-        PolyType::Quotation(ins, outs) => {
+        PolyType::Quotation(ins, outs, _) => {
             for t in ins.iter().chain(outs) {
                 collect_poly_concrete(t, out);
             }
@@ -6038,7 +6038,7 @@ fn unify_poly_input(
         // variable a row mentions (`[ 'T -- ]` against `[ i64 -- ]` binds
         // `'T = i64`). Equal arity is required on both sides; else it is a
         // located mismatch, never a silent bind.
-        PolyType::Quotation(ins, outs) => {
+        PolyType::Quotation(ins, outs, _) => {
             // Slice 10a (R1): accept a `~` slot as well as an ordinary
             // quotation slot (accessor), so a declared quotation parameter
             // unifies against either.
@@ -6118,7 +6118,7 @@ fn apply_subst(
         }
         // Slice 6a (R6): substitute both rows of a declared quotation effect,
         // yielding a concrete `Type::Quotation`.
-        PolyType::Quotation(ins, outs) => {
+        PolyType::Quotation(ins, outs, is_inline) => {
             let mut cins = Vec::with_capacity(ins.len());
             for p in ins {
                 cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
@@ -6127,7 +6127,14 @@ fn apply_subst(
             for p in outs {
                 couts.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
             }
-            Ok(crate::ast::quotation_type(cins, couts))
+            // Slice 10a (R1): ground a `~` effect to `Type::InlineQuotation`
+            // rather than `Type::Quotation`, so the materialization
+            // boundaries reject it by type inequality.
+            Ok(if *is_inline {
+                crate::ast::inline_quotation_type(cins, couts)
+            } else {
+                crate::ast::quotation_type(cins, couts)
+            })
         }
     }
 }
@@ -6424,7 +6431,7 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             };
             format!("[{} {}]", poly_type_str(elem, sig), l)
         }
-        PolyType::Quotation(ins, outs) => {
+        PolyType::Quotation(ins, outs, is_inline) => {
             let row = |r: &[PolyType]| {
                 r.iter()
                     .map(|p| poly_type_str(p, sig))
@@ -6432,11 +6439,12 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
                     .join(" ")
             };
             let (i, o) = (row(ins), row(outs));
+            let sigil = if *is_inline { "~" } else { "" };
             match (i.is_empty(), o.is_empty()) {
-                (true, true) => "[ -- ]".to_string(),
-                (true, false) => format!("[ -- {o} ]"),
-                (false, true) => format!("[ {i} -- ]"),
-                (false, false) => format!("[ {i} -- {o} ]"),
+                (true, true) => format!("{sigil}[ -- ]"),
+                (true, false) => format!("{sigil}[ -- {o} ]"),
+                (false, true) => format!("{sigil}[ {i} -- ]"),
+                (false, false) => format!("{sigil}[ {i} -- {o} ]"),
             }
         }
     }
@@ -7626,6 +7634,18 @@ fn captured_quotation_name_deferred_error(ctx: &Ctx, span: Span) -> String {
     )
 }
 
+/// Slice 10a (R2): the fifth materialization boundary. Distinct wording from
+/// `captured_quotation_name_deferred_error` -- an ordinary quotation capture
+/// is *deferred* (unimplemented, might land later); a `~` capture is *banned*
+/// (materialization is exactly what `~` forbids, permanently).
+fn captured_inline_quotation_error(ctx: &Ctx, span: Span) -> String {
+    let _ = ctx;
+    format!(
+        "error: a `~` quotation cannot be captured (line {})",
+        span.line,
+    )
+}
+
 /// R15: how a captured name's referent is rooted, which decides whether it may
 /// outlive the closure's calls.
 enum CaptureClass {
@@ -7741,6 +7761,9 @@ fn check_capture_admission(
         // this guard, is recorded in a surviving capture set, and lowering
         // materializes it into an env bundle -- the one thing `~` forbids.
         // Phase 2 replaces the message with a `~`-specific one plus a golden.
+        if matches!(b.ty, Type::InlineQuotation(_)) {
+            return Err(captured_inline_quotation_error(ctx, span));
+        }
         if b.quot.is_some() || crate::ast::is_quotation_type(b.ty).is_some() {
             return Err(captured_quotation_name_deferred_error(ctx, span));
         }
@@ -11708,6 +11731,47 @@ mod tests {
         );
     }
 
+    /// Slice 10a (R2): the fifth materialization boundary, pinned directly.
+    /// A poly signature cannot place an ordinary quotation anywhere but a
+    /// direct top-level parameter (`reject_poly_quotation_anywhere`), so a
+    /// `~` local can never reach the escaping-closure output/store boundaries
+    /// through a real `.sth` program in this slice; the guard is exercised
+    /// directly instead, the same way phase 1 pinned the routing predicates.
+    #[test]
+    fn check_capture_admission_rejects_captured_inline_quotation() {
+        let mut scope = Scope::default();
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], vec![Type::I64]);
+        scope.bound.push(Binding {
+            name: "f".to_string(),
+            ty: inl,
+            aliases: None,
+            deriv: None,
+            quot: None,
+            surviving: None,
+        });
+        let mut prov = Provenance::default();
+        prov.quotation_captures
+            .push(std::iter::once("f".to_string()).collect());
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let err = check_capture_admission(QuotId(0), true, span, &ctx, &mut prov, &scope)
+            .expect_err("a captured `~` local must be rejected");
+        assert!(
+            err.contains("`~`") && err.contains("captured"),
+            "a captured `~` local should be its own located rejection, not the ordinary \
+             quotation deferral, got: {err}"
+        );
+    }
+
     #[test]
     fn times_typing_obligations() {
         // R18u: the three `times` typing obligations, each its own row, since a
@@ -15643,7 +15707,11 @@ mod tests {
         use crate::ast::quotation_type;
         let sig = PolySig {
             row_in: None,
-            inputs: vec![PolyType::Quotation(vec![PolyType::Var(0)], Vec::new())],
+            inputs: vec![PolyType::Quotation(
+                vec![PolyType::Var(0)],
+                Vec::new(),
+                false,
+            )],
             outputs: Vec::new(),
             row_out: None,
             bounds: Vec::new(),
