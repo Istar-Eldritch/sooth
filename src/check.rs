@@ -7265,20 +7265,30 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
 /// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
 /// declared output. Extracted as a named, callable function (R14a) so phase 6
 /// can drive it from a white-box test: `#[ignore]` skips execution, not
-/// compilation, so the test needs a real symbol to call. Phase 5 produces
-/// type-only slots; phase 6 (R14) forwards the `surviving` capture set and
-/// `quot` marker from `carried_inputs` along `index_map` (bottom-aligned:
-/// ground output `i` <- `carried_inputs[index_map[i]]`), so an aggregate
-/// carrying an erased quotation across the back-edge keeps its escape
-/// obligation. Until then the two forwarding inputs are unused.
+/// compilation, so the test needs a real symbol to call. R14: the `surviving`
+/// capture set and the `quot` marker are forwarded from `carried_inputs` along
+/// `index_map` (bottom-aligned: ground output `i` <- `carried_inputs[j]` when
+/// `index_map[i] == Some(j)`), so an aggregate carrying an erased quotation
+/// across the back-edge keeps its escape obligation (`d1b3f0a`/`bee407c`: a
+/// `Slot::computed` drops both fields, so a bare forward would leak the
+/// obligation). An output with no source (`None`) is a fresh type-only slot.
 fn back_edge_outs(
     ground_outputs: &[Type],
-    _index_map: &[Option<usize>],
-    _carried_inputs: &[Slot],
+    index_map: &[Option<usize>],
+    carried_inputs: &[Slot],
 ) -> Vec<Slot> {
     ground_outputs
         .iter()
-        .map(|&ty| Slot::computed(ty))
+        .enumerate()
+        .map(|(i, &ty)| {
+            let mut out = Slot::computed(ty);
+            if let Some(src) = index_map.get(i).copied().flatten() {
+                let carried = carried_inputs[src];
+                out.surviving = carried.surviving;
+                out.quot = carried.quot;
+            }
+            out
+        })
         .collect()
 }
 
@@ -16242,16 +16252,15 @@ mod tests {
             .expect("`while` still type-checks after the back-edge rewrite");
     }
 
-    /// Slice 10a (R14a): phase 6's white-box test, landed `#[ignore]`d against
-    /// the extracted `back_edge_outs` so its absence is visible in the tree
-    /// (an `#[ignore]` skips execution, not compilation). Phase 6's deliverable
-    /// is to make `back_edge_outs` forward the surviving capture set along the
-    /// index map and un-ignore this. The witness is an aggregate carrying an
-    /// erased quotation (`ty` a struct, `surviving: Some(..)`, `quot: None`),
-    /// and the shape yields a `Some(0)` map entry, so the produced output must
-    /// inherit the carried input's surviving set.
+    /// Slice 10a (R14): white-box proof that `back_edge_outs` forwards the
+    /// surviving capture set along the index map. The witness is an aggregate
+    /// carrying an erased quotation (`ty` a struct, `surviving: Some(..)`,
+    /// `quot: None`), and the shape yields a `Some(0)` map entry, so the
+    /// produced output must inherit the carried input's surviving set --
+    /// bypassing `union_surviving`, which a conditional join would otherwise
+    /// use to reconstruct the set from a sibling arm and mask a dropped
+    /// forward (`d1b3f0a`/`bee407c`).
     #[test]
-    #[ignore = "phase 6 (R14): back_edge_outs must forward the surviving capture set along the index map; phase 5 produces type-only slots"]
     fn back_edge_outs_forwards_surviving_set_along_index_map() {
         let set = SurvivingCaptureSetId(0);
         let agg = Type::Struct(crate::ast::StructId::from_index(0), "Agg");
