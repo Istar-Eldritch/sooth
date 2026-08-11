@@ -491,6 +491,34 @@ fn own_module_operator_overload_reachable_bare_in_multi_module() {
 }
 
 #[test]
+fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
+    // R13: same fix, exercised through `poly_delegate_op` (the poly-body
+    // operator path) rather than `check_term`'s concrete path. `probe` is
+    // polymorphic (`'T`), so its body is checked by `check_poly_body`; the
+    // `+` call inside it is on a fully-concrete suffix (two `Vec2`s), so it
+    // still needs the calling module's scoped candidates to find `main`'s
+    // own mangled `+` overload.
+    let c = Closure::new("own-operator-multi-poly");
+    c.write("lib.sth", ": p ( -- i64 ) 0 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: lib \"lib.sth\" ;\n",
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 + Vec2>x ;\n",
+            ": main ( -- ) lib::p . 42 probe . . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "0\n1\n42\n",
+        "the own `+` overload dispatched inside the poly body, keeping the first operand's x"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn selectively_imported_operator_does_not_hijack_unrelated_module() {
     // R13: `main` imports `x`'s type qualified-only, so it holds `x::XT` values
     // but never imported `x`'s `+` by name. A bare `+` on two XT operands is the
