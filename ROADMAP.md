@@ -2038,12 +2038,36 @@ then find out what the compiler owes it.
 
 ### Phase 5 — Errors as values  `[S]`
 
-Result/Either as an ordinary ADT (mostly free from Phase 2), plus the `?`-style
-short-circuit sugar and the convention that fallible words return it. Branch-on-
-result codegen, no unwinding. FFI/C error returns map to Result at the (later)
-safe-wrapper layer.
-**Exit:** Result-based error handling with `?` sugar; no exception/unwind path
-exists anywhere.
+Result/Either as an ordinary generic ADT (`type: Result 'T 'E | Ok val 'T | Err val 'E
+;`), plus the `?`-style short-circuit sugar and the convention that fallible words
+return it. Branch-on-result codegen, no unwinding. FFI/C error returns map to Result at
+the (later) safe-wrapper layer.
+**`Option['T]` (`type: Option 'T | None | Some val 'T ;`) ships as a `core` library type
+in the same slice**, DESIGN.md's own named answer to pointer nullability (`^T` stays
+non-null; a program wanting nullability names this type rather than each redeclaring an
+equivalent enum, which would make two modules' "same" option type nominally distinct).
+It is also the mechanism's cheapest second consumer: one type variable against Result's
+two, so it is what proves the mechanism generalizes across arity rather than being
+shaped by its first client. Not scoped here: rebuilding the allocator's OOM trap
+(Phase 3 Slice 2) to return `Option`/`Result` instead of trapping — a real future
+consumer, but a change to already-shipped allocator behavior, not a consequence of
+this slice existing.
+
+**Prerequisite: generic `type:` declarations (structs and enums).** `type:` parses only
+concrete field types today (`parse_enum_typedef`/`parse_variant_fields`,
+`src/parser.rs`), so a user-declared `Result 'T 'E` needs a `type:` header parameterized
+by Phase 4's type variables, one `StructId`/`EnumId` minted per concrete instantiation
+(mirroring how a polymorphic word already monomorphizes), plus per-instantiation
+generated words and destructor synthesis. `intern_bundle_struct` already keys an
+interned struct per instantiation, so the layout half of the machinery exists; the
+user-facing declaration, resolution, and generation half does not. Scoped without an
+allocator-parameter slot: the default-allocator-parameter question (`Vec['T 'A =
+Global]`) stays Phase 6's, since `Result` allocates nothing and is this mechanism's
+first, allocator-free consumer — `Vec`/`Map` reuse it there rather than being its
+motivating case.
+**Exit:** a generic `type:` declaration monomorphizes per instantiation the way a
+polymorphic word already does; Result-based error handling with `?` sugar; `Option['T]`
+importable from `core`; no exception/unwind path exists anywhere.
 
 ### Phase 6 — Stdlib and `no_std` layering  `[L]`  `[where it becomes usable for real programs]`
 
@@ -2129,21 +2153,10 @@ motivated the change). Its brief has to settle that before anything else, and sh
 the corpus migration honestly: every struct access in `examples/` and the test suite, which
 is 8c-shaped mechanical work on top of a real design decision.
 
-**Generic struct declarations (moved from Phase 4 Slice 3).** A `type:` parameterized by
-Phase 4's type and length variables, with layout and the `StructId`/`ArrayId` registries
-keyed per instantiation. It was placed in Phase 4 on the strength of a single named
-consumer, `filter` needing to bundle a filtered array with a count, and moved here when
-that consumer evaporated: Phase 4 Slice 1's synthesized multi-output return bundles make
-`( [i64 'N] -- [i64 'N] usize )` an ordinary word signature, verified against the built
-compiler, so no user-declared generic type is needed to return the pair. The internal half
-of the machinery exists either way, since `intern_bundle_struct` already keys an interned
-struct per instantiation on concrete field types; what stays unbuilt is the user-facing
-half, a parameterized declaration with name resolution, per-instantiation generated words,
-and per-instantiation destructor synthesis, all of which the bundle path deliberately opts
-out of (a bundle is an ABI detail, not a nameable type). `Vec['T]` and `Map['K 'V]` are the
-real consumers and they live here, which is what makes this the right phase: specifying it
-in Phase 4 would have designed it against a consumer that does not exist, the same test
-that sends open multimethods' former slot to Phase 6.
+**Generic types, continued: the allocator parameter.** Phase 5's generic `type:`
+declarations give `Vec['T]` and `Map['K 'V]` somewhere to be named; what's left here is
+the piece only a growable, allocating collection needs, not the declaration mechanism
+itself.
 **Explicit allocators ride on this item and belong in its brief, not after it.** A defaulted
 type parameter (`Vec['T 'A = Global]`, a zero-size handle in the default case) is what makes
 an allocator explicit without the parameter appearing at every use site, and the `core` /
@@ -2165,7 +2178,8 @@ and recurses the rest, so a left-leaning tree still disposes in O(depth); a work
 let every child dispose iteratively instead. Waits for here because it needs a growable
 pending-pointer structure to hold onto siblings while descending, which is exactly the
 `alloc` layer's job, and because a fallible push wants an
-optional to report through, which only exists after Phase 4's generics. Building a private
+optional to report through, which only exists once Phase 5's generic `type:` declarations
+land. Building a private
 version of either inside a Phase 3 destructor would be guessing at both. If the fixed-size
 bound turns out to be enough, the `fixed` layer's ringbuffer covers it without waiting for
 `alloc`. No dogfood forces this earlier: the first real pressure is Phase 9's self-hosted
