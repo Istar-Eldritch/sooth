@@ -90,7 +90,7 @@ fn inline_quotation_as_word_output_is_error() {
 fn inline_quotation_as_struct_field_is_error() {
     let err = parse_error("type: Box f ~[ i64 -- i64 ] ;\n");
     assert!(
-        err.contains("`~`"),
+        err.contains("cannot appear here"),
         "a `~` struct field should be a located rejection, got: {err}"
     );
 }
@@ -101,16 +101,20 @@ fn inline_quotation_as_array_element_is_error() {
     // type), not a term-level quotation literal.
     let err = parse_error("type: Box f [ ~[ i64 -- i64 ] 3 ] ;\n");
     assert!(
-        err.contains("`~`"),
+        err.contains("cannot appear here"),
         "a `~` array element should be a located rejection, got: {err}"
     );
 }
 
 #[test]
 fn inline_quotation_as_ref_referent_is_error() {
-    let err = parse_error("extern: f ( &!~[ i64 -- i64 ] -- ) \"f\" ;\n");
+    // The referent must be spaced off from the sigil (`&! ~[`, not `&!~[`):
+    // the lexer only glues `~[` into a `TildeLBracket` when the scanned word
+    // is exactly `~`, and `&!~` greedily scans as one word, missing the
+    // guard entirely (it fails on an unrelated "unknown type `~`" path).
+    let err = parse_error("extern: f ( &! ~[ i64 -- i64 ] -- ) \"f\" ;\n");
     assert!(
-        err.contains("`~`"),
+        err.contains("cannot appear here"),
         "a `~` reference referent should be a located rejection, got: {err}"
     );
 }
@@ -119,7 +123,7 @@ fn inline_quotation_as_ref_referent_is_error() {
 fn inline_quotation_as_extern_parameter_is_error() {
     let err = parse_error("extern: f ( ~[ i64 -- i64 ] -- ) \"f\" ;\n");
     assert!(
-        err.contains("`~`"),
+        err.contains("cannot appear here"),
         "a `~` extern parameter should be a located rejection, got: {err}"
     );
 }
