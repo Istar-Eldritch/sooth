@@ -186,9 +186,7 @@ fn my_times_nested_in_itself_produces_correct_output() {
 fn combinators_library_contains_no_tilde() {
     // R19: `lib/combinators.sth` contains no `~`, i.e. 10a changed no
     // shipped signature to the new inline-quotation syntax; the intrinsic's
-    // callers were not touched. (Byte-identity against history is already
-    // covered, without a hardcoded SHA, by `tests/qbe_baseline.rs`'s
-    // `corpus_qbe_stays_byte_identical_to_baseline`.)
+    // callers were not touched.
     let current_src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/combinators.sth"),
     )
