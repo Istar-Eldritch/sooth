@@ -47,6 +47,17 @@ Slice 10a, phase 2 of 7. Delivers **R1 rest**, **R2 rest**, **R3**.
   fixed here because a compile error forced touching the match arm anyway,
   and the R3 goldens below need it (row-awareness proper is phase 3's job,
   named in the existing comment).
+- **Nested-in-a-parameter rejection** (`audit_poly_input_quotation`,
+  `src/check.rs`): a `~` (or an ordinary quotation) buried inside another
+  quotation parameter's effect is now rejected, not silently accepted. Every
+  `~` parameter folds to `PolyType::Concrete` (its effect has no row), so the
+  variable-bearing `PolyType::Quotation` arm never fired for it; the `Concrete`
+  arm returned `Ok` without recursing into the effect. It now recurses through
+  `reject_quotation_type_position`, exactly as the monomorphic input walk in
+  `audit_word_quotation_positions` already did — closing an R2
+  ("`~` is only legal as a word's own direct declared parameter") hole that
+  became reachable only once phase 2's `~[` parse path existed. Covers all four
+  shapes: `~`-in-ordinary, ordinary-in-`~`, `~`-in-`~`, and either row.
 - The fifth materialization boundary (capture admission,
   `check_capture_admission`) gained its own `~`-specific error,
   `captured_inline_quotation_error` ("a `~` quotation cannot be captured"),
@@ -132,6 +143,7 @@ Every new guard, reverted and confirmed to flip a test, then restored:
 | `parse_type_expr`'s gate | remove the peek | `inline_quotation_as_array_element_is_error` (and the ref-referent golden) |
 | `parse_field_type_expr`'s gate | remove the peek | `inline_quotation_as_struct_field_is_error` |
 | Capture admission's `~` branch | remove the `InlineQuotation` check | `check_capture_admission_rejects_captured_inline_quotation` |
+| `audit_poly_input_quotation`'s `Concrete`-arm recursion | collapse back to `Concrete(_) \| Var(_) => Ok(())` | `inline_quotation_nested_in_a_quotation_parameter_is_error` |
 | `apply_subst`'s `is_inline` branch | always ground to `quotation_type` | `variable_bearing_inline_quotation_still_mismatches_ordinary` |
 | `raw_to_poly_type`'s fold `is_inline` branch | always fold to `Concrete(Type::Quotation)` | `inline_quotation_type_differs_from_ordinary_at_the_output_boundary`, both forwarding-mismatch goldens |
 
@@ -142,7 +154,7 @@ without touching any other guard, then reverted before moving to the next.
 ## Green
 
 `cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test`
-all pass: 773 lib tests, 15 new phase-2 integration tests, full existing
+all pass: 773 lib tests, 16 new phase-2 integration tests, full existing
 suite (including `qbe_baseline`) unchanged. `lib/combinators.sth` is
 byte-unchanged; `git diff --stat` touches only `src/{ast,check,ir,lexer,
 parser,repl}.rs` and adds the one new test file.

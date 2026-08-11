@@ -2071,7 +2071,20 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
             Ok(())
         }
         PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
-        PolyType::Concrete(_) | PolyType::Var(_) => Ok(()),
+        // A `~` parameter always folds to `Concrete` (its effect has no row),
+        // so the nested-effect rejection must live here too, not only in the
+        // variable-bearing `Quotation` arm above -- otherwise a `~` (or an
+        // ordinary quotation) buried in a concrete parameter's effect slips
+        // past silently.
+        PolyType::Concrete(ty) => {
+            if let Some(eff) = crate::ast::is_quotation_type(*ty) {
+                for t in eff.inputs.iter().chain(&eff.outputs) {
+                    reject_quotation_type_position(*t, "nested inside a quotation effect")?;
+                }
+            }
+            Ok(())
+        }
+        PolyType::Var(_) => Ok(()),
     }
 }
 

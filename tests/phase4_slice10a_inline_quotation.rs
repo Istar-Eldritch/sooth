@@ -128,6 +128,22 @@ fn inline_quotation_as_extern_parameter_is_error() {
     );
 }
 
+#[test]
+fn inline_quotation_nested_in_a_quotation_parameter_is_error() {
+    // A `~` is legal only as a word's own *direct* declared parameter, never
+    // buried inside another quotation's effect: the outer ordinary quotation
+    // is materializable, so a `~` riding inside it would reach a runtime
+    // representation -- the one thing `~` forbids. The parameter folds to
+    // `Concrete(Type::Quotation)`, so the poly audit must recurse into its
+    // effect to catch the inner `~` (the variable-bearing `Quotation` arm
+    // never fires on a fully-concrete parameter).
+    let err = check_error(": f ( [ ~[ i64 -- i64 ] -- ] -- ) drop ;\n");
+    assert!(
+        err.contains("nested inside a quotation effect") && err.contains('~'),
+        "a `~` nested inside an ordinary quotation parameter should be rejected, got: {err}"
+    );
+}
+
 // The fifth materialization boundary -- capture admission -- has no
 // source-level golden here: a poly signature (which a `~` parameter forces)
 // cannot place an ordinary quotation anywhere but a direct top-level
