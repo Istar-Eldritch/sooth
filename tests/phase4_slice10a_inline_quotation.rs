@@ -1,7 +1,10 @@
-//! Slice 10a, phase 2 goldens: `~[ ... ]` parses on every entry point,
-//! grounds to `Type::InlineQuotation`, `call` still works on it, all five
-//! materialization boundaries reject it, and R3's mismatch is located in
-//! both directions.
+//! Slice 10a goldens. Phase 2: `~[ ... ]` parses on every entry point, grounds
+//! to `Type::InlineQuotation`, `call` still works on it, all five
+//! materialization boundaries reject it, and R3's mismatch is located in both
+//! directions. Phase 4 (bottom section): a row inside a `~` effect grounds to
+//! the concrete caller region at each of R9's four check-site contexts, the
+//! region is stripped from mismatch diagnostics (R10), and the prepend is
+//! type-only so a caller borrow in the row is not falsely flagged.
 
 use sooth::{check, lexer, parser};
 
@@ -266,5 +269,116 @@ fn forwarding_inline_quotation_into_a_matching_inline_declared_parameter_runs() 
                : main ( -- ) [ 1 + ] outer . ;\n";
     let (stdout, code) = run_src("tilde-forward-match", src);
     assert_eq!(stdout, "6\n");
+    assert_eq!(code, 0);
+}
+
+// -- Phase 4 (R9/R10): a row inside a `~` effect grounds at the check site ---
+//
+// The combinator under test is `apply-with ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )`:
+// a quotation whose declared input row `..s` is the signature's own top-level
+// row. At a call site the row grounds to the caller-stack region below the
+// fixed inputs; at the definition site it grounds to the empty region. These
+// are `times`'s signature shape minus the back-edge (phase 5), so they exercise
+// R9 without depending on the self-tail rewrite.
+
+const APPLY_WITH: &str = ": apply-with ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | f call ;\n";
+
+#[test]
+fn row_bearing_inline_quotation_grounds_and_runs() {
+    // R9 context 1 (known-literal splice). The caller row `..s` is `[i64]` (the
+    // `10`), so the grounded quotation input is `[ i64 i64 ]` and `[ + ]` folds
+    // the row's top with the fixed input: 10 + 5 = 15. If the row were not
+    // prepended, `[ + ]` would underflow (`+` needs 2, the sub-stack holds 1).
+    let src = format!("{APPLY_WITH}: main ( -- ) 10 5 [ + ] apply-with . ;\n");
+    let (stdout, code) = run_src("row-ground-run", &src);
+    assert_eq!(stdout, "15\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn row_grounding_mismatch_strips_the_caller_region() {
+    // R9/R10: a literal whose body does not restore the declared output row is
+    // a located mismatch. The grounded row region (`[i64]`, the caller's `10`)
+    // is stripped before rendering, so the printed effect shows only the
+    // quotation's own fixed slots -- `[ i64 -- ]` declared, `[ i64 -- i64 i64 ]`
+    // actual -- never the caller's stack. `[ dup ]` leaves an extra `i64`.
+    let src = format!("{APPLY_WITH}: main ( -- ) 10 5 [ dup ] apply-with . . ;\n");
+    let err = check_error(&src);
+    assert!(
+        err.contains("the quotation passed to `apply-with` was declared `[ i64 -- ]` but its body has effect `[ i64 -- i64 i64 ]`"),
+        "the grounding mismatch must render the row-stripped effect, got: {err}"
+    );
+    // The anti-leak assertion pinned to exact text: an unstripped `actual`
+    // would carry the row through as a third output (`[ i64 -- i64 i64 i64 ]`)
+    // and an unstripped `declared`/input side would show `i64 i64 --`.
+    assert!(
+        !err.contains("i64 i64 i64") && !err.contains("i64 i64 --"),
+        "the caller's row region must not leak into the printed effect, got: {err}"
+    );
+}
+
+#[test]
+fn abstract_row_bearing_quotation_passes_down() {
+    // R9 context 2 (abstract pass-down). `outer` forwards its own row-bearing
+    // `~` parameter into `apply-with`. The forward is a type comparison of two
+    // row-free `QuotEffect`s (the interned effect drops the row, so both sides
+    // agree), and the spliced `apply-with` body grounds the row itself.
+    let src = format!(
+        "{APPLY_WITH}\
+         : outer ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | g | g apply-with ;\n\
+         : main ( -- ) 10 5 [ + ] outer . ;\n"
+    );
+    let (stdout, code) = run_src("row-passdown", &src);
+    assert_eq!(stdout, "15\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn row_bearing_combinator_checks_standalone_with_empty_region() {
+    // R9 context 3 (definition-site, no caller). `apply-with` checks standalone
+    // with its row grounded to the empty region: `f call` consumes the fixed
+    // `i64` and leaves the (empty) row, matching the declared output. No call
+    // site is present, yet `check` still checks the word.
+    let tokens = lexer::lex(APPLY_WITH).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module)
+        .expect("a row-bearing `~` combinator must check standalone against the empty region");
+}
+
+#[test]
+fn row_bearing_inline_quotation_routes_to_the_poly_path() {
+    // R9 context 4 (mono declared parameter is unreachable for a `~`). The
+    // unreachability rests on routing, not on the absence of an error:
+    // `inline_combinator` branches on `word.poly.is_some()`, so a `~`-bearing
+    // signature -- even a row-bearing one -- must set `WordDef.poly`, sending
+    // it to `check_poly_combinator_args` and never to the monomorphic
+    // declared-parameter path.
+    let tokens = lexer::lex(APPLY_WITH).expect("lexing should succeed");
+    let module = parser::parse(&tokens).expect("parsing should succeed");
+    assert!(
+        module.words[0].poly.is_some(),
+        "a row-bearing `~` signature must set `WordDef.poly`, routing to the poly path"
+    );
+}
+
+#[test]
+fn grounded_row_region_is_type_only_so_a_caller_borrow_is_not_flagged() {
+    // R9: the prepended row region is type-only (`Slot::computed`, `deriv:
+    // None`). A live borrow `&v` riding untouched in the caller row must not be
+    // reported by the exit-row borrow guard as `quotation borrows place` -- a
+    // false positive that prepending the caller's *real* slots would produce.
+    // `[ drop ]` consumes the fixed `i64` and leaves the row (the borrow)
+    // untouched.
+    let src = format!(
+        "type: V x i64 ;\n\
+         {APPLY_WITH}\
+         : main ( -- )\n\
+           0 V | v |\n\
+           &v 5 [ drop ] apply-with\n\
+           drop\n\
+           v drop ;\n"
+    );
+    let (stdout, code) = run_src("row-typeonly-borrow", &src);
+    assert_eq!(stdout, "");
     assert_eq!(code, 0);
 }

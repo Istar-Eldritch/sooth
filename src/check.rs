@@ -7291,8 +7291,25 @@ fn inline_combinator(
             let found = stack[base + i];
             if let Some(eff) = crate::ast::is_quotation_type(*want) {
                 if let Some(QuotRef::Known(id)) = found.quot {
+                    // Slice 10a (R9, context 4): a monomorphic word's declared
+                    // quotation parameter is a `Type::Quotation`/`InlineQuotation`
+                    // whose `QuotEffect` carries no row, so the row grounds to
+                    // the empty region. (Unreachable for a `~`: `inline_combinator`
+                    // routes any poly word here to `check_poly_combinator_args`.)
                     check_literal_against_declared_effect(
-                        id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+                        id,
+                        eff,
+                        &[],
+                        name,
+                        span,
+                        ctx,
+                        env,
+                        arrays,
+                        cells,
+                        refs,
+                        prov,
+                        scope,
+                        poly,
                     )?;
                 } else if crate::ast::is_quotation_type(found.ty).is_some() {
                     // R21: forwarding an abstract quotation parameter. `found`
@@ -7460,9 +7477,24 @@ fn check_poly_combinator_args(
         let Some(eff) = crate::ast::is_quotation_type(concrete) else {
             unreachable!("a quotation input grounds to a quotation type (apply_subst)")
         };
+        // Slice 10a (R9, context 1): a row-bearing declared quotation parameter
+        // grounds its row to the concrete caller-stack region below the
+        // combinator's fixed inputs (`stack[..base]`). Per R4 that row is the
+        // signature's own top-level row, so it grounds to the same region the
+        // top-level row does. A parameter that declared no row grounds against
+        // the empty region. `apply_subst` deliberately left the row off the
+        // interned `eff` (splicing it would mint an effect no literal equals),
+        // so it is reconstructed here, at the callee, and only type-only
+        // (`Slot::computed`, dropping provenance, R16).
+        let row: Vec<Type> = match pin {
+            PolyType::Quotation(_, _, _, Some(_), _) => {
+                stack[..base].iter().map(|s| s.ty).collect()
+            }
+            _ => Vec::new(),
+        };
         if let Some(QuotRef::Known(id)) = found.quot {
             check_literal_against_declared_effect(
-                id, eff, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+                id, eff, &row, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
             )?;
         } else if crate::ast::is_quotation_type(found.ty).is_some() {
             // R21 (poly): a forwarded abstract quotation parameter, accepted
@@ -7493,6 +7525,7 @@ fn check_poly_combinator_args(
 fn check_literal_against_declared_effect(
     id: QuotId,
     eff: &QuotEffect,
+    row: &[Type],
     word: &str,
     span: Span,
     ctx: &Ctx,
@@ -7507,7 +7540,16 @@ fn check_literal_against_declared_effect(
     let body = prov.quotations[id.0].body.clone();
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let moves_before = scope.moves.states.clone();
-    let fresh: Vec<Slot> = eff.inputs.iter().map(|t| Slot::computed(*t)).collect();
+    // Slice 10a (R9): ground the declared quotation's row against the concrete
+    // caller region `row`, prepended type-only below the declared inputs. The
+    // slots are `Slot::computed`, so `deriv`/`surviving`/`quot` are dropped
+    // (R16): prepending the caller's real slots would make the exit-row borrow
+    // guard below flag a caller borrow riding untouched in the row as
+    // `quotation borrows place`, a false positive on correct code. A caller
+    // whose effect carries no row (every one but the poly literal path) passes
+    // an empty region, leaving `fresh` as before.
+    let mut fresh: Vec<Slot> = row.iter().map(|t| Slot::computed(*t)).collect();
+    fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t)));
     let depth = scope.depth();
     let result = check_terms(
         &body, fresh, ctx, env, arrays, cells, refs, prov, scope, false, poly,
@@ -7545,18 +7587,30 @@ fn check_literal_against_declared_effect(
             span,
         },
     )?;
-    // R11: the literal's exit row must equal the declared output row.
-    let matches_out = result.len() == eff.outputs.len()
-        && result.iter().zip(&eff.outputs).all(|(f, w)| {
+    // R11: the literal's exit row must equal the grounded declared output row:
+    // the same carried region `row` followed by the declared outputs. N=0
+    // leaves the region untouched and N≥2 feeds one iteration's output into the
+    // next, so the carried region is a fixed point (spec: "one row, the same on
+    // both sides").
+    let expected_out: Vec<Type> = row
+        .iter()
+        .copied()
+        .chain(eff.outputs.iter().copied())
+        .collect();
+    let matches_out = result.len() == expected_out.len()
+        && result.iter().zip(&expected_out).all(|(f, w)| {
             matches!(
                 match_slot(*f, *w),
                 SlotMatch::Exact | SlotMatch::LiteralSizeType
             )
         });
     if !matches_out {
+        // R9/R10: strip the grounded row region before rendering, so the
+        // caller's concrete stack never leaks into the printed effect -- the
+        // declared/actual types show only the quotation's own fixed slots.
+        let actual_outs: Vec<Type> = result.iter().skip(row.len()).map(|s| s.ty).collect();
         let declared = crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone());
-        let actual =
-            crate::ast::quotation_type(eff.inputs.clone(), result.iter().map(|s| s.ty).collect());
+        let actual = crate::ast::quotation_type(eff.inputs.clone(), actual_outs);
         return Err(literal_effect_mismatch_error(
             ctx, span, word, declared, actual,
         ));
@@ -7875,8 +7929,22 @@ fn materialize_quotation_at_boundary(
     } else {
         None
     };
+    // Slice 10a (R9): an `eff` reaching an erasure boundary is a `QuotEffect`
+    // with no row, so the row grounds to the empty region.
     check_literal_against_declared_effect(
-        id, eff, word, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+        id,
+        eff,
+        &[],
+        word,
+        span,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        scope,
+        poly,
     )?;
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
@@ -9020,13 +9088,38 @@ fn check_term(
                                 let word = ctx.word_name().unwrap_or("the branch");
                                 let a_span = prov.quotations[a.0].span;
                                 let b_span = prov.quotations[b.0].span;
+                                // Slice 10a (R9): the `if`-join's expected
+                                // effect is a `QuotEffect` (no row), so both
+                                // arms ground to the empty region.
                                 check_literal_against_declared_effect(
-                                    a, eff, word, a_span, ctx, env, arrays, cells, refs, prov,
-                                    scope, poly,
+                                    a,
+                                    eff,
+                                    &[],
+                                    word,
+                                    a_span,
+                                    ctx,
+                                    env,
+                                    arrays,
+                                    cells,
+                                    refs,
+                                    prov,
+                                    scope,
+                                    poly,
                                 )?;
                                 check_literal_against_declared_effect(
-                                    b, eff, word, b_span, ctx, env, arrays, cells, refs, prov,
-                                    scope, poly,
+                                    b,
+                                    eff,
+                                    &[],
+                                    word,
+                                    b_span,
+                                    ctx,
+                                    env,
+                                    arrays,
+                                    cells,
+                                    refs,
+                                    prov,
+                                    scope,
+                                    poly,
                                 )?;
                                 // R23: the merged erased slot's surviving set is
                                 // the union of both arms' -- a fresh interned
