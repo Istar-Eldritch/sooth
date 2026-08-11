@@ -2064,7 +2064,7 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
 /// -- is rejected.
 fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String> {
     match pt {
-        PolyType::Quotation(ins, outs, _) => {
+        PolyType::Quotation(ins, outs, _, _, _) => {
             for t in ins.iter().chain(outs) {
                 reject_poly_quotation_anywhere(t, sig, "nested inside a quotation effect")?;
             }
@@ -2680,7 +2680,7 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         // Slice 6a (R5): a declared quotation effect's rows may name concrete
         // types (`[ i64 -- ]`); collect them so export-privacy still sees a
         // private type mentioned inside an effect.
-        PolyType::Quotation(ins, outs, _) => {
+        PolyType::Quotation(ins, outs, _, _, _) => {
             for t in ins.iter().chain(outs) {
                 collect_poly_concrete(t, out);
             }
@@ -6051,25 +6051,33 @@ fn unify_poly_input(
         // variable a row mentions (`[ 'T -- ]` against `[ i64 -- ]` binds
         // `'T = i64`). Equal arity is required on both sides; else it is a
         // located mismatch, never a silent bind.
-        PolyType::Quotation(ins, outs, _) => {
+        PolyType::Quotation(ins, outs, _, _, _) => {
             // Slice 10a (R1): accept a `~` slot as well as an ordinary
             // quotation slot (accessor), so a declared quotation parameter
-            // unifies against either.
+            // unifies against either. Slice 10a (R10): the mismatch
+            // messages below render the declared `PolyType` (`pty`) itself
+            // through `poly_type_str`, rather than fabricating a `Type` --
+            // `Type::Quotation`'s `QuotEffect` has no row field to hold R7's
+            // row, so an expected type nobody wrote (e.g. `[ -- ]`) or a
+            // rendering that silently drops the row are both avoided by
+            // never building one.
             let Some(eff) = crate::ast::is_quotation_type(slot_ty) else {
-                return Err(type_mismatch_error(
+                return Err(poly_quotation_type_mismatch_error(
                     ctx,
                     span,
                     name,
-                    crate::ast::quotation_type(Vec::new(), Vec::new()),
+                    &poly_type_str(pty, sig),
                     slot_ty,
                 ));
             };
+            // Slice 10a (R8): the row is a separate field, never a slot in
+            // `ins`/`outs`, so this arity check already excludes it.
             if ins.len() != eff.inputs.len() || outs.len() != eff.outputs.len() {
-                return Err(type_mismatch_error(
+                return Err(poly_quotation_type_mismatch_error(
                     ctx,
                     span,
                     name,
-                    poly_quotation_concrete_hint(ins, outs, subst),
+                    &poly_type_str(pty, sig),
                     slot_ty,
                 ));
             }
@@ -6084,21 +6092,27 @@ fn unify_poly_input(
     Ok(())
 }
 
-/// A best-effort concrete rendering of a declared quotation effect for an
-/// arity-mismatch diagnostic: any already-bound variable is shown resolved,
-/// an unbound one falls back to a nil-row placeholder so the message names a
-/// real `Type`.
-fn poly_quotation_concrete_hint(ins: &[PolyType], outs: &[PolyType], subst: &Subst) -> Type {
-    let ground = |row: &[PolyType]| -> Vec<Type> {
-        row.iter()
-            .map(|p| match p {
-                PolyType::Concrete(t) => *t,
-                PolyType::Var(v) => subst.ty_of(*v).unwrap_or(Type::I64),
-                _ => Type::I64,
-            })
-            .collect()
-    };
-    crate::ast::quotation_type(ground(ins), ground(outs))
+/// Slice 10a (R10): `type_mismatch_error`'s twin for a declared quotation
+/// mismatch, taking the expected side as an already-rendered `PolyType`
+/// string (`poly_type_str`, which knows the `~` sigil and the row) rather
+/// than a `Type` -- a row cannot live in a `Type::Quotation`'s `QuotEffect`.
+fn poly_quotation_type_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    expected: &str,
+    found: Type,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
+            name, span.line, op, expected, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
+        }
+    }
 }
 
 /// R5: apply the ground `θ` to a declared output `PolyType`, yielding a
@@ -6130,8 +6144,12 @@ fn apply_subst(
             Ok(intern_array_type(arrays, elem_ty, count))
         }
         // Slice 6a (R6): substitute both rows of a declared quotation effect,
-        // yielding a concrete `Type::Quotation`.
-        PolyType::Quotation(ins, outs, is_inline) => {
+        // yielding a concrete `Type::Quotation`. Slice 10a (R9): a row on
+        // this `PolyType::Quotation` is left ungrounded here -- splicing a
+        // caller region into an *interned* effect would mint one no literal
+        // could ever equal; grounding happens at the callee side instead
+        // (`check_literal_against_declared_effect`, phase 4).
+        PolyType::Quotation(ins, outs, is_inline, _, _) => {
             let mut cins = Vec::with_capacity(ins.len());
             for p in ins {
                 cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
@@ -6444,14 +6462,19 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
             };
             format!("[{} {}]", poly_type_str(elem, sig), l)
         }
-        PolyType::Quotation(ins, outs, is_inline) => {
-            let row = |r: &[PolyType]| {
-                r.iter()
-                    .map(|p| poly_type_str(p, sig))
-                    .collect::<Vec<_>>()
-                    .join(" ")
+        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => {
+            // Slice 10a (R10): the row is a separate field, not a slot in
+            // `ins`/`outs`, so it is rendered as the leading element of its
+            // side, exactly as `poly_sig_str` renders the top-level row.
+            let row = |r: &[PolyType], row_var: Option<u32>| {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(v) = row_var {
+                    parts.push(sig.row_var_names[v as usize].clone());
+                }
+                parts.extend(r.iter().map(|p| poly_type_str(p, sig)));
+                parts.join(" ")
             };
-            let (i, o) = (row(ins), row(outs));
+            let (i, o) = (row(ins, *row_in), row(outs, *row_out));
             let sigil = if *is_inline { "~" } else { "" };
             match (i.is_empty(), o.is_empty()) {
                 (true, true) => format!("{sigil}[ -- ]"),
@@ -15724,6 +15747,8 @@ mod tests {
                 vec![PolyType::Var(0)],
                 Vec::new(),
                 false,
+                None,
+                None,
             )],
             outputs: Vec::new(),
             row_out: None,

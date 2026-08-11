@@ -621,8 +621,12 @@ pub enum PolyType {
     /// here. The trailing `bool` is Slice 10a (R1): whether the effect was
     /// declared with the `~` sigil, so the concrete fold and `apply_subst`
     /// know to ground it to `Type::InlineQuotation` rather than
-    /// `Type::Quotation`.
-    Quotation(Vec<PolyType>, Vec<PolyType>, bool),
+    /// `Type::Quotation`. The two trailing `Option<u32>`s are Slice 10a
+    /// (R7): the input/output row variable, if any, in the signature's own
+    /// row id space (`PolySig::row_in`/`row_out`) -- a row inside a
+    /// quotation effect can only ever denote the signature's top-level row
+    /// (R4), so it shares that id space rather than minting its own.
+    Quotation(Vec<PolyType>, Vec<PolyType>, bool, Option<u32>, Option<u32>),
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature

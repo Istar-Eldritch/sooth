@@ -251,7 +251,7 @@ fn remap_poly_type(
             )),
             len.clone(),
         ),
-        PolyType::Quotation(ins, outs, is_inline) => PolyType::Quotation(
+        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
             ins.iter()
                 .map(|q| {
                     remap_poly_type(q, struct_base, enum_base, array_base, cell_base, ref_base)
@@ -263,6 +263,8 @@ fn remap_poly_type(
                 })
                 .collect(),
             *is_inline,
+            *row_in,
+            *row_out,
         ),
     }
 }
