@@ -1,11 +1,16 @@
 \ Dogfood: Phase 4 slice 6h. The raw array constructor `[ Type ; Count ]`
 \ allocs one array slot and zero-inits its contents with a counted loop. Every
-\ probe runs *after* `dirty`, which fills a same-or-larger array with a nonzero
-\ seed and returns, so the constructor reuses a stack region full of 99s: a
+\ probe runs *after* a dirtier that fills a nonzero seed into the same stack
+\ region and returns, so the constructor reuses stack full of nonzero bytes: a
 \ zero read then proves the zero-init loop ran, not that fresh stack happened
 \ to be zero. Without the preamble these are placebos (`Alloc` never zeroes).
+\ Each dirtier is sized to the probe's own element width, since an [i64;10]
+\ dirtier's residue lands on 8-byte-strided offsets only and never overlaps
+\ the [i8;10]/[bool;4] probes' own byte-granular slots.
 
 : dirty ( -- ) 99 10 fill drop ;
+: dirty_i8 ( -- ) 99 >i8 200 fill drop ;
+: dirty_bool ( -- ) true 200 fill drop ;
 
 \ `[ i64 ; 10 ]`: index 9 reads 0 after the dirty preamble.
 : probe10 ( -- i64 )
@@ -53,8 +58,8 @@
 
 : main ( -- )
   dirty probe10 .        \ 0
-  dirty probe_i8 . .     \ 5 0
-  dirty probe_bool       \ false false false false
+  dirty_i8 probe_i8 . .  \ 5 0
+  dirty_bool probe_bool  \ false false false false
   dirty probe_after      \ 100 0 1 2 200
   [ 5 ] withbuf .        \ 5
   dirty 3 recur ;        \ 3 2 1 0

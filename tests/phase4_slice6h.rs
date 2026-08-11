@@ -1,11 +1,15 @@
 //! Phase 4 slice 6h goldens: the raw array constructor `[ Type ; Count ]`.
-//! Each probe in `examples/array_ctor.sth` runs after a `dirty` preamble that
-//! fills a same-or-larger array with a nonzero seed and returns, so a zero read
-//! proves the constructor's zero-init loop ran rather than fresh stack residue
-//! (`Alloc` never zeroes). The single expected-output assertion covers the
-//! `[i64;10]`, `[i8;10]`+neighbour, `[bool;4]` variant-0, after-the-loop
-//! (`terminated` reset), `times`-composition, and combinator-body (D5) cases at
-//! once, since they share one deterministic program.
+//! Each probe in `examples/array_ctor.sth` runs after a dirtier that fills a
+//! nonzero seed into the same stack region and returns, so a zero read proves
+//! the constructor's zero-init loop ran rather than fresh stack residue
+//! (`Alloc` never zeroes). The dirtier is sized to each probe's own element
+//! width (`dirty` for `i64` slots, `dirty_i8`/`dirty_bool` for the
+//! byte-granular ones), since an `[i64;10]` dirtier's residue only lands on
+//! 8-byte-strided offsets and never overlaps an `[i8;10]`/`[bool;4]` slot. The
+//! single expected-output assertion covers the `[i64;10]`, `[i8;10]`+neighbour,
+//! `[bool;4]` variant-0, after-the-loop (`terminated` reset), `times`-
+//! composition, and combinator-body (D5) cases at once, since they share one
+//! deterministic program.
 
 use std::process::Command;
 

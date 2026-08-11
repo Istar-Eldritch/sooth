@@ -421,7 +421,14 @@ golden so it is decided rather than accidental.
 
 - **The zero goldens are placebos without the dirty-frame preamble.** `Alloc` never zeroes,
   so fresh stack residue often reads as 0 and the tests would pass *flakily* with the
-  entire zero-fill loop deleted. The preamble is load-bearing, not decoration.
+  entire zero-fill loop deleted. The preamble is load-bearing, not decoration. A single
+  `[i64;N]` dirtier only reliably overlaps other `[i64;N']` stack slots; the `[i8;10]` and
+  `[bool;4]` probes need their own byte-granular dirtier or they pass on incidental
+  stack-zero residue instead of the zero-init loop (mutation-tested in phase 3's review).
+- **The exit `terminated = false` reset is unreachable in phase 3's fixed loop body**
+  (nothing in the `ArrayCtor` arm ever sets `terminated = true`), so no golden can exercise
+  it there; it earns coverage only once phase 4 splices `fill`'s own body through the same
+  template shape. Kept for template parity, not because phase 3 can prove it load-bearing.
 - **Loop-state hygiene is new exposure for both lowerings** and fails silently in the
   *surrounding* code, not at the loop. `examples/combinator_in_times.sth:13` does place a
   `fill` before a `times`, so the corpus offers partial cover, but the dedicated
