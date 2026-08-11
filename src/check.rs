@@ -12068,6 +12068,19 @@ mod tests {
             "a captured `~` local should be its own located rejection, not the ordinary \
              quotation deferral, got: {err}"
         );
+
+        // The same rejection under `Ctx::Word` must name the enclosing word,
+        // not fall back to `<line>` -- the only other call site exercises
+        // `Ctx::Line`, which can't discriminate a discarded `Ctx` parameter
+        // from a used one.
+        let word = bare_word("outer", 0);
+        let word_ctx = word_ctx(&word, &structs, &enums, None);
+        let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
+            .expect_err("a captured `~` local must be rejected");
+        assert!(
+            word_err.contains("`outer`"),
+            "a captured `~` local under `Ctx::Word` should name the enclosing word: {word_err}"
+        );
     }
 
     #[test]
