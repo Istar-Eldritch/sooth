@@ -15790,13 +15790,42 @@ mod tests {
             &mut subst2,
         )
         .expect_err("an arity mismatch must be a located type mismatch");
-        assert!(
-            err.contains("`f`"),
-            "the arity mismatch should name the word, got: {err}"
+        // Slice 10a (R10/R20): pin the *exact* mismatch text. The expected
+        // side must render the declared `PolyType` (`[ 'T -- ]`) through
+        // `poly_type_str`, never a fabricated `[ -- ]`; a substring like
+        // "`f`" would survive that rendering vanishing, so it is not enough.
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `[ 'T -- ]`, found `[ i64 i64 -- ]`",
         );
         assert!(
             subst2.ty_of(0).is_none(),
             "an arity mismatch must not silently bind `'T`"
+        );
+
+        // Slice 10a (R10): the `is_quotation_type` let-else arm -- a
+        // non-quotation slot against a declared quotation parameter -- routes
+        // through the same row-aware renderer, so its expected side is the
+        // declared `[ 'T -- ]`, not a fabricated quotation `Type`.
+        let mut subst3 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            Type::I64,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst3,
+        )
+        .expect_err("a non-quotation slot must be a located type mismatch");
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `[ 'T -- ]`, found `i64`",
+        );
+        assert!(
+            subst3.ty_of(0).is_none(),
+            "a non-quotation slot must not silently bind `'T`"
         );
     }
 
