@@ -602,6 +602,14 @@ borrow substitution, the aggregate aliasing witness, self-nesting, corpus/`while
 library unchanged with byte-identical baselines against the named base commit, and an audit
 enumerating every located error from phases 1–5 with its mutation evidence. Standard.
 
+*Untested seam (phase-6 review note).* Phase 6 asserts `surviving` rides a `Some` map entry
+using a hardcoded `index_map = vec![Some(0)]`; R15/R17's e2e `my-times` exercises a real
+asymmetric shape that must yield a `Some` entry, but its join masks the forward via
+`union_surviving`. Neither half proves the composition: that a real aggregate-carrying shape
+*produces* the `Some` entry that `surviving` then rides. It cannot be an e2e golden (the mask is
+by design, R14), so if it is worth closing, close it with a white-box test bridging
+`back_edge_declared_shape` → `back_edge_outs` on a real `my-times` shape.
+
 ## Exit criteria
 
 10a exits when: `Type::InlineQuotation` exists with every silent `Type::Quotation` site
