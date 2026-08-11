@@ -15801,6 +15801,32 @@ mod tests {
     }
 
     #[test]
+    fn poly_type_str_renders_a_quotation_row() {
+        // Slice 10a (R10): the row is a separate field on `PolyType::Quotation`,
+        // not a slot in `ins`/`outs`, so `poly_type_str` must render it
+        // explicitly as the leading element of each side -- dropping that
+        // rendering must leave no trace of the row name in the output.
+        let sig = PolySig {
+            row_in: Some(0),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: Some(0),
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: Vec::new(),
+            row_var_names: vec!["..s".to_string()],
+        };
+        let quot = PolyType::Quotation(
+            vec![PolyType::Concrete(Type::I64)],
+            Vec::new(),
+            true,
+            Some(0),
+            Some(0),
+        );
+        assert_eq!(poly_type_str(&quot, &sig), "~[ ..s i64 -- ..s ]");
+    }
+
+    #[test]
     fn quotation_parameter_is_copy_no_move_obligation() {
         // Criterion 6b: a quotation parameter is `Copy` (it registers no move
         // obligation), so a body that *binds* its quotation param and never
