@@ -10605,18 +10605,36 @@ fn drop_import_visibility_error(
         .imports
         .iter()
         .find(|(_, &target)| target == decl.module)
-        .map(|(q, _)| q.as_str())
-        .unwrap_or(source);
-    let note = format!(
-        "\n  note: add `{source}` to the import (`import: {qualifier} | {source} | \"...\"`), or dispose it in a module that declares `{source}`"
-    );
+        .map(|(q, _)| q.as_str());
+    // `ModuleInfo` carries no name or path of its own (only its import map,
+    // exports, and selective names), so a struct reachable only
+    // *transitively* -- the caller imports some module that imports the
+    // declaring one, but never imports the declaring one itself -- has no
+    // qualifier to name here. Naming the struct's own bare name as if it
+    // were a module qualifier (the prior behavior) reads as a valid import
+    // spelling that silently fails; say plainly that the path is transitive
+    // instead of fabricating one.
+    let (ty_name, note) = match qualifier {
+        Some(qualifier) => (
+            format!("{qualifier}::{source}"),
+            format!(
+                "disposing it runs a `drop` destructor declared in module `{qualifier}`, which this module has not imported by name\n  note: add `{source}` to the import (`import: {qualifier} | {source} | \"...\"`), or dispose it in a module that declares `{source}`"
+            ),
+        ),
+        None => (
+            source.to_string(),
+            format!(
+                "disposing it runs a `drop` destructor declared in a module this module never imports directly -- it is only reachable transitively, through another module's import\n  note: import the module that declares `{source}` directly, then add `{source}` to that import"
+            ),
+        ),
+    };
     match ctx {
         Ctx::Word { name, .. } => format!(
-            "error: cannot `drop` a value of type `{qualifier}::{source}` in `{name}` (line {})\n  disposing it runs a `drop` destructor declared in module `{qualifier}`, which this module has not imported by name{note}",
+            "error: cannot `drop` a value of type `{ty_name}` in `{name}` (line {})\n  {note}",
             span.line
         ),
         Ctx::Line { .. } => format!(
-            "error: cannot `drop` a value of type `{qualifier}::{source}` (line {})\n  disposing it runs a `drop` destructor declared in module `{qualifier}`, which this module has not imported by name{note}",
+            "error: cannot `drop` a value of type `{ty_name}` (line {})\n  {note}",
             span.line
         ),
     }
@@ -11275,6 +11293,27 @@ mod tests {
         assert_eq!(
             err,
             "error: cannot `drop` a value of type `lib::Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in module `lib`, which this module has not imported by name\n  note: add `Res` to the import (`import: lib | Res | \"...\"`), or dispose it in a module that declares `Res`"
+        );
+    }
+
+    #[test]
+    fn drop_of_transitively_reachable_type_with_no_direct_import_is_error() {
+        // Round-2 fix: `Res` is declared by module 0 (`deep`), reached by the
+        // caller (module 2, `main`) only through module 1 (`mid`), which
+        // `main` never imports directly. The caller's import map has no
+        // qualifier mapping to module 0, so the diagnostic must not fabricate
+        // one -- naming the struct's own bare name as if it were a module
+        // qualifier (the pre-fix behavior) read as a valid but wrong import
+        // spelling.
+        let structs = vec![res_struct(0, true)];
+        let mid = ModuleInfo::default();
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("mid".to_string(), 1);
+        let modules = vec![ModuleInfo::default(), mid, caller];
+        let err = drop_res(&structs, Some(&modules), 2).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `drop` a value of type `Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in a module this module never imports directly -- it is only reachable transitively, through another module's import\n  note: import the module that declares `Res` directly, then add `Res` to that import"
         );
     }
 
@@ -12853,6 +12892,61 @@ mod tests {
                    : drop ( B -- ) | b | b B>a drop ; \
                    : main ( -- ) 1 A B drop ;";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn collect_drop_targets_stops_descending_at_an_overridden_struct() {
+        // R6 case (b), on `collect_drop_targets` directly. Post-D3, no legal
+        // Sooth program can discriminate this rule any more (see the
+        // `check_src`-based test above): disposing an overridden field always
+        // requires a real `drop` call, which already contributes the same
+        // edge a field-walk would synthesize, so a mutated (fields-walking)
+        // version of this function passes every `check_src` test just as the
+        // correct one does. Hand-build the registries instead: `B` overrides
+        // `drop` and has a field of type `A`, which also overrides `drop`.
+        // Walking `B`'s targets must add `B`'s own override and nothing else
+        // -- never descend into the overridden field to add `A`'s too.
+        let a = StructDecl {
+            name: "A".to_string(),
+            name_static: "A",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        };
+        let b = StructDecl {
+            name: "B".to_string(),
+            name_static: "B",
+            fields: vec![("a".to_string(), Type::Struct(StructId::from_index(0), "A"))],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        };
+        let structs = vec![a, b];
+        let mut overloads = HashMap::new();
+        overloads.insert(StructId::from_index(0), 0usize);
+        overloads.insert(StructId::from_index(1), 1usize);
+
+        let mut found = Vec::new();
+        collect_drop_targets(
+            Type::Struct(StructId::from_index(1), "B"),
+            &structs,
+            &[],
+            &[],
+            &[],
+            &overloads,
+            &mut Vec::new(),
+            &mut found,
+        );
+
+        assert_eq!(
+            found,
+            vec![1],
+            "walking B's targets must stop at B's own override, never also \
+             descend into its overridden `A` field"
+        );
     }
 
     #[test]
