@@ -22,145 +22,32 @@ export function :Buf $new__m0() {
 	%v1 =w and %v0, 255
 	%v2 =l copy 64
 	%v3 =l alloc4 64
-	%v4 =l add %v3, 0
-	storeb %v1, %v4
-	%v5 =l add %v3, 1
-	storeb %v1, %v5
-	%v6 =l add %v3, 2
-	storeb %v1, %v6
-	%v7 =l add %v3, 3
-	storeb %v1, %v7
-	%v8 =l add %v3, 4
+	%v4 =l copy 0
+	jmp @blk1
+@blk1
+	%v5 =l phi @start %v4, @blk2 %v10
+	%v6 =l copy 64
+	%v7 =w csltl %v5, %v6
+	jnz %v7, @blk2, @blk3
+@blk2
+	%eoff0 =l mul %v5, 1
+	%v8 =l add %v3, %eoff0
 	storeb %v1, %v8
-	%v9 =l add %v3, 5
-	storeb %v1, %v9
-	%v10 =l add %v3, 6
-	storeb %v1, %v10
-	%v11 =l add %v3, 7
-	storeb %v1, %v11
-	%v12 =l add %v3, 8
-	storeb %v1, %v12
-	%v13 =l add %v3, 9
-	storeb %v1, %v13
-	%v14 =l add %v3, 10
-	storeb %v1, %v14
-	%v15 =l add %v3, 11
-	storeb %v1, %v15
-	%v16 =l add %v3, 12
-	storeb %v1, %v16
-	%v17 =l add %v3, 13
-	storeb %v1, %v17
-	%v18 =l add %v3, 14
-	storeb %v1, %v18
-	%v19 =l add %v3, 15
-	storeb %v1, %v19
-	%v20 =l add %v3, 16
-	storeb %v1, %v20
-	%v21 =l add %v3, 17
-	storeb %v1, %v21
-	%v22 =l add %v3, 18
-	storeb %v1, %v22
-	%v23 =l add %v3, 19
-	storeb %v1, %v23
-	%v24 =l add %v3, 20
-	storeb %v1, %v24
-	%v25 =l add %v3, 21
-	storeb %v1, %v25
-	%v26 =l add %v3, 22
-	storeb %v1, %v26
-	%v27 =l add %v3, 23
-	storeb %v1, %v27
-	%v28 =l add %v3, 24
-	storeb %v1, %v28
-	%v29 =l add %v3, 25
-	storeb %v1, %v29
-	%v30 =l add %v3, 26
-	storeb %v1, %v30
-	%v31 =l add %v3, 27
-	storeb %v1, %v31
-	%v32 =l add %v3, 28
-	storeb %v1, %v32
-	%v33 =l add %v3, 29
-	storeb %v1, %v33
-	%v34 =l add %v3, 30
-	storeb %v1, %v34
-	%v35 =l add %v3, 31
-	storeb %v1, %v35
-	%v36 =l add %v3, 32
-	storeb %v1, %v36
-	%v37 =l add %v3, 33
-	storeb %v1, %v37
-	%v38 =l add %v3, 34
-	storeb %v1, %v38
-	%v39 =l add %v3, 35
-	storeb %v1, %v39
-	%v40 =l add %v3, 36
-	storeb %v1, %v40
-	%v41 =l add %v3, 37
-	storeb %v1, %v41
-	%v42 =l add %v3, 38
-	storeb %v1, %v42
-	%v43 =l add %v3, 39
-	storeb %v1, %v43
-	%v44 =l add %v3, 40
-	storeb %v1, %v44
-	%v45 =l add %v3, 41
-	storeb %v1, %v45
-	%v46 =l add %v3, 42
-	storeb %v1, %v46
-	%v47 =l add %v3, 43
-	storeb %v1, %v47
-	%v48 =l add %v3, 44
-	storeb %v1, %v48
-	%v49 =l add %v3, 45
-	storeb %v1, %v49
-	%v50 =l add %v3, 46
-	storeb %v1, %v50
-	%v51 =l add %v3, 47
-	storeb %v1, %v51
-	%v52 =l add %v3, 48
-	storeb %v1, %v52
-	%v53 =l add %v3, 49
-	storeb %v1, %v53
-	%v54 =l add %v3, 50
-	storeb %v1, %v54
-	%v55 =l add %v3, 51
-	storeb %v1, %v55
-	%v56 =l add %v3, 52
-	storeb %v1, %v56
-	%v57 =l add %v3, 53
-	storeb %v1, %v57
-	%v58 =l add %v3, 54
-	storeb %v1, %v58
-	%v59 =l add %v3, 55
-	storeb %v1, %v59
-	%v60 =l add %v3, 56
-	storeb %v1, %v60
-	%v61 =l add %v3, 57
-	storeb %v1, %v61
-	%v62 =l add %v3, 58
-	storeb %v1, %v62
-	%v63 =l add %v3, 59
-	storeb %v1, %v63
-	%v64 =l add %v3, 60
-	storeb %v1, %v64
-	%v65 =l add %v3, 61
-	storeb %v1, %v65
-	%v66 =l add %v3, 62
-	storeb %v1, %v66
-	%v67 =l add %v3, 63
-	storeb %v1, %v67
-	%v68 =l copy 64
-	%v69 =l call $sooth_alloc(l %v68)
-	blit %v3, %v69, 64
-	%v70 =l copy 0
-	%v71 =l copy %v70
-	%v72 =l alloc8 16
-	%v73 =l add %v72, 0
-	storel %v69, %v73
-	%v74 =l add %v72, 8
-	storel %v71, %v74
-	ret %v72
+	%v9 =l copy 1
+	%v10 =l add %v5, %v9
+	jmp @blk1
+@blk3
+	%v11 =l copy 64
+	%v12 =l call $sooth_alloc(l %v11)
+	blit %v3, %v12, 64
+	%v13 =l copy 0
+	%v14 =l copy %v13
+	%v15 =l alloc8 16
+	%v16 =l add %v15, 0
+	storel %v12, %v16
+	%v17 =l add %v15, 8
+	storel %v14, %v17
+	ret %v15
 }
 
 export function $push.2d.byte__m0(l %v0, w %v1) {

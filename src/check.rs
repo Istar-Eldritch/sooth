@@ -558,6 +558,105 @@ fn contains_reference(
     }
 }
 
+/// D3 (slice 6h phase 2): whether `ty` transitively contains a pointer-shaped
+/// `Copy` type the array constructor cannot safely zero-initialize --
+/// `Type::Str`, `Type::Cstr`, `Type::Quotation` -- recursing through struct
+/// fields, ALL enum variant fields (conservative: only variant 0's payload is
+/// readable in an all-zero value, but any variant's pointer-shaped payload is
+/// rejected rather than argue a subtle tag-gating case with no known use),
+/// and array elements. Returns the offending inner type and the path to it
+/// (outermost first) on a hit. `fill` never calls this: it replicates a real
+/// seed and never mints one from zeroed memory, so it keeps accepting these
+/// types (D4).
+fn find_zero_unsafe_element(
+    ty: Type,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Option<(Type, Vec<String>)> {
+    match ty {
+        Type::Str | Type::Cstr | Type::Quotation(_) => Some((ty, Vec::new())),
+        Type::Struct(id, _) => {
+            for (fname, fty) in &structs[id.index()].fields {
+                if let Some((bad, mut path)) =
+                    find_zero_unsafe_element(*fty, structs, enums, arrays)
+                {
+                    path.insert(0, format!("field `{fname}`"));
+                    return Some((bad, path));
+                }
+            }
+            None
+        }
+        Type::Enum(id, _) => {
+            for variant in &enums[id.index()].variants {
+                for (fname, fty) in &variant.fields {
+                    if let Some((bad, mut path)) =
+                        find_zero_unsafe_element(*fty, structs, enums, arrays)
+                    {
+                        path.insert(0, format!("variant `{}` field `{fname}`", variant.name));
+                        return Some((bad, path));
+                    }
+                }
+            }
+            None
+        }
+        Type::Array(id, _) => {
+            find_zero_unsafe_element(arrays[id.index()].element, structs, enums, arrays).map(
+                |(bad, mut path)| {
+                    path.insert(0, "array element".to_string());
+                    (bad, path)
+                },
+            )
+        }
+        _ => None,
+    }
+}
+
+/// D2 (slice 6h phase 2): the shared type-directed gate for a construction
+/// site that accepts a bare `Type` with no declaration for
+/// `check_no_stored_references` to have caught -- `fill`'s element and the
+/// array constructor's element. Owns exactly the checks that read a `Type`
+/// (never a `Slot`): no stored reference, `Copy`, and (when `zero_safety` is
+/// set, the constructor only) D3's zero-validity predicate. It does not own
+/// the quotation or literal-count checks (`Slot` fields) or the count range
+/// check, which stay at `fill`'s own call site. `site` names the
+/// construction site and drives both diagnostics that need one:
+/// `fill_of_linear_element_error` renders it as a bare code span, and this
+/// composes `constructed_reference_error`'s noun phrase from it the same way
+/// -- `fill` passing `"fill"` keeps both byte-identical to before this gate
+/// existed.
+#[allow(clippy::too_many_arguments)]
+fn check_array_element_gate(
+    ctx: &Ctx,
+    span: Span,
+    site: &str,
+    element: Type,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    zero_safety: bool,
+) -> Result<(), String> {
+    if contains_reference(element, structs, enums, arrays) {
+        return Err(constructed_reference_error(
+            ctx,
+            span,
+            &format!("the element `{site}` would store"),
+            element,
+        ));
+    }
+    if !is_copy(element, structs, enums, arrays) {
+        return Err(fill_of_linear_element_error(ctx, span, element, site));
+    }
+    if zero_safety {
+        if let Some((bad, path)) = find_zero_unsafe_element(element, structs, enums, arrays) {
+            return Err(array_constructor_zero_unsafe_element_error(
+                ctx, span, element, bad, &path,
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Which region of memory an aggregate value denotes. Two slots carrying
 /// the same id are two names for one address, which is what makes a mutation
 /// through one silently observable through the other. `None` means "denotes a
@@ -5326,6 +5425,17 @@ fn poly_term(
                 span.line
             ));
         }
+        // Slice 6h: no interning route exists for a body-internal array
+        // shape absent from a poly signature (`subst_polytype`/`array_id_of`
+        // both look up an already-interned shape and panic otherwise), so
+        // this is rejected eagerly, mirroring the quotation rejection above.
+        TermKind::ArrayCtor(_) => {
+            return Err(format!(
+                "error: an array constructor in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
+        }
     }
     Ok(stack)
 }
@@ -9390,6 +9500,27 @@ fn check_term(
             });
             Ok(stack)
         }
+        // D2/D3 (slice 6h phase 2): the shared gate, with the zero-validity
+        // predicate turned on -- unlike `fill`, an all-zero slot here is
+        // never a replicated real seed.
+        TermKind::ArrayCtor(ty) => {
+            let Type::Array(id, _) = *ty else {
+                unreachable!("the parser only ever interns a Type::Array for an ArrayCtor term")
+            };
+            let element = arrays[id.index()].element;
+            check_array_element_gate(
+                ctx,
+                span,
+                "the array constructor",
+                element,
+                ctx.structs(),
+                ctx.enums(),
+                arrays,
+                true,
+            )?;
+            stack.push(Slot::computed(*ty));
+            Ok(stack)
+        }
     }
 }
 
@@ -9837,14 +9968,46 @@ fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
 /// `drop` nor a nested struct's `dup` check would ever see the array's real
 /// element count). Reject rather than accept a value the rest of the linear
 /// checker can't reason about; array-of-linear support is future work.
-fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type) -> String {
+/// D2 (phase 2): `site` names the construction site (`"fill"`, or the array
+/// constructor's own site), rendered as a bare code span, so `fill`'s call
+/// passing `"fill"` keeps this byte-identical.
+fn fill_of_linear_element_error(ctx: &Ctx, span: Span, elem: Type, site: &str) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: linear array elements are not supported yet in `{}` (line {})\n  `fill` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
-            name, span.line, elem, elem, effect_str(effect),
+            "error: linear array elements are not supported yet in `{}` (line {})\n  `{}` would replicate a `{}` across every slot, but `{}` is linear and has no `Copy` instance\n  note: declared {}",
+            name, span.line, site, elem, elem, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: linear array elements are not supported yet: `fill` would replicate a `{elem}` across every slot, but `{elem}` is linear and has no `Copy` instance"
+            "error: linear array elements are not supported yet: `{site}` would replicate a `{elem}` across every slot, but `{elem}` is linear and has no `Copy` instance"
+        ),
+    }
+}
+
+/// D3 (slice 6h phase 2): the array constructor's element transitively
+/// contains `str`/`cstr`/a quotation -- all `Copy` and pointer-shaped, so an
+/// all-zero slot would be a null pointer whose first read faults. Names the
+/// offending inner type and the field/variant/array-element path to it
+/// (outermost first); an empty path means the element itself is the
+/// offending type.
+fn array_constructor_zero_unsafe_element_error(
+    ctx: &Ctx,
+    span: Span,
+    outer: Type,
+    bad: Type,
+    path: &[String],
+) -> String {
+    let where_ = if path.is_empty() {
+        "directly".to_string()
+    } else {
+        format!("via {}", path.join(" -> "))
+    };
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot zero-initialize a `{}` in `{}` (line {})\n  `{}` transitively contains `{}` ({}), which is pointer-shaped and would zero to a null pointer\n  note: declared {}",
+            outer, name, span.line, outer, bad, where_, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot zero-initialize a `{outer}`: it transitively contains `{bad}` ({where_}), which is pointer-shaped and would zero to a null pointer"
         ),
     }
 }
@@ -10604,18 +10767,18 @@ fn check_array_word(
             }
             // A construction site the declaration-site rule cannot reach: `fill` accepts
             // any `Copy` element, and `&T` is `Copy`, so the declaration-site
-            // sweep never sees this shape.
-            if contains_reference(element.ty, ctx.structs(), ctx.enums(), arrays) {
-                return Err(constructed_reference_error(
-                    ctx,
-                    span,
-                    "the element `fill` would store",
-                    element.ty,
-                ));
-            }
-            if !is_copy(element.ty, ctx.structs(), ctx.enums(), arrays) {
-                return Err(fill_of_linear_element_error(ctx, span, element.ty));
-            }
+            // sweep never sees this shape. D2's shared gate owns this check
+            // (no zero-safety: `fill` replicates a real seed, D4).
+            check_array_element_gate(
+                ctx,
+                span,
+                "fill",
+                element.ty,
+                ctx.structs(),
+                ctx.enums(),
+                arrays,
+                false,
+            )?;
             let array_ty = intern_array_type(arrays, element.ty, count_val as u32);
             // Review fix: forward the element's surviving set (R19) onto the
             // array -- `fill` replicates one closure-carrying element N
@@ -12200,6 +12363,23 @@ mod tests {
         .expect_err("a quotation literal in a polymorphic body should be rejected");
         assert!(
             err.contains("a quotation in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn poly_term_rejects_an_array_constructor() {
+        // Slice 6h: an array constructor in a polymorphic body is rejected
+        // eagerly, mirroring the quotation rejection above (no interning
+        // route exists for a body-internal shape absent from the signature).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ i64 ; 4 ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("an array constructor in a polymorphic body should be rejected");
+        assert!(
+            err.contains("an array constructor in the polymorphic body of `bad`")
                 && err.contains("not yet supported"),
             "poly_term should name `bad`, got: {err}"
         );
@@ -14179,6 +14359,186 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(err.contains("`Holder`"), "unexpected message: {err}");
+    }
+
+    // Slice 6h phase 2: D2's shared gate plus the constructor's own D3
+    // zero-validity predicate.
+
+    #[test]
+    fn array_constructor_i64_ten_yields_slot() {
+        check_src(": w ( -- ) [ i64 ; 10 ] drop ;").unwrap();
+    }
+
+    #[test]
+    fn array_constructor_str_element_is_rejected() {
+        let err = check_src(": w ( -- ) [ str ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (directly)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn array_constructor_struct_containing_str_element_is_rejected() {
+        let err = check_src("type: HasStr s str ; : w ( -- ) [ HasStr ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `HasStr`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via field `s`)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn array_constructor_depth_two_struct_containing_str_is_rejected() {
+        // Proves recursion, not one-level field iteration: `str` is two
+        // struct fields deep (`Outer.i.s`), so deleting the struct-field
+        // recursion arm (keeping only a one-level check) must fail this.
+        let err =
+            check_src("type: Inner s str ; type: Outer i Inner ; : w ( -- ) [ Outer ; 4 ] drop ;")
+                .unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `Outer`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via field `i` -> field `s`)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn array_constructor_struct_with_array_of_str_field_is_rejected() {
+        // The predicate's array arm: the offending `str` is reached only
+        // through a struct field that is itself an array. Deleting the
+        // array-element recursion arm must fail this test.
+        let err = check_src("type: Wrap arr [str 4] ; : w ( -- ) [ Wrap ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `Wrap`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via field `arr` -> array element)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn array_constructor_enum_with_str_on_a_nonzero_variant_is_rejected() {
+        // Pins the conservative all-variant recursion: `str` lives on `B`,
+        // not the zero-tag `A`, so a variant-0-only walk would miss it.
+        let err = check_src("type: E | A | B s str ; : w ( -- ) [ E ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `E`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via variant `B` field `s`)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn array_constructor_struct_containing_quotation_element_is_rejected() {
+        let err = check_src("type: Boxed f [ i64 -- i64 ] ; : w ( -- ) [ Boxed ; 4 ] drop ;")
+            .unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `Boxed`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `[ i64 -- i64 ]` (via field `f`)"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn array_constructor_linear_element_is_rejected() {
+        // Preempted by the module-wide `check_no_linear_array_elements` sweep
+        // (D1 interns the shape unconditionally at parse time, before any
+        // body is checked), rather than by the new per-site gate -- but
+        // still a located rejection, not a silent accept.
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) [ Spy ; 4 ] drop ;")).unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn fill_still_accepts_a_str_element() {
+        // D4: `fill` replicates a real seed and never mints one from zeroed
+        // memory, so it keeps accepting `str`/`cstr`/a quotation -- the
+        // shared gate's zero-safety branch is off for `fill`.
+        check_src(": main ( -- ) \"hi\" 3 fill drop ;").unwrap();
+    }
+
+    #[test]
+    fn fill_diagnostics_unchanged_after_site_parameterization() {
+        // D2: `fill`'s rendered diagnostics must stay byte-identical to
+        // before the shared gate existed. Assert the full strings, not
+        // `contains("fill")`.
+        let linear_err =
+            check_src(&format!("{SPY_DEF}: w ( -- ) 0 Spy 3 fill drop ;")).unwrap_err();
+        assert_eq!(
+            linear_err,
+            "error: linear array elements are not supported yet in `w` (line 3)\n  `fill` would replicate a `Spy` across every slot, but `Spy` is linear and has no `Copy` instance\n  note: declared ( -- )"
+        );
+        let ref_err = check_src(": w ( &i64 -- ) 3 fill drop ;").unwrap_err();
+        assert_eq!(
+            ref_err,
+            "error: a reference cannot be stored in `w` (line 1)\n  the element `fill` would store has type `&i64`\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow"
+        );
+    }
+
+    #[test]
+    fn fill_forwards_surviving_set_so_a_returned_array_rejects_an_escaping_capture() {
+        // D4/R19: `check_array_word`'s "fill" arm forwards the element's
+        // surviving-capture-set (`let surviving = element.surviving;`) onto
+        // the array it produces, exactly as a struct/enum constructor's
+        // output does -- the array is the closure's carrier now, having
+        // replicated it N times. `Boxed>f` materializes a quotation field
+        // getter's output with its surviving set intact (the R19/R22 comment
+        // on the generic accessor path), so `b Boxed>f` hands `fill` an
+        // already-erased closure whose surviving set has one frame-rooted
+        // member (`r`, a reference into `mk`'s own local `arr`). If `fill`
+        // did not forward that set onto the array, `mk`'s R22 word-output
+        // walk over its final stack would find nothing suspicious and wrongly
+        // accept a program that returns a carrier holding a dangling
+        // reference into a frame that no longer exists.
+        //
+        // This is the only place this forwarding can be tested: `Slot`/
+        // `surviving` is check-time-only and never reaches the IR, so no
+        // IR-level assertion can exercise it (see `ir::tests`'s renamed
+        // `fill_lowering_result_reaches_a_reference_consumer`). Mutating
+        // `check.rs`'s forwarding line to `let surviving = None;` makes this
+        // program wrongly build (verified by hand); restoring it makes this
+        // assertion hold.
+        let err = check_src(
+            "type: Boxed f [ -- i64 ] ;\n\
+             : mk ( -- [ [ -- i64 ] 4 ] )\n\
+             0 4 fill | arr |\n\
+             &arr | r |\n\
+             [ r 0 >usize &> @ ] Boxed | b |\n\
+             b Boxed>f\n\
+             4 fill ;\n\
+             : main ( -- ) mk drop ;\n",
+        )
+        .expect_err(
+            "an escaping frame-rooted capture, carried through `fill`'s array, must be rejected",
+        );
+        assert!(
+            err.contains("an escaping closure captures `r`")
+                && err.contains("does not survive the return"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

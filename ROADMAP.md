@@ -586,10 +586,30 @@ own scan exactly like one it binds — dying at its own last use in an execute-o
 pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
 prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
 
+**Phase 4 Slice 6h (a raw array constructor, plus `fill`'s re-lowering) is complete**:
+`[ Type ; Count ]` allocates one array slot and zero-initializes it with a byte-granular
+runtime loop, sized exactly to `ArrayLayout::size` (an array is not word-padded). The
+element name resolves and the shape interns at **parse time** (the parser already owns
+`&mut Vec<ArrayDecl>`), so the term carries a finished `Type::Array` with no lowering-time
+lookup. A recursive zero-validity gate rejects an element that transitively contains
+`str`, `cstr`, or a quotation (through struct fields, every enum variant, and array
+elements): each is `Copy` and pointer-shaped, so an all-zero slot would be a null pointer.
+`fill` is re-lowered the same way — one `Alloc` plus a runtime counted-store loop (via
+`ElemAddr`) replacing its N unrolled compile-time stores, closing a QBE-quadratic
+compile-cost defect (emitted code size is now O(1) in the count); its type-checking is
+otherwise untouched, and it keeps accepting `str`/`cstr`/quotation elements since it
+replicates a real seed rather than minting one from zeroed memory. A polymorphic body
+constructing its own array, typed by its own `'T`/`'N`, is out of scope: `subst_polytype`/
+`array_id_of` only look up an already-interned shape and panic otherwise, and a poly body
+has nothing to intern a body-internal shape against, so this is deferred to a future
+slice. A concrete element inside a combinator body already works today, since a
+combinator is monomorphized and checked by the ordinary concrete `check_word`.
+
 **Next action: Phase 4 Slice 10a** (row variables inside a quotation's declared effect, in
 progress). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
-and 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
-module-scoping gap) are all done on `main`. Slice 9 shipped P1–P2 only (`Bool` as a library
+8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
+module-scoping gap), and 6h (the raw array constructor and `fill`'s re-lowering) are all
+done on `main`. Slice 9 shipped P1–P2 only (`Bool` as a library
 enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
 quotation's declared effect, which does not parse before slice 10a, and is split out as
 **slice 10c** (`docs/phase4-slice10c-brief.md`), renumbered into slice 10's lineage since it

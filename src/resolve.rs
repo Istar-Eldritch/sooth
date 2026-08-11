@@ -455,7 +455,12 @@ fn rewrite_terms(
             TermKind::Quotation(inner) => {
                 rewrite_terms(inner, module, imports, selective, tables, scope, exports)?;
             }
-            TermKind::IntLit(_) | TermKind::FloatLit(_) | TermKind::StrLit(_) => {}
+            // Slice 6h: an array constructor carries an already-resolved
+            // `Type::Array(id)`, not a name, so there is nothing to rewrite.
+            TermKind::ArrayCtor(_)
+            | TermKind::IntLit(_)
+            | TermKind::FloatLit(_)
+            | TermKind::StrLit(_) => {}
         }
     }
     truncate_scope(scope, base, &added);
