@@ -20,46 +20,29 @@ export function :Stack $empty__m0() {
 	%v0 =l copy 0
 	%v1 =l copy 16
 	%v2 =l alloc8 128
-	%v3 =l add %v2, 0
-	storel %v0, %v3
-	%v4 =l add %v2, 8
-	storel %v0, %v4
-	%v5 =l add %v2, 16
-	storel %v0, %v5
-	%v6 =l add %v2, 24
-	storel %v0, %v6
-	%v7 =l add %v2, 32
+	%v3 =l copy 0
+	jmp @blk1
+@blk1
+	%v4 =l phi @start %v3, @blk2 %v9
+	%v5 =l copy 16
+	%v6 =w csltl %v4, %v5
+	jnz %v6, @blk2, @blk3
+@blk2
+	%eoff0 =l mul %v4, 8
+	%v7 =l add %v2, %eoff0
 	storel %v0, %v7
-	%v8 =l add %v2, 40
-	storel %v0, %v8
-	%v9 =l add %v2, 48
-	storel %v0, %v9
-	%v10 =l add %v2, 56
-	storel %v0, %v10
-	%v11 =l add %v2, 64
-	storel %v0, %v11
-	%v12 =l add %v2, 72
-	storel %v0, %v12
-	%v13 =l add %v2, 80
-	storel %v0, %v13
-	%v14 =l add %v2, 88
-	storel %v0, %v14
-	%v15 =l add %v2, 96
-	storel %v0, %v15
-	%v16 =l add %v2, 104
-	storel %v0, %v16
-	%v17 =l add %v2, 112
-	storel %v0, %v17
-	%v18 =l add %v2, 120
-	storel %v0, %v18
-	%v19 =l copy 0
-	%v20 =l copy %v19
-	%v21 =l alloc8 136
-	%v22 =l add %v21, 0
-	blit %v2, %v22, 128
-	%v23 =l add %v21, 128
-	storel %v20, %v23
-	ret %v21
+	%v8 =l copy 1
+	%v9 =l add %v4, %v8
+	jmp @blk1
+@blk3
+	%v10 =l copy 0
+	%v11 =l copy %v10
+	%v12 =l alloc8 136
+	%v13 =l add %v12, 0
+	blit %v2, %v13, 128
+	%v14 =l add %v12, 128
+	storel %v11, %v14
+	ret %v12
 }
 
 export function :Stack $push__m0(:Stack %v0, l %v1) {

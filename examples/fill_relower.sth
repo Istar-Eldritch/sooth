@@ -1,0 +1,32 @@
+\ Dogfood: Phase 4 slice 6h. `fill`'s re-lowering (one alloc + a counted store
+\ loop, replacing N unrolled stores). A scalar seed and a struct seed both
+\ reach the array's last slot, and a `fill` inside a self-tail loop composes
+\ (the same loop-state hygiene the constructor needs, now on `fill` for the
+\ first time since `fill` never opened a loop before).
+
+type: Pair a i64 b i64 ;
+
+\ A scalar seed reaches the last slot (index 7 of 8).
+: scalar_last ( -- i64 )
+  42 8 fill | a | &a 7 >usize &> @ | v | a drop v ;
+
+\ A struct (aggregate) seed reaches the last slot; both fields survive the
+\ `store_elem` `Blit` under the loop.
+: struct_last ( -- i64 i64 )
+  3 4 Pair 8 fill | a | &a 7 >usize &> @ | v | a drop
+  v Pair>a v Pair>b ;
+
+\ A self-tail-recursive word that fills an array each iteration: `fill`'s loop
+\ opens inside the word's own self-tail loop, so without save/restore loop-
+\ state hygiene the enclosing back-edge seals against the wrong header (panic),
+\ and without the `terminated` reset the terms after `fill` are dropped. `z` is
+\ the seed read back from index 0.
+: countdown ( i64 -- )
+  | n | 0 4 fill | a | &a 0 >usize &> @ | z | a drop
+  n z + .
+  n 0 > if n 1 - countdown else end ;
+
+: main ( -- )
+  scalar_last .          \ 42
+  struct_last . .        \ last slot's fields
+  3 countdown ;          \ 3 2 1 0

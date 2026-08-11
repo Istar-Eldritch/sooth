@@ -4142,8 +4142,9 @@ impl<'a> FuncBuilder<'a> {
     }
 
     /// `dst = base + index*stride`, a `Ptr` (R17): a `FieldLoad`/`FieldStore`
-    /// through `dst` always follows, either a reference projection (`&>`) or
-    /// the array constructor's byte-granular zero-init store (slice 6h).
+    /// through `dst` always follows: a reference projection (`&>`), the array
+    /// constructor's byte-granular zero-init store, or `fill`'s counted
+    /// element store (both slice 6h).
     fn elem_addr(&mut self, base: Value, index: Value, stride: u32) -> Value {
         let dst = self.fresh_value(IrType::Ptr);
         self.push_instr(Instr::ElemAddr(dst, base, index, stride as i64));
@@ -4152,7 +4153,8 @@ impl<'a> FuncBuilder<'a> {
 
     /// Store `val` (of element type `elem`) at element place `fptr`: a
     /// width-exact scalar `FieldStore`, or an aggregate `Blit` of the whole
-    /// element. `fill`'s unrolled stores are the only caller.
+    /// element. `fill`'s counted store loop is the only caller (slice 6h; the
+    /// `Blit` arm accepts the loop's runtime `elem_addr` destination).
     fn store_elem(&mut self, fptr: Value, val: Value, elem: IrType) {
         match elem {
             // Slice 9 (R1): a zero-payload-enum element is a bare scalar.
@@ -4169,10 +4171,18 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// Lower an array word inline: `fill` = alloc + N unrolled stores;
-    /// `len` = a constant `usize` from the layout, non-consuming.
+    /// Lower an array word inline: `fill` = one alloc + a counted store loop
+    /// (slice 6h; was N unrolled stores, which was QBE-quadratic on one large
+    /// straight-line block); `len` = a constant `usize` from the layout,
+    /// non-consuming.
     fn lower_array_word(&mut self, name: &str) {
         match name {
+            // Slice 6h (D4): one `Instr::Alloc` plus a `begin_loop`/
+            // `finalize_loop`-bounded loop storing the `Copy` seed `n` times
+            // via `elem_addr` (a runtime index) + `store_elem`, replacing the
+            // N unrolled compile-time `field_ptr` stores. Code size stays O(1)
+            // in `n`; the seed is replicated per iteration (never minted from
+            // zeroed memory), so this arm keeps `fill`'s looser element gate.
             "fill" => {
                 let count_v = self.stack.pop().expect("fill: count");
                 let n = *self
@@ -4183,12 +4193,62 @@ impl<'a> FuncBuilder<'a> {
                 let elem = self.value_type(elem_v);
                 let id = self.array_id_of(elem, n);
                 let (stride, _, _) = self.array_parts(id);
+
+                // Save/restore the enclosing loop state so this loop composes
+                // with a later `Alloc` or loop (see `save_loop_state`).
+                let saved_loop_state = self.save_loop_state();
+                // The destination reaches the loop body and the exit block by
+                // dominance; it must not be carried, or the back-edge staging
+                // blit would copy a stale snapshot over each iteration's store.
                 let dst = self.alloc_array(id);
-                for i in 0..n {
-                    let fptr = self.field_ptr(dst, i * stride);
-                    self.store_elem(fptr, elem_v, elem);
-                }
+
+                let seed = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(seed, 0));
+                self.const_vals.insert(seed, 0);
+                // Carry only the induction index, with `stage_aggregates =
+                // false`.
+                let outs = self.begin_loop(&[seed], false);
+                let index_phi = outs[0];
+
+                // Header (current after `begin_loop`): loop while index < n.
+                let bound = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(bound, n as i64));
+                self.const_vals.insert(bound, n as i64);
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, bound));
+                let body_block = self.fresh_block();
+                let exit_block = self.fresh_block();
+                self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
+
+                // Body: store the seed at element `dst + index*stride`.
+                // `elem_addr`'s runtime index replaces the unrolled
+                // compile-time `field_ptr`; `store_elem`'s `Blit` arm accepts a
+                // runtime destination, so an aggregate seed works too.
+                self.start_block(body_block);
+                self.terminated = false;
+                let fptr = self.elem_addr(dst, index_phi, stride);
+                self.store_elem(fptr, elem_v, elem);
+
+                // Back-edge: index + 1.
+                let one = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(one, 1));
+                self.const_vals.insert(one, 1);
+                let index_next = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
+                self.back_edges.push((self.cur_id, vec![index_next]));
+                self.seal_block(Terminator::Jmp(self.header.expect("fill loop header")));
+
+                self.finalize_loop();
+
+                // Exit: the filled array is the result. The fixed loop body
+                // never terminates, so `terminated` is already false here; the
+                // reset keeps this arm identical to the loop template so terms
+                // after `fill` are not dropped if the body ever gains one.
+                self.start_block(exit_block);
+                self.terminated = false;
                 self.stack.push(dst);
+
+                self.restore_loop_state(saved_loop_state);
             }
             "len" => {
                 // Non-consuming (R10): the array stays; the constant folds in.
@@ -6455,14 +6515,68 @@ mod tests {
     }
 
     #[test]
-    fn lower_fill_allocs_and_unrolls_n_stores() {
-        // R18/M6: `fill` allocs one array slot and unrolls N FieldStores of the
-        // element (no loop, no blit for a scalar element).
+    fn fill_lowering_instruction_count_is_independent_of_n() {
+        // Slice 6h (D4): `fill`'s re-lowering is a counted loop, so its emitted
+        // instruction count is identical at N 4 and 64 (the retired unrolled
+        // lowering grew one FieldStore per element), and above a small floor so
+        // an empty lowering cannot satisfy it. Replaces
+        // `lower_fill_allocs_and_unrolls_n_stores`, whose name encoded the
+        // removed unrolling.
+        let n4 = count(&lower_src(": w ( -- ) 7 4 fill drop ;").funcs[0], |_| true);
+        let n64 = count(&lower_src(": w ( -- ) 7 64 fill drop ;").funcs[0], |_| true);
+        assert_eq!(n4, n64);
+        assert!(n4 > 4, "not an empty lowering: {n4}");
+    }
+
+    #[test]
+    fn fill_lowering_instruction_count_at_10000_equals_4() {
+        // The compile-cost defect's durable proxy: the retired unrolled
+        // lowering emitted one store per element, so N = 10000 was QBE-
+        // quadratic on one straight-line block. The counted loop emits the
+        // same instruction count at N = 10000 as at N = 4, so code size is O(1)
+        // in the count (the re-measured wall-clock numbers are in the commit).
+        let n4 = count(&lower_src(": w ( -- ) 7 4 fill drop ;").funcs[0], |_| true);
+        let n10k = count(
+            &lower_src(": w ( -- ) 7 10000 fill drop ;").funcs[0],
+            |_| true,
+        );
+        assert_eq!(n4, n10k);
+    }
+
+    #[test]
+    fn fill_lowering_uses_elem_addr_after_relowering() {
+        // A real transition assertion: `fill` used `field_ptr`/`PtrOffset` with
+        // a compile-time offset before slice 6h, so exactly one runtime
+        // `ElemAddr` (the counted store loop's body) is the observable switch.
+        // Its stride is the element stride (8 for `[i64]`), not the byte-
+        // granular `1` the constructor's zero-init uses.
         let ir = lower_src(": w ( -- ) 7 4 fill drop ;");
         let w = &ir.funcs[0];
+        let strides: Vec<i64> = w
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::ElemAddr(_, _, _, s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strides, vec![8], "one ElemAddr, element-strided");
         assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
-        assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 4);
-        assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn fill_lowering_preserves_surviving_set() {
+        // D4: the re-lowering must not disturb `fill`'s consumed operands nor
+        // leave the array off the stack. A `fill` result that is then used
+        // (indexed via a reference) lowers and reads back the seed, proving the
+        // filled array survives the loop and reaches its consumer.
+        let ir = lower_src(": w ( -- i64 ) 7 4 fill | a | &a 1 &> @ ;");
+        let w = &ir.funcs[0];
+        // One alloc for the array; the loop stores the seed; the consumer
+        // reads it back through a reference projection.
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert!(count(w, |i| matches!(i, Instr::ElemAddr(..))) >= 2);
     }
 
     #[test]

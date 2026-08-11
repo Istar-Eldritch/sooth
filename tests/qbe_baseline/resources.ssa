@@ -39,143 +39,30 @@ export function $sooth_main() {
 	%v9 =w and %v8, 255
 	%v10 =l copy 64
 	%v11 =l alloc4 64
-	%v12 =l add %v11, 0
-	storeb %v9, %v12
-	%v13 =l add %v11, 1
-	storeb %v9, %v13
-	%v14 =l add %v11, 2
-	storeb %v9, %v14
-	%v15 =l add %v11, 3
-	storeb %v9, %v15
-	%v16 =l add %v11, 4
+	%v12 =l copy 0
+	jmp @blk1
+@blk1
+	%v13 =l phi @start %v12, @blk2 %v18
+	%v14 =l copy 64
+	%v15 =w csltl %v13, %v14
+	jnz %v15, @blk2, @blk3
+@blk2
+	%eoff0 =l mul %v13, 1
+	%v16 =l add %v11, %eoff0
 	storeb %v9, %v16
-	%v17 =l add %v11, 5
-	storeb %v9, %v17
-	%v18 =l add %v11, 6
-	storeb %v9, %v18
-	%v19 =l add %v11, 7
-	storeb %v9, %v19
-	%v20 =l add %v11, 8
-	storeb %v9, %v20
-	%v21 =l add %v11, 9
-	storeb %v9, %v21
-	%v22 =l add %v11, 10
-	storeb %v9, %v22
-	%v23 =l add %v11, 11
-	storeb %v9, %v23
-	%v24 =l add %v11, 12
-	storeb %v9, %v24
-	%v25 =l add %v11, 13
-	storeb %v9, %v25
-	%v26 =l add %v11, 14
-	storeb %v9, %v26
-	%v27 =l add %v11, 15
-	storeb %v9, %v27
-	%v28 =l add %v11, 16
-	storeb %v9, %v28
-	%v29 =l add %v11, 17
-	storeb %v9, %v29
-	%v30 =l add %v11, 18
-	storeb %v9, %v30
-	%v31 =l add %v11, 19
-	storeb %v9, %v31
-	%v32 =l add %v11, 20
-	storeb %v9, %v32
-	%v33 =l add %v11, 21
-	storeb %v9, %v33
-	%v34 =l add %v11, 22
-	storeb %v9, %v34
-	%v35 =l add %v11, 23
-	storeb %v9, %v35
-	%v36 =l add %v11, 24
-	storeb %v9, %v36
-	%v37 =l add %v11, 25
-	storeb %v9, %v37
-	%v38 =l add %v11, 26
-	storeb %v9, %v38
-	%v39 =l add %v11, 27
-	storeb %v9, %v39
-	%v40 =l add %v11, 28
-	storeb %v9, %v40
-	%v41 =l add %v11, 29
-	storeb %v9, %v41
-	%v42 =l add %v11, 30
-	storeb %v9, %v42
-	%v43 =l add %v11, 31
-	storeb %v9, %v43
-	%v44 =l add %v11, 32
-	storeb %v9, %v44
-	%v45 =l add %v11, 33
-	storeb %v9, %v45
-	%v46 =l add %v11, 34
-	storeb %v9, %v46
-	%v47 =l add %v11, 35
-	storeb %v9, %v47
-	%v48 =l add %v11, 36
-	storeb %v9, %v48
-	%v49 =l add %v11, 37
-	storeb %v9, %v49
-	%v50 =l add %v11, 38
-	storeb %v9, %v50
-	%v51 =l add %v11, 39
-	storeb %v9, %v51
-	%v52 =l add %v11, 40
-	storeb %v9, %v52
-	%v53 =l add %v11, 41
-	storeb %v9, %v53
-	%v54 =l add %v11, 42
-	storeb %v9, %v54
-	%v55 =l add %v11, 43
-	storeb %v9, %v55
-	%v56 =l add %v11, 44
-	storeb %v9, %v56
-	%v57 =l add %v11, 45
-	storeb %v9, %v57
-	%v58 =l add %v11, 46
-	storeb %v9, %v58
-	%v59 =l add %v11, 47
-	storeb %v9, %v59
-	%v60 =l add %v11, 48
-	storeb %v9, %v60
-	%v61 =l add %v11, 49
-	storeb %v9, %v61
-	%v62 =l add %v11, 50
-	storeb %v9, %v62
-	%v63 =l add %v11, 51
-	storeb %v9, %v63
-	%v64 =l add %v11, 52
-	storeb %v9, %v64
-	%v65 =l add %v11, 53
-	storeb %v9, %v65
-	%v66 =l add %v11, 54
-	storeb %v9, %v66
-	%v67 =l add %v11, 55
-	storeb %v9, %v67
-	%v68 =l add %v11, 56
-	storeb %v9, %v68
-	%v69 =l add %v11, 57
-	storeb %v9, %v69
-	%v70 =l add %v11, 58
-	storeb %v9, %v70
-	%v71 =l add %v11, 59
-	storeb %v9, %v71
-	%v72 =l add %v11, 60
-	storeb %v9, %v72
-	%v73 =l add %v11, 61
-	storeb %v9, %v73
-	%v74 =l add %v11, 62
-	storeb %v9, %v74
-	%v75 =l add %v11, 63
-	storeb %v9, %v75
-	%v76 =l add %v6, 0
-	%v77 =l add %v76, 0
-	%v78 =l add %v77, 0
-	%v79 =l loadl %v78
-	%v80 =l add %v11, 0
-	%v81 =l copy 64
-	%v82 =l copy %v81
-	%v83 =l call $read(l %v79, l %v80, l %v82)
-	call $printf(l $fmt, l %v83, ...)
+	%v17 =l copy 1
+	%v18 =l add %v13, %v17
+	jmp @blk1
+@blk3
+	%v19 =l add %v6, 0
+	%v20 =l add %v19, 0
+	%v21 =l add %v20, 0
+	%v22 =l loadl %v21
+	%v23 =l add %v11, 0
+	%v24 =l copy 64
+	%v25 =l copy %v24
+	%v26 =l call $read(l %v22, l %v23, l %v25)
+	call $printf(l $fmt, l %v26, ...)
 	call $close__m0(:File %v6)
 	ret
 }

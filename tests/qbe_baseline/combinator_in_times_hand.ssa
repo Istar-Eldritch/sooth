@@ -18,61 +18,70 @@ export function :arr_0 $mk__m0(l %v0) {
 	%v1 =l copy 0
 	%v2 =l copy 3
 	%v3 =l alloc8 24
-	%v4 =l add %v3, 0
-	storel %v1, %v4
-	%v5 =l add %v3, 8
-	storel %v1, %v5
-	%v6 =l add %v3, 16
-	storel %v1, %v6
-	%v7 =l add %v3, 0
-	%v8 =l copy 0
-	%v9 =l copy %v8
-	%v10 =l copy 3
-	%v11 =w cultl %v9, %v10
-	jnz %v11, @blk1, @blk2
-@blk2
-	%v12 =l copy 11
-	%v13 =l copy 3
-	call $sooth_oob_trap(l %v12, l %v9, l %v13)
+	%v4 =l copy 0
 	jmp @blk1
 @blk1
-	%eoff0 =l mul %v9, 8
-	%v14 =l add %v7, %eoff0
-	storel %v0, %v14
-	%v15 =l add %v3, 0
-	%v16 =l copy 1
-	%v17 =l copy %v16
-	%v18 =l copy 3
-	%v19 =w cultl %v17, %v18
-	jnz %v19, @blk3, @blk4
-@blk4
-	%v20 =l copy 12
-	%v21 =l copy 3
-	call $sooth_oob_trap(l %v20, l %v17, l %v21)
-	jmp @blk3
+	%v5 =l phi @start %v4, @blk2 %v10
+	%v6 =l copy 3
+	%v7 =w csltl %v5, %v6
+	jnz %v7, @blk2, @blk3
+@blk2
+	%eoff0 =l mul %v5, 8
+	%v8 =l add %v3, %eoff0
+	storel %v1, %v8
+	%v9 =l copy 1
+	%v10 =l add %v5, %v9
+	jmp @blk1
 @blk3
-	%eoff1 =l mul %v17, 8
-	%v22 =l add %v15, %eoff1
-	%v23 =l copy 1
-	%v24 =l add %v0, %v23
-	storel %v24, %v22
-	%v25 =l add %v3, 0
-	%v26 =l copy 2
-	%v27 =l copy %v26
-	%v28 =l copy 3
-	%v29 =w cultl %v27, %v28
-	jnz %v29, @blk5, @blk6
-@blk6
-	%v30 =l copy 13
-	%v31 =l copy 3
-	call $sooth_oob_trap(l %v30, l %v27, l %v31)
-	jmp @blk5
+	%v11 =l add %v3, 0
+	%v12 =l copy 0
+	%v13 =l copy %v12
+	%v14 =l copy 3
+	%v15 =w cultl %v13, %v14
+	jnz %v15, @blk4, @blk5
 @blk5
-	%eoff2 =l mul %v27, 8
-	%v32 =l add %v25, %eoff2
-	%v33 =l copy 2
-	%v34 =l add %v0, %v33
-	storel %v34, %v32
+	%v16 =l copy 11
+	%v17 =l copy 3
+	call $sooth_oob_trap(l %v16, l %v13, l %v17)
+	jmp @blk4
+@blk4
+	%eoff1 =l mul %v13, 8
+	%v18 =l add %v11, %eoff1
+	storel %v0, %v18
+	%v19 =l add %v3, 0
+	%v20 =l copy 1
+	%v21 =l copy %v20
+	%v22 =l copy 3
+	%v23 =w cultl %v21, %v22
+	jnz %v23, @blk6, @blk7
+@blk7
+	%v24 =l copy 12
+	%v25 =l copy 3
+	call $sooth_oob_trap(l %v24, l %v21, l %v25)
+	jmp @blk6
+@blk6
+	%eoff2 =l mul %v21, 8
+	%v26 =l add %v19, %eoff2
+	%v27 =l copy 1
+	%v28 =l add %v0, %v27
+	storel %v28, %v26
+	%v29 =l add %v3, 0
+	%v30 =l copy 2
+	%v31 =l copy %v30
+	%v32 =l copy 3
+	%v33 =w cultl %v31, %v32
+	jnz %v33, @blk8, @blk9
+@blk9
+	%v34 =l copy 13
+	%v35 =l copy 3
+	call $sooth_oob_trap(l %v34, l %v31, l %v35)
+	jmp @blk8
+@blk8
+	%eoff3 =l mul %v31, 8
+	%v36 =l add %v29, %eoff3
+	%v37 =l copy 2
+	%v38 =l add %v0, %v37
+	storel %v38, %v36
 	ret %v3
 }
 
