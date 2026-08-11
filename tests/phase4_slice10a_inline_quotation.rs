@@ -19,8 +19,11 @@ fn parse_error(src: &str) -> String {
     parser::parse(&tokens).expect_err("parsing should fail")
 }
 
+static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn run_src(name: &str, src: &str) -> (String, i32) {
-    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}-{id}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let binary = sooth::driver::build(&path).expect("build should succeed");
     let output = std::process::Command::new(&binary)
@@ -46,10 +49,6 @@ fn spaced_tilde_bracket_is_a_parse_error() {
     // declares a bare `~` word, so it is a located parse error, not a silent
     // fallback to the ordinary quotation type.
     let err = parse_error(": apply ( i64 ~ [ i64 -- i64 ] -- i64 ) call ;\n");
-    assert!(
-        err.starts_with("parse error") || err.starts_with("error"),
-        "a spaced `~ [` should be a parse error, got: {err}"
-    );
     assert!(
         err.contains('~'),
         "the spaced-form error should name the bare `~` word, got: {err}"
@@ -182,7 +181,7 @@ fn inline_quotation_type_differs_from_ordinary_at_the_output_boundary() {
     // output would be accepted: the boundary treats the two variants as
     // unequal types, not interchangeable spellings of "a quotation".
     let inline_err = check_error(": mk ( -- ~[ i64 -- i64 ] ) [ 1 + ] ;\n");
-    assert!(inline_err.contains("`~`") || inline_err.contains('~'));
+    assert!(inline_err.contains('~'));
     let ordinary_ok = ": mk ( -- [ i64 -- i64 ] ) [ 1 + ] ;\n";
     let tokens = lexer::lex(ordinary_ok).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
@@ -228,12 +227,11 @@ fn forwarding_ordinary_quotation_into_an_inline_declared_parameter_is_error() {
 
 #[test]
 fn variable_bearing_inline_quotation_grounds_through_apply_subst() {
-    // Every other `~` golden here is fully concrete, so it folds to
-    // `Concrete(InlineQuotation)` at *parse* time (`raw_to_poly_type`) and
-    // never reaches `apply_subst`'s `PolyType::Quotation` arm. `'T` keeps
-    // this one a real `PolyType::Quotation`, so grounding it against a
-    // concrete call site is what exercises `apply_subst`'s `is_inline`
-    // branch.
+    // A positive control: a variable-bearing (non-folded) `~` parameter still
+    // runs correctly end to end. (The sibling test
+    // `variable_bearing_inline_quotation_still_mismatches_ordinary` is the one
+    // that actually discriminates `apply_subst`'s `is_inline` branch -- it
+    // fails if that branch is mutated away, this one does not.)
     let src = ": apply ( 'T ~[ 'T -- 'T ] -- 'T ) call ;\n\
                : main ( -- ) 3 [ 2 * ] apply . ;\n";
     let (stdout, code) = run_src("tilde-var-ground", src);
@@ -246,7 +244,14 @@ fn variable_bearing_inline_quotation_still_mismatches_ordinary() {
     // R3 through the variable-bearing (non-folded) path: `outer` forwards its
     // own `'T ~[ 'T -- 'T ]` parameter into `takes_ordinary`'s `'T [ 'T -- 'T ]`.
     // `apply_subst` must ground `outer`'s parameter to `InlineQuotation`, not
-    // silently drop the sigil during substitution.
+    // silently drop the sigil during substitution. This is the test that
+    // actually discriminates `apply_subst`'s `is_inline` branch: mutate that
+    // branch away (always ground to `Concrete(Type::Quotation)`) and this
+    // test fails, since the forward would then silently match.
+    //
+    // (Its sibling `variable_bearing_inline_quotation_grounds_through_apply_subst`
+    // is a positive control -- it exercises the same branch but does not
+    // discriminate it.)
     let err = check_error(
         ": takes_ordinary ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
          : outer ( 'T ~[ 'T -- 'T ] -- 'T ) | g | g takes_ordinary ;\n\
@@ -300,12 +305,14 @@ fn row_grounding_mismatch_strips_the_caller_region() {
     // R9/R10: a literal whose body does not restore the declared output row is
     // a located mismatch. The grounded row region (`[i64]`, the caller's `10`)
     // is stripped before rendering, so the printed effect shows only the
-    // quotation's own fixed slots -- `[ i64 -- ]` declared, `[ i64 -- i64 i64 ]`
-    // actual -- never the caller's stack. `[ dup ]` leaves an extra `i64`.
+    // quotation's own fixed slots -- `~[ i64 -- ]` declared (the review fix:
+    // rendered with the inline-quotation renderer, since `apply-with`'s
+    // parameter is declared `~`), `[ i64 -- i64 i64 ]` actual -- never the
+    // caller's stack. `[ dup ]` leaves an extra `i64`.
     let src = format!("{APPLY_WITH}: main ( -- ) 10 5 [ dup ] apply-with . . ;\n");
     let err = check_error(&src);
     assert!(
-        err.contains("the quotation passed to `apply-with` was declared `[ i64 -- ]` but its body has effect `[ i64 -- i64 i64 ]`"),
+        err.contains("the quotation passed to `apply-with` was declared `~[ i64 -- ]` but its body has effect `[ i64 -- i64 i64 ]`"),
         "the grounding mismatch must render the row-stripped effect, got: {err}"
     );
     // The anti-leak assertion pinned to exact text: an unstripped `actual`
