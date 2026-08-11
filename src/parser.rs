@@ -1230,7 +1230,6 @@ impl<'t> Parser<'t> {
         false
     }
 
-
     /// R1/R3: parse a variable-bearing effect into a `PolySig`. Runs the
     /// binding-occurrence analysis (X1/X3) and the row-variable placement rule
     /// (X2) as it goes, left-to-right, inputs then outputs, so the first
@@ -3497,8 +3496,7 @@ mod tests {
         // anywhere in the row index, which let this compile and run with a
         // row grounded against whatever the caller's actual stack happened
         // to be.
-        let err = parse_src(": bad ( i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | f call ;")
-            .unwrap_err();
+        let err = parse_src(": bad ( i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | f call ;").unwrap_err();
         assert!(err.contains("..s"), "unexpected message: {err}");
         assert!(err.contains("top-level row"), "unexpected message: {err}");
         assert!(
@@ -3548,8 +3546,8 @@ mod tests {
     fn parse_row_in_non_inline_quotation_effect_in_array_element_position_is_error() {
         // Coverage gap (review cycle 3): the guard must also reach a
         // row-bearing quotation appearing as an array element type.
-        let err = parse_src(": fx ( ..s i64 [ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;")
-            .unwrap_err();
+        let err =
+            parse_src(": fx ( ..s i64 [ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;").unwrap_err();
         assert!(err.contains("..s"), "unexpected message: {err}");
         assert!(err.contains("inline"), "unexpected message: {err}");
     }
