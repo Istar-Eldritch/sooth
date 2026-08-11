@@ -2,6 +2,11 @@
 
 Slice 10a, phase 7 of 7 (final). Delivers **R15–R20**.
 
+> **No separate phase-5 report exists.** Phase 5 (`feat(phase-5)`, `abb934c` on this branch
+> post-rebase) landed with no standalone report, unlike phases 1–4, 6, and 7. Its exit evidence
+> (R12's mutation audit) is gathered retroactively and folded into this report's R20 section
+> below, under "Phase 5".
+
 ## What landed
 
 `tests/phase4_slice10a_exit_witnesses.rs`, seven tests covering R15–R19, plus
@@ -86,10 +91,14 @@ hitting `~[` should not re-derive them.)
 
 ## R19 — no regression
 
-- `combinators_library_is_byte_unchanged_and_contains_no_tilde`: `git show
-  dbdb4a3:lib/combinators.sth` (the base commit this slice branches from,
-  named in phase 1's report) diffed against the working tree's copy —
-  byte-identical — and grepped for `~` — absent.
+- `combinators_library_contains_no_tilde` (review fix, cycle 3: dropped the
+  git-show byte-comparison this test originally also ran against
+  `dbdb4a3:lib/combinators.sth`, the base commit this slice branches from,
+  named in phase 1's report -- it broke in a non-git build tree, a shallow
+  clone, or once the pinned SHA became unreachable; byte-identity is already
+  covered, without a hardcoded SHA, by `tests/qbe_baseline.rs`'s
+  `corpus_qbe_stays_byte_identical_to_baseline`): the working tree's copy of
+  `lib/combinators.sth` grepped for `~` — absent.
 - `while_is_unaffected_by_the_row_and_back_edge_rewrite`: the value-level twin
   of `while_self_tail_still_checks_after_back_edge_rewrite` (`src/check.rs`),
   run end to end (`0 [ dup 5 < if 1 + true else false end ] while` → `5`).
@@ -97,10 +106,11 @@ hitting `~[` should not re-derive them.)
   `corpus_qbe_stays_byte_identical_to_baseline`, unaffected by this phase (no
   corpus file touched) and confirmed still green.
 - No index type changed anywhere in this slice (spec's explicit
-  constraint); the intrinsic's two hardcoded `Type::I64` sites
-  (`src/check.rs:6853`, `:6855`) and the Known-literal count check (`:8237`)
-  are untouched — `my_times_compiles_beside_the_untouched_intrinsic_and_sums`
-  is the end-to-end confirmation.
+  constraint); the intrinsic's two hardcoded `Type::I64` sites in
+  `check_abstract_quotation_times` (`src/check.rs:7043`, `:7046`) and the
+  Known-literal count check in the `times` term-checking arm (`:8646`) are
+  untouched — `my_times_compiles_beside_the_untouched_intrinsic_and_sums` is
+  the end-to-end confirmation.
 
 ## R20 — the mutation audit
 

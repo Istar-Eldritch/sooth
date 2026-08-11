@@ -165,8 +165,11 @@ identically; regression test pins it.
 add no exemption.
 
 **R14 / R14a** — R11's rewrite must forward the surviving capture set along the index map (the
-old block's `Slot::computed` drops `surviving`/`quot`, and its filter excludes a bare erased
-quotation but **not an aggregate carrying one**). All obvious witnesses are vacuous or masked, so
+old block's `Slot::computed` drops `surviving`, and its filter excludes a bare erased
+quotation but **not an aggregate carrying one**). Only `surviving` is forwarded: `quot` is not,
+since the upstream call site already filters `carried_inputs` to `s.quot.is_none()` before this
+code runs, so a `quot` forward would provably always write `None` into `None` (dead code, found
+and dropped in round-1 review). All obvious witnesses are vacuous or masked, so
 the proof requires all five: extract the `outs` construction into a named function (phase 5);
 witness slot is an aggregate carrying an erased quotation; the shape yields ≥1 `Some(j)` map
 entry; a white-box unit test asserts the forwarded `SurvivingCaptureSetId` on produced `outs`
@@ -242,9 +245,10 @@ at `92e7f16`; re-anchor before editing.
    with ground outputs + bottom-aligned map; rewrite the arm; explicit unify with located
    diagnostic; guards untouched; `while` pinned; extract the `outs` function and land R14's test
    `#[ignore]`d.
-6. **Surviving-set forwarding gate** *(hard)* — forward `surviving`/`quot` along the map; un-ignore
-   the test with an aggregate-carrying witness (≥1 `Some(j)` entry); record mutation evidence. Own
-   commit and review.
+6. **Surviving-set forwarding gate** *(hard)* — forward `surviving` along the map (`quot` is not
+   forwarded: the upstream call site already filters to `quot.is_none()`, so a `quot` forward
+   would be dead code); un-ignore the test with an aggregate-carrying witness (≥1 `Some(j)`
+   entry); record mutation evidence. Own commit and review.
 7. **Exit witnesses and mutation audit** *(standard)* — `my-times` sum + 1M-iteration run, pinned
    grounding semantics incl. borrow substitution, aggregate aliasing witness, self-nesting,
    corpus/`while`/intrinsic/library unchanged with byte-identical baselines against the named base,
