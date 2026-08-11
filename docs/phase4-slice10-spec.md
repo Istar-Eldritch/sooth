@@ -114,10 +114,15 @@ error: a loop body cannot change the shape of the carried region: `..a` in, `..b
 note: 10c lifts this for a word without a back-edge
 ```
 
-**R6** — suppress the concrete fold whenever `row_in`/`row_out` is set, **independently of `~`**.
-`raw_to_poly_type` folds to `Concrete` iff every *slot* is concrete; the row is a field, not a
-slot, so `~[ ..s i64 -- ..s ]` would otherwise collapse to `Concrete(...)` and destroy the row
-at parse time. Unit test asserts it stays `PolyType::Quotation` with both row fields populated.
+A row-bearing quotation effect that is not inline (`~[ ... ]`) is also a located error: a
+row's size is unknown at runtime, so only a splice-only quotation may carry one.
+
+**R6** — suppress the concrete fold whenever `row_in`/`row_out` is set. (R5's inline-only guard
+means a row-bearing effect is always `is_inline == true` by the time this runs; the suppression
+is keyed on the row fields alone, not on `~`.) `raw_to_poly_type` folds to `Concrete` iff every
+*slot* is concrete; the row is a field, not a slot, so `~[ ..s i64 -- ..s ]` would otherwise
+collapse to `Concrete(...)` and destroy the row at parse time. Unit test asserts it stays
+`PolyType::Quotation` with both row fields populated.
 
 **R7** — `PolyType::Quotation` grows optional row fields in the signature's existing row id
 space, mirroring `PolySig`. `QuotEffect` needs **no** row field: at every splice the row is
@@ -209,17 +214,17 @@ arithmetically correct fields (slice-3 aliasing surfaces as a wrong number, not 
 **R18** — `my-times` nested inside itself produces correct output.
 
 **R19** — no regression. `while` and the full corpus unchanged; `tests/qbe_baseline*` goldens
-byte-identical **against the base commit named in the phase-1 report** (sibling sessions land
-baseline-rewriting commits). No index type changed, no `~` added to any shipped signature; the
-intrinsic's arms still serve `times`; `lib/combinators.sth` is byte-unchanged and contains no `~`.
+byte-identical **against base commit `dbdb4a3`** (sibling sessions land baseline-rewriting
+commits). No index type changed, no `~` added to any shipped signature; the intrinsic's arms
+still serve `times`; `lib/combinators.sth` is byte-unchanged and contains no `~`.
 
 **R20** — mutation-test every new guard: prove each located error's test can fail by deleting the
-guard and confirming the golden flips. Phase 7's audit enumerates them individually.
+guard and confirming the golden flips.
 
 ## Codebase notes
 
-`Type` derives `PartialEq` (`src/ast.rs:820`), `Type::Quotation` (`:879`), `Bound = { Copy, Ord }`
-(`:594`). Poly words **are** combinators (`is_combinator` doc `src/check.rs:6913-6920`; the
+`Type` derives `PartialEq` (`src/ast.rs:827`), `Type::Quotation` (`:886`), `Bound = { Copy, Ord }`
+(`:594`). Poly words **are** combinators (`is_combinator` doc `src/check.rs:7100-7111`; the
 `:2173-2178` comment saying otherwise is stale — fixed in R9). `Slot::computed` sets
 `quot: None, surviving: None, deriv: None` — the drop-flag defect class of `d1b3f0a`/`bee407c`.
 Landed prerequisites: 7b `3776579`, 8a `e20c52f`, slice 9 `c5db035`. Line anchors were verified
