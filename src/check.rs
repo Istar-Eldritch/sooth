@@ -648,6 +648,21 @@ impl Deriv {
 struct SelfTailMarker {
     name: String,
     input_count: usize,
+    /// Slice 10a (R11/R12): the ground declared inputs, against which the
+    /// back-edge's self-call arguments (`stack[base..]`) are explicitly
+    /// unified. Grounded once at the marker's sole set site, since the
+    /// back-edge arm has no `sig`/`Subst` of its own.
+    ground_inputs: Vec<Type>,
+    /// Slice 10a (R11): the ground declared outputs the back-edge arm
+    /// produces (the old code fictionally produced the non-quotation inputs,
+    /// which is right only for `while`'s state-threading shape).
+    ground_outputs: Vec<Type>,
+    /// Slice 10a (R11): the bottom-aligned index map -- ground output `i`
+    /// forwards provenance from the `index_map[i]`-th non-quotation carried
+    /// input (both counted deepest-first), or `None` when `i` is beyond the
+    /// carried-input count or the types differ. Phase 6 (R14) forwards
+    /// `surviving`/`quot` along it.
+    index_map: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Default)]
@@ -7247,6 +7262,82 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
     )
 }
 
+/// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
+/// declared output. Extracted as a named, callable function (R14a) so phase 6
+/// can drive it from a white-box test: `#[ignore]` skips execution, not
+/// compilation, so the test needs a real symbol to call. Phase 5 produces
+/// type-only slots; phase 6 (R14) forwards the `surviving` capture set and
+/// `quot` marker from `carried_inputs` along `index_map` (bottom-aligned:
+/// ground output `i` <- `carried_inputs[index_map[i]]`), so an aggregate
+/// carrying an erased quotation across the back-edge keeps its escape
+/// obligation. Until then the two forwarding inputs are unused.
+fn back_edge_outs(
+    ground_outputs: &[Type],
+    _index_map: &[Option<usize>],
+    _carried_inputs: &[Slot],
+) -> Vec<Slot> {
+    ground_outputs
+        .iter()
+        .map(|&ty| Slot::computed(ty))
+        .collect()
+}
+
+/// Slice 10a (R11): a self-tail combinator's ground declared inputs, ground
+/// declared outputs, and bottom-aligned output->carried-input index map --
+/// what the back-edge marker carries.
+type BackEdgeShape = (Vec<Type>, Vec<Type>, Vec<Option<usize>>);
+
+/// Slice 10a (R11): ground a self-tail combinator's declared inputs and
+/// outputs at the marker's set site, plus the bottom-aligned index map. A
+/// poly combinator grounds through the `θ` `check_poly_combinator_args`
+/// resolved (now returned rather than discarded); a monomorphic one reads its
+/// already-concrete `effect`. The index map pairs ground output `i` with the
+/// `i`-th non-quotation ground input, both counted from the deepest slot,
+/// `None` when `i` is beyond the carried-input count or the types differ
+/// (so `times`-shape, with zero fixed outputs, yields an empty map, and
+/// `while`'s 1-in/1-out shape yields `[Some(0)]`).
+fn back_edge_declared_shape(
+    word: &WordDef,
+    subst: Option<&Subst>,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+) -> Result<BackEdgeShape, String> {
+    let (inputs, outputs): (Vec<Type>, Vec<Type>) = match word.poly.as_ref() {
+        Some(sig) => {
+            let subst = subst.expect("a poly combinator's marker carries its resolved θ");
+            let mut inputs = Vec::with_capacity(sig.inputs.len());
+            for p in &sig.inputs {
+                inputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+            }
+            let mut outputs = Vec::with_capacity(sig.outputs.len());
+            for p in &sig.outputs {
+                outputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+            }
+            (inputs, outputs)
+        }
+        None => (
+            word.effect.inputs.iter().map(|s| s.ty).collect(),
+            word.effect.outputs.iter().map(|s| s.ty).collect(),
+        ),
+    };
+    let carried: Vec<Type> = inputs
+        .iter()
+        .copied()
+        .filter(|t| crate::ast::is_quotation_type(*t).is_none())
+        .collect();
+    let index_map = outputs
+        .iter()
+        .enumerate()
+        .map(|(i, out)| match carried.get(i) {
+            Some(c) if c == out => Some(i),
+            _ => None,
+        })
+        .collect();
+    Ok((inputs, outputs, index_map))
+}
+
 /// R18: inline a call to a monomorphic quotation-taking word. Validate each
 /// declared input against the caller's live slot (a quotation parameter takes
 /// a `Known` literal, checked directionally with the D3 capture check, R11/R12;
@@ -7276,10 +7367,10 @@ fn inline_combinator(
     // through the poly-argument check, which resolves the parameter's declared
     // effect against the live stack and runs the *same* directional + D3
     // check, so the two paths agree.
-    if let Some(sig) = comb.word.poly.as_ref() {
-        check_poly_combinator_args(
+    let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
+        Some(check_poly_combinator_args(
             sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly,
-        )?;
+        )?)
     } else {
         let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
         let n = inputs.len();
@@ -7351,7 +7442,8 @@ fn inline_combinator(
                 }
             }
         }
-    }
+        None
+    };
     // R6: a self-tail combinator opens a splice-time loop. Its body is spliced
     // with `tail = true` so its own tail-position self-call is recognized as
     // the back-edge (above). 6d/R6: the nested-loop rejection is retired --
@@ -7363,6 +7455,15 @@ fn inline_combinator(
     let input_count = match comb.word.poly.as_ref() {
         Some(sig) => sig.inputs.len(),
         None => comb.word.effect.inputs.len(),
+    };
+    // Slice 10a (R11): a self-tail combinator's back-edge needs its ground
+    // declared shape (inputs for R12's argument check, outputs and the
+    // bottom-aligned index map for the arm's result), which only this set
+    // site can compute -- the arm deep in the splice has no `sig`/`Subst`.
+    let (ground_inputs, ground_outputs, index_map) = if self_tail {
+        back_edge_declared_shape(comb.word, poly_subst.as_ref(), name, span, ctx, arrays)?
+    } else {
+        (Vec::new(), Vec::new(), Vec::new())
     };
     // R18/R21: splice the callee body, alpha-renamed so its `| ... |` locals
     // cannot collide with a caller local or, under transitive inlining, an
@@ -7377,6 +7478,9 @@ fn inline_combinator(
         prov.self_tail_combinator = Some(SelfTailMarker {
             name: name.to_string(),
             input_count,
+            ground_inputs,
+            ground_outputs,
+            index_map,
         });
         Some(saved)
     } else {
@@ -7441,7 +7545,7 @@ fn check_poly_combinator_args(
     prov: &mut Provenance,
     scope: &mut Scope,
     poly: &mut PolyCtx,
-) -> Result<(), String> {
+) -> Result<Subst, String> {
     let n = sig.inputs.len();
     if stack.len() < n {
         return Err(underflow_error(ctx, span, name, n, stack.len()));
@@ -7511,7 +7615,9 @@ fn check_poly_combinator_args(
             ));
         }
     }
-    Ok(())
+    // Slice 10a (R11): the resolved `θ` is no longer discarded -- the back-edge
+    // marker grounds the declared outputs through it (`inline_combinator`).
+    Ok(subst)
 }
 
 /// R11/R12: check a quotation *literal* against a declared quotation parameter
@@ -8744,22 +8850,27 @@ fn check_term(
             // the combinator dispatch below. It discharges the two
             // move/borrow obligations at the self-call (the stack-row identity
             // obligation is left to the ordinary stack-effect and `if`-join
-            // discipline, R7) and produces the combinator's carried state --
-            // its non-quotation inputs, which for a self-tail combinator are
-            // exactly its declared outputs -- then terminates this branch. A
-            // non-tail self-call never reaches here: R4 rejected it at
-            // `check_combinator_cycles` before any splice.
+            // discipline, R7), checks its arguments against the ground declared
+            // inputs (R12), and produces the ground declared outputs (R11) --
+            // then terminates this branch. A non-tail self-call never reaches
+            // here: R4 rejected it at `check_combinator_cycles` before any
+            // splice.
             let back_edge = tail
                 && prov
                     .self_tail_combinator
                     .as_ref()
                     .is_some_and(|m| m.name == *name);
             if back_edge {
-                let n = prov
+                let marker = prov
                     .self_tail_combinator
                     .as_ref()
-                    .expect("back-edge marker set")
-                    .input_count;
+                    .expect("back-edge marker set");
+                let n = marker.input_count;
+                // Cloned out so `stack`/`prov` stay mutably usable below (the
+                // ground shape is small: a handful of `Type` and indices).
+                let ground_inputs = marker.ground_inputs.clone();
+                let ground_outputs = marker.ground_outputs.clone();
+                let index_map = marker.index_map.clone();
                 if stack.len() < n {
                     return Err(underflow_error(ctx, span, name, n, stack.len()));
                 }
@@ -8769,15 +8880,52 @@ fn check_term(
                 check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
                 // R9: no reference into a frame local carried by the args.
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
-                // The carried state is the non-quotation inputs (a concrete
-                // literal quotation carries `quot`, a def-site abstract one is
-                // `Type::Quotation`); both are dropped, exactly as the loop
-                // carries no quotation phantom in its phis (R10).
-                let outs: Vec<Slot> = stack[base..]
+                // R12: the self-call's arguments are checked against the ground
+                // declared inputs. Rewriting the arm to produce the declared
+                // outputs (below) removed the transitive check the `if`-join
+                // used to get from the produced-inputs fiction, so this is made
+                // explicit. Sound because the marker matches only in tail
+                // position. A quotation-typed declared input matches any
+                // quotation-carrying arg (its own `call`/`times` already
+                // checked the body); everything else matches by type.
+                for (i, want) in ground_inputs.iter().enumerate() {
+                    let found = stack[base + i];
+                    if crate::ast::is_quotation_type(*want).is_some() {
+                        if found.quot.is_none() && crate::ast::is_quotation_type(found.ty).is_none()
+                        {
+                            return Err(quotation_argument_required_error(
+                                ctx, span, name, *want, found.ty,
+                            ));
+                        }
+                    } else if found.quot.is_some() {
+                        return Err(reject_quotation_argument(ctx, span, name));
+                    } else {
+                        match match_slot(found, *want) {
+                            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+                            SlotMatch::NeedsSizeConversion => {
+                                return Err(size_conversion_needed_error(ctx, span, name, *want));
+                            }
+                            SlotMatch::NeedsStrToCstrConversion => {
+                                return Err(str_needs_cstr_conversion_error(ctx, span, name));
+                            }
+                            SlotMatch::Mismatch => {
+                                return Err(type_mismatch_error(ctx, span, name, *want, found.ty));
+                            }
+                        }
+                    }
+                }
+                // R11: the arm produces the ground declared outputs, not the
+                // non-quotation inputs (right only for `while`'s state-threading
+                // shape, false for a loop that consumes its counters). The
+                // carried non-quotation inputs feed provenance forwarding along
+                // the index map (phase 6, R14); a quotation arg carries no
+                // loop-phi state and is dropped.
+                let carried: Vec<Slot> = stack[base..]
                     .iter()
+                    .copied()
                     .filter(|s| s.quot.is_none() && crate::ast::is_quotation_type(s.ty).is_none())
-                    .map(|s| Slot::computed(s.ty))
                     .collect();
+                let outs = back_edge_outs(&ground_outputs, &index_map, &carried);
                 stack.truncate(base);
                 stack.extend(outs);
                 return Ok(stack);
@@ -15977,5 +16125,147 @@ mod tests {
         let plain = module.words.iter().find(|w| w.name == "plain").unwrap();
         assert!(is_combinator(apply), "`apply` is a combinator (no symbol)");
         assert!(!is_combinator(plain), "`plain` is an ordinary word");
+    }
+
+    /// Slice 10a (R11): the bottom-aligned index map, exercised directly on
+    /// `back_edge_declared_shape` (a monomorphic effect grounds with no
+    /// `Subst`, so no parser is needed). Covers the `times`-shape (empty),
+    /// the `while`-shape (1<->1), an asymmetric shape (deepest output <-
+    /// deepest carried input), a longer output list (overflow -> `None`), and
+    /// a type mismatch at the aligned position (-> `None`).
+    #[test]
+    fn back_edge_index_map_is_bottom_aligned() {
+        let quot = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        fn imap(inputs: Vec<Type>, outputs: Vec<Type>) -> Vec<Option<usize>> {
+            use crate::ast::{StackEffect, TypedSlot};
+            let w = WordDef {
+                name: "w".to_string(),
+                effect: StackEffect {
+                    inputs: inputs
+                        .into_iter()
+                        .map(|ty| TypedSlot { name: None, ty })
+                        .collect(),
+                    outputs: outputs
+                        .into_iter()
+                        .map(|ty| TypedSlot { name: None, ty })
+                        .collect(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module: 0,
+                span: Span::default(),
+            };
+            let ctx = Ctx::Line {
+                structs: &[],
+                enums: &[],
+            };
+            let mut arrays = Vec::new();
+            back_edge_declared_shape(&w, None, "w", Span::default(), &ctx, &mut arrays)
+                .unwrap()
+                .2
+        }
+        // `times`-shape: zero fixed outputs -> empty map.
+        assert_eq!(
+            imap(vec![Type::I64, quot], Vec::new()),
+            Vec::<Option<usize>>::new()
+        );
+        // `while`-shape: one carried in, one out, same type.
+        assert_eq!(imap(vec![Type::I64, quot], vec![Type::I64]), vec![Some(0)]);
+        // Asymmetric: two carried, one out -> output 0 <- deepest carried.
+        assert_eq!(
+            imap(vec![Type::I64, Type::I64, quot], vec![Type::I64]),
+            vec![Some(0)]
+        );
+        // More outputs than carried inputs: the overflowing output is `None`.
+        assert_eq!(
+            imap(vec![Type::I64, quot], vec![Type::I64, Type::I64]),
+            vec![Some(0), None]
+        );
+        // Type differs at the aligned position -> `None`.
+        assert_eq!(imap(vec![Type::I64, quot], vec![Type::Str]), vec![None]);
+    }
+
+    /// Slice 10a (R11): the recon-4 `my-times` -- which *consumes* its counters
+    /// -- used to fail with a spurious `if` branch-depth mismatch, because the
+    /// back-edge produced the non-quotation inputs instead of the (empty,
+    /// row-only) ground declared outputs. It now checks.
+    #[test]
+    fn back_edge_produces_ground_declared_outputs() {
+        let src = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+                   | f | | to | | from |\n\
+                   from to < if\n\
+                   from f call\n\
+                   from 1 + to f my-times\n\
+                   else\n\
+                   end ;\n\
+                   : main ( -- ) 0 0 5 [ + ] my-times . ;\n";
+        check_src(src)
+            .expect("my-times checks: the back-edge produces the ground declared outputs");
+    }
+
+    /// Slice 10a (R12): the self-call's arguments are checked against the
+    /// *ground* declared inputs, with a located diagnostic. The witness must
+    /// diverge from the standalone check, which binds every type variable to
+    /// `i64` and so cannot see a wrong `'a`: `loopy` is polymorphic in `'a`
+    /// and its back-edge passes a hardcoded `i64` literal in the `'a` slot.
+    /// Standalone (`'a = i64`) accepts it; the instantiation `'a = str` from
+    /// `main` grounds the marker at `str`, and only the R12 unify catches the
+    /// `i64`. (Removing the R12 loop makes this program compile clean -- a
+    /// silent soundness hole -- so the test is not a placebo.)
+    #[test]
+    fn back_edge_rejects_mismatched_self_call_argument() {
+        let src = ": loopy ( ..s 'a i64 ~[ ..s 'a -- ..s ] -- ..s )\n\
+                   | f | | n | | acc |\n\
+                   n 0 > if\n\
+                   acc f call\n\
+                   5 n 1 - f loopy\n\
+                   else\n\
+                   end ;\n\
+                   : main ( -- ) \"x\" 3 [ drop ] loopy ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("type mismatch in `main`"),
+            "located at the instantiation: {err}"
+        );
+        assert!(
+            err.contains("`loopy` expected `str`, found `i64`"),
+            "names the callee and both types: {err}"
+        );
+    }
+
+    /// Slice 10a (R12): `while` -- the symmetric shape whose back-edge produced
+    /// the carried input pre-rewrite and produces the ground declared output
+    /// post-rewrite (they agree at 1<->1) -- must still type-check identically.
+    #[test]
+    fn while_self_tail_still_checks_after_back_edge_rewrite() {
+        check_src(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n")
+            .expect("`while` still type-checks after the back-edge rewrite");
+    }
+
+    /// Slice 10a (R14a): phase 6's white-box test, landed `#[ignore]`d against
+    /// the extracted `back_edge_outs` so its absence is visible in the tree
+    /// (an `#[ignore]` skips execution, not compilation). Phase 6's deliverable
+    /// is to make `back_edge_outs` forward the surviving capture set along the
+    /// index map and un-ignore this. The witness is an aggregate carrying an
+    /// erased quotation (`ty` a struct, `surviving: Some(..)`, `quot: None`),
+    /// and the shape yields a `Some(0)` map entry, so the produced output must
+    /// inherit the carried input's surviving set.
+    #[test]
+    #[ignore = "phase 6 (R14): back_edge_outs must forward the surviving capture set along the index map; phase 5 produces type-only slots"]
+    fn back_edge_outs_forwards_surviving_set_along_index_map() {
+        let set = SurvivingCaptureSetId(0);
+        let agg = Type::Struct(crate::ast::StructId::from_index(0), "Agg");
+        let carried = vec![Slot {
+            surviving: Some(set),
+            ..Slot::computed(agg)
+        }];
+        let ground_outputs = vec![agg];
+        let index_map = vec![Some(0)];
+        let outs = back_edge_outs(&ground_outputs, &index_map, &carried);
+        assert_eq!(
+            outs[0].surviving,
+            Some(set),
+            "the aggregate's surviving capture set must ride across the back-edge"
+        );
     }
 }
