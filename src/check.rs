@@ -1731,6 +1731,16 @@ impl Ctx<'_> {
         }
     }
 
+    /// The enclosing word's own declared effect, for recognizing which
+    /// struct (not just which name) a `drop` override's body is exempt for
+    /// (D3's destructure guard). A bare REPL line has no declared effect.
+    fn effect(&self) -> Option<&StackEffect> {
+        match self {
+            Ctx::Word { effect, .. } => Some(effect),
+            Ctx::Line { .. } => None,
+        }
+    }
+
     /// R11: the enclosing word's declared output row, the context a branch join
     /// in tail position materializes its quotation arms against (the merged
     /// slot maps to the output at the same index). A bare REPL line has no
@@ -1739,6 +1749,41 @@ impl Ctx<'_> {
         match self {
             Ctx::Word { effect, .. } => Some(&effect.outputs),
             Ctx::Line { .. } => None,
+        }
+    }
+}
+
+impl<'a> Ctx<'a> {
+    /// D1 fix (slice 8b, bug 3): rebuild this `Ctx` with `module` swapped to
+    /// the module that actually declares the term about to be checked, not
+    /// the caller's. `inline_combinator` splices a combinator's body into the
+    /// *caller's* `Ctx` so its locals/effect/name still read right in
+    /// diagnostics, but a module-scoped visibility gate (D1's drop-import
+    /// check, 8a's operator scoping) run against `ctx.module()` while
+    /// checking that spliced body must see the combinator's own declaring
+    /// module, or a library combinator disposing its own resource gets
+    /// attributed to whichever module happened to call it. A no-op on
+    /// `Ctx::Line`, which has no module to scope against.
+    fn with_module(&self, module: u32) -> Ctx<'a> {
+        match *self {
+            Ctx::Word {
+                name,
+                mangled,
+                effect,
+                structs,
+                enums,
+                modules,
+                ..
+            } => Ctx::Word {
+                name,
+                mangled,
+                effect,
+                structs,
+                enums,
+                module,
+                modules,
+            },
+            Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
         }
     }
 }
@@ -3998,6 +4043,12 @@ pub(crate) fn word_span(word: &WordDef) -> Span {
 /// allowed; only mutual cycles are the error. Builtins, generated words, and
 /// non-tail calls contribute no edge, so a pair of words that mutually call
 /// each other in non-tail position never false-positives.
+///
+/// Slice 8b (D1): a recognized `drop` overload's exclusion here is unrelated
+/// to D1's own drop-import-visibility gate (`check_drop_import_visibility`,
+/// run later, per call site, inside `check_shuffle`'s `"drop"` arm) -- this
+/// pass only keeps a scalar `drop` inside an override's own body from being
+/// misread as a tail call to the override itself.
 fn check_tail_call_cycles(
     words: &[WordDef],
     drop_overload_indices: &HashSet<usize>,
@@ -5365,6 +5416,13 @@ fn poly_call_term(
     // R1/R2: resolve among this name's candidates by exact operand match; a
     // lone candidate is the ordinary case and is used as-is, matching the
     // single-signature behaviour this path had before overloading.
+    //
+    // D3 (slice 8b): this is the poly-body twin of the concrete path's own
+    // call ahead of `check_struct_get_word` -- a generated accessor
+    // (`S>`/`S>field`) is just another `env` candidate here, so the guard
+    // must run before this lookup dispatches one for a drop-overloaded
+    // struct, or a generic word could destructure it and skip the destructor.
+    check_destructure_drop_guard(name, span, ctx)?;
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
         _ => candidates.iter().find(|o| {
@@ -7243,10 +7301,16 @@ fn inline_combinator(
     } else {
         None
     };
+    // D1 fix (slice 8b, bug 3): the spliced body is `comb.word`'s own, so a
+    // module-scoped visibility gate inside it (D1's drop-import check, 8a's
+    // operator scoping) must resolve against the module that declares *it*,
+    // not `ctx.module()` -- otherwise a library combinator disposing its own
+    // resource gets attributed to whichever module happened to call it.
+    let spliced_ctx = ctx.with_module(comb.word.module);
     let result = check_terms(
         &renamed,
         stack,
-        ctx,
+        &spliced_ctx,
         env,
         arrays,
         cells,
@@ -10569,22 +10633,34 @@ fn drop_import_visibility_error(
 /// The functional setter (`S<f`) has no `>` in its name and never matches
 /// here; it returns the struct itself, so the value stays live.
 fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(), String> {
-    // A word literally named `drop` can only be the recognized override for
-    // the one struct its declared effect names (`find_drop_overloads`
-    // rejects any other shape before body checking ever starts), so its own
-    // body is exactly where moving that struct's fields out implements
-    // disposal (`examples/resources.sth`'s `Fd>n` inside `: drop`). The guard
-    // exists to stop *other* callers from bypassing the destructor.
-    if ctx.mangled_name() == Some("drop") {
-        return Ok(());
-    }
     let Some((struct_name, field_name)) = name.split_once('>') else {
         return Ok(());
     };
-    let Some(decl) = ctx.structs().iter().find(|d| d.name == struct_name) else {
+    let Some((struct_idx, decl)) = ctx
+        .structs()
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.name == struct_name)
+    else {
         return Ok(());
     };
     if !decl.has_drop_overload {
+        return Ok(());
+    }
+    // A word literally named `drop` is exempt only for the *one* struct its
+    // own declared effect names (`find_drop_overloads` rejects any other
+    // input shape before body checking ever starts): its own body is exactly
+    // where moving that struct's fields out implements disposal
+    // (`examples/resources.sth`'s `Fd>n` inside `: drop`). `resolve::mangle`
+    // leaves `drop` unmangled program-wide, so a name-only check would wave
+    // through *any* word named `drop`, including one overriding a different
+    // struct that destructures this one -- compare the struct identity the
+    // enclosing word's effect declares, not the word's name.
+    let is_own_drop_body = ctx.mangled_name() == Some("drop")
+        && ctx.effect().is_some_and(|eff| {
+            matches!(eff.inputs.as_slice(), [input] if matches!(input.ty, Type::Struct(id, _) if id.index() == struct_idx))
+        });
+    if is_own_drop_body {
         return Ok(());
     }
     let is_destructure = field_name.is_empty();
@@ -11242,6 +11318,41 @@ mod tests {
         assert_eq!(
             err,
             "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn own_drop_body_may_not_destructure_a_different_drop_overloaded_struct() {
+        // Bug 1 (round-1 review): the exemption for a word literally named
+        // `drop` must be scoped to the *one* struct its own declared effect
+        // names, not to the bare name `"drop"` -- `resolve::mangle` leaves
+        // `drop` unmangled program-wide, so any struct's own `drop` override
+        // could otherwise destructure an unrelated drop-overloaded struct and
+        // skip *that* struct's destructor. `Box`'s own `drop` here
+        // destructures `Fd`, not `Box`, so it must still be rejected.
+        let err = check_src(&format!(
+            "{FD_DEF}type: Box b i64 ;\n: drop ( Box -- ) | x | 7 Fd Fd>n drop x Box>b drop ;\n: main ( -- ) 1 Box drop ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `drop` (line 4): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn poly_body_destructuring_drop_overloaded_type_is_error() {
+        // Bug 2 (round-1 review): `poly_call_term` resolved a generated
+        // accessor through the ordinary `env` lookup with no D3 guard at all,
+        // so a generic word could destructure any drop-overloaded type and
+        // skip its destructor.
+        let err = check_src(&format!(
+            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd>n ;\n: main ( -- ) 1 sneak drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `sneak` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
         );
     }
 
@@ -12728,16 +12839,19 @@ mod tests {
     }
 
     #[test]
-    fn check_drop_of_an_overridden_aggregate_does_not_walk_its_fields() {
+    fn check_drop_of_an_overridden_aggregate_disposing_its_overridden_field_is_not_a_cycle() {
         // R6: case (b) must not fire when the dropped type is *itself*
-        // overridden. Dropping a `B` runs `B`'s own body, never `B`'s field
-        // glue, so walking into its `A` field here would fabricate an edge
-        // `drop@A -> drop@A` and reject a program that terminates: `drop@B`
-        // destructures its `A` field rather than dropping it.
+        // overridden -- `B`'s own body is its whole disposal, so the graph
+        // must reflect only the `drop` calls that body actually makes, never
+        // a synthesized walk of its fields. D3 requires `B`'s override to
+        // dispose its drop-overloaded `a` field with a real `drop` call
+        // (destructuring it apart from calling `drop` would itself be D3's
+        // own rejection), forming exactly one edge, `B` -> `A`; since `A`'s
+        // own override never calls back into `B`, this is not a cycle.
         let src = "type: A x i64 ; type: B a A ; \
-                   : drop ( A -- ) | a | a A>x drop 1 A B drop ; \
-                   : drop ( B -- ) | b | b B>a A>x drop ; \
-                   : main ( -- ) 1 A drop ;";
+                   : drop ( A -- ) | a | a A>x drop ; \
+                   : drop ( B -- ) | b | b B>a drop ; \
+                   : main ( -- ) 1 A B drop ;";
         check_src(src).unwrap();
     }
 

@@ -1898,7 +1898,8 @@ then find out what the compiler owes it.
    — with rule 1's collision, rule 3's missing import, rule 4's arity clash, and rule 5's
    overlap each a located error, and no definition left silently unreachable.
 
-   **8b — `drop` obeys the 8a table, plus 8a's own operator module-scoping gap.** Disposal for
+   **8b — `drop`'s import visibility and destructure guard, plus 8a's own operator
+   module-scoping gap.** Disposal for
    a resource lives on a one-field leaf wrapper where the resource enters the language
    (`type: Fd n i64 ; : drop ( Fd -- ) ... ;`); a composite like `File` holds an undeclared
    `Fd` field and inherits disposal structurally, with no `type:` surface and no named-word
@@ -1912,36 +1913,34 @@ then find out what the compiler owes it.
      module. The qualified form (`v::+`) already resolves correctly — bare names should
      resolve the way qualified ones do, per call site, against candidates visible to the
      calling module.
-   - **`drop` is not import-scoped, which is the implicit behaviour the magicless decision
-     rejects.** `check_shuffle`/`lower_call` intercept `drop` before any `env` lookup,
-     overrides live in a `StructId`-keyed registry `env` never sees, and `mangle` exempts
-     `drop` — so a module can dispose an imported resource whose destructor it never
-     imported, proven by the golden `imported_linear_type_is_disposed_by_drop`
-     (`tests/phase4_modules.rs:384`): `lib.sth` exports `mk`/`Res`, never `drop`, and the
-     consumer's bare `drop` still runs `lib`'s destructor. Retiring the interception arms and
-     folding `drop` into 8a's table — an always-visible generic row (any `'T` with no
-     override) plus per-type override rows gated by rule 3's import requirement — fixes this
-     the same way rule 3 fixes it for `+`. A generic `drop ( 'T -- )` caller is unaffected,
-     since no disposal word is ever renamed. DESIGN.md's slice 5a paragraph ("disposal
-     crosses the export boundary for free", "a destructor runs without being named") is
-     amended here (`DESIGN.md:547`), as is slice 5a's Criterion 17 golden above.
-   - **Destructuring bypasses a `drop` override entirely.** `type: R tag i64 ; : drop
-     ( R -- ) ... ;` then `r R>tag .` prints the field and never runs the destructor. Rust
-     closes exactly this with E0509 (cannot move out of a type implementing `Drop`); Sooth has
-     no such rule. Scoped to leaf wrappers only: a composite like `File` has no override to
-     bypass (`File>fd` moving the still-linear `Fd` out is correct, not a hole), so the guard
-     is only needed where a type both owns a resource and declares `drop`.
+   - **Disposing an imported resource requires that resource's type to be visible to the
+     disposing module.** `check_shuffle`/`lower_call` intercept `drop` before any `env`
+     lookup, overrides live in a `StructId`-keyed registry `env` never sees, and `mangle`
+     exempts `drop` from per-module renaming, so the ordinary import-visibility check other
+     names get from table dispatch cannot reach it structurally. A dedicated gate at the
+     interception site (D1) checks the disposed type's owning module against the calling
+     module's imports instead: a qualified-only import that never names the type is a
+     located error at the `drop`, naming the remedy (import the type by name, or dispose it
+     in a module that declares it). A generic `drop ( 'T -- )` caller is unaffected, since no
+     disposal word is ever renamed.
+   - **Destructuring a type that declares `drop` is rejected.** Moving a field out via the
+     generated destructure or field-getter (`R>`, `R>field`) would otherwise bypass whatever
+     `drop` override `R` owns, the same hole Rust's E0509 closes (cannot move out of a type
+     implementing `Drop`); the guard (D3) rejects it with a located error naming `R`, scoped
+     to leaf wrappers only — a composite like `File` has no override to bypass (`File>fd`
+     moving the still-linear `Fd` out is correct, not a hole), so the guard fires only where a
+     type both owns a resource and declares `drop`.
    **Not this slice's problem:** whether *derived* disposal of a composite holding a resource
    that itself needs extra runtime inputs (a `Vec['T 'A]` field disposed via
    `free ( &!'A Vec['T 'A] -- )`, not `drop`) is possible at all remains open, and belongs to
    Phase 6's allocator-rework question (below); every disposal word in this design is
    `drop ( 'T -- )`, so nothing here answers it.
-   **Exit:** `drop` overloads ride the 8a table and obey rule 3's import requirement (the
-   golden above inverts to require the import), a generic `drop ( 'T -- )` still dispatches
-   correctly by monomorphization, destructuring a type that declares `drop` is a located error,
-   and a module's own operator overload is reachable from its own module in a ≥2-module build
-   with a selectively imported operator no longer hijacking unrelated bare uses of that name in
-   the importer, single-module corpus unchanged.
+   **Exit:** a bare `drop` of an imported resource is a located error unless its type is visible
+   to the disposing module (imported by name or declared locally), a generic `drop ( 'T -- )`
+   still dispatches correctly by monomorphization, destructuring a type that declares `drop` is
+   a located error, and a module's own operator overload is reachable from its own module in a
+   ≥2-module build with a selectively imported operator no longer hijacking unrelated bare uses
+   of that name in the importer, single-module corpus unchanged.
 9. **`Bool` as a library enum. ✅ done** (brief + spec: `docs/phase4-slice9-brief.md`,
    `docs/phase4-slice9-spec.md`). `type: Bool | False | True ;` replaces the primitive, via a
    **general** zero-payload-enum → scalar-discriminant layout rule (`Bool` is that rule's

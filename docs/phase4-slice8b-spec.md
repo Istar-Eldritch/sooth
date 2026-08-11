@@ -61,12 +61,14 @@ disposal word is `drop ( 'T -- )` and the leaf-handle convention already ships
 
 ### D1: `drop`'s import-visibility gate
 
-- **R3.** Thread `modules: Option<&[ModuleInfo]>` down the whole `check_terms` /
-  `check_terms_relaxed` chain to `check_shuffle`. `check::check` passes
-  `Some(&module.modules)`; `infer_line` passes `None` (deliberate, R8). In the `"drop"`
-  arm, when the popped type is `Type::Struct(id,_)`, `has_drop_overload` is true, and
-  `modules` is `Some(m)`, call `check_drop_import_visibility`. `None` = today's behaviour,
-  no gate. `prov.dropped` recording unchanged.
+- **R3.** Park `modules: Option<&'a [ModuleInfo]>` on `Ctx::Word` itself, read back via
+  `ctx.modules()`; `Ctx::Line` carries no such field and structurally returns `None` (so
+  `infer_line`'s REPL path never threads one, deliberate, R8), with no parameter added to
+  `check_terms`/`check_terms_relaxed`/`check_shuffle`'s own signatures. `check::check`
+  builds every word's `Ctx::Word` with `Some(&module.modules)`. In the `"drop"` arm, when
+  the popped type is `Type::Struct(id,_)`, `has_drop_overload` is true, and `ctx.modules()`
+  is `Some(m)`, call `check_drop_import_visibility`. `None` = today's behaviour, no gate.
+  `prov.dropped` recording unchanged.
 - **R4.** `check_drop_import_visibility` returns `Ok` when
   `is_name_visible_to_module(m, ctx.module(), decl.module, demangle(&decl.name))` holds,
   else the R5 error. The passed name is the struct's demangled source name (`selective` is
@@ -84,7 +86,7 @@ disposal word is `drop ( 'T -- )` and the leaf-handle convention already ships
     note: add `Res` to the import (`import: lib | Res | "..."`), or dispose it in a module that declares `Res`
   ```
 
-  `Ctx::Line` arm drops the `in `main`` clause. Test asserts exact text.
+  `Ctx::Line` arm drops the `in`main`` clause. Test asserts exact text.
 - **R6.** Golden inversion. `imported_linear_type_is_disposed_by_drop` →
   `imported_linear_type_dropped_without_importing_it_is_error` (qualified-only import now
   errors at build). Positive companion
@@ -95,8 +97,9 @@ disposal word is `drop ( 'T -- )` and the leaf-handle convention already ships
   `imported_resource_qualified_only_non_disposal_uses_compile`.
 - **R8.** REPL enforcement is out of scope (a stated cut, not "already fine"). `infer_line`
   has no `Module.modules`; REPL `import:` uses epoch-tagged `dlopen` retention with no
-  `ModuleInfo`/`selective` shape. `infer_line` passes `None`; a bare `drop` in a session
-  disposes exactly as today. Regression goldens:
+  `ModuleInfo`/`selective` shape. `infer_line` builds a `Ctx::Line`, which carries no
+  `modules` field and structurally returns `None`; a bare `drop` in a session disposes
+  exactly as today. Regression goldens:
   `repl_dispose_of_session_defined_override_is_unaffected` (assert destructor output and an
   exactly-empty residual stack line, not a `contains`) and
   `repl_dispose_of_imported_override_without_selective_import_is_unaffected` (pins the case
@@ -147,8 +150,9 @@ disposal word is `drop ( 'T -- )` and the leaf-handle convention already ships
 `emit_drop` / `ir.rs` drop lowering / epoch symbols (D1 is check-time only); the poly-body
 `"drop"` arm; `check_tail_call_cycles` (comment-only update);
 `check_duplicate_word_names`'s skip of `drop` words (`find_drop_overloads` still owns
-program-wide uniqueness by struct id); `examples/resources.sth` /
-`tests/phase3_resources.rs` (stay green untouched).
+program-wide uniqueness by struct id); `examples/resources.sth` (untouched).
+`tests/phase3_resources.rs`'s existing tests are untouched; it gained one new REPL
+regression golden (R8).
 
 ## Documentation amendments (done in-slice)
 
@@ -182,7 +186,8 @@ stated cut).
    imported operator does not leak; the single-module corpus is unchanged (R13).
 6. `DESIGN.md` disposal paragraph and `ROADMAP.md` slice 5a Criterion 17 read as
    current-state.
-7. `examples/resources.sth` and `tests/phase3_resources.rs` remain green untouched.
+7. `examples/resources.sth` remains untouched; `tests/phase3_resources.rs`'s existing
+   tests are untouched, with one new REPL regression golden (R8) added.
 8. REPL disposal of both a session-defined and an `import:`-retained override is
    byte-for-byte unaffected (R8's two goldens).
 9. Green: `cargo fmt --check && cargo clippy -- -D warnings && cargo test`.

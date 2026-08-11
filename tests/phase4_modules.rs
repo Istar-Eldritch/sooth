@@ -459,6 +459,39 @@ fn imported_resource_qualified_only_non_disposal_uses_compile() {
     assert_eq!(code, 0);
 }
 
+#[test]
+fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_import() {
+    // Round-1 review bug 3: a quotation-taking word (`with`) is a combinator,
+    // so it is never checked standalone -- only spliced into each caller's
+    // own body. Before this fix the splice reused the caller's `Ctx` whole,
+    // so D1's drop-visibility gate ran `with`'s internal `r drop` against
+    // `main`'s module instead of `lib`'s (the module that actually declares
+    // `Res` and its `drop` override), rejecting code that never names `Res`
+    // at all. `main` imports `lib` qualified-only -- no `Res`, no `drop` --
+    // since disposing the resource is entirely `with`'s own affair.
+    let c = Closure::new("library-combinator-self-dispose");
+    c.write(
+        "lib.sth",
+        concat!(
+            "type: Res n i64 ;\n",
+            ": mk ( -- Res ) 1 Res ;\n",
+            ": drop ( Res -- ) | r | r Res>n . ;\n",
+            ": with ( [ i64 -- i64 ] -- i64 ) | q | mk | r | &r &Res>n @ q call r drop ;\n",
+            "export: with ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) [ 1 + ] lib::with . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "1\n2\n",
+        "with's destructor ran (prints 1), then its own result (2)"
+    );
+    assert_eq!(code, 0);
+}
+
 // Slice 8b goldens (R13): 8a's operator module-scoping fix. A bare operator
 // resolves against the overloads visible to the calling module, so a module's
 // own overload is reachable bare even in a >=2-module build (where the decl is

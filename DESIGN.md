@@ -527,22 +527,18 @@ constructor." It didn't survive contact with what Sooth actually is. Structs are
 data; a violated field invariant is a bug in the *consumer's* program, not unsoundness,
 because there is no UB, indexing traps at the bound, and linearity already prevents
 aliasing a value into two invariant-breaking places at once. And the resource argument
-for opacity fails on a fact measurable in the single-file compiler today: destructuring
-a type with a `drop` override already skips that override (`type: R tag i64 ;` with a
-`drop` override, then `r R>tag .`, prints the tag and never runs the destructor) — so
-visibility was never actually protecting resource discipline, opaque or not. Hiding an
-accessor behind a visibility rule is the OOP ceremony this language is declining to
-need; a withhold marker on `export:` is an additive feature for a real consumer that
-wants it, not a default this slice should guess at.
+for opacity has nothing to add: destructuring a type with a `drop` override is rejected
+outright (`type: R tag i64 ;` with a `drop` override, then `r R>tag .`, is a located
+error) by a rule in the ownership checker, independent of modules — so hiding an
+accessor behind export visibility would protect nothing that rule doesn't already
+guarantee. Hiding an accessor behind a visibility rule is the OOP ceremony this
+language is declining to need; a withhold marker on `export:` is an additive feature
+for a real consumer that wants it, not a default this slice should guess at.
 
-That destructure-bypasses-`drop` gap is real and becomes newly *reachable* across a
-file boundary once types are transparent — a library consumer can now destructure an
-imported linear type down to `Copy` leaves without running its destructor, the same way
-a single-file program already could. It is not a new hole class, and this slice does
-not half-fix it with a partial guard: the honest fix is a Rust-E0509-style rule
-(reject destructuring a type that has a `drop` override) belonging to the ownership
-checker, independent of modules, and it is recorded against Phase 4 Slice 8 rather than
-grown here.
+The same rule holds across a file boundary as within one: a library consumer
+destructuring an imported linear type down to `Copy` leaves is rejected exactly as a
+single-file program's own destructure would be, since the rule lives in the ownership
+checker and knows nothing about modules.
 
 **Disposing an imported resource type requires that type to be visible to the disposing
 module.** `drop` is compiler-known and dispatches on the concrete type (Slice 3/8b), but
@@ -1242,9 +1238,9 @@ that were argued out rather than assumed.
   O(fields x operations) to O(fields + operations), which is the same problem the module
   export list runs into from a different direction (listing three words per field to control
   visibility), and two independent routes to one root cause is a signal it is real. A
-  further benefit: with few explicit operations, the destructure-bypasses-`drop` hole
-  (recorded on ROADMAP Phase 4 slice 8) becomes one rule about one operation rather than a
-  property spread across three generated words per field.
+  further benefit: with few explicit operations, the destructure-vs-`drop` rule (D3,
+  today matched per generated accessor name) becomes one rule about one operation
+  rather than a property re-derived for each of the three generated words per field.
 
   **The hard problem is heterogeneity.** An array is homogeneous, so its index does not
   affect the result type; a struct's fields have different types, so the selector
