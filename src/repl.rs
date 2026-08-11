@@ -2946,6 +2946,13 @@ pub enum Completeness {
 /// `Token::Semicolon`) or while `[`/`]` brackets are unbalanced. `Complete`
 /// otherwise, including on an over-closed bracket (a real error, left for the
 /// parser to report rather than buffered forever).
+///
+/// Slice 6h: a `Token::Semicolon` only closes `open_def` at bracket depth
+/// `0`. An array constructor's own `;` (`[ i64 ; 4 ]`) sits inside a bracket,
+/// so without this guard a first REPL line like `: f ( -- ) [ i64 ; 4 ]`
+/// (a word definition containing a constructor, no closing `;` of its own
+/// yet) would be judged `Complete` on the constructor's `;` and submitted
+/// unterminated.
 pub fn input_is_complete(tokens: &[Token]) -> Completeness {
     let mut bracket_depth: i32 = 0;
     let mut open_def = false;
@@ -2954,7 +2961,7 @@ pub fn input_is_complete(tokens: &[Token]) -> Completeness {
             Token::LBracket => bracket_depth += 1,
             Token::RBracket => bracket_depth -= 1,
             Token::Word(w) if w == ":" || w == "type:" => open_def = true,
-            Token::Semicolon => open_def = false,
+            Token::Semicolon if bracket_depth == 0 => open_def = false,
             _ => {}
         }
     }
@@ -3305,6 +3312,21 @@ mod tests {
         assert_eq!(input_is_complete(&toks), Completeness::Complete);
 
         let tokens = lexer::lex("1 2 +").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::Complete);
+    }
+
+    #[test]
+    fn repl_input_with_a_constructor_is_not_complete_until_the_definition_ends() {
+        // Slice 6h: the array constructor's own `;` sits inside a bracket
+        // (depth 1), so it must not close `open_def`. Without the guard, this
+        // first line would be judged `Complete` on the constructor's `;` and
+        // submitted with the `:` definition still open.
+        let tokens = lexer::lex(": f ( -- ) [ i64 ; 4 ]").unwrap();
+        let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
+        assert_eq!(input_is_complete(&toks), Completeness::NeedMore);
+
+        let tokens = lexer::lex(": f ( -- ) [ i64 ; 4 ] drop ;").unwrap();
         let toks: Vec<Token> = tokens.into_iter().map(|(t, _)| t).collect();
         assert_eq!(input_is_complete(&toks), Completeness::Complete);
     }

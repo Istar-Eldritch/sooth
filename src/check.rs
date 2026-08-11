@@ -5287,6 +5287,17 @@ fn poly_term(
                 span.line
             ));
         }
+        // Slice 6h: no interning route exists for a body-internal array
+        // shape absent from a poly signature (`subst_polytype`/`array_id_of`
+        // both look up an already-interned shape and panic otherwise), so
+        // this is rejected eagerly, mirroring the quotation rejection above.
+        TermKind::ArrayCtor(_) => {
+            return Err(format!(
+                "error: an array constructor in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
+        }
     }
     Ok(stack)
 }
@@ -9035,6 +9046,13 @@ fn check_term(
             });
             Ok(stack)
         }
+        // Slice 6h phase 1 stub: the real type-directed gate (D2/D3) lands in
+        // phase 2. Push the term's own interned array type unchecked so the
+        // exhaustive match compiles.
+        TermKind::ArrayCtor(ty) => {
+            stack.push(Slot::computed(*ty));
+            Ok(stack)
+        }
     }
 }
 
@@ -11716,6 +11734,23 @@ mod tests {
         .expect_err("a quotation literal in a polymorphic body should be rejected");
         assert!(
             err.contains("a quotation in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+
+    #[test]
+    fn poly_term_rejects_an_array_constructor() {
+        // Slice 6h: an array constructor in a polymorphic body is rejected
+        // eagerly, mirroring the quotation rejection above (no interning
+        // route exists for a body-internal shape absent from the signature).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ i64 ; 4 ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("an array constructor in a polymorphic body should be rejected");
+        assert!(
+            err.contains("an array constructor in the polymorphic body of `bad`")
                 && err.contains("not yet supported"),
             "poly_term should name `bad`, got: {err}"
         );

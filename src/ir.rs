@@ -3275,6 +3275,13 @@ impl<'a> FuncBuilder<'a> {
                 self.quot_bodies.insert(v, id);
                 self.stack.push(v);
             }
+            // Slice 6h phase 1 stub: phase 3 replaces this with one
+            // `Instr::Alloc` plus a byte-granular zero-init loop (D3). A
+            // placeholder value keeps the stack depth right for now.
+            TermKind::ArrayCtor(_) => {
+                let v = self.fresh_value(IrType::I64);
+                self.stack.push(v);
+            }
         }
     }
 

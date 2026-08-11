@@ -1138,6 +1138,11 @@ pub enum TermKind {
     /// construction since the element list is parsed with `parse_terms`.
     /// Compile-time-only marker in this slice (D1): never a runtime value.
     Quotation(Vec<Term>),
+    /// Slice 6h (D1): a body-level `[ Type ; Count ]` raw array constructor,
+    /// carrying the parse-time-interned `Type::Array(id)` for the shape.
+    /// Concrete-path only: `poly_term` rejects it eagerly (there is nowhere
+    /// to intern a body-internal shape absent from a poly signature).
+    ArrayCtor(Type),
 }
 
 /// R18/R21: clone a combinator body, appending a unique per-inline suffix to
