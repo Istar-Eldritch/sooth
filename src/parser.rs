@@ -3407,6 +3407,21 @@ mod tests {
     }
 
     #[test]
+    fn array_constructor_bare_reference_element_is_rejected() {
+        // Phase 2's exit criteria: a bare-reference element is a located
+        // rejection naming the constructor's site, not `fill`'s. Unlike a
+        // linear element (a plain word, resolved via `resolve_type` and
+        // rejected by check.rs's shared gate), `&i64` is a single lexed word
+        // that never reaches a registered type name -- `resolve_type_name_in_module`
+        // has no `&`-prefix case (only `parse_type_expr`'s own dedicated arm
+        // does), so this is caught here at parse time as an unknown type,
+        // never reaching check.rs at all.
+        let err = parse_src(": w ( -- ) [ &i64 ; 4 ] drop ;").unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("&i64"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn quotation_without_a_semicolon_still_parses_as_a_quotation() {
         let module = parse_src(": w ( -- ) [ 1 2 drop ] drop ;").unwrap();
         let body = terms_body(&module.words[0]);
