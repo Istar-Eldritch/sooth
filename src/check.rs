@@ -7266,12 +7266,14 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
 /// declared output. Extracted as a named, callable function (R14a) so phase 6
 /// can drive it from a white-box test: `#[ignore]` skips execution, not
 /// compilation, so the test needs a real symbol to call. R14: the `surviving`
-/// capture set and the `quot` marker are forwarded from `carried_inputs` along
-/// `index_map` (bottom-aligned: ground output `i` <- `carried_inputs[j]` when
+/// capture set is forwarded from `carried_inputs` along `index_map`
+/// (bottom-aligned: ground output `i` <- `carried_inputs[j]` when
 /// `index_map[i] == Some(j)`), so an aggregate carrying an erased quotation
 /// across the back-edge keeps its escape obligation (`d1b3f0a`/`bee407c`: a
-/// `Slot::computed` drops both fields, so a bare forward would leak the
-/// obligation). An output with no source (`None`) is a fresh type-only slot.
+/// `Slot::computed` drops it, so a bare forward would leak the obligation).
+/// `carried_inputs` is itself filtered to non-quotation slots at the call
+/// site, so `quot` is always `None` there and never needs forwarding. An
+/// output with no source (`None`) is a fresh type-only slot.
 fn back_edge_outs(
     ground_outputs: &[Type],
     index_map: &[Option<usize>],
@@ -7283,9 +7285,7 @@ fn back_edge_outs(
         .map(|(i, &ty)| {
             let mut out = Slot::computed(ty);
             if let Some(src) = index_map.get(i).copied().flatten() {
-                let carried = carried_inputs[src];
-                out.surviving = carried.surviving;
-                out.quot = carried.quot;
+                out.surviving = carried_inputs[src].surviving;
             }
             out
         })
