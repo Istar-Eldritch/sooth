@@ -7400,6 +7400,7 @@ fn inline_combinator(
                     check_literal_against_declared_effect(
                         id,
                         eff,
+                        false,
                         &[],
                         name,
                         span,
@@ -7607,8 +7608,10 @@ fn check_poly_combinator_args(
             _ => Vec::new(),
         };
         if let Some(QuotRef::Known(id)) = found.quot {
+            let is_inline = matches!(concrete, Type::InlineQuotation(_));
             check_literal_against_declared_effect(
-                id, eff, &row, name, span, ctx, env, arrays, cells, refs, prov, scope, poly,
+                id, eff, is_inline, &row, name, span, ctx, env, arrays, cells, refs, prov, scope,
+                poly,
             )?;
         } else if crate::ast::is_quotation_type(found.ty).is_some() {
             // R21 (poly): a forwarded abstract quotation parameter, accepted
@@ -7641,6 +7644,7 @@ fn check_poly_combinator_args(
 fn check_literal_against_declared_effect(
     id: QuotId,
     eff: &QuotEffect,
+    is_inline: bool,
     row: &[Type],
     word: &str,
     span: Span,
@@ -7725,7 +7729,11 @@ fn check_literal_against_declared_effect(
         // caller's concrete stack never leaks into the printed effect -- the
         // declared/actual types show only the quotation's own fixed slots.
         let actual_outs: Vec<Type> = result.iter().skip(row.len()).map(|s| s.ty).collect();
-        let declared = crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone());
+        let declared = if is_inline {
+            crate::ast::inline_quotation_type(eff.inputs.clone(), eff.outputs.clone())
+        } else {
+            crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone())
+        };
         let actual = crate::ast::quotation_type(eff.inputs.clone(), actual_outs);
         return Err(literal_effect_mismatch_error(
             ctx, span, word, declared, actual,
@@ -7845,9 +7853,9 @@ fn captured_quotation_name_deferred_error(ctx: &Ctx, span: Span) -> String {
 /// is *deferred* (unimplemented, might land later); a `~` capture is *banned*
 /// (materialization is exactly what `~` forbids, permanently).
 fn captured_inline_quotation_error(ctx: &Ctx, span: Span) -> String {
-    let _ = ctx;
+    let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
-        "error: a `~` quotation cannot be captured (line {})",
+        "error: a `~` quotation cannot be captured in `{where_}` (line {})",
         span.line,
     )
 }
@@ -8050,6 +8058,7 @@ fn materialize_quotation_at_boundary(
     check_literal_against_declared_effect(
         id,
         eff,
+        false,
         &[],
         word,
         span,
@@ -9252,6 +9261,7 @@ fn check_term(
                                 check_literal_against_declared_effect(
                                     a,
                                     eff,
+                                    false,
                                     &[],
                                     word,
                                     a_span,
@@ -9267,6 +9277,7 @@ fn check_term(
                                 check_literal_against_declared_effect(
                                     b,
                                     eff,
+                                    false,
                                     &[],
                                     word,
                                     b_span,
