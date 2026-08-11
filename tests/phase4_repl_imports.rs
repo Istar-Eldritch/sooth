@@ -651,3 +651,28 @@ fn repl_modules_dogfood_session_runs() {
 
     r.finish();
 }
+
+#[test]
+fn repl_dispose_of_imported_override_without_selective_import_is_unaffected() {
+    // Slice 8b, R8: the native `drop` import-visibility gate would reject a
+    // qualified-only imported resource type's bare `drop`, but a bare REPL
+    // `drop` line is checked through `infer_line` (`Ctx::Line`), which never
+    // reaches the gate at all -- not because it opts out with `None`, but
+    // because `Ctx::Line::modules()` has no module parameter to thread in the
+    // first place. So a session that imports a library's resource type (no
+    // selective clause) and disposes it with a bare `drop` still runs the
+    // retained destructor exactly as before this slice -- not the R5 error,
+    // which is native-only.
+    let d = LibDir::new("imported-drop-unaffected");
+    let lib = d.write(
+        "lib.sth",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+    );
+    let input = format!("{}\nq::mk\ndrop\n", import_line("q", &lib));
+    let out = repl(&input);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["imported q", "stack: <Res>", "7", "stack: (empty)"],
+    );
+}

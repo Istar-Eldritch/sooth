@@ -381,11 +381,12 @@ fn exported_word_naming_exported_type_is_accepted() {
 }
 
 #[test]
-fn imported_linear_type_is_disposed_by_drop() {
-    // Criterion 17: `Res` is linear (a `drop` overload) and exported; the
-    // consumer disposes one with a bare `drop`, whose destructor glue runs
-    // whether or not it was itself exported (D6/R19).
-    let c = Closure::new("imported-linear-drop");
+fn imported_linear_type_dropped_without_importing_it_is_error() {
+    // Slice 8b, R6 (supersedes slice 5a Criterion 17): disposing an imported
+    // resource type with a bare `drop` runs a destructor declared in another
+    // module, so under a qualified-only import it is a located error naming the
+    // remedy -- importing the type by name.
+    let c = Closure::new("imported-linear-drop-ungated");
     c.write(
         "lib.sth",
         "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
@@ -394,8 +395,213 @@ fn imported_linear_type_is_disposed_by_drop() {
         "main.sth",
         "import: lib \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
     );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("cannot `drop` a value of type `lib::Res` in `main`"),
+        "names the type, qualifier, and caller: {err}"
+    );
+    assert!(
+        err.contains("declared in module `lib`, which this module has not imported by name"),
+        "names the declaring module and the cause: {err}"
+    );
+    assert!(
+        err.contains("add `Res` to the import (`import: lib | Res | \"...\"`)"),
+        "names the remedy: {err}"
+    );
+}
+
+#[test]
+fn imported_linear_type_dropped_after_selective_import_ok() {
+    // Slice 8b, R6 (positive companion): importing `Res` by name makes its
+    // override visible, so a bare `drop` runs `lib`'s destructor (prints `7`).
+    let c = Closure::new("imported-linear-drop-selective");
+    c.write(
+        "lib.sth",
+        "type: Res n i64 ;\n: mk ( -- Res ) 7 Res ;\n: drop ( Res -- ) | r | r Res>n . ;\nexport: mk Res ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib | Res | \"lib.sth\" ;\n: main ( -- ) lib::mk drop ;\n",
+    );
     let (stdout, code) = build_and_run(&entry);
     assert_eq!(stdout, "7\n", "the module's own destructor observably ran");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn imported_resource_qualified_only_non_disposal_uses_compile() {
+    // Slice 8b, R7: only a bare `drop` reaches the gate. Under a qualified-only
+    // import, naming the type in an effect, holding a value, forwarding it to
+    // another word, and `&`-reading a field all still compile -- the value is
+    // disposed in `lib`, which declares `Res`.
+    let c = Closure::new("imported-linear-nondisposal");
+    c.write(
+        "lib.sth",
+        concat!(
+            "type: Res n i64 ;\n",
+            ": mk ( -- Res ) 7 Res ;\n",
+            ": sink ( Res -- ) drop ;\n",
+            ": peek ( &Res -- i64 ) &Res>n @ ;\n",
+            ": drop ( Res -- ) | r | r Res>n . ;\n",
+            "export: mk Res sink peek ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: lib \"lib.sth\" ;\n",
+            ": hold ( -- lib::Res ) lib::mk ;\n",
+            ": main ( -- ) hold | r | &r lib::peek . r lib::sink ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "7\n7\n", "the borrow reads, then `lib` disposes it");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_import() {
+    // Round-1 review bug 3: a quotation-taking word (`with`) is a combinator,
+    // so it is never checked standalone -- only spliced into each caller's
+    // own body. Before this fix the splice reused the caller's `Ctx` whole,
+    // so D1's drop-visibility gate ran `with`'s internal `r drop` against
+    // `main`'s module instead of `lib`'s (the module that actually declares
+    // `Res` and its `drop` override), rejecting code that never names `Res`
+    // at all. `main` imports `lib` qualified-only -- no `Res`, no `drop` --
+    // since disposing the resource is entirely `with`'s own affair.
+    let c = Closure::new("library-combinator-self-dispose");
+    c.write(
+        "lib.sth",
+        concat!(
+            "type: Res n i64 ;\n",
+            ": mk ( -- Res ) 1 Res ;\n",
+            ": drop ( Res -- ) | r | r Res>n . ;\n",
+            ": with ( [ i64 -- i64 ] -- i64 ) | q | mk | r | &r &Res>n @ q call r drop ;\n",
+            "export: with ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) [ 1 + ] lib::with . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "1\n2\n",
+        "with's destructor ran (prints 1), then its own result (2)"
+    );
+    assert_eq!(code, 0);
+}
+
+// Slice 8b goldens (R13): 8a's operator module-scoping fix. A bare operator
+// resolves against the overloads visible to the calling module, so a module's
+// own overload is reachable bare even in a >=2-module build (where the decl is
+// mangled per module), a selectively-unimported overload does not leak, and the
+// single-module corpus is byte-for-byte unchanged.
+
+#[test]
+fn own_module_operator_overload_reachable_bare_in_multi_module() {
+    // R13: `main` declares `+` for its own `Vec2`, with `lib` in the closure
+    // forcing the operator decl to mangle to `+__m{k}`. The bare `+` now
+    // resolves to the own overload; before the fix `env.get("+")` missed it and
+    // the call fell to the builtin, which rejects the struct operands.
+    let c = Closure::new("own-operator-multi");
+    c.write("lib.sth", ": p ( -- i64 ) 0 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: lib \"lib.sth\" ;\n",
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 + Vec2>x . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "the own `+` overload dispatched, keeping the first operand's x"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn own_module_operator_overload_reachable_bare_in_multi_module_poly_body() {
+    // R13: same fix, exercised through `poly_delegate_op` (the poly-body
+    // operator path) rather than `check_term`'s concrete path. `probe` is
+    // polymorphic (`'T`), so its body is checked by `check_poly_body`; the
+    // `+` call inside it is on a fully-concrete suffix (two `Vec2`s), so it
+    // still needs the calling module's scoped candidates to find `main`'s
+    // own mangled `+` overload.
+    let c = Closure::new("own-operator-multi-poly");
+    c.write("lib.sth", ": p ( -- i64 ) 0 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: lib \"lib.sth\" ;\n",
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": probe ( 'T -- 'T i64 ) 1 2 Vec2 3 4 Vec2 + Vec2>x ;\n",
+            ": main ( -- ) lib::p . 42 probe . . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "0\n1\n42\n",
+        "the own `+` overload dispatched inside the poly body, keeping the first operand's x"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn selectively_imported_operator_does_not_hijack_unrelated_module() {
+    // R13: `main` imports `x`'s type qualified-only, so it holds `x::XT` values
+    // but never imported `x`'s `+` by name. A bare `+` on two XT operands is the
+    // ordinary operand-mismatch error, not a silent dispatch to `x`'s word.
+    let c = Closure::new("operator-no-hijack");
+    c.write(
+        "x.sth",
+        concat!(
+            "type: XT v i64 ;\n",
+            ": mk ( i64 -- XT ) XT ;\n",
+            ": + ( XT XT -- XT ) drop ;\n",
+            "export: XT mk ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: x \"x.sth\" ;\n",
+            ": main ( -- ) 1 x::mk 2 x::mk + x::XT>v . ;\n",
+        ),
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("`+` requires two operands of the same numeric type"),
+        "the bare `+` falls to the builtin, not x's overload: {err}"
+    );
+    assert!(
+        err.contains("found `XT` and `XT`"),
+        "names the rejected struct operand type: {err}"
+    );
+}
+
+#[test]
+fn single_module_operator_overload_unchanged() {
+    // R13 (regression / mutation guard): a single-file program overloading `+`
+    // on a struct compiles and runs exactly as before. The decl is left bare in
+    // a single-module build, so the assembly degenerates to the flat
+    // `env.get("+")` via the `modules.len() < 2` fallback -- deleting that
+    // branch would seek `+__m0` (which does not exist) and fail this test.
+    let c = Closure::new("single-operator");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": main ( -- ) 1 2 Vec2 3 4 Vec2 + Vec2>x . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "1\n", "the single-file `+` overload dispatched");
     assert_eq!(code, 0);
 }
 

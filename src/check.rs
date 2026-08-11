@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{
     instantiation_symbol, intern_array_type, intern_bundle_struct, intern_owned_cell_type,
     intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId, ExternDecl, Len, Module,
-    OwnedCellDecl, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect,
+    StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 /// A word's typed stack effect: the concrete input and output slot types,
@@ -1649,6 +1649,15 @@ enum Ctx<'a> {
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
+        /// R2 (slice 8b): the owning module of the word being checked, the
+        /// caller module D1's `drop` gate and 8a's operator fix scope a name's
+        /// visibility against.
+        module: u32,
+        /// R3 (slice 8b): the import closure's per-module data, `Some` on the
+        /// native build path and `None` on the REPL path (`infer_line` builds
+        /// `Ctx::Line`, and a retained poly word passes `None`): the gate reads
+        /// it and never fires when it is absent.
+        modules: Option<&'a [ModuleInfo]>,
     },
     Line {
         structs: &'a [StructDecl],
@@ -1658,13 +1667,20 @@ enum Ctx<'a> {
 
 /// The `Ctx` for checking `word`'s body: shared by the body walkers and the
 /// binding-name rejections so all of them cite the same declared effect.
-fn word_ctx<'a>(word: &'a WordDef, structs: &'a [StructDecl], enums: &'a [EnumDecl]) -> Ctx<'a> {
+fn word_ctx<'a>(
+    word: &'a WordDef,
+    structs: &'a [StructDecl],
+    enums: &'a [EnumDecl],
+    modules: Option<&'a [ModuleInfo]>,
+) -> Ctx<'a> {
     Ctx::Word {
         name: crate::resolve::demangle_word(&word.name),
         mangled: &word.name,
         effect: &word.effect,
         structs,
         enums,
+        module: word.module,
+        modules,
     }
 }
 
@@ -1678,6 +1694,24 @@ impl Ctx<'_> {
     fn enums(&self) -> &[EnumDecl] {
         match self {
             Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
+        }
+    }
+
+    /// R2 (slice 8b): the caller module a scoped-name visibility check runs
+    /// against. A bare REPL line denotes module 0.
+    fn module(&self) -> u32 {
+        match self {
+            Ctx::Word { module, .. } => *module,
+            Ctx::Line { .. } => 0,
+        }
+    }
+
+    /// R3 (slice 8b): the import closure's per-module data, or `None` on the
+    /// REPL path, where the `drop` import-visibility gate does not fire.
+    fn modules(&self) -> Option<&[ModuleInfo]> {
+        match self {
+            Ctx::Word { modules, .. } => *modules,
+            Ctx::Line { .. } => None,
         }
     }
 
@@ -1697,6 +1731,16 @@ impl Ctx<'_> {
         }
     }
 
+    /// The enclosing word's own declared effect, for recognizing which
+    /// struct (not just which name) a `drop` override's body is exempt for
+    /// (D3's destructure guard). A bare REPL line has no declared effect.
+    fn effect(&self) -> Option<&StackEffect> {
+        match self {
+            Ctx::Word { effect, .. } => Some(effect),
+            Ctx::Line { .. } => None,
+        }
+    }
+
     /// R11: the enclosing word's declared output row, the context a branch join
     /// in tail position materializes its quotation arms against (the merged
     /// slot maps to the output at the same index). A bare REPL line has no
@@ -1705,6 +1749,41 @@ impl Ctx<'_> {
         match self {
             Ctx::Word { effect, .. } => Some(&effect.outputs),
             Ctx::Line { .. } => None,
+        }
+    }
+}
+
+impl<'a> Ctx<'a> {
+    /// D1 fix (slice 8b, bug 3): rebuild this `Ctx` with `module` swapped to
+    /// the module that actually declares the term about to be checked, not
+    /// the caller's. `inline_combinator` splices a combinator's body into the
+    /// *caller's* `Ctx` so its locals/effect/name still read right in
+    /// diagnostics, but a module-scoped visibility gate (D1's drop-import
+    /// check, 8a's operator scoping) run against `ctx.module()` while
+    /// checking that spliced body must see the combinator's own declaring
+    /// module, or a library combinator disposing its own resource gets
+    /// attributed to whichever module happened to call it. A no-op on
+    /// `Ctx::Line`, which has no module to scope against.
+    fn with_module(&self, module: u32) -> Ctx<'a> {
+        match *self {
+            Ctx::Word {
+                name,
+                mangled,
+                effect,
+                structs,
+                enums,
+                modules,
+                ..
+            } => Ctx::Word {
+                name,
+                mangled,
+                effect,
+                structs,
+                enums,
+                module,
+                modules,
+            },
+            Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
         }
     }
 }
@@ -2164,7 +2243,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         externs: _,
         instantiations: _,
         builtin_overloads: _,
-        modules: _,
+        modules,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below
@@ -2225,6 +2304,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     owned_cells,
                     refs,
                     structs,
+                    Some(modules),
                     &mut poly,
                 )?;
             } else {
@@ -2238,6 +2318,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     structs,
                     enums,
                     arrays,
+                    Some(modules),
                     &mut builtin_overloads,
                 )?;
             }
@@ -2256,6 +2337,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 owned_cells,
                 refs,
                 structs,
+                Some(modules),
                 &mut sites,
                 &mut poly,
             )?;
@@ -3589,8 +3671,10 @@ pub(crate) fn check_def_collecting_drop_sites(
         builtin_overloads: &mut overloads,
         combinators,
     };
+    // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
+    // `drop` import-visibility gate never fires on the session path.
     check_word(
-        word, enums, &env, arrays, cells, refs, structs, &mut sites, &mut poly,
+        word, enums, &env, arrays, cells, refs, structs, None, &mut sites, &mut poly,
     )?;
     Ok((sites, insts, overloads))
 }
@@ -3959,6 +4043,12 @@ pub(crate) fn word_span(word: &WordDef) -> Span {
 /// allowed; only mutual cycles are the error. Builtins, generated words, and
 /// non-tail calls contribute no edge, so a pair of words that mutually call
 /// each other in non-tail position never false-positives.
+///
+/// Slice 8b (D1): a recognized `drop` overload's exclusion here is unrelated
+/// to D1's own drop-import-visibility gate (`check_drop_import_visibility`,
+/// run later, per call site, inside `check_shuffle`'s `"drop"` arm) -- this
+/// pass only keeps a scalar `drop` inside an override's own body from being
+/// misread as a tail call to the override itself.
 fn check_tail_call_cycles(
     words: &[WordDef],
     drop_overload_indices: &HashSet<usize>,
@@ -4377,12 +4467,13 @@ fn check_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
-    let ctx = word_ctx(word, structs, enums);
+    let ctx = word_ctx(word, structs, enums, modules);
     for slot in &word.effect.inputs {
         if let Some(name) = &slot.name {
             reject_variant_local(&ctx, name, "parameter")?;
@@ -4391,10 +4482,10 @@ fn check_word(
     check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
     match &word.body {
         WordBody::Terms { terms } => check_terms_word(
-            word, enums, terms, env, arrays, cells, refs, structs, dropped, poly,
+            word, enums, terms, env, arrays, cells, refs, structs, modules, dropped, poly,
         ),
         WordBody::Clauses(clauses) => check_clause_word(
-            word, enums, clauses, env, arrays, cells, refs, structs, dropped, poly,
+            word, enums, clauses, env, arrays, cells, refs, structs, modules, dropped, poly,
         ),
     }
 }
@@ -4442,6 +4533,7 @@ fn check_terms_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
@@ -4471,7 +4563,7 @@ fn check_terms_word(
         .map(|s| Slot::computed(s.ty))
         .collect();
 
-    let ctx = word_ctx(word, structs, enums);
+    let ctx = word_ctx(word, structs, enums, modules);
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
     let mut final_stack = check_terms(
@@ -4547,6 +4639,7 @@ fn check_clause_word(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    modules: Option<&[ModuleInfo]>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
@@ -4644,6 +4737,7 @@ fn check_clause_word(
             cells,
             refs,
             structs,
+            modules,
             ref_mutable,
             dropped,
             poly,
@@ -4665,11 +4759,12 @@ fn check_clause_body(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    modules: Option<&[ModuleInfo]>,
     ref_mutable: Option<bool>,
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
-    let ctx = word_ctx(word, structs, enums);
+    let ctx = word_ctx(word, structs, enums, modules);
     let mut seen_locals = HashSet::new();
     for name in &clause.locals {
         reject_variant_local(&ctx, name, "local")?;
@@ -4862,10 +4957,11 @@ fn check_poly_combinator_standalone(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    modules: Option<&[ModuleInfo]>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
-    let ctx = word_ctx(word, structs, enums);
+    let ctx = word_ctx(word, structs, enums, modules);
     let span = word_span(word);
     let mut subst = Subst::default();
     for v in 0..sig.ty_var_names.len() as u32 {
@@ -4911,6 +5007,7 @@ fn check_poly_combinator_standalone(
         cells,
         refs,
         structs,
+        modules,
         &mut dropped,
         poly,
     )
@@ -4944,8 +5041,10 @@ pub(crate) fn check_poly_combinator_repl(
         builtin_overloads: &mut scratch_overloads,
         combinators,
     };
+    // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
+    // import-visibility gate never fires on a session-checked combinator body.
     check_poly_combinator_standalone(
-        word, sig, enums, env, arrays, cells, refs, structs, &mut poly,
+        word, sig, enums, env, arrays, cells, refs, structs, None, &mut poly,
     )
 }
 
@@ -4959,6 +5058,7 @@ pub(crate) fn check_poly_combinator_repl(
 /// comparisons need `Ord`), local bind/read, and being returned; every other
 /// type-directed operation on it is a located error naming the variable, so a
 /// body a real instantiation would reject can never slip through.
+#[allow(clippy::too_many_arguments)]
 pub fn check_poly_body(
     word: &WordDef,
     sig: &PolySig,
@@ -4966,9 +5066,14 @@ pub fn check_poly_body(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
-    let ctx = word_ctx(word, structs, enums);
+    // R12 (slice 8b, 8a): the caller module's operator visibility rides on
+    // `ctx`, so a bare operator in a poly body resolves against the same
+    // scoped candidate set a concrete body does. `Some` from `check::check`,
+    // `None` from `repl.rs` (the REPL path is unscoped, R8).
+    let ctx = word_ctx(word, structs, enums, modules);
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
         WordBody::Clauses(_) => {
@@ -5311,6 +5416,13 @@ fn poly_call_term(
     // R1/R2: resolve among this name's candidates by exact operand match; a
     // lone candidate is the ordinary case and is used as-is, matching the
     // single-signature behaviour this path had before overloading.
+    //
+    // D3 (slice 8b): this is the poly-body twin of the concrete path's own
+    // call ahead of `check_struct_get_word` -- a generated accessor
+    // (`S>`/`S>field`) is just another `env` candidate here, so the guard
+    // must run before this lookup dispatches one for a drop-overloaded
+    // struct, or a generic word could destructure it and skip the destructor.
+    check_destructure_drop_guard(name, span, ctx)?;
     let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
         [only] => Some(only),
         _ => candidates.iter().find(|o| {
@@ -5449,21 +5561,27 @@ fn poly_delegate_op(
             _ => unreachable!("suffix is all concrete by construction"),
         })
         .collect();
-    let handled = match check_operator(name, span, &mut cstack, ctx, env.get(name).map(|v| &v[..]))?
-    {
+    // R12 (slice 8b, 8a): the poly operator path scopes candidates to the
+    // calling module exactly like the concrete path; `None` (REPL /
+    // single-module) falls back to the flat `env.get(name)`.
+    let scoped_ops = scoped_operator_overloads(ctx, env, name);
+    let op_candidates = match &scoped_ops {
+        Some(v) => Some(&v[..]),
+        None => env.get(name).map(|v| &v[..]),
+    };
+    let handled = match check_operator(name, span, &mut cstack, ctx, op_candidates)? {
         OpDispatch::Builtin(s) => {
             cstack = s;
             true
         }
         // R6/R7: a builtin-row exact miss whose operands exactly match one of
-        // this name's env candidates dispatches to that user word, same as
+        // this name's scoped candidates dispatches to that user word, same as
         // `check_term`'s call site: apply the chosen candidate's own outputs
         // (the resolver already confirmed its inputs equal the operands).
         OpDispatch::UserOverload(symbol) => {
-            let sig = &env
-                .get(name)
+            let sig = &op_candidates
                 .and_then(|c| c.iter().find(|o| o.symbol == symbol))
-                .expect("check_operator resolved this symbol from this env candidate set")
+                .expect("check_operator resolved this symbol from this scoped candidate set")
                 .sig;
             cstack.truncate(cstack.len() - sig.inputs.len());
             cstack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
@@ -7183,10 +7301,16 @@ fn inline_combinator(
     } else {
         None
     };
+    // D1 fix (slice 8b, bug 3): the spliced body is `comb.word`'s own, so a
+    // module-scoped visibility gate inside it (D1's drop-import check, 8a's
+    // operator scoping) must resolve against the module that declares *it*,
+    // not `ctx.module()` -- otherwise a library combinator disposing its own
+    // resource gets attributed to whichever module happened to call it.
+    let spliced_ctx = ctx.with_module(comb.word.module);
     let result = check_terms(
         &renamed,
         stack,
-        ctx,
+        &spliced_ctx,
         env,
         arrays,
         cells,
@@ -8407,7 +8531,17 @@ fn check_term(
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
-            match check_operator(name, span, &mut stack, ctx, env.get(name).map(|v| &v[..]))? {
+            // R12 (slice 8b, 8a): a bare operator resolves against the
+            // overloads visible to the calling module, not the flat `env`
+            // lookup that misses a per-module-mangled decl in a multi-module
+            // build. `None` (REPL / single-module) falls back to the flat
+            // lookup unchanged.
+            let scoped_ops = scoped_operator_overloads(ctx, env, name);
+            let op_candidates = match &scoped_ops {
+                Some(v) => Some(&v[..]),
+                None => env.get(name).map(|v| &v[..]),
+            };
+            match check_operator(name, span, &mut stack, ctx, op_candidates)? {
                 OpDispatch::Builtin(stack) => return Ok(stack),
                 // Slice 8a phase 2 (R6/R7): a builtin operator name whose
                 // operands match a user overload exactly dispatches to the
@@ -8435,6 +8569,11 @@ fn check_term(
             {
                 return Ok(stack);
             }
+            // D3 (slice 8b): ahead of both the aggregate-field getter below
+            // and the ordinary env call path further down, so it catches a
+            // moving accessor of a drop-overloaded struct regardless of the
+            // extracted field's own type.
+            check_destructure_drop_guard(name, span, ctx)?;
             if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
                 return Ok(stack);
             }
@@ -8513,10 +8652,21 @@ fn check_term(
             // before; an overload set resolves by exact operand match here and
             // records the chosen candidate's symbol, so lowering calls that
             // definition rather than whichever body the name alone would find.
-            let candidates = env
-                .get(name)
-                .ok_or_else(|| unknown_word_error(ctx, span, name))?;
-            let chosen = match &candidates[..] {
+            //
+            // R12 (slice 8b, 8a): a bare operator whose `check_operator` arm
+            // returned `UserOverload` falls through to here to reuse the
+            // move/borrow discipline, but its decl is mangled per module in a
+            // multi-module build, so the flat `env.get(name)` misses it.
+            // `scoped_ops` (computed once above) is `Some` exactly for an
+            // operator name under module scoping and carries the caller-visible
+            // overloads; every other name still resolves through `env`.
+            let candidates = match &scoped_ops {
+                Some(v) => v.as_slice(),
+                None => env
+                    .get(name)
+                    .ok_or_else(|| unknown_word_error(ctx, span, name))?,
+            };
+            let chosen = match candidates {
                 [only] => only,
                 _ => {
                     let operands: Vec<Type> = stack.iter().map(|s| s.ty).collect();
@@ -10362,6 +10512,200 @@ fn check_struct_get_word(
 /// the name is not a shuffle (the caller then looks it up in the env). Shuffles
 /// move concrete slot types with no fixed signature: `dup` of a `bool` yields
 /// two `bool`s, `swap` reorders whatever two types are on top, etc.
+/// R1 (slice 8b, D2): the sole authority on whether a scoped name is visible to
+/// a module. A name owned by `defining` is visible to `caller` iff `defining` is
+/// the caller's own module, or the caller selectively imported that bare name
+/// from that module. A qualified-only import (`import: lib "lib.sth"`) makes
+/// nothing visible by bare name, so it is not a route here. Consumed by D1's
+/// `drop` gate and (phase 3) 8a's operator fix; neither invents its own rule.
+fn is_name_visible_to_module(
+    modules: &[ModuleInfo],
+    caller: u32,
+    defining: u32,
+    name: &str,
+) -> bool {
+    defining == caller || modules[caller as usize].selective.get(name) == Some(&defining)
+}
+
+/// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
+/// module. `None` means "module scoping does not apply -- use the flat
+/// `env.get(name)`": the REPL path (`ctx.modules()` is `None`) and a
+/// single-module build, where `resolve_modules` leaves an operator decl bare
+/// (`+`, not `+__m0`) so the flat lookup already finds the own overload. In a
+/// multi-module build every operator decl is mangled per module, so a bare
+/// lookup of `+` is `None`; assemble the caller's own overload (under
+/// `mangle(name, M)`) plus one it selectively imported, membership decided by
+/// `is_name_visible_to_module` (R1), never re-derived.
+fn scoped_operator_overloads(
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    name: &str,
+) -> Option<Vec<Overload>> {
+    // Only a builtin operator name is left bare by `resolve_modules` and so
+    // scoped here; every other bare call was already rewritten to its mangled
+    // spelling, and re-mangling that would only miss (`foo__m0__m0`). This is
+    // also what keeps the fall-through env-call path (which reads this result)
+    // from corrupting an ordinary word's candidate lookup.
+    if !BUILTIN_TABLE.contains_key(name) {
+        return None;
+    }
+    let modules = ctx.modules()?;
+    if modules.len() < 2 {
+        return None;
+    }
+    let caller = ctx.module();
+    let mut defining = vec![caller];
+    if let Some(&k) = modules[caller as usize].selective.get(name) {
+        defining.push(k);
+    }
+    let mut out: Vec<Overload> = Vec::new();
+    for d in defining {
+        if is_name_visible_to_module(modules, caller, d, name) {
+            if let Some(cands) = env.get(&crate::resolve::mangle(name, d)) {
+                out.extend(cands.iter().cloned());
+            }
+        }
+    }
+    Some(out)
+}
+
+/// R4 (slice 8b, D1): reject a bare `drop` of an imported resource type whose
+/// `drop` override is not visible to the calling module. The name checked is the
+/// struct's demangled source spelling, since `ModuleInfo::selective` is keyed by
+/// source names while `decl.name` is mangled (`Res__m1`) in a >=2-module build.
+fn check_drop_import_visibility(
+    ctx: &Ctx,
+    span: Span,
+    m: &[ModuleInfo],
+    decl: &StructDecl,
+) -> Result<(), String> {
+    let source = crate::resolve::demangle_word(&decl.name);
+    if is_name_visible_to_module(m, ctx.module(), decl.module, source) {
+        Ok(())
+    } else {
+        Err(drop_import_visibility_error(ctx, span, m, decl, source))
+    }
+}
+
+/// R5 (slice 8b): the located diagnostic for a `drop` whose destructor lives in
+/// a module the caller imported qualified-only. Names the demangled type under
+/// the qualifier the caller binds it (the qualifier whose import maps to the
+/// declaring module) and the remedy: import the type by name. The `Ctx::Line`
+/// arm drops the enclosing-word clause, though the REPL path never reaches the
+/// gate (`ctx.modules()` is `None` there, R8).
+fn drop_import_visibility_error(
+    ctx: &Ctx,
+    span: Span,
+    m: &[ModuleInfo],
+    decl: &StructDecl,
+    source: &str,
+) -> String {
+    let caller = ctx.module() as usize;
+    let qualifier = m[caller]
+        .imports
+        .iter()
+        .find(|(_, &target)| target == decl.module)
+        .map(|(q, _)| q.as_str());
+    // `ModuleInfo` carries no name or path of its own (only its import map,
+    // exports, and selective names), so a struct reachable only
+    // *transitively* -- the caller imports some module that imports the
+    // declaring one, but never imports the declaring one itself -- has no
+    // qualifier to name here. Naming the struct's own bare name as if it
+    // were a module qualifier (the prior behavior) reads as a valid import
+    // spelling that silently fails; say plainly that the path is transitive
+    // instead of fabricating one.
+    let (ty_name, note) = match qualifier {
+        Some(qualifier) => (
+            format!("{qualifier}::{source}"),
+            format!(
+                "disposing it runs a `drop` destructor declared in module `{qualifier}`, which this module has not imported by name\n  note: add `{source}` to the import (`import: {qualifier} | {source} | \"...\"`), or dispose it in a module that declares `{source}`"
+            ),
+        ),
+        None => (
+            source.to_string(),
+            format!(
+                "disposing it runs a `drop` destructor declared in a module this module never imports directly -- it is only reachable transitively, through another module's import\n  note: import the module that declares `{source}` directly, then add `{source}` to that import"
+            ),
+        ),
+    };
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: cannot `drop` a value of type `{ty_name}` in `{name}` (line {})\n  {note}",
+            span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `drop` a value of type `{ty_name}` (line {})\n  {note}",
+            span.line
+        ),
+    }
+}
+
+/// D3 (slice 8b): a struct's destructure (`S>`) or field getter (`S>f`) moves
+/// fields out of `S`, bypassing whatever `drop` override `S` owns -- the value
+/// never reaches a bare `drop` call site for D1's gate to see. `name` is
+/// checked as-parsed (mangled in a >=2-module build, matching
+/// `struct_generated_sigs`'s own keys), so this runs ahead of both
+/// `check_struct_get_word` (which alone claims an aggregate-typed field) and
+/// the ordinary `env` call path (every other field type, and the full
+/// destructure), catching the accessor before either applies its signature.
+/// The functional setter (`S<f`) has no `>` in its name and never matches
+/// here; it returns the struct itself, so the value stays live.
+fn check_destructure_drop_guard(name: &str, span: Span, ctx: &Ctx) -> Result<(), String> {
+    let Some((struct_name, field_name)) = name.split_once('>') else {
+        return Ok(());
+    };
+    let Some((struct_idx, decl)) = ctx
+        .structs()
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.name == struct_name)
+    else {
+        return Ok(());
+    };
+    if !decl.has_drop_overload {
+        return Ok(());
+    }
+    // A word literally named `drop` is exempt only for the *one* struct its
+    // own declared effect names (`find_drop_overloads` rejects any other
+    // input shape before body checking ever starts): its own body is exactly
+    // where moving that struct's fields out implements disposal
+    // (`examples/resources.sth`'s `Fd>n` inside `: drop`). `resolve::mangle`
+    // leaves `drop` unmangled program-wide, so a name-only check would wave
+    // through *any* word named `drop`, including one overriding a different
+    // struct that destructures this one -- compare the struct identity the
+    // enclosing word's effect declares, not the word's name.
+    let is_own_drop_body = ctx.mangled_name() == Some("drop")
+        && ctx.effect().is_some_and(|eff| {
+            matches!(eff.inputs.as_slice(), [input] if matches!(input.ty, Type::Struct(id, _) if id.index() == struct_idx))
+        });
+    if is_own_drop_body {
+        return Ok(());
+    }
+    let is_destructure = field_name.is_empty();
+    let is_field_move = decl.fields.iter().any(|(f, _)| f == field_name);
+    if is_destructure || is_field_move {
+        return Err(destructure_drop_overloaded_error(ctx, span, decl));
+    }
+    Ok(())
+}
+
+/// R11 (slice 8b, D3): the located diagnostic for destructuring a type whose
+/// `drop` override would otherwise be skipped.
+fn destructure_drop_overloaded_error(ctx: &Ctx, span: Span, decl: &StructDecl) -> String {
+    let source = crate::resolve::demangle_word(&decl.name);
+    let note = "\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out";
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: cannot destructure `{source}` in `{name}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
+            span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot destructure `{source}` (line {}): it defines `drop`, so moving its fields out would skip its destructor{note}",
+            span.line
+        ),
+    }
+}
+
 fn check_shuffle(
     name: &str,
     span: Span,
@@ -10396,6 +10740,18 @@ fn check_shuffle(
             // discards it with nothing to dispose, and its `Cstr` placeholder
             // is inert in the drop-override graph; skip the push.
             if top.quot.is_none() {
+                // D1 (R3/R4): disposing a value whose struct owns a `drop`
+                // override runs that destructor, so the override must be
+                // visible to the calling module (declared locally or imported
+                // by name). On the REPL path `ctx.modules()` is `None` (R8) and
+                // the arm is exactly what it was before this slice. The
+                // `prov.dropped` recording below is unchanged either way.
+                if let (Type::Struct(id, _), Some(m)) = (top.ty, ctx.modules()) {
+                    if ctx.structs()[id.index()].has_drop_overload {
+                        let decl = &ctx.structs()[id.index()];
+                        check_drop_import_visibility(ctx, span, m, decl)?;
+                    }
+                }
                 prov.dropped.push(top.ty);
             }
         }
@@ -10802,6 +11158,262 @@ mod tests {
         assert_eq!(scope.local("q").unwrap().quot, marker);
     }
 
+    // --- Slice 8b, D2/D1: the module-visibility primitive and `drop` gate. ---
+
+    /// R1: the primitive is a pure function of `(modules, caller, defining,
+    /// name)`; construct `ModuleInfo` directly rather than route through a build.
+    #[test]
+    fn visibility_own_module_is_visible() {
+        let modules = vec![ModuleInfo::default(), ModuleInfo::default()];
+        assert!(is_name_visible_to_module(&modules, 1, 1, "Res"));
+    }
+
+    #[test]
+    fn visibility_selectively_imported_is_visible() {
+        let mut caller = ModuleInfo::default();
+        caller.selective.insert("Res".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(is_name_visible_to_module(&modules, 1, 0, "Res"));
+    }
+
+    #[test]
+    fn visibility_qualified_only_import_is_not_visible() {
+        // A qualified-only import binds the qualifier but no bare name.
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("lib".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(!is_name_visible_to_module(&modules, 1, 0, "Res"));
+    }
+
+    #[test]
+    fn visibility_unrelated_module_is_not_visible() {
+        let modules = vec![
+            ModuleInfo::default(),
+            ModuleInfo::default(),
+            ModuleInfo::default(),
+        ];
+        assert!(!is_name_visible_to_module(&modules, 1, 2, "Res"));
+    }
+
+    fn bare_word(name: &str, module: u32) -> WordDef {
+        WordDef {
+            name: name.to_string(),
+            effect: StackEffect::default(),
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module,
+            span: Span::default(),
+        }
+    }
+
+    /// R2: `Ctx::Word` carries its word's owning module; `Ctx::Line` denotes 0.
+    #[test]
+    fn ctx_word_carries_owning_module() {
+        let word = bare_word("main", 3);
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = word_ctx(&word, &structs, &enums, None);
+        assert_eq!(ctx.module(), 3);
+        assert!(ctx.modules().is_none());
+    }
+
+    #[test]
+    fn ctx_line_is_module_zero() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        assert_eq!(ctx.module(), 0);
+        assert!(ctx.modules().is_none());
+    }
+
+    /// A `Res` owned by `defining`, mangled as `resolve` would in a multi-module
+    /// build (`Res__m{defining}`), so `check_drop_import_visibility`'s demangle
+    /// is exercised for real.
+    fn res_struct(defining: u32, has_drop_overload: bool) -> StructDecl {
+        StructDecl {
+            name: format!("Res__m{defining}"),
+            name_static: "Res",
+            fields: vec![("n".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload,
+            is_bundle: false,
+            module: defining,
+        }
+    }
+
+    /// Run `check_shuffle`'s `"drop"` arm on a single `Res` operand under a
+    /// caller-module `Ctx::Word` built with `modules`.
+    fn drop_res(
+        structs: &[StructDecl],
+        modules: Option<&[ModuleInfo]>,
+        caller: u32,
+    ) -> Result<Option<Vec<Slot>>, String> {
+        let word = bare_word("main", caller);
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = word_ctx(&word, structs, &enums, modules);
+        let arrays: Vec<ArrayDecl> = Vec::new();
+        let mut prov = Provenance::default();
+        let span = Span {
+            line: 2,
+            col: 1,
+            module: 0,
+        };
+        let mut stack = vec![Slot::computed(Type::Struct(StructId::from_index(0), "Res"))];
+        check_shuffle("drop", span, &mut stack, &ctx, &arrays, &mut prov)
+    }
+
+    #[test]
+    fn drop_of_locally_declared_override_is_ok() {
+        // caller == defining: the override is the caller's own, always visible.
+        let structs = vec![res_struct(0, true)];
+        let modules = vec![ModuleInfo::default()];
+        assert!(drop_res(&structs, Some(&modules), 0).is_ok());
+    }
+
+    #[test]
+    fn drop_of_selectively_imported_type_is_ok() {
+        let structs = vec![res_struct(0, true)];
+        let mut caller = ModuleInfo::default();
+        caller.selective.insert("Res".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(drop_res(&structs, Some(&modules), 1).is_ok());
+    }
+
+    #[test]
+    fn drop_of_qualified_only_imported_type_is_error() {
+        let structs = vec![res_struct(0, true)];
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("lib".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        let err = drop_res(&structs, Some(&modules), 1).unwrap_err();
+        // R5: the exact located diagnostic, not merely that it fails.
+        assert_eq!(
+            err,
+            "error: cannot `drop` a value of type `lib::Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in module `lib`, which this module has not imported by name\n  note: add `Res` to the import (`import: lib | Res | \"...\"`), or dispose it in a module that declares `Res`"
+        );
+    }
+
+    #[test]
+    fn drop_of_transitively_reachable_type_with_no_direct_import_is_error() {
+        // Round-2 fix: `Res` is declared by module 0 (`deep`), reached by the
+        // caller (module 2, `main`) only through module 1 (`mid`), which
+        // `main` never imports directly. The caller's import map has no
+        // qualifier mapping to module 0, so the diagnostic must not fabricate
+        // one -- naming the struct's own bare name as if it were a module
+        // qualifier (the pre-fix behavior) read as a valid but wrong import
+        // spelling.
+        let structs = vec![res_struct(0, true)];
+        let mid = ModuleInfo::default();
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("mid".to_string(), 1);
+        let modules = vec![ModuleInfo::default(), mid, caller];
+        let err = drop_res(&structs, Some(&modules), 2).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `drop` a value of type `Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in a module this module never imports directly -- it is only reachable transitively, through another module's import\n  note: import the module that declares `Res` directly, then add `Res` to that import"
+        );
+    }
+
+    #[test]
+    fn drop_of_plain_struct_no_override_is_ungated() {
+        // No override: the gate is never reached, the value disposes structurally.
+        let structs = vec![res_struct(0, false)];
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("lib".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(drop_res(&structs, Some(&modules), 1).is_ok());
+    }
+
+    #[test]
+    fn check_shuffle_with_no_modules_is_ungated() {
+        // R8's contract: with `modules: None` (the REPL path) an override is
+        // never gated -- disposing it is byte-for-byte what it was before 8b.
+        let structs = vec![res_struct(0, true)];
+        assert!(drop_res(&structs, None, 1).is_ok());
+    }
+
+    /// D3's leaf resource: one field, a `drop` override implemented exactly
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// inside `drop`'s own body -- exempted, since a word literally named
+    /// `drop` can only be the recognized override for the struct its declared
+    /// effect names).
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+
+    #[test]
+    fn destructure_of_drop_overloaded_type_is_error() {
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd> . ;\n")).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn field_move_of_drop_overloaded_type_is_error() {
+        let err = check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd Fd>n . ;\n")).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `main` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn own_drop_body_may_not_destructure_a_different_drop_overloaded_struct() {
+        // Bug 1 (round-1 review): the exemption for a word literally named
+        // `drop` must be scoped to the *one* struct its own declared effect
+        // names, not to the bare name `"drop"` -- `resolve::mangle` leaves
+        // `drop` unmangled program-wide, so any struct's own `drop` override
+        // could otherwise destructure an unrelated drop-overloaded struct and
+        // skip *that* struct's destructor. `Box`'s own `drop` here
+        // destructures `Fd`, not `Box`, so it must still be rejected.
+        let err = check_src(&format!(
+            "{FD_DEF}type: Box b i64 ;\n: drop ( Box -- ) | x | 7 Fd Fd>n drop x Box>b drop ;\n: main ( -- ) 1 Box drop ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `drop` (line 4): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn poly_body_destructuring_drop_overloaded_type_is_error() {
+        // Bug 2 (round-1 review): `poly_call_term` resolved a generated
+        // accessor through the ordinary `env` lookup with no D3 guard at all,
+        // so a generic word could destructure any drop-overloaded type and
+        // skip its destructor.
+        let err = check_src(&format!(
+            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd>n ;\n: main ( -- ) 1 sneak drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `sneak` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+
+    #[test]
+    fn field_move_of_composite_holding_resource_is_ok() {
+        // `File` has no override of its own; moving the still-linear `Fd`
+        // out of it is unguarded -- D3 fires on `Fd.has_drop_overload`, not
+        // on `File`'s. The extracted `Fd` is disposed by an ordinary bare
+        // `drop`, unrelated to D3.
+        check_src(&format!(
+            "{FD_DEF}type: File fd Fd ;\n: main ( -- ) 7 Fd File File>fd drop ;\n"
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn setter_on_drop_overloaded_type_is_not_guarded() {
+        // The functional setter returns `Fd` itself (the value stays live),
+        // and its name has no `>`, so it never matches the guard.
+        check_src(&format!("{FD_DEF}: main ( -- ) 7 Fd 8 Fd<n drop ;\n")).unwrap();
+    }
+
     fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
         Binding {
             name: name.to_string(),
@@ -11001,7 +11613,7 @@ mod tests {
         // (1) Move-state identity: consuming an outer linear local is rejected,
         // named, with the repeated-disposal reason.
         let consume = check_src(&format!(
-            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | s Spy>tag + ] times . ;\n"
+            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | i s drop + ] times . ;\n"
         ))
         .expect_err("consuming a linear local should be rejected");
         assert!(
@@ -12266,17 +12878,75 @@ mod tests {
     }
 
     #[test]
-    fn check_drop_of_an_overridden_aggregate_does_not_walk_its_fields() {
+    fn check_drop_of_an_overridden_aggregate_disposing_its_overridden_field_is_not_a_cycle() {
         // R6: case (b) must not fire when the dropped type is *itself*
-        // overridden. Dropping a `B` runs `B`'s own body, never `B`'s field
-        // glue, so walking into its `A` field here would fabricate an edge
-        // `drop@A -> drop@A` and reject a program that terminates: `drop@B`
-        // destructures its `A` field rather than dropping it.
+        // overridden -- `B`'s own body is its whole disposal, so the graph
+        // must reflect only the `drop` calls that body actually makes, never
+        // a synthesized walk of its fields. D3 requires `B`'s override to
+        // dispose its drop-overloaded `a` field with a real `drop` call
+        // (destructuring it apart from calling `drop` would itself be D3's
+        // own rejection), forming exactly one edge, `B` -> `A`; since `A`'s
+        // own override never calls back into `B`, this is not a cycle.
         let src = "type: A x i64 ; type: B a A ; \
-                   : drop ( A -- ) | a | a A>x drop 1 A B drop ; \
-                   : drop ( B -- ) | b | b B>a A>x drop ; \
-                   : main ( -- ) 1 A drop ;";
+                   : drop ( A -- ) | a | a A>x drop ; \
+                   : drop ( B -- ) | b | b B>a drop ; \
+                   : main ( -- ) 1 A B drop ;";
         check_src(src).unwrap();
+    }
+
+    #[test]
+    fn collect_drop_targets_stops_descending_at_an_overridden_struct() {
+        // R6 case (b), on `collect_drop_targets` directly. Post-D3, no legal
+        // Sooth program can discriminate this rule any more (see the
+        // `check_src`-based test above): disposing an overridden field always
+        // requires a real `drop` call, which already contributes the same
+        // edge a field-walk would synthesize, so a mutated (fields-walking)
+        // version of this function passes every `check_src` test just as the
+        // correct one does. Hand-build the registries instead: `B` overrides
+        // `drop` and has a field of type `A`, which also overrides `drop`.
+        // Walking `B`'s targets must add `B`'s own override and nothing else
+        // -- never descend into the overridden field to add `A`'s too.
+        let a = StructDecl {
+            name: "A".to_string(),
+            name_static: "A",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        };
+        let b = StructDecl {
+            name: "B".to_string(),
+            name_static: "B",
+            fields: vec![("a".to_string(), Type::Struct(StructId::from_index(0), "A"))],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        };
+        let structs = vec![a, b];
+        let mut overloads = HashMap::new();
+        overloads.insert(StructId::from_index(0), 0usize);
+        overloads.insert(StructId::from_index(1), 1usize);
+
+        let mut found = Vec::new();
+        collect_drop_targets(
+            Type::Struct(StructId::from_index(1), "B"),
+            &structs,
+            &[],
+            &[],
+            &[],
+            &overloads,
+            &mut Vec::new(),
+            &mut found,
+        );
+
+        assert_eq!(
+            found,
+            vec![1],
+            "walking B's targets must stop at B's own override, never also \
+             descend into its overridden `A` field"
+        );
     }
 
     #[test]

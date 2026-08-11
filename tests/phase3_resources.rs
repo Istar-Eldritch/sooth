@@ -56,6 +56,33 @@ fn slice8b_dogfood_compiles_and_runs() {
 }
 
 #[test]
+fn repl_dispose_of_session_defined_override_is_unaffected() {
+    // Slice 8b, R8: the `drop` import-visibility gate is native-only
+    // (`modules: None` on the REPL path), so disposing a session-defined
+    // override is byte-for-byte what it was before this slice: the destructor
+    // runs (prints `7`) and the residual stack line is exactly empty. Asserting
+    // the whole line list, not a `contains`, since the session reprints the
+    // entire residual stack every line.
+    let out = run_session(&[
+        "type: Res n i64 ;",
+        ": drop ( Res -- ) | r | r Res>n . ;",
+        "7 Res",
+        "drop",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "defined type Res",
+            "defined drop for Res",
+            "stack: <Res>",
+            "7",
+            "stack: (empty)",
+        ]
+    );
+}
+
+#[test]
 fn repl_drop_overload_still_runs_on_a_later_line() {
     // Criterion 17/R11.1: the declaring line's `WordDef` dies with that line,
     // but the destructor is re-synthesized into every subsequent line's own

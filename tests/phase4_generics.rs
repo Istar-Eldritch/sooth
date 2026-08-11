@@ -976,7 +976,7 @@ fn times_body_consuming_a_linear_local_is_error() {
     // runs N times, so consuming the outer linear `s` would dispose it N times.
     // Named `s`, with the "body runs more than once" wording.
     let err = check_error(&format!(
-        "{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 [ | i | s Spy>tag + ] times . ;\n"
+        "{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 [ | i | i s drop + ] times . ;\n"
     ));
     assert!(
         err.contains("a `times` body cannot consume `s`")
