@@ -786,12 +786,14 @@ fn row_var_misplaced_error(name: &str, span: Span) -> String {
     )
 }
 
-/// Slice 10a (R4): a `..`-prefixed name inside a quotation effect that is
-/// not the signature's own top-level row -- either a fresh name, or the
-/// signature declared no top-level row at all.
+/// Slice 10a (R4): a `..`-prefixed name inside a quotation effect that does
+/// not yet denote a row already declared at the signature's own top level --
+/// either a fresh name, or a row declared only later in the signature (e.g.
+/// an output-side row named from inside the input side), which is not the
+/// stack region present when the quotation executes.
 fn quotation_row_not_top_level_error(name: &str, span: Span) -> String {
     format!(
-        "error: row variable `{name}` at line {}, col {} inside a quotation effect must be the signature's own top-level row (none of that name is declared at the top level)",
+        "error: row variable `{name}` at line {}, col {} inside a quotation effect must be the signature's own top-level row, already declared by this point (a row named only later in the signature does not count)",
         span.line, span.col
     )
 }
@@ -1228,32 +1230,6 @@ impl<'t> Parser<'t> {
         false
     }
 
-    /// Review fix (R4): scan ahead, from the current position (just past the
-    /// signature's opening `(`), for the top-level (bracket-depth-0) `--` and
-    /// pre-intern the name immediately following it, if it is a row mention
-    /// (`..`-prefixed). Depth-tracked so a nested quotation effect's own
-    /// `--` is not mistaken for the signature's own.
-    fn preintern_output_row_name(&self, builder: &mut PolyBuilder) {
-        let mut depth: i32 = 0;
-        let mut i = self.pos;
-        while let Some((tok, _)) = self.tokens.get(i) {
-            match tok {
-                Token::LBracket | Token::TildeLBracket => depth += 1,
-                Token::RBracket => depth -= 1,
-                Token::RParen if depth == 0 => break,
-                Token::Word(w) if depth == 0 && w == "--" => {
-                    if let Some((Token::Word(w2), _)) = self.tokens.get(i + 1) {
-                        if w2.starts_with("..") {
-                            builder.row_id(w2);
-                        }
-                    }
-                    break;
-                }
-                _ => {}
-            }
-            i += 1;
-        }
-    }
 
     /// R1/R3: parse a variable-bearing effect into a `PolySig`. Runs the
     /// binding-occurrence analysis (X1/X3) and the row-variable placement rule
@@ -1262,15 +1238,6 @@ impl<'t> Parser<'t> {
     /// occurrence and every later one a use.
     fn parse_poly_effect(&mut self) -> Result<PolySig, String> {
         let mut builder = PolyBuilder::default();
-        // Review fix: pre-intern the output side's row name (if any) before
-        // parsing the input side. A nested quotation effect *inside* the
-        // input side may mention the signature's own output-side row (R4),
-        // but without this the input side is parsed first and the row index
-        // would not yet know that name, producing a false "not top level"
-        // rejection. The reverse direction needs no such pre-pass: by the
-        // time the output side is parsed, the input side's row is already
-        // interned.
-        self.preintern_output_row_name(&mut builder);
         let raw_in = self.parse_poly_slots(&mut builder, false, |tok| {
             matches!(tok, Token::RParen) || is_word(tok, "--")
         })?;
@@ -3486,20 +3453,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_row_in_quotation_effect_naming_the_not_yet_parsed_output_row_is_not_error() {
-        // Review fix: a nested quotation effect inside the *input* side may
-        // name the signature's own *output*-side row (R4), even though the
-        // output side is parsed only after the input side finishes. Without
-        // pre-interning the output row ahead of parsing, this used to trip
-        // the fresh-name rejection (`quotation_row_not_top_level_error`)
-        // even though `..t` is genuinely the signature's own top-level row.
-        let module =
-            parse_src(": f ( ~[ ..t i64 -- ..t ] i64 -- ..t i64 ) | q | q call ;").unwrap();
-        let sig = module.words[0].poly.as_ref().expect("poly sig present");
-        assert!(sig.row_out.is_some());
-    }
-
-    #[test]
     fn parse_row_in_quotation_effect_no_top_level_row_is_error() {
         // R4: any row inside a quotation effect is an error when the
         // signature declared no top-level row at all.
@@ -3534,6 +3487,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_row_in_quotation_effect_naming_an_output_only_row_from_the_input_side_is_error() {
+        // Review fix (cycle 3): a row named only on the signature's *output*
+        // side, referenced from a nested quotation effect on the *input*
+        // side, must still be rejected -- the signature declares no
+        // top-level input row at all here, so there is no stack region for
+        // the quotation to be grounded against when it executes. A prior
+        // (unsound) fix made `quotation_row_id` accept any name present
+        // anywhere in the row index, which let this compile and run with a
+        // row grounded against whatever the caller's actual stack happened
+        // to be.
+        let err = parse_src(": bad ( i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | f call ;")
+            .unwrap_err();
+        assert!(err.contains("..s"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
+        assert!(
+            !err.contains("none of that name is declared"),
+            "message must not claim the name isn't declared anywhere: {err}"
+        );
+    }
+
+    #[test]
     fn parse_row_in_non_inline_quotation_effect_is_error() {
         // Review fix (post-10a): a row's size is unknown at runtime, so only
         // an inline (`~[ ... ]`) quotation -- spliced at its call site, never
@@ -3557,6 +3531,36 @@ mod tests {
         let sig = module.words[0].poly.as_ref().expect("poly sig present");
         assert!(sig.row_in.is_some());
         assert!(sig.row_out.is_some());
+    }
+
+    #[test]
+    fn parse_row_in_non_inline_quotation_effect_nested_inside_an_inline_one_is_error() {
+        // Coverage gap (review cycle 3): the inline-only guard must reach a
+        // non-inline row-bearing quotation nested *inside* an inline one,
+        // not just a top-level non-inline quotation.
+        let err = parse_src(": fx ( ..s i64 ~[ ..s [ ..s -- ..s ] -- ..s ] -- ..s ) drop drop ;")
+            .unwrap_err();
+        assert!(err.contains("..s"), "unexpected message: {err}");
+        assert!(err.contains("inline"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_row_in_non_inline_quotation_effect_in_array_element_position_is_error() {
+        // Coverage gap (review cycle 3): the guard must also reach a
+        // row-bearing quotation appearing as an array element type.
+        let err = parse_src(": fx ( ..s i64 [ [ ..s -- ..s ] 3 ] -- ..s ) drop drop ;")
+            .unwrap_err();
+        assert!(err.contains("..s"), "unexpected message: {err}");
+        assert!(err.contains("inline"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_row_in_non_inline_quotation_effect_on_output_side_is_error() {
+        // Coverage gap (review cycle 3): the guard must also reach a
+        // row-bearing quotation on the signature's output side.
+        let err = parse_src(": fx ( ..s i64 -- ..s [ ..s -- ..s ] ) drop ;").unwrap_err();
+        assert!(err.contains("..s"), "unexpected message: {err}");
+        assert!(err.contains("inline"), "unexpected message: {err}");
     }
 
     #[test]
