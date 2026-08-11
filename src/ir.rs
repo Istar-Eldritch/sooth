@@ -3275,12 +3275,79 @@ impl<'a> FuncBuilder<'a> {
                 self.quot_bodies.insert(v, id);
                 self.stack.push(v);
             }
-            // Slice 6h phase 1 stub: phase 3 replaces this with one
-            // `Instr::Alloc` plus a byte-granular zero-init loop (D3). A
-            // placeholder value keeps the stack depth right for now.
-            TermKind::ArrayCtor(_) => {
-                let v = self.fresh_value(IrType::I64);
-                self.stack.push(v);
+            // Slice 6h (D3): one `Instr::Alloc` for the array's inline
+            // aggregate, then a byte-granular zero-init loop of exactly
+            // `ArrayLayout::size` bytes. Byte granularity (not a word store)
+            // because an array is not word-padded, so a wider store would
+            // overrun the allocation; the runtime cost is a deliberate trade
+            // for one obviously-correct path (code size stays O(1) in Count).
+            TermKind::ArrayCtor(ty) => {
+                let Type::Array(id, _) = *ty else {
+                    unreachable!("the parser only ever interns a Type::Array for an ArrayCtor term")
+                };
+                // Save/restore the enclosing loop state so this loop composes
+                // with a later `Alloc` or loop (see `save_loop_state`).
+                let saved_loop_state = self.save_loop_state();
+                let size = self.arrays.layouts[id.index()].size;
+                // The destination reaches the loop body and the exit block by
+                // dominance; it must not be carried, or the back-edge staging
+                // blit would copy a stale snapshot over each iteration's store.
+                let dst = self.alloc_array(id);
+
+                let seed = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(seed, 0));
+                self.const_vals.insert(seed, 0);
+                // Carry only the induction index, with `stage_aggregates =
+                // false`.
+                let outs = self.begin_loop(&[seed], false);
+                let index_phi = outs[0];
+
+                // Header (current after `begin_loop`): loop while index < size.
+                let bound = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(bound, size as i64));
+                self.const_vals.insert(bound, size as i64);
+                let cmp = self.fresh_value(IrType::Bool);
+                self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, bound));
+                let body_block = self.fresh_block();
+                let exit_block = self.fresh_block();
+                self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
+
+                // Body: store one zero byte at `dst + index`. `ElemAddr` with
+                // `stride = 1` gives byte addressing off the runtime index; a
+                // `FieldStore` of an 8-bit-typed `Const` picks `storeb`.
+                self.start_block(body_block);
+                self.terminated = false;
+                let fptr = self.elem_addr(dst, index_phi, 1);
+                let zero = self.fresh_value(IrType::Int {
+                    bits: 8,
+                    signed: false,
+                });
+                self.push_instr(Instr::Const(zero, 0));
+                self.push_instr(Instr::FieldStore(fptr, zero));
+
+                // Back-edge: index + 1.
+                let one = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Const(one, 1));
+                self.const_vals.insert(one, 1);
+                let index_next = self.fresh_value(IrType::I64);
+                self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
+                self.back_edges.push((self.cur_id, vec![index_next]));
+                self.seal_block(Terminator::Jmp(
+                    self.header.expect("array ctor loop header"),
+                ));
+
+                self.finalize_loop();
+
+                // Exit: the array is the constructor's result. The fixed loop
+                // body never terminates, so `terminated` is already false here
+                // (unlike the `times` arm, whose spliced user body can); the
+                // reset keeps this arm identical to the loop template so it
+                // stays correct if the body ever gains a terminating term.
+                self.start_block(exit_block);
+                self.terminated = false;
+                self.stack.push(dst);
+
+                self.restore_loop_state(saved_loop_state);
             }
         }
     }
@@ -4074,9 +4141,9 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// `dst = base + index*stride`, a `Ptr` (R17): every caller is a
-    /// reference projection, so a `FieldLoad`/`FieldStore` through `dst`
-    /// always follows.
+    /// `dst = base + index*stride`, a `Ptr` (R17): a `FieldLoad`/`FieldStore`
+    /// through `dst` always follows, either a reference projection (`&>`) or
+    /// the array constructor's byte-granular zero-init store (slice 6h).
     fn elem_addr(&mut self, base: Value, index: Value, stride: u32) -> Value {
         let dst = self.fresh_value(IrType::Ptr);
         self.push_instr(Instr::ElemAddr(dst, base, index, stride as i64));
@@ -6396,6 +6463,74 @@ mod tests {
         assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
         assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 4);
         assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn array_constructor_emits_exactly_one_alloc_of_correct_size() {
+        // D3: the constructor allocs exactly one array slot, sized to the
+        // layout (`[i64 10]` is 80 bytes / align 8), not one Alloc per element.
+        let src = ": w ( -- ) [ i64 ; 10 ] drop ;";
+        let ir = lower_src(src);
+        let w = &ir.funcs[0];
+        let (size, align) = {
+            let a = arrays_of(src);
+            (a.layouts[0].size, a.layouts[0].align)
+        };
+        assert_eq!((size, align), (80, 8));
+        let allocs: Vec<(u32, u32)> = w
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::Alloc(_, s, al) => Some((*s, *al)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(allocs, vec![(size, align)]);
+    }
+
+    #[test]
+    fn array_constructor_zero_init_uses_stride_one_and_bounds_by_layout_size() {
+        // The zero-init loop is byte-granular: exactly one `ElemAddr` with
+        // `stride == 1` (a stride of 8 would skip 7 of every 8 bytes), and its
+        // loop bound is a `Const` equal to `ArrayLayout::size` (a bound of
+        // `count` would zero only the first `count` bytes). An
+        // instruction-*kind* assertion would catch neither mutation.
+        let src = ": w ( -- ) [ i64 ; 10 ] drop ;";
+        let ir = lower_src(src);
+        let w = &ir.funcs[0];
+        let size = arrays_of(src).layouts[0].size; // 80
+        let strides: Vec<i64> = w
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::ElemAddr(_, _, _, s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strides, vec![1], "one byte-granular ElemAddr, stride 1");
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::Const(_, v) if *v == size as i64)),
+            1,
+            "the loop bound is one Const equal to ArrayLayout::size"
+        );
+    }
+
+    #[test]
+    fn array_constructor_instruction_count_is_independent_of_count() {
+        // A runtime zero-init loop is O(1) in Count: the emitted instruction
+        // count is identical at 4 and 64 (an unrolled lowering would grow), and
+        // above a small floor so an empty lowering cannot satisfy it.
+        let n4 = count(&lower_src(": w ( -- ) [ i64 ; 4 ] drop ;").funcs[0], |_| {
+            true
+        });
+        let n64 = count(
+            &lower_src(": w ( -- ) [ i64 ; 64 ] drop ;").funcs[0],
+            |_| true,
+        );
+        assert_eq!(n4, n64);
+        assert!(n4 > 4, "not an empty lowering: {n4}");
     }
 
     #[test]
