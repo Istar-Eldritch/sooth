@@ -586,15 +586,15 @@ own scan exactly like one it binds — dying at its own last use in an execute-o
 pinned live for the whole body once used anywhere inside a `times`/quotation body. See the
 prose above ("Second bug found in review") and `docs/phase4-slice6f-spec.md`'s D6/M4/M5.
 
-**Next action: Phase 4 Slice 8b.** 7b (capturing closures) and 8a (ad-hoc dispatch: static
-overloading, the mechanism) are both done on `main`, though 8a's own "is implemented" exit
-marker was never added to this file's 8a heading below — a pre-existing gap, not fixed here.
-Slice 9 shipped P1–P2 only (`Bool` as a library enum, merged at `c5db035`); its `if`/`cond`
-half (P3–P5) needs a row variable inside a quotation's declared effect, which does not parse
-before slice 10a, and is split out as **slice 10c** (`docs/phase4-slice10c-brief.md`),
-renumbered into slice 10's lineage since it extends 10a's row mechanism and gates on 10a
-phases 1–4, i.e. everything up to and including grounding (not on 10b). 8b (polymorphic `drop`) is next, now scoped to include the module-scoped `env` fix 8a
-left open (see 8b's heading below).
+**Next action: Phase 4 Slice 10a** (row variables inside a quotation's declared effect, in
+progress). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
+and 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
+module-scoping gap) are all done on `main`. Slice 9 shipped P1–P2 only (`Bool` as a library
+enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
+quotation's declared effect, which does not parse before slice 10a, and is split out as
+**slice 10c** (`docs/phase4-slice10c-brief.md`), renumbered into slice 10's lineage since it
+extends 10a's row mechanism and gates on 10a phases 1–4, i.e. everything up to and including
+grounding (not on 10b).
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1790,7 +1790,8 @@ then find out what the compiler owes it.
    overload (an 8a case) for `Bool`'s type-directed printing, not `drop`'s, so it does not
    have to wait on 8b's argument to be settled.
 
-   **8a — the mechanism.** The compiler already does this by hand and this slice is where it
+   **8a — the mechanism. ✅ done** (brief + spec: `docs/phase4-slice8a-brief.md`,
+   `docs/phase4-slice8a-spec.md`). The compiler already does this by hand and this slice is where it
    stops: the numeric-tower operators and `.` (type-directed over any printable scalar)
    dispatch on the concrete operand type inside `check_operator`/`check_term` match arms
    rather than through any table — which is why `builtin_table` is empty. `len`'s
@@ -1899,7 +1900,8 @@ then find out what the compiler owes it.
    overlap each a located error, and no definition left silently unreachable.
 
    **8b — `drop`'s import visibility and destructure guard, plus 8a's own operator
-   module-scoping gap.** Disposal for
+   module-scoping gap. ✅ done** (brief + spec: `docs/phase4-slice8b-brief.md`,
+   `docs/phase4-slice8b-spec.md`). Disposal for
    a resource lives on a one-field leaf wrapper where the resource enters the language
    (`type: Fd n i64 ; : drop ( Fd -- ) ... ;`); a composite like `File` holds an undeclared
    `Fd` field and inherits disposal structurally, with no `type:` surface and no named-word
