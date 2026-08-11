@@ -1667,6 +1667,53 @@ then find out what the compiler owes it.
    **Exit:** a reference bound to a local, used and then finished with, no longer blocks
    consuming the place it borrowed; the in-place accumulator body compiles as written; and a
    test proves the borrow is still rejected when the reference is used *after* the consume.
+
+   **6g — combinator splices never learned 6f's granting rule, so a consumed `Copy`-array
+   local is misread as a live alias at every combinator call.** `check_terms`
+   (`src/check.rs:8037`) is the plain root-invocation entry point 6f's own contract names:
+   "nothing is ancestor to those, so both [`outer_releasable`, `back_edge`] are empty/false."
+   `inline_combinator` (`:7194`) calls it unconditionally when splicing a combinator's body
+   (`filter`/`map`/`fold`/`while`/any user quotation-taking word), even though a splice is
+   exactly the nested-invocation shape `times`/`if`/`call` (`:8311`, `:8397`, `:8797`) instead
+   route through `check_terms_relaxed` with a `releasable_into`-computed set. Every array in
+   Sooth is `Copy` (`fill` rejects a linear element outright — no other array constructor
+   exists), so naming one never enters `Moves` (`Moves::take`'s own doc: "a Copy local never
+   appears" in its map) — `aliasing_origin`'s move-check is permanently blind for arrays,
+   leaving `Liveness::dead` as the only remaining guard. Because `inline_combinator` never
+   grants the caller's already-consumed local into the spliced body's scan, that local has no
+   entry in the splice's own `last_use` table and `dead()`'s fallback (`None =>
+   self.outer_releasable.contains(name)`) is always false for it, so it reads as permanently
+   live. Minimal repro, confirmed against the current compiler:
+
+   ```
+   0 4 fill | a |
+   a [ 4 > ] c::filter drop drop
+   → error: cannot borrow `arr__inl0` mutably: it is aliased by `a`
+   ```
+
+   Reported and deferred at 6b's own recon 10 ("a pre-existing 6a inliner limitation... whether
+   to fix the underlying alias-after-move tracking is 6a's business, not this slice's") but
+   never root-caused until now; the same mechanism produces a false rejection nesting `while`
+   inside a `times` loop that swaps array-typed row bindings, or splitting merge logic into a
+   separate quotation-taking word called from that loop — `lib/arrays.sth`'s `sort` currently
+   works around it by inlining its merge logic into one word and avoiding `while` for its
+   inner loop.
+   **Fix:** thread a `releasable_into`-computed `outer_releasable` set (and the correct
+   `back_edge` value — `true` for a self-tail combinator splice, matching `times`'s own
+   back-edge) through `inline_combinator`'s call, switching it from `check_terms` to
+   `check_terms_relaxed`, mirroring the three sites that already do this correctly.
+   **Exit:** the recon-10 minimal case above compiles clean; `lib/arrays.sth`'s `sort` no
+   longer needs the inline-everything/no-`while` workaround (the header comment documenting
+   it is deleted, and the merge logic may be restructured to use `while`/a separate word if
+   that reads better — not required, but the workaround's *rationale* must no longer hold);
+   and a mutation test proves the fix by reverting `inline_combinator`'s call and confirming
+   the recon-10 case starts failing again.
+   Depends on 6f (uses its exact granting machinery); independent of 7-10's own mechanisms.
+   **Sequenced after slice 10a lands** (avoid disrupting in-flight work) **and before 10b/10c
+   begin**: both widen this bug's blast radius by turning a compiler-intrinsic control-flow
+   form into a combinator splice — 10b for every `times` loop, 10c for every `if` in the
+   language — so fixing this first keeps neither slice from silently multiplying a
+   pre-existing, already-load-bearing false rejection across most existing Sooth code.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
