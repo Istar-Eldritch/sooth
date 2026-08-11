@@ -2394,6 +2394,7 @@ impl Session {
             &self.structs,
             &self.enums,
             &self.arrays,
+            None,
             &mut builtin_overloads,
         )?;
 

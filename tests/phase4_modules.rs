@@ -459,6 +459,91 @@ fn imported_resource_qualified_only_non_disposal_uses_compile() {
     assert_eq!(code, 0);
 }
 
+// Slice 8b goldens (R13): 8a's operator module-scoping fix. A bare operator
+// resolves against the overloads visible to the calling module, so a module's
+// own overload is reachable bare even in a >=2-module build (where the decl is
+// mangled per module), a selectively-unimported overload does not leak, and the
+// single-module corpus is byte-for-byte unchanged.
+
+#[test]
+fn own_module_operator_overload_reachable_bare_in_multi_module() {
+    // R13: `main` declares `+` for its own `Vec2`, with `lib` in the closure
+    // forcing the operator decl to mangle to `+__m{k}`. The bare `+` now
+    // resolves to the own overload; before the fix `env.get("+")` missed it and
+    // the call fell to the builtin, which rejects the struct operands.
+    let c = Closure::new("own-operator-multi");
+    c.write("lib.sth", ": p ( -- i64 ) 0 ;\nexport: p ;\n");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: lib \"lib.sth\" ;\n",
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": main ( -- ) lib::p . 1 2 Vec2 3 4 Vec2 + Vec2>x . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "0\n1\n",
+        "the own `+` overload dispatched, keeping the first operand's x"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn selectively_imported_operator_does_not_hijack_unrelated_module() {
+    // R13: `main` imports `x`'s type qualified-only, so it holds `x::XT` values
+    // but never imported `x`'s `+` by name. A bare `+` on two XT operands is the
+    // ordinary operand-mismatch error, not a silent dispatch to `x`'s word.
+    let c = Closure::new("operator-no-hijack");
+    c.write(
+        "x.sth",
+        concat!(
+            "type: XT v i64 ;\n",
+            ": mk ( i64 -- XT ) XT ;\n",
+            ": + ( XT XT -- XT ) drop ;\n",
+            "export: XT mk ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: x \"x.sth\" ;\n",
+            ": main ( -- ) 1 x::mk 2 x::mk + x::XT>v . ;\n",
+        ),
+    );
+    let err = build_err(&entry);
+    assert!(
+        err.contains("`+` requires two operands of the same numeric type"),
+        "the bare `+` falls to the builtin, not x's overload: {err}"
+    );
+    assert!(
+        err.contains("found `XT` and `XT`"),
+        "names the rejected struct operand type: {err}"
+    );
+}
+
+#[test]
+fn single_module_operator_overload_unchanged() {
+    // R13 (regression / mutation guard): a single-file program overloading `+`
+    // on a struct compiles and runs exactly as before. The decl is left bare in
+    // a single-module build, so the assembly degenerates to the flat
+    // `env.get("+")` via the `modules.len() < 2` fallback -- deleting that
+    // branch would seek `+__m0` (which does not exist) and fail this test.
+    let c = Closure::new("single-operator");
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 ) drop ;\n",
+            ": main ( -- ) 1 2 Vec2 3 4 Vec2 + Vec2>x . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "1\n", "the single-file `+` overload dispatched");
+    assert_eq!(code, 0);
+}
+
 // Phase 4 goldens: selective import (the optional additive `| name... |`
 // clause). A selectively imported name is exposed unqualified in addition to
 // the always-available qualifier (R20), a private one is a visibility error,

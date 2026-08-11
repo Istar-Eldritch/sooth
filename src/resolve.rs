@@ -28,7 +28,7 @@ use std::collections::HashSet;
 /// two different structs never collide on the name, since neither is ever
 /// registered under it. Every other name gains a `__m{module}` component,
 /// minted so no punctuation reaches a symbol sanitizer (D8).
-fn mangle(name: &str, module: u32) -> String {
+pub(crate) fn mangle(name: &str, module: u32) -> String {
     if name == "main" || name == "drop" {
         return name.to_string();
     }

@@ -2273,6 +2273,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     structs,
                     enums,
                     arrays,
+                    Some(modules),
                     &mut builtin_overloads,
                 )?;
             }
@@ -5006,6 +5007,7 @@ pub(crate) fn check_poly_combinator_repl(
 /// comparisons need `Ord`), local bind/read, and being returned; every other
 /// type-directed operation on it is a located error naming the variable, so a
 /// body a real instantiation would reject can never slip through.
+#[allow(clippy::too_many_arguments)]
 pub fn check_poly_body(
     word: &WordDef,
     sig: &PolySig,
@@ -5013,11 +5015,14 @@ pub fn check_poly_body(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
-    // Phase 1 (slice 8b): the poly body path does not reach the concrete
-    // `drop` gate; 8a's operator fix threads real `modules` here in phase 3.
-    let ctx = word_ctx(word, structs, enums, None);
+    // R12 (slice 8b, 8a): the caller module's operator visibility rides on
+    // `ctx`, so a bare operator in a poly body resolves against the same
+    // scoped candidate set a concrete body does. `Some` from `check::check`,
+    // `None` from `repl.rs` (the REPL path is unscoped, R8).
+    let ctx = word_ctx(word, structs, enums, modules);
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
         WordBody::Clauses(_) => {
@@ -5498,21 +5503,27 @@ fn poly_delegate_op(
             _ => unreachable!("suffix is all concrete by construction"),
         })
         .collect();
-    let handled = match check_operator(name, span, &mut cstack, ctx, env.get(name).map(|v| &v[..]))?
-    {
+    // R12 (slice 8b, 8a): the poly operator path scopes candidates to the
+    // calling module exactly like the concrete path; `None` (REPL /
+    // single-module) falls back to the flat `env.get(name)`.
+    let scoped_ops = scoped_operator_overloads(ctx, env, name);
+    let op_candidates = match &scoped_ops {
+        Some(v) => Some(&v[..]),
+        None => env.get(name).map(|v| &v[..]),
+    };
+    let handled = match check_operator(name, span, &mut cstack, ctx, op_candidates)? {
         OpDispatch::Builtin(s) => {
             cstack = s;
             true
         }
         // R6/R7: a builtin-row exact miss whose operands exactly match one of
-        // this name's env candidates dispatches to that user word, same as
+        // this name's scoped candidates dispatches to that user word, same as
         // `check_term`'s call site: apply the chosen candidate's own outputs
         // (the resolver already confirmed its inputs equal the operands).
         OpDispatch::UserOverload(symbol) => {
-            let sig = &env
-                .get(name)
+            let sig = &op_candidates
                 .and_then(|c| c.iter().find(|o| o.symbol == symbol))
-                .expect("check_operator resolved this symbol from this env candidate set")
+                .expect("check_operator resolved this symbol from this scoped candidate set")
                 .sig;
             cstack.truncate(cstack.len() - sig.inputs.len());
             cstack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
@@ -8456,7 +8467,17 @@ fn check_term(
             if let Some(stack) = check_shuffle(name, span, &mut stack, ctx, arrays, prov)? {
                 return Ok(stack);
             }
-            match check_operator(name, span, &mut stack, ctx, env.get(name).map(|v| &v[..]))? {
+            // R12 (slice 8b, 8a): a bare operator resolves against the
+            // overloads visible to the calling module, not the flat `env`
+            // lookup that misses a per-module-mangled decl in a multi-module
+            // build. `None` (REPL / single-module) falls back to the flat
+            // lookup unchanged.
+            let scoped_ops = scoped_operator_overloads(ctx, env, name);
+            let op_candidates = match &scoped_ops {
+                Some(v) => Some(&v[..]),
+                None => env.get(name).map(|v| &v[..]),
+            };
+            match check_operator(name, span, &mut stack, ctx, op_candidates)? {
                 OpDispatch::Builtin(stack) => return Ok(stack),
                 // Slice 8a phase 2 (R6/R7): a builtin operator name whose
                 // operands match a user overload exactly dispatches to the
@@ -8567,10 +8588,21 @@ fn check_term(
             // before; an overload set resolves by exact operand match here and
             // records the chosen candidate's symbol, so lowering calls that
             // definition rather than whichever body the name alone would find.
-            let candidates = env
-                .get(name)
-                .ok_or_else(|| unknown_word_error(ctx, span, name))?;
-            let chosen = match &candidates[..] {
+            //
+            // R12 (slice 8b, 8a): a bare operator whose `check_operator` arm
+            // returned `UserOverload` falls through to here to reuse the
+            // move/borrow discipline, but its decl is mangled per module in a
+            // multi-module build, so the flat `env.get(name)` misses it.
+            // `scoped_ops` (computed once above) is `Some` exactly for an
+            // operator name under module scoping and carries the caller-visible
+            // overloads; every other name still resolves through `env`.
+            let candidates = match &scoped_ops {
+                Some(v) => v.as_slice(),
+                None => env
+                    .get(name)
+                    .ok_or_else(|| unknown_word_error(ctx, span, name))?,
+            };
+            let chosen = match candidates {
                 [only] => only,
                 _ => {
                     let operands: Vec<Type> = stack.iter().map(|s| s.ty).collect();
@@ -10429,6 +10461,48 @@ fn is_name_visible_to_module(
     name: &str,
 ) -> bool {
     defining == caller || modules[caller as usize].selective.get(name) == Some(&defining)
+}
+
+/// R12 (slice 8b, 8a): the operator overloads of `name` visible to the calling
+/// module. `None` means "module scoping does not apply -- use the flat
+/// `env.get(name)`": the REPL path (`ctx.modules()` is `None`) and a
+/// single-module build, where `resolve_modules` leaves an operator decl bare
+/// (`+`, not `+__m0`) so the flat lookup already finds the own overload. In a
+/// multi-module build every operator decl is mangled per module, so a bare
+/// lookup of `+` is `None`; assemble the caller's own overload (under
+/// `mangle(name, M)`) plus one it selectively imported, membership decided by
+/// `is_name_visible_to_module` (R1), never re-derived.
+fn scoped_operator_overloads(
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    name: &str,
+) -> Option<Vec<Overload>> {
+    // Only a builtin operator name is left bare by `resolve_modules` and so
+    // scoped here; every other bare call was already rewritten to its mangled
+    // spelling, and re-mangling that would only miss (`foo__m0__m0`). This is
+    // also what keeps the fall-through env-call path (which reads this result)
+    // from corrupting an ordinary word's candidate lookup.
+    if !BUILTIN_TABLE.contains_key(name) {
+        return None;
+    }
+    let modules = ctx.modules()?;
+    if modules.len() < 2 {
+        return None;
+    }
+    let caller = ctx.module();
+    let mut defining = vec![caller];
+    if let Some(&k) = modules[caller as usize].selective.get(name) {
+        defining.push(k);
+    }
+    let mut out: Vec<Overload> = Vec::new();
+    for d in defining {
+        if is_name_visible_to_module(modules, caller, d, name) {
+            if let Some(cands) = env.get(&crate::resolve::mangle(name, d)) {
+                out.extend(cands.iter().cloned());
+            }
+        }
+    }
+    Some(out)
 }
 
 /// R4 (slice 8b, D1): reject a bare `drop` of an imported resource type whose
