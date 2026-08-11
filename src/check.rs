@@ -14015,6 +14015,49 @@ mod tests {
     }
 
     #[test]
+    fn fill_forwards_surviving_set_so_a_returned_array_rejects_an_escaping_capture() {
+        // D4/R19: `check_array_word`'s "fill" arm forwards the element's
+        // surviving-capture-set (`let surviving = element.surviving;`) onto
+        // the array it produces, exactly as a struct/enum constructor's
+        // output does -- the array is the closure's carrier now, having
+        // replicated it N times. `Boxed>f` materializes a quotation field
+        // getter's output with its surviving set intact (the R19/R22 comment
+        // on the generic accessor path), so `b Boxed>f` hands `fill` an
+        // already-erased closure whose surviving set has one frame-rooted
+        // member (`r`, a reference into `mk`'s own local `arr`). If `fill`
+        // did not forward that set onto the array, `mk`'s R22 word-output
+        // walk over its final stack would find nothing suspicious and wrongly
+        // accept a program that returns a carrier holding a dangling
+        // reference into a frame that no longer exists.
+        //
+        // This is the only place this forwarding can be tested: `Slot`/
+        // `surviving` is check-time-only and never reaches the IR, so no
+        // IR-level assertion can exercise it (see `ir::tests`'s renamed
+        // `fill_lowering_result_reaches_a_reference_consumer`). Mutating
+        // `check.rs`'s forwarding line to `let surviving = None;` makes this
+        // program wrongly build (verified by hand); restoring it makes this
+        // assertion hold.
+        let err = check_src(
+            "type: Boxed f [ -- i64 ] ;\n\
+             : mk ( -- [ [ -- i64 ] 4 ] )\n\
+             0 4 fill | arr |\n\
+             &arr | r |\n\
+             [ r 0 >usize &> @ ] Boxed | b |\n\
+             b Boxed>f\n\
+             4 fill ;\n\
+             : main ( -- ) mk drop ;\n",
+        )
+        .expect_err(
+            "an escaping frame-rooted capture, carried through `fill`'s array, must be rejected",
+        );
+        assert!(
+            err.contains("an escaping closure captures `r`")
+                && err.contains("does not survive the return"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
     fn check_print_on_array_is_error() {
         // X6/R13: `.` on an array is a sharp located error naming `[T N]`.
         let err = check_src(": w ( -- ) 0 4 fill . ;").unwrap_err();

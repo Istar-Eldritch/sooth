@@ -6566,11 +6566,22 @@ mod tests {
     }
 
     #[test]
-    fn fill_lowering_preserves_surviving_set() {
+    fn fill_lowering_result_reaches_a_reference_consumer() {
         // D4: the re-lowering must not disturb `fill`'s consumed operands nor
         // leave the array off the stack. A `fill` result that is then used
         // (indexed via a reference) lowers and reads back the seed, proving the
         // filled array survives the loop and reaches its consumer.
+        //
+        // This does NOT cover R19 surviving-capture-set forwarding
+        // (`check.rs`'s `let surviving = element.surviving;` in
+        // `check_array_word`'s "fill" arm): `Slot`/`surviving` is a check-time
+        // concept the IR never sees (`lower_src` returns an `IrModule` with no
+        // Slot-level information), so no IR-level assertion can exercise it.
+        // The real regression test for that forwarding is
+        // `check::tests::fill_forwards_surviving_set_so_a_returned_array_rejects_an_escaping_capture`
+        // (an end-to-end located-error test, since deleting the forwarding
+        // makes an unsound program wrongly build rather than change any IR
+        // shape).
         let ir = lower_src(": w ( -- i64 ) 7 4 fill | a | &a 1 &> @ ;");
         let w = &ir.funcs[0];
         // One alloc for the array; the loop stores the seed; the consumer
