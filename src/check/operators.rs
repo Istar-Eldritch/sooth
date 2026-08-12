@@ -329,6 +329,7 @@ pub(super) fn check_operator(
     Ok(OpDispatch::Builtin(std::mem::take(stack)))
 }
 
+/// Both-operand type mismatch for a homogeneous operator (`+ - * = < >`):
 /// mixed int/float, mixed integer widths/signs, mixed float widths, or a
 /// `bool` operand, name both operand types (X1, X2).
 fn operand_pair_mismatch_error(ctx: &Ctx, span: Span, op: &str, a: Type, b: Type) -> String {
