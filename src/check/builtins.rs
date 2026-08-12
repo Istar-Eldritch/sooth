@@ -286,3 +286,430 @@ pub(super) fn contains_reference(
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    /// Assert `name`'s rows are exactly a homogeneous `(T T -- T)` set, one
+    /// per type in `want`, all lowering `lower`. Shared shape for the
+    /// binary numeric-tower operators, mirroring
+    /// `builtin_table_plus_has_a_row_per_numeric_type`.
+    fn assert_homogeneous_binary_rows(name: &str, want: Vec<Type>, lower: BuiltinLower) {
+        let table = builtin_table();
+        let rows = table
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is a builtin operator"));
+        assert_eq!(rows.len(), want.len(), "row count for `{name}`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], r.outputs[0]],
+                    "a `{name}` row is homogeneous `(T T -- T)`"
+                );
+                assert_eq!(r.lower, lower, "`{name}` lowers `{lower:?}`");
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = want;
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `{name}` row per expected type, no more");
+    }
+    /// Assert `name`'s rows are the irregular `(T, i64 -- T)` shape (the
+    /// shift-amount operand is always `i64` regardless of `T`), one per
+    /// `int_types()`, lowering `lower`. Nothing before slice 8a fix 4 checked
+    /// that the *second* input type is right: a row wrongly shaped `(T, T --
+    /// T)` would still pass `builtin_table_plus_has_a_row_per_numeric_type`-
+    /// style checks that only compare `inputs[0]`/`inputs[1]` against
+    /// `outputs[0]`.
+    fn assert_shift_rows(name: &str, lower: BuiltinLower) {
+        let table = builtin_table();
+        let rows = table
+            .get(name)
+            .unwrap_or_else(|| panic!("`{name}` is a builtin operator"));
+        let want = int_types();
+        assert_eq!(rows.len(), want.len(), "row count for `{name}`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], Type::I64],
+                    "a `{name}` row is `(T, i64 -- T)`, the count is always `i64`"
+                );
+                assert_eq!(r.lower, lower, "`{name}` lowers `{lower:?}`");
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = want;
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `{name}` row per int type, no more");
+    }
+    #[test]
+    fn builtin_table_plus_has_a_row_per_numeric_type() {
+        // Q-A: `+` resolves by exact operand type, so the table carries one
+        // homogeneous `(T T -- T)` row for every numeric type and nothing
+        // else. Anchored to the literal count (12: eight fixed-width ints,
+        // usize/isize, two floats) rather than `numeric_types()` itself, so
+        // shrinking that function can't shrink both sides of the comparison
+        // together and hide a wiring bug.
+        let table = builtin_table();
+        let rows = table.get("+").expect("`+` is a builtin operator");
+        assert_eq!(rows.len(), 12, "12 numeric rows");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(
+                    r.inputs,
+                    vec![r.outputs[0], r.outputs[0]],
+                    "a `+` row is homogeneous `(T T -- T)`"
+                );
+                assert_eq!(r.lower, BuiltinLower::Add);
+                r.outputs[0]
+            })
+            .collect();
+        let mut want = numeric_types();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `+` row per numeric type, no more");
+    }
+    #[test]
+    fn builtin_table_sub_has_a_row_per_numeric_type() {
+        assert_homogeneous_binary_rows("-", numeric_types(), BuiltinLower::Sub);
+    }
+    #[test]
+    fn builtin_table_mul_has_a_row_per_numeric_type() {
+        assert_homogeneous_binary_rows("*", numeric_types(), BuiltinLower::Mul);
+    }
+    #[test]
+    fn builtin_table_div_has_a_row_per_float_type() {
+        // `/` is float-only (D7): the integer tower divides via a separate
+        // hand-written path this table does not cover.
+        assert_homogeneous_binary_rows("/", float_types(), BuiltinLower::DivFloat);
+    }
+    #[test]
+    fn builtin_table_mod_has_a_row_per_int_type() {
+        assert_homogeneous_binary_rows("mod", int_types(), BuiltinLower::Mod);
+    }
+    #[test]
+    fn builtin_table_max_has_a_row_per_int_type() {
+        // `max` is integer-only: `max-total` is the float twin (D7).
+        assert_homogeneous_binary_rows("max", int_types(), BuiltinLower::Max);
+    }
+    #[test]
+    fn builtin_table_max_total_has_a_row_per_float_type() {
+        assert_homogeneous_binary_rows("max-total", float_types(), BuiltinLower::MaxTotal);
+    }
+    #[test]
+    fn builtin_table_and_has_a_row_per_int_type_plus_bool() {
+        // `and`/`or`/`xor` are bitwise on every integer width and logical on
+        // `bool` (eager evaluation makes bitwise-on-0/1 coincide with
+        // logical), so their domain is `int_types()` plus one `bool` row.
+        let mut want = int_types();
+        want.push(Type::BOOL);
+        assert_homogeneous_binary_rows("and", want, BuiltinLower::And);
+    }
+    #[test]
+    fn builtin_table_or_has_a_row_per_int_type_plus_bool() {
+        let mut want = int_types();
+        want.push(Type::BOOL);
+        assert_homogeneous_binary_rows("or", want, BuiltinLower::Or);
+    }
+    #[test]
+    fn builtin_table_xor_has_a_row_per_int_type_plus_bool() {
+        let mut want = int_types();
+        want.push(Type::BOOL);
+        assert_homogeneous_binary_rows("xor", want, BuiltinLower::Xor);
+    }
+    #[test]
+    fn builtin_table_not_has_a_row_per_int_type_plus_bool() {
+        // `not` is unary, so it does not fit `assert_homogeneous_binary_rows`
+        // (a `(T -- T)` shape, not `(T T -- T)`).
+        let table = builtin_table();
+        let rows = table.get("not").expect("`not` is a builtin operator");
+        let mut want = int_types();
+        want.push(Type::BOOL);
+        assert_eq!(rows.len(), want.len(), "row count for `not`");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(r.inputs, vec![r.outputs[0]], "a `not` row is `(T -- T)`");
+                assert_eq!(r.lower, BuiltinLower::Not);
+                r.outputs[0]
+            })
+            .collect();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want, "one `not` row per int type plus `bool`, no more");
+    }
+    #[test]
+    fn builtin_table_shl_rows_take_an_i64_count_regardless_of_element_type() {
+        assert_shift_rows("shl", BuiltinLower::Shl);
+    }
+    #[test]
+    fn builtin_table_shr_rows_take_an_i64_count_regardless_of_element_type() {
+        assert_shift_rows("shr", BuiltinLower::Shr);
+    }
+    #[test]
+    fn builtin_table_comparisons_have_a_row_per_numeric_type() {
+        use crate::ir::CmpOp;
+        let table = builtin_table();
+        for (op, cmp) in [
+            ("=", CmpOp::Eq),
+            ("<", CmpOp::Lt),
+            (">", CmpOp::Gt),
+            ("<=", CmpOp::Le),
+            (">=", CmpOp::Ge),
+            ("<>", CmpOp::Ne),
+        ] {
+            let rows = table
+                .get(op)
+                .unwrap_or_else(|| panic!("`{op}` is a builtin operator"));
+            let want = numeric_types();
+            assert_eq!(rows.len(), want.len(), "row count for `{op}`");
+            let mut got: Vec<Type> = rows
+                .iter()
+                .map(|r| {
+                    assert_eq!(r.outputs, vec![Type::BOOL], "`{op}` produces `bool`");
+                    assert_eq!(r.inputs.len(), 2, "`{op}` is binary");
+                    assert_eq!(r.inputs[0], r.inputs[1], "a `{op}` row is homogeneous");
+                    assert_eq!(
+                        r.lower,
+                        BuiltinLower::Cmp(cmp),
+                        "`{op}` lowers `Cmp({cmp:?})`"
+                    );
+                    r.inputs[0]
+                })
+                .collect();
+            let mut want = want;
+            got.sort_by_key(|t| t.name());
+            want.sort_by_key(|t| t.name());
+            assert_eq!(got, want, "one `{op}` row per numeric type, no more");
+        }
+    }
+    #[test]
+    fn builtin_table_has_a_row_per_printable_type_for_print() {
+        // Rule 6: `.` dispatches over 14 printable types, each a `(T -- )` row
+        // lowering a `Print`. Mutation-check: dropping the printable loop or a
+        // `push` in `printable_types` fails this. `bool` is not among them
+        // (slice 9 R6): it dispatches through the injected library overload.
+        let table = builtin_table();
+        let rows = table.get(".").expect("`.` is a builtin operator");
+        assert_eq!(rows.len(), 14, "14 printable rows");
+        let mut got: Vec<Type> = rows
+            .iter()
+            .map(|r| {
+                assert_eq!(r.outputs, Vec::<Type>::new(), "`.` produces nothing");
+                assert_eq!(r.lower, BuiltinLower::Print);
+                assert_eq!(r.inputs.len(), 1, "`.` is unary");
+                r.inputs[0]
+            })
+            .collect();
+        let mut want = printable_types();
+        got.sort_by_key(|t| t.name());
+        want.sort_by_key(|t| t.name());
+        assert_eq!(got, want);
+    }
+    // Phase 3 Slice 1: the linear core on bare linear values.
+
+    #[test]
+    fn is_copy_every_scalar_is_copy_and_a_drop_overloaded_struct_is_not() {
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): its registry
+        // entry must be present, exactly as `assemble_module`/the REPL
+        // session seed it, for `is_copy`'s enum arm to resolve it.
+        let bool_enums = [crate::ast::bool_enum_decl()];
+        for name in ["i8", "u64", "f32", "f64", "bool", "usize"] {
+            assert!(
+                is_copy(Type::from_name(name).unwrap(), &[], &bool_enums, &[]),
+                "{name} is Copy"
+            );
+        }
+        // R3 (slice 8b): a struct with a user `drop` overload is linear
+        // whatever its fields say -- built directly here since this test
+        // exercises `is_copy`'s own signature, not a checked module.
+        let structs = vec![StructDecl {
+            name: "Res".to_string(),
+            name_static: "Res",
+            fields: vec![("tag".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        }];
+        let res = Type::Struct(StructId::from_index(0), "Res");
+        assert!(!is_copy(res, &structs, &[], &[]));
+    }
+    #[test]
+    fn is_copy_owned_cell_is_never_copy_regardless_of_payload() {
+        // R4: always linear, no payload lookup, even over a Copy payload.
+        let mut cells = Vec::new();
+        let ty = crate::ast::intern_owned_cell_type(&mut cells, Type::I64);
+        assert!(!is_copy(ty, &[], &[], &[]));
+    }
+    #[test]
+    fn is_copy_struct_is_linear_iff_a_field_is_transitively() {
+        // R7/R8 (Phase 2): a struct with no linear field is Copy; one with a
+        // linear field (direct or nested) is linear, transitively. `^i64`
+        // (an owning cell, always linear regardless of payload) stands in
+        // for a direct linear leaf field, since this test exercises
+        // `is_copy`'s own fold directly rather than through a checked module.
+        let mut owned_cells = Vec::new();
+        let cell_ty = intern_owned_cell_type(&mut owned_cells, Type::I64);
+        let structs = vec![
+            StructDecl {
+                name: "Plain".to_string(),
+                name_static: "Plain",
+                fields: vec![("x".to_string(), Type::I64), ("y".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "Holds".to_string(),
+                name_static: "Holds",
+                fields: vec![("a".to_string(), cell_ty), ("b".to_string(), Type::I64)],
+                span: Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "Wraps".to_string(),
+                name_static: "Wraps",
+                fields: vec![(
+                    "h".to_string(),
+                    Type::Struct(StructId::from_index(1), "Holds"),
+                )],
+                span: Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+        ];
+        let plain = Type::Struct(StructId::from_index(0), "Plain");
+        let holds = Type::Struct(StructId::from_index(1), "Holds");
+        let wraps = Type::Struct(StructId::from_index(2), "Wraps");
+        assert!(is_copy(plain, &structs, &[], &[]));
+        assert!(!is_copy(holds, &structs, &[], &[]));
+        assert!(!is_copy(wraps, &structs, &[], &[]));
+    }
+    #[test]
+    fn is_copy_enum_is_linear_iff_a_variant_field_is_transitively() {
+        // R7/R12 (Phase 4): an enum with no linear variant field is Copy; one
+        // with a linear field (direct in one variant, or nested through a
+        // struct in another) is linear, transitively. `Plain` has no linear
+        // variant, `Item` carries a linear field (an owning cell) directly in
+        // `Full`, `Boxed` carries one nested inside `Holds`. Built by hand
+        // rather than parsed, for the same reason as the struct fold above.
+        let mut owned_cells = Vec::new();
+        let cell_ty = intern_owned_cell_type(&mut owned_cells, Type::I64);
+        let structs = vec![StructDecl {
+            name: "Holds".to_string(),
+            name_static: "Holds",
+            fields: vec![("a".to_string(), cell_ty), ("b".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
+            name: name.to_string(),
+            name_static: name,
+            fields,
+            span: Span::default(),
+        };
+        let enums = vec![
+            EnumDecl {
+                name: "Plain".to_string(),
+                name_static: "Plain",
+                variants: vec![variant("A", vec![]), variant("B", vec![])],
+                span: Span::default(),
+                module: 0,
+            },
+            EnumDecl {
+                name: "Item".to_string(),
+                name_static: "Item",
+                variants: vec![
+                    variant("Empty", vec![]),
+                    variant("Full", vec![("v".to_string(), cell_ty)]),
+                ],
+                span: Span::default(),
+                module: 0,
+            },
+            EnumDecl {
+                name: "Boxed".to_string(),
+                name_static: "Boxed",
+                variants: vec![
+                    variant(
+                        "Some",
+                        vec![(
+                            "h".to_string(),
+                            Type::Struct(StructId::from_index(0), "Holds"),
+                        )],
+                    ),
+                    variant("None", vec![]),
+                ],
+                span: Span::default(),
+                module: 0,
+            },
+        ];
+        let plain = Type::Enum(EnumId::from_index(0), "Plain");
+        let item = Type::Enum(EnumId::from_index(1), "Item");
+        let boxed = Type::Enum(EnumId::from_index(2), "Boxed");
+        assert!(is_copy(plain, &structs, &enums, &[]));
+        assert!(!is_copy(item, &structs, &enums, &[]));
+        assert!(!is_copy(boxed, &structs, &enums, &[]));
+    }
+    #[test]
+    fn shared_reference_is_copy_and_mutable_reference_is_neither() {
+        // The soundness question here: getting either wrong silently misclassifies
+        // a reference as duplicable-and-droppable, or as owing a linear drop it
+        // must never receive.
+        let mut refs = Vec::new();
+        let shared = intern_ref_type(&mut refs, Type::I64, false);
+        let mutable = intern_ref_type(&mut refs, Type::I64, true);
+        assert_ne!(shared, mutable);
+        assert_eq!(shared.name(), "&i64");
+        assert_eq!(mutable.name(), "&!i64");
+
+        assert!(is_copy(shared, &[], &[], &[]));
+        assert!(!is_copy(mutable, &[], &[], &[]));
+        // Neither is linear: a reference owns nothing, so neither enters move
+        // tracking nor owes a disposal.
+        assert!(!is_linear(shared, &[], &[], &[]));
+        assert!(!is_linear(mutable, &[], &[], &[]));
+    }
+    #[test]
+    fn contains_reference_sees_through_a_struct_field() {
+        // The predicate is transitive: a struct that merely *reaches* a
+        // reference is rejected wherever a bare one would be.
+        let tokens = lex("type: Plain x i64 ;\n").unwrap();
+        let module = parse(&tokens).unwrap();
+        let mut refs = Vec::new();
+        let plain = Type::Struct(StructId::from_index(0), "Plain");
+        assert!(!contains_reference(
+            plain,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        let mut structs = module.structs;
+        structs[0].fields.push((
+            "r".to_string(),
+            intern_ref_type(&mut refs, Type::I64, false),
+        ));
+        assert!(contains_reference(
+            plain,
+            &structs,
+            &module.enums,
+            &module.arrays
+        ));
+    }
+}

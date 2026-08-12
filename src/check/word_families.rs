@@ -819,3 +819,261 @@ fn drop_import_visibility_error(
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
+        let tokens = lex(src).unwrap();
+        let terms = match crate::parser::parse_line(&tokens).unwrap() {
+            crate::ast::Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
+        // session seeds this at index 0 (`Session::new`); this bare-line
+        // helper mirrors that so a `bool`-producing comparison resolves.
+        let bool_enums = [crate::ast::bool_enum_decl()];
+        infer_line(
+            &terms,
+            entry,
+            &HashMap::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+            &bool_enums,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .map(|(stack, _insts, _overloads)| stack)
+    }
+    // --- Slice 8b, D2/D1: the module-visibility primitive and `drop` gate. ---
+
+    /// R1: the primitive is a pure function of `(modules, caller, defining,
+    /// name)`; construct `ModuleInfo` directly rather than route through a build.
+    #[test]
+    fn visibility_own_module_is_visible() {
+        let modules = vec![ModuleInfo::default(), ModuleInfo::default()];
+        assert!(is_name_visible_to_module(&modules, 1, 1, "Res"));
+    }
+    #[test]
+    fn visibility_selectively_imported_is_visible() {
+        let mut caller = ModuleInfo::default();
+        caller.selective.insert("Res".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(is_name_visible_to_module(&modules, 1, 0, "Res"));
+    }
+    #[test]
+    fn visibility_qualified_only_import_is_not_visible() {
+        // A qualified-only import binds the qualifier but no bare name.
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("lib".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(!is_name_visible_to_module(&modules, 1, 0, "Res"));
+    }
+    #[test]
+    fn visibility_unrelated_module_is_not_visible() {
+        let modules = vec![
+            ModuleInfo::default(),
+            ModuleInfo::default(),
+            ModuleInfo::default(),
+        ];
+        assert!(!is_name_visible_to_module(&modules, 1, 2, "Res"));
+    }
+    #[test]
+    fn quotation_as_operand_is_rejected_at_every_audited_site() {
+        // R11t: the audit is a *test artifact*, not prose. A missed guard on the
+        // `Cstr` placeholder is a silent accept (R4), so every default-deny site
+        // gets a row here: a new consumer added later without a guard turns one
+        // row from `Err` to `Ok` and fails the test. The one `is_line` row is the
+        // REPL residual, checked through `infer_line` rather than `check`.
+        //
+        // Each row asserts TWO substrings, and this is load-bearing. `site` is
+        // the token the message names (the op, or the word for the argument
+        // family); `phrase` is text only the quotation rejection produces. The
+        // pre-existing generic diagnostics (`operand_pair_mismatch`,
+        // `type_mismatch`, `array_word_operand`, `reference_word_operand`,
+        // `fill_count_not_literal`, ...) all print the op in backticks too, so a
+        // `site`-only row stays green when its guard is removed and the fallback
+        // fires: it names the same op. Requiring `phrase` as well is what turns a
+        // removed guard from green to red. Every operand-family row shares the
+        // one `reject_quotation_operand` phrase; the store/argument/output/
+        // residual families carry their own wording no generic diagnostic emits.
+        //
+        // FIX 2 (verified, no row): the only `check_operator` op that would
+        // accept a `Cstr` operand if its guard were removed is `.` (print, whose
+        // printable set includes `Str`/`Cstr`), and it already has the `.` row.
+        // Every comparison (`=`/`<`/`>`/...), like every arithmetic/bitwise/
+        // shift op, requires `is_numeric`/`is_int`/`is_float` and rejects a
+        // `cstr` outright, so there is no silent-accept comparison path to row.
+        struct Row {
+            source: &'static str,
+            site: &'static str,
+            phrase: &'static str,
+            is_line: bool,
+        }
+        const OPERAND: &str = "cannot take a quotation as an operand";
+        // Operand-family row: `site` is the op, `phrase` is the shared wording.
+        let op = |source, site| Row {
+            source,
+            site,
+            phrase: OPERAND,
+            is_line: false,
+        };
+        // Any other family: spell both substrings out.
+        let w = |source, site, phrase| Row {
+            source,
+            site,
+            phrase,
+            is_line: false,
+        };
+        let rows = [
+            // check_operator, both operand positions, plus print.
+            op(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
+            op(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
+            op(": main ( -- ) [ + ] . ;\n", "`.`"),
+            // the `if` condition, before the `bool` mismatch.
+            op(": main ( -- ) [ + ] if 1 . else 2 . end ;\n", "`if`"),
+            // check_str_word (`len`/`cstr`).
+            op(": main ( -- ) [ + ] len ;\n", "`len`"),
+            op(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
+            // check_array_word: the `fill` count operand and the stored element.
+            op(": main ( -- ) 5 [ + ] fill ;\n", "`fill`"),
+            w(
+                ": main ( -- ) [ + ] 8 fill drop ;\n",
+                "a quotation cannot be stored",
+                "escaping quotations are slice 7",
+            ),
+            // check_array_index, reached through the `&>` reference word.
+            op(
+                "type: V x i64 ;\n: main ( -- ) 1 2 V | v | &v &V>x [ + ] &> drop drop ;\n",
+                "`&>`",
+            ),
+            // check_owned_cell_word.
+            op(": main ( -- ) [ + ] ^ ;\n", "`^`"),
+            // check_reference_word's `&q` prefix-borrow-of-a-local form.
+            op(": main ( -- ) [ + ] | q | &q drop ;\n", "`&q`"),
+            // check_struct_peek_word and check_struct_get_word (an aggregate
+            // field, so the getter is intercepted here, not by the env loop).
+            op("type: V x i64 ;\n: main ( -- ) [ + ] V|>x ;\n", "`V|>x`"),
+            op(
+                "type: Inner a i64 ;\ntype: Outer b Inner ;\n: main ( -- ) [ + ] Outer>b ;\n",
+                "`Outer>b`",
+            ),
+            // check_access_word's store paths: the value and the receiver.
+            w(
+                "type: Box s cstr ;\n: main ( -- ) \"hi\" cstr Box | b | &!b &!Box>s [ + ] ! b drop ;\n",
+                "a quotation cannot be stored",
+                "escaping quotations are slice 7",
+            ),
+            op(": main ( -- ) [ + ] 1 ! ;\n", "`!`"),
+            // the env argument loop and check_poly_call's input loop (R9/R9p).
+            w(
+                ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n",
+                "passed to `foo`",
+                "only `call` and `times` accept one",
+            ),
+            w(
+                ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
+                "passed to `dupit`",
+                "only `call` and `times` accept one",
+            ),
+            // check_outputs (R10) and the `times` body-output row (blocker 2).
+            w(
+                ": f ( -- i64 ) [ + ] ;\n",
+                "declared output",
+                "leaves a quotation on the stack",
+            ),
+            op(
+                ": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n",
+                "`times`",
+            ),
+            // the REPL residual (R19), checked through `infer_line`.
+            Row {
+                source: "1 [ + ]",
+                site: "end of a line",
+                phrase: "a quotation cannot be left on the stack",
+                is_line: true,
+            },
+        ];
+        for Row {
+            source,
+            site,
+            phrase,
+            is_line,
+        } in rows
+        {
+            let err = match is_line {
+                true => infer_src(source, &[])
+                    .expect_err("an audited site must reject a quotation, not silently accept it"),
+                false => check_src(source)
+                    .expect_err("an audited site must reject a quotation, not silently accept it"),
+            };
+            assert!(
+                err.contains(site),
+                "audited site `{site}` was not named, got: {err}"
+            );
+            assert!(
+                err.contains(phrase),
+                "audited site `{site}` did not produce its quotation-rejection phrase `{phrase}`, got: {err}"
+            );
+        }
+    }
+    #[test]
+    fn check_len_on_str_types_as_usize() {
+        // R8: `check_str_word` claims `len` on a `str` operand before the
+        // array path ever sees it, consuming the `str` and typing the result
+        // `usize` (not the array `len`'s non-consuming signature).
+        check_src(": w ( -- usize ) \"hi\" len ;").unwrap();
+    }
+    #[test]
+    fn check_owned_cell_underflow_is_error_for_all_three_words() {
+        // `^`, `^>`, `^|>` each underflow the same way as any other word.
+        for (op, src) in [
+            ("^", ": w ( -- ^i64 ) ^ ;"),
+            ("^>", ": w ( -- i64 ) ^> ;"),
+            ("^|>", ": w ( -- i64 ) ^|> ;"),
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(
+                err.contains(&format!("`{op}`")),
+                "{op}: unexpected message: {err}"
+            );
+            assert!(
+                err.contains("needs 1 values"),
+                "{op}: unexpected message: {err}"
+            );
+            assert!(err.contains("holds 0"), "{op}: unexpected message: {err}");
+        }
+    }
+    #[test]
+    fn check_unwrap_of_non_cell_is_error() {
+        // `^>` on a plain `i64` names the word and the offending type.
+        let err = check_src(": w ( -- i64 ) 5 ^> ;").unwrap_err();
+        assert!(err.contains("`^>`"), "unexpected message: {err}");
+        assert!(
+            err.contains("requires an owning-cell operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("found `i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_peek_of_non_cell_is_error() {
+        // `^|>` on a plain `bool` names the word and the offending type.
+        let err = check_src(": w ( -- bool bool ) true ^|> ;").unwrap_err();
+        assert!(err.contains("`^|>`"), "unexpected message: {err}");
+        assert!(
+            err.contains("requires an owning-cell operand"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("found `bool`"), "unexpected message: {err}");
+    }
+}

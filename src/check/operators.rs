@@ -499,3 +499,482 @@ fn conversion_unknown_type_error(ctx: &Ctx, span: Span, name: &str) -> String {
         Ctx::Line { .. } => format!("error: unknown type `{name}`"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is (R3),
+    /// not by any compiler-known bit. Always the first struct in a source
+    /// string that uses it, so every other struct's `StructId` shifts up by
+    /// one relative to a spy-free program.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    #[test]
+    fn check_declared_output_type_mismatch_is_error() {
+        let src = ": w ( i64 -- bool ) 1 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("type mismatch"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_shuffle_dup_bool_is_type_transparent() {
+        // `dup` of a `bool` yields two `bool`s and satisfies the declaration.
+        check_src(": w ( bool -- bool bool ) dup ;").unwrap();
+    }
+    #[test]
+    fn check_arith_same_width_ok() {
+        check_src(": w ( -- i32 ) 1 >i32 2 >i32 + ;").unwrap();
+    }
+    #[test]
+    fn check_arith_mixed_width_is_error() {
+        // An `i32` and an `i64` fed to `+` names both differing types, via
+        // the operand-pair-mismatch diagnostic specifically (not just any error
+        // that happens to mention both type names).
+        let src = ": f ( -- i32 ) 1 >i32 5 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_cmp_mixed_sign_is_error() {
+        // `u8` and `i8` fed to `<` names both differing operand types, via
+        // the same operand-pair-mismatch diagnostic.
+        let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`u8`"), "unexpected message: {err}");
+        assert!(err.contains("`i8`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_arith_mixed_int_float_is_error() {
+        // X1: mixed int/float arithmetic names both operand types.
+        let src = ": f ( -- f64 ) 1 >i32 5.0 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_cmp_mixed_float_width_is_error() {
+        // X2: mixed float-width comparison names both operand types.
+        let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`f32`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_div_same_float_type_ok() {
+        check_src(": w ( -- f64 ) 1.0 2.0 / ;").unwrap();
+    }
+    #[test]
+    fn check_div_on_ints_is_error() {
+        // X3: `/` requires floats; integer operands are a sharp error.
+        let src = ": w ( -- i64 ) 4 2 / ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`/`"), "unexpected message: {err}");
+        assert!(err.contains("float"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_mod_same_int_type_ok() {
+        check_src(": w ( -- i64 ) 5 2 mod ;").unwrap();
+    }
+    #[test]
+    fn check_mod_on_floats_is_error() {
+        // X4: `mod` requires integers; float operands are a sharp error.
+        let src = ": w ( -- f64 ) 5.0 2.0 mod ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`mod`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_max_same_int_type_ok() {
+        check_src(": w ( -- i64 ) 3 5 max ;").unwrap();
+    }
+    #[test]
+    fn check_max_on_floats_is_error() {
+        // X9: `max` is integer-only; a float pair names `max-total`.
+        let src = ": w ( -- f64 ) 3.0 5.0 max ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`max`"), "unexpected message: {err}");
+        assert!(err.contains("`max-total`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_max_total_same_float_type_ok() {
+        check_src(": w ( -- f64 ) 3.0 5.0 max-total ;").unwrap();
+    }
+    #[test]
+    fn check_max_total_on_ints_is_error() {
+        // X10: `max-total` is float-only; an integer pair names `max`.
+        let src = ": w ( -- i64 ) 3 5 max-total ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`max-total`"), "unexpected message: {err}");
+        assert!(err.contains("`max`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_bitwise_and_or_xor_same_type_ok() {
+        check_src(": w ( -- i32 ) 1 >i32 2 >i32 and 3 >i32 or 4 >i32 xor ;").unwrap();
+    }
+    #[test]
+    fn check_bitwise_and_mixed_width_is_error() {
+        let src = ": w ( -- i64 ) 1 >i32 2 and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same integer or bool type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_bitwise_and_or_xor_on_bool_is_ok() {
+        // Bool is now an accepted homogeneous operand class for `and`/`or`/`xor`
+        // (logical-and on two 0/1 bools coincides with bitwise-and).
+        check_src(": w ( -- bool ) true false and true false or drop true false xor drop ;")
+            .unwrap();
+    }
+    #[test]
+    fn check_bitwise_and_mixed_bool_int_is_error() {
+        let src = ": w ( -- bool ) true 5 and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same integer or bool type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_bitwise_and_on_float_is_error() {
+        let src = ": w ( -- f64 ) 3.0 5.0 and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_not_same_type_ok() {
+        check_src(": w ( -- u8 ) 5 >u8 not ;").unwrap();
+    }
+    #[test]
+    fn check_not_on_float_is_error() {
+        let src = ": w ( -- f64 ) 3.0 not ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`not`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_not_on_bool_is_ok() {
+        // `not` is type-directed: on a `bool` it is logical negation, not
+        // the integer bitwise complement (R9-ext).
+        check_src(": w ( -- bool ) true not ;").unwrap();
+    }
+    #[test]
+    fn check_cmp_le_ge_ne_numeric_same_type_ok() {
+        check_src(": w ( -- bool bool bool ) 1 2 <= 1 2 >= 1 2 <> ;").unwrap();
+    }
+    #[test]
+    fn check_cmp_le_ge_ne_on_bool_is_error() {
+        // Comparisons stay numeric-only: `bool` is never accepted, even
+        // though it now is for `and`/`or`/`xor`.
+        let src = ": w ( -- bool ) true false <= ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_cmp_ne_mixed_type_is_error() {
+        let src = ": w ( -- bool ) 1 >i32 2 <> ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_shl_shr_i64_count_ok() {
+        check_src(": w ( -- u8 ) 1 >u8 3 shl ;").unwrap();
+        check_src(": w ( -- u8 ) 200 >u8 3 shr ;").unwrap();
+    }
+    #[test]
+    fn check_shl_count_not_i64_is_error() {
+        let src = ": w ( -- u8 ) 1 >u8 3 >i32 shl ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`shl`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`i32`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_shr_value_not_int_is_error() {
+        let src = ": w ( -- f64 ) 3.0 2 shr ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`shr`"), "unexpected message: {err}");
+        assert!(err.contains("integer"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_usize_is_recognised_as_a_type_name() {
+        check_src(": w ( -- usize ) 5 ;").unwrap();
+    }
+    #[test]
+    fn check_usize_arithmetic_and_comparison_ok() {
+        check_src(": w ( -- usize ) 5 3 >usize + ;").unwrap();
+        check_src(": w ( -- bool ) 5 3 >usize < ;").unwrap();
+    }
+    #[test]
+    fn check_usize_literal_coerces_into_usize_position_ok() {
+        // D8: a bare integer literal fills a `usize` position on either side
+        // of a homogeneous binary op, no `>usize` required.
+        check_src(": w ( -- usize ) 3 >usize 5 + ;").unwrap();
+        check_src(": w ( -- usize ) 5 3 >usize + ;").unwrap();
+    }
+    #[test]
+    fn check_usize_computed_value_without_conversion_is_error() {
+        // X10: `1 1 +` is a *computed* i64 (no constant folding), so mixing
+        // it with a `usize` still needs an explicit `>usize`.
+        let src = ": w ( -- usize ) 3 >usize 1 1 + + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("usize"), "unexpected message: {err}");
+        assert!(err.contains(">usize"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_usize_to_int_and_int_to_usize_conversions_ok() {
+        check_src(": w ( -- i64 ) 5 >usize >i64 ;").unwrap();
+        check_src(": w ( -- usize ) 5 >usize ;").unwrap();
+    }
+    #[test]
+    fn check_usize_print_is_type_directed_ok() {
+        check_src(": w ( -- ) 5 >usize . ;").unwrap();
+    }
+    #[test]
+    fn check_print_on_array_is_error() {
+        // X6/R13: `.` on an array is a sharp located error naming `[T N]`.
+        let err = check_src(": w ( -- ) 0 4 fill . ;").unwrap_err();
+        assert!(err.contains("[i64 4]"), "should name the array type: {err}");
+    }
+    #[test]
+    fn check_usize_mixed_with_bool_is_error() {
+        // X9: `usize` mixed with a non-coercible operand (`bool`) names both.
+        let src = ": w ( -- usize ) 5 >usize true and ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`usize`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_usize_mixed_with_float_is_error() {
+        // X9: `usize` mixed with `f64` (both numeric, not coercible).
+        let src = ": w ( -- bool ) 5 >usize 1.0 < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`usize`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_usize_declared_output_needs_conversion_is_error() {
+        // X10 at a declared-output position: a computed `i64` doesn't
+        // silently satisfy a declared `usize` output.
+        let src = ": w ( -- usize ) 1 1 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("usize"), "unexpected message: {err}");
+        assert!(err.contains(">usize"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_isize_mixed_with_usize_is_error() {
+        // `usize` and `isize` are sibling size types but do not coerce
+        // into each other; mixing them is a plain type mismatch naming both
+        // backticked types.
+        let src = ": w ( -- bool ) 5 >usize 3 >isize < ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`usize`"), "unexpected message: {err}");
+        assert!(err.contains("`isize`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_isize_declared_output_needs_conversion_is_error() {
+        // X10 at a declared-output position, mirroring
+        // check_usize_declared_output_needs_conversion_is_error: a computed
+        // `i64` doesn't silently satisfy a declared `isize` output, and the
+        // message names the backticked `isize` form rather than `usize`.
+        let src = ": w ( -- isize ) 1 1 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`isize`"), "unexpected message: {err}");
+        assert!(err.contains(">isize"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_usize_branch_merge_keeps_computed_arm_non_coercible_is_error() {
+        // A literal in one arm and a computed value in the other must NOT
+        // merge to a coercible literal: on the computed arm's runtime path a
+        // computed `i64` would fill the `usize` output without `>usize` (X10).
+        for src in [
+            ": w ( bool -- usize ) if 5 else 1 1 + end ;",
+            ": w ( bool -- usize ) if 1 1 + else 5 end ;",
+        ] {
+            let err = check_src(src).unwrap_err();
+            assert!(err.contains("usize"), "unexpected message: {err}");
+            assert!(err.contains(">usize"), "unexpected message: {err}");
+        }
+    }
+    #[test]
+    fn check_usize_branch_merge_both_literals_coerces_ok() {
+        // Both arms leave a literal, so the merged slot stays a coercible
+        // literal and fills the `usize` output.
+        check_src(": w ( bool -- usize ) if 5 else 6 end ;").unwrap();
+    }
+    #[test]
+    fn check_usize_call_argument_literal_coerces_ok() {
+        // A bare literal fills a declared `usize` parameter without `>usize`.
+        let src = ": at ( usize -- usize ) ; : w ( -- usize ) 5 at ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn check_usize_call_argument_computed_needs_conversion_is_error() {
+        let src = ": at ( usize -- usize ) ; : w ( -- usize ) 1 1 + at ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("usize"), "unexpected message: {err}");
+        assert!(err.contains(">usize"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_conv_int_to_float_ok() {
+        check_src(": w ( -- f64 ) 5 >f64 ;").unwrap();
+    }
+    #[test]
+    fn check_conv_float_to_int_ok() {
+        check_src(": w ( -- i64 ) 5.0 >i64 ;").unwrap();
+    }
+    #[test]
+    fn check_conv_float_target_of_bool_is_error() {
+        // X5: a conversion to a float target applied to a `bool` source.
+        let src = ": w ( -- f64 ) true >f64 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_conv_unknown_float_target_is_error() {
+        // X6: `>f128` reads as an unknown conversion target.
+        let src = ": w ( -- f64 ) 5.0 >f128 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("f128"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_float_lit_types_as_f64() {
+        check_src(": w ( -- f64 ) 3.14 ;").unwrap();
+    }
+    #[test]
+    fn check_shuffle_dup_float_is_type_transparent() {
+        check_src(": w ( -- f64 f64 ) 1.0 dup ;").unwrap();
+    }
+    #[test]
+    fn check_conv_from_any_int_ok() {
+        check_src(": w ( -- u8 ) 5 >i32 >u8 ;").unwrap();
+    }
+    #[test]
+    fn check_conv_of_bool_is_error() {
+        // A conversion applied to `bool` is a type error (X5).
+        let src = ": w ( -- i32 ) true >i32 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_declared_output_needs_conversion_is_error() {
+        // X3: the literal is `i64`, the declared output is `u8`.
+        let src = ": f ( -- u8 ) 5 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`u8`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_conv_unknown_target_is_error() {
+        // X6: `>i128` reads as an unknown conversion target.
+        // (this test predates R10's float target; kept for the integer case)
+        let src = ": w ( -- i64 ) 5 >i128 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("unknown type"), "unexpected message: {err}");
+        assert!(err.contains("i128"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_shuffle_dup_u8_is_transparent() {
+        check_src(": w ( -- u8 u8 ) 5 >u8 dup ;").unwrap();
+    }
+    #[test]
+    fn check_shuffle_swap_mixed_types_is_type_transparent() {
+        // `swap` reorders a mixed `bool`/`i64` pair with no fixed signature.
+        check_src(": w ( bool i64 -- i64 bool ) swap ;").unwrap();
+    }
+    #[test]
+    fn check_print_accepts_every_printable_scalar() {
+        // `.` is type-directed over the whole integer tower, both float
+        // widths, and `bool`, not just `i64`.
+        check_src(": w ( -- ) 5 . ;").unwrap();
+        check_src(": w ( -- ) 5 >u8 . ;").unwrap();
+        check_src(": w ( -- ) 5 >i32 . ;").unwrap();
+        check_src(": w ( -- ) -1 >u64 . ;").unwrap();
+        check_src(": w ( -- ) 3.14 . ;").unwrap();
+        check_src(": w ( -- ) 3.14 >f32 . ;").unwrap();
+        check_src(": w ( -- ) true . ;").unwrap();
+    }
+    #[test]
+    fn check_not_on_literal_count_is_not_a_literal_for_fill() {
+        // The retired hand-written `not` arm left its operand slot in place,
+        // preserving `literal`/`int_val` (so a `not`'d literal fed to `fill`
+        // would have used the *pre-negation* value, silently wrong). The
+        // table row it was replaced with emits `Slot::computed`, so `fill`
+        // now correctly refuses a `not`'d literal as a non-literal count
+        // instead of miscounting.
+        let err = check_src(": w ( -- ) 0 4 not fill drop ;").unwrap_err();
+        assert!(err.contains("literal count"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_print_accepts_str_and_cstr() {
+        // `.`'s printable-scalar guard also accepts `str`/`cstr` (R9), matched
+        // by name rather than `is_numeric`/`is_bool`, since neither is numeric.
+        check_src(": w ( -- ) \"hi\" . ;").unwrap();
+        check_src(": w ( -- ) \"hi\" cstr . ;").unwrap();
+    }
+    #[test]
+    fn check_print_on_empty_stack_is_underflow_error() {
+        let src = ": w ( -- ) . ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`.`"), "unexpected message: {err}");
+        assert!(err.contains("needs 1 values"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_print_on_linear_value_is_error() {
+        // R16: `.` is a printable-scalar path, and a linear value is not one
+        // (the backend's `unreachable!` guard depends on this).
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy . ;")).unwrap_err();
+        assert!(err.contains("printable"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+}

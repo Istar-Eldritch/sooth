@@ -1669,3 +1669,494 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    // A one-field struct with a `drop` overload: linear for the same reason any
+    // resource is, used to force the `Copy`-bound failure (X5).
+    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+    /// D3's leaf resource: one field, a `drop` override implemented exactly
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// inside `drop`'s own body -- exempted, since a word literally named
+    /// `drop` can only be the recognized override for the struct its declared
+    /// effect names).
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+    /// A checked module, for the tests that read a type fact back out of the
+    /// registries rather than only asserting a diagnostic.
+    fn checked_module(src: &str) -> Module {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+    /// Slice 10a (R1): a fully-concrete `~` folds to `Concrete(InlineQuotation)`,
+    /// which the routing predicate must recognize -- else the word is not a
+    /// combinator, is lowered as an ordinary call, and reaches `ir_type_of`'s
+    /// `unreachable!`. Constructed directly, no parser.
+    #[test]
+    fn poly_input_is_quotation_recognizes_inline() {
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(poly_input_is_quotation(&PolyType::Concrete(inl)));
+        assert!(poly_input_is_quotation(&PolyType::Concrete(ord)));
+        assert!(!poly_input_is_quotation(&PolyType::Concrete(Type::I64)));
+    }
+    #[test]
+    fn poly_body_destructuring_drop_overloaded_type_is_error() {
+        // Bug 2 (round-1 review): `poly_call_term` resolved a generated
+        // accessor through the ordinary `env` lookup with no D3 guard at all,
+        // so a generic word could destructure any drop-overloaded type and
+        // skip its destructor.
+        let err = check_src(&format!(
+            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd>n ;\n: main ( -- ) 1 sneak drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `sneak` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+    #[test]
+    fn check_poly_call_rejects_a_quotation_argument() {
+        // R9p: `check_poly_call` reads only `stack[base + i].ty`, so a quotation
+        // does not *fail* unification, it *succeeds* binding `'T` to the
+        // placeholder and monomorphizes a real call over a phantom. The guard
+        // before `unify_poly_input` is what makes the R9 rejection reachable.
+        let err = check_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) [ + ] dupit drop drop ;\n",
+        )
+        .expect_err("a quotation passed to a polymorphic word should be rejected");
+        assert!(
+            err.contains("a quotation cannot be passed to `dupit`"),
+            "check_poly_call should name `dupit`, got: {err}"
+        );
+    }
+    #[test]
+    fn poly_term_rejects_a_quotation_literal() {
+        // R5p: a quotation literal in a polymorphic body is rejected eagerly at
+        // the literal (the polymorphic path cannot yet carry the marker).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("a quotation literal in a polymorphic body should be rejected");
+        assert!(
+            err.contains("a quotation in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+    #[test]
+    fn poly_term_rejects_an_array_constructor() {
+        // Slice 6h: an array constructor in a polymorphic body is rejected
+        // eagerly, mirroring the quotation rejection above (no interning
+        // route exists for a body-internal shape absent from the signature).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ i64 ; 4 ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("an array constructor in a polymorphic body should be rejected");
+        assert!(
+            err.contains("an array constructor in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_copy_word_accepts_and_instantiates() {
+        // R1/R4–R7: a `'T: Copy` word `dup`s its variable and is called at a
+        // concrete `Copy` type; the body and the instantiation both check.
+        check_src(": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) 5 dupit drop drop ;")
+            .unwrap();
+    }
+    #[test]
+    fn check_poly_word_records_one_instantiation_per_concrete_shape() {
+        // R8/R14: each distinct ground θ is recorded once, keyed by call span.
+        let module = checked_module(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) 5 dupit drop drop true dupit drop drop ;",
+        );
+        // Two call sites, two distinct θ (i64 and bool): two instantiations.
+        let symbols: std::collections::HashSet<&str> = module
+            .instantiations
+            .values()
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(module.instantiations.len(), 2);
+        assert_eq!(symbols.len(), 2);
+    }
+    #[test]
+    fn check_poly_ord_word_accepts_comparison_body() {
+        // R7: a `'T: Ord` variable may be compared; the body and a numeric
+        // instantiation both check.
+        check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) 3 4 less drop ;").unwrap();
+    }
+    #[test]
+    fn check_poly_length_word_accepts_and_monomorphizes_len() {
+        // R1/R5/R9: a length variable is opaque through `len`; the same word
+        // instantiates at `[i64 4]` and `[i64 8]`.
+        check_src(
+            ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+             : main ( -- ) 5 4 fill alen . drop 5 8 fill alen . drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_poly_row_word_accepts_and_expands_outputs() {
+        // R1/R5/R7: a row-variable word passes its deeper stack through
+        // untouched and duplicates the two `Copy` variables; the resolved
+        // instantiation has four concrete outputs, so it interns a bundle.
+        let module = checked_module(
+            ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+             : main ( -- ) 1 2 dup2 . . . . ;",
+        );
+        assert_eq!(module.instantiations.len(), 1);
+        let inst = module.instantiations.values().next().unwrap();
+        assert_eq!(inst.out_arity, 4);
+        assert!(inst.bundle.is_some());
+    }
+    #[test]
+    fn check_x4_type_variable_forced_to_two_concretes_names_both() {
+        // X4: one `'T` unified to both `i64` and `bool` at one call site names
+        // both concrete types.
+        let err = check_src(": pairwise ( 'T 'T -- ) drop drop ;\n: main ( -- ) 1 true pairwise ;")
+            .unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("i64"), "unexpected message: {err}");
+        assert!(err.contains("bool"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x5_copy_bound_on_linear_type_names_variable_type_and_reason() {
+        // X5: instantiating a `'T: Copy` word with a linear type is a located
+        // call-site error naming the variable, the type, and the linear reason.
+        let src = format!("{SPY}: idc ( 'T: Copy -- 'T ) ;\n: main ( -- ) 0 Spy idc drop ;");
+        let err = check_src(&src).unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Spy"), "unexpected message: {err}");
+        assert!(err.contains("linear"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x6_ord_bound_on_non_ord_type_is_error() {
+        // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
+        // located error.
+        let err =
+            check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) true false less drop ;")
+                .unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Ord"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x7_dup_of_unbounded_variable_names_missing_copy_bound() {
+        // X7: `dup` of an unbounded `'T` inside a body names the variable and
+        // the missing `Copy` bound.
+        let err = check_src(": bad ( 'T -- 'T 'T ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Copy"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x8_compare_of_unbounded_variable_requires_ord() {
+        // X8: `>` on an unbounded `'T` inside a body requires an `Ord` bound.
+        let err = check_src(": bad ( 'T 'T -- bool ) > ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Ord"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_local_bound_and_never_read_is_unconsumed_error() {
+        // A `'T` bound to a local and never read leaks: the polymorphic body
+        // checker rejects it exactly as the monomorphic sibling rejects
+        // `( ^i64 -- ) | x | ;`, naming the variable.
+        let err = check_src(": leaky ( 'T -- ) | x | ;\n: main ( -- ) ;").unwrap_err();
+        assert!(
+            err.contains("linear value `x` is never consumed"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_local_read_twice_is_use_after_move() {
+        // Reading a non-`Copy` local a second time is use-after-move: the
+        // polymorphic checker rejects it as the monomorphic sibling rejects
+        // `( ^i64 -- ^i64 ^i64 ) | x | x x ;`, naming the variable.
+        let err = check_src(": twice ( 'T -- 'T 'T ) | x | x x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("local `x`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_local_rebound_while_in_scope_is_error() {
+        // R4 twin of the monomorphic rebinding rejection: a second `| x |`
+        // while `x` is still in scope would orphan the first binding, leaking
+        // the non-`Copy` value parked in it. Reject at compile time, naming the
+        // variable, exactly as `( ^i64 ^i64 -- ^i64 ) | x | | x | x ;` is.
+        let err =
+            check_src(": shadow ( 'T 'T -- 'T ) | x | | x | x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("already bound"), "unexpected message: {err}");
+        assert!(err.contains('x'), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_duplicate_local_in_bind_group_is_error() {
+        // A name repeated inside one bind group (`| x x |`) orphans the first
+        // binding before the cross-group rebind guard can see it: the poly
+        // checker rejects it as the monomorphic sibling rejects
+        // `( ^i64 ^i64 -- ^i64 ) | x x | x ;`, naming the variable.
+        let err = check_src(": bad ( 'T 'T -- 'T ) | x x | x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains('x'), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_local_named_after_variant_is_error() {
+        // A local named after a registered variant would make the clause-vs-
+        // locals `|` disambiguation ambiguous: the poly binder rejects it as
+        // the monomorphic sibling `( i64 i64 -- i64 )` of the same body does,
+        // naming the collision.
+        let err = check_src(
+            "type: Maybe | None | Some v i64 ;\n: f ( 'T i64 -- 'T ) drop | Some | Some ;\n: main ( -- ) 1 2 f drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("collides with the variant name `Some`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_body_with_if_accepts_choose() {
+        // T1: a polymorphic body may branch. `choose` consumes `a` and `b` on
+        // both arms but at different sites; the move-join must recognise
+        // `Moved`+`Moved` as consumed-once (not a leak), or `choose` would be
+        // wrongly rejected at the word end (M1).
+        assert!(
+            check_src(
+                ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n: main ( -- ) 1 2 true choose drop ;",
+            )
+            .is_ok(),
+            "choose should type-check"
+        );
+    }
+    #[test]
+    fn check_poly_arm_local_unconsumed_is_error() {
+        // T2: `y` is bound inside the `then` arm and never consumed in it;
+        // `leave_arm` must catch the arm-local leak (M2).
+        let err = check_src(
+            ": arm_leak ( 'T 'T bool -- 'T ) | a b flag | flag if a b | y | else a drop b end ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(err.contains('y'), "names the arm-local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_if_moved_on_both_arms_is_accepted() {
+        // T3: `a`/`b` consumed on both arms (`Moved`+`Moved` => `Moved`), so
+        // nothing leaks at the word end.
+        assert!(
+            check_src(
+                ": both ( 'T 'T bool -- ) | a b flag | flag if a drop b drop else b drop a drop end ;\n: main ( -- ) ;",
+            )
+            .is_ok(),
+            "both should type-check"
+        );
+    }
+    #[test]
+    fn check_poly_if_moved_on_one_arm_leaks() {
+        // T4: `x` consumed on the `then` arm only (`Moved`+`Live` =>
+        // `MaybeMoved`), which the leak check must count as still-unconsumed
+        // (M3).
+        let err =
+            check_src(": one ( 'T bool -- ) | x flag | flag if x drop else end ;\n: main ( -- ) ;")
+                .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_if_moved_on_neither_arm_leaks() {
+        // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
+        // parked in a local across an `if` still leaks at the word end (M4).
+        let err = check_src(": none ( 'T bool -- ) | x flag | flag if else end ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_if_condition_not_bool_is_error() {
+        // T6: the `if` condition must be `bool`; here the popped condition is
+        // the type variable `'T`, so the condition guard fires before anything
+        // else (an output-mismatch never mentions `if`).
+        let err = check_src(": bad ( 'T 'T -- 'T ) if drop else drop end ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains("if"), "names the `if`: {err}");
+        assert!(err.contains("'T"), "names the variable condition: {err}");
+    }
+    #[test]
+    fn check_poly_if_branch_depth_mismatch_is_error() {
+        // T7: the arms leave different stack depths (then: 1, else: 2). `'T`
+        // carries a `Copy` bound so the repeated reads are not use-after-move,
+        // leaving the depth mismatch as the sole failure this test proves.
+        let err = check_src(
+            ": bad ( 'T: Copy bool -- 'T ) | x flag | flag if x else x x end ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("different stack depths"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_if_use_after_join_is_error() {
+        // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
+        // after `end` is a second read: use-after-move, not a leak.
+        let err = check_src(
+            ": bad ( 'T bool -- ) | x flag | flag if x drop else x drop end x drop ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains('x'), "names the moved local: {err}");
+    }
+    #[test]
+    fn check_poly_dup_of_variable_element_array_names_type_variable() {
+        // R7/`poly_copy_gate` array arm: `dup` of an array whose element is an
+        // unbounded `'T` recurses to the element and names the variable, not a
+        // fabricated `i64`.
+        let err =
+            check_src(": bad ( ['T 'N] -- ['T 'N] ['T 'N] ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Copy"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_dup_of_linear_element_array_names_element_type() {
+        // `poly_copy_gate` array arm: `dup` of a length-variable array whose
+        // element is a concrete linear struct names that struct, never `i64`.
+        let err = check_src(&format!(
+            "{SPY}: bad ( [Spy 'N] -- [Spy 'N] [Spy 'N] ) dup ;\n: main ( -- ) ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("Spy"), "unexpected message: {err}");
+        assert!(err.contains("linear"), "unexpected message: {err}");
+    }
+    #[test]
+    fn quotation_effect_unifies_and_binds_variable() {
+        // Criterion 2 (R6): a declared `[ 'T -- ]` unified against a concrete
+        // `[ i64 -- ]` binds `'T = i64`; an arity mismatch is a located type
+        // mismatch, never a silent bind. Exercises `unify_poly_input`'s
+        // `PolyType::Quotation` arm directly (the concrete poly path is Phase
+        // 2), so deleting the pointwise-row unify makes this fail.
+        use crate::ast::quotation_type;
+        let sig = PolySig {
+            row_in: None,
+            inputs: vec![PolyType::Quotation(
+                vec![PolyType::Var(0)],
+                Vec::new(),
+                false,
+                None,
+                None,
+            )],
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let structs: [StructDecl; 0] = [];
+        let enums: [EnumDecl; 0] = [];
+        let arrays: [ArrayDecl; 0] = [];
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let mut subst = Subst::default();
+        unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            quotation_type(vec![Type::I64], Vec::new()),
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst,
+        )
+        .expect("`[ 'T -- ]` should unify against `[ i64 -- ]`");
+        assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
+
+        let mut subst2 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            quotation_type(vec![Type::I64, Type::I64], Vec::new()),
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst2,
+        )
+        .expect_err("an arity mismatch must be a located type mismatch");
+        // Slice 10a (R10/R20): pin the *exact* mismatch text. The expected
+        // side must render the declared `PolyType` (`[ 'T -- ]`) through
+        // `poly_type_str`, never a fabricated `[ -- ]`; a substring like
+        // "`f`" would survive that rendering vanishing, so it is not enough.
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `[ 'T -- ]`, found `[ i64 i64 -- ]`",
+        );
+        assert!(
+            subst2.ty_of(0).is_none(),
+            "an arity mismatch must not silently bind `'T`"
+        );
+
+        // Slice 10a (R10): the `is_quotation_type` let-else arm -- a
+        // non-quotation slot against a declared quotation parameter -- routes
+        // through the same row-aware renderer, so its expected side is the
+        // declared `[ 'T -- ]`, not a fabricated quotation `Type`.
+        let mut subst3 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            Type::I64,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst3,
+        )
+        .expect_err("a non-quotation slot must be a located type mismatch");
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `[ 'T -- ]`, found `i64`",
+        );
+        assert!(
+            subst3.ty_of(0).is_none(),
+            "a non-quotation slot must not silently bind `'T`"
+        );
+    }
+    #[test]
+    fn poly_type_str_renders_a_quotation_row() {
+        // Slice 10a (R10): the row is a separate field on `PolyType::Quotation`,
+        // not a slot in `ins`/`outs`, so `poly_type_str` must render it
+        // explicitly as the leading element of each side -- dropping that
+        // rendering must leave no trace of the row name in the output.
+        let sig = PolySig {
+            row_in: Some(0),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: Some(0),
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: Vec::new(),
+            row_var_names: vec!["..s".to_string()],
+        };
+        let quot = PolyType::Quotation(
+            vec![PolyType::Concrete(Type::I64)],
+            Vec::new(),
+            true,
+            Some(0),
+            Some(0),
+        );
+        assert_eq!(poly_type_str(&quot, &sig), "~[ ..s i64 -- ..s ]");
+    }
+}

@@ -341,3 +341,254 @@ pub(super) fn materialize_quotation_at_boundary(
         ..Slot::computed(Type::Quotation(eff))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn bare_word(name: &str, module: u32) -> WordDef {
+        WordDef {
+            name: name.to_string(),
+            effect: StackEffect::default(),
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module,
+            span: Span::default(),
+        }
+    }
+    fn capture_binding(name: &str, ty: Type, deriv: Option<DerivId>) -> Binding {
+        Binding {
+            name: name.to_string(),
+            ty,
+            aliases: None,
+            deriv,
+            quot: None,
+            surviving: None,
+        }
+    }
+    #[test]
+    fn classify_capture_splits_scalar_aggregate_and_borrow_roots() {
+        // U-classify (R15): the four-way capture classifier, each arm on its
+        // own, since only case 2 and one case-3 direction are reachable from a
+        // golden (make-a hits the aggregate arm, the case-3 golden the
+        // frame-rooted borrow; the outer-rooted and no-deriv arms ride only on
+        // make-b end to end).
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let ref_ty = intern_ref_type(&mut refs, arr_ty, false);
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+
+        // Case 1: a scalar local -> Scalar (snapshotted, never dangles).
+        let prov = Provenance::default();
+        let empty = Scope::default();
+        let scalar = capture_binding("x", Type::I64, None);
+        assert!(matches!(
+            classify_capture(&scalar, &prov, &empty),
+            CaptureClass::Scalar
+        ));
+
+        // Case 2: a by-value aggregate -> FrameRooted (owned by, dies with,
+        // this frame).
+        let agg = capture_binding("arr", arr_ty, None);
+        assert!(matches!(
+            classify_capture(&agg, &prov, &empty),
+            CaptureClass::FrameRooted
+        ));
+
+        // Case 3a: a borrow whose `owned_root` names a current-frame local ->
+        // FrameRooted.
+        let mut prov = Provenance::default();
+        let d = prov.borrow("arr", false, span);
+        let mut framed = Scope::default();
+        framed.bound.push(capture_binding("arr", arr_ty, None));
+        let borrow_local = capture_binding("r", ref_ty, Some(d));
+        assert!(matches!(
+            classify_capture(&borrow_local, &prov, &framed),
+            CaptureClass::FrameRooted
+        ));
+
+        // Case 3b: the same borrow, but its `owned_root` is not in this scope
+        // (rooted in an ancestor frame) -> OuterRooted.
+        assert!(matches!(
+            classify_capture(&borrow_local, &prov, &empty),
+            CaptureClass::OuterRooted
+        ));
+
+        // Case 3c: a `&T` parameter reborrow carrying no owned root at all ->
+        // OuterRooted by construction, without consulting the scope.
+        let mut prov = Provenance::default();
+        let d = prov.add(Deriv {
+            place: "p".to_string(),
+            owned_root: None,
+            reborrow: true,
+            mutable: false,
+            projected: false,
+            span,
+        });
+        let param_ref = capture_binding("r", ref_ty, Some(d));
+        assert!(matches!(
+            classify_capture(&param_ref, &prov, &empty),
+            CaptureClass::OuterRooted
+        ));
+    }
+    #[test]
+    fn check_capture_admission_gates_each_capture_kind() {
+        // U-admit (R15): the admission gate around `classify_capture`. Each
+        // deferral/rejection is its own row, since a dropped guard is a silent
+        // accept the well-typed goldens never trip.
+        fn prov_with(names: &[&str]) -> Provenance {
+            let mut prov = Provenance::default();
+            prov.quotation_captures
+                .push(names.iter().map(|s| s.to_string()).collect());
+            prov
+        }
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let admit = |prov: &mut Provenance, escaping, scope: &Scope| {
+            check_capture_admission(QuotId(0), escaping, span, &ctx, prov, scope)
+        };
+
+        // No real capture: an empty set, and a free global not in scope, both
+        // admit (a free word resolves at the call and needs no env).
+        assert!(admit(&mut prov_with(&[]), true, &Scope::default()).is_ok());
+        assert!(admit(&mut prov_with(&["some-word"]), true, &Scope::default()).is_ok());
+
+        // A single scalar capture admits at every boundary and, being a
+        // snapshot, contributes no surviving-set member (R19 / D4 amendment).
+        let mut scope = Scope::default();
+        scope.bound.push(capture_binding("x", Type::I64, None));
+        assert_eq!(admit(&mut prov_with(&["x"]), true, &scope), Ok(None));
+
+        // A frame-rooted aggregate is past-owning-frame when escaping (R24),
+        // and admitted in-frame (R21) with a frame-rooted surviving member.
+        let mut scope = Scope::default();
+        scope.bound.push(capture_binding("arr", arr_ty, None));
+        let escaping = admit(&mut prov_with(&["arr"]), true, &scope).unwrap_err();
+        assert!(
+            escaping.contains("`arr`") && escaping.contains("does not survive the return"),
+            "escaping frame-rooted capture is past-owning-frame: {escaping}"
+        );
+        let mut prov = prov_with(&["arr"]);
+        let set = admit(&mut prov, false, &scope)
+            .expect("in-frame frame capture admits (R21)")
+            .expect("an aggregate capture is a surviving-set member");
+        let members = prov.surviving_set(set);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].name, "arr");
+        assert!(
+            members[0].frame_rooted,
+            "an in-frame aggregate is frame-rooted"
+        );
+
+        // Case 4: a quotation-typed name is deferred at every boundary.
+        let mut scope = Scope::default();
+        scope.bound.push(Binding {
+            name: "q".to_string(),
+            ty: Type::I64,
+            aliases: None,
+            deriv: None,
+            quot: Some(QuotRef::Known(QuotId(0))),
+            surviving: None,
+        });
+        let quot_name = admit(&mut prov_with(&["q"]), true, &scope).unwrap_err();
+        assert!(
+            quot_name.contains("capturing a quotation value by name is deferred"),
+            "a captured quotation-typed name is deferred: {quot_name}"
+        );
+
+        // Two scalar captures escaping need a heap env, deferred (R18); the
+        // same two admit in-frame as a stack bundle (R16, R21).
+        let mut scope = Scope::default();
+        scope.bound.push(capture_binding("x", Type::I64, None));
+        scope.bound.push(capture_binding("y", Type::I64, None));
+        let multi = admit(&mut prov_with(&["x", "y"]), true, &scope).unwrap_err();
+        assert!(
+            multi.contains("at most one reference"),
+            "a 2+-capture escaping closure is deferred: {multi}"
+        );
+        // In-frame, the same two admit -- but as a stack bundle (R16), so the
+        // interned set has no members yet must survive with `bundle = true`,
+        // else the bundle-escape-via-carrier signal is lost before R22.
+        let mut prov = prov_with(&["x", "y"]);
+        let set = admit(&mut prov, false, &scope)
+            .expect("two scalar captures admit in-frame (R21)")
+            .expect("an all-scalar stack bundle keeps a set to carry the bundle signal");
+        assert!(
+            prov.surviving_set(set).is_empty(),
+            "a scalar snapshot is never a surviving member (D4)"
+        );
+        assert!(
+            prov.surviving_set_is_bundle(set),
+            "the all-scalar 2-capture stack bundle marks its set as a bundle"
+        );
+    }
+    /// Slice 10a (R2): the fifth materialization boundary, pinned directly.
+    /// A poly signature cannot place an ordinary quotation anywhere but a
+    /// direct top-level parameter (`reject_poly_quotation_anywhere`), so a
+    /// `~` local can never reach the escaping-closure output/store boundaries
+    /// through a real `.sth` program in this slice; the guard is exercised
+    /// directly instead, the same way phase 1 pinned the routing predicates.
+    #[test]
+    fn check_capture_admission_rejects_captured_inline_quotation() {
+        let mut scope = Scope::default();
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], vec![Type::I64]);
+        scope.bound.push(Binding {
+            name: "f".to_string(),
+            ty: inl,
+            aliases: None,
+            deriv: None,
+            quot: None,
+            surviving: None,
+        });
+        let mut prov = Provenance::default();
+        prov.quotation_captures
+            .push(std::iter::once("f".to_string()).collect());
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let err = check_capture_admission(QuotId(0), true, span, &ctx, &mut prov, &scope)
+            .expect_err("a captured `~` local must be rejected");
+        assert!(
+            err.contains("`~`") && err.contains("captured"),
+            "a captured `~` local should be its own located rejection, not the ordinary \
+             quotation deferral, got: {err}"
+        );
+
+        // The same rejection under `Ctx::Word` must name the enclosing word,
+        // not fall back to `<line>` -- the only other call site exercises
+        // `Ctx::Line`, which can't discriminate a discarded `Ctx` parameter
+        // from a used one.
+        let word = bare_word("outer", 0);
+        let word_ctx = word_ctx(&word, &structs, &enums, None);
+        let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
+            .expect_err("a captured `~` local must be rejected");
+        assert!(
+            word_err.contains("`outer`"),
+            "a captured `~` local under `Ctx::Word` should name the enclosing word: {word_err}"
+        );
+    }
+}

@@ -356,3 +356,178 @@ pub(super) fn reject_quotation_type_position(ty: Type, position: &str) -> Result
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    /// Slice 10a (R2): the declaration-position rejection is no longer fail-open
+    /// for a `~` -- it used to return `Ok` (`if let Type::Quotation`), letting a
+    /// `~` slip past silently. Constructed directly.
+    #[test]
+    fn reject_quotation_type_position_rejects_inline() {
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let err = reject_quotation_type_position(inl, "a struct field").unwrap_err();
+        assert!(err.contains("~[ i64 -- ]"), "names the `~` type: {err}");
+        assert!(err.contains("a struct field"), "names the position: {err}");
+        // The ordinary quotation is still rejected in this position too.
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(reject_quotation_type_position(ord, "a struct field").is_err());
+    }
+    /// Slice 10a (R2): a word declaring a `~` *output* is rejected by the audit,
+    /// where a bare `Type::Quotation` output is allowed (a materialization
+    /// boundary). The `~` cannot be materialized, so it is never a legal output.
+    #[test]
+    fn audit_rejects_inline_quotation_output_but_allows_ordinary() {
+        use crate::ast::TypedSlot;
+        let mk = |ty: Type| WordDef {
+            name: "w".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: vec![TypedSlot { name: None, ty }],
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+            span: Span::default(),
+        };
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let err = audit_word_quotation_positions(&mk(inl)).unwrap_err();
+        assert!(err.contains("the output of `w`"), "locates it: {err}");
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(audit_word_quotation_positions(&mk(ord)).is_ok());
+    }
+    #[test]
+    fn check_drop_overload_on_non_struct_input_is_error() {
+        // Criterion 5/R1: an enum, an array, or a scalar input is rejected
+        // exactly as a non-struct input would be, with a located error.
+        let enum_input = "type: E | V ; : drop ( E -- ) drop ;";
+        let err = check_src(enum_input).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(err.contains("type:"), "unexpected message: {err}");
+
+        let array_input = ": drop ( [i64 4] -- ) drop ;";
+        let err = check_src(array_input).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+
+        let scalar_input = ": drop ( i64 -- ) drop ;";
+        let err = check_src(scalar_input).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_drop_overload_with_wrong_arity_is_error() {
+        // R1: a `drop` overload declaring anything other than exactly one
+        // input is a located error, distinct from the non-struct-input and
+        // output rejections tested above.
+        let src = "type: T x i64 ; : drop ( T T -- ) drop drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(
+            err.contains("must declare exactly one input"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_drop_overload_with_output_is_error() {
+        // Criterion 6/R1: a `drop` overload declaring an output is a located
+        // error, regardless of whether it also declares an input.
+        let src = "type: T x i64 ; : drop ( T -- i64 ) drop 0 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(err.contains("output"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_duplicate_drop_overload_for_one_struct_is_error() {
+        // Criterion 7/R1: two `drop` overloads for the same struct id is a
+        // located error naming that struct, even though the two words'
+        // bodies are otherwise unrelated. Both bodies destructure rather
+        // than self-recurse: a self-recursive body would let R6's own
+        // recursion check produce a message containing both "T" and "drop"
+        // even if the duplicate-override rejection this test targets were
+        // deleted entirely, since `find_drop_overloads` runs and returns
+        // before either body is ever checked.
+        let src = "type: T x i64 ; : drop ( T -- ) | a | a T>x drop ; \
+                   : drop ( T -- ) | a | a T>x drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("`T` already defines its own `drop`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_drop_overloads_for_different_structs_both_land_in_the_registry() {
+        // Criterion 16's check-side half: two overrides for different
+        // structs coexist with distinct `StructId` keys, with no collision
+        // reported (the module checks fine), and the registry carries one
+        // entry per struct.
+        let src = "type: A x i64 ; type: B y i64 ; \
+                   : drop ( A -- ) | a | a A>x . ; : drop ( B -- ) | b | b B>y . ; \
+                   : main ( -- ) 1 A drop 2 B drop ;";
+        check_src(src).unwrap();
+
+        let tokens = crate::lexer::lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
+        assert_eq!(
+            registry.len(),
+            2,
+            "expected one entry per struct: {registry:?}"
+        );
+    }
+    #[test]
+    fn check_drop_overloads_are_excluded_from_env() {
+        // Stage-test obligation (criterion 16's check-side half): neither
+        // override lands in `env` under the shared literal name `"drop"` --
+        // if it did, the second override registered would silently clobber
+        // the first with no diagnostic, since `check`'s env-registration
+        // loop has no redeclaration check for ordinary `:` words the way
+        // `check_extern_decls` has for `extern:`. Mirrors `check`'s own
+        // filtered registration loop rather than calling it directly, since
+        // `env` is internal to `check`.
+        let src = "type: A x i64 ; type: B y i64 ; \
+                   : drop ( A -- ) drop ; : drop ( B -- ) drop ; \
+                   : main ( -- ) 1 A drop 2 B drop ;";
+        let tokens = crate::lexer::lex(src).unwrap();
+        let module = crate::parser::parse(&tokens).unwrap();
+        let registry = find_drop_overloads(&module.words, &module.structs).unwrap();
+        let overload_indices: HashSet<usize> = registry.values().copied().collect();
+        let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
+        for (idx, word) in module.words.iter().enumerate() {
+            if overload_indices.contains(&idx) {
+                continue;
+            }
+            env.insert(
+                word.name.clone(),
+                vec![Overload {
+                    sig: sig_of(&word.effect),
+                    symbol: word.name.clone(),
+                }],
+            );
+        }
+        assert!(
+            !env.contains_key("drop"),
+            "a `drop` overload leaked into env: {env:?}"
+        );
+    }
+    #[test]
+    fn check_drop_overload_with_self_recursive_struct_is_still_a_declaration_error_not_overflow() {
+        // R1's ordering-hazard caveat: a self-recursive struct with a
+        // malformed `drop` override naming that very struct (here, an
+        // extra output) must still produce this pre-pass's own located
+        // diagnostic, not overflow the stack inside `is_copy`/
+        // `check_recursion` -- the pre-pass runs before `check_types`
+        // (where `check_recursion` lives) and never calls `is_copy` on the
+        // declared input type itself.
+        let src = "type: Loop | Wrap next Loop | End ; : drop ( Loop -- i64 ) drop 0 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("drop"), "unexpected message: {err}");
+        assert!(err.contains("output"), "unexpected message: {err}");
+    }
+}

@@ -1260,3 +1260,725 @@ impl<'a> Ctx<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    // A one-field struct with a `drop` overload: linear for the same reason any
+    // resource is, used to force the `Copy`-bound failure (X5).
+    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+    fn bare_word(name: &str, module: u32) -> WordDef {
+        WordDef {
+            name: name.to_string(),
+            effect: StackEffect::default(),
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module,
+            span: Span::default(),
+        }
+    }
+    /// A `Res` owned by `defining`, mangled as `resolve` would in a multi-module
+    /// build (`Res__m{defining}`), so `check_drop_import_visibility`'s demangle
+    /// is exercised for real.
+    fn res_struct(defining: u32, has_drop_overload: bool) -> StructDecl {
+        StructDecl {
+            name: format!("Res__m{defining}"),
+            name_static: "Res",
+            fields: vec![("n".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload,
+            is_bundle: false,
+            module: defining,
+        }
+    }
+    /// Run `check_shuffle`'s `"drop"` arm on a single `Res` operand under a
+    /// caller-module `Ctx::Word` built with `modules`.
+    fn drop_res(
+        structs: &[StructDecl],
+        modules: Option<&[ModuleInfo]>,
+        caller: u32,
+    ) -> Result<Option<Vec<Slot>>, String> {
+        let word = bare_word("main", caller);
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = word_ctx(&word, structs, &enums, modules);
+        let arrays: Vec<ArrayDecl> = Vec::new();
+        let mut prov = Provenance::default();
+        let span = Span {
+            line: 2,
+            col: 1,
+            module: 0,
+        };
+        let mut stack = vec![Slot::computed(Type::Struct(StructId::from_index(0), "Res"))];
+        check_shuffle("drop", span, &mut stack, &ctx, &arrays, &mut prov)
+    }
+    /// A checked module, for the tests that read a type fact back out of the
+    /// registries rather than only asserting a diagnostic.
+    fn checked_module(src: &str) -> Module {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+    /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
+    /// every R3/R4 test turns on, since the structural fold alone would call
+    /// it `Copy`.
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is (R3),
+    /// not by any compiler-known bit. Always the first struct in a source
+    /// string that uses it, so every other struct's `StructId` shifts up by
+    /// one relative to a spy-free program.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    fn struct_ty(module: &Module, name: &str) -> Type {
+        let idx = module
+            .structs
+            .iter()
+            .position(|s| s.name == name)
+            .expect("declared struct");
+        Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
+    }
+    fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
+        let tokens = lex(src).unwrap();
+        let terms = match crate::parser::parse_line(&tokens).unwrap() {
+            crate::ast::Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
+        // session seeds this at index 0 (`Session::new`); this bare-line
+        // helper mirrors that so a `bool`-producing comparison resolves.
+        let bool_enums = [crate::ast::bool_enum_decl()];
+        infer_line(
+            &terms,
+            entry,
+            &HashMap::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &[],
+            &bool_enums,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .map(|(stack, _insts, _overloads)| stack)
+    }
+    /// U12 (R13): an `[i64 8]` array shape declared in two files interns into
+    /// the one shared registry the driver assembles across the closure,
+    /// deduping to a single `ArrayId` rather than one per file.
+    #[test]
+    fn array_shape_dedupes_across_files() {
+        use crate::parser::parse_bodies;
+        let a = lex(": fa ( [i64 8] -- ) drop ;").unwrap();
+        let b = lex(": fb ( [i64 8] -- ) drop ;").unwrap();
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let no_imports = HashMap::new();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        parse_bodies(
+            &a,
+            &structs,
+            &enums,
+            0,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        parse_bodies(
+            &b,
+            &structs,
+            &enums,
+            1,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        assert_eq!(
+            arrays.len(),
+            1,
+            "two files' [i64 8] dedupe to one ArrayId in the shared registry"
+        );
+    }
+    #[test]
+    fn quotation_survives_dup_swap_and_bind() {
+        // Cu1 (D2/R4): a quotation `Slot` is `Copy`, so a shuffle moves it (and
+        // its `quot` marker) verbatim; a bind carries the marker into the
+        // `Binding`, from which a local read reconstructs it (the read-back is
+        // witnessed end-to-end by `quotation_forwarded_through_bind_still_calls`).
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let arrays: Vec<ArrayDecl> = Vec::new();
+        let mut prov = Provenance::default();
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let marker = Some(QuotRef::Known(QuotId(0)));
+        let quot = Slot {
+            quot: marker,
+            ..Slot::computed(Type::Cstr)
+        };
+
+        // Every shuffle keeps the marker on the slot it moves.
+        for name in ["dup", "swap", "over", "rot"] {
+            let mut stack = match name {
+                "swap" | "over" => vec![Slot::computed(Type::I64), quot],
+                "rot" => vec![Slot::computed(Type::I64), Slot::computed(Type::I64), quot],
+                _ => vec![quot],
+            };
+            let out = check_shuffle(name, span, &mut stack, &ctx, &arrays, &mut prov)
+                .unwrap()
+                .unwrap();
+            assert!(
+                out.iter().any(|s| s.quot == marker),
+                "`{name}` dropped the quotation marker"
+            );
+        }
+
+        // A bind carries the marker into the `Binding`.
+        let mut scope = Scope::default();
+        scope.bind("q", quot, false, &mut prov);
+        assert_eq!(scope.local("q").unwrap().quot, marker);
+    }
+    /// R2: `Ctx::Word` carries its word's owning module; `Ctx::Line` denotes 0.
+    #[test]
+    fn ctx_word_carries_owning_module() {
+        let word = bare_word("main", 3);
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = word_ctx(&word, &structs, &enums, None);
+        assert_eq!(ctx.module(), 3);
+        assert!(ctx.modules().is_none());
+    }
+    #[test]
+    fn ctx_line_is_module_zero() {
+        let structs: Vec<StructDecl> = Vec::new();
+        let enums: Vec<EnumDecl> = Vec::new();
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        assert_eq!(ctx.module(), 0);
+        assert!(ctx.modules().is_none());
+    }
+    #[test]
+    fn drop_of_locally_declared_override_is_ok() {
+        // caller == defining: the override is the caller's own, always visible.
+        let structs = vec![res_struct(0, true)];
+        let modules = vec![ModuleInfo::default()];
+        assert!(drop_res(&structs, Some(&modules), 0).is_ok());
+    }
+    #[test]
+    fn drop_of_selectively_imported_type_is_ok() {
+        let structs = vec![res_struct(0, true)];
+        let mut caller = ModuleInfo::default();
+        caller.selective.insert("Res".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(drop_res(&structs, Some(&modules), 1).is_ok());
+    }
+    #[test]
+    fn drop_of_qualified_only_imported_type_is_error() {
+        let structs = vec![res_struct(0, true)];
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("lib".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        let err = drop_res(&structs, Some(&modules), 1).unwrap_err();
+        // R5: the exact located diagnostic, not merely that it fails.
+        assert_eq!(
+            err,
+            "error: cannot `drop` a value of type `lib::Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in module `lib`, which this module has not imported by name\n  note: add `Res` to the import (`import: lib | Res | \"...\"`), or dispose it in a module that declares `Res`"
+        );
+    }
+    #[test]
+    fn drop_of_transitively_reachable_type_with_no_direct_import_is_error() {
+        // Round-2 fix: `Res` is declared by module 0 (`deep`), reached by the
+        // caller (module 2, `main`) only through module 1 (`mid`), which
+        // `main` never imports directly. The caller's import map has no
+        // qualifier mapping to module 0, so the diagnostic must not fabricate
+        // one -- naming the struct's own bare name as if it were a module
+        // qualifier (the pre-fix behavior) read as a valid but wrong import
+        // spelling.
+        let structs = vec![res_struct(0, true)];
+        let mid = ModuleInfo::default();
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("mid".to_string(), 1);
+        let modules = vec![ModuleInfo::default(), mid, caller];
+        let err = drop_res(&structs, Some(&modules), 2).unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `drop` a value of type `Res` in `main` (line 2)\n  disposing it runs a `drop` destructor declared in a module this module never imports directly -- it is only reachable transitively, through another module's import\n  note: import the module that declares `Res` directly, then add `Res` to that import"
+        );
+    }
+    #[test]
+    fn drop_of_plain_struct_no_override_is_ungated() {
+        // No override: the gate is never reached, the value disposes structurally.
+        let structs = vec![res_struct(0, false)];
+        let mut caller = ModuleInfo::default();
+        caller.imports.insert("lib".to_string(), 0);
+        let modules = vec![ModuleInfo::default(), caller];
+        assert!(drop_res(&structs, Some(&modules), 1).is_ok());
+    }
+    #[test]
+    fn check_shuffle_with_no_modules_is_ungated() {
+        // R8's contract: with `modules: None` (the REPL path) an override is
+        // never gated -- disposing it is byte-for-byte what it was before 8b.
+        let structs = vec![res_struct(0, true)];
+        assert!(drop_res(&structs, None, 1).is_ok());
+    }
+    #[test]
+    fn times_typing_obligations() {
+        // R18u: the three `times` typing obligations, each its own row, since a
+        // missed guard is a silent accept (the well-typed witness never trips
+        // them). Move-state identity, the whole-row guard, and row-effect
+        // equality.
+
+        // A well-typed `times` accepts (the body consumes the index and returns
+        // the row unchanged, touching no linear local).
+        check_src(": main ( -- ) 0 10 [ + ] times . ;\n").unwrap();
+
+        // (1) Move-state identity: consuming an outer linear local is rejected,
+        // named, with the repeated-disposal reason.
+        let consume = check_src(&format!(
+            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | i s drop + ] times . ;\n"
+        ))
+        .expect_err("consuming a linear local should be rejected");
+        assert!(
+            consume.contains("a `times` body cannot consume `s`")
+                && consume.contains("the body runs more than once"),
+            "move-state identity should name `s`, got: {consume}"
+        );
+
+        // (2) Whole-row guard: a quotation anywhere in the row, not just the
+        // consumed top, is rejected.
+        let row_quot = check_src(": main ( -- ) [ + ] 3 [ drop ] times ;\n")
+            .expect_err("a quotation in the row should be rejected");
+        assert!(
+            row_quot.contains("`times`")
+                && row_quot.contains("cannot take a quotation as an operand"),
+            "whole-row guard should reject a row quotation, got: {row_quot}"
+        );
+
+        // (3) Row-effect equality: a body that changes the row's depth is
+        // rejected.
+        let row_effect = check_src(": main ( -- ) 0 10 [ + 1 ] times . ;\n")
+            .expect_err("a body that changes the row should be rejected");
+        assert!(
+            row_effect.contains("`times` body must leave the row unchanged"),
+            "row-effect equality should reject a changed row, got: {row_effect}"
+        );
+    }
+    #[test]
+    fn merged_quotations_are_rejected_at_the_join() {
+        // Cu2 (R7): two *different* quotations merged at an `if` join are
+        // rejected at the join (not at consumption), because `lower_if` would
+        // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
+        // both arms (one literal bound before the `if`, read in each) is safe:
+        // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
+        let different = check_src(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n")
+            .expect_err("two different quotations at a join should be rejected");
+        assert!(
+            different.contains("these two branches leave different quotations"),
+            "the join guard should fire, got: {different}"
+        );
+        check_src(": main ( -- ) [ + ] | q | true if q else q end drop ;\n")
+            .expect("the same `Known` id in both arms is safe and must not error");
+    }
+    #[test]
+    fn check_two_output_word_interns_its_return_bundle() {
+        // R8/R10: a word with two outputs gets a bundle struct in the same
+        // registry the layout pass reads, flagged as a bundle and carrying the
+        // output tuple in order (deepest output first).
+        let module = checked_module(": pair ( -- i64 bool ) 1 true ; : main ( -- ) ;");
+        let bundles: Vec<&StructDecl> = module.structs.iter().filter(|d| d.is_bundle).collect();
+        assert_eq!(bundles.len(), 1);
+        assert_eq!(
+            bundles[0]
+                .fields
+                .iter()
+                .map(|(_, ty)| *ty)
+                .collect::<Vec<Type>>(),
+            vec![Type::I64, Type::BOOL]
+        );
+    }
+    #[test]
+    fn check_one_output_word_interns_no_bundle() {
+        // R2: nothing changes for a word the aggregate ABI does not apply to.
+        let module = checked_module(": inc ( i64 -- i64 ) 1 + ; : main ( -- ) ;");
+        assert!(module.structs.iter().all(|d| !d.is_bundle));
+    }
+    #[test]
+    fn check_two_words_of_one_output_shape_share_one_bundle() {
+        // R8: interning dedups structurally on the output tuple, so two words
+        // of the same shape share a bundle and a differing shape gets its own.
+        let module = checked_module(
+            ": pair ( i64 -- i64 i64 ) dup ;\n\
+             : twice ( i64 -- i64 i64 ) dup ;\n\
+             : flags ( -- i64 bool ) 1 true ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(module.structs.iter().filter(|d| d.is_bundle).count(), 2);
+    }
+    #[test]
+    fn check_dup_of_drop_overload_type_names_the_cause() {
+        // Criterion 2/R4: the reason-carrying cause, in both `Ctx` arms. The
+        // generic linear wording ("no bits to copy") would be actively
+        // misleading here: `File`'s bits are one plain `i64`, and its own
+        // `: drop` declaration is the whole reason they may not be copied.
+        let err = check_src(&format!(
+            "{FILE_RESOURCE} : main ( -- ) 1 File dup drop drop ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("cannot `dup`"), "unexpected message: {err}");
+        assert!(
+            err.contains("`File` is linear because it defines `drop`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains("no bits to copy"),
+            "the generic linear cause was used: {err}"
+        );
+
+        // The `Ctx::Line` arm: the same fact reaches a bare REPL line, whose
+        // carried `File` slot is linear for the same reason.
+        let module = checked_module(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let tokens = lex("dup").unwrap();
+        let terms = match crate::parser::parse_line(&tokens).unwrap() {
+            crate::ast::Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let err = infer_line(
+            &terms,
+            &[struct_ty(&module, "File")],
+            &HashMap::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &module.structs,
+            &module.enums,
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`File` is linear because it defines `drop`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_double_drop_of_all_copy_resource_is_use_after_move_error() {
+        // Criterion 4/R3: a second `drop` of the same resource is a compile
+        // error rather than a runtime double-close, which is the whole point
+        // of forcing linearity on a struct the field fold calls `Copy`.
+        let err = check_src(&format!(
+            "{FILE_RESOURCE} : main ( -- ) 1 File | f | f drop f drop ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("local `f`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn scope_leave_reports_the_unconsumed_linear_local() {
+        // `leave_block`'s diagnostic depends on this return value. Extent is
+        // enforced by checking each arm on its own `scope.clone()`, not by the
+        // `bound` truncation `leave` performs as a side effect, so the extent
+        // rule is covered end to end by the goldens rather than here.
+        let mut scope = Scope::default();
+        let prov = &mut Provenance::default();
+        scope.bind("a", Slot::computed(Type::I64), false, prov);
+        let depth = scope.depth();
+        scope.bind("b", Slot::computed(Type::I64), false, prov);
+        assert!(scope.leave(depth).is_none(), "a Copy local leaves cleanly");
+
+        // R6: a linear name leaving scope with its value still held is what the
+        // block-end firing site reports. `bind`'s `linear` flag is passed
+        // explicitly by the caller (not derived from the `Type` via
+        // `is_copy`), so any type distinct from `a`'s suffices here.
+        scope.bind("s", Slot::computed(Type::BOOL), true, prov);
+        let leaked = scope.leave(depth).expect("an unconsumed linear local");
+        assert_eq!((leaked.0.as_str(), leaked.1), ("s", Type::BOOL));
+        assert_eq!(leaked.2, MoveState::Live);
+    }
+    #[test]
+    fn fill_diagnostics_unchanged_after_site_parameterization() {
+        // D2: `fill`'s rendered diagnostics must stay byte-identical to
+        // before the shared gate existed. Assert the full strings, not
+        // `contains("fill")`.
+        let linear_err =
+            check_src(&format!("{SPY_DEF}: w ( -- ) 0 Spy 3 fill drop ;")).unwrap_err();
+        assert_eq!(
+            linear_err,
+            "error: linear array elements are not supported yet in `w` (line 3)\n  `fill` would replicate a `Spy` across every slot, but `Spy` is linear and has no `Copy` instance\n  note: declared ( -- )"
+        );
+        let ref_err = check_src(": w ( &i64 -- ) 3 fill drop ;").unwrap_err();
+        assert_eq!(
+            ref_err,
+            "error: a reference cannot be stored in `w` (line 1)\n  the element `fill` would store has type `&i64`\n  a `&T`/`&!T` borrows a local and may not outlive it, so it cannot be put anywhere that survives the borrow"
+        );
+    }
+    #[test]
+    fn operator_dispatch_resolves_the_exact_row_type() {
+        // Guards that resolution yields the right stack-effect type: a
+        // homogeneous op over `u8` yields `u8`, a comparison yields `bool`,
+        // `.` yields nothing. Note these all resolve identically through the
+        // numeric fallback too, so this does *not* prove the table pass is
+        // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
+        // guard that the exact-match table row actually drives dispatch.
+        assert_eq!(
+            infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
+            vec![Type::from_name("u8").unwrap()]
+        );
+        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::BOOL]);
+        assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
+    }
+    #[test]
+    fn check_parameter_named_after_variant_is_error() {
+        // X12 (D8 backstop): a binding name equal to a registered variant
+        // name is rejected. A parameter name is the reachable case — a `|`
+        // local named after a variant is instead read as a clause by D8, so
+        // the parameter slot is where the collision actually surfaces.
+        let err = check_src(
+            "type: Shape | Circle r f64 ;
+             : bad ( Circle : i64 -- i64 ) drop 0 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("collides"), "unexpected message: {err}");
+        assert!(err.contains("Circle"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_second_mention_of_a_copy_local_is_ordinary_reuse() {
+        // The move-state tracks linear locals only: a Copy local stays usable.
+        check_src(": w ( i64 -- i64 ) | n | n n + ;").unwrap();
+    }
+    #[test]
+    fn check_unconsumed_linear_local_is_error() {
+        let err = check_src(&format!("{SPY_DEF}: w ( Spy -- )\n  | s |\n  1 . ;")).unwrap_err();
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        assert!(
+            err.contains("`s`"),
+            "the error should name the local: {err}"
+        );
+    }
+    #[test]
+    fn intern_ref_type_dedups_per_referent_and_mutability() {
+        let mut refs = Vec::new();
+        let a = intern_ref_type(&mut refs, Type::I64, true);
+        let b = intern_ref_type(&mut refs, Type::I64, true);
+        let c = intern_ref_type(&mut refs, Type::BOOL, true);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(refs.len(), 2);
+    }
+    #[test]
+    fn provenance_interns_one_region_per_parent_and_segment() {
+        // The peek route rests on this: two non-consuming projections of one
+        // field of one parent must be recognised as one region, or the aliasing
+        // they create is invisible.
+        let mut prov = Provenance::default();
+        let s = prov.fresh_region();
+        let other = prov.fresh_region();
+        assert_ne!(s, other);
+        assert_eq!(prov.field_region(s, "a"), prov.field_region(s, "a"));
+        assert_ne!(prov.field_region(s, "a"), prov.field_region(s, "b"));
+        assert_ne!(prov.field_region(s, "a"), prov.field_region(other, "a"));
+    }
+    #[test]
+    fn provenance_regions_overlap_along_the_field_chain() {
+        // The alias check reads this: a field region is still an alias of
+        // its parent (and transitively, its parent's parent), while two
+        // fields of unrelated parents share no ancestry at all.
+        let mut prov = Provenance::default();
+        let s = prov.fresh_region();
+        let other = prov.fresh_region();
+        let a = prov.field_region(s, "a");
+        let ab = prov.field_region(a, "b");
+        assert!(
+            prov.regions_overlap(s, s),
+            "a region always overlaps itself"
+        );
+        assert!(prov.regions_overlap(s, a), "a field overlaps its parent");
+        assert!(prov.regions_overlap(a, s), "overlap is symmetric");
+        assert!(
+            prov.regions_overlap(s, ab),
+            "overlap reaches through a grandparent"
+        );
+        assert!(
+            !prov.regions_overlap(other, a),
+            "unrelated parents share no ancestry"
+        );
+    }
+    #[test]
+    fn scope_bind_keeps_the_reborrow_and_the_owned_root() {
+        // The fix this replaces: a bound reference used to release the place
+        // it was reborrowed from, which silently dropped protection for a
+        // reborrow of a reference *parameter* (no `owned_root` either, so
+        // nothing was left to suspend). Binding must be a no-op on
+        // provenance now: what ends a suspension is last-use liveness (6f),
+        // not the bind. `Scope::bind` stores `slot.deriv` verbatim (no
+        // `Provenance` transform in between), so this asserts that directly.
+        let mut prov = Provenance::default();
+        let mut scope = Scope::default();
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let fresh = prov.borrow("v", true, span);
+        let reborrow = prov.reborrow("r", Some(fresh), true, span);
+        let projected = prov.project(Some(reborrow)).expect("a projection");
+        assert!(prov.deriv(projected).reborrow, "still suspends `r`");
+        assert!(prov.deriv(projected).projected, "R7's note is apt here");
+        assert_eq!(prov.deriv(projected).owned_root.as_deref(), Some("v"));
+
+        scope.bind(
+            "e",
+            Slot::derived(Type::I64, Some(projected)),
+            false,
+            &mut prov,
+        );
+        let bound = scope
+            .local("e")
+            .and_then(|b| b.deriv)
+            .expect("a bound deriv");
+        assert!(
+            prov.deriv(bound).reborrow,
+            "`r` stays suspended after binding"
+        );
+        assert_eq!(
+            prov.deriv(bound).owned_root.as_deref(),
+            Some("v"),
+            "`v` is still borrowed by the local"
+        );
+    }
+    #[test]
+    fn provenance_suspension_key_covers_a_reborrow_with_no_owned_root() {
+        // The join key: a reborrow of a reference *parameter* has no owned
+        // root, so keying the join on `owned_root` alone would make two arms
+        // reborrowing two different parameters look identical.
+        let mut prov = Provenance::default();
+        let span = Span {
+            line: 1,
+            col: 1,
+            module: 0,
+        };
+        let p = prov.reborrow("p", None, true, span);
+        let q = prov.reborrow("q", None, true, span);
+        assert_eq!(prov.deriv(p).owned_root, prov.deriv(q).owned_root);
+        assert_ne!(prov.deriv(p).suspension(), prov.deriv(q).suspension());
+
+        // A shared reborrow suspends nothing: `&T` is Copy, so two arms
+        // reborrowing different shared parameters still agree.
+        let p = prov.reborrow("p", None, false, span);
+        let q = prov.reborrow("q", None, false, span);
+        assert_eq!(prov.deriv(p).suspension(), prov.deriv(q).suspension());
+    }
+    #[test]
+    fn quotation_parameter_is_copy_no_move_obligation() {
+        // Criterion 6b: a quotation parameter is `Copy` (it registers no move
+        // obligation), so a body that *binds* its quotation param and never
+        // consumes it still checks -- forgetting is only an error for a linear
+        // value. The body must bind and drop-on-the-floor (`| f |`, not an
+        // explicit `drop`), or the `drop` discharges the obligation and the
+        // test cannot detect the property it names: making quotation types
+        // linear would leave a `drop`-bodied version green.
+        check_src(": ignore ( i64 [ i64 -- i64 ] -- i64 ) | f | ;\n")
+            .expect("an unused quotation parameter is not a linear-forgetting error");
+    }
+    /// Slice 10a (R11): the bottom-aligned index map, exercised directly on
+    /// `back_edge_declared_shape` (a monomorphic effect grounds with no
+    /// `Subst`, so no parser is needed). Covers the `times`-shape (empty),
+    /// the `while`-shape (1<->1), an asymmetric shape (deepest output <-
+    /// deepest carried input), a longer output list (overflow -> `None`), and
+    /// a type mismatch at the aligned position (-> `None`).
+    #[test]
+    fn back_edge_index_map_is_bottom_aligned() {
+        let quot = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        fn imap(inputs: Vec<Type>, outputs: Vec<Type>) -> Vec<Option<usize>> {
+            use crate::ast::{StackEffect, TypedSlot};
+            let w = WordDef {
+                name: "w".to_string(),
+                effect: StackEffect {
+                    inputs: inputs
+                        .into_iter()
+                        .map(|ty| TypedSlot { name: None, ty })
+                        .collect(),
+                    outputs: outputs
+                        .into_iter()
+                        .map(|ty| TypedSlot { name: None, ty })
+                        .collect(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module: 0,
+                span: Span::default(),
+            };
+            let ctx = Ctx::Line {
+                structs: &[],
+                enums: &[],
+            };
+            let mut arrays = Vec::new();
+            back_edge_declared_shape(&w, None, "w", Span::default(), &ctx, &mut arrays)
+                .unwrap()
+                .2
+        }
+        // `times`-shape: zero fixed outputs -> empty map.
+        assert_eq!(
+            imap(vec![Type::I64, quot], Vec::new()),
+            Vec::<Option<usize>>::new()
+        );
+        // `while`-shape: one carried in, one out, same type.
+        assert_eq!(imap(vec![Type::I64, quot], vec![Type::I64]), vec![Some(0)]);
+        // Asymmetric: two carried, one out -> output 0 <- deepest carried.
+        assert_eq!(
+            imap(vec![Type::I64, Type::I64, quot], vec![Type::I64]),
+            vec![Some(0)]
+        );
+        // More outputs than carried inputs: the overflowing output is `None`.
+        assert_eq!(
+            imap(vec![Type::I64, quot], vec![Type::I64, Type::I64]),
+            vec![Some(0), None]
+        );
+        // Type differs at the aligned position -> `None`.
+        assert_eq!(imap(vec![Type::I64, quot], vec![Type::Str]), vec![None]);
+    }
+    /// Slice 10a (R11): the recon-4 `my-times` -- which *consumes* its counters
+    /// -- used to fail with a spurious `if` branch-depth mismatch, because the
+    /// back-edge produced the non-quotation inputs instead of the (empty,
+    /// row-only) ground declared outputs. It now checks.
+    #[test]
+    fn back_edge_produces_ground_declared_outputs() {
+        let src = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+                   | f | | to | | from |\n\
+                   from to < if\n\
+                   from f call\n\
+                   from 1 + to f my-times\n\
+                   else\n\
+                   end ;\n\
+                   : main ( -- ) 0 0 5 [ + ] my-times . ;\n";
+        check_src(src)
+            .expect("my-times checks: the back-edge produces the ground declared outputs");
+    }
+}

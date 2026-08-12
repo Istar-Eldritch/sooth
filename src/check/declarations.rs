@@ -1197,3 +1197,1340 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, Sig)> {
     }
     sigs
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    /// A checked module, for the tests that read a type fact back out of the
+    /// registries rather than only asserting a diagnostic.
+    fn checked_module(src: &str) -> Module {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+    /// `File`, whose only field is an `i64`, with a `drop` overload: the shape
+    /// every R3/R4 test turns on, since the structural fold alone would call
+    /// it `Copy`.
+    const FILE_RESOURCE: &str = "type: File fd i64 ; : drop ( File -- ) | f | f File>fd . ;";
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is (R3),
+    /// not by any compiler-known bit. Always the first struct in a source
+    /// string that uses it, so every other struct's `StructId` shifts up by
+    /// one relative to a spy-free program.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    fn struct_ty(module: &Module, name: &str) -> Type {
+        let idx = module
+            .structs
+            .iter()
+            .position(|s| s.name == name)
+            .expect("declared struct");
+        Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
+    }
+    /// U7 (R18): the exported-signature helper flags a word whose effect
+    /// names a private type of its own module, and clears once that type is
+    /// exported too (the positive half, R18's own escape hatch).
+    #[test]
+    fn exported_signature_rule_flags_private_type() {
+        use crate::ast::{ModuleInfo, TypedSlot};
+        let structs = vec![StructDecl {
+            name: "Res".to_string(),
+            name_static: "Res",
+            fields: vec![("n".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let mk_word = WordDef {
+            name: "mk".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: vec![TypedSlot {
+                    name: None,
+                    ty: Type::Struct(StructId::from_index(0), "Res"),
+                }],
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+            span: Span::default(),
+        };
+        let mut module = Module {
+            words: vec![mk_word],
+            structs,
+            enums: Vec::new(),
+            arrays: Vec::new(),
+            owned_cells: Vec::new(),
+            refs: Vec::new(),
+            externs: Vec::new(),
+            instantiations: HashMap::new(),
+            builtin_overloads: HashMap::new(),
+            modules: vec![ModuleInfo {
+                imports: HashMap::new(),
+                exports: vec![("mk".to_string(), Span::default())],
+                selective: HashMap::new(),
+            }],
+        };
+
+        let err = check_exported_signatures(&module).unwrap_err();
+        assert!(err.contains("mk"), "names the word: {err}");
+        assert!(err.contains("Res"), "names the private type: {err}");
+
+        module.modules[0]
+            .exports
+            .push(("Res".to_string(), Span::default()));
+        assert!(
+            check_exported_signatures(&module).is_ok(),
+            "exporting the type clears the rule"
+        );
+    }
+    /// U8 (R20/R21): the selective-import validator rejects a name absent from
+    /// its source module's export list (R20), two selective imports of one name
+    /// (R21, naming both sources), and a selective name colliding with a local
+    /// word (R21), while a clean import passes.
+    #[test]
+    fn selective_import_collision_is_rejected() {
+        use crate::ast::ModuleInfo;
+
+        fn info(exports: &[&str]) -> ModuleInfo {
+            ModuleInfo {
+                imports: HashMap::new(),
+                exports: exports
+                    .iter()
+                    .map(|n| (n.to_string(), Span::default()))
+                    .collect(),
+                selective: HashMap::new(),
+            }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect::default(),
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+                span: Span::default(),
+            }
+        }
+        fn module_with(words: Vec<WordDef>, modules: Vec<ModuleInfo>) -> Module {
+            Module {
+                words,
+                structs: Vec::new(),
+                enums: Vec::new(),
+                arrays: Vec::new(),
+                owned_cells: Vec::new(),
+                refs: Vec::new(),
+                externs: Vec::new(),
+                instantiations: HashMap::new(),
+                builtin_overloads: HashMap::new(),
+                modules,
+            }
+        }
+        fn sel(name: &str, qualifier: &str, target: u32, line: u32) -> SelectiveName {
+            SelectiveName {
+                name: name.to_string(),
+                qualifier: qualifier.to_string(),
+                target,
+                span: Span {
+                    line,
+                    col: 1,
+                    module: 0,
+                },
+            }
+        }
+
+        // R21: modules 1 and 2 each export `p`; module 0 selectively imports it
+        // from both, colliding at the second.
+        let m = module_with(
+            vec![word("p", 1), word("p", 2)],
+            vec![info(&[]), info(&["p"]), info(&["p"])],
+        );
+        let entries = vec![
+            vec![sel("p", "a", 1, 1), sel("p", "b", 2, 2)],
+            Vec::new(),
+            Vec::new(),
+        ];
+        let err = check_selective_imports(&m, &entries).unwrap_err();
+        assert!(err.contains("collides"), "selective collision: {err}");
+        assert!(
+            err.contains("`a`") && err.contains("`b`"),
+            "names both sources: {err}"
+        );
+
+        // R20: a name absent from its source's export list is the visibility
+        // error, distinct from a collision.
+        let m = module_with(vec![word("grow", 1)], vec![info(&[]), info(&[])]);
+        let err =
+            check_selective_imports(&m, &[vec![sel("grow", "lib", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(err.contains("not exported"), "R20 export gate: {err}");
+        assert!(!err.contains("collides"), "not the collision error: {err}");
+
+        // R21: a selective name colliding with the importer's own local word.
+        let m = module_with(
+            vec![word("p", 0), word("p", 1)],
+            vec![info(&[]), info(&["p"])],
+        );
+        let err =
+            check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).unwrap_err();
+        assert!(
+            err.contains("collides") && err.contains("local"),
+            "local collision: {err}"
+        );
+
+        // A clean selective import of an exported, non-colliding name passes.
+        let m = module_with(vec![word("p", 1)], vec![info(&[]), info(&["p"])]);
+        assert!(check_selective_imports(&m, &[vec![sel("p", "lib", 1, 1)], Vec::new()]).is_ok());
+    }
+    /// U3 (R12): the duplicate-type-name check partitions by owning module, so
+    /// two modules each declaring `Point` is not a duplicate, while two `Point`
+    /// decls in one module still is (reported by the raw `name_static`, not the
+    /// resolver's mangled `name`).
+    #[test]
+    fn duplicate_type_check_is_per_module() {
+        let mk = |module: u32| StructDecl {
+            name: format!("Point__m{module}"),
+            name_static: "Point",
+            fields: Vec::new(),
+            span: crate::ast::Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        // Two modules, one `Point` each: not a duplicate.
+        assert!(check_duplicate_type_names(&[mk(0), mk(1)], &[]).is_ok());
+        // Same module, two `Point`: a duplicate, named by the raw surface name.
+        let same_module = vec![
+            StructDecl {
+                name: "Point".to_string(),
+                name_static: "Point",
+                fields: Vec::new(),
+                span: crate::ast::Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+            StructDecl {
+                name: "Point".to_string(),
+                name_static: "Point",
+                fields: Vec::new(),
+                span: crate::ast::Span::default(),
+                has_drop_overload: false,
+                is_bundle: false,
+                module: 0,
+            },
+        ];
+        let err = check_duplicate_type_names(&same_module, &[]).unwrap_err();
+        assert!(err.contains("duplicate type `Point`"), "raw name: {err}");
+    }
+    /// Two words of the same name in one module are rejected; the same pair
+    /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).
+    #[test]
+    fn duplicate_word_name_is_rejected_only_within_one_module() {
+        fn word_at(name: &str, module: u32, line: u32) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect::default(),
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+                span: Span {
+                    line,
+                    col: 1,
+                    module: 0,
+                },
+            }
+        }
+        fn word(name: &str, module: u32) -> WordDef {
+            word_at(name, module, 0)
+        }
+
+        // Two modules, one `push` each: not a duplicate.
+        assert!(check_duplicate_word_names(&[word("push", 0), word("push", 1)]).is_ok());
+
+        // Same module, two `push`: a duplicate, naming both locations.
+        let err = check_duplicate_word_names(&[word_at("push", 0, 1), word_at("push", 0, 2)])
+            .unwrap_err();
+        assert!(
+            err.contains("duplicate word `push`") && err.contains("line 2"),
+            "names the repeat's location: {err}"
+        );
+        assert!(
+            err.contains("first defined at line 1"),
+            "also names the first definition's location: {err}"
+        );
+
+        // A repeat `main` in one module is caught too: nothing else validates
+        // `main`'s multiplicity within a module.
+        let err = check_duplicate_word_names(&[word("main", 0), word("main", 0)]).unwrap_err();
+        assert!(err.contains("duplicate word `main`"), "names main: {err}");
+
+        // Two `drop`s sharing a module are *not* rejected here: distinct-struct
+        // overloading is `find_drop_overloads`'s job, keyed by struct id, not
+        // this check's; re-flagging by name alone would reject Phase 3 slice
+        // 8b's legitimate multi-type overloading.
+        assert!(check_duplicate_word_names(&[word("drop", 0), word("drop", 0)]).is_ok());
+    }
+    #[test]
+    fn check_extern_redeclaring_a_word_is_error() {
+        // Criterion 5/R1: an `extern:` naming an already-registered word (a
+        // user `:` word here) is a located error.
+        let src = ": foo ( i64 -- i64 ) ;\nextern: foo ( i64 -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("foo"), "unexpected message: {err}");
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_redeclaring_a_builtin_is_error() {
+        // Criterion 5/R1: every builtin `check_term` dispatches by name before
+        // the env lookup, plus the `>`-prefixed conversion family. None is in
+        // `builtin_table`, so without the `BUILTIN_WORDS` gate the declaration
+        // would be accepted, never consulted, and silently do nothing.
+        for name in BUILTIN_WORDS.iter().copied().chain([">u8", ">f64"]) {
+            let src = format!("extern: {name} ( i64 -- i64 ) \"s\" ;");
+            let Err(err) = check_src(&src) else {
+                panic!("`extern: {name}` was accepted");
+            };
+            assert!(
+                err.contains("redeclares"),
+                "unexpected message for `{name}`: {err}"
+            );
+        }
+    }
+    #[test]
+    fn overload_exact_input_match_is_error() {
+        // R1: two definitions with identical `(module, name, input_types)`
+        // still hit the `duplicate word` message, byte-for-byte.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 0 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 1 ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("duplicate word `dist`"),
+            "unexpected message: {err}"
+        );
+
+        // R1: an overload whose input types exactly match a builtin row is a
+        // located error too, naming the operand types.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( i64 i64 -- i64 ) drop ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `+`") && err.contains("as a builtin"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("i64 i64"), "names the operand types: {err}");
+
+        // Mutation check: two overloads of one name with *different* input
+        // types no longer collide as a duplicate (the whole reason for R1's
+        // widened key).
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: dist ( Vec2 Vec2 -- i64 ) drop drop 0 ;\n\
+: dist ( Vec2 -- i64 ) drop 0 ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            !err.contains("duplicate word"),
+            "different input types must not collide as a duplicate: {err}"
+        );
+    }
+    #[test]
+    fn overload_arity_clash_is_error() {
+        // R4: a local overload of `+` whose arity disagrees with the
+        // builtin's is rejected at its own definition site.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 -- Vec2 ) ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `+`")
+                && err.contains("takes 1 input but another `+` takes 2")
+                && err.contains("must agree on input count"),
+            "unexpected message: {err}"
+        );
+
+        // R4: two local overloads of a non-builtin name disagreeing on
+        // arity, rejected at the second's site.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("overload of `bump`") && err.contains("takes 2 input"),
+            "unexpected message: {err}"
+        );
+
+        // Mutation check: two overloads agreeing on arity (even with
+        // different input types) never hit this check.
+        let ok = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( i64 -- i64 ) ;\n\
+: main ( -- ) ;\n";
+        check_src(ok).expect("same-arity overloads must not trip the arity check");
+    }
+    #[test]
+    fn overload_generic_and_concrete_overlap_is_error() {
+        // R5: a poly candidate overlapping the builtin `+` of the same
+        // arity is rejected -- no specialization ordering.
+        let src = ": + ( 'T 'T -- 'T ) drop ;\n: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("generic overload") && err.contains("overlaps a concrete overload of `+`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains(": + ( 'T 'T -- 'T )"),
+            "renders the poly signature: {err}"
+        );
+
+        // R5: a poly candidate overlapping a *local* concrete overload of
+        // the same name and arity.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T -- 'T ) ;\n\
+: main ( -- ) ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `bump`"),
+            "unexpected message: {err}"
+        );
+
+        // Mutation check: a poly candidate of a *different* arity than
+        // every concrete candidate for the name never trips the check.
+        let ok = "type: Vec2 x i64 y i64 ;\n\
+: bump ( Vec2 -- Vec2 ) ;\n\
+: bump ( 'T 'T -- 'T ) drop ;\n\
+: main ( -- ) ;\n";
+        check_src(ok).expect("a differing-arity poly candidate must not trip the overlap check");
+    }
+    /// Fix 3 (R5, module-scoped): `check_generic_concrete_overlap` operates
+    /// directly on `WordDef`s carrying pre-mangle bare names and hand-set
+    /// module ids -- unlike a `check_src` scenario (always module 0), this
+    /// exercises the cross-module key `resolve::mangle` would otherwise
+    /// disambiguate before `check` ever ran on a real multi-file program, so
+    /// the two candidates' bare names can actually collide by string here.
+    #[test]
+    fn overload_generic_and_concrete_overlap_is_module_scoped() {
+        fn concrete_word(name: &str, module: u32, arity: usize) -> WordDef {
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect {
+                    inputs: (0..arity)
+                        .map(|_| TypedSlot {
+                            name: None,
+                            ty: Type::I64,
+                        })
+                        .collect(),
+                    outputs: Vec::new(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: None,
+                module,
+                span: Span::default(),
+            }
+        }
+        fn poly_word(name: &str, module: u32, arity: usize) -> WordDef {
+            let sig = PolySig {
+                row_in: None,
+                inputs: (0..arity as u32).map(PolyType::Var).collect(),
+                outputs: Vec::new(),
+                row_out: None,
+                bounds: Vec::new(),
+                ty_var_names: (0..arity).map(|i| format!("'T{i}")).collect(),
+                len_var_names: Vec::new(),
+                row_var_names: Vec::new(),
+            };
+            WordDef {
+                name: name.to_string(),
+                effect: StackEffect {
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                },
+                body: WordBody::Terms { terms: Vec::new() },
+                poly: Some(Box::new(sig)),
+                module,
+                span: Span::default(),
+            }
+        }
+
+        // R5, module-scoped: an unrelated concrete `bump` in module 1 does
+        // not overlap a poly `bump` of the same arity declared in module 0 --
+        // pre-fix, both were keyed by the bare name alone, globally, so this
+        // combination was rejected even though nothing imports across the
+        // two modules.
+        let words = vec![concrete_word("bump", 1, 1), poly_word("bump", 0, 1)];
+        check_generic_concrete_overlap(&words)
+            .expect("an unrelated same-name concrete word in a different module must not overlap");
+
+        // Mutation check: the *same*-module case must still be rejected --
+        // module-scoping narrows the key, it does not disable the check.
+        let words = vec![concrete_word("bump", 0, 1), poly_word("bump", 0, 1)];
+        let err = check_generic_concrete_overlap(&words).unwrap_err();
+        assert!(
+            err.contains("generic overload")
+                && err.contains("overlaps a concrete overload of `bump`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn overload_missing_at_call_site_is_error() {
+        // R3: a builtin operator's exact-match miss falls back to its
+        // existing operand-class diagnostic, byte-for-byte, even when a
+        // *different* struct's overload of the same name exists in the
+        // module (importing `Vec2` does not bring `+` for it, and a local
+        // `Vec2 +` overload does not answer an `i64 bool` call site
+        // either).
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: + ( Vec2 Vec2 -- Vec2 ) drop ;\n\
+: main ( -- ) 1 true + drop ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("requires two operands of the same numeric type")
+                && err.contains("`i64`")
+                && err.contains("`bool`"),
+            "unexpected message: {err}"
+        );
+
+        // R3: a user-overloaded, non-operator name called with operands
+        // that match no candidate names the operand types, the same as any
+        // ordinary word call.
+        let src = "type: Vec2 x i64 y i64 ;\n\
+: describe ( Vec2 -- ) drop ;\n\
+: main ( -- ) 1 describe ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("expected `Vec2`") && err.contains("found `i64`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_extern_shadowing_a_builtin_does_not_change_its_meaning() {
+        // R1's reason for existing: before the gate, this compiled, and `dup`
+        // at the call site still meant the builtin with no diagnostic at all.
+        let src = "extern: dup ( i64 -- i64 ) \"mydup\" ;\n: main ( -- ) 1 dup . . ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_registers_its_effect_at_call_sites() {
+        // Criterion 4/R1: registration is what makes the existing arity and
+        // type checks apply to a foreign call unchanged. Parsing it is not
+        // enough, so assert the effect is actually consulted.
+        let ok =
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) \"hi\" cstr strlen . ;";
+        check_src(ok).unwrap();
+        let underflow = "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) strlen . ;";
+        let err = check_src(underflow).unwrap_err();
+        assert!(err.contains("strlen"), "unexpected message: {err}");
+        let wrong_type =
+            "extern: strlen ( cstr -- usize ) \"strlen\" ;\n: main ( -- ) true strlen . ;";
+        let err = check_src(wrong_type).unwrap_err();
+        assert!(err.contains("strlen"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_redeclaring_another_extern_is_error() {
+        let src = "extern: foo ( i64 -- i64 ) \"foo\" ;\nextern: foo ( i64 -- i64 ) \"bar\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("redeclares"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_with_drop_overload_is_linear() {
+        // Criterion 1/R3: the override forces linearity, so a struct whose
+        // every field is `Copy` is not `Copy`. Without the override the same
+        // declaration folds to `Copy`, which is what makes this a real
+        // decision rather than a restatement of the field fold.
+        let module = checked_module(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let file = struct_ty(&module, "File");
+        assert!(!is_copy(
+            file,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(is_linear(
+            file,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+
+        let plain = checked_module("type: File fd i64 ; : main ( -- ) 1 File drop ;");
+        assert!(is_copy(
+            struct_ty(&plain, "File"),
+            &plain.structs,
+            &plain.enums,
+            &plain.arrays
+        ));
+    }
+    #[test]
+    fn check_extern_accepts_the_full_r2_boundary_type_set() {
+        // R2: the numeric tower, `bool`, `&T`/`&!T`, and `cstr` may all cross
+        // an `extern:` boundary in either position.
+        let src = "extern: f1 ( i64 u8 usize isize f64 f32 bool -- i64 ) \"f1\" ;\nextern: f2 ( &i64 &!i64 -- i64 ) \"f2\" ;\nextern: f3 ( cstr -- cstr ) \"f3\" ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn check_extern_with_str_parameter_is_error() {
+        // R2/R7: a `str` is a descriptor handle (R4), not a scalar or a
+        // single opaque `Ptr`, so it matches no C parameter; the rejection
+        // names the total conversion to `cstr`.
+        let src = "extern: f ( str -- i64 ) \"f\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("matches no C parameter") && err.contains("`cstr`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_extern_returning_str_is_error() {
+        // R11: a returned `str` would be one not built from a literal, which
+        // is the invariant R10's `Copy`/non-escaping status rests on.
+        let src = "extern: f ( -- str ) \"f\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("cannot return a `str`") && err.contains("static data only"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_extern_with_aggregate_parameter_is_error() {
+        // Criterion 11/R3: an owned aggregate (struct/enum/array) as an
+        // `extern:` input is rejected at the declaration.
+        let src = "type: Point x i64 y i64 ;\nextern: foo ( Point -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("owned aggregate"), "unexpected message: {err}");
+        assert!(err.contains("Point"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_with_array_parameter_is_error() {
+        let src = "extern: foo ( [i64 4] -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("owned aggregate"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_with_owned_pointer_parameter_is_error() {
+        // R3: `^T` is an owned aggregate too, rejected in input position
+        // with the generic aggregate message (the output-specific
+        // "forge ownership" message is only for the output position).
+        let src = "extern: foo ( ^i64 -- i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("owned aggregate"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_cannot_express_a_variadic_c_function() {
+        // R3: `extern:`'s grammar has no syntax for a variadic parameter
+        // list, so `printf` cannot be usefully declared: only a fixed
+        // effect can be spelled, e.g. one `cstr` and nothing else.
+        let src = "extern: printf ( cstr -- i64 ) \"printf\" ;";
+        check_src(src).unwrap();
+        let err =
+            crate::parser::parse(&lex("extern: printf ( cstr ... -- i64 ) \"printf\" ;").unwrap())
+                .unwrap_err();
+        assert!(
+            err.contains("unknown type `...`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_extern_multi_output_is_error() {
+        // Criterion 18/R8: a two-output `extern:` describes no C prototype.
+        // Unrejected it lowered to a discarded result and panicked in the
+        // *next* consumer of the value that was never pushed, naming the
+        // wrong term; the diagnostic sits at the declaration instead.
+        let src = "extern: two ( i64 -- i64 i64 ) \"two\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("`extern: two` declares 2 outputs")
+                && err.contains("no C function returns more than one value"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_extern_returning_owned_pointer_is_error() {
+        // Criterion 12/R3: an `extern:` returning `^T` is rejected: it would
+        // forge ownership of memory the allocator did not hand out.
+        let src = "extern: foo ( i64 -- ^i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("forge ownership"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_extern_returning_a_reference_is_error() {
+        // Criterion 13/R3: reusing the existing no-declared-output-reference
+        // message rather than duplicating it.
+        let src = "extern: foo ( i64 -- &i64 ) \"foo\" ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("a reference cannot be stored"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_clause_body_duplicate_local_is_error() {
+        let src = "type: Shape | Circle r f64 s f64 ;
+             : area ( Shape -- f64 ) | Circle | a a | a ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`area`"), "unexpected message: {err}");
+    }
+    // Slice 6h phase 2: D2's shared gate plus the constructor's own D3
+    // zero-validity predicate.
+
+    #[test]
+    fn array_constructor_i64_ten_yields_slot() {
+        check_src(": w ( -- ) [ i64 ; 10 ] drop ;").unwrap();
+    }
+    #[test]
+    fn array_constructor_str_element_is_rejected() {
+        let err = check_src(": w ( -- ) [ str ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (directly)"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn array_constructor_struct_containing_str_element_is_rejected() {
+        let err = check_src("type: HasStr s str ; : w ( -- ) [ HasStr ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `HasStr`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via field `s`)"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn array_constructor_depth_two_struct_containing_str_is_rejected() {
+        // Proves recursion, not one-level field iteration: `str` is two
+        // struct fields deep (`Outer.i.s`), so deleting the struct-field
+        // recursion arm (keeping only a one-level check) must fail this.
+        let err =
+            check_src("type: Inner s str ; type: Outer i Inner ; : w ( -- ) [ Outer ; 4 ] drop ;")
+                .unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `Outer`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via field `i` -> field `s`)"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn array_constructor_struct_with_array_of_str_field_is_rejected() {
+        // The predicate's array arm: the offending `str` is reached only
+        // through a struct field that is itself an array. Deleting the
+        // array-element recursion arm must fail this test.
+        let err = check_src("type: Wrap arr [str 4] ; : w ( -- ) [ Wrap ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `Wrap`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via field `arr` -> array element)"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn array_constructor_enum_with_str_on_a_nonzero_variant_is_rejected() {
+        // Pins the conservative all-variant recursion: `str` lives on `B`,
+        // not the zero-tag `A`, so a variant-0-only walk would miss it.
+        let err = check_src("type: E | A | B s str ; : w ( -- ) [ E ; 4 ] drop ;").unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `E`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `str` (via variant `B` field `s`)"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn array_constructor_struct_containing_quotation_element_is_rejected() {
+        let err = check_src("type: Boxed f [ i64 -- i64 ] ; : w ( -- ) [ Boxed ; 4 ] drop ;")
+            .unwrap_err();
+        assert!(
+            err.contains("cannot zero-initialize a `Boxed`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            err.contains("transitively contains `[ i64 -- i64 ]` (via field `f`)"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn array_constructor_linear_element_is_rejected() {
+        // Preempted by the module-wide `check_no_linear_array_elements` sweep
+        // (D1 interns the shape unconditionally at parse time, before any
+        // body is checked), rather than by the new per-site gate -- but
+        // still a located rejection, not a silent accept.
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) [ Spy ; 4 ] drop ;")).unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn fill_still_accepts_a_str_element() {
+        // D4: `fill` replicates a real seed and never mints one from zeroed
+        // memory, so it keeps accepting `str`/`cstr`/a quotation -- the
+        // shared gate's zero-safety branch is off for `fill`.
+        check_src(": main ( -- ) \"hi\" 3 fill drop ;").unwrap();
+    }
+    #[test]
+    fn check_value_recursion_through_array_element_is_error() {
+        // X5/R14/M3: a struct containing itself via an array element is a
+        // recursive definition (infinite size), caught by the DFS.
+        let err = check_src("type: Node kids [Node 4] ;").unwrap_err();
+        assert!(err.contains("recursive"), "unexpected message: {err}");
+        assert!(err.contains("Node"), "should name the cycle: {err}");
+    }
+    #[test]
+    fn check_struct_generated_words_flat_struct_ok() {
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             : main ( -- ) 1 2 Vec2 dup Vec2>x drop Vec2>y drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_struct_generated_words_nested_struct_ok() {
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             type: Segment from Vec2 to Vec2 ;
+             : main ( -- ) 1 2 Vec2 3 4 Vec2 Segment dup Segment>from Vec2>x drop Segment> drop drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_struct_zero_field_registers_only_ctor_and_destructure() {
+        check_src("type: Unit ; : main ( -- ) Unit Unit> ;").unwrap();
+    }
+    #[test]
+    fn check_struct_setter_returns_updated_struct_ok() {
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 3 Vec2<x ;").unwrap();
+    }
+    #[test]
+    fn check_struct_peek_copy_field_leaves_struct_live_ok() {
+        // R10: `Vec2|>x` is non-consuming, so the struct is still on the
+        // stack for the second peek and the trailing `Vec2>` destructure.
+        check_src("type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 Vec2|>x drop Vec2> drop drop ;")
+            .unwrap();
+    }
+    #[test]
+    fn check_struct_peek_on_linear_field_is_error() {
+        // R10: a linear field can't be peeked (workaround: `S>`).
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holds a Spy b i64 ; : main ( -- ) 7 Spy 1 Holds Holds|>a drop drop ;"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("cannot `Holds|>a`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        assert!(err.contains("`S>`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_peek_on_wrong_type_is_error() {
+        // A peek word applied to a value that isn't its struct: names the
+        // peek word and both types, same shape as the getter/setter checks.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2|>x drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2|>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_duplicate_type_name_is_error() {
+        // X2: two `type:` declarations sharing a name name that type.
+        let err = check_src("type: Vec2 x i64 ; type: Vec2 y i64 ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_recursion_by_value_self_cycle_is_error() {
+        // X3/M5: a directly self-referential struct (no `^` anywhere
+        // on the cycle) is an error naming the full path (a bare string,
+        // no span), and this test itself is proof the checker terminated
+        // rather than hung.
+        let err = check_src("type: Loop next Loop ;").unwrap_err();
+        assert!(
+            err.contains("recursive struct"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("Loop -> Loop"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_recursion_by_value_mutual_cycle_is_error() {
+        // X3/M5: a mutually-recursive pair of structs, no `^`
+        // anywhere, names the full path A -> B -> A.
+        let err = check_src("type: A b B ; type: B a A ;").unwrap_err();
+        assert!(
+            err.contains("recursive struct"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("A -> B -> A"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_direct_recursion_is_error_not_hang() {
+        // X3/M5: a directly self-referential enum (a variant field of its own
+        // type) is an error naming the cycle (bare, no span), and this
+        // test's return is proof the DFS terminated rather than hung.
+        let err = check_src("type: Loop | Wrap next Loop | End ;").unwrap_err();
+        assert!(err.contains("recursive enum"), "unexpected message: {err}");
+        assert!(err.contains("Loop"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_mutual_recursion_is_error_not_hang() {
+        // X3/M5: a mutually-recursive pair of enums, names both in the cycle.
+        let err = check_src("type: A | Ta x B ; type: B | Tb y A ;").unwrap_err();
+        assert!(err.contains("recursive enum"), "unexpected message: {err}");
+        assert!(err.contains('A'), "unexpected message: {err}");
+        assert!(err.contains('B'), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_recursion_cell_cycle_in_struct_field_is_ok() {
+        // A `^` edge through a struct field is legal, not just through
+        // an enum variant payload -- the rule is about size finiteness, not
+        // idiom.
+        check_src("type: Node v i64 next ^Node ;").unwrap();
+    }
+    #[test]
+    fn check_recursion_cell_cycle_in_enum_variant_is_ok() {
+        // The same `^` cycle acceptance in enum variant position,
+        // mirroring check_recursion_cell_cycle_in_struct_field_is_ok.
+        check_src("type: List | Nil | Cons v i64 next ^List ;").unwrap();
+    }
+    #[test]
+    fn check_recursion_array_element_cell_is_cut_then_rejected_as_linear() {
+        // The `^` edge is cut inside an array element too, so this
+        // definition survives the recursion rule and reaches the linear
+        // array-element rule instead of "recursive array definition".
+        let err = check_src("type: Node kids [^Node 4] ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^Node`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_enum_mixed_recursion_is_error_not_hang() {
+        // D9/X3: a struct field of enum type closing a cycle back to the
+        // struct is caught by the combined-graph DFS.
+        let err = check_src("type: S f E ; type: E | V g S ;").unwrap_err();
+        assert!(err.contains("recursive"), "unexpected message: {err}");
+        assert!(err.contains('S'), "unexpected message: {err}");
+        assert!(err.contains('E'), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_no_linear_array_elements_direct_element_in_struct_field_is_error() {
+        // The parser cannot reject `[Spy N]` (struct fields aren't resolved
+        // until the whole module is parsed), so this is the checker's job.
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Bag xs [Spy 2] ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_no_linear_array_elements_direct_element_in_word_signature_is_error() {
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( [Spy 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_no_linear_array_elements_indirect_via_linear_struct_field_is_error() {
+        // `Arr`'s element (`Holds`) is not itself `Spy`, but contains one
+        // transitively; `is_copy` already sees through that, so the sweep
+        // over `module.arrays` must too.
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holds s Spy ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_no_linear_array_elements_indirect_via_linear_struct_in_signature_is_error() {
+        let err = check_src(&format!(
+            "{SPY_DEF}type: Holds s Spy ; : w ( [Holds 2] -- ) | a | a drop ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_no_linear_array_elements_copy_element_is_ok() {
+        check_src("type: V xs [i64 4] ; : main ( -- ) 0 . ;").unwrap();
+    }
+    #[test]
+    fn array_of_owned_is_error() {
+        let err = check_src(": w ( [^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn owned_of_linear_array_is_error() {
+        let err = check_src(&format!(
+            "{SPY_DEF}: w ( ^[Spy 2] -- ) drop ; : main ( -- ) 0 . ;"
+        ))
+        .unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn nested_array_of_owned_is_error() {
+        let err = check_src(": w ( ^[^i64 4] -- ) drop ; : main ( -- ) 0 . ;").unwrap_err();
+        assert!(
+            err.contains("linear array elements are not supported yet"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`^i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn array_of_struct_holding_owned_is_error() {
+        // Keeps `emit_drop`'s linear-array `unreachable!` guard valid now that
+        // cells are a second linear type: an array whose element only holds a
+        // cell transitively must be rejected here too, or lowering would reach
+        // that arm with an array needing drop glue.
+        let err = check_src("type: Holds c ^i64 ; type: Arr a [Holds 2] ; : main ( -- ) 0 . ;")
+            .unwrap_err();
+        assert!(err.contains("linear array elements are not supported yet"));
+        assert!(err.contains("`Holds`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_and_enum_duplicate_name_across_registries_is_error() {
+        // X2: a name used by one struct and one enum names that type.
+        let err = check_src("type: Dup x i64 ; type: Dup | V ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Dup"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_nested_aggregate_fields_ok() {
+        // D9: a variant may carry a struct, and a struct may carry an enum,
+        // acyclically — no recursion error.
+        check_src(
+            "type: Vec2 x f64 y f64 ;
+             type: Shape | Dot p Vec2 | Empty ;
+             type: Tagged k Shape n i64 ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_struct_constructor_arity_mismatch_is_error() {
+        // X4: too few values fed to the constructor, naming the struct.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 Vec2 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+        assert!(err.contains("needs 2 values"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_constructor_field_type_mismatch_is_error() {
+        // X4: a `bool` where an `i64` field is expected, naming struct+field type.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 true Vec2 ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_accessor_on_wrong_type_is_error() {
+        // X5: `Vec2>x` applied to a bare `i64` names the accessor and both types.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- i64 ) 5 Vec2>x ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_accessor_on_other_struct_is_error() {
+        // X5: a `Vec2` accessor applied to a `Segment` names both struct types.
+        let src = "type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;
+            : main ( -- i64 ) 1 2 Vec2 3 4 Vec2 Segment Vec2>x ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Vec2>x"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+        assert!(err.contains("`Segment`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_print_is_error() {
+        // X6: `.` on a struct reaches `print_requires_printable`, naming it.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- ) 1 2 Vec2 . ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("printable"), "unexpected message: {err}");
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_equality_operator_is_error() {
+        // X7: `=` on two structs is scalar-only, naming the struct type.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- bool ) 1 2 Vec2 1 2 Vec2 = ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_arithmetic_operator_is_error() {
+        // X7: `+` on two structs is scalar-only, naming the struct type.
+        let src = "type: Vec2 x i64 y i64 ; : main ( -- Vec2 ) 1 2 Vec2 1 2 Vec2 + ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("same numeric type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Vec2`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_unifies_through_if_else_join_ok() {
+        // R10: a struct type flows through an `if`/`else` join like any Type.
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             : pick ( bool -- Vec2 ) if 1 2 Vec2 else 3 4 Vec2 end ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_struct_moves_through_shuffles_ok() {
+        // R10: dup/drop/swap/over move a struct value with no special case.
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             : main ( -- Vec2 ) 1 2 Vec2 3 4 Vec2 swap drop dup drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_enum_zero_field_variant_constructor_ok() {
+        check_src("type: Cmd | Halt ; : main ( -- Cmd ) Halt ;").unwrap();
+    }
+    #[test]
+    fn check_enum_multi_field_variant_constructor_ok() {
+        check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ; : main ( -- Shape ) 2.0 Circle ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_enum_used_in_word_effect_ok() {
+        check_src("type: Shape | Circle r f64 ; : id ( Shape -- Shape ) ;").unwrap();
+    }
+    #[test]
+    fn check_enum_single_variant_newtype_ok() {
+        // M3: a single-variant enum is allowed.
+        check_src("type: Id | Wrap v i64 ; : main ( -- Id ) 5 Wrap ;").unwrap();
+    }
+    #[test]
+    fn check_enum_duplicate_type_name_across_two_enums_is_error() {
+        // X2: two enum `type:` declarations sharing a name.
+        let err =
+            check_src("type: Shape | Circle r f64 ; type: Shape | Square s f64 ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_duplicate_type_name_against_struct_is_error() {
+        // X2: a struct and an enum sharing a name, across the combined
+        // struct+enum registry (D10).
+        let err = check_src("type: Vec2 x i64 y i64 ; type: Vec2 | Only v i64 ;").unwrap_err();
+        assert!(err.contains("duplicate type"), "unexpected message: {err}");
+        assert!(err.contains("Vec2"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_constructor_arity_mismatch_is_error() {
+        // X9: too few values fed to a variant constructor, naming the enum.
+        let src = "type: Shape | Rect w f64 h f64 ; : main ( -- Shape ) 1.0 Rect ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+        assert!(err.contains("needs 2 values"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_constructor_field_type_mismatch_is_error() {
+        // X9: a `bool` where an `f64` field is expected, naming both types.
+        let src = "type: Shape | Circle r f64 ; : main ( -- Shape ) true Circle ;";
+        let err = check_src(src).unwrap_err();
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_unifies_through_if_else_join_ok() {
+        // R10: an enum type flows through an `if`/`else` join like any Type.
+        check_src(
+            "type: Shape | Circle r f64 | Square s f64 ;
+             : pick ( bool -- Shape ) if 1.0 Circle else 2.0 Square end ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_enum_moves_through_shuffles_ok() {
+        // R10: dup/drop/swap/over move an enum value with no special case.
+        check_src(
+            "type: Shape | Circle r f64 | Square s f64 ;
+             : main ( -- Shape ) 1.0 Circle 2.0 Square swap drop dup drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_enum_struct_and_enum_coexist_ok() {
+        // D10: a distinct registry per kind; structs and enums both resolve
+        // and both generate correctly-typed words in the same module.
+        check_src(
+            "type: Vec2 x i64 y i64 ;
+             type: Shape | Circle r f64 ;
+             : main ( -- Vec2 Shape ) 1 2 Vec2 3.0 Circle ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_clause_word_multi_and_zero_field_ok() {
+        // R11: a clause per variant, each leaving the single declared output;
+        // a clause-body `| w h |` binds the payload, a zero-field clause with
+        // a value flowing underneath the scrutinee type-checks.
+        check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             type: MaybeInt | None | Some v i64 ;
+             : area ( Shape -- f64 ) | Circle dup * 3.14159 * | Rect | w h | w h * ;
+             : unwrap-or ( i64 MaybeInt -- i64 ) | None | Some swap drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_clause_word_non_exhaustive_names_missing_variant() {
+        // X4: a clause word missing a variant names the missing one.
+        let err = check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             : area ( Shape -- f64 ) | Circle dup * ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("non-exhaustive"), "unexpected message: {err}");
+        assert!(err.contains("Rect"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_clause_word_duplicate_clause_names_variant() {
+        // X5: two clauses for the same variant names it.
+        let err = check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             : area ( Shape -- f64 ) | Circle dup * | Circle dup * | Rect | w h | w h * ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("duplicate clause"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("Circle"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_clause_word_unknown_variant_names_it_and_enum() {
+        // X6: a clause naming a non-variant of the scrutinee enum.
+        let err = check_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ;
+             type: Other | Blob b i64 ;
+             : area ( Shape -- f64 ) | Circle dup * | Rect | w h | w h * | Blob 0.0 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("unknown variant"), "unexpected message: {err}");
+        assert!(err.contains("Blob"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_clause_word_on_non_enum_top_input_is_error() {
+        // X7: a clause body whose top input is a scalar (not an enum).
+        let err = check_src(
+            "type: Circle | C r f64 ;
+             : bad ( i64 -- i64 ) | C 0 ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("not an enum"), "unexpected message: {err}");
+        assert!(err.contains("bad"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_clause_body_violating_declared_output_is_error() {
+        // X8/M6: a clause whose body leaves a type other than the single
+        // declared output effect.
+        let err = check_src(
+            "type: MaybeInt | None | Some v i64 ;
+             : bad ( MaybeInt -- i64 ) | None true | Some ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("type mismatch"), "unexpected message: {err}");
+        assert!(err.contains("`bool`"), "unexpected message: {err}");
+        assert!(err.contains("`i64`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_print_is_error() {
+        // X10/M2: `.` on an enum reaches the printable guard, naming the enum.
+        let err = check_src("type: Shape | Circle r f64 ; : w ( Shape -- ) . ;").unwrap_err();
+        assert!(err.contains("printable"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_equality_operator_is_error() {
+        // X10/M2: `=` on two enums reaches the operand-pair guard.
+        let err =
+            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- bool ) = ;").unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_enum_arithmetic_operator_is_error() {
+        // X10/M2: arithmetic on an enum reaches the operand-pair guard.
+        let err =
+            check_src("type: Shape | Circle r f64 ; : w ( Shape Shape -- Shape ) + ;").unwrap_err();
+        assert!(err.contains("numeric"), "unexpected message: {err}");
+        assert!(err.contains("Shape"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_struct_constructor_takes_a_matching_i64_field_ok() {
+        check_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;")).unwrap();
+    }
+    #[test]
+    fn check_struct_constructor_on_a_float_field_is_error() {
+        let err = check_src(&format!("{SPY_DEF}: w ( -- ) 7.5 Spy drop ;")).unwrap_err();
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+        assert!(err.contains("`f64`"), "unexpected message: {err}");
+    }
+}

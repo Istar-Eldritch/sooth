@@ -554,3 +554,342 @@ fn recursive_drop_overload_error(
         name
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    /// The Phase 3 Slice 1 linear-mechanics stand-in, retired as a compiler
+    /// primitive in Slice 8c: an ordinary one-field struct with a `drop`
+    /// overload, so it is linear for the same reason any resource is (R3),
+    /// not by any compiler-known bit. Always the first struct in a source
+    /// string that uses it, so every other struct's `StructId` shifts up by
+    /// one relative to a spy-free program.
+    const SPY_DEF: &str =
+        "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
+    fn first_word(src: &str) -> WordDef {
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        module.words.into_iter().next().unwrap()
+    }
+    #[test]
+    fn check_drop_body_must_consume_linear_fields() {
+        // Criterion 12/R5/R9: an override body is checked like any other word
+        // body, so a resource holding a linear field is already forced to
+        // account for it -- no scalar-only restriction, and no new check.
+        let src = format!(
+            "{SPY_DEF}type: Inner s Spy ; type: Res i Inner ; \
+             : drop ( Res -- ) | r | r Res> drop ; \
+             : main ( -- ) 1 Spy Inner Res drop ;"
+        );
+        check_src(&src).unwrap();
+
+        let forgotten = format!(
+            "{SPY_DEF}type: Inner s Spy ; type: Res i Inner ; \
+             : drop ( Res -- ) | r | ; \
+             : main ( -- ) 1 Spy Inner Res drop ;"
+        );
+        let err = check_src(&forgotten).unwrap_err();
+        assert!(
+            err.contains("linear value `r` is never consumed"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_drop_body_direct_self_recursion_is_error() {
+        // Criterion 8/R6: a `drop` body that drops its own receiver is a
+        // cycle of length one. The message names the chain and `File>` as the
+        // remedy, since destructuring is what the user has to do instead.
+        let src = "type: File fd i64 ; : drop ( File -- ) drop ; : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`File>`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_drop_body_indirect_self_recursion_through_helper_is_error() {
+        // Criterion 9/R6: the same rejection through one helper word, which is
+        // why this is reachability over the whole call graph rather than a
+        // self-call test. The chain names the helper it goes through.
+        let src = "type: File fd i64 ; \
+                   : shut ( File -- ) drop ; \
+                   : drop ( File -- ) shut ; \
+                   : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`shut`"), "unexpected message: {err}");
+        assert!(err.contains("`File>`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_drop_body_recursion_inside_an_if_arm_is_error() {
+        // R6: the call graph is over calls in *any* position, so the walker
+        // has to visit both `if` arms and every term after them --
+        // `tail_position_calls` only ever reads `terms.last()`, and would see
+        // neither of these.
+        let src = "type: File fd i64 ; \
+                   : shut ( File -- ) drop ; \
+                   : drop ( File -- ) | f | true if f shut else f shut end 1 . ; \
+                   : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`shut`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_drop_of_copy_scalar_inside_drop_body_is_not_a_cycle() {
+        // Criterion 10/R6: the dogfood's own shape. Its body ends in a `drop`
+        // of the `Copy` `i64` its extern call returns, which a name-keyed
+        // graph would read as a call to the override itself and reject.
+        let src = "type: File fd i64 ; \
+                   : drop ( File -- ) | f | f File>fd drop ; \
+                   : main ( -- ) 1 File drop ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn check_drop_of_different_resource_inside_another_drop_body_is_ok() {
+        // Criterion 11/R6: dispatch is per struct id, so `drop@A` disposing a
+        // `B` is an edge to `drop@B` and nothing more -- no cycle, since
+        // `drop@B` reaches nothing back.
+        let src = "type: A x i64 ; type: B y i64 ; \
+                   : drop ( A -- ) | a | a A>x B drop ; \
+                   : drop ( B -- ) | b | b B>y drop ; \
+                   : main ( -- ) 1 A drop ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn check_drop_body_recursion_through_a_containing_aggregate_is_error() {
+        // Criterion 21/R6 case (b): `Box` has no override, so dropping one
+        // runs generic field glue that disposes its `File` field through
+        // `File`'s own override -- unbounded recursion at runtime, invisible
+        // to a graph that only looked at directly dropped types.
+        let src = "type: File fd i64 ; type: Box f File ; \
+                   : drop ( File -- ) | f | f Box drop ; \
+                   : main ( -- ) 1 File drop ;";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("recursive `drop` overload for `File`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`File>`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_drop_of_an_overridden_aggregate_disposing_its_overridden_field_is_not_a_cycle() {
+        // R6: case (b) must not fire when the dropped type is *itself*
+        // overridden -- `B`'s own body is its whole disposal, so the graph
+        // must reflect only the `drop` calls that body actually makes, never
+        // a synthesized walk of its fields. D3 requires `B`'s override to
+        // dispose its drop-overloaded `a` field with a real `drop` call
+        // (destructuring it apart from calling `drop` would itself be D3's
+        // own rejection), forming exactly one edge, `B` -> `A`; since `A`'s
+        // own override never calls back into `B`, this is not a cycle.
+        let src = "type: A x i64 ; type: B a A ; \
+                   : drop ( A -- ) | a | a A>x drop ; \
+                   : drop ( B -- ) | b | b B>a drop ; \
+                   : main ( -- ) 1 A B drop ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn collect_drop_targets_stops_descending_at_an_overridden_struct() {
+        // R6 case (b), on `collect_drop_targets` directly. Post-D3, no legal
+        // Sooth program can discriminate this rule any more (see the
+        // `check_src`-based test above): disposing an overridden field always
+        // requires a real `drop` call, which already contributes the same
+        // edge a field-walk would synthesize, so a mutated (fields-walking)
+        // version of this function passes every `check_src` test just as the
+        // correct one does. Hand-build the registries instead: `B` overrides
+        // `drop` and has a field of type `A`, which also overrides `drop`.
+        // Walking `B`'s targets must add `B`'s own override and nothing else
+        // -- never descend into the overridden field to add `A`'s too.
+        let a = StructDecl {
+            name: "A".to_string(),
+            name_static: "A",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        };
+        let b = StructDecl {
+            name: "B".to_string(),
+            name_static: "B",
+            fields: vec![("a".to_string(), Type::Struct(StructId::from_index(0), "A"))],
+            span: Span::default(),
+            has_drop_overload: true,
+            is_bundle: false,
+            module: 0,
+        };
+        let structs = vec![a, b];
+        let mut overloads = HashMap::new();
+        overloads.insert(StructId::from_index(0), 0usize);
+        overloads.insert(StructId::from_index(1), 1usize);
+
+        let mut found = Vec::new();
+        collect_drop_targets(
+            Type::Struct(StructId::from_index(1), "B"),
+            &structs,
+            &[],
+            &[],
+            &[],
+            &overloads,
+            &mut Vec::new(),
+            &mut found,
+        );
+
+        assert_eq!(
+            found,
+            vec![1],
+            "walking B's targets must stop at B's own override, never also \
+             descend into its overridden `A` field"
+        );
+    }
+    #[test]
+    fn check_drop_body_sharing_a_helper_with_another_word_is_not_a_cycle() {
+        // R6: reachability is over the whole call graph, so a helper called
+        // both from an override and from elsewhere must not read as a cycle
+        // just for being reachable from two places.
+        let src = "type: File fd i64 ; \
+                   : show ( i64 -- ) . ; \
+                   : drop ( File -- ) | f | f File>fd show ; \
+                   : main ( -- ) 1 File drop 2 show ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn check_a_word_named_drop_contributes_no_tail_call_edge() {
+        // A `drop` term never resolves to a user word (`check_shuffle`
+        // intercepts it first), so the tail-call graph must not treat one as a
+        // call to a `drop` overload: `helper`'s trailing `drop` of an `i64`
+        // would otherwise close a fabricated mutual cycle with the override
+        // that tail-calls `helper`.
+        let src = "type: T x i64 ; \
+                   : helper ( i64 -- ) drop ; \
+                   : drop ( T -- ) | t | t T>x helper ; \
+                   : main ( -- ) 1 T drop ;";
+        check_src(src).unwrap();
+    }
+    #[test]
+    fn check_main_linear_output_is_error() {
+        let err = check_src(&format!("{SPY_DEF}: main ( -- Spy ) 7 Spy ;")).unwrap_err();
+        assert!(
+            err.contains("cannot declare a linear type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_main_linear_input_is_error() {
+        let err = check_src(&format!("{SPY_DEF}: main ( Spy -- ) | s | s drop ;")).unwrap_err();
+        assert!(
+            err.contains("cannot declare a linear type"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_main_copy_effect_is_ok() {
+        check_src(": main ( i64 -- i64 ) 1 + ;").unwrap();
+        // The misfire risk is `is_copy`'s recursive struct/enum arms, not the
+        // scalar arm: a Copy struct in `main`'s effect must not be rejected.
+        check_src("type: P a i64 b i64 ; : main ( P -- ) P> drop drop ;").unwrap();
+    }
+    #[test]
+    fn tail_position_final_self_call_is_tail() {
+        let w = first_word(": rec ( i64 -- i64 ) rec ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["rec"]);
+        assert!(has_self_tail_call(&w));
+    }
+    #[test]
+    fn tail_position_trailing_arithmetic_is_not_tail() {
+        // `rec *`: the final term is `*`, so the self-call is not in tail
+        // position (classic non-tail recursion).
+        let w = first_word(": rec ( i64 -- i64 ) rec * ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["*"]);
+        assert!(!has_self_tail_call(&w));
+    }
+    #[test]
+    fn tail_position_trailing_swap_is_not_tail() {
+        let w = first_word(": rec ( i64 -- i64 ) rec swap ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["swap"]);
+        assert!(!has_self_tail_call(&w));
+    }
+    #[test]
+    fn tail_position_trailing_drop_is_not_tail() {
+        let w = first_word(": rec ( i64 -- i64 ) rec drop ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["drop"]);
+        assert!(!has_self_tail_call(&w));
+    }
+    #[test]
+    fn tail_position_builtin_named_word_trailing_its_own_name_is_not_self_tail() {
+        // Slice 8a made every builtin name overloadable, so a builtin-named
+        // word ending in that same name is resolving against the builtin
+        // table, not recursing: `<` here compares the two extracted `i64`s.
+        // `tail_position_calls` still reports the name (it is syntactic);
+        // only the self-call conclusion changes.
+        let w = first_word(
+            "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;",
+        );
+        assert_eq!(tail_position_calls(&w.body), vec!["<"]);
+        assert!(!has_self_tail_call(&w));
+    }
+    #[test]
+    fn tail_position_both_terminal_if_arms_are_tail() {
+        // A terminal `if` hands tail position to the last term of both arms.
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else rec end ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["rec", "rec"]);
+        assert!(has_self_tail_call(&w));
+    }
+    #[test]
+    fn tail_position_non_terminal_if_self_call_is_not_tail() {
+        // The `if` is followed by more terms, so it is non-terminal and its
+        // arms are not in tail position.
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else 0 end drop 5 ;");
+        assert!(!has_self_tail_call(&w));
+        assert!(!tail_position_calls(&w.body).contains(&"rec"));
+    }
+    #[test]
+    fn tail_position_clause_body_final_self_call_is_tail() {
+        let w = first_word("type: E | A | B ; : w ( E -- E ) | A w | B w ;");
+        assert_eq!(tail_position_calls(&w.body), vec!["w", "w"]);
+        assert!(has_self_tail_call(&w));
+    }
+    #[test]
+    fn check_mutual_tail_recursion_is_error() {
+        // X1: A tail-calls B, B tail-calls A -> located error naming the cycle.
+        let err = check_src(": a ( i64 -- i64 ) b ; : b ( i64 -- i64 ) a ;").unwrap_err();
+        assert!(
+            err.contains("mutual tail recursion"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("`a`"), "unexpected message: {err}");
+        assert!(err.contains("`b`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_non_tail_mutual_recursion_is_ok() {
+        // Both words call each other only in non-tail position (`x 1 +`), so no
+        // tail-call edge exists and X1 must not fire (R4 no-false-positive).
+        check_src(
+            ": a ( i64 -- i64 ) dup 0 > if b 1 + else drop 0 end ; \
+             : b ( i64 -- i64 ) dup 0 > if a 1 + else drop 0 end ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_self_tail_recursion_is_allowed() {
+        // A self-loop (`gcd -> gcd`) is tier-1 and must not be flagged as a
+        // mutual cycle.
+        check_src(&std::fs::read_to_string("examples/gcd.sth").unwrap()).unwrap();
+    }
+}

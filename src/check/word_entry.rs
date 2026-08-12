@@ -370,3 +370,22 @@ fn check_clause_body(
     check_outputs(word, &final_stack, declared, line, structs, enums, arrays)?;
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    #[test]
+    fn check_term_word_with_entry_locals_still_ok() {
+        // Regression: a plain term word with `| ... |` entry locals is
+        // unaffected by the clause-body path (no enum in scope).
+        check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
+    }
+}

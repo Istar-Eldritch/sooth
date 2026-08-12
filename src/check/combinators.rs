@@ -500,3 +500,51 @@ fn check_poly_combinator_args(
     // marker grounds the declared outputs through it (`inline_combinator`).
     Ok(subst)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    /// Slice 10a (R1): a monomorphic word whose input is a `~` still counts as
+    /// declaring a quotation parameter (accessor-routed), so it is inlined
+    /// rather than lowered to a call.
+    #[test]
+    fn word_declares_quotation_parameter_recognizes_inline() {
+        use crate::ast::TypedSlot;
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let w = WordDef {
+            name: "w".to_string(),
+            effect: StackEffect {
+                inputs: vec![TypedSlot {
+                    name: None,
+                    ty: inl,
+                }],
+                outputs: Vec::new(),
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            module: 0,
+            span: Span::default(),
+        };
+        assert!(word_declares_quotation_parameter(&w));
+    }
+    #[test]
+    fn quotation_taking_word_mints_no_symbol() {
+        // U20: a monomorphic quotation-taking word is a combinator, so it is
+        // inlined and mints no `IrFunc`; `is_combinator` (the single predicate
+        // `check` and `ir::lower` share) recognizes it and excludes an
+        // ordinary word. Deleting the `Type::Quotation` clause makes `apply`
+        // stop being a combinator and mint a symbol (a link error, since its
+        // body is a bare `call` over a phantom).
+        let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+                   : plain ( i64 -- i64 ) 1 + ;\n";
+        let tokens = lex(src).unwrap();
+        let module = parse(&tokens).unwrap();
+        let apply = module.words.iter().find(|w| w.name == "apply").unwrap();
+        let plain = module.words.iter().find(|w| w.name == "plain").unwrap();
+        assert!(is_combinator(apply), "`apply` is a combinator (no symbol)");
+        assert!(!is_combinator(plain), "`plain` is an ordinary word");
+    }
+}
