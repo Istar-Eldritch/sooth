@@ -1,0 +1,1262 @@
+//! The borrow/scope/liveness engine: the shared substrate every body-level
+//! checker threads through the walk. Owns the region/alias/derivation arenas
+//! (`RegionId`, `Alias`, `Deriv`, `Provenance`), the move-state and scope
+//! bookkeeping (`Moves`, `Scope`/`Binding`), the last-use liveness analysis
+//! (`Liveness` + its query helpers), and the walk context (`Ctx`/`word_ctx`,
+//! `BlockEnd`). Engine-independent clusters do not touch these types; every
+//! `engine`-dependent cluster imports them via `super::*`.
+
+use super::*;
+
+/// Which region of memory an aggregate value denotes. Two slots carrying
+/// the same id are two names for one address, which is what makes a mutation
+/// through one silently observable through the other. `None` means "denotes a
+/// region nothing else names": every value is born that way, and an aggregate
+/// is given an id lazily, the first time something could alias it (a binding,
+/// or a non-consuming projection out of it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RegionId(u32);
+
+/// One live name for a region, and where that name was pushed. The span is
+/// what lets the alias check report a *stack-resident* alias, which has no name
+/// of its own to cite: an aggregate spends most of its life on the virtual
+/// stack in this language, so the ability to locate one there is the difference
+/// between catching the hazard and only catching the spelling of it where
+/// both ends happen to be bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Alias {
+    pub(super) set: AliasSetId,
+    pub(super) span: Span,
+}
+
+/// The regions one value may denote, interned in `Provenance` so a `Slot` can
+/// carry them by id and stay `Copy`. A value denotes more than one region only
+/// where control flow merged two arms that named different places: the merge
+/// cannot know which arm ran, so it keeps both and the borrow check tests every
+/// member. Same trick as `DerivId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct AliasSetId(u32);
+
+/// One outstanding derivation from a place, interned in `Provenance` so a
+/// `Slot` can carry it by id and stay `Copy`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) struct DerivId(u32);
+
+/// What one live reference traces back to. Created by a fresh borrow
+/// (`&v`/`&!v`), by naming a reference local (a reborrow), and by every
+/// projection step, which copies its parent's chain rather than starting a new
+/// one — that is what lets a check ask "does anything still trace back to this
+/// place" without scanning for a particular value's identity.
+#[derive(Debug, Clone)]
+pub(super) struct Deriv {
+    /// The place the reference was taken from: an owned aggregate local for a
+    /// fresh borrow, the reference local itself for a reborrow.
+    pub(super) place: String,
+    /// The owned local at the bottom of the chain, if the chain starts at one.
+    /// A reborrow of a reference *parameter* has none: its referent lives in an
+    /// ancestor frame, so there is no place in this body to protect.
+    pub(super) owned_root: Option<String>,
+    /// Whether `place` is a reference local this was reborrowed from, which is
+    /// what the suspend rule is keyed on. Binding into a local does *not*
+    /// clear this: the place stays suspended for as long as the bound
+    /// reference is live. What lets `push-byte` name `b` three times is
+    /// last-use liveness (6f) ending that suspension once the bound name's
+    /// last use has passed, not the binding itself.
+    pub(super) reborrow: bool,
+    pub(super) mutable: bool,
+    /// Whether any projection step stands between the place and this
+    /// reference: the path-disjointness note is only apt when one does.
+    pub(super) projected: bool,
+    /// Where the borrow was taken, so a conflict can name both ends.
+    pub(super) span: Span,
+}
+
+impl Deriv {
+    /// The places this derivation keeps suspended, which is what a branch
+    /// join has to agree on. Both halves are consulted by a hazard check
+    /// (`owned_root` by the consume/borrow-conflict scans, the reborrowed
+    /// reference local by the suspend rule), so both belong in the key: a join
+    /// keeps only one arm's derivation, and any place the discarded arm
+    /// suspended would silently stop being protected.
+    pub(super) fn suspension(&self) -> (Option<&str>, Option<&str>) {
+        (
+            self.owned_root.as_deref(),
+            (self.reborrow && self.mutable).then_some(self.place.as_str()),
+        )
+    }
+}
+
+/// The per-body provenance arenas: which place each live reference traces back
+/// to and which region each aggregate value denotes. Threaded `&mut`
+/// through the walk rather than kept in `Scope`, which an `if` arm clones: ids
+/// stay unique across the arms, and a record outlives the arm that made it.
+/// R6: the self-tail combinator whose body is currently being spliced. `name`
+/// is the mangled combinator name (matched against a self-call inside the
+/// splice); `input_count` is its declared input arity, so the back-edge can
+/// find the carried state row (the non-quotation inputs) below the arguments.
+#[derive(Debug, Clone)]
+pub(super) struct SelfTailMarker {
+    pub(super) name: String,
+    pub(super) input_count: usize,
+    /// Slice 10a (R11/R12): the ground declared inputs, against which the
+    /// back-edge's self-call arguments (`stack[base..]`) are explicitly
+    /// unified. Grounded once at the marker's sole set site, since the
+    /// back-edge arm has no `sig`/`Subst` of its own.
+    pub(super) ground_inputs: Vec<Type>,
+    /// Slice 10a (R11): the ground declared outputs the back-edge arm
+    /// produces (the old code fictionally produced the non-quotation inputs,
+    /// which is right only for `while`'s state-threading shape).
+    pub(super) ground_outputs: Vec<Type>,
+    /// Slice 10a (R11): the bottom-aligned index map -- ground output `i`
+    /// forwards provenance from the `index_map[i]`-th non-quotation carried
+    /// input (both counted deepest-first), or `None` when `i` is beyond the
+    /// carried-input count or the types differ. Phase 6 (R14) forwards
+    /// `surviving`/`quot` along it.
+    pub(super) index_map: Vec<Option<usize>>,
+}
+
+#[derive(Debug, Default)]
+pub(super) struct Provenance {
+    pub(super) derivs: Vec<Deriv>,
+    pub(super) regions: u32,
+    /// The interned region of one non-consuming projection out of a parent
+    /// region, so two peeks of the same field yield one id.
+    pub(super) fields: HashMap<(u32, String), RegionId>,
+    /// The interned region sets, indexed by `AliasSetId`.
+    pub(super) alias_sets: Vec<Vec<RegionId>>,
+    /// Each field region's immediate parent: a name for a struct's
+    /// field is still a name for part of the whole struct, so the alias check
+    /// has to test region *overlap* along this chain, not bare equality.
+    pub(super) parents: HashMap<u32, RegionId>,
+    /// R6 (slice 8b): the resolved operand type of every `drop` call site in
+    /// this body, in the order the walk reaches them. Nothing in the walk
+    /// reads it back; the body walkers hand it to `check`, which needs the
+    /// *type* each `drop` resolves to in order to tell `drop@File` from a
+    /// `drop` of a plain `i64` — a distinction no purely syntactic pass over
+    /// callee names can make. It rides this arena for the same reason the
+    /// arena is threaded at all: an `if` arm clones `Scope`, so an
+    /// observation kept there would die with the arm.
+    pub(super) dropped: Vec<Type>,
+    /// D2/R4: the per-check quotation-literal side table, indexed by `QuotId`.
+    /// A quotation `Slot`/`Binding` carries only a `QuotId`, so the body it
+    /// marks is interned here and spliced from here at `call`/`times`. Rides
+    /// this arena because it is the one scratch already threaded `&mut`
+    /// through the walk, so a quotation pushed in one `if` arm and read in a
+    /// merge outlives the arm's cloned `Scope`.
+    pub(super) quotations: Vec<QuotBody>,
+    /// 6f: each quotation's free-name set (every outer local its body reads,
+    /// sigil-stripped, minus whatever the body binds and shadows itself),
+    /// computed once at intern time and indexed in lockstep with
+    /// `quotations` by `QuotId`. A pure function of the literal's own AST, so
+    /// it needs no invalidation and is safe to cache: whether a captured name
+    /// is actually still live is a separate, per-query question answered by
+    /// `capture_alive_names`, not baked in here.
+    pub(super) quotation_captures: Vec<HashSet<String>>,
+    /// 7b/R19: the side table of surviving capture sets, keyed by
+    /// `SurvivingCaptureSetId`, mirroring how `quotation_captures` stores
+    /// capture sets by `QuotId`. An erased capturing quotation's aggregate and
+    /// borrow captures (never its scalar snapshots) ride here so
+    /// `capture_alive_names` (R20) and the R22 escape guard can read them past
+    /// erasure, when the `QuotRef::Known` marker is gone.
+    pub(super) surviving_sets: Vec<SurvivingSet>,
+    /// R6/R14: the self-tail combinator currently being spliced (its name and
+    /// its declared input arity), set for the duration of that body splice. A
+    /// tail-position call to that same name reached inside the spliced body is
+    /// the loop back-edge, not a re-splice: it discharges the two move/borrow
+    /// obligations and produces the combinator's carried state, terminating
+    /// the branch. Saved and restored around the splice so loops compose.
+    pub(super) self_tail_combinator: Option<SelfTailMarker>,
+    /// R18/R21: a monotonic counter minting a fresh suffix each time a
+    /// combinator body is spliced, so the callee's `| ... |` locals are
+    /// alpha-renamed to names no caller local (or outer combinator, under
+    /// transitive inlining) can collide with. Term-splice binds names in the
+    /// caller's scope (R18: binding, not string rewriting), so without this a
+    /// nested `each` inside a `map` would re-bind the outer `arr`/`f`.
+    pub(super) inline_uid: u32,
+}
+
+impl Provenance {
+    pub(super) fn fresh_region(&mut self) -> RegionId {
+        let id = RegionId(self.regions);
+        self.regions += 1;
+        id
+    }
+
+    pub(super) fn intern_alias_set(&mut self, mut regions: Vec<RegionId>) -> AliasSetId {
+        regions.sort_unstable_by_key(|r| r.0);
+        regions.dedup();
+        if let Some(i) = self.alias_sets.iter().position(|s| *s == regions) {
+            return AliasSetId(i as u32);
+        }
+        self.alias_sets.push(regions);
+        AliasSetId((self.alias_sets.len() - 1) as u32)
+    }
+
+    pub(super) fn alias_set_of(&mut self, region: RegionId) -> AliasSetId {
+        self.intern_alias_set(vec![region])
+    }
+
+    pub(super) fn alias_regions(&self, id: AliasSetId) -> &[RegionId] {
+        &self.alias_sets[id.0 as usize]
+    }
+
+    /// Both arms' regions, since either runtime path may have produced the
+    /// merged value.
+    pub(super) fn alias_union(&mut self, a: AliasSetId, b: AliasSetId) -> AliasSetId {
+        let mut regions = self.alias_regions(a).to_vec();
+        regions.extend_from_slice(self.alias_regions(b));
+        self.intern_alias_set(regions)
+    }
+
+    /// Whether any region of one value overlaps any region of the other.
+    pub(super) fn alias_sets_overlap(&self, a: AliasSetId, b: AliasSetId) -> bool {
+        self.alias_regions(a).iter().any(|x| {
+            self.alias_regions(b)
+                .iter()
+                .any(|y| self.regions_overlap(*x, *y))
+        })
+    }
+
+    /// The same field projected out of every region the parent may denote.
+    pub(super) fn field_alias_set(&mut self, parent: AliasSetId, segment: &str) -> AliasSetId {
+        let parents = self.alias_regions(parent).to_vec();
+        let mut fields = Vec::with_capacity(parents.len());
+        for region in parents {
+            fields.push(self.field_region(region, segment));
+        }
+        self.intern_alias_set(fields)
+    }
+
+    /// The region an interior value of `parent` denotes, interned per path
+    /// segment, so two non-consuming projections of the same field of the same
+    /// parent are recognised as two names for one address.
+    pub(super) fn field_region(&mut self, parent: RegionId, segment: &str) -> RegionId {
+        let key = (parent.0, segment.to_string());
+        if let Some(id) = self.fields.get(&key) {
+            return *id;
+        }
+        let id = self.fresh_region();
+        self.fields.insert(key, id);
+        self.parents.insert(id.0, parent);
+        id
+    }
+
+    /// Whether `a` and `b` denote overlapping storage — the same region,
+    /// or one an ancestor of the other along the field-projection chain.
+    /// Mirrors the conservative field-borrow rule on the naming side: a name
+    /// for an interior is still a name for (part of) its parent, so equality
+    /// alone misses the aliasing a peeked field's binding creates.
+    pub(super) fn regions_overlap(&self, a: RegionId, b: RegionId) -> bool {
+        a == b || self.is_ancestor(a, b) || self.is_ancestor(b, a)
+    }
+
+    pub(super) fn is_ancestor(&self, ancestor: RegionId, mut descendant: RegionId) -> bool {
+        while let Some(&parent) = self.parents.get(&descendant.0) {
+            if parent == ancestor {
+                return true;
+            }
+            descendant = parent;
+        }
+        false
+    }
+
+    pub(super) fn deriv(&self, id: DerivId) -> &Deriv {
+        &self.derivs[id.0 as usize]
+    }
+
+    /// The free names cached for quotation `id` at intern time (`capture_names`).
+    pub(super) fn quotation_captures(&self, id: QuotId) -> &HashSet<String> {
+        &self.quotation_captures[id.0]
+    }
+
+    /// 7b/R19: the surviving capture set behind `id`.
+    pub(super) fn surviving_set(&self, id: SurvivingCaptureSetId) -> &[SurvivingCapture] {
+        &self.surviving_sets[id.0 as usize].members
+    }
+
+    /// Review fix: whether the closure behind `id` needed a stack-allocated
+    /// env bundle (2+ total captures, R16) rather than an inline single-word
+    /// env. Read by the R22 word-output escape guard alongside `frame_rooted`.
+    pub(super) fn surviving_set_is_bundle(&self, id: SurvivingCaptureSetId) -> bool {
+        self.surviving_sets[id.0 as usize].bundle
+    }
+
+    /// 7b/R19: intern a surviving capture set, or `None` if it holds nothing
+    /// the R22 word-output guard must watch. That is empty members *and* no
+    /// bundle: a closure snapshotting only scalars into an inline env has no
+    /// referent and no bundle storage that can go dead. But an all-scalar 2+
+    /// capture still allocates a *stack* env bundle (R16) whose own storage
+    /// dies at return, so it must keep a set (empty members, `bundle = true`)
+    /// to carry that signal onto a carrier for R22 to reject.
+    pub(super) fn intern_surviving_set(
+        &mut self,
+        mut members: Vec<SurvivingCapture>,
+        bundle: bool,
+    ) -> Option<SurvivingCaptureSetId> {
+        members.sort_by(|a, b| a.name.cmp(&b.name));
+        members.dedup();
+        if members.is_empty() && !bundle {
+            return None;
+        }
+        let id = SurvivingCaptureSetId(self.surviving_sets.len() as u32);
+        self.surviving_sets.push(SurvivingSet { members, bundle });
+        Some(id)
+    }
+
+    /// 7b/R23: a fresh interned set holding the union of two surviving sets
+    /// (either or both may be absent). Never mutates an existing set in place,
+    /// so a joined value's set is independent of its arms'.
+    pub(super) fn union_surviving(
+        &mut self,
+        a: Option<SurvivingCaptureSetId>,
+        b: Option<SurvivingCaptureSetId>,
+    ) -> Option<SurvivingCaptureSetId> {
+        let mut members: Vec<SurvivingCapture> = Vec::new();
+        let mut bundle = false;
+        for id in [a, b].into_iter().flatten() {
+            members.extend_from_slice(self.surviving_set(id));
+            bundle |= self.surviving_set_is_bundle(id);
+        }
+        self.intern_surviving_set(members, bundle)
+    }
+
+    pub(super) fn add(&mut self, deriv: Deriv) -> DerivId {
+        let id = DerivId(self.derivs.len() as u32);
+        self.derivs.push(deriv);
+        id
+    }
+
+    /// A fresh borrow of an owned aggregate place.
+    pub(super) fn borrow(&mut self, place: &str, mutable: bool, span: Span) -> DerivId {
+        self.add(Deriv {
+            place: place.to_string(),
+            owned_root: Some(place.to_string()),
+            reborrow: false,
+            mutable,
+            projected: false,
+            span,
+        })
+    }
+
+    /// Naming a reference local reborrows it — a new chain rooted at that
+    /// local, keeping whatever owned place the old chain had already reached.
+    pub(super) fn reborrow(
+        &mut self,
+        place: &str,
+        held: Option<DerivId>,
+        mutable: bool,
+        span: Span,
+    ) -> DerivId {
+        let owned_root = held.and_then(|id| self.deriv(id).owned_root.clone());
+        self.add(Deriv {
+            place: place.to_string(),
+            owned_root,
+            reborrow: true,
+            mutable,
+            projected: false,
+            span,
+        })
+    }
+
+    /// One projection step — the same place, one step further from it.
+    pub(super) fn project(&mut self, parent: Option<DerivId>) -> Option<DerivId> {
+        let deriv = Deriv {
+            projected: true,
+            ..self.deriv(parent?).clone()
+        };
+        Some(self.add(deriv))
+    }
+}
+
+/// R14: the move-state of one linear local, a three-value lattice. `Moved` and
+/// `MaybeMoved` carry the site that consumed the value, so a later use can name
+/// it; `MaybeMoved` is the join of disagreeing arms (consumed on one path only),
+/// which is neither usable nor accepted as disposed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MoveState {
+    Live,
+    Moved(Span),
+    MaybeMoved(Span),
+}
+
+/// The move-state of every *linear* name in scope, carried by the `Scope` the
+/// walker threads (R14). A Copy local never appears: it carries no ownership
+/// obligation, so mentioning it twice is ordinary reuse.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Moves {
+    pub(super) states: HashMap<String, MoveState>,
+}
+
+impl Moves {
+    /// R3 (D2): mentioning a linear local moves its value out. `Ok(())` for a
+    /// Copy local (absent from the map) or a first mention; `Err(site)` names
+    /// the move that already consumed it.
+    pub(super) fn take(&mut self, name: &str, span: Span) -> Result<(), Span> {
+        match self.states.get(name) {
+            None => Ok(()),
+            Some(MoveState::Live) => {
+                self.states.insert(name.to_string(), MoveState::Moved(span));
+                Ok(())
+            }
+            Some(MoveState::Moved(site) | MoveState::MaybeMoved(site)) => Err(*site),
+        }
+    }
+
+    /// The site that already consumed `name`, if any. Read-only companion to
+    /// `take`: a borrow is not a move, but a consumed local is no longer a
+    /// valid borrow root — its value, and any heap it owned, is gone.
+    pub(super) fn moved_site(&self, name: &str) -> Option<Span> {
+        match self.states.get(name) {
+            Some(MoveState::Moved(site) | MoveState::MaybeMoved(site)) => Some(*site),
+            _ => None,
+        }
+    }
+
+    /// The locals still holding an unconsumed value: `Live` (never mentioned)
+    /// or `MaybeMoved` (consumed on one branch only), name-sorted so a scope
+    /// with two of them always reports the same one.
+    pub(super) fn unconsumed(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .states
+            .iter()
+            .filter(|(_, st)| !matches!(st, MoveState::Moved(_)))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// R14: combine two `if` arms at the join. Equal states are preserved; any
+    /// disagreement (`Live` vs `Moved`, or anything vs `MaybeMoved`) yields
+    /// `MaybeMoved`, carrying whichever arm's move site exists, so the value is
+    /// neither usable past the join nor counted as disposed at scope end. The
+    /// checker never inserts a compensating drop.
+    pub(super) fn join(then_arm: Moves, else_arm: Moves) -> Moves {
+        let mut states = then_arm.states;
+        for (name, state) in states.iter_mut() {
+            let other = else_arm.states[name.as_str()];
+            *state = match (*state, other) {
+                (MoveState::Live, MoveState::Live) => MoveState::Live,
+                // Consumed on both paths (at two different sites, which is
+                // still exactly once at runtime), so the join stays `Moved`.
+                (MoveState::Moved(site), MoveState::Moved(_)) => MoveState::Moved(site),
+                (MoveState::Moved(site) | MoveState::MaybeMoved(site), _)
+                | (_, MoveState::Moved(site) | MoveState::MaybeMoved(site)) => {
+                    MoveState::MaybeMoved(site)
+                }
+            };
+        }
+        Moves { states }
+    }
+}
+
+/// The names in scope while a body is walked, innermost-last so that leaving a
+/// block truncates back to its entry depth (R2, R9), paired with the
+/// move-state of the linear ones (R14). Mid-body binding is why this is a
+/// threaded `&mut` value rather than a map computed before the walk: the set of
+/// names in scope changes as terms are visited.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Scope {
+    pub(super) bound: Vec<Binding>,
+    pub(super) moves: Moves,
+}
+
+/// One name in scope, with the provenance a borrow check reads off it: which
+/// region an aggregate binding denotes and which derivation a reference
+/// binding holds.
+#[derive(Debug, Clone)]
+pub(super) struct Binding {
+    pub(super) name: String,
+    pub(super) ty: Type,
+    pub(super) aliases: Option<AliasSetId>,
+    pub(super) deriv: Option<DerivId>,
+    /// D2/R4: a bound quotation's marker. A local read reconstructs a fresh
+    /// `Slot` that drops every non-`ty` side channel, so unlike a shuffle a
+    /// bind is a *second*, explicit forwarding site: this field carries the
+    /// marker across the bind and back onto the reconstructed slot.
+    pub(super) quot: Option<QuotRef>,
+    /// 7b/R19: the surviving capture set an erased quotation (or an aggregate
+    /// carrying one) holds, carried across the bind exactly like `quot` so a
+    /// stored-closure binding keeps its captures' referents live (R20).
+    pub(super) surviving: Option<SurvivingCaptureSetId>,
+}
+
+impl Scope {
+    pub(super) fn depth(&self) -> usize {
+        self.bound.len()
+    }
+
+    pub(super) fn local(&self, name: &str) -> Option<&Binding> {
+        self.bound.iter().find(|b| b.name == name)
+    }
+
+    pub(super) fn local_type(&self, name: &str) -> Option<Type> {
+        self.local(name).map(|b| b.ty)
+    }
+
+    /// Bring `name` into scope. A linear value also enters the move-state map,
+    /// so forgetting it is caught at the end of its block. An aggregate
+    /// with no region of its own gets one here: a binding is the first point at
+    /// which a second name could denote the same address.
+    pub(super) fn bind(&mut self, name: &str, slot: Slot, linear: bool, prov: &mut Provenance) {
+        if linear {
+            self.moves.states.insert(name.to_string(), MoveState::Live);
+        }
+        let aliases = match (slot.alias, slot.ty.is_aggregate()) {
+            (Some(alias), _) => Some(alias.set),
+            (None, true) => {
+                let region = prov.fresh_region();
+                Some(prov.alias_set_of(region))
+            }
+            (None, false) => None,
+        };
+        self.bound.push(Binding {
+            name: name.to_string(),
+            ty: slot.ty,
+            aliases,
+            deriv: slot.deriv,
+            quot: slot.quot,
+            surviving: slot.surviving,
+        });
+    }
+
+    /// Take every name bound past `depth` out of scope, returning the first one
+    /// (name-sorted, so a block leaking two always reports the same one) still
+    /// holding a linear value.
+    pub(super) fn leave(&mut self, depth: usize) -> Option<(String, Type, MoveState)> {
+        let mut leaked: Vec<(String, Type, MoveState)> = Vec::new();
+        for binding in self.bound.split_off(depth) {
+            match self.moves.states.remove(&binding.name) {
+                Some(MoveState::Moved(_)) | None => {}
+                Some(state) => leaked.push((binding.name, binding.ty, state)),
+            }
+        }
+        leaked.sort_by(|a, b| a.0.cmp(&b.0));
+        leaked.into_iter().next()
+    }
+}
+
+/// The bare local name a `Call` denotes, with any leading `&!`/`&` borrow
+/// sigil stripped (matching `ast::rename_call`'s notion of a use of a local).
+pub(super) fn call_local(name: &str) -> &str {
+    name.strip_prefix("&!")
+        .or_else(|| name.strip_prefix('&'))
+        .unwrap_or(name)
+}
+
+/// Every free name a quotation body reads: a `Call` whose bare-or-sigilled
+/// target is not itself bound *inside* this body (shadowing), at any depth,
+/// recursing into `if` arms and nested quotation literals. Computed once per
+/// literal at intern time and cached on `Provenance` by `QuotId` -- it is a
+/// pure property of the literal's own AST, independent of where or when it
+/// gets called. Over-includes ordinary word names (there is no way to tell a
+/// local reference from a word call at this syntactic layer), which is
+/// harmless: `capture_alive_names` only ever intersects this set against
+/// actual scope bindings, so a name that never denotes a local simply never
+/// matches anything.
+pub(super) fn capture_names(body: &[Term]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    capture_names_into(body, &mut HashSet::new(), &mut out);
+    out
+}
+
+pub(super) fn capture_names_into(
+    terms: &[Term],
+    shadowed: &mut HashSet<String>,
+    out: &mut HashSet<String>,
+) {
+    for term in terms {
+        match &term.kind {
+            TermKind::Bind(names) => {
+                shadowed.extend(names.iter().cloned());
+            }
+            TermKind::Call(name) => {
+                let local = call_local(name);
+                if !shadowed.contains(local) {
+                    out.insert(local.to_string());
+                }
+            }
+            TermKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                capture_names_into(then_branch, &mut shadowed.clone(), out);
+                capture_names_into(else_branch, &mut shadowed.clone(), out);
+            }
+            TermKind::Quotation(inner) => {
+                capture_names_into(inner, &mut shadowed.clone(), out);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Q1/D3: the last-use index, within one `check_terms` invocation's term list,
+/// of every reference/aggregate name that invocation *binds*. A name used but
+/// not bound here (an outer local inherited into this block) is absent from
+/// `last_use` UNLESS the caller has established it as `outer_releasable`
+/// (D6's relaxation, below): once granted, it is tracked exactly like a name
+/// this invocation binds. A name is *used* by a `TermKind::Call` whose
+/// bare-or-sigilled target resolves to it, at any depth; a use inside a
+/// nested `if` arm or quotation literal is attributed to the index of the
+/// top-level term of *this* list that contains it (Q3's conservative max).
+///
+/// This is a floor, not the whole story, for a quotation: a literal bound to
+/// a local (`[ ... ] | q |`) does not execute at its own position, it
+/// executes wherever `q` is later used, so a name it captures must not die
+/// before `q` itself does -- and, transitively, before whatever *else*
+/// captures `q`'s name does. Rather than infer that syntactically here, the
+/// checker already records the association on both carriers a quotation can
+/// occupy (`Slot.quot`, `Binding.quot`); `capture_alive_names` reads that
+/// directly, at query time, in `live_derivs` and `aliasing_origin`. This scan
+/// treats every quotation literal exactly like an `if` arm, giving each
+/// capture its floor; `capture_alive_names` is strictly additive on top.
+///
+/// D6, relaxed: a name bound by an *ancestor* invocation is only ever a
+/// candidate for early death here if the caller first proves it has no
+/// residual use anywhere past this block (`outer_releasable`, computed at
+/// each recursion site from "not referenced in the remaining sibling terms"
+/// composed with whatever the caller itself was granted). An `if` arm is
+/// execute-once, so a granted name gets the same fine last-use tracking as a
+/// name bound here (`back_edge = false`): it may die at its own last call
+/// inside the arm. A `times`/quotation body can run more than once or be
+/// invoked from elsewhere, so a granted name used anywhere inside is pinned
+/// live for the *whole* body (`back_edge = true`, sentinel `usize::MAX`);
+/// only a name unused anywhere in the body dies, and it dies throughout.
+/// Either way this only *adds* candidates for death beyond what the plain
+/// bound-here rule already grants (D1: monotone).
+pub(super) struct Liveness {
+    pub(super) last_use: HashMap<String, usize>,
+    pub(super) outer_releasable: HashSet<String>,
+}
+
+/// Sentinel `last_use` for a name proven used somewhere inside a back-edge
+/// body: never `< at` for any real term index, so it stays live for the
+/// whole body rather than dying at its first (or any) use inside it.
+pub(super) const IMMORTAL_IN_BODY: usize = usize::MAX;
+
+impl Liveness {
+    pub(super) fn scan(
+        terms: &[Term],
+        outer_releasable: &HashSet<String>,
+        back_edge: bool,
+    ) -> Self {
+        let mut last_use = HashMap::new();
+        let mut bound: HashSet<String> = HashSet::new();
+        for (i, term) in terms.iter().enumerate() {
+            match &term.kind {
+                TermKind::Bind(names) => {
+                    for name in names {
+                        bound.insert(name.clone());
+                        // The bind index is the floor of a name's last use: a
+                        // binding never mentioned again is dead from the term
+                        // after its bind (D5), not live for the whole block.
+                        last_use.insert(name.clone(), i);
+                    }
+                }
+                TermKind::Call(name) => {
+                    let local = call_local(name);
+                    if bound.contains(local) {
+                        last_use.insert(local.to_string(), i);
+                    } else if outer_releasable.contains(local) {
+                        Self::record_granted_use(&mut last_use, local, i, back_edge);
+                    }
+                }
+                // A nested `if` arm is its own `check_terms` invocation with
+                // its own binds; here we only look for uses of names *this*
+                // list bound (or was granted), attributed to the containing
+                // top-level index (Q3's conservative max). Nested binds are
+                // not collected: they belong to the nested invocation's own
+                // scan.
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::nested_uses(
+                        then_branch,
+                        &bound,
+                        outer_releasable,
+                        back_edge,
+                        i,
+                        &mut last_use,
+                    );
+                    Self::nested_uses(
+                        else_branch,
+                        &bound,
+                        outer_releasable,
+                        back_edge,
+                        i,
+                        &mut last_use,
+                    );
+                }
+                // Same treatment as an `if` arm: this is only a floor
+                // (`capture_alive_names` extends it for a quotation the
+                // checker later finds is still reachable, bound or not).
+                TermKind::Quotation(inner) => {
+                    Self::nested_uses(inner, &bound, outer_releasable, back_edge, i, &mut last_use);
+                }
+                _ => {}
+            }
+        }
+        Liveness {
+            last_use,
+            outer_releasable: outer_releasable.clone(),
+        }
+    }
+
+    /// Record a use of a granted (outer-releasable) name at index `at`: fine
+    /// last-use tracking for an execute-once block, or the immortal sentinel
+    /// for a back-edge body (see the struct doc).
+    pub(super) fn record_granted_use(
+        last_use: &mut HashMap<String, usize>,
+        local: &str,
+        at: usize,
+        back_edge: bool,
+    ) {
+        let value = if back_edge { IMMORTAL_IN_BODY } else { at };
+        let entry = last_use.entry(local.to_string()).or_insert(value);
+        *entry = (*entry).max(value);
+    }
+
+    pub(super) fn nested_uses(
+        terms: &[Term],
+        bound: &HashSet<String>,
+        outer_releasable: &HashSet<String>,
+        back_edge: bool,
+        at: usize,
+        last_use: &mut HashMap<String, usize>,
+    ) {
+        for term in terms {
+            match &term.kind {
+                TermKind::Call(name) => {
+                    let local = call_local(name);
+                    if bound.contains(local) {
+                        let entry = last_use.entry(local.to_string()).or_insert(at);
+                        *entry = (*entry).max(at);
+                    } else if outer_releasable.contains(local) {
+                        Self::record_granted_use(last_use, local, at, back_edge);
+                    }
+                }
+                TermKind::If {
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    Self::nested_uses(
+                        then_branch,
+                        bound,
+                        outer_releasable,
+                        back_edge,
+                        at,
+                        last_use,
+                    );
+                    Self::nested_uses(
+                        else_branch,
+                        bound,
+                        outer_releasable,
+                        back_edge,
+                        at,
+                        last_use,
+                    );
+                }
+                TermKind::Quotation(inner) => {
+                    Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// A binding is dead at term index `at` iff its last use (its bind index
+    /// when never mentioned again) is strictly before `at`. A name this
+    /// invocation neither bound nor used at all is dead throughout iff the
+    /// caller granted it (`outer_releasable`); otherwise D6's original rule
+    /// holds unchanged: an outer name with no entry is never dead here.
+    pub(super) fn dead(&self, name: &str, at: usize) -> bool {
+        match self.last_use.get(name) {
+            Some(&last) => last < at,
+            None => self.outer_releasable.contains(name),
+        }
+    }
+}
+
+/// Whether `name` (already sigil-stripped) is referenced by a `TermKind::Call`
+/// anywhere in `terms`, at any nesting depth (an `if` arm, a quotation
+/// literal). Used to ask "is there a residual use past this point" for the
+/// D6 relaxation above; a name still in scope may not be rebound while live
+/// (`rebound_local_error`), so there is no shadowing case to exclude here.
+pub(super) fn references(terms: &[Term], name: &str) -> bool {
+    terms.iter().any(|term| match &term.kind {
+        TermKind::Call(n) => call_local(n) == name,
+        TermKind::If {
+            then_branch,
+            else_branch,
+            ..
+        } => references(then_branch, name) || references(else_branch, name),
+        TermKind::Quotation(inner) => references(inner, name),
+        _ => false,
+    })
+}
+
+/// D6 relaxation: the set of ancestor-bound names safe to grant into a nested
+/// block starting right after term index `at` in the current invocation.
+/// A name qualifies iff it is either bound *within* the current invocation
+/// (position `>= base_depth`, so nothing outside this invocation could ever
+/// need it) or already granted to the current invocation by its own caller,
+/// and it is not referenced anywhere in `rest` (the current invocation's own
+/// remaining sibling terms after `at`) -- a sibling `if` arm's own uses stay
+/// invisible here because they live *inside* `terms[at]`, not in `rest`.
+pub(super) fn releasable_into(
+    scope: &Scope,
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
+    rest: &[Term],
+) -> HashSet<String> {
+    scope
+        .bound
+        .iter()
+        .enumerate()
+        .filter(|(idx, b)| {
+            (*idx >= base_depth || outer_releasable.contains(&b.name)) && !references(rest, &b.name)
+        })
+        .map(|(_, b)| b.name.clone())
+        .collect()
+}
+
+/// Every name kept alive by a still-live quotation, at query index `at`: a
+/// quotation on the virtual stack is unconditionally live (same as any other
+/// stack-resident value -- nothing has consumed it yet, whether or not it is
+/// ever bound), and a quotation held by a scope binding is live if that
+/// binding itself is (by the ordinary last-use rule, *or* because it is
+/// itself a name this same computation has already found alive). The second
+/// disjunct is what makes a quotation capturing a quotation transitive
+/// (`[ q1 call ] | q2 |`): once `q2` is found alive, `q1` -- a name `q2`'s
+/// body merely calls -- is added, and the next pass then reads `q1`'s own
+/// capture set. The graph is acyclic (a quotation can only capture a name
+/// already bound earlier in program order), so this always terminates.
+///
+/// Only ever *extends* what `live_derivs`/`aliasing_origin` already treat as
+/// live; it is never consulted to shorten anything (D1: monotone).
+/// 7b/R20: the same rule extended past erasure. A `Known` marker's captures
+/// come from `quotation_captures`; an *erased* closure (or an aggregate
+/// carrying one) has no marker, so `include_surviving` unions the names from
+/// its `surviving` set (R19) instead -- keeping a captured borrow's referent
+/// live exactly as the `Known` case does. `include_surviving = false` yields
+/// the pre-erasure (marker-only) view the R24 past-last-use check diffs
+/// against, so that check fires only for captures the surviving set added.
+pub(super) fn capture_alive_names(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+) -> HashSet<String> {
+    capture_alive_names_impl(stack, scope, prov, live, at, true)
+}
+
+pub(super) fn capture_alive_names_impl(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    include_surviving: bool,
+) -> HashSet<String> {
+    let mut alive: HashSet<String> = HashSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for slot in stack {
+            if let Some(QuotRef::Known(id)) = slot.quot {
+                for name in prov.quotation_captures(id) {
+                    if alive.insert(name.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+            // A stack-resident value is unconditionally live: an erased
+            // closure (or carrier) there keeps its surviving captures alive.
+            if include_surviving {
+                if let Some(set) = slot.surviving {
+                    for member in prov.surviving_set(set) {
+                        if alive.insert(member.name.clone()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+        for b in &scope.bound {
+            let base_alive = !live.dead(&b.name, at);
+            let alive_here = base_alive || alive.contains(&b.name);
+            if let (true, Some(QuotRef::Known(id))) = (alive_here, b.quot) {
+                for name in prov.quotation_captures(id) {
+                    if alive.insert(name.clone()) {
+                        changed = true;
+                    }
+                }
+            }
+            if include_surviving && alive_here {
+                if let Some(set) = b.surviving {
+                    for member in prov.surviving_set(set) {
+                        if alive.insert(member.name.clone()) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    alive
+}
+
+/// 7b/R24: if the reference-local holding derivation `id` is dead by ordinary
+/// liveness (its last syntactic use is past) and is kept alive *only* by an
+/// erased closure's surviving-set union (R20) -- not by a still-`Known` marker
+/// -- return its name. This is the signal that a conflicting borrow/consume of
+/// its referent is reading a captured reference past its last use, so the
+/// past-last-use wording (R24) applies instead of the generic
+/// conflicting-borrow one. Dropping R20's union empties the `full` set, so this
+/// returns `None` and the rejection disappears entirely (mutation test M2).
+pub(super) fn past_last_use_capture(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    id: DerivId,
+) -> Option<String> {
+    let holder = scope.bound.iter().find(|b| b.deriv == Some(id))?;
+    if !live.dead(&holder.name, at) {
+        return None;
+    }
+    let full = capture_alive_names_impl(stack, scope, prov, live, at, true);
+    if !full.contains(&holder.name) {
+        return None;
+    }
+    let known = capture_alive_names_impl(stack, scope, prov, live, at, false);
+    if known.contains(&holder.name) {
+        return None;
+    }
+    Some(holder.name.clone())
+}
+
+/// Every derivation still live — held by a slot on the virtual stack, or by
+/// a reference-typed local whose binding is not yet dead at term index `at`
+/// (Q1/D2), or whose name a still-live quotation captures
+/// (`capture_alive_names`). A reference is live from the term that creates it
+/// until the term that consumes its slot; a reference *local* is live from
+/// its bind to its last use in this block, extended for as long as a
+/// quotation that can still reach it survives.
+pub(super) fn live_derivs<'a>(
+    stack: &'a [Slot],
+    scope: &'a Scope,
+    prov: &'a Provenance,
+    live: &'a Liveness,
+    at: usize,
+) -> impl Iterator<Item = DerivId> + 'a {
+    let captured = capture_alive_names(stack, scope, prov, live, at);
+    stack.iter().filter_map(|slot| slot.deriv).chain(
+        scope
+            .bound
+            .iter()
+            .filter(move |b| !live.dead(&b.name, at) || captured.contains(&b.name))
+            .filter_map(|b| b.deriv),
+    )
+}
+
+/// The first live derivation satisfying `pred`. The scan is over
+/// provenance, never over value identity: a reference two projection steps
+/// removed from a place is still a derivation of that place.
+pub(super) fn live_deriv(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    mut pred: impl FnMut(&Deriv) -> bool,
+) -> Option<DerivId> {
+    live_derivs(stack, scope, prov, live, at).find(|id| pred(prov.deriv(*id)))
+}
+
+/// A live borrow rooted at the owned place `place`, whatever its
+/// mutability and however many projection steps away.
+pub(super) fn live_borrow_of(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    place: &str,
+) -> Option<DerivId> {
+    live_deriv(stack, scope, prov, live, at, |d| {
+        d.owned_root.as_deref() == Some(place)
+    })
+}
+
+/// The naming side: a live *mutable* borrow rooted at `place`, which any new
+/// name for that place would then silently observe mutations through.
+pub(super) fn live_mutable_borrow_of(
+    stack: &[Slot],
+    scope: &Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    place: &str,
+) -> Option<DerivId> {
+    live_deriv(stack, scope, prov, live, at, |d| {
+        d.mutable && d.owned_root.as_deref() == Some(place)
+    })
+}
+
+/// The region a non-consuming projection out of `parent` denotes, for an
+/// aggregate interior value (a scalar one is loaded into a temporary and denotes
+/// no region). The parent is given a region of its own if it has none: it is
+/// only here, where a second name for its interior can appear, that the
+/// identity starts to matter. Both names are located at the projection, which is
+/// where each of them enters play as an alias of the other.
+pub(super) fn peek_region(
+    parent: &mut Slot,
+    interior: Type,
+    segment: &str,
+    span: Span,
+    prov: &mut Provenance,
+) -> Option<Alias> {
+    if !interior.is_aggregate() {
+        return None;
+    }
+    let base = match parent.alias {
+        Some(alias) => alias.set,
+        None => {
+            let region = prov.fresh_region();
+            let set = prov.alias_set_of(region);
+            parent.alias = Some(Alias { set, span });
+            set
+        }
+    };
+    Some(Alias {
+        set: prov.field_alias_set(base, segment),
+        span,
+    })
+}
+
+/// Where a second live name for a region is, when the diagnostic has to
+/// point at it. A bound local reports its name, which is what the user has to
+/// change; a value still on the virtual stack has no name, so it reports the
+/// site that pushed it instead.
+pub(super) enum AliasOrigin<'a> {
+    Name(&'a str),
+    Stack(Span),
+}
+
+/// Another live name denoting a region overlapping the local `place`'s —
+/// the same region, or one nested inside the other's field chain (a name for
+/// a field is still a name for part of the whole place). The scan covers the
+/// virtual stack as well as the locals map, exactly as the reference-derivation scan does: a
+/// concatenative body leaves aggregates on the stack constantly, so the
+/// stack-resident alias is the *common* shape of this hazard rather than an edge
+/// of it. A bound name is preferred over a stack slot when both alias, being the
+/// more actionable end to report, and names are sorted so a place aliased twice
+/// always reports the same one. A consumed local is not a name for anything, so
+/// it never aliases; nor is a name whose last use has passed (Q6/D8): filtering
+/// each candidate by its *own* last use preserves overlap — a dead name A is
+/// dropped while any still-live name B overlapping `place` keeps rejecting, so
+/// the borrow is accepted only when no live name can observe the mutation.
+pub(super) fn aliasing_origin<'a>(
+    stack: &[Slot],
+    scope: &'a Scope,
+    prov: &Provenance,
+    live: &Liveness,
+    at: usize,
+    place: &str,
+) -> Option<AliasOrigin<'a>> {
+    let set = scope.local(place)?.aliases?;
+    let overlaps = |other: AliasSetId| prov.alias_sets_overlap(set, other);
+    let captured = capture_alive_names(stack, scope, prov, live, at);
+    let mut names: Vec<&str> = scope
+        .bound
+        .iter()
+        .filter(|b| {
+            b.name != place
+                && b.aliases.is_some_and(&overlaps)
+                && scope.moves.moved_site(&b.name).is_none()
+                && (!live.dead(&b.name, at) || captured.contains(&b.name))
+        })
+        .map(|b| b.name.as_str())
+        .collect();
+    names.sort_unstable();
+    if let Some(name) = names.into_iter().next() {
+        return Some(AliasOrigin::Name(name));
+    }
+    stack
+        .iter()
+        .filter_map(|slot| slot.alias)
+        .find(|alias| overlaps(alias.set))
+        .map(|alias| AliasOrigin::Stack(alias.span))
+}
+
+/// Where a block's extent ended, for the scope-end linearity diagnostic (R6):
+/// a word body or REPL line can only cite a line, while an `if` arm cites the
+/// exact terminator token that closed it.
+pub(super) enum BlockEnd {
+    Body(u32),
+    Arm { token: &'static str, span: Span },
+}
+
+/// Error context for the shared stack simulation: a full word (with its
+/// declared effect to cite) or a bare REPL line (no signature to cite).
+/// Both carry the struct/enum registries `is_copy` needs to resolve a
+/// `Type::Struct`/`Type::Enum`'s linearity, so `dup`/`over`/back-edge checking
+/// works identically whether the caller is a compiled word or a REPL line.
+pub(super) enum Ctx<'a> {
+    Word {
+        /// Demangled, so every diagnostic that interpolates it is correct by
+        /// default: `resolve` rewrites module 0's decls to `{name}__m{module}`
+        /// as soon as a file has an import, and `check` runs on those names.
+        /// Self-tail recognition compares against mangled *call* names, so it
+        /// reads `mangled` instead.
+        name: &'a str,
+        mangled: &'a str,
+        effect: &'a StackEffect,
+        structs: &'a [StructDecl],
+        enums: &'a [EnumDecl],
+        /// R2 (slice 8b): the owning module of the word being checked, the
+        /// caller module D1's `drop` gate and 8a's operator fix scope a name's
+        /// visibility against.
+        module: u32,
+        /// R3 (slice 8b): the import closure's per-module data, `Some` on the
+        /// native build path and `None` on the REPL path (`infer_line` builds
+        /// `Ctx::Line`, and a retained poly word passes `None`): the gate reads
+        /// it and never fires when it is absent.
+        modules: Option<&'a [ModuleInfo]>,
+    },
+    Line {
+        structs: &'a [StructDecl],
+        enums: &'a [EnumDecl],
+    },
+}
+
+/// The `Ctx` for checking `word`'s body: shared by the body walkers and the
+/// binding-name rejections so all of them cite the same declared effect.
+pub(super) fn word_ctx<'a>(
+    word: &'a WordDef,
+    structs: &'a [StructDecl],
+    enums: &'a [EnumDecl],
+    modules: Option<&'a [ModuleInfo]>,
+) -> Ctx<'a> {
+    Ctx::Word {
+        name: crate::resolve::demangle_word(&word.name),
+        mangled: &word.name,
+        effect: &word.effect,
+        structs,
+        enums,
+        module: word.module,
+        modules,
+    }
+}
+
+impl Ctx<'_> {
+    pub(super) fn structs(&self) -> &[StructDecl] {
+        match self {
+            Ctx::Word { structs, .. } | Ctx::Line { structs, .. } => structs,
+        }
+    }
+
+    pub(super) fn enums(&self) -> &[EnumDecl] {
+        match self {
+            Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
+        }
+    }
+
+    /// R2 (slice 8b): the caller module a scoped-name visibility check runs
+    /// against. A bare REPL line denotes module 0.
+    pub(super) fn module(&self) -> u32 {
+        match self {
+            Ctx::Word { module, .. } => *module,
+            Ctx::Line { .. } => 0,
+        }
+    }
+
+    /// R3 (slice 8b): the import closure's per-module data, or `None` on the
+    /// REPL path, where the `drop` import-visibility gate does not fire.
+    pub(super) fn modules(&self) -> Option<&[ModuleInfo]> {
+        match self {
+            Ctx::Word { modules, .. } => *modules,
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    /// The enclosing word's name, for recognizing a self-tail-call back-edge
+    /// (R15). A bare REPL line has no word to recurse into.
+    pub(super) fn word_name(&self) -> Option<&str> {
+        match self {
+            Ctx::Word { name, .. } => Some(name),
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    pub(super) fn mangled_name(&self) -> Option<&str> {
+        match self {
+            Ctx::Word { mangled, .. } => Some(mangled),
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    /// The enclosing word's own declared effect, for recognizing which
+    /// struct (not just which name) a `drop` override's body is exempt for
+    /// (D3's destructure guard). A bare REPL line has no declared effect.
+    pub(super) fn effect(&self) -> Option<&StackEffect> {
+        match self {
+            Ctx::Word { effect, .. } => Some(effect),
+            Ctx::Line { .. } => None,
+        }
+    }
+
+    /// R11: the enclosing word's declared output row, the context a branch join
+    /// in tail position materializes its quotation arms against (the merged
+    /// slot maps to the output at the same index). A bare REPL line has no
+    /// declared row, so a materializing join there stays a located error.
+    pub(super) fn declared_outputs(&self) -> Option<&[TypedSlot]> {
+        match self {
+            Ctx::Word { effect, .. } => Some(&effect.outputs),
+            Ctx::Line { .. } => None,
+        }
+    }
+}
+
+impl<'a> Ctx<'a> {
+    /// D1 fix (slice 8b, bug 3): rebuild this `Ctx` with `module` swapped to
+    /// the module that actually declares the term about to be checked, not
+    /// the caller's. `inline_combinator` splices a combinator's body into the
+    /// *caller's* `Ctx` so its locals/effect/name still read right in
+    /// diagnostics, but a module-scoped visibility gate (D1's drop-import
+    /// check, 8a's operator scoping) run against `ctx.module()` while
+    /// checking that spliced body must see the combinator's own declaring
+    /// module, or a library combinator disposing its own resource gets
+    /// attributed to whichever module happened to call it. A no-op on
+    /// `Ctx::Line`, which has no module to scope against.
+    pub(super) fn with_module(&self, module: u32) -> Ctx<'a> {
+        match *self {
+            Ctx::Word {
+                name,
+                mangled,
+                effect,
+                structs,
+                enums,
+                modules,
+                ..
+            } => Ctx::Word {
+                name,
+                mangled,
+                effect,
+                structs,
+                enums,
+                module,
+                modules,
+            },
+            Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
+        }
+    }
+}
