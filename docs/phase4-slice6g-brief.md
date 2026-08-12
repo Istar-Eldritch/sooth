@@ -4,172 +4,440 @@
 lets a nested invocation — an `if` arm, a `call`'d quotation body, a `times` body — learn
 that the caller has already proven an ancestor-bound name has no residual use past this
 point, so that name can die inside the nested body instead of defaulting to "never dead
-here" (6f's own words). `inline_combinator` (`src/check.rs:7194`), the function that
-splices a combinator's body (`filter`/`map`/`fold`/`while`/any user quotation-taking word)
-at its call site, is a fourth nested-invocation shape but was never wired into this
-mechanism: it calls the plain `check_terms` (`src/check.rs:8037`) — the entry point 6f's own
-doc comment reserves for "a word body, a REPL line, a `case` clause: nothing is ancestor to
-those" — instead of `check_terms_relaxed` with a computed `outer_releasable` set. This
-slice closes that gap. Everything below was run, not read.
+here". `inline_combinator` (`src/check.rs:7359`), which splices a combinator's body
+(`filter`/`map`/`fold`/`while`/any user quotation-taking word) at its call site, is a
+fourth nested-invocation shape and was never wired into it: it calls the plain
+`check_terms` (`:8318`) — the entry point 6f's own doc comment reserves for "a word body, a
+REPL line, a `case` clause: nothing is ancestor to those" — instead of
+`check_terms_relaxed` (`:8357`) with a computed `outer_releasable` set.
+
+**Anchors are against `e87bcae` (post-10a).** 10a has merged; every anchor below was
+re-verified against that commit, and every behavioural claim was built and run, not read.
+A previous revision of this brief and its spec were anchored to `491cf54` and are
+superseded: 10a moved every function this slice touches by 100+ lines and gave
+`check_literal_against_declared_effect` a new `row: &[Type]` parameter. The *shape* of the
+mechanism survived 10a unchanged; only positions and that one signature moved.
+
+**Every anchor below will move again before this slice lands: slice 6h is in flight.**
+`impl/phase4_slice6h_spec-2608111725` inserts ~99 lines at `src/check.rs:558`, above every
+anchor here, and has further hunks inside two functions this slice edits (`poly_term`, the
+D5 poly bind site; `check_term`, the `releasable_into` sites and the `inline_combinator`
+call site). It also regenerates every `tests/qbe_baseline/*.ssa`. **Re-anchor after 6h
+merges rather than resolving a conflict; re-run the R1-only suite-green check and the
+R1+D1+R2 composition check on the merged tree, since 6h re-lowers `fill` and touches almost
+every example.** What 6h does *not* do is disturb this slice's premises, checked directly
+against that branch: its raw `[ Type ; Count ]` constructor still rejects linear elements
+(it reuses `fill_of_linear_element_error` and adds a module-wide sweep), so recon 2 and D2
+hold; `fill` remains in `BUILTIN_WORDS`, so D5's predicate is unaffected; and its new
+`TermKind::ArrayCtor(Type)` carries a type, not nested terms, so it is not a nesting variant
+and the R1 soundness argument below is untouched by it.
 
 ## Recon: measured against the built compiler
 
-**1. The bug reported and deferred at 6b's own recon 10 has a single, confirmed root
-cause.** 6b's brief named it "a pre-existing 6a inliner limitation... whether to fix the
-underlying alias-after-move tracking is 6a's business, not this slice's" and moved on
-without root-causing it. Minimal repro, unchanged since 6b, still reproduces verbatim on
-the current compiler:
+**1. The bug 6b's recon 10 deferred has a single confirmed root cause, and it still
+reproduces.** Minimal repro, run on `e87bcae`:
 
-```
+```text
 0 4 fill | a |
 a [ 4 > ] c::filter drop drop
-→ error: cannot borrow `arr__inl0` mutably: it is aliased by `a`
+→ error: cannot borrow `arr__inl0` mutably in `main`: it is aliased by `a`
 ```
 
-**2. Every array in Sooth is `Copy`, so naming one never enters move-tracking at all.**
-`fill` is the only array constructor and rejects a linear element outright
-(`src/check.rs:6620`/`:2017`) — confirmed again here, not just cited from 6b's recon 8. A
-`Copy` local is, by `Moves`' own doc comment (`src/check.rs:920`), "absent from the map":
-`Moves::take` (`:929`) returns `Ok(())` for a name it has never seen and never inserts one.
-So `scope.moves.moved_site("a")` is `None` forever, regardless of how many times `a` is
-named and consumed. `aliasing_origin`'s (`:1594`) filter `scope.moves.moved_site(&b.name).
-is_none()` — meant to exclude an already-consumed rival name — can never exclude an array
-this way. `Liveness::dead` is the only remaining guard.
+**2. Every array in Sooth is `Copy`, so naming one never enters move-tracking.** `fill` is
+the only array constructor and rejects a linear element outright. A `Copy` local is, by
+`Moves`' own doc comment, absent from the map, so `moved_site` is `None` forever and
+`aliasing_origin`'s (`:1609`) `moved_site(&b.name).is_none()` filter can never exclude an
+array. `Liveness::dead` (`:1319`) is the only remaining guard. This is a correct, permanent
+property of the language, not a gap (D2).
 
-**3. `check_terms` vs `check_terms_relaxed` is the actual fork, and `inline_combinator` is
-on the wrong side of it.** `times` (`:8394`), `call` (`:8308`), and an `if` arm (`:8797`)
-all compute `releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..])`
-and pass the result into `check_terms_relaxed`. `inline_combinator`'s own body-check
-(`:7300`, the tail of the function, shared by every combinator regardless of `comb.word.
-poly`) calls plain `check_terms`, which hardcodes `outer_releasable = HashSet::new()` and
-`back_edge = false` (`:8037`). Traced by reading, then confirmed by the repro above:
-`arr__inl0`'s mutable borrow calls `aliasing_origin`, which finds `a`'s alias set overlaps
-and checks `!live.dead("a", at) || captured.contains("a")` — `live` here is
-`Liveness::scan`'d fresh over just the *spliced* body's own term list (`:8094`), which never
-mentions `a` at all, so `dead()` falls to its `None` arm (`:1304`): `self.outer_releasable.
-contains("a")`, which is always false, because `inline_combinator` never populated it.
+**3. `check_terms` vs `check_terms_relaxed` is the fork, and `inline_combinator` is on the
+wrong side.** `call` (`:8595`), `times` (`:8683`) and an `if` arm (`:9125`) all compute
+`releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..])` and pass the
+result into `check_terms_relaxed`. `inline_combinator`'s body splice (`:7506`, the tail of
+the function, shared by every combinator regardless of `comb.word.poly`) calls plain
+`check_terms`, which hardcodes an empty `outer_releasable` and `back_edge = false`
+(`:8331`).
 
-**4. The same mechanism reproduces without `filter`, without genericity, and down to a
-single no-op iteration.** Confirmed independently (three separate from-scratch minimal
-repros, each isolating one variable):
+**4. The doorway grant is load-bearing, and the splice path lacks it.** Three programs, all
+run on `e87bcae`:
 
-- Nesting `c::while` inside a `times` loop that rebinds/swaps array-typed row items
-     across iterations, borrowing both a shared and a mutable reference inside the `while`'s
-     quotation.
-- Splitting merge-style logic into a separate, non-combinator, non-generic word taking a
-     quotation parameter, called from that same swapping loop.
-- Neither the swap, the loop nesting depth, nor `'T`-genericity is what triggers it —
-     every variant above reproduces with fully concrete (`[i64 3]`, hardcoded comparator)
-     types and a single outer iteration. What is common to every triggering shape and absent
-     from every non-triggering one tried is exactly recon 3's mechanism: a combinator splice
-     (`while`, or any quotation-taking word call) sitting between the caller's array local and
-     the point it gets borrowed again.
-   `lib/arrays.sth`'s `sort` (in-place bottom-up merge sort) currently works around this by
-   inlining all of its merge logic into one word body and using a fixed-bound `times` instead
-   of `while` for its innermost loop — both forced, documented in the file's own header
-   comment, not stylistic.
+```sooth
+\ ACCEPTS: the times doorway grants `a` into the loop body, so the aliased
+\ mutable borrow of `arr` is allowed
+: main ( -- )
+  0 4 fill | a |
+  a | arr |
+  4 [ | i | &!arr i >usize &!> i ! ] times
+  &arr 2 >usize &> @ .
+  arr drop ;
 
-**5. `inline_combinator`'s call to `check_terms` is a single, shared exit point for both
-monomorphic and polymorphic combinators.** `comb.word.poly.is_some()` only branches the
-*argument*-side check (`check_poly_combinator_args` vs the inline mono loop, `:7213`–
-`:7273`); the body splice at the end of the function (`:7300`) runs unconditionally for
-both. `while` itself is polymorphic (`'a [ 'a -- 'a bool ] -- 'a`), and recon 4's `while`
-repro exercises exactly this shared path — so one fix site covers both the mono (`filter`/
-`map`/`each`/`fold`) and poly (`while`, any user poly combinator) cases; there is no second,
-poly-specific splice path this bug also lives in.
+\ REJECTS (`aliased by a`): one later use of `a` withholds the same grant.
+\ This is what proves the grant above is load-bearing, not incidental.
+: main ( -- )
+  0 4 fill | a |
+  a | arr |
+  4 [ | i | &!arr i >usize &!> i ! ] times
+  arr drop
+  &a 0 >usize &> @ .
+  a drop ;
 
-**6. `inline_combinator` does not currently have access to `siblings`/`at`/`base_depth`/
-`outer_releasable`.** It is called from exactly one site (`:8640`, inside `check_term`'s own
-`TermKind::Call` dispatch), which *does* have all four in scope — the same values `times`/
-`call`/`if` already use at their own `releasable_into` call sites, a few hundred lines away
-in the same function. Threading them the last few lines into `inline_combinator` is
-mechanical.
+\ REJECTS: the identical shape routed through a combinator splice, which
+\ carries no grant at all (recon 1's repro).
+: main ( -- )
+  0 4 fill | a |
+  a [ 4 > ] c::filter drop drop ;
+```
 
-**7. The three existing `releasable_into` call sites disagree on `back_edge`, and the
-reason tracks whether the *body being spliced* can run more than once, not whether the call
-*site* is textually reachable more than once.** An `if` arm (`:8797`) is `back_edge =
-false`: it is a single, execute-once splice, "may die at its own last use inside" (comment
-at `:8794`). `times` (`:8394`) is `back_edge = true`: the same one splice runs N times at
-runtime. `call` (`:8308`) is also `back_edge = true`, despite splicing a *literal* body at
-one textual site — the comment there (`:8302`, "a quotation body can be called from
-elsewhere too") gives the reason: the `Known` quotation value is `Copy`, so the *same*
-literal could be bound to a local and invoked again from a different call/times/combinator
-site the checker cannot see from here, and the conservative choice is to treat any granted
-name's use anywhere in the body as pinning it live throughout, rather than at its last
-syntactic use. A combinator's body is not itself a `Copy`, reachable-from-elsewhere value in
-this sense: it is spliced fresh, once, at this exact call term, every time this term is
-reached. The candidate rule — `back_edge = self_tail` (`:7280`, already computed in
-`inline_combinator` for the loop-back-edge marker), `false` otherwise — treats a plain
-combinator splice like an `if` arm (one shot) and a self-tail combinator's splice like
-`times` (its own body re-enters via the back-edge). Not yet confirmed against the compiler
-either way; see open questions.
+This is the whole slice in three programs: the doorways grant, the splice does not.
+
+**5. It is a prerequisite of 10b/10c, not merely sequenced before them.** 10b deletes the
+`times` intrinsic and moves `times` into `lib/combinators.sth`; 10c makes `if`/`cond`
+ordinary words. Both convert a doorway that grants into a splice that does not, so recon
+4's first program regresses at 10b unless this slice has landed. 10b would otherwise have
+to implement D1 itself as unplanned scope.
+
+**6. `inline_combinator`'s `check_terms` is one shared exit point for mono and poly.**
+`comb.word.poly.is_some()` branches only the *argument* check
+(`check_poly_combinator_args` `:7546` vs the mono loop inside `inline_combinator`); the
+body splice at `:7506` runs unconditionally for both. `while` is itself polymorphic, so one
+fix site covers both.
+
+**7. `inline_combinator` lacks `siblings`/`at`/`base_depth`/`outer_releasable`, and its one
+call site has all four.** It is called from exactly one place (`:8968`, inside
+`check_term`'s `TermKind::Call` dispatch), and `check_term` takes `live`, `at`, `terms`,
+`base_depth` and `outer_releasable` as its own parameters, the same values `call`/`times`/
+`if` use a few hundred lines away in the same function.
+
+**8. There is a second wrong-side `check_terms`, on the argument path.**
+`check_literal_against_declared_effect` (`:7644`) runs the caller's quotation *literal*
+against the declared parameter effect, in the caller's own scope, through the plain root
+entry point (`:7674`). It is reached from both of `inline_combinator`'s argument paths (the
+mono loop at `:7400`, `check_poly_combinator_args` at `:7612`) and rejects *before* the
+body splice does, so D1 alone cannot discharge the `while`-nested-in-a-combinator shape.
+Its three non-combinator callers are `materialize_quotation_at_boundary` (`:8058`) and the
+two `if`-arm quotation-merge sites (`:9261`, `:9277`); whether those deserve a grant is
+7b's and 10c's question, not this slice's.
+
+**9. The same hole is already open today, with no 6g change, and it is a silent wrong
+value.** Run on `e87bcae`:
+
+```sooth
+\ ACCEPTS today, prints `0` then `9`: a mutation through `arr` is silently
+\ visible through `a` on the next iteration. No combinator involved.
+: main ( -- )
+  0 4 fill | a |
+  2 [ | i | a | arr | &a 0 >usize &> @ . true if &!arr 0 >usize &!> 9 ! else end arr drop ] times ;
+```
+
+So the granting rule is already wrong at the `if`-inside-`times` doorway, independent of
+this slice. What 6g does is multiply its blast radius: every combinator call sited inside a
+loop (legal since 6d) becomes a fourth doorway, and 10b/10c turn `times` and `if`
+themselves into splices. Shipping D1 while leaving this open would trade a false rejection
+for a silent wrong answer, which is not a trade this slice may make.
+
+**Placebo warning, measured.** Appending `a drop` after that loop flips the program to a
+*rejection on today's compiler* — for an unrelated reason (`references(rest, "a")` at
+`:1332` sees the trailing use and withholds the grant). A reject golden written that way
+passes green with and without the fix and pins nothing. The golden's program must have no
+use of `a` after the loop.
+
+**10. `back_edge` is *not* unobservable at a splice, and the reason is a name-hygiene
+defect.** `alpha_rename_locals` (`src/ast.rs:1208`) renames the callee's *locals*;
+`rename_call` (`src/ast.rs:1229`) deliberately leaves a call to a word or builtin
+untouched (its final `name.to_string()`). A caller local sharing a name with a builtin the
+spliced body calls internally is therefore read *in place of that builtin*, silently. Run
+on `e87bcae`:
+
+```text
+1 >usize | len |  9 4 fill [ 4 > ] c::filter . drop  len drop   → prints 1
+                  9 4 fill [ 4 > ] c::filter . drop             → prints 4
+```
+
+No diagnostic either way. This is a silent wrong value, not a loud failure, and it is the
+one route by which a granted caller name can appear as a `Call` inside a spliced body.
+Any argument that a splice's `back_edge` is unobservable depends on closing it (D5).
 
 ## Decided (locked)
 
-**D1. The fix is `inline_combinator`'s final body-check call: `check_terms` becomes
-`check_terms_relaxed` with a `releasable_into`-computed `outer_releasable` set.** Forced by
-recon 3 and 6, not chosen — this is the one call site on the wrong side of 6f's own
-`check_terms`/`check_terms_relaxed` contract, and the other three correct call sites are the
-worked pattern to copy.
+**D1. `inline_combinator`'s body check (`:7506`) becomes `check_terms_relaxed` with a
+`releasable_into`-computed grant.** Forced by recon 3/6/7: this is the one call site on the
+wrong side of 6f's own contract, and the three correct sites are the pattern to copy.
 
-**D2. No change to `Moves`, `aliasing_origin`, or the Copy-array move-blindness itself.**
-Recon 2 is a true, permanent, and correct property of the language (Copy locals are not
-move-tracked by design — `Moves`' own doc comment states this as the intended shape, not a
-gap), not a bug to fix. It is only a problem in combination with recon 3's missing
-`outer_releasable` wiring; fixing recon 3 alone closes the repro without touching move
-semantics.
+**D2. No change to `Moves`, `aliasing_origin`, or Copy-array move-blindness.** Recon 2 is a
+property of the language, not a bug.
 
 **D3. `lib/arrays.sth`'s `sort` header comment documenting the inline-everything/no-`while`
-workaround is deleted once the fix lands and the workaround's rationale no longer holds.**
-Whether `sort`'s merge logic is actually *restructured* to use `while`/a separate word is
-not required by this slice — only that the workaround's stated reason for existing is
-retested and found false.
+workaround is deleted, its rationale having been retested and found false.** `sort`'s code
+is *not* restructured. **`sort`'s own doc comment separately justifies a fixed-bound
+`times` over stopping early on the `u32` length bound — that rationale is unrelated to
+aliasing and must stay.** Note `lib/arrays.sth` is currently untracked; if it has not
+landed when 6g starts, the `sort` dogfood golden and this edit move to whichever commit
+brings it in. Nothing in the suite builds that file today, so the dogfood also needs an
+import helper of the kind `tests/phase4_combinators.rs` already has for
+`lib/combinators.sth` (`run_src` writes to `temp_dir()`, so relative imports do not
+resolve).
+
+**D4. Both new relaxed calls pass `back_edge = true`, and at the literal check this is
+required for soundness rather than chosen by convention.** At
+`check_literal_against_declared_effect` the terms scanned are the caller's own literal,
+which references caller locals directly, so a granted name provably does appear in that
+scan; with `false` its last use would be treated as final even though the callee
+re-executes the literal per iteration. At the body splice, `true` matches `call`/`times`
+and is the conservative value (a granted name used inside is pinned live for the whole
+body). Recon 10's hygiene defect is what would otherwise make the splice's flag
+observable; D5 closes it, making the splice's value a uniformity choice rather than a
+soundness one. Do not write a test claiming to pin the splice's flag, and do not treat a
+green suite as evidence it is right.
+
+**D5 (new). Reject binding a local whose name collides with a callable name.** Sites: the
+mono `TermKind::Bind` arm (`:8448`) and the poly one (`:5201`), alongside the existing
+`reject_variant_local` (`:3886`) and `reject_duplicate_local` (`:3906`) checks.
+`is_builtin_word_name` (`:2527`) already exists as the predicate, and
+`extern_redeclaration_error` (`:2533`) is the existing precedent for rejecting a declaration
+that reuses a builtin or word name; `reject_variant_local` is the precedent for rejecting a
+*local* that collides with another namespace (enum variants). This closes recon 10 at the
+root rather than patching splice hygiene, and it turns "a granted caller name can never
+appear as a `Call` in a spliced body" from false-by-counterexample into true-by-construction.
+
+**Coverage differs by site, deliberately.** The mono arm checks builtins, `env`,
+`poly.env` and `poly.combinators`. The poly arm checks **builtins and `env` only**, because
+`poly_term` has no `PolyCtx` parameter at all: reaching `poly.env`/`poly.combinators` there
+means changing the signature of `pub fn check_poly_body` and editing `src/repl.rs`, which is
+out of this slice's sanctioned files. **Recorded gap:** after 6g, a polymorphic word may
+still bind a local named after a combinator or poly word
+(`: pick ( 'T 'T -- 'T ) | len | | other | other drop len ;` compiles). Nobody has been able
+to construct a wrong-value witness through the poly arm — the hygiene defect needs an
+`alpha_rename_locals` splice, and no shape routes a poly-bound shadowing local into one — so
+this is scoped as uniformity, not soundness. If someone does build that witness, closing it
+is a separate slice that owns the `check_poly_body` signature change.
+
+*Measured, with the compiler rather than a text scan:* a build enforcing D5 at both bind
+sites compiles every file in `examples/` and `lib/` unchanged and passes the entire suite,
+all 20 test binaries, 1513 tests, zero failures. It also rejects recon 10's shadowing
+program. Blast radius is zero. (A regex over `|...|` is *not* a valid way to check this: `|`
+is overloaded between bind groups and clause dispatch, and a naive scan reports false
+clashes on clause bodies like `examples/shapes.sth:9`'s `| Circle dup * 3.14159 *`.)
+
+**R1 (new, forced by recon 9). `releasable_into` (`:1353`) gains `live: &Liveness, at:
+usize`, and its filter splits: a name bound in the current invocation
+(`idx >= base_depth`) keeps today's `!references(rest, name)` rule verbatim; an ancestor
+name is granted only if the caller's own liveness says it is dead there.**
+
+```rust
+.filter(|(idx, b)| {
+    if *idx >= base_depth {
+        !references(rest, &b.name)
+    } else {
+        outer_releasable.contains(&b.name) && live.dead(&b.name, at + 1)
+    }
+})
+```
+
+**The index is `at + 1`, not `at`, and this is the whole correctness of the rule.**
+`nested_uses` (`:1265`) attributes a use found *inside* `terms[at]` to index `at` itself,
+and `dead` (`:1319`) is `last < at`, so `live.dead(name, at)` is always false whenever the
+term being granted into is itself the thing that uses the name — which is the entire reason
+one grants. Asking at `at + 1` reproduces exactly what `!references(rest, name)` already
+meant ("no residual use *after* this term") while still catching recon 9's wrap-around,
+because a use anywhere in a `back_edge = true` body is recorded as `IMMORTAL_IN_BODY`
+(`:1183`, via `record_granted_use` `:1254`), which is not `<` any index.
+
+**R1 is provably sound relative to today's compiler, not merely measured green.**
+`Liveness::scan` (`:1186`) records a `Call` use at its index and `nested_uses` (`:1265`)
+records uses inside `If`/`Quotation` at the containing index; `references` (`:1332`)
+recurses over exactly the same three `TermKind` variants, and `TermKind` has no other
+nesting variant. So if `references(rest, name)` is true, some use sits at index `>= at + 1`
+and `dead(name, at + 1)` is false: **`dead(name, at + 1)` implies `!references(rest, name)`,
+so R1 grants a strict subset of what HEAD grants.** Over-permissiveness relative to HEAD is
+impossible by construction. The `idx >= base_depth` branch is unchanged verbatim and carries
+no new risk.
+
+**What R1 actually does, stated plainly, because it is broader than "a wrap-around fix".**
+Inside a `back_edge = true` body, `record_granted_use` (`:1254`) writes `IMMORTAL_IN_BODY`
+for *any* mention of a granted ancestor name, including one `nested_uses` finds inside
+`terms[at]` itself, and `usize::MAX < at + 1` is never true. Therefore: **an ancestor name
+mentioned anywhere inside a back-edge body is never re-granted into a block nested in that
+body; `releasable_into`'s ancestor branch is inert inside every loop and every `call`ed
+quotation.** Do not sell R1 as narrow. In particular a combinator call over a *named* array
+inside a `times` body compiles under D1+R2 and is **rejected** under D1+R2+R1 (measured).
+That rejection is correct by the language's own rule — `filter` mutates in place, so the next
+iteration re-reads a mutated `a` through a second name — so it must not be advertised as a
+win this slice delivers.
+
+**Accepted cost: R1 also rejects sound programs that compile today.** The class needs the
+ancestor name to appear *by name* inside a back-edge body; a combinator splice never does
+(the array arrives on the stack and callee locals are alpha-renamed), which is why the
+splice, `while` and `sort` shapes all survive. Two witnesses, both measured accepting on
+HEAD and rejecting under R1:
+
+```sooth
+\ b-call-nested-only: one invocation, no wrap-around anywhere, `a` mentioned
+\ nowhere else. HEAD accepts and prints 9; R1 rejects. Pin this as a reject
+\ golden so the behaviour change is recorded rather than discovered later.
+: main ( -- )
+  0 4 fill | a |
+  [ true if a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop else end ] call ;
+
+\ d2-times-mutate-only: write-only across the back edge, nothing reads the
+\ stale value. HEAD accepts; R1 rejects.
+: main ( -- )
+  0 4 fill | a |
+  2 [ | i | true if a | arr | &!arr 0 >usize &!> 9 ! arr drop else end ] times ;
+```
+
+**A refinement that would recover both was built and is unsound — do not re-propose it.**
+The candidate: for a back-edge body, grant iff the name is unmentioned in the siblings
+*before* and *after* `at` (excluding `terms[at]`'s own subtree). It restores both witnesses
+above and still rejects recon 9, but it accepts this, which prints `0` then `9`:
+
+```sooth
+\ danger: read and mutation both inside the granted-into term, in a loop.
+\ Iteration 2's read through `a` sees iteration 1's write through `arr`.
+\ HEAD accepts it too (a second pre-existing silent wrong value beyond recon 9);
+\ R1 as specified rejects it; the refinement does not.
+: main ( -- )
+  0 4 fill | a |
+  2 [ | i | true if a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop else end ] times ;
+```
+
+So `danger` is a second justification for R1 and a second behaviour change to document, and
+the over-strictness above is the honest price of closing it: the checker cannot distinguish
+"mentioned inside the granted-into term but never read across the edge" from "read across the
+edge" without machinery beyond this slice.
+
+*Measured on a build with R1 applied to the three existing call sites alone (no D1, no
+R2):* recon 9's program rejects; `danger` rejects; a two-level non-back-edge grant chain that
+compiles today still compiles (below); a three-level version of it also still compiles; a
+wrap-around-through-an-earlier-sibling-literal shape rejects; the full suite stays green
+(1513 tests).
+
+*Measured on a build with all three together (R1+D1+R2), which no earlier revision checked
+and which the phasing hides until Phase 3:* the splice shape accepts, the `sort` dogfood
+accepts and sorts, recon 9 rejects, the in-loop combinator call rejects, suite green. **Put
+this composition check in the spec: R1 lands in Phase 1 and D1 in Phase 3, so a composition
+failure would not surface for two phases.**
+
+```sooth
+\ ACCEPTS today (prints 9) and must keep accepting: two levels of
+\ execute-once nesting, `a` used only inside the innermost one.
+\ R1 written with `at` instead of `at + 1` rejects this.
+: main ( -- )
+  0 4 fill | a |
+  true if
+    true if
+      a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop
+    else end
+  else end ;
+```
+
+**R2 (new, forced by recon 8). `check_literal_against_declared_effect` takes the same grant
+and its `check_terms` (`:7674`) becomes `check_terms_relaxed`.** Its three non-combinator
+callers pass an empty set, preserving their behaviour exactly: with an empty grant,
+`back_edge` only feeds `record_granted_use`, which fires only for names in
+`outer_releasable`.
+
+**Q2 (was open). The parameter is `granted: &HashSet<String>`, computed by the caller.**
+Recon 8 decides it: the set must reach `check_literal_against_declared_effect`, which sits
+two frames below `inline_combinator` and has neither a sibling list nor an index of its own.
+One `HashSet` threaded down beats re-deriving position in a function that has no position.
+
+## Invariant worth recording while it is still true
+
+Grants are handed out **capture-blind** — `releasable_into` never consults captures — and
+capture-awareness lives at the *use* site: `live_derivs` (`:1495`) and `aliasing_origin`
+(`:1609`) each compute `capture_alive_names` (`:1391`) and check
+`!live.dead(name, at) || captured.contains(name)`. `capture_alive_names` is a fixpoint over
+stack slots and bound locals covering both `Known` markers and 7b's erased-closure
+`surviving` sets. `live.dead` has exactly four call sites: those two, plus two internal to
+the capture machinery (`:1419`, `past_last_use_capture` `:1459`). R1 adds a fifth, inside
+`releasable_into` — but that is a *grant* site, not an aliasing-use site, so it needs no
+disjunct. A future slice adding a consumer of `live.dead` on an aliasing path without the
+capture disjunct would break this silently, and nothing currently records it.
+
+Second half of the same invariant: **`dead`'s `None` arm is fail-open.** It returns
+`outer_releasable.contains(name)`, so a name `Liveness::scan` fails to record is granted,
+not withheld. Today that is safe because `scan` (`:1186`) and `references` (`:1332`)
+traverse the identical three nesting variants, which is exactly what makes R1 a strict
+subset of HEAD's grants. **A future `TermKind` with nested terms added to `references` but
+not to `scan` would silently open a hole.** (Checked against the in-flight 6h: its
+`TermKind::ArrayCtor(Type)` carries a type, not terms, so it is not such a variant.)
 
 ## Open questions the spec must answer
 
-- **The exact `back_edge` value for a combinator splice.** Recon 7's candidate rule
-  (`self_tail` for a self-tail combinator, `false` otherwise) is reasoned from the existing
-  three call sites' own stated justifications, not yet built and tested. The spec must
-  probe: does a self-tail combinator (`while`) need `back_edge = true` to avoid a *new*
-  false rejection (a granted name used only once, on an early loop iteration, wrongly dying
-  before a later iteration's use) the way `times`'s own loop body does? Does a plain,
-  non-recursive combinator (`filter`) genuinely behave like an `if` arm (`false`) with no
-  observable regression, or does treating it as `false` under-grant in some shape recon
-  did not try (e.g. a combinator call sited *inside* another loop, legal since 6d)?
-- **Whether `inline_combinator` should take `granted: &HashSet<String>` computed by its
-  caller (mirroring `call`/`times`, which compute `releasable_into` inline at their own call
-  site before recursing) or take `siblings`/`at`/`base_depth`/`outer_releasable` directly and
-  compute it internally.** The former keeps `inline_combinator`'s signature smaller and
-  matches the existing pattern exactly; the latter avoids a redundant `releasable_into` call
-  if `inline_combinator` is ever invoked from a second site in the future. Recon 6 found only
-  one call site today, so this is a style choice with no measured consequence — the spec
-  should just pick one and say why.
-- **A mutation test for the fix, not just a green build.** Per project convention (the
-  alias half of 6f's own slice was "mutation-tested rather than merely run green" because a
-  wrong answer here is a silent wrong *value*, not just a rejected program) — but this bug's
-  failure mode is the opposite: a false *rejection*, not a false acceptance. Confirm the test
-  shape: reverting `inline_combinator`'s call back to plain `check_terms` must make the
-  recon-1 minimal case start failing again, and the spec should say whether that reversion is
-  itself the mutation test or whether a `#[cfg(test)]` unit test closer to `inline_combinator`
-  is also warranted (comparable to 6f's own R6 mutation-test precedent in
-  `docs/phase4-slice6f-spec.md`).
-- **Whether any existing golden/example changes shape.** `examples/filter_while.sth`'s own
-  comment states it deliberately routes arrays through producer words "so this does not trip
-  6a's bind-then-pass alias limitation" — once this slice lands that avoidance is no longer
-  necessary. The spec should decide whether to leave that example as-is (it still compiles
-  and its comment becomes historical) or add a second example/golden that deliberately binds
-  first, to positively pin the fix rather than only removing an old workaround's necessity.
+- **Does any shipped `.sth` need editing to positively pin the fix, and what does that cost?**
+  `examples/filter_while.sth` binds through producer words to dodge this bug, and its
+  comment says so. Binding first would convert it into a positive pin. **But that example is
+  in `tests/qbe_baseline.rs`'s `CORPUS`, whose golden asserts the emitted `.ssa` is
+  byte-identical to `tests/qbe_baseline/filter_while.ssa`** — so editing its source requires
+  sanctioning a baseline regeneration and reviewing that diff. **Re-derive this after 6h
+  merges rather than inheriting the answer:** 6h regenerates every baseline in that corpus
+  anyway, so "avoid a baseline regeneration" will no longer be the deciding cost, and the
+  blanket "everything lowers byte-for-byte" claim has to be re-stated against the merged
+  tree either way.
+- **D1 versus R2 witnesses — partly answered, and one half is not available.** Reverting R2
+  with D1 present turns a `while`-shaped accept golden red while the plain splice golden
+  stays green, so R2 is demonstrably not redundant. The converse does **not** hold: every
+  `while`-with-a-borrowing-literal shape goes red under a D1 revert *too*, because `while`
+  is itself a combinator and therefore traverses the argument path and its own body splice.
+  No discriminating shape is known to exist. The spec must state that the `while` golden
+  pins D1+R2 jointly and rest R2's non-redundancy on the half that does discriminate,
+  rather than asserting a clean separation.
+- **Which of the two arrays `sort` returns holds the sorted result** — the dogfood golden
+  must say. `sort` returns `ra rs` (`lib/arrays.sth:124`): sorted first, leftover scratch on
+  top, and it needs a caller-supplied scratch of the same length. A golden that reads the
+  top-of-stack array after `a::sort` reads the scratch and prints zeros, which looks like a
+  broken fix and invites a golden written to expect zeros. Measured: fed by producer words,
+  `sort` prints `1 2 3 4`; the same call with both arrays bound to locals fails today with
+  `cannot borrow cs__inl0 mutably: it is aliased by s0`, which is the bug this slice fixes.
+
+## Test and mutation requirements
+
+- **Mutation phasing is a trap this slice has to avoid, in both directions.** R1 is a pure
+  tightening and can land alone; D1/R2 are the relaxation. A reject golden for recon 9
+  discriminates R1 in a relaxation-free tree, but **any golden whose program needs D1 to
+  compile at all cannot go red when R1 is reverted in an R1-only tree**, so it is not an R1
+  witness and must not be listed as one. The dual trap is the one an earlier revision fell
+  into: **reverting R1 to the pre-R1 filter is a *loosening*, and a loosening can never turn
+  an *accept* golden red.** So the accept golden that discriminates `at + 1` from `at`
+  belongs only to the `at + 1` → `at` mutation, never to the full-revert mutation, whose only
+  witness is the reject golden. Each mutation must name the phase it is runnable in and the
+  specific test it turns red, and the direction of the mutation must match the kind of
+  golden named.
+- The wrong-value cases must assert the *value*, not just that the program compiles: under
+  a reverted build recon 9's program must run and print `0` then `9`. A reject test that
+  only checks "fails" cannot distinguish this from a type error, and the wrong value is the
+  point.
+- R1 additionally warrants a direct `#[cfg(test)]` unit test on `releasable_into`
+  constructing a `Scope` plus a `Liveness` built via `scan` over synthetic terms, because
+  the end-to-end goldens reach the rule only through several nested invocations. Precedent:
+  6f's R6 walk-stop test, which became a unit test for the same reason. The unit test must
+  cover both the `IMMORTAL_IN_BODY` case and the `None`-arm case (granted, never mentioned,
+  still granted), so the tightening is shown not to over-tighten. **Note which half each
+  mutation kills:** the `None`-arm half passes trivially through `dead`'s fail-open arm as
+  long as the `outer_releasable.contains` conjunct survives, so deleting the `live.dead`
+  conjunct turns only the *first* half red. Stated as a two-sided pin it reads stronger than
+  it is.
+- Run mutations in a **throwaway copy** of the tree, never the shared worktree: a concurrent
+  reviewer has previously mistaken an in-place mutation for a real bug. There is no tooling
+  for this, so the spec should say the mechanism outright, and keep `target/` copies off
+  `/tmp` (a 32G tmpfs shared across sessions; an unrelated session has already been
+  ENOSPC'd by orphaned scratch dirs).
 
 ## Out of scope
 
-Rewriting `lib/arrays.sth`'s `sort` to actually use `while` or a split-out merge word (D3
-only requires the stale rationale be deleted, not the code be restructured). Any change to
-`Moves`/move-tracking semantics for `Copy` types (D2). The polymorphic-body `if` gap
-(`src/check.rs:3664`/`:3672`) and the polymorphic self-call gap (`poly_call_term`, unrelated
-— `while`'s repro goes through `inline_combinator`'s shared splice tail, never through
-`poly_call_term` at all, since a combinator's own call resolution is intercepted earlier by
-`poly.combinators.get(name)`, `:8629`). The `PolyType::Ref` gap (a separate, already-scoped
-defect: `&name` unparseable at a generic word's own top-level body — orthogonal borrow-sigil
-work, not this slice's). Sequencing: after slice 10a lands, before 10b/10c begin (ROADMAP.md
-Phase 4 item 6g states the reason: both widen this exact bug's blast radius by turning a
-compiler-intrinsic control-flow form into a combinator splice).
+Restructuring `lib/arrays.sth`'s `sort` (D3 requires only the stale rationale to go). Any
+change to `Moves`/move-tracking for `Copy` types (D2). Whether the three non-combinator
+`check_literal_against_declared_effect` callers deserve a grant (R2). The `PolyType::Ref`
+gap. Any lowering, IR, or diagnostic-text change beyond D5's new diagnostic.
+
+**Sequencing: after 6h, before 10b/10c.** 10a has merged (`e87bcae`), so the old blocker is
+gone. The 10b/10c relation is a prerequisite, not a preference (recon 5). The 6h relation is
+the opposite — pure mechanical courtesy, no dependency either way — but it is worth honouring:
+6h is well advanced, moves every anchor in this document, has hunks inside two functions this
+slice edits, and regenerates every QBE baseline. Landing 6g first buys a conflict in exactly
+those two functions plus a re-measure against a tree whose lowering changed anyway; landing it
+second costs one re-anchoring pass.
+
+Note `ROADMAP.md`'s own "Next action" pointer (line 589) still reads "Phase 4 Slice 10a" and
+its 6g entry still prescribes the `self_tail`-conditioned `back_edge` that D4 rejects; both are
+stale text that the ROADMAP edit should correct.
