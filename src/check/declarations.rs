@@ -442,12 +442,7 @@ pub(crate) fn selective_not_exported_error(name: &str, qualifier: &str, span: Sp
 /// R21: a second selective import exposing a name a prior one already exposed,
 /// naming both source modules. No precedence, no shadowing: the collision is
 /// the error.
-pub(crate) fn selective_collision_error(
-    name: &str,
-    first: &str,
-    second: &str,
-    span: Span,
-) -> String {
+fn selective_collision_error(name: &str, first: &str, second: &str, span: Span) -> String {
     format!(
         "error: selective import of `{name}` from module `{second}` (line {}, col {}) collides with the selective import of `{name}` from module `{first}`",
         span.line, span.col
@@ -456,11 +451,7 @@ pub(crate) fn selective_collision_error(
 
 /// R21: a selective import exposing a name the importing module already defines
 /// locally, naming the source module and the local definition.
-pub(crate) fn selective_collides_with_local_error(
-    name: &str,
-    qualifier: &str,
-    span: Span,
-) -> String {
+fn selective_collides_with_local_error(name: &str, qualifier: &str, span: Span) -> String {
     format!(
         "error: selective import of `{name}` from module `{qualifier}` (line {}, col {}) collides with a local definition of `{name}`",
         span.line, span.col
