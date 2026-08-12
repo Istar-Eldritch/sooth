@@ -299,7 +299,12 @@ then `destructors` (needs `layout`), then `func_builder` (needs `types` + `layou
   `mod tests` into its subject module per Q4 (mechanical grep pass, hand-fix ambiguous,
   tie-break to the asserted subject; `func_builder` tests distribute to the method-group file
   they exercise). `ir.rs` retains only tests for items that stayed in `ir.rs` (there should be
-  none beyond the re-export shim; if a helper stayed, its tests stay with it). Final gate: full
+  none beyond the re-export shim; if a helper stayed, its tests stay with it). Once the tests
+  move, delete the `#[cfg(test)]`-only re-exports and dead-code allows they were propping up:
+  `layout::VariantLayout`, `layout::build_registries_ww`, `layout::scalar_size_align_ww`, and
+  the `#[allow(dead_code)]` on `Registries::from_structs` (added in Phase 2 solely because their
+  only callers were in `ir.rs`'s flat test module; once those tests relocate into `layout.rs`
+  they reach the items directly via `super::` and the shim gates become dead). Final gate: full
   checkpoint green **and** the surface diff byte-identical to `/tmp/ir-surface-before.txt` with
   zero external call-site changes.
 
