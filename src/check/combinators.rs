@@ -15,7 +15,7 @@ pub(crate) type CombinatorEnv<'a> = HashMap<String, Vec<Combinator<'a>>>;
 #[derive(Clone, Copy)]
 pub(crate) struct Combinator<'a> {
     pub(super) word: &'a WordDef,
-    pub(super) terms: &'a [Term],
+    terms: &'a [Term],
 }
 
 /// R18: gather the quotation-taking `WordBody::Terms` words, mono and poly
