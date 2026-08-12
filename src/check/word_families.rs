@@ -820,6 +820,79 @@ fn drop_import_visibility_error(
     }
 }
 
+/// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
+/// error naming the length `N` and the offending index.
+fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: array index out of range in `{}` (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",
+            name, span.line, index, count, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: array index out of range: index {index} is out of bounds for length {count}"
+        ),
+    }
+}
+
+/// `fill` given a *computed* (non-literal) count (M1): the count must be a
+/// compile-time literal, since there is no comptime interpreter to fold it.
+fn fill_count_not_literal_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `fill` requires a literal count, found a computed `{}` (no const-expr eval)\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `fill` requires a literal count, found a computed `{found}` (no const-expr eval)"
+        ),
+    }
+}
+
+/// `fill` given a literal count `< 1` (or `> u32::MAX`): an array length must
+/// be `>= 1` (X2, M1), named against the offending count.
+fn fill_count_out_of_range_error(ctx: &Ctx, span: Span, count: i64) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: invalid array length in `{}` (line {})\n  `fill` count {} is invalid (an array length must be >= 1 and <= {})\n  note: declared {}",
+            name, span.line, count, u32::MAX, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `fill` count {count} is invalid (an array length must be >= 1 and <= {})",
+            u32::MAX
+        ),
+    }
+}
+
+/// An exact `usize` is a runtime index; a bare integer literal coerces and
+/// gets a compile-time bounds check; a computed `i64` needs an explicit
+/// `>usize`; anything else is a plain type mismatch.
+fn check_array_index(
+    index: Slot,
+    count: u32,
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+) -> Result<(), String> {
+    match match_slot(index, Type::Usize) {
+        SlotMatch::Exact => Ok(()),
+        SlotMatch::LiteralSizeType => {
+            let idx = index.int_val.expect("a literal slot carries its value");
+            if idx < 0 || idx >= i64::from(count) {
+                return Err(array_index_out_of_range_error(ctx, span, count, idx));
+            }
+            Ok(())
+        }
+        SlotMatch::NeedsSizeConversion => {
+            Err(size_conversion_needed_error(ctx, span, op, Type::Usize))
+        }
+        // A `str` index is a plain mismatch: the str-to-cstr case can only
+        // arise where a `cstr` is wanted, and an index always wants `usize`.
+        SlotMatch::NeedsStrToCstrConversion | SlotMatch::Mismatch => {
+            Err(type_mismatch_error(ctx, span, op, Type::Usize, index.ty))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1106,3 +1106,238 @@ fn check_term(
         }
     }
 }
+
+/// R15 (D8): a linear value live across the self-tail-call back-edge, which the
+/// loop lowering would carry into the next iteration with nobody responsible
+/// for disposing it. Deferred to a later Phase 3 slice, as a located error
+/// rather than silence. Copy loops are untouched.
+fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: linear values across a loop are not supported yet in `{}` (line {})\n  a `{}` is live across the self-tail-call back-edge to `{}`: consume it before the recursive call\n  note: declared {}",
+            name, span.line, ty, callee, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: linear values across a loop are not supported yet: a `{ty}` is live across the back-edge to `{callee}`"
+        ),
+    }
+}
+
+/// R15: reject a linear value that would survive the back-edge of a
+/// self-tail-call, either stranded on the stack below the call's arguments or
+/// held by a local that was never consumed. A value *moved into* the call's
+/// arguments is forwarded, not live across the edge, so it stays legal.
+fn check_linear_across_back_edge(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    below_args: &[Slot],
+    scope: &Scope,
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    if let Some(slot) = below_args
+        .iter()
+        .find(|s| is_linear(s.ty, ctx.structs(), ctx.enums(), arrays))
+    {
+        return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
+    }
+    if let Some(local) = scope.moves.unconsumed().first() {
+        let ty = scope
+            .local_type(local)
+            .expect("a tracked local is in scope");
+        return Err(linear_across_back_edge_error(ctx, span, callee, ty));
+    }
+    Ok(())
+}
+
+/// R4: a binding naming something already in scope. For a linear value the
+/// rejection is forced (the earlier binding would become unreachable, and its
+/// value could then never be consumed), and applying it to Copy values too
+/// keeps one rule and one message instead of two.
+/// `call` reached without a statically-known quotation literal on top (D4):
+/// the value there is not traceable to a single literal.
+fn call_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `call` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+            name, span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `call` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+            span.line
+        ),
+    }
+}
+
+/// R8: check a call of an *abstract* quotation (one typed only by a declared
+/// `Type::Quotation` parameter, with no known literal body) against its
+/// declared effect: consume `eff.inputs` deepest-first, then push
+/// `eff.outputs`. No splice happens; the declared effect *is* the contract.
+/// This is how a quotation-taking word's own body type-checks at its
+/// definition site (D4), independent of any call site's literal.
+fn check_abstract_quotation_call(
+    eff: &QuotEffect,
+    span: Span,
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+    op: &str,
+) -> Result<Vec<Slot>, String> {
+    let n = eff.inputs.len();
+    if stack.len() < n {
+        return Err(underflow_error(ctx, span, op, n, stack.len()));
+    }
+    let base = stack.len() - n;
+    for (i, want) in eff.inputs.iter().enumerate() {
+        let found = stack[base + i];
+        match match_slot(found, *want) {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            _ => return Err(type_mismatch_error(ctx, span, op, *want, found.ty)),
+        }
+    }
+    stack.truncate(base);
+    for out in &eff.outputs {
+        stack.push(Slot::computed(*out));
+    }
+    Ok(stack)
+}
+
+/// R9: check `f times` for an *abstract* quotation `f`. The count is already
+/// verified as an `i64` by the caller path's guard below; here the declared
+/// effect must be row-preserving with a trailing `i64` index
+/// (`inputs == outputs ++ [i64]`), and the row on the stack is left unchanged.
+fn check_abstract_quotation_times(
+    eff: &QuotEffect,
+    span: Span,
+    mut stack: Vec<Slot>,
+    ctx: &Ctx,
+) -> Result<Vec<Slot>, String> {
+    let Some(count) = stack.pop() else {
+        return Err(underflow_error(ctx, span, "times", 2, 1));
+    };
+    if count.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, "times"));
+    }
+    if count.ty != Type::I64 {
+        return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
+    }
+    let row_preserving = eff.inputs.last() == Some(&Type::I64)
+        && eff.inputs.len() == eff.outputs.len() + 1
+        && eff.inputs[..eff.outputs.len()] == eff.outputs[..];
+    if !row_preserving {
+        return Err(times_body_row_effect_error(ctx, span));
+    }
+    let row_len = eff.outputs.len();
+    if stack.len() < row_len {
+        return Err(underflow_error(ctx, span, "times", row_len, stack.len()));
+    }
+    let base = stack.len() - row_len;
+    for (i, want) in eff.outputs.iter().enumerate() {
+        let found = stack[base + i];
+        match match_slot(found, *want) {
+            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+            _ => return Err(type_mismatch_error(ctx, span, "times", *want, found.ty)),
+        }
+    }
+    Ok(stack)
+}
+
+/// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
+/// declared output. Extracted as a named, callable function (R14a) so phase 6
+/// can drive it from a white-box test: `#[ignore]` skips execution, not
+/// compilation, so the test needs a real symbol to call. R14: the `surviving`
+/// capture set is forwarded from `carried_inputs` along `index_map`
+/// (bottom-aligned: ground output `i` <- `carried_inputs[j]` when
+/// `index_map[i] == Some(j)`), so an aggregate carrying an erased quotation
+/// across the back-edge keeps its escape obligation (`d1b3f0a`/`bee407c`: a
+/// `Slot::computed` drops it, so a bare forward would leak the obligation).
+/// `carried_inputs` is itself filtered to non-quotation slots at the call
+/// site, so `quot` is always `None` there and never needs forwarding. An
+/// output with no source (`None`) is a fresh type-only slot.
+fn back_edge_outs(
+    ground_outputs: &[Type],
+    index_map: &[Option<usize>],
+    carried_inputs: &[Slot],
+) -> Vec<Slot> {
+    ground_outputs
+        .iter()
+        .enumerate()
+        .map(|(i, &ty)| {
+            let mut out = Slot::computed(ty);
+            if let Some(src) = index_map.get(i).copied().flatten() {
+                out.surviving = carried_inputs[src].surviving;
+            }
+            out
+        })
+        .collect()
+}
+
+/// R18: `times` reached without a statically-known quotation literal on top
+/// (D4). Parallel to `call_needs_quotation_error`.
+fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+            name, span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
+            span.line
+        ),
+    }
+}
+
+/// R18: the body is spliced once but runs N times, so a linear outer local it
+/// consumes would be disposed of more than once. The single most important
+/// `times` checker rule.
+fn times_body_consumes_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
+    format!(
+        "error: a `times` body cannot consume `{name}`{} (line {}): the body runs more than once, so the value would be disposed of more than once",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18: a reference the body derives would cross the back-edge into the next
+/// iteration. A borrow is idempotent per iteration, so a well-formed body
+/// leaves `live_derivs` unchanged; this fires when it does not.
+fn times_body_borrow_across_loop_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` body cannot leave a reference live across the loop{} (line {}): the local it borrows does not survive to the next iteration",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// R18/D6: the body's net effect on the row is not identity -- it must consume
+/// the index and return the row it received unchanged.
+fn times_body_row_effect_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a `times` body must leave the row unchanged{} (line {}): it takes `( ..s i64 -- ..s )`, consuming the index and returning the same row",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn back_edge_outs_forwards_surviving_set_along_index_map() {
+        let set = SurvivingCaptureSetId(0);
+        let agg = Type::Struct(crate::ast::StructId::from_index(0), "Agg");
+        let carried = vec![Slot {
+            surviving: Some(set),
+            ..Slot::computed(agg)
+        }];
+        let ground_outputs = vec![agg];
+        let index_map = vec![Some(0)];
+        let outs = back_edge_outs(&ground_outputs, &index_map, &carried);
+        assert_eq!(
+            outs[0].surviving,
+            Some(set),
+            "the aggregate's surviving capture set must ride across the back-edge"
+        );
+    }
+}
