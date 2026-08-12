@@ -216,6 +216,13 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
     )
 }
 
+/// R18: inline a call to a monomorphic quotation-taking word. Validate each
+/// declared input against the caller's live slot (a quotation parameter takes
+/// a `Known` literal, checked directionally with the D3 capture check, R11/R12;
+/// every other parameter is matched as usual), then splice the callee body
+/// against the live stack (bracketed like a `call`, `tail = false`), so the
+/// callee's own `call`/`times` fuse against the caller's literals. R22
+/// guarantees termination.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn inline_combinator(
     comb: &Combinator,
