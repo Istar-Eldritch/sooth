@@ -344,11 +344,16 @@ pub(super) fn poly_term(
             for name in names {
                 reject_variant_local(ctx, name, "local")?;
                 reject_duplicate_local(ctx, name, span, &mut seen)?;
-                // D5, poly coverage: builtins and `env` only. `poly_term` has
-                // no `PolyCtx`, so `poly.env`/`poly.combinators` are
-                // unreachable here (recorded gap, D5).
-                let collides = is_builtin_word_name(name) || env.contains_key(name);
-                reject_callable_local(ctx, name, span, collides)?;
+                // D5, poly coverage: builtins and `env` (bare and mangled)
+                // only. `poly_term` has no `PolyCtx`, so `poly.env`/
+                // `poly.combinators` are unreachable here (recorded gap, D5).
+                let mangled = crate::resolve::mangle(name, span.module);
+                let collides = is_builtin_word_name(name)
+                    || env.contains_key(name)
+                    || env.contains_key(&mangled);
+                if collides {
+                    return Err(callable_local_error(ctx, name, span));
+                }
                 if scope.locals.contains_key(name) {
                     return Err(rebound_local_error(ctx, span, name));
                 }

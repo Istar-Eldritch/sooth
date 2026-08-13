@@ -194,7 +194,22 @@ fn binding_a_local_named_after_a_builtin_is_rejected() {
          len . ;\n",
     );
     assert!(
-        err.contains("`len`"),
-        "expected the diagnostic to name the collided builtin `len`: {err}"
+        err.contains("`len`") && err.contains("collides with the callable name"),
+        "expected the D5 collision wording naming `len`: {err}"
+    );
+}
+
+#[test]
+fn binding_a_poly_local_named_after_a_builtin_is_rejected() {
+    // The poly-arm twin of T-shadow: a two-site guard needs a mutation
+    // target at each site. Deleting only the poly arm's rejection leaves the
+    // whole suite green while this builds and prints `2`.
+    let err = check_error(
+        ": pick ( 'T 'T -- 'T ) | len | | other | other drop len ;\n\
+         : main ( -- ) 1 2 pick . ;\n",
+    );
+    assert!(
+        err.contains("`len`") && err.contains("collides with the callable name"),
+        "expected the D5 collision wording naming `len`: {err}"
     );
 }
