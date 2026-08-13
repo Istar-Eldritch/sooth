@@ -18,6 +18,12 @@ relaxation) is committed beside this spec as
 the soundness evidence in the P0 section below was measured against it. Treat it as reference,
 not as the delivery: it carries no tests and none of the corpus or test-suite sweep.
 
+**Warning:** the patch was generated before commit `9ee7b6a`, so its first two hunks *delete*
+`docs/phase4-slice11-brief.md` and `docs/phase4-slice11-spec.md` (a concurrent effort's docs).
+Apply only its `src/`, `lib/`, and `examples/` hunks. It also deliberately leaves the four dead
+`times_*` diagnostics in place, so it emits 4 `dead_code` warnings and is **not**
+clippy-clean: R1's warning-free state is only reached once they are deleted.
+
 ## The blocker: a linear local held across a `times` loop stops compiling
 
 `examples/inplace_fold.sth` builds today (intrinsic) and prints `1 3 6 10 1 3 6 10`. Under a
@@ -35,7 +41,8 @@ through `out`, then returns `acc`. `acc` is never consumed inside the loop; it s
 stable frame slot, reached only by the borrow. The intrinsic's bespoke check permitted this
 (it checked body move-state identity and the row, never the enclosing frame). `times-helper`
 is a genuine self-tail combinator, so its splice runs the general
-`check_linear_across_back_edge` (`src/check/terms.rs:477`), whose second clause flags **any**
+`check_linear_across_back_edge` (`src/check/terms.rs:1168`; its diagnostic,
+`linear_across_back_edge_error`, is at `:1151`), whose second clause flags **any**
 unconsumed linear local in scope, including `prefix-linear`'s `acc`.
 
 This is not a `times-helper` defect. It is a pre-existing limitation of **every** spliced
@@ -91,7 +98,7 @@ not.
 
 3. **The test-file blast radius the brief enumerated is wrong in both directions.** The brief
    named eleven test files. Measured with `--no-fail-fast` on the deleted-intrinsic tree
-   (before any test edits), the failing set is **twelve targets, 55 tests**, and it does not
+   (before any test edits), the failing set is **11 targets, 55 tests**, and it does not
    match the brief's list:
    - **Two brief-named files do not fail at all**: `phase0.rs` (199 pass) and
      `phase4_slice10a_inline_quotation.rs` (22 pass). Their `times` mentions are in comments or
@@ -102,9 +109,15 @@ not.
    - `phase4_generics.rs` (12) and `phase4_slice6g.rs` (6) were named but unmeasured; now
      measured.
 
-4. **The corpus enumeration missed one file.** The brief named seven bare-`times` corpus
-   files. `examples/combinator_in_times.sth:20` is an eighth: it imports combinators as `c`
-   (qualified) but drives its outer loop with a bare `times`, which the intrinsic served.
+4. **The corpus enumeration is seven example files, plus `lib/arrays.sth` as an eighth
+   (library, not example) file, not eight examples.** The seven: `array_ctor.sth`,
+   `array_totals_hand.sth`, `combinator_in_times.sth`, `combinator_in_times_hand.sth`,
+   `filter_while_hand.sth`, `inplace_fold.sth`, `times.sth`. `array_totals.sth` and
+   `filter_while.sth` contain no bare `times` and need no import: their combinators wrap it
+   internally. `examples/combinator_in_times.sth:20` imports combinators as `c` (qualified)
+   but drives its outer loop with a bare `times`, which the intrinsic served, so it qualifies
+   that one call to `c::times` rather than taking the selective import the other six examples
+   take.
 
 5. **Both unprobed bespoke diagnostics are still caught, reworded (Q1 resolved).** See below.
 
@@ -137,34 +150,41 @@ per-iteration indirect call replaced the spliced constant-stack loop. (The `.ssa
 *do* change, in internal value numbering, while machine-code size does not; see Q3's
 `qbe_baseline` row.)
 
-**Q3 (full fallout enumeration). Resolved: twelve targets, categorized.** The complete list,
+**Q3 (full fallout enumeration). Resolved: 11 targets, categorized.** The complete list,
 with the edit each needs (measured, not inferred):
 
 | Target | Fails | Nature / edit |
 | --- | --- | --- |
 | `--lib` `check::engine::times_typing_obligations` (`engine.rs:1572`) | 1 | intrinsic-only typing obligations; **retire the test** (engine.rs, **not sanctioned**) |
 | `--lib` `check::word_families::quotation_as_operand_is_rejected_at_every_audited_site` (`word_families.rs:1154`) | 1 | remove the `times` audit row (`word_families.rs:1258`); reword two `"only call and times"` rows (**not sanctioned**) |
-| `--lib` `ir::func_builder::calls::each_lowers_to_a_loop_not_a_per_element_call` (`calls.rs:1615`) | 1 | inline `each` uses bare `times`; add inline `times`/`times-helper` defs (calls.rs, sanctioned) |
+| `--lib` `ir::func_builder::calls::each_lowers_to_a_loop_not_a_per_element_call` (`calls.rs:1615`), plus its two siblings `calls::times_lowers_to_a_loop_header_not_a_per_iteration_call` and `calls::times_saves_and_restores_loop_state` | 3 | `each_lowers` needs inline `times`/`times-helper` defs (calls.rs, sanctioned); the other two call `lower_call("times", ...)` directly on the now-deleted arm and are deleted outright by R1 (recon item 2), not fixed by the sweep |
 | `phase3_refs.rs` | 3 | inline bare `times`; add combinators import + reword any intrinsic-wording asserts |
 | `phase4_combinators.rs` | 20 | bulk bare `times` (import) + intrinsic-diagnostic asserts (reword) + dogfoods (pass once imported); the 2 REPL-import tests need the `times-helper` export (Q4) |
-| `phase4_generics.rs` | 11 | inline bare `times`; import / reword |
+| `phase4_generics.rs` | 12 | inline bare `times`; import / reword |
 | `phase4_quotations.rs` | 2 | inline bare `times`; import / reword |
-| `phase4_slice6f.rs` | 2 | **neither an import fix nor P0-gated** (the spec originally claimed both, wrongly): both tests call `check::check` in-process on `include_str!`'d dogfood source, so an `import:` line in the `.sth` file never resolves and the failure is `` unknown word `times` in `prefix-copy` ``. Fix by routing through the driver or inlining `times`/`times-helper` into the checked source. **This is a category, not one file**: every in-process-check test over a corpus file that now needs an import behaves this way |
-| `phase4_slice6g.rs` | 5 | doorway-grant tests, inline bare `times`; add combinators import (grant verified to survive) |
+| `phase4_slice6f.rs` | 2 | both tests (`inplace_fold_copy_lowers_without_per_iteration_blit`, `inplace_fold_linear_lowers_without_per_iteration_blit`) call `run_dogfood` first, which goes through `common::build_example` and the driver and already asserts exact stdout; each then calls `fold_body`, which does `check::check` in-process on `include_str!`'d dogfood source, so the added `import:` line never resolves there, and the failure is `` unknown word `times` in `prefix-copy` ``. Fix `fold_body` by routing it through `sooth::driver::emit_ssa(path)` (what `tests/qbe_baseline.rs:66` uses); under `emit_ssa` the emitted names gain a module suffix (`export function :AccC $prefix.2d.copy__m0(...)`), so its `` format!("${word}(") `` lookup must change to match. The substantive assertions (`phi`, two `jmp @blk1`, `storel`, no `blit`) survive unchanged, so the no-blit claim stays non-vacuous; do not "fix" this by loosening the blit assertion into a placebo. Once fixed, these two tests are an exact-stdout-plus-structure witness for the P0 shape (the linear one directly). **This is a category, not one file**: every test whose in-process half checks a corpus file via `lex`/`parse`/`check` directly, as `fold_body` does, behaves this way |
+| `phase4_slice6g.rs` | 6 | doorway-grant tests, inline bare `times`; add combinators import (grant verified to survive) |
 | `phase4_slice6h.rs` | 1 | builds the corpus (`inplace_fold` etc.); fixed by corpus imports, **linear case gated on P0** |
 | `phase4_slice6h_fill_corpus.rs` | 1 | corpus stdout baseline; fixed by corpus imports, **gated on P0** |
 | `phase4_slice10a_exit_witnesses.rs` | 2 | resolved per Decision 4 below |
 | `qbe_baseline.rs` | 1 | regenerate `.ssa` for the times-using corpus (sanctioned baseline diff) |
 
-The starting count was 55 tests across the untouched-test tree; exporting `times-helper` (P1)
-clears 2, the arrays.sth import clears the sort dogfood, and the rest are the table's edits.
+Row counts sum to 55 (5 + 3 + 20 + 12 + 2 + 2 + 6 + 1 + 1 + 2 + 1), across 11 unique targets
+(13 rows, three of them `--lib`). The measured 55 already assumes `times-helper` is exported
+(Decision 2, delivered alongside R2 in the intrinsic-deletion phase, not a separate "P1"
+step): without the export, the two REPL tests (`repl_imported_filter_runs`,
+`repl_combinators_dogfood_matches_native`, both in `tests/phase4_combinators.rs`, not a
+REPL-specific file) add 2 more failures, for 57. `tests/phase4_repl_imports.rs` stays 23/23
+green either way. The `arrays.sth` import clears the sort dogfood, and the rest are the
+table's edits.
 
-Re-measured with the Phase 1 relaxation in place: still 55 tests, across 11 targets. The
+Re-measured with the Phase 1 relaxation in place: 56 tests, still across 11 targets. The
 relaxation changes the failing set by exactly one test, in the direction of *adding* one
 (`while_body_linear_local_across_back_edge_is_error`, the deliberate re-point, see P0) and
 fixing none. That it fixes none is itself a finding: the shape it enables is pinned by no
-working test today, because `phase4_slice6f.rs`'s two tests cannot even reach the checker
-(this table's `phase4_slice6f.rs` row). Phase 1 must therefore add its own golden.
+working test today, because `phase4_slice6f.rs`'s two tests' `fold_body` calls cannot even
+reach the checker (this table's `phase4_slice6f.rs` row). Phase 1 must therefore add its own
+golden.
 
 **Q4 (REPL). Resolved: `times-helper` must be exported.** Two REPL tests
 (`repl_imported_filter_runs`, `repl_combinators_dogfood_matches_native`) fail with
@@ -203,36 +223,57 @@ completes at `ulimit -s 1024`, exit 0.
 
 **P0 (new, forced by the blocker, and this slice's Phase 1). `check_linear_across_back_edge`
 gains a `frame_floor: Option<usize>` parameter. Its second clause (any unconsumed linear local
-in scope) skips a local bound below the floor: such a local lives in an ancestor frame that
-outlives every iteration, so the loop neither rebinds it nor carries it, and its disposal
-obligation stays with the enclosing word.** The `terms.rs` sanctioned edit widens from
-delete-only to include this relaxation.
+in scope) skips a local bound below the floor.** `base_depth` is captured per
+`check_terms_relaxed` invocation (`src/check/terms.rs:73`), and `TermKind::If` re-enters
+`check_terms_relaxed` per arm (`terms.rs:856`, `:884`); every real self-tail combinator's
+back-edge sits inside an `if` arm. So the floor passed at the combinator site is the **if-arm
+entry depth**, not a frame floor: "bound below the floor" does not mean "lives in an ancestor
+frame". It also exempts a local bound in the combinator's own frame *before* the tail-`if`
+(`times-helper`'s own parameters, for instance), which is re-created every iteration and has no
+ancestor-frame lifetime at all. The `terms.rs` sanctioned edit widens from delete-only to
+include this relaxation.
 
 **Only the combinator-splice call site passes a floor.** `Some(base_depth)` at the self-tail
 *combinator* site (`terms.rs:615`, the marker path `while`/`times-helper` take); `None`, i.e.
 today's behaviour, at the whole-word TCO site (`terms.rs:787`). This is load-bearing, not
-tidiness: a plain recursive word has no parked-ancestor shape to admit, because its self-call
+tidiness: a plain recursive word has no shape below the floor to admit, because its self-call
 must supply its full declared inputs, so a linear is either forwarded as an argument (already
 legal by design, per the function's own doc comment) or genuinely stranded beneath them
 (clause 1). Passing a floor at both sites is the change that would actually open a hole.
 
-**Why this is sound, and not a new permission.** `check_reference_across_back_edge`
-(`src/check.rs:1264`) already draws exactly this distinction for references, and says so: a
-reference with no owned root "may cross freely: its referent lives in an ancestor frame that
-outlives every iteration", which is what keeps `walk ( &!List -- ) ... walk ;` legal. The
-linear check simply never made the distinction. P0 brings it to parity. References carry no
-disposal obligation and linear values do, so parity is not self-evidently transferable, and the
-two failure modes were probed rather than argued (all against the prototype patch):
+**Why this is sound: it relocates a diagnostic, it does not add a permission.** Deleting the
+combinator-site `check_linear_across_back_edge` call outright changes zero test outcomes
+across the whole suite, and every hazard probe below still rejects (measured against the
+prototype, call deleted): an own-frame linear bound before the tail-`if` is still rejected by
+end-of-scope disposal, byte-identical message; a linear bound inside the `if` arm is still
+rejected, but the message degrades from the back-edge wording to the scope-end wording; a
+parked ancestor linear is still accepted. So clause 2 at the combinator site is **not** a
+soundness guard. Disposal of an enclosing linear local is independently enforced by
+end-of-scope disposal and the branch-join "not consumed on every path" guard (`MaybeMoved`),
+and a self-tail call has no position after it, so an own-frame linear has nowhere to be
+disposed except before the back-edge. Clause 2's only job is to *locate* that same rejection at
+the back-edge ("consume it before the recursive call") instead of the vaguer scope-end
+wording. `frame_floor` suppresses the clause precisely where that locating job produces a
+**false rejection**: a local bound below the if-arm entry depth that the loop neither rebinds
+nor carries, which covers both a genuine ancestor-frame local and, wrongly but harmlessly, the
+combinator's own pre-`if` locals (see above). `check_reference_across_back_edge`
+(`src/check.rs:1264`) draws an analogous ancestor-frame distinction for references, and the
+function is worth knowing about, but it is not the argument for P0: references carry no
+disposal obligation, and the distinction that function needs is about a reference's
+*referent* frame, which is orthogonal to where a linear *value* sits relative to an `if`-arm.
+P0 stands on the mutation evidence below, not on that parallel.
 
 | Hazard | Probe | Still rejected by |
 | --- | --- | --- |
 | body consumes the enclosing linear inside the loop (double-consume per iteration) | `[ ... acc drop ... ] c::while` | capture-admission D3: `` the quotation passed to `while` consumes the enclosing local `acc`, which is linear `` |
-| consumed on one branch only (`MaybeMoved` across the edge) | `[ ... n 2 > if acc drop else end ... ]` | capture-admission D3, same message |
-| own-frame linear bound inside the body, unconsumed at the edge (the leak clause 2 nominally guarded) | `[ ... 5 AccL \| tmp \| ... ]` | end-of-scope disposal: `` linear value `tmp` is never consumed ``, located at the quotation's own scope end, which is *tighter* than the back-edge check |
+| consumed on one branch only (`MaybeMoved` across the edge) | `[ ... n 2 > if acc drop else end ... ]` | capture-admission D3, same message (both hazards share one match arm at `src/check.rs:1385`) |
+| linear bound inside a spliced quotation body, unconsumed at the edge | `[ ... 5 AccL \| tmp \| ... ]` | end-of-scope disposal: `` linear value `tmp` is never consumed ``, located at the quotation's own scope end, which closes before the back-edge check ever runs: this hazard gets the scope-end message whether clause 2 is present or not |
 | enclosing linear never disposed at all | `work` binds `acc`, loops, returns nothing | end-of-scope disposal: `` drop it or return it `` |
 
-None of the four leans on the relaxed clause. Clause 2 was over-approximating what three other
-guards already cover precisely.
+All four are pre-existing guards, not P0's own code: they were true before P0 and stay true
+after it. None leans on the relaxed clause, so none of them witnesses P0 or would go red under
+a P0 regression; they are kept as reject goldens because they are correct and worth pinning,
+not because they guard the relaxation.
 
 **Blast radius, measured.** Full `cargo test --no-fail-fast` on the prototype, then the same
 run with only the relaxation reverted, diffing the failure sets: exactly one test is red only
@@ -244,18 +285,38 @@ an outer `Spy`, never touches it inside `while`'s predicate, and disposes it on 
 line (`sp drop`). That is the parked-with-a-disposer shape, the same one `inplace_fold.sth`
 needs and the intrinsic allowed. Its own comment justifies itself with "it would ride into the
 next iteration with nobody to dispose it", which is factually false about its own program. It
-pins the over-approximation, so Phase 1 re-points it: keep the name and the located-error
-assertion, change the program to a shape that is genuinely unguarded elsewhere (an own-frame
-linear bound inside the body, i.e. the third hazard row above), so the criterion keeps a real
-witness instead of losing one.
+pins the over-approximation, so Phase 1 re-points it to a genuinely different shape: a
+test-local self-tail combinator whose own body binds a linear *inside the tail-`if` arm* and
+reaches the back-edge with it unconsumed (not a linear bound inside a spliced quotation
+argument, which closes its own scope first and would only ever produce the scope-end message,
+never the kept assertion). Measured: with the combinator-site call present, this produces both
+`` linear values across a loop are not supported yet `` and `` is live across the
+self-tail-call back-edge ``, the same substrings the current test asserts, so the assertion
+survives verbatim; with the call deleted it degrades to `` linear value ... is never consumed
+``. It is therefore a genuine mutation witness, but of **diagnostic location**, not of leak
+prevention: nothing here would leak if clause 2 were absent, since the same guards in the
+hazard table would still catch it, one step later and with a worse message. The spec drops any
+"load-bearing" framing that implies this test prevents a leak.
+
+**A permanent reject golden covers the shape the floor wrongly exempts.** An own-frame linear
+bound in the combinator's own frame *before* the tail-`if` (the case the floor treats as
+ancestor-like even though it is re-created every iteration) must stay pinned as a reject,
+asserting the scope-end message. The over-exemption is harmless only because end-of-scope
+disposal and the branch-join guard independently catch it; this golden is the tripwire if
+either of those two co-guards is ever widened or removed.
 
 **Phase 1 owns its own golden.** The relaxation fixes zero existing tests, and the shape it
-enables is pinned by nothing today (`phase4_slice6f.rs`'s two dogfood tests cannot reach the
-checker at all, see Q3). Without a new golden the capability ships unguarded, which is this
-project's documented placebo pattern. Phase 1 adds: an accept golden for the parked-linear
-shape over a library-style self-tail combinator *and* over `while` (both, since P0 changes
-`while` too), each asserting the value, plus the four hazard rejections above as reject
-goldens naming the guard that catches each. All of it mutation-audited per R9.
+enables is pinned by nothing today (`phase4_slice6f.rs`'s two tests' `fold_body` calls cannot
+reach the checker at all, see Q3). Without a new golden the capability ships unguarded, which
+is this project's documented placebo pattern. Phase 1 adds: an accept golden for the
+parked-linear shape over a library-style self-tail combinator *and* over `while` (both, since
+P0 changes `while` too), each asserting the value; the re-pointed if-arm reject golden above
+(diagnostic location, not leak prevention); the new own-frame-before-the-tail-if reject golden
+(the tripwire); and the four pre-existing hazard rejections, correctly labelled as pinning
+pre-existing guards rather than P0. Every reject golden asserts on message **wording**, never
+line numbers (a library-spliced rejection's span points into `lib/combinators.sth`, while the
+message names the caller) and never a bare local name (a spliced local is reported mangled,
+e.g. `tmp__inl0`). All of it mutation-audited per R9.
 
 1. **`times` is a thin public wrapper over a private self-tail-recursive `times-helper`
    carrying a from/to pair.** Verified end to end:
@@ -282,19 +343,23 @@ goldens naming the guard that catches each. All of it mutation-audited per R9.
    Export list becomes `export: each map fold filter while times times-helper ;`.
 
 3. **Every bare-`times` corpus file gets an import; `arrays.sth` gets a library-to-library
-   selective import.** The seven brief-named files and the eighth (`combinator_in_times.sth`)
-   each gain a `times` import. Examples use `import: c | times | "../lib/combinators.sth" ;`
+   selective import.** Seven example files need it: `array_ctor.sth`, `array_totals_hand.sth`,
+   `combinator_in_times.sth`, `combinator_in_times_hand.sth`, `filter_while_hand.sth`,
+   `inplace_fold.sth`, `times.sth` (`array_totals.sth` and `filter_while.sth` contain no bare
+   `times` and need none). Examples use `import: c | times | "../lib/combinators.sth" ;`
    (selective, so the existing bare `times` calls resolve unqualified);
    `combinator_in_times.sth`, which already imports `c` qualified, qualifies its one bare call
-   to `c::times` instead. `lib/arrays.sth` gets `import: c | times | "combinators.sth" ;`.
+   to `c::times` instead. `lib/arrays.sth` gets `import: c | times | "combinators.sth" ;`, an
+   eighth file, but a library-to-library import (Q5), not an example.
 
 4. **`tests/phase4_slice10a_exit_witnesses.rs` is resolved test by test.** Exactly two of its
    tests fail: `my_times_compiles_beside_the_untouched_intrinsic_and_sums` (its "untouched
    intrinsic" premise is retired, and its `my-times` half is subsumed by 10b's own goldens on
    the real `times`) is **deleted**; `combinators_library_contains_no_tilde` (false by design
    now that `times`/`times-helper` carry `~[ ... ]`) is **inverted** into a positive assertion
-   that `combinators.sth` declares exactly the two expected `~` signatures. The other five
-   tests (`my_times_runs_one_million_iterations_in_constant_stack`,
+   that `combinators.sth` declares exactly the two expected `~` signatures, and that the file's
+   total `~` count is exactly 2 (otherwise a stray `~` in a prose comment would satisfy it).
+   The other five tests (`my_times_runs_one_million_iterations_in_constant_stack`,
    `row_grounding_accepts_a_borrow_of_an_unrelated_place_of_the_same_type`,
    `my_times_carries_an_aggregate_without_aliasing`,
    `my_times_nested_in_itself_produces_correct_output`,
@@ -321,6 +386,27 @@ goldens naming the guard that catches each. All of it mutation-audited per R9.
    only delete the `times` audit row) ships a misleading diagnostic; per the project's "sharp
    errors are the point", correct them.
 
+**R10 (new, folded into Phase 1 alongside P0; a pre-existing gap, reproducible at HEAD via
+`c::while`, needing no intrinsic deletion). A quotation body that disposes a linear via a
+user-declared `drop` overload compiles under the `times` intrinsic but is rejected under any
+library-spliced combinator**, with `` cannot `drop` a value of type `X` `` plus the
+transitive-import note, even when the type and its `drop` are declared in the caller's own
+file. Cause: `check_drop_import_visibility` (`src/check/word_families.rs:756-768`) gates on
+`ctx.module()`, which for a spliced body is the **splice destination** (`lib/combinators.sth`),
+not the module where the quotation literal was written. `ast::Span` already carries a `module`
+field (`src/ast.rs:11-15`). Fix: gate on `span.module` instead of `ctx.module()`; `span.module`
+equals `ctx.module()` everywhere except under splicing, where it is strictly more correct.
+Verified: the failing case then compiles and runs; and a real two-file multi-module program
+using a qualified-only import still rejects with its exact expected diagnostic
+(`` cannot `drop` a value of type `lib::Res` in `main` `` plus the "has not imported by name"
+note), so the rule stays intact. Two unit tests flip, and they are a harness artifact, not a
+hole: `drop_res` (`src/check/engine.rs:1324-1341`) hardcodes `span.module: 0` while varying
+`caller` (1 or 2), so the synthetic span contradicts what a real build produces; the fix is to
+set the synthetic span's module to `caller` in `drop_of_qualified_only_imported_type_is_error`
+and `drop_of_transitively_reachable_type_with_no_direct_import_is_error`. R10 needs its own
+golden: a library-spliced combinator body that disposes a locally-declared linear through its
+own `drop` overload compiles and runs with exact expected stdout.
+
 ## Requirements
 
 **R1**. Delete the intrinsic: the `check_term` `if name == "times"` interception
@@ -332,49 +418,65 @@ and the `calls.rs` `"times" =>` arm (`:326-418`) with its two unit tests (`:782`
 **R2**: Add `times`/`times-helper` to `lib/combinators.sth` per Decision 1, both on the
 `export:` line per Decision 2.
 
-**R3**: Add the corpus imports per Decision 3 (eight example files plus `lib/arrays.sth`),
-with stdout and exit code held byte-identical (Decision 6).
+**R3**: Add the corpus imports per Decision 3 (seven example files plus `lib/arrays.sth`,
+eight files total), with stdout and exit code held byte-identical (Decision 6).
 
 **R4**: Resolve `phase4_slice10a_exit_witnesses.rs` per Decision 4.
 
 **R5**: Sweep the remaining test targets per the Q3 table: import for bare-`times` sources,
 reword for intrinsic-diagnostic asserts, retire `engine.rs`'s `times_typing_obligations`,
-remove `word_families.rs`'s `times` audit row, restore `calls.rs`'s `each_lowers` test with
-inline `times`/`times-helper` defs, and correct the stale `check.rs` diagnostics per Decision 7.
-For any test that checks a corpus file **in process** (`lexer::lex` / `parser::parse` /
-`check::check` over `include_str!`'d source, as `phase4_slice6f.rs` does), an `import:` line in
-the `.sth` file does not resolve: route it through the driver or inline `times`/`times-helper`
-into the checked source. Audit for this pattern rather than assuming `phase4_slice6f.rs` is the
-only instance.
+remove `word_families.rs`'s `times` audit row, fix `calls.rs`'s `each_lowers` test with inline
+`times`/`times-helper` defs (its two siblings, `times_lowers_to_a_loop_header...` and
+`times_saves_and_restores_loop_state`, are deleted outright by R1, not fixed here), and correct
+the stale `check.rs` diagnostics per Decision 7. `phase4_slice6f.rs`'s `fold_body`-based halves
+check a corpus file **in process** via lex/parse/check/lower/emit, so an `import:` line in the
+`.sth` file never resolves there; fix by routing `fold_body` through `sooth::driver::emit_ssa`
+(what `tests/qbe_baseline.rs:66` uses), adjusting its `` format!("${word}(") `` lookup for the
+module-suffixed emitted name. Its `run_dogfood` half already goes through the driver and needs
+only the import. Audit for the `fold_body` pattern elsewhere rather than assuming
+`phase4_slice6f.rs` is the only instance.
 
 **R6**: Regenerate the `qbe_baseline` `.ssa` for the times-using corpus (a sanctioned
 baseline diff). Machine-code size is unchanged (Q2); the `.ssa` differs only in value
-numbering.
+numbering. Mechanism: `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline` (documented at
+`tests/qbe_baseline.rs:8`).
 
-**R7 (exit witnesses on the real `times`, not `my-times`)**: new goldens:
+**R7 (exit witnesses on the real `times`, not `my-times`)**: new goldens, each an
+`assert_eq!` on full stdout plus exit code, never a bare "runs" or "produces correct values"
+claim, living in `tests/phase4_slice10b.rs` (new file):
 
-- `0 5 [ + ] times` sums to `10`; `0 1000000 [ drop 1 + ] times` exits 0 at `ulimit -s 1024`.
-- an aggregate carried through the row (a `map`-shaped body) prints arithmetically correct
-  fields, no aliasing.
+- `0 5 [ + ] times`: `assert_eq!` stdout `10`, exit `0`.
+- `0 1000000 [ drop 1 + ] times`: `assert_eq!` stdout `1000000`, exit `0`, at `ulimit -s 1024`,
+  following `tests/phase4_slice10a_exit_witnesses.rs:98-102`'s `(Some(0), "1000000")` pattern
+  (checking only exit code 0 is a placebo: a loop that runs zero iterations also exits 0).
+- an aggregate carried through the row (a `map`-shaped body): `assert_eq!` on its full stdout.
 - a `times` call nested inside `each`/`map`/`fold`/`filter` (the newly doubled splice depth)
-  and a `times` nested inside an outer loop both produce correct values under 6g's fix. This
-  is the most novel risk beyond 10a and needs its own golden, not reliance on the library
-  suite passing.
+  and a `times` nested inside an outer loop: `assert_eq!` on full stdout for each. This is the
+  most novel risk beyond 10a and needs its own golden, not reliance on the library suite
+  passing.
 - the binary-size delta across the corpus is measured and recorded per Q2.
 
 **R8 (Phase 1 / P0 witnesses, in this slice)**: `check_linear_across_back_edge` takes
 `frame_floor`, passed `Some(base_depth)` at the combinator site and `None` at the whole-word
 TCO site (P0). `inplace_fold.sth`'s `prefix-linear` compiles again and prints identically.
-Phase 1's own goldens: an accept for the parked-linear shape over both a library-style
-self-tail combinator and `while`, asserting the value; reject goldens for all four hazards in
-P0's table, each asserting the message of the guard that actually catches it (D3
-capture-admission, or end-of-scope disposal), so a future regression that silently moves the
-rejection to a different guard is visible. `while_body_linear_local_across_back_edge_is_error`
-is re-pointed per P0, not deleted.
+Phase 1's own goldens, in `tests/phase4_slice10b.rs` (new file): an accept for the
+parked-linear shape over both a library-style self-tail combinator and `while`, asserting the
+value; `while_body_linear_local_across_back_edge_is_error` re-pointed to the if-arm shape per
+P0 (a diagnostic-location witness, not a leak-prevention one); a new reject golden for the
+own-frame-before-the-tail-if shape the floor wrongly exempts, asserting the scope-end message
+(the tripwire for end-of-scope disposal and the branch-join guard); and the four pre-existing
+hazard rejections from P0's table, correctly labelled as pinning those guards, not P0. Every
+reject golden asserts on message wording, never a line number (a library-spliced rejection's
+span points into `lib/combinators.sth`, not the caller) and never a bare local name (a spliced
+local is reported mangled, e.g. `tmp__inl0`).
 
-**R9**: Mutation-test each new guard and each reworded rejection: prove the test can fail by
-deleting or reverting what it guards, in a throwaway copy of the tree (never the shared
-worktree; keep `target/` copies off the `/tmp` tmpfs).
+**R9**: Mutation-test each new guard and each reworded rejection, in a throwaway copy of the
+tree (never the shared worktree; keep `target/` copies off the `/tmp` tmpfs). Exactly three
+mutations are required: (a) neuter `frame_floor` (make it always `None`): the parked-linear
+accept goldens go red; (b) delete the combinator-site call at `terms.rs:615`: the re-pointed
+if-arm diagnostic witness goes red (degrading to the scope-end message); (c) remove
+`MaybeMoved(_)` from the match arm at `src/check.rs:1385`: the branch-only-consume hazard
+golden goes red.
 
 ## Sanctioned files, and the scope this spec adds
 
@@ -387,8 +489,10 @@ Investigation forces these additions the brief's file list omits, each stated so
 maintainer can veto:
 
 - `src/check/engine.rs` and `src/check/word_families.rs`: unit tests coupled to the intrinsic
-  (retire / trim). Unavoidable: the suite cannot go green while they assert intrinsic-only
-  behaviour.
+  (retire / trim, R5), and, separately, R10's `check_drop_import_visibility` fix (gate on
+  `span.module`) plus the two `engine.rs` tests whose synthetic span hardcodes `module: 0`.
+  Unavoidable: the suite cannot go green while they assert intrinsic-only behaviour, and
+  R10's splice-gate fix is a correctness fix, not a green-only one.
 - `src/check.rs`: the three stale `` "only `call` and `times`" `` diagnostics (Decision 7).
   Correctness, not just green.
 - `lib/arrays.sth`: the library-to-library import (Q5). The brief mentions arrays.sth in recon
@@ -396,14 +500,29 @@ maintainer can veto:
 - `tests/phase4_combinators.rs`: the `while_body_linear_local_across_back_edge_is_error`
   re-point (P0). Called out separately from R5's bulk sweep because it is a criterion change,
   not an import fix.
+- `tests/phase3_refs.rs`, `tests/phase4_generics.rs`, `tests/phase4_quotations.rs`,
+  `tests/phase4_slice6f.rs`, `tests/phase4_slice6g.rs`, `tests/phase4_slice6h.rs`,
+  `tests/phase4_slice6h_fill_corpus.rs`, `tests/qbe_baseline.rs` and its
+  `tests/qbe_baseline/*.ssa` snapshots: R5's and R6's sweep targets, named explicitly so this
+  section actually vetoes what it touches.
+- `tests/phase4_slice10b.rs` (new file): the home for R7's, R8's, and R10's new goldens.
+- `README.md`, `ROADMAP.md`, `DESIGN.md`: still describe `times` as a compiler intrinsic
+  (`README.md:54`, `:61`; `ROADMAP.md:304`, `:308-312`; `DESIGN.md:352-357`, `:513`), which is
+  now current-state-wrong; the project keeps these as current-state documents, so they are
+  corrected as part of this slice.
 
 ## Sequencing
 
 After 6g (merged `86aee0a`). Independent of 10c. `ROADMAP.md:608`'s "Next action" already names
 10b/10c and needs no correction: P0 is Phase 1 of this slice, not a separate entry. Phase 1
 must land and be green before Phase 3's corpus imports, since `inplace_fold.sth` cannot compile
-without it. Phase 1 is independently verifiable: it is green against the *unmodified* intrinsic,
-so the relaxation is reviewed on its own evidence before anything is deleted.
+without it. Phase 1 is independently verifiable: it is green against the *unmodified*
+intrinsic, so the relaxation is reviewed on its own evidence before anything is deleted;
+applying only P0 to HEAD leaves exactly one failing test, the one Phase 1 re-points.
+
+The suite is **red by design** through Phases 2 and 3: the intrinsic-deletion tree alone fails
+55 tests over 11 cargo targets (Q3), and that count does not clear until Phase 4's sweep
+lands. Green is restored only at Phase 4, not incrementally across Phases 2 and 3.
 
 ## Exit criteria
 
@@ -415,23 +534,28 @@ corpus file compiles with an added import and prints byte-identical stdout and e
 is resolved test by test (R4); every failing target listed in Q3 is green, including the `engine.rs`
 / `word_families.rs` / `calls.rs` unit tests and the corrected `check.rs` diagnostics (R5);
 the times-using `qbe_baseline` `.ssa` is regenerated (R6); the real-`times` goldens pass
-(1M constant stack, aggregate-through-row, times nested in a combinator and in an outer loop),
-and the binary-size delta is recorded (R7); `check_linear_across_back_edge` takes a frame floor
-passed only at the combinator site, `inplace_fold.sth`'s linear half compiles and prints
+(1M constant stack with the printed value asserted, aggregate-through-row, times nested in a
+combinator and in an outer loop), each an exact stdout-plus-exit-code assertion, and the
+binary-size delta is recorded (R7); `check_linear_across_back_edge` takes a frame floor passed
+only at the combinator site, `inplace_fold.sth`'s linear half compiles and prints
 `1 3 6 10 1 3 6 10`, Phase 1's parked-linear accept goldens pass over both a library self-tail
-combinator and `while`, all four hazard rejections hold naming their actual guard, and
-`while_body_linear_local_across_back_edge_is_error` is re-pointed rather than dropped (R8); and
-every new guard has been shown capable of failing by mutation in a throwaway tree (R9).
+combinator and `while`, the four pre-existing hazard rejections hold (pinning those guards, not
+P0), the own-frame-before-the-tail-if reject golden holds, and
+`while_body_linear_local_across_back_edge_is_error` is re-pointed to the if-arm shape rather
+than dropped (R8); a library-spliced combinator body disposes a locally-declared linear
+through its own `drop` overload, `check_drop_import_visibility` gates on `span.module`, and the
+qualified-only-import rejection stays intact (R10); and every new guard has been shown capable
+of failing by mutation in a throwaway tree (R9).
 
 ## Phases (JSON)
 
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "P0: check_linear_across_back_edge gains frame_floor, Some(base_depth) at the combinator site and None at the whole-word TCO site; parked-linear accept goldens over a library self-tail combinator and over while; the four hazard reject goldens naming their actual guard (D3 capture-admission / end-of-scope disposal); re-point while_body_linear_local_across_back_edge_is_error. No intrinsic deletion yet: this phase is green against the unmodified intrinsic. Reference: docs/phase4-slice10b-p0-prototype.patch", "difficulty": "hard" },
-    { "phase": 2, "focus": "delete the intrinsic (interception, check_abstract_quotation_times, four dead diagnostics, calls.rs lowering arm and its two unit tests) and add exported times/times-helper to lib/combinators.sth", "difficulty": "hard" },
-    { "phase": 3, "focus": "corpus imports across the eight bare-times example files and arrays.sth library-to-library import, with byte-identical stdout including inplace_fold", "difficulty": "standard" },
-    { "phase": 4, "focus": "test-suite sweep across the twelve targets including the in-process-check category, slice10a witness resolution, stale check.rs diagnostic correction, qbe baseline regeneration, real-times exit witnesses, and the mutation audit", "difficulty": "hard" }
+    { "phase": 1, "focus": "P0: check_linear_across_back_edge gains frame_floor, Some(base_depth) at the combinator site and None at the whole-word TCO site; parked-linear accept goldens over a library self-tail combinator and over while; the re-pointed if-arm reject golden for while_body_linear_local_across_back_edge_is_error (diagnostic location, not leak prevention); a new reject golden for the own-frame-before-the-tail-if shape the floor exempts; the four pre-existing hazard rejections, labelled as pinning those guards, not P0. R10: check_drop_import_visibility gates on span.module instead of ctx.module(), fixing the drop-overload splice gap, plus the two engine.rs tests with hardcoded span.module: 0. No intrinsic deletion yet: this phase is green against the unmodified intrinsic. Reference: docs/phase4-slice10b-p0-prototype.patch, applying only its src/, lib/, and examples/ hunks", "difficulty": "hard" },
+    { "phase": 2, "focus": "delete the intrinsic (interception, check_abstract_quotation_times, four dead diagnostics, calls.rs lowering arm and its two unit tests) and add exported times/times-helper to lib/combinators.sth; the suite is red by design from here through Phase 3 (55 failing tests over 11 targets measured on the deletion alone)", "difficulty": "hard" },
+    { "phase": 3, "focus": "corpus imports across the seven bare-times example files and arrays.sth library-to-library import, with byte-identical stdout including inplace_fold; still red by design, green restored only at Phase 4", "difficulty": "standard" },
+    { "phase": 4, "focus": "test-suite sweep across the 11 remaining targets including the in-process-check category, slice10a witness resolution, stale check.rs diagnostic correction, qbe baseline regeneration, real-times exit witnesses, and the mutation audit; restores green", "difficulty": "hard" }
   ]
 }
 ```
