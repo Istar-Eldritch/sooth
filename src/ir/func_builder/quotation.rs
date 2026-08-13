@@ -718,6 +718,8 @@ mod tests {
         assert!(instrs(n).iter().any(|i| matches!(i, Instr::Const(_, 0))));
     }
 
+    // Phase 3 Slice 1: the drop-spy's lowering (R5/R6/R16).
+
     #[test]
     fn lower_struct_constructor_emits_no_call_only_alloc_and_store() {
         // Constructing a linear struct value is inlined alloc + field

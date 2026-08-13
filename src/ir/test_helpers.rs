@@ -302,6 +302,10 @@ pub(super) fn back_edge_pred(f: &IrFunc, header: BlockId) -> &Block {
         .expect("a back-edge predecessor block")
 }
 
+// Phase 4 Slice 3: the aggregate-staging loop transform (R1-R4, R1a).
+// Structural coverage beside the changed `begin_loop`/`finalize_loop`; the
+// runtime witnesses are the `tests/phase4_generics.rs` goldens.
+
 /// A self-tail loop carrying an i64 (scalar) and a re-produced `Box`
 /// (aggregate), so the aggregate slot stages rather than forwards.
 pub(super) const STAGED_LOOP: &str = "type: Box n i64 ;\n\

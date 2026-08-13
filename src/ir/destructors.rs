@@ -769,6 +769,10 @@ mod tests {
         );
     }
 
+    // Phase 3 Slice 1, Phase 4: the synthesized enum destructor's own tag
+    // dispatch (structural, not full-stdout: `tests/phase0.rs` covers the
+    // 2-variant runtime behavior; these pin the shapes it doesn't reach).
+
     #[test]
     fn synthesized_enum_destructor_newtype_skips_the_tag_compare() {
         // R7/R12: a single-variant enum (n == 1) has nothing to dispatch on,
@@ -828,6 +832,10 @@ mod tests {
         let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
         assert_eq!(calls, vec![spy_drop.as_str()]);
     }
+
+    // Unit-level coverage of `recursive_disposal_path`'s path-finding: which
+    // steps it finds for a shape, distinct from the runtime goldens in
+    // tests/phase0.rs that prove those shapes actually dispose correctly.
 
     #[test]
     fn recursive_disposal_path_finds_indirect_nested_mutual_and_composed_cycles() {

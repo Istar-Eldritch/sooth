@@ -1080,6 +1080,9 @@ mod tests {
         );
     }
 
+    // Phase 3 Slice 1, Phase 2: struct linearity + the synthesized destructor
+    // (R7/R9/R11/R12).
+
     #[test]
     fn struct_layout_is_linear_iff_a_field_is_transitively() {
         let ir = lower_src(&format!(
