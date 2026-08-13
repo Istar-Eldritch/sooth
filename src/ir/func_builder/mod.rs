@@ -1,6 +1,10 @@
 //! `FuncBuilder`: the compile-time virtual-stack lowering machine. Holds the
 //! per-function block/value/loop bookkeeping and the term-lowering methods that
-//! turn a word body into SSA-shaped blocks. Depends on `types`, `layout`, and
+//! turn a word body into SSA-shaped blocks, plus the shared `lower_word_parts`
+//! entry point that drives a `FuncBuilder` through a word body. Both the
+//! lowering driver (`driver`) and the destructor synthesizer (`destructors`)
+//! call `lower_word_parts` here, so it lives at this shared dependency root
+//! rather than in either caller (Q2). Depends on `types`, `layout`, and
 //! `destructors`; the lowering driver (parent module) drives it.
 
 mod calls;
@@ -624,4 +628,257 @@ impl<'a> FuncBuilder<'a> {
             block.instrs.append(&mut writes);
         }
     }
+}
+
+/// 7b/R16/R17: turn the env `word` holding capture `cap` into the value the
+/// lowered body binds. A reference capture *is* the pointer (carry its
+/// referent shape across); a scalar snapshot reinterprets the word back to
+/// the scalar's own type (`Ptr` is neither arithmetic nor printable) via a
+/// one-word scratch slot: `FieldStore` the received `Ptr`-typed word (its full
+/// width, matching the env slot `build_env` wrote the capture's own bytes
+/// into) then `FieldLoad` it back at `cap.ty`'s own width/class. A typed
+/// add-of-zero previously stood in for this -- correct only when `cap.ty`
+/// shared `Ptr`'s width and register class (an integer), wrong for `bool`
+/// (narrower, silently read garbage upper bytes) and any float (a mismatched-
+/// class `add` the backend rejects outright). The memory round-trip is
+/// class-agnostic and needs no assumption about `Ptr`'s concrete width (NF1).
+fn bind_env_capture(b: &mut FuncBuilder, cap: &EnvCapture, word: Value) -> Value {
+    match cap.referent {
+        Some(referent) => {
+            b.ref_inner.insert(word, referent);
+            word
+        }
+        None => {
+            let slot = b.fresh_value(IrType::Ptr);
+            b.push_alloc(Instr::Alloc(slot, WORD_WIDTH, WORD_WIDTH));
+            b.push_instr(Instr::FieldStore(slot, word));
+            let v = b.fresh_value(cap.ty);
+            b.push_instr(Instr::FieldLoad(v, slot));
+            v
+        }
+    }
+}
+
+/// The shared word-body lowering, parameterized by name/effect/body so a
+/// monomorphized instantiation (R9) can lower a polymorphic word's body under
+/// its mangled symbol against a `θ`-substituted concrete effect. The
+/// instantiation table and poly-arity map thread through so a call to a
+/// polymorphic word inside this body resolves to its per-site symbol (R14).
+/// Lives here rather than in `driver` so `destructors` can call it without a
+/// `destructors` → `driver` back-edge (Q2: shared code at the shared root).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lower_word_parts(
+    name: &str,
+    effect: &StackEffect,
+    body: &WordBody,
+    self_tail: bool,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
+    poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
+    env_plan: EnvPlan,
+) -> Vec<IrFunc> {
+    let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
+    // 7b/R17: a materialized quotation body takes one trailing `Ptr` env
+    // parameter after its declared inputs (even when it captures nothing, so
+    // `lower_indirect_call` can pass the env slot uniformly).
+    let n_declared = params.len();
+    if matches!(env_plan, EnvPlan::Env(_)) {
+        params.push(IrType::Ptr);
+    }
+    let bundle = bundle_of(&effect.outputs, regs.structs);
+    let ret = word_ret_ty(&effect.outputs, regs.structs);
+
+    let mut b = FuncBuilder::new(env, resolve, regs, name.to_string());
+    b.instantiations = instantiations;
+    b.builtin_overloads = builtin_overloads;
+    b.poly_arities = poly_arities;
+    b.combinators = combinators;
+    // R11: the declared output row's `IrType`s, so a tail branch join can find
+    // the target quotation type for the slot it materializes.
+    b.cur_outputs = effect.outputs.iter().map(|s| ir_type_of(s.ty)).collect();
+
+    // Params occupy the first N value ids; leftmost input is deepest.
+    // (b.cur_word_name is set above for R7's self-tail-call detection.)
+    let params_values: Vec<Value> = params.iter().map(|ty| b.fresh_value(*ty)).collect();
+
+    // R6: a self-tail-recursive word lowers to a loop. The entry block binds
+    // the params and jumps to a header carrying one phi per loop-carried slot;
+    // the body reads the phi outputs so each iteration rebinds them. A word
+    // with no tail self-call lowers exactly as before (no header, no phi).
+    let entry_values = if self_tail {
+        // R1a: aggregate staging gated ON for the user self-tail-call loop. A
+        // materialized body is never self-tail, so its env param is never here.
+        b.begin_loop(&params_values, true)
+    } else {
+        params_values
+    };
+
+    // 7b/R17: the trailing env param is not a stack input; split it off. Its
+    // value binds the captured local (if any); the declared inputs alone seed
+    // the stack.
+    let env_value = if matches!(env_plan, EnvPlan::Env(_)) {
+        Some(entry_values[n_declared])
+    } else {
+        None
+    };
+    let stack_inputs: Vec<Value> = entry_values[..n_declared].to_vec();
+
+    // A reference parameter arrives as an opaque `Ptr`, so the referent
+    // shape every projection and access needs comes from the declared type,
+    // not from the value. Seeded against `stack_inputs` so a loop reads it off
+    // the header phi output the body actually uses.
+    for (slot, value) in effect.inputs.iter().zip(&stack_inputs) {
+        if let Type::Ref(id, _, _) = slot.ty {
+            b.ref_inner.insert(*value, regs.refs.referent[id.index()]);
+        }
+    }
+
+    // 7b/R16/R17: bind each captured local to a read of the env before the
+    // body runs, so its `Call` references resolve. With one capture the env
+    // word *is* the capture (inline); with two or more the env word is a
+    // pointer to a stack bundle, each capture read from its word offset.
+    if let (Some(env), EnvPlan::Env(caps)) = (env_value, &env_plan) {
+        match caps.as_slice() {
+            [] => {}
+            [cap] => {
+                let bound = bind_env_capture(&mut b, cap, env);
+                b.locals.push((cap.name.clone(), bound));
+            }
+            many => {
+                for (i, cap) in many.iter().enumerate() {
+                    let slot = b.field_ptr(env, i as u32 * WORD_WIDTH);
+                    let word = b.fresh_value(IrType::Ptr);
+                    b.push_instr(Instr::FieldLoad(word, slot));
+                    let bound = bind_env_capture(&mut b, cap, word);
+                    b.locals.push((cap.name.clone(), bound));
+                }
+            }
+        }
+    }
+
+    match body {
+        WordBody::Terms { terms } => {
+            // Every input starts on the stack (D6: the header phi outputs when
+            // looping); an entry `| ... |` binding pops from it like any other
+            // binding term.
+            b.stack = stack_inputs;
+            b.lower_terms(terms, self_tail);
+        }
+        WordBody::Clauses(clauses) => {
+            let scrutinee_ty = effect
+                .inputs
+                .last()
+                .expect("clause word has a scrutinee input")
+                .ty;
+            b.lower_clauses(clauses, &stack_inputs, scrutinee_ty)
+        }
+    }
+
+    // R8: back-patch the header phis with the collected back-edge operands.
+    if self_tail {
+        b.finalize_loop();
+    }
+
+    // The fall-through (base-case) block returns; a body that ended entirely in
+    // back-edges is already terminated and needs no Ret.
+    if !b.terminated {
+        // R10: two or more outputs leave the frame packed into the bundle,
+        // deepest output in the first field; one or none is the single value
+        // (or nothing) it always was.
+        let result = match bundle {
+            Some(id) => Some(b.pack_bundle(id)),
+            // R7/R9: a word declaring a `Type::Quotation` output is a
+            // materialization boundary; a phantom the body leaves there becomes
+            // a real `(code, env)` value before it is returned.
+            None if ret.is_some() => {
+                let v = b
+                    .stack
+                    .pop()
+                    .expect("a word with a declared output leaves one");
+                Some(b.materialize_if_phantom(v, ret.expect("ret.is_some()")))
+            }
+            None => None,
+        };
+        b.seal_block(Terminator::Ret(result));
+    }
+
+    // R9: this word is done; any quotation literal a materialization boundary
+    // turned into a value is lowered into its own `IrFunc` here (recursively:
+    // a materialized body may itself materialize a nested quotation). The main
+    // func is element 0; every caller flattens the returned vec into the
+    // module's function list.
+    let mats = std::mem::take(&mut b.materialized);
+    let mut out = vec![IrFunc {
+        name: name.to_string(),
+        params,
+        ret,
+        blocks: b.blocks,
+        value_types: b.value_types,
+    }];
+    out.extend(lower_materialized(
+        mats,
+        env,
+        resolve,
+        regs,
+        instantiations,
+        builtin_overloads,
+        poly_arities,
+        combinators,
+    ));
+    out
+}
+
+/// Slice 7a (R9): lower a batch of materialized quotations into standalone
+/// `IrFunc`s. Each is an ordinary term-bodied word under its minted symbol and
+/// declared effect; `lower_word_parts` handles it (and any nested quotation it
+/// materializes) exactly like a user word. Shared by `lower_word_parts` and
+/// `lower_line`, the two lowering entry points that own a `FuncBuilder`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn lower_materialized(
+    mats: Vec<MaterializedQuot>,
+    env: &HashMap<String, Arity>,
+    resolve: Resolver,
+    regs: Registries,
+    instantiations: &HashMap<Span, CallInst>,
+    builtin_overloads: &HashMap<Span, String>,
+    poly_arities: &HashMap<String, usize>,
+    combinators: &HashMap<String, Vec<Term>>,
+) -> Vec<IrFunc> {
+    let mut out = Vec::new();
+    for m in mats {
+        let effect = StackEffect {
+            inputs: m
+                .effect
+                .inputs
+                .iter()
+                .map(|&ty| TypedSlot { name: None, ty })
+                .collect(),
+            outputs: m
+                .effect
+                .outputs
+                .iter()
+                .map(|&ty| TypedSlot { name: None, ty })
+                .collect(),
+        };
+        let body = WordBody::Terms { terms: m.body };
+        out.extend(lower_word_parts(
+            &m.symbol,
+            &effect,
+            &body,
+            false,
+            env,
+            resolve,
+            regs,
+            instantiations,
+            builtin_overloads,
+            poly_arities,
+            combinators,
+            EnvPlan::Env(m.captures),
+        ));
+    }
+    out
 }

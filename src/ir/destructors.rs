@@ -1,8 +1,7 @@
 //! Aggregate destructor synthesis: recursive disposal path search plus the
 //! struct/enum/owned-cell destructor synthesizers, driven by
-//! `synthesize_aggregate_destructors`. Depends only on `layout`.
-
-use super::driver::lower_word_parts;
+//! `synthesize_aggregate_destructors`. Depends on `layout` and `func_builder`
+//! (the shared `lower_word_parts` entry point, for drop-override body lowering).
 use super::*;
 
 /// Every linear struct's and enum's synthesized destructor, one `IrFunc` per

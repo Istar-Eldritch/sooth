@@ -26,9 +26,7 @@ pub(crate) use self::destructors::synthesize_aggregate_destructors;
 use self::destructors::PathStep;
 #[cfg(test)]
 use self::destructors::{recursive_disposal_path, synthesize_struct_destructor};
-use self::func_builder::{
-    bundle_of, word_ret_ty, EnvCapture, EnvPlan, FuncBuilder, MaterializedQuot,
-};
+use self::func_builder::{lower_materialized, lower_word_parts, word_ret_ty, EnvPlan, FuncBuilder};
 
 use self::types::QuotId;
 pub use self::types::{
