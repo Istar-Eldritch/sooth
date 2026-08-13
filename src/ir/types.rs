@@ -396,3 +396,118 @@ pub type Arity = (usize, usize, Option<IrType>);
 /// path uses identity; the REPL supplies generation-mangled symbols so a unit
 /// links against the words it was compiled against.
 pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn ir_type_of_array_and_usize_map() {
+        let m = module_of(": w ( [i64 4] usize -- ) drop drop ;");
+        let arr = m.resolve_type_name("usize").unwrap();
+        assert_eq!(ir_type_of(arr), IrType::Usize);
+        // The `[i64 4]` shape is interned as ArrayId 0.
+        assert_eq!(
+            ir_type_of(Type::Array(ArrayId::from_index(0), "[i64 4]")),
+            IrType::Array(ArrayId::from_index(0))
+        );
+    }
+
+    #[test]
+    fn ir_type_of_each_width_expected() {
+        let cases: &[(&str, u8, bool)] = &[
+            ("i8", 8, true),
+            ("i16", 16, true),
+            ("i32", 32, true),
+            ("i64", 64, true),
+            ("u8", 8, false),
+            ("u16", 16, false),
+            ("u32", 32, false),
+            ("u64", 64, false),
+        ];
+        for (name, bits, signed) in cases {
+            let ty = Type::from_name(name).unwrap();
+            assert_eq!(
+                ir_type_of(ty),
+                IrType::Int {
+                    bits: *bits,
+                    signed: *signed
+                },
+                "mapping {name}"
+            );
+        }
+        // Slice 9 (R1/R2): `Bool` is `Type::Enum(BOOL_ENUM_ID, "bool")`, and
+        // flows through the general enum arm above like any other enum --
+        // whether its value ends up scalar or a memory aggregate is decided
+        // by `EnumLayout::is_scalar`, not by a hard-coded arm here (which has
+        // no registry access to consult).
+        assert_eq!(ir_type_of(Type::BOOL), IrType::Enum(BOOL_ENUM_ID));
+    }
+
+    #[test]
+    fn ir_type_of_float_widths_expected() {
+        assert_eq!(
+            ir_type_of(Type::from_name("f32").unwrap()),
+            IrType::Float { bits: 32 }
+        );
+        assert_eq!(
+            ir_type_of(Type::from_name("f64").unwrap()),
+            IrType::Float { bits: 64 }
+        );
+    }
+
+    #[test]
+    fn ir_type_of_struct_maps_to_struct_irtype() {
+        let tokens = lex("type: Vec2 x i64 y i64 ;").unwrap();
+        let module = parse(&tokens).unwrap();
+        let ty = module.resolve_type_name("Vec2").unwrap();
+        assert!(matches!(ir_type_of(ty), IrType::Struct(_)));
+    }
+
+    #[test]
+    fn ir_type_of_enum_maps_to_enum_irtype() {
+        let tokens = lex("type: Shape | Circle r f64 | Rect w f64 h f64 ;").unwrap();
+        let module = parse(&tokens).unwrap();
+        let ty = module.resolve_type_name("Shape").unwrap();
+        assert!(matches!(ir_type_of(ty), IrType::Enum(_)));
+    }
+
+    #[test]
+    fn ir_type_of_quotation_is_two_slot_aggregate() {
+        // T-irtype (R2/R3): a quotation type maps to a runtime value ---
+        // `IrType::Quotation` naming its effect --- with a fixed two-slot
+        // `{ code@0, env@WORD_WIDTH }` layout: size `2*WORD_WIDTH`, align
+        // `WORD_WIDTH`, every figure word-width-derived, not a hardcoded
+        // 16/8. The carried effect gives value equality, so two structurally
+        // equal effects share one `IrType`.
+        use crate::ast::quotation_type;
+        let ir = ir_type_of(quotation_type(vec![Type::I64], vec![Type::I64]));
+        assert!(
+            matches!(ir, IrType::Quotation(_)),
+            "a quotation type maps to `IrType::Quotation`, got {ir:?}"
+        );
+        assert_eq!(
+            ir,
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::I64])),
+            "structurally equal effects are one `IrType`"
+        );
+        assert_ne!(
+            ir,
+            ir_type_of(quotation_type(vec![Type::I64], vec![Type::BOOL])),
+            "structurally different effects are distinct `IrType`s"
+        );
+        let layout = quotation_layout(WORD_WIDTH);
+        assert_eq!(layout.code_offset, 0, "code slot at offset 0");
+        assert_eq!(
+            layout.env_offset, WORD_WIDTH,
+            "env slot at offset WORD_WIDTH"
+        );
+        assert_eq!(layout.size, 2 * WORD_WIDTH, "two word-width slots");
+        assert_eq!(layout.align, WORD_WIDTH);
+    }
+}

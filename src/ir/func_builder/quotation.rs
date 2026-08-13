@@ -472,3 +472,304 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn lower_two_output_word_returns_one_bundle_holding_both() {
+        // Criterion 9 (R10): a two-output word's body ends in one `Ret` of the
+        // synthesized bundle, with both outputs stored into it -- not a single
+        // value returned and the other silently dropped.
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let pair = ir.funcs.iter().find(|f| f.name == "pair").unwrap();
+        let IrType::Struct(bundle) = pair.ret.expect("a two-output word returns its bundle") else {
+            panic!("expected a struct return, got {:?}", pair.ret);
+        };
+        assert!(ir.structs[bundle.index()].bundle);
+        assert_eq!(ir.structs[bundle.index()].fields.len(), 2);
+
+        let last = pair.blocks.last().unwrap();
+        let Terminator::Ret(Some(returned)) = last.term else {
+            panic!("expected a value return, got {:?}", last.term);
+        };
+        assert_eq!(
+            pair.value_types[returned.0 as usize],
+            IrType::Struct(bundle)
+        );
+        assert_eq!(count(pair, |i| matches!(i, Instr::FieldStore(..))), 2);
+    }
+
+    #[test]
+    fn lower_call_of_two_output_word_unpacks_the_bundle_onto_the_stack() {
+        // R11: the caller reads both outputs back out of the returned bundle
+        // (two field loads), so its lowering stack matches the stack the
+        // checker verified -- the recon-3 desync that used to panic.
+        let ir = lower_src(": pair ( i64 -- i64 i64 ) dup ; : main ( -- ) 5 pair . . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(count(main, |i| matches!(i, Instr::Call(Some(_), ..))), 1);
+        assert_eq!(count(main, |i| matches!(i, Instr::FieldLoad(..))), 2);
+        assert_eq!(count(main, |i| matches!(i, Instr::Print(_))), 2);
+    }
+
+    #[test]
+    fn monomorphization_emits_one_mangled_func_per_instantiation() {
+        // R9/R14: a polymorphic word is never emitted under its plain name;
+        // instead one mangled `IrFunc` is emitted per distinct ground θ, and
+        // each call site targets its own instantiation's symbol through the
+        // R14 table, not `dupit`.
+        let ir = lower_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) 5 dupit . . true dupit . . ;",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "dupit"),
+            "the polymorphic word must not lower under its plain name"
+        );
+        let mono: Vec<&str> = ir
+            .funcs
+            .iter()
+            .map(|f| f.name.as_str())
+            .filter(|n| n.starts_with("sooth_mono_dupit"))
+            .collect();
+        assert_eq!(mono.len(), 2, "one IrFunc per θ (i64 and bool)");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        let calls = call_symbols(main);
+        for sym in &mono {
+            assert!(calls.contains(sym), "main should call `{sym}` directly");
+        }
+    }
+
+    #[test]
+    fn lower_single_output_word_keeps_its_scalar_return() {
+        // R2/R15: nothing about the bundle path reaches a word with one
+        // output; it returns its scalar directly, as before the slice.
+        let ir = lower_src(": inc ( i64 -- i64 ) 1 + ;");
+        let inc = ir.funcs.iter().find(|f| f.name == "inc").unwrap();
+        assert_eq!(inc.ret, Some(IrType::I64));
+        assert!(ir.structs.is_empty());
+    }
+
+    #[test]
+    fn lower_bundle_with_a_linear_field_gets_no_destructor() {
+        // Criterion 10 (R10/R11, key risk 1): the bundle for `( -- ^i64 i64 )`
+        // folds linear (its first field is an owning cell), yet no drop glue is
+        // synthesized for it -- the glue would free the cell the caller's
+        // unpack has already moved out.
+        let ir =
+            lower_src(": cell-and-tag ( -- ^i64 i64 ) 7 ^ 3 ; : main ( -- ) cell-and-tag . ^> . ;");
+        let (idx, layout) = ir
+            .structs
+            .iter()
+            .enumerate()
+            .find(|(_, l)| l.bundle)
+            .expect("the two-output word interned a bundle");
+        assert!(
+            layout.is_linear,
+            "an owning-cell field folds the bundle linear"
+        );
+        let glue = format!("sooth_struct_drop_{idx}");
+        assert!(
+            !ir.funcs.iter().any(|f| f.name == glue),
+            "a bundle must carry no destructor, found `{glue}`"
+        );
+    }
+
+    #[test]
+    fn lower_two_words_with_one_output_shape_share_one_bundle() {
+        // R8: bundles are interned by output tuple, deduped structurally like
+        // an array shape, so two words of the same shape share one struct and
+        // a third shape gets its own.
+        let ir = lower_src(
+            ": pair ( i64 -- i64 i64 ) dup ;\n\
+             : twice ( i64 -- i64 i64 ) dup ;\n\
+             : flags ( -- bool bool ) true false ;\n\
+             : main ( -- ) ;",
+        );
+        assert_eq!(ir.structs.iter().filter(|l| l.bundle).count(), 2);
+    }
+
+    #[test]
+    fn lower_drop_pops_without_instr() {
+        let ir = lower_src(": w ( i64 i64 -- i64 ) drop ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).is_empty());
+        let last = w.blocks.last().unwrap();
+        assert!(matches!(last.term, Terminator::Ret(Some(_))));
+    }
+
+    #[test]
+    fn bool_enum_true_false_construct_0_and_1() {
+        // Slice 9 (R2): `True`/`False` replace `TermKind::BoolLit`, lowering
+        // to the same `0`/`1` scalar discriminant a bare `Const` produced
+        // before this migration -- no memory aggregate, `IrType::Enum`
+        // carrying `BOOL_ENUM_ID` (R1's general zero-payload-enum scalar
+        // rule, not `IrType::Bool` directly).
+        // Single-output words each, so neither triggers R10's bundle-return
+        // packing (which would add its own, unrelated `Instr::Alloc` for the
+        // bundle struct and muddy the "no aggregate" assertion below).
+        let ir = lower_src(": t ( -- bool ) true ; : f ( -- bool ) false ;");
+        let t = ir.funcs.iter().find(|f| f.name == "t").unwrap();
+        let f = ir.funcs.iter().find(|f| f.name == "f").unwrap();
+        assert_eq!(
+            instrs(t).iter().find_map(|i| match i {
+                Instr::Const(_, n) => Some(*n),
+                _ => None,
+            }),
+            Some(1),
+            "true -> 1"
+        );
+        assert_eq!(
+            instrs(f).iter().find_map(|i| match i {
+                Instr::Const(_, n) => Some(*n),
+                _ => None,
+            }),
+            Some(0),
+            "false -> 0"
+        );
+        assert!(
+            !instrs(t).iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "a zero-payload enum construct must not allocate a memory aggregate"
+        );
+        let v = instrs(t)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(v, 1) => Some(*v),
+                _ => None,
+            })
+            .expect("a const 1 for `true`");
+        assert_eq!(t.value_types[v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
+    }
+
+    #[test]
+    fn lower_constructor_allocs_and_stores_each_field() {
+        // The constructor allocs one aggregate slot and width-exact-stores both
+        // fields; no aggregate copy for a flat struct.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : mk ( i64 i64 -- Vec2 ) Vec2 ;");
+        let mk = ir.funcs.iter().find(|f| f.name == "mk").unwrap();
+        assert_eq!(count(mk, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(mk, |i| matches!(i, Instr::FieldStore(..))), 2);
+    }
+
+    #[test]
+    fn lower_getter_is_single_field_load_no_copy() {
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : gx ( Vec2 -- i64 ) Vec2>x ;");
+        let gx = ir.funcs.iter().find(|f| f.name == "gx").unwrap();
+        assert_eq!(count(gx, |i| matches!(i, Instr::FieldLoad(..))), 1);
+        assert_eq!(count(gx, |i| matches!(i, Instr::Blit(..))), 0);
+        assert_eq!(count(gx, |i| matches!(i, Instr::Alloc(..))), 0);
+    }
+
+    #[test]
+    fn lower_setter_allocs_new_blits_all_and_overwrites_one_field() {
+        // Functional update: alloc a fresh aggregate, blit all bytes, then a
+        // single width-exact store of the replaced field.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : sx ( Vec2 i64 -- Vec2 ) Vec2<x ;");
+        let sx = ir.funcs.iter().find(|f| f.name == "sx").unwrap();
+        assert_eq!(count(sx, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::Blit(..))), 1);
+        assert_eq!(count(sx, |i| matches!(i, Instr::FieldStore(..))), 1);
+    }
+
+    #[test]
+    fn lower_destructure_loads_every_field() {
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : ex ( Vec2 -- i64 i64 ) Vec2> ;");
+        let ex = ir.funcs.iter().find(|f| f.name == "ex").unwrap();
+        assert_eq!(count(ex, |i| matches!(i, Instr::FieldLoad(..))), 2);
+    }
+
+    #[test]
+    fn lower_zero_field_constructor_allocs_destructure_emits_nothing() {
+        let ir = lower_src("type: Unit ; : u ( -- ) Unit Unit> ;");
+        let u = ir.funcs.iter().find(|f| f.name == "u").unwrap();
+        assert_eq!(count(u, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(u, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(u, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn lower_constructor_allocs_stores_tag_and_each_field() {
+        // R15: a variant constructor allocs the tagged aggregate, stores the
+        // discriminant as a `Const`, then width-exact-stores each field. Rect
+        // has two fields, so: one Alloc, one tag Const, three FieldStores
+        // (tag + two fields).
+        let ir = lower_src(
+            "type: Shape | Circle r f64 | Rect w f64 h f64 ; : mk ( f64 f64 -- Shape ) Rect ;",
+        );
+        let mk = ir.funcs.iter().find(|f| f.name == "mk").unwrap();
+        assert_eq!(count(mk, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(mk, |i| matches!(i, Instr::FieldStore(..))), 3);
+        // The tag store writes the variant index (Rect = 1).
+        assert!(instrs(mk).iter().any(|i| matches!(i, Instr::Const(_, 1))));
+    }
+
+    #[test]
+    fn lower_zero_field_constructor_stores_only_the_tag() {
+        // A zero-field variant constructs with just the tag store: one Alloc,
+        // one FieldStore (the tag), no payload store.
+        let ir = lower_src("type: MaybeInt | None | Some v i64 ; : n ( -- MaybeInt ) None ;");
+        let n = ir.funcs.iter().find(|f| f.name == "n").unwrap();
+        assert_eq!(count(n, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(n, |i| matches!(i, Instr::FieldStore(..))), 1);
+        // None is variant index 0.
+        assert!(instrs(n).iter().any(|i| matches!(i, Instr::Const(_, 0))));
+    }
+
+    #[test]
+    fn lower_struct_constructor_emits_no_call_only_alloc_and_store() {
+        // Constructing a linear struct value is inlined alloc + field
+        // stores, not a runtime call: only `drop`'s own destructor call is
+        // emitted.
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;"));
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let is = instrs(w);
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(_, sym, _) if sym != &spy_drop)
+            ),
+            0,
+            "the constructor emits no call: {is:?}"
+        );
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1, "{is:?}");
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::FieldStore(..))),
+            1,
+            "{is:?}"
+        );
+    }
+
+    #[test]
+    fn lower_drop_of_linear_value_calls_the_destructor() {
+        let ir = lower_src(&format!("{SPY_DEF}: w ( -- ) 7 Spy drop ;"));
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let calls: Vec<&String> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::Call(None, sym, args) if args.len() == 1 => Some(sym),
+                _ => None,
+            })
+            .collect();
+        let spy_drop = struct_drop_symbol(StructId::from_index(0), None);
+        assert_eq!(
+            calls,
+            vec![spy_drop.as_str()],
+            "expected one destructor call"
+        );
+    }
+
+    #[test]
+    fn lower_drop_of_copy_value_emits_no_destructor_call() {
+        // R2: `drop` on a Copy value keeps its no-runtime-effect discard.
+        let ir = lower_src(": w ( -- ) 7 drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, is_call_instr), 0);
+    }
+}

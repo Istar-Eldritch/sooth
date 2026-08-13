@@ -754,3 +754,328 @@ impl<'a> FuncBuilder<'a> {
         self.stack.push(v);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn lower_borrow_of_cell_local_gives_the_pointer_a_place() {
+        // `&^`/`&!^` project by *loading* the cell pointer out of the
+        // place holding it, but a cell local's value already *is* that pointer
+        // (an SSA temporary with no address), so borrowing one has to give it a
+        // slot first. The load then reads that slot back.
+        let ir = lower_src(": w ( -- i64 ) 7 ^ | c | &c &^ @ c ^> drop ;");
+        let w = &ir.funcs[0];
+        let alloc = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Alloc(v, size, _) if *size == WORD_WIDTH => Some(*v),
+                _ => None,
+            })
+            .expect("borrowing a cell local allocs a one-word place");
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Store(dst, _) if *dst == alloc)),
+            "the cell pointer is stored into its new place: {:?}",
+            instrs(w)
+        );
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Load(_, src) if *src == alloc)),
+            "the projection loads the pointer back out: {:?}",
+            instrs(w)
+        );
+    }
+
+    #[test]
+    fn lower_reference_through_a_branch_join_keeps_its_referent() {
+        // A merged reference is still the opaque `Ptr`, which says nothing
+        // about what it points at, so the join has to carry the referent shape
+        // across or the projection past it has no field offset to use.
+        let ir = lower_src(
+            "type: V x i64 y i64 ;\n             : w ( bool -- i64 ) | c | 1 2 V | v | c if &v else &v end &V>x @ ;",
+        );
+        let w = &ir.funcs[0];
+        let phi = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Phi(v, _) => Some(*v),
+                _ => None,
+            })
+            .expect("the two arms merge their references in a phi");
+        assert!(
+            instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::PtrOffset(_, base, _) if *base == phi)),
+            "the projection past the join offsets from the merged value: {:?}",
+            instrs(w)
+        );
+    }
+
+    #[test]
+    fn fill_lowering_instruction_count_is_independent_of_n() {
+        // Slice 6h (D4): `fill`'s re-lowering is a counted loop, so its emitted
+        // instruction count is identical at N 4 and 64 (the retired unrolled
+        // lowering grew one FieldStore per element), and above a small floor so
+        // an empty lowering cannot satisfy it. Replaces
+        // `lower_fill_allocs_and_unrolls_n_stores`, whose name encoded the
+        // removed unrolling.
+        let n4 = count(&lower_src(": w ( -- ) 7 4 fill drop ;").funcs[0], |_| true);
+        let n64 = count(&lower_src(": w ( -- ) 7 64 fill drop ;").funcs[0], |_| true);
+        assert_eq!(n4, n64);
+        assert!(n4 > 4, "not an empty lowering: {n4}");
+    }
+
+    #[test]
+    fn fill_lowering_instruction_count_at_10000_equals_4() {
+        // The compile-cost defect's durable proxy: the retired unrolled
+        // lowering emitted one store per element, so N = 10000 was QBE-
+        // quadratic on one straight-line block. The counted loop emits the
+        // same instruction count at N = 10000 as at N = 4, so code size is O(1)
+        // in the count (the re-measured wall-clock numbers are in the commit).
+        let n4 = count(&lower_src(": w ( -- ) 7 4 fill drop ;").funcs[0], |_| true);
+        let n10k = count(
+            &lower_src(": w ( -- ) 7 10000 fill drop ;").funcs[0],
+            |_| true,
+        );
+        assert_eq!(n4, n10k);
+    }
+
+    #[test]
+    fn fill_lowering_uses_elem_addr_after_relowering() {
+        // A real transition assertion: `fill` used `field_ptr`/`PtrOffset` with
+        // a compile-time offset before slice 6h, so exactly one runtime
+        // `ElemAddr` (the counted store loop's body) is the observable switch.
+        // Its stride is the element stride (8 for `[i64]`), not the byte-
+        // granular `1` the constructor's zero-init uses.
+        let ir = lower_src(": w ( -- ) 7 4 fill drop ;");
+        let w = &ir.funcs[0];
+        let strides: Vec<i64> = w
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::ElemAddr(_, _, _, s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strides, vec![8], "one ElemAddr, element-strided");
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
+    }
+
+    #[test]
+    fn fill_lowering_result_reaches_a_reference_consumer() {
+        // D4: the re-lowering must not disturb `fill`'s consumed operands nor
+        // leave the array off the stack. A `fill` result that is then used
+        // (indexed via a reference) lowers and reads back the seed, proving the
+        // filled array survives the loop and reaches its consumer.
+        //
+        // This does NOT cover R19 surviving-capture-set forwarding
+        // (`check.rs`'s `let surviving = element.surviving;` in
+        // `check_array_word`'s "fill" arm): `Slot`/`surviving` is a check-time
+        // concept the IR never sees (`lower_src` returns an `IrModule` with no
+        // Slot-level information), so no IR-level assertion can exercise it.
+        // The real regression test for that forwarding is
+        // `check::tests::fill_forwards_surviving_set_so_a_returned_array_rejects_an_escaping_capture`
+        // (an end-to-end located-error test, since deleting the forwarding
+        // makes an unsound program wrongly build rather than change any IR
+        // shape).
+        let ir = lower_src(": w ( -- i64 ) 7 4 fill | a | &a 1 &> @ ;");
+        let w = &ir.funcs[0];
+        // One alloc for the array; the loop stores the seed; the consumer
+        // reads it back through a reference projection.
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert!(count(w, |i| matches!(i, Instr::ElemAddr(..))) >= 2);
+    }
+
+    #[test]
+    fn array_constructor_emits_exactly_one_alloc_of_correct_size() {
+        // D3: the constructor allocs exactly one array slot, sized to the
+        // layout (`[i64 10]` is 80 bytes / align 8), not one Alloc per element.
+        let src = ": w ( -- ) [ i64 ; 10 ] drop ;";
+        let ir = lower_src(src);
+        let w = &ir.funcs[0];
+        let (size, align) = {
+            let a = arrays_of(src);
+            (a.layouts[0].size, a.layouts[0].align)
+        };
+        assert_eq!((size, align), (80, 8));
+        let allocs: Vec<(u32, u32)> = w
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::Alloc(_, s, al) => Some((*s, *al)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(allocs, vec![(size, align)]);
+    }
+
+    #[test]
+    fn array_constructor_zero_init_uses_stride_one_and_bounds_by_layout_size() {
+        // The zero-init loop is byte-granular: exactly one `ElemAddr` with
+        // `stride == 1` (a stride of 8 would skip 7 of every 8 bytes), and its
+        // loop bound is a `Const` equal to `ArrayLayout::size` (a bound of
+        // `count` would zero only the first `count` bytes). An
+        // instruction-*kind* assertion would catch neither mutation.
+        let src = ": w ( -- ) [ i64 ; 10 ] drop ;";
+        let ir = lower_src(src);
+        let w = &ir.funcs[0];
+        let size = arrays_of(src).layouts[0].size; // 80
+        let strides: Vec<i64> = w
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::ElemAddr(_, _, _, s) => Some(*s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(strides, vec![1], "one byte-granular ElemAddr, stride 1");
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::Const(_, v) if *v == size as i64)),
+            1,
+            "the loop bound is one Const equal to ArrayLayout::size"
+        );
+    }
+
+    #[test]
+    fn array_constructor_instruction_count_is_independent_of_count() {
+        // A runtime zero-init loop is O(1) in Count: the emitted instruction
+        // count is identical at 4 and 64 (an unrolled lowering would grow), and
+        // above a small floor so an empty lowering cannot satisfy it.
+        let n4 = count(&lower_src(": w ( -- ) [ i64 ; 4 ] drop ;").funcs[0], |_| {
+            true
+        });
+        let n64 = count(
+            &lower_src(": w ( -- ) [ i64 ; 64 ] drop ;").funcs[0],
+            |_| true,
+        );
+        assert_eq!(n4, n64);
+        assert!(n4 > 4, "not an empty lowering: {n4}");
+    }
+
+    #[test]
+    fn lower_reference_element_read_is_elem_addr_and_load() {
+        // `&>` addresses the element (`ElemAddr`); `@` loads it
+        // (`FieldLoad`); neither allocs, since the array is never rebuilt.
+        let ir = lower_src(": w ( [i64 4] -- i64 ) | a | &a 0 &> @ ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 0);
+    }
+
+    #[test]
+    fn lower_reference_element_store_is_elem_addr_and_store_no_rebuild() {
+        // `&!>` addresses the element; `!` stores directly, with no alloc and
+        // no blit: replacing `set`'s whole-array rebuild is the point.
+        let ir = lower_src(": w ( [i64 4] usize i64 -- ) | a i x | &!a i &!> x ! ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldStore(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::Alloc(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::Blit(..))), 0);
+    }
+
+    #[test]
+    fn lower_reference_element_runtime_index_emits_bounds_guard_and_trap_call() {
+        // A runtime (non-literal) index guards the access with `index < N`
+        // and jumps to a trap block that calls the OOB helper.
+        let ir = lower_src(": w ( [i64 4] usize -- i64 ) | a i | &a i &> @ ;");
+        let w = &ir.funcs[0];
+        assert!(w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn lower_reference_element_constant_index_has_no_runtime_guard() {
+        // A checked literal index is bounds-verified at compile time, so it
+        // skips the runtime guard entirely — no branch, no trap call.
+        let ir = lower_src(": w ( [i64 4] -- i64 ) | a | &a 0 &> @ ;");
+        let w = &ir.funcs[0];
+        assert!(!w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+        assert_eq!(
+            count(
+                w,
+                |i| matches!(i, Instr::Call(None, sym, _) if sym == OOB_TRAP_SYMBOL)
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn lower_len_is_a_constant_with_no_memory_access() {
+        // R18: `len` folds to a constant `usize` (the count) with no load and
+        // no element addressing.
+        let ir = lower_src(": w ( [i64 4] -- usize ) len swap drop ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).iter().any(|i| matches!(i, Instr::Const(_, 4))));
+        assert_eq!(count(w, |i| matches!(i, Instr::ElemAddr(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::Load(..))), 0);
+    }
+
+    #[test]
+    fn lower_owned_cell_unwrap_scalar_loads_before_freeing() {
+        // R13: `^>` must materialise the payload before calling `sooth_free`,
+        // so the freed pointer is never handed to the stack.
+        let ir = lower_src(": w ( -- i64 ) 5 ^ ^> ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        let load_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::FieldLoad(..)))
+            .expect("a FieldLoad");
+        let free_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Call(None, sym, _) if sym == FREE_SYMBOL))
+            .expect("a free call");
+        assert!(
+            load_at < free_at,
+            "scalar payload must load before the cell frees: load at {load_at}, free at {free_at}"
+        );
+    }
+
+    #[test]
+    fn lower_owned_cell_unwrap_aggregate_blits_before_freeing() {
+        // The aggregate counterpart of the scalar case above (R13): the copy-out
+        // `Blit` must precede `sooth_free`, never aliasing the freed cell.
+        let ir = lower_src("type: Point x i64 y i64 ; : w ( -- Point ) 1 2 Point ^ ^> ;");
+        let w = ir.funcs.iter().find(|f| f.name == "w").unwrap();
+        let is = instrs(w);
+        let blit_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Blit(..)))
+            .expect("a Blit");
+        let free_at = is
+            .iter()
+            .position(|i| matches!(i, Instr::Call(None, sym, _) if sym == FREE_SYMBOL))
+            .expect("a free call");
+        assert!(
+            blit_at < free_at,
+            "aggregate payload must blit out before the cell frees: blit at {blit_at}, free at {free_at}"
+        );
+    }
+}

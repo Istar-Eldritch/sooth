@@ -695,3 +695,996 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn quotation_literal_emits_no_instr_and_records_body() {
+        // R12u: `lower_term`'s `TermKind::Quotation` arm mints a phantom
+        // `Value` that defines no `Instr`, records `Value -> QuotId`, and
+        // pushes it; the body is interned, not emitted.
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+            },
+        );
+        let term = &line_terms("[ + ]")[0];
+        assert!(matches!(term.kind, TermKind::Quotation(_)));
+        b.lower_term(term, false);
+        assert!(
+            b.cur_instrs.is_empty(),
+            "a quotation literal emits no instruction: {:?}",
+            b.cur_instrs
+        );
+        assert_eq!(b.stack.len(), 1);
+        let v = b.stack[0];
+        assert!(
+            b.quot_bodies.contains_key(&v),
+            "the phantom value is recorded in quot_bodies"
+        );
+        assert_eq!(b.quot_defs.len(), 1, "the body is interned once");
+    }
+
+    #[test]
+    fn call_of_literal_emits_no_call_instr() {
+        // Criterion 6b (R13): `[ + ] call` fuses in place, so lowered `main`
+        // contains no `Instr::Call`; the phantom quotation never becomes a
+        // runtime code value.
+        let module = lower_src(": main ( -- ) 1 2 [ + ] call . ;");
+        let main = func(&module, "main");
+        assert_eq!(count(main, is_call_instr), 0);
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Bin(_, BinOp::Add, ..))),
+            1
+        );
+    }
+
+    #[test]
+    fn times_lowers_to_a_loop_header_not_a_per_iteration_call() {
+        // Criterion 6 (R14/R17): `times` builds a header `Block` carrying the
+        // index `Phi`, sealed with a `Terminator::Jnz`, reached by a back-edge
+        // `Terminator::Jmp`, with no per-iteration `Instr::Call`. The index
+        // `Phi` + header `Jnz` are pinned because "header + back-edge `Jmp` + no
+        // `Call`" alone also describes a one-trip or infinite loop.
+        let simple = lower_src(": main ( -- ) 0 1000000 [ + ] times . ;");
+        let main = func(&simple, "main");
+        let header = loop_header(main);
+        let hblock = header_block(main, header);
+        assert!(
+            !header_phis(hblock).is_empty(),
+            "the header carries the index phi"
+        );
+        assert!(
+            matches!(hblock.term, Terminator::Jnz(..)),
+            "the header is sealed with a Jnz (index < count), got {:?}",
+            hblock.term
+        );
+        let entry_id = main.blocks[0].id;
+        assert!(
+            main.blocks
+                .iter()
+                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
+            "a non-entry body block back-edges to the header"
+        );
+        assert_eq!(
+            count(main, is_call_instr),
+            0,
+            "no per-iteration Instr::Call"
+        );
+
+        // On 5a's source (a `Vec2` constructed each iteration): every `Alloc`
+        // hoists into the entry block, none into the body block (R17). This is
+        // the deterministic R17 witness, not the coarse `ulimit` run.
+        let agg = lower_src(
+            "type: Vec2 x i64 y i64 ;\n\
+             : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;",
+        );
+        let main = func(&agg, "main");
+        let header = loop_header(main);
+        let entry = &main.blocks[0];
+        let body = main
+            .blocks
+            .iter()
+            .find(|b| b.id != entry.id && matches!(b.term, Terminator::Jmp(h) if h == header))
+            .expect("a body block back-edging to the header");
+        assert!(
+            entry.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "the per-iteration Vec2 Alloc hoists into the entry block"
+        );
+        assert!(
+            !body.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "no Alloc in the loop body block (R17)"
+        );
+    }
+
+    #[test]
+    fn times_saves_and_restores_loop_state() {
+        // R15u/U12: after the `times` arm returns, all five loop-state fields
+        // (`header`/`entry_block`/`alloca_home`/`carried_slots`/`back_edges`)
+        // are back to their pre-`times` values. `finalize_loop` clears only
+        // two of them, so the arm's explicit save/restore is what lets a later
+        // `Alloc` (or a second sequential `times`) not hoist into the dead
+        // `times` preheader, and lets a second top-level loop reseat the
+        // alloca home to its own entry. Dropping the `alloca_home` member from
+        // the shared helper leaves it stuck at the first loop's entry and this
+        // fails (mutation-test the guard, U12).
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let mut b = empty_builder(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+            },
+        );
+        // A `times` over an empty row: push the count, then intern a body that
+        // consumes just the synthesized index (`[ drop ]`) so the row stays
+        // empty and the back-edge arity matches the single index slot.
+        let count = b.fresh_value(IrType::I64);
+        b.push_instr(Instr::Const(count, 3));
+        b.const_vals.insert(count, 3);
+        b.stack.push(count);
+        let quot_term = &line_terms("[ drop ]")[0];
+        b.lower_term(quot_term, false);
+        assert_eq!(b.stack.len(), 2, "count beneath the quotation phantom");
+
+        let saved_header = b.header;
+        let saved_entry = b.entry_block;
+        let saved_alloca_home = b.alloca_home;
+        b.lower_call(
+            "times",
+            Span {
+                line: 1,
+                col: 1,
+                module: 0,
+            },
+            false,
+        );
+
+        assert_eq!(b.header, saved_header, "header restored");
+        assert_eq!(b.entry_block, saved_entry, "entry_block restored");
+        assert_eq!(b.alloca_home, saved_alloca_home, "alloca_home restored");
+        assert!(b.carried_slots.is_empty(), "carried_slots restored");
+        assert!(b.back_edges.is_empty(), "back_edges restored");
+
+        // D4: the combinator mid-body site shares the same save/restore
+        // helper as the `times` arm above. `lower_self_tail_combinator` is
+        // called directly (bypassing the `self_tail` dispatch gate) with a
+        // body that is itself the self-call (`foo`), so it back-edges to the
+        // header exactly as a real `while` body would, and this exercises the
+        // same four-field save/restore.
+        let state = b.fresh_value(IrType::I64);
+        b.push_instr(Instr::Const(state, 7));
+        b.const_vals.insert(state, 7);
+        b.stack.push(state);
+        let saved_header = b.header;
+        let saved_entry = b.entry_block;
+        let saved_alloca_home = b.alloca_home;
+        b.lower_self_tail_combinator("foo", &line_terms("foo"));
+
+        assert_eq!(b.header, saved_header, "header restored (combinator site)");
+        assert_eq!(
+            b.entry_block, saved_entry,
+            "entry_block restored (combinator site)"
+        );
+        assert_eq!(
+            b.alloca_home, saved_alloca_home,
+            "alloca_home restored (combinator site)"
+        );
+        assert!(
+            b.carried_slots.is_empty(),
+            "carried_slots restored (combinator site)"
+        );
+        assert!(
+            b.back_edges.is_empty(),
+            "back_edges restored (combinator site)"
+        );
+    }
+
+    #[test]
+    fn lower_max_emits_a_compare_and_select_no_call() {
+        // R12: `max` lowers inline to `Cmp(Gt)` plus a `Phi`-joined select, no
+        // `Instr::Call` and no monomorphization.
+        let ir = lower_src(": main ( -- ) 3 5 max . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        assert_eq!(
+            count(main, |i| matches!(i, Instr::Cmp(_, CmpOp::Gt, ..))),
+            1
+        );
+        assert_eq!(count(main, |i| matches!(i, Instr::Phi(..))), 1);
+        assert_eq!(count(main, is_call_instr), 0);
+    }
+
+    #[test]
+    fn lower_max_total_emits_no_float_compare() {
+        // R13: `max-total` orders by the bit-pattern rule, so the emitted
+        // `Cmp`s are all over the unsigned integer key, never `Instr::Cmp`
+        // with a float operand.
+        let ir = lower_src(": main ( -- ) 1.5 2.5 max-total . ;");
+        let main = ir.funcs.iter().find(|f| f.name == "main").unwrap();
+        let float_cmps = instrs(main)
+            .iter()
+            .filter(|i| match i {
+                Instr::Cmp(_, _, a, _) => {
+                    matches!(main.value_types[a.0 as usize], IrType::Float { .. })
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(float_cmps, 0);
+        assert_eq!(count(main, is_call_instr), 0);
+    }
+
+    #[test]
+    fn lower_square_has_one_mul() {
+        let ir = lower_src(": sq ( i64 -- i64 ) | n | n n * ;");
+        let sq = &ir.funcs[0];
+        let mul_count = instrs(sq)
+            .iter()
+            .filter(|i| matches!(i, Instr::Bin(_, BinOp::Mul, _, _)))
+            .count();
+        assert_eq!(mul_count, 1);
+        let last = sq.blocks.last().unwrap();
+        assert!(matches!(last.term, Terminator::Ret(Some(_))));
+    }
+
+    #[test]
+    fn lower_dup_reuses_value_id() {
+        // `dup +` squares: both operands must be the same SSA value, dup emits nothing.
+        let ir = lower_src(": w ( i64 -- i64 ) dup + ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(is.iter().all(|i| !matches!(i, Instr::Const(..))));
+        let bin = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(_, BinOp::Add, a, b) => Some((*a, *b)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(bin.0, bin.1);
+    }
+
+    #[test]
+    fn lower_binding_emits_no_new_instr() {
+        // R10: a binding is a compile-time rebinding of SSA values, so binding
+        // the operands and mentioning them lowers to the same instructions as
+        // leaving them on the stack. No `Instr` variant was added.
+        let bound = lower_src(": w ( -- i64 ) 1 2 | a b | a b - ;");
+        let plain = lower_src(": w ( -- i64 ) 1 2 - ;");
+        assert_eq!(
+            format!("{:?}", instrs(&bound.funcs[0])),
+            format!("{:?}", instrs(&plain.funcs[0]))
+        );
+    }
+
+    #[test]
+    fn lower_swap_reorders_without_instr() {
+        // `swap -` computes b - a instead of a - b, and swap itself emits no instr.
+        let swapped = lower_src(": w ( i64 i64 -- i64 ) swap - ;");
+        let plain = lower_src(": w ( i64 i64 -- i64 ) - ;");
+        let operands = |ir: &IrModule| {
+            instrs(&ir.funcs[0])
+                .iter()
+                .find_map(|i| match i {
+                    Instr::Bin(_, BinOp::Sub, a, b) => Some((*a, *b)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let (sa, sb) = operands(&swapped);
+        let (pa, pb) = operands(&plain);
+        assert_eq!((sa, sb), (pb, pa));
+        assert_eq!(instrs(&swapped.funcs[0]).len(), 1);
+    }
+
+    #[test]
+    fn str_literal_lowers_to_a_static_data_reference() {
+        // R6: a `str` literal is exactly one `Instr::StrLit`, the backend's
+        // hook to emit the static descriptor and take its address.
+        let ir = lower_src(": w ( -- str ) \"hi\" ;");
+        let w = &ir.funcs[0];
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::StrLit(_, s) if s == "hi")),
+            1
+        );
+    }
+
+    #[test]
+    fn len_of_str_lowers_to_str_len_with_no_call() {
+        // R8: `len` on a `str` lowers to the dedicated `StrLen`
+        // instruction, not a call and not a hand-written byte offset.
+        let ir = lower_src(": w ( -- usize ) \"hi\" len ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::StrLen(..))), 1);
+        assert_eq!(count(w, is_call_instr), 0);
+    }
+
+    #[test]
+    fn cstr_conversion_lowers_to_str_ptr() {
+        // R7: `cstr` lowers to the dedicated `StrPtr` instruction.
+        let ir = lower_src(": w ( -- cstr ) \"hi\" cstr ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::StrPtr(..))), 1);
+    }
+
+    #[test]
+    fn len_and_cstr_of_str_emit_no_byte_offset_instruction() {
+        // Neither `len` nor `cstr` reads the descriptor via a hand-written
+        // `field_ptr` offset (`PtrOffset` + `FieldLoad`) any more; both state
+        // their intent through a dedicated instruction instead, keeping the
+        // descriptor's layout a backend-only concern.
+        let ir = lower_src(": w ( -- ) \"hi\" len drop \"hi\" cstr drop ;");
+        let w = &ir.funcs[0];
+        assert_eq!(count(w, |i| matches!(i, Instr::PtrOffset(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::FieldLoad(..))), 0);
+        assert_eq!(count(w, |i| matches!(i, Instr::StrLen(..))), 1);
+        assert_eq!(count(w, |i| matches!(i, Instr::StrPtr(..))), 1);
+    }
+
+    #[test]
+    fn lower_comparison_result_is_bool() {
+        let ir = lower_src(": w ( i64 i64 -- bool ) > ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Cmp(v, CmpOp::Gt, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Gt comparison");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+    }
+
+    #[test]
+    fn lower_print_emits_print_instr() {
+        let ir = lower_src(": w ( i64 -- ) . ;");
+        let w = &ir.funcs[0];
+        assert!(instrs(w).iter().any(|i| matches!(i, Instr::Print(_))));
+        let last = w.blocks.last().unwrap();
+        assert!(matches!(last.term, Terminator::Ret(None)));
+    }
+
+    #[test]
+    fn lower_print_on_bool_and_float_emits_same_print_instr() {
+        // `.` lowers to one `Print` regardless of operand type: the IR stays
+        // neutral and the backend dispatches on the value's own `IrType`.
+        let bool_ir = lower_src(": w ( bool -- ) . ;");
+        assert!(instrs(&bool_ir.funcs[0])
+            .iter()
+            .any(|i| matches!(i, Instr::Print(_))));
+        let float_ir = lower_src(": w ( f64 -- ) . ;");
+        assert!(instrs(&float_ir.funcs[0])
+            .iter()
+            .any(|i| matches!(i, Instr::Print(_))));
+    }
+
+    #[test]
+    fn lower_float_literal_is_constf_f64_typed() {
+        let ir = lower_src(": w ( -- f64 ) 2.5 ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::ConstF(v, x) if *x == 2.5 => Some(*v),
+                _ => None,
+            })
+            .expect("a ConstF for the float literal");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Float { bits: 64 });
+    }
+
+    #[test]
+    fn lower_float_div_routes_to_div_op() {
+        // `/` lowers to `BinOp::Div` whose result carries the float operand type.
+        let ir = lower_src(": w ( -- f64 ) 1.0 2.0 / ;");
+        let w = &ir.funcs[0];
+        let v = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Div, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Div bin op");
+        assert_eq!(w.value_types[v.0 as usize], IrType::Float { bits: 64 });
+    }
+
+    #[test]
+    fn lower_conv_pushes_target_typed_value() {
+        // `5 >u8` lowers the literal, then a `Conv` whose dst carries the u8 type.
+        let ir = lower_src(": w ( -- u8 ) 5 >u8 ;");
+        let w = &ir.funcs[0];
+        let dst = instrs(w)
+            .iter()
+            .find_map(|i| match i {
+                Instr::Conv(dst, _) => Some(*dst),
+                _ => None,
+            })
+            .expect("a Conv instr");
+        assert_eq!(
+            w.value_types[dst.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
+    }
+
+    #[test]
+    fn lower_bitwise_and_or_xor_route_to_matching_binop() {
+        let ir = lower_src(": w ( -- i32 ) 1 >i32 2 >i32 and 3 >i32 or 4 >i32 xor ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::And, _, _))));
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::Or, _, _))));
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::Xor, _, _))));
+    }
+
+    #[test]
+    fn lower_not_emits_xor_with_neg1_const() {
+        let ir = lower_src(": w ( -- u8 ) 5 >u8 not ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        let neg1 = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Const(v, -1) => Some(*v),
+                _ => None,
+            })
+            .expect("a -1 const");
+        let xor = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Xor, _, b) if *b == neg1 => Some(*v),
+                _ => None,
+            })
+            .expect("a xor against the -1 const");
+        assert_eq!(
+            w.value_types[xor.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
+    }
+
+    #[test]
+    fn lower_not_on_bool_emits_xor_with_1_const_not_neg1() {
+        // Type-directed `not`: on a `bool` it must flip the low bit
+        // (`xor operand, 1`), not the integer-complement `xor operand, -1`,
+        // since `-1`/`-2` are not valid canonical `bool` values.
+        let ir = lower_src(": w ( -- bool ) true not ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        assert!(
+            !is.iter().any(|i| matches!(i, Instr::Const(_, -1))),
+            "bool `not` must not use a -1 mask"
+        );
+        let (xor_v, mask_operand) = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Xor, _, b) => Some((*v, *b)),
+                _ => None,
+            })
+            .expect("a xor bin op");
+        assert_eq!(w.value_types[xor_v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
+        let mask_const = is.iter().find_map(|i| match i {
+            Instr::Const(v, n) if *v == mask_operand => Some(*n),
+            _ => None,
+        });
+        assert_eq!(mask_const, Some(1));
+    }
+
+    #[test]
+    fn lower_bitwise_and_or_xor_accept_bool_operands() {
+        let ir =
+            lower_src(": w ( -- bool ) true false and true false or drop true false xor drop ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        for op in [BinOp::And, BinOp::Or, BinOp::Xor] {
+            let v = is
+                .iter()
+                .find_map(|i| match i {
+                    Instr::Bin(v, o, ..) if *o == op => Some(*v),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("expected a {op:?} bin op"));
+            assert_eq!(w.value_types[v.0 as usize], IrType::Enum(BOOL_ENUM_ID));
+        }
+    }
+
+    #[test]
+    fn lower_le_ge_ne_route_to_matching_cmpop() {
+        let ir = lower_src(": w ( -- bool bool bool ) 1 2 <= 1 2 >= 1 2 <> ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        for op in [CmpOp::Le, CmpOp::Ge, CmpOp::Ne] {
+            assert!(
+                is.iter()
+                    .any(|i| matches!(i, Instr::Cmp(_, o, _, _) if *o == op)),
+                "expected a {op:?} comparison"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_shl_shr_route_to_matching_binop_with_lhs_type() {
+        let ir = lower_src(": w ( -- u8 ) 200 >u8 3 shl 3 shr ;");
+        let w = &ir.funcs[0];
+        let is = instrs(w);
+        let shl_ty = is
+            .iter()
+            .find_map(|i| match i {
+                Instr::Bin(v, BinOp::Shl, _, _) => Some(*v),
+                _ => None,
+            })
+            .expect("a Shl bin op");
+        assert_eq!(
+            w.value_types[shl_ty.0 as usize],
+            IrType::Int {
+                bits: 8,
+                signed: false
+            }
+        );
+        assert!(is
+            .iter()
+            .any(|i| matches!(i, Instr::Bin(_, BinOp::Shr, _, _))));
+    }
+
+    #[test]
+    fn lower_add_u8_result_is_u8_typed() {
+        // Drive `lower_call`'s arithmetic arm with hand-typed u8 operands
+        // directly, isolating the arm from parsing/checking, and assert the
+        // result carries the operand type through to its `IrType`.
+        let u8 = IrType::Int {
+            bits: 8,
+            signed: false,
+        };
+        let env = HashMap::new();
+        let resolve = |name: &str| name.to_string();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let mut b = FuncBuilder::new(
+            &env,
+            &resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+            },
+            "w".to_string(),
+        );
+        let x = b.fresh_value(u8);
+        let y = b.fresh_value(u8);
+        b.stack = vec![x, y];
+        b.lower_call("+", Span::default(), false);
+        let top = *b.stack.last().unwrap();
+        assert_eq!(b.value_type(top), u8);
+    }
+
+    #[test]
+    fn lower_dup_of_struct_allocs_and_blits() {
+        // R14: `dup` of a struct copies the aggregate bytes (fresh alloc +
+        // blit), unlike a scalar `dup` which reuses the value id. Single
+        // output plus a `drop` of the extra copy, so this measures only
+        // `dup`'s own copy, not the multi-output bundle-pack path.
+        let ir = lower_src("type: Vec2 x i64 y i64 ; : d ( Vec2 -- Vec2 ) dup drop ;");
+        let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+    }
+
+    #[test]
+    fn lower_dup_of_enum_allocs_and_blits() {
+        // R15: `dup` of an enum copies the aggregate bytes (fresh alloc +
+        // blit), like a struct and unlike a scalar. Single output plus a
+        // `drop` of the extra copy, so this measures only `dup`'s own copy,
+        // not the multi-output bundle-pack path.
+        let ir = lower_src(
+            "type: MaybeInt | None | Some v i64 ; : d ( MaybeInt -- MaybeInt ) dup drop ;",
+        );
+        let d = ir.funcs.iter().find(|f| f.name == "d").unwrap();
+        assert_eq!(count(d, |i| matches!(i, Instr::Alloc(..))), 1);
+        assert_eq!(count(d, |i| matches!(i, Instr::Blit(..))), 1);
+    }
+
+    #[test]
+    fn tail_self_call_lowers_to_back_edge_not_call() {
+        // Criterion 2 (R6/R7/R8): a self-tail-recursive word lowers to a header
+        // carrying one phi per loop-carried (input-arity) slot, and the tail
+        // self-call is a `Jmp` back to that header with no `Instr::Call` to
+        // self. `go` has input arity 2, so the header has two phis.
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+        let f = &ir.funcs[0];
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(phis.len(), 2, "one header phi per loop-carried slot");
+        // Each phi has the entry arm plus the single back-edge arm.
+        assert!(phis.iter().all(|arms| arms.len() == 2));
+        // Entry + one back-edge both target the header.
+        assert_eq!(jmps_to(f, header), 2);
+        assert_eq!(
+            count(f, is_call_instr),
+            0,
+            "tail self-call is a back-edge, not a Call"
+        );
+    }
+
+    #[test]
+    fn lower_mid_body_binding_adds_no_header_phi() {
+        // Criterion 22 (R11): a mid-body binding inside a self-tail-recursive
+        // arm has its extent end at the arm's terminator, where the back-edge
+        // sits, so no name is live across it and the header still carries
+        // exactly one phi per loop-carried (input-arity) slot, unaffected by
+        // the binding. Proved by comparing against a binding-free equivalent:
+        // if a bound name ever leaked a phi onto the header, this source's
+        // shape would diverge from the one below instead of both trivially
+        // satisfying the same hard-coded numbers.
+        let with_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if | x | 1 - x go else drop end ;");
+        let without_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+        let f1 = &with_binding.funcs[0];
+        let f2 = &without_binding.funcs[0];
+        let header1 = loop_header(f1);
+        let header2 = loop_header(f2);
+        let shape1 = header_phi_shape(f1, header1);
+        let shape2 = header_phi_shape(f2, header2);
+        assert_eq!(
+            shape1, shape2,
+            "a mid-body binding must not change the header's phi structure"
+        );
+        assert_eq!(shape1.0, 2, "one header phi per loop-carried slot");
+    }
+
+    #[test]
+    fn non_tail_self_call_stays_a_call() {
+        // R10: a self-call followed by more work (`fact *`) is not in tail
+        // position, so it stays a real `Instr::Call` and no loop is built.
+        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = if drop 1 else dup 1 - fact * end ;");
+        let f = &ir.funcs[0];
+        assert_eq!(
+            count(f, is_call_instr),
+            1,
+            "non-tail self-call stays a real Call"
+        );
+        assert!(
+            !matches!(f.blocks[0].term, Terminator::Jmp(_)),
+            "a non-tail-recursive word builds no loop header"
+        );
+    }
+
+    #[test]
+    fn self_call_in_non_terminal_if_stays_a_call() {
+        // R10 over-eager boundary: the `if` is followed by more terms
+        // (`drop 5`), so it is non-terminal and its arms are not in tail
+        // position; the self-call stays a real `Instr::Call`.
+        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > if w else drop 0 end drop 5 ;");
+        let f = &ir.funcs[0];
+        assert_eq!(count(f, is_call_instr), 1);
+        assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
+    }
+
+    #[test]
+    fn both_if_arms_tail_produce_two_back_edges() {
+        // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
+        // arm of a terminal `if` back-edges, so the single header phi gains two
+        // back-edge arms on top of the entry arm (three total).
+        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > if 1 - go else 1 + go end ;");
+        let f = &ir.funcs[0];
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(phis.len(), 1);
+        assert_eq!(phis[0].len(), 3, "entry arm + two back-edge arms");
+        assert_eq!(jmps_to(f, header), 3);
+        assert_eq!(count(f, is_call_instr), 0);
+    }
+
+    #[test]
+    fn clause_tails_share_one_header() {
+        // R9: a `|`-clause self-tail-recursive word gets a single header; each
+        // clause's terminal self-call is one back-edge into it. Both clauses
+        // here tail-recurse, so each header phi has three arms (entry + two
+        // back-edges) and no `Instr::Call` to self remains.
+        let ir = lower_src(
+            "type: Flag | Go | Stop ; \
+             : loop2 ( i64 Flag -- i64 ) | Go 1 - Go loop2 | Stop 1 + Stop loop2 ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "loop2").unwrap();
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        // Slice 9 (R1): `Flag` is zero-payload, so the general scalar-enum
+        // rule makes it register-resident -- it never enters the aggregate-
+        // staging path, so it keeps a header phi just like the `i64` slot
+        // (both scalar): 2 phis, not 1.
+        assert_eq!(phis.len(), 2, "both the i64 and the scalar Flag slot phi");
+        assert!(phis.iter().all(|arms| arms.len() == 3));
+        assert_eq!(jmps_to(f, header), 3, "entry + two clause back-edges");
+        assert_eq!(count(f, is_call_instr), 0);
+    }
+
+    #[test]
+    fn mixed_clause_header_and_join_predecessors_stay_disjoint() {
+        // R9 / risk 5: some clauses back-edge and one is a base case that
+        // `Ret`s. The loop header phi (preds = entry + tail clause ends) and
+        // the Slice-4 dispatch-join phi (preds = non-tail clause ends) must
+        // keep disjoint predecessor sets.
+        let ir = lower_src(
+            "type: Flag | Go | Stop ; \
+             : run ( i64 Flag -- i64 ) | Go 1 - Stop run | Stop ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
+        let header = loop_header(f);
+        let hb = header_block(f, header);
+        let hphis = header_phis(hb);
+        // Slice 9 (R1): `Flag` is zero-payload, hence scalar, hence it also
+        // keeps a header phi alongside the `i64` one (2, not 1).
+        assert_eq!(hphis.len(), 2);
+        // header preds: entry arm + the one Go back-edge.
+        assert!(hphis.iter().all(|arms| arms.len() == 2));
+        assert!(
+            f.blocks
+                .iter()
+                .any(|b| matches!(b.term, Terminator::Ret(_))),
+            "the Stop base case still Rets"
+        );
+        // Every phi that is not a header phi is a dispatch/join phi; its
+        // predecessors must not overlap the header phi's predecessors.
+        let header_preds: std::collections::HashSet<u32> = hphis
+            .iter()
+            .flat_map(|arms| arms.iter().map(|(p, _)| p.0))
+            .collect();
+        for block in &f.blocks {
+            if block.id == header {
+                continue;
+            }
+            for instr in &block.instrs {
+                if let Instr::Phi(_, arms) = instr {
+                    for (p, _) in arms {
+                        assert!(
+                            !header_preds.contains(&p.0),
+                            "join phi pred {p:?} collides with a header phi pred"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clause_tail_call_alloc_is_hoisted_to_entry_not_loop_body() {
+        // A clause self-tail-call rebuilds its enum scrutinee on every
+        // back-edge. `Stop` carries a payload here (Slice 9, R1: a
+        // zero-payload variant's construct no longer allocs at all -- it is a
+        // bare scalar `Const` -- so this test needs a payload-bearing variant
+        // to keep exercising the alloc-hoisting invariant it is named for).
+        // If that `Alloc` stayed in the loop body, QBE's `alloc*` would bump
+        // the frame pointer every iteration and blow the stack well before
+        // Phase 4's N >= 1_000_000 golden. It must land in the entry block
+        // instead, so the loop body has none.
+        let ir = lower_src(
+            "type: Flag | Go | Stop n i64 ; \
+             : run ( i64 Flag -- i64 ) | Go 1 - dup Stop run | Stop drop ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "run").unwrap();
+        let header = loop_header(f);
+        let entry = &f.blocks[0];
+        assert!(
+            entry.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+            "the Stop scrutinee's alloc should be hoisted into the entry block"
+        );
+        let entry_id = entry.id;
+        for block in &f.blocks {
+            if block.id == entry_id || block.id == header {
+                continue;
+            }
+            assert!(
+                !block.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+                "block {:?} in the loop body must not alloc",
+                block.id
+            );
+        }
+    }
+
+    #[test]
+    fn quotation_taking_word_emits_no_call_and_no_irfunc() {
+        // Criterion 3b/R20: a monomorphic quotation-taking word is inlined, so
+        // it mints no `IrFunc` and its caller emits no `Instr::Call`. The
+        // lowered `main` is just `1 +` (the spliced literal over `3`), a pure
+        // arithmetic body. Deleting the `combinator_indices` filter would put
+        // an `apply` func back, and deleting the `lower_call` inline branch
+        // would leave an `Instr::Call apply` in `main`.
+        let ir = lower_src(
+            ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+             : main ( -- ) 3 [ 1 + ] apply . ;\n",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "apply"),
+            "a combinator mints no `IrFunc`, but one named `apply` was emitted"
+        );
+        let main = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("`main` is emitted");
+        assert!(
+            call_symbols(main).is_empty(),
+            "the inlined caller emits no `Instr::Call`, got: {:?}",
+            call_symbols(main)
+        );
+    }
+
+    #[test]
+    fn abstract_forward_inlines_transitively_with_no_call() {
+        // Criterion 10b (R21): transitive inlining. `outer` forwards its own
+        // abstract quotation parameter to `inner`, so splicing `outer` into
+        // `main` must in turn splice `inner` -- two levels, outermost-first.
+        // The spec names this `map`-over-`each`. The shipped library keeps
+        // `map`/`fold` as leaf combinators on cost grounds rather than scope
+        // ones (building them on `each` is expressible, but inlining is total,
+        // so composition depth is code size at every call site), so this
+        // two-combinator chain stands in for that shape. It exercises the same
+        // load-bearing property the criterion guards:
+        // both combinators mint no `IrFunc` and `main` emits no `Instr::Call`.
+        // Breaking the transitive splice (the `lower_call` combinator branch,
+        // or the checker's abstract-forward accept) leaves an `Instr::Call`
+        // for `inner` behind.
+        let ir = lower_src(
+            ": inner ( i64 [ i64 -- ] -- ) call ;\n\
+             : outer ( i64 [ i64 -- ] -- ) inner ;\n\
+             : main ( -- ) 7 [ 1 + . ] outer ;\n",
+        );
+        assert!(
+            ir.funcs
+                .iter()
+                .all(|f| f.name != "inner" && f.name != "outer"),
+            "both combinators are inlined and mint no `IrFunc`, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = ir
+            .funcs
+            .iter()
+            .find(|f| f.name == "main")
+            .expect("`main` is emitted");
+        assert!(
+            call_symbols(main).is_empty(),
+            "transitive inlining leaves no `Instr::Call` in `main`, got: {:?}",
+            call_symbols(main)
+        );
+    }
+
+    #[test]
+    fn each_lowers_to_a_loop_not_a_per_element_call() {
+        // Criterion 14b (R19, load-bearing): the inlined `each` lowers to a
+        // real loop -- an entry `Jmp` to a header carrying the index `Phi`,
+        // sealed with a `Jnz`, reached by a back-edge `Jmp` -- with no
+        // per-element `Instr::Call` (the element quotation is spliced, not
+        // called). This is the *structural* constant-stack guarantee behind
+        // criterion 14's equivalence witness: deleting the `lower_call` inline
+        // branch would leave an `Instr::Call` for `each` and no loop, and
+        // unrolling per element would drop the back-edge. `each` is defined
+        // inline here so the unit needs no import closure.
+        let ir = lower_src(
+            ": each ( ['T 'N] [ 'T -- ] -- )\n\
+             | f | len >i64 | count | | arr |\n\
+             count [ | i | &arr i >usize &> @ f call ] times\n\
+             arr drop ;\n\
+             : main ( -- ) 0 4 fill [ . ] each ;\n",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "each"),
+            "the inlined `each` mints no IrFunc, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = func(&ir, "main");
+        let header = loop_header(main);
+        let hblock = header_block(main, header);
+        assert!(
+            !header_phis(hblock).is_empty(),
+            "the header carries the index phi"
+        );
+        assert!(
+            matches!(hblock.term, Terminator::Jnz(..)),
+            "the header is sealed with a Jnz (index < count), got {:?}",
+            hblock.term
+        );
+        let entry_id = main.blocks[0].id;
+        assert!(
+            main.blocks
+                .iter()
+                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
+            "a non-entry body block back-edges to the header"
+        );
+        // The array read `&arr i &>` emits the mandatory `sooth_oob_trap`
+        // bounds-check call (the hand-threaded twin emits it too); it is not a
+        // per-element call to the combinator or its element quotation, so it is
+        // excluded. What must be absent is any call to `each` or a spliced
+        // element op: the loop body is the spliced literal, not a call.
+        let user_calls: Vec<&str> = call_symbols(main)
+            .into_iter()
+            .filter(|s| *s != "sooth_oob_trap")
+            .collect();
+        assert!(
+            user_calls.is_empty(),
+            "the inlined `each` body is spliced, not called; unexpected calls: {user_calls:?}"
+        );
+    }
+
+    #[test]
+    fn while_lowers_to_a_back_edge_not_an_infinite_splice() {
+        // U12 (R10, load-bearing): a self-tail combinator `while` lowers to a
+        // real mid-body loop -- an entry `Jmp` to a header carrying the state
+        // `Phi`, reached by a back-edge `Jmp` -- with no `Instr::Call` to
+        // `while` and no re-splice. Deleting the back-edge branch in
+        // `lower_call` would leave an `Instr::Call` to `while` (or splice the
+        // body forever), not silently pass. `while` is defined inline so the
+        // unit needs no import closure.
+        let ir = lower_src(
+            ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n\
+             : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n",
+        );
+        assert!(
+            ir.funcs.iter().all(|f| f.name != "while"),
+            "the inlined `while` mints no IrFunc, got: {:?}",
+            ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+        );
+        let main = func(&ir, "main");
+        let header = loop_header(main);
+        let hblock = header_block(main, header);
+        assert!(
+            !header_phis(hblock).is_empty(),
+            "the header carries the state phi"
+        );
+        let entry_id = main.blocks[0].id;
+        assert!(
+            main.blocks
+                .iter()
+                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
+            "a non-entry body block back-edges to the header"
+        );
+        assert!(
+            call_symbols(main).is_empty(),
+            "the `while` body is spliced with a back-edge, not called; unexpected calls: {:?}",
+            call_symbols(main)
+        );
+    }
+}

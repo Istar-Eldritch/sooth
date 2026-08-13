@@ -882,3 +882,165 @@ pub(super) fn lower_materialized(
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn func_builder_new_threads_current_word_name() {
+        // R5: FuncBuilder carries the word being lowered, set from `word.name`
+        // in `lower_word`; the REPL path calls the same `lower_word` (no
+        // REPL-specific plumbing), so this covers both callers.
+        let env: HashMap<String, Arity> = HashMap::new();
+        let structs = Structs::default();
+        let enums = Enums::default();
+        let arrays = Arrays::default();
+        let cells = Cells::default();
+        let refs = Refs::default();
+        let resolve: Resolver = &|_name: &str| unreachable!("not called");
+        let b = FuncBuilder::new(
+            &env,
+            resolve,
+            Registries {
+                structs: &structs,
+                enums: &enums,
+                arrays: &arrays,
+                cells: &cells,
+                refs: &refs,
+            },
+            "loop-word".to_string(),
+        );
+        assert_eq!(b.cur_word_name, "loop-word");
+    }
+
+    #[test]
+    fn aggregate_carried_slot_gets_no_header_phi_but_scalar_does() {
+        // R2: the aggregate (`Box`) slot contributes no header phi (it reads
+        // its entry-hoisted stable slot); the scalar (i64) slot keeps one.
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let phis = header_phis(header_block(f, header));
+        assert_eq!(
+            phis.len(),
+            1,
+            "only the i64 scalar slot carries a header phi"
+        );
+        // `len() == 1` alone would also pass a transform that kept the `Box`
+        // slot's phi and dropped the scalar's; pin that the survivor carries
+        // the i64 counter, not a `Box` pointer, so "but scalar does" is checked.
+        let (_, incoming) = phis[0][0];
+        assert_eq!(
+            f.value_types[incoming.0 as usize],
+            IrType::I64,
+            "the surviving header phi carries the scalar slot, not the aggregate"
+        );
+    }
+
+    #[test]
+    fn aggregate_stable_slot_and_temp_are_entry_hoisted_not_in_the_body() {
+        // R1/R9: the stable slot and staging temp are `alloc`ed in the entry
+        // block, not per-iteration in the body (which would bump the frame
+        // every iteration and break the constant-stack guarantee). `instrs`
+        // flattens across blocks, so this iterates `func.blocks` directly.
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let entry = &f.blocks[0];
+        let entry_allocs = entry
+            .instrs
+            .iter()
+            .filter(|i| matches!(i, Instr::Alloc(..)))
+            .count();
+        assert!(
+            entry_allocs >= 2,
+            "the stable slot and temp allocs should be hoisted into the entry block, saw {entry_allocs}"
+        );
+        let entry_id = entry.id;
+        for block in &f.blocks {
+            if block.id == entry_id || block.id == header {
+                continue;
+            }
+            assert!(
+                !block.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
+                "block {:?} in the loop body must not alloc",
+                block.id
+            );
+        }
+    }
+
+    #[test]
+    fn aggregate_init_blit_lands_in_the_entry_block() {
+        // R3: `begin_loop` seeds the stable slot with the incoming param once,
+        // in the entry block, so iteration 1 reads an initialised value. It is
+        // the only Blit routed to the entry block (the back-edge staging blits
+        // go to predecessor blocks).
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let entry = &f.blocks[0];
+        assert!(
+            entry.instrs.iter().any(|i| matches!(i, Instr::Blit(..))),
+            "the entry-arm init blit should land in the entry block"
+        );
+    }
+
+    #[test]
+    fn back_edge_stages_reads_before_writes() {
+        // R4: on a staged back-edge, every read-phase blit (a snapshot into a
+        // temp) precedes every write-phase blit (a store into the stable slot).
+        // A blit is write-phase when its source is an earlier blit's dest in
+        // the same predecessor block. `instrs` flattens across blocks, so this
+        // inspects the predecessor block directly.
+        let ir = lower_src(STAGED_LOOP);
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let pred = back_edge_pred(f, header);
+        let mut written: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut seen_write = false;
+        let mut blits = 0;
+        for instr in &pred.instrs {
+            if let Instr::Blit(src, dst, _) = instr {
+                blits += 1;
+                if written.contains(&src.0) {
+                    seen_write = true;
+                } else {
+                    assert!(!seen_write, "a read-phase blit follows a write-phase blit");
+                }
+                written.insert(dst.0);
+            }
+        }
+        assert!(
+            blits >= 2,
+            "the staged Box back-edge should emit a read and a write blit, saw {blits}"
+        );
+    }
+
+    #[test]
+    fn forwarded_in_place_aggregate_slot_emits_zero_back_edge_blits() {
+        // R4: an aggregate carried unchanged (`prev`, its back-edge arg is
+        // exactly its own stable slot) is forwarded in place and stages
+        // nothing.
+        let ir = lower_src(
+            "type: Box n i64 ;\n\
+             : mk ( i64 -- Box ) | n | n Box ;\n\
+             : loop ( i64 Box -- Box ) | n prev | n 0 = if prev else n 1 - prev loop end ;",
+        );
+        let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
+        let header = loop_header(f);
+        let pred = back_edge_pred(f, header);
+        assert_eq!(
+            pred.instrs
+                .iter()
+                .filter(|i| matches!(i, Instr::Blit(..)))
+                .count(),
+            0,
+            "a forwarded-in-place slot emits zero back-edge blits"
+        );
+    }
+}

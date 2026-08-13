@@ -313,3 +313,64 @@ impl<'a> FuncBuilder<'a> {
         self.stack = join_stack;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn lower_if_emits_phi_at_join() {
+        let ir = lower_src(": w ( bool -- i64 ) if 1 else 2 end ;");
+        let w = &ir.funcs[0];
+        let has_phi = instrs(w).iter().any(|i| matches!(i, Instr::Phi(..)));
+        assert!(has_phi);
+        assert!(w
+            .blocks
+            .iter()
+            .any(|b| matches!(b.term, Terminator::Jnz(..))));
+    }
+
+    #[test]
+    fn lower_clause_word_builds_nway_dispatch_and_join_phi() {
+        // R16: a clause word loads the discriminant (one FieldLoad on the
+        // scrutinee tag), builds an N-way `Cmp(Eq)` compare-chain (N-1
+        // compares for N variants, the last variant a fall-through), and
+        // merges the clauses at a single join with one Phi per declared
+        // output. A 4-variant enum: 3 Cmp(Eq), one Phi.
+        let ir = lower_src(
+            "type: Cmd | Halt | Push v i64 | Add | Dbl ;
+             : run ( i64 Cmd -- i64 ) | Halt drop 0 | Push swap drop | Add 1 + | Dbl 2 * ;",
+        );
+        let run = ir.funcs.iter().find(|f| f.name == "run").unwrap();
+        // Three `Cmp(Eq)` compares for four variants (the last falls through).
+        assert_eq!(
+            count(run, |i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
+            3
+        );
+        // Exactly one Phi (single declared output) merging all four clauses.
+        let phi_arms: Vec<usize> = run
+            .blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .filter_map(|i| match i {
+                Instr::Phi(_, arms) => Some(arms.len()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(phi_arms, vec![4]);
+    }
+
+    #[test]
+    fn lower_single_variant_clause_word_jumps_without_compare() {
+        // R16: a single-variant (newtype) enum needs no compare — the sole
+        // clause is the terminal fall-through, reached by a direct jump.
+        let ir = lower_src("type: Id | Wrap v i64 ; : unwrap ( Id -- i64 ) | Wrap ;");
+        let unwrap = ir.funcs.iter().find(|f| f.name == "unwrap").unwrap();
+        assert_eq!(count(unwrap, |i| matches!(i, Instr::Cmp(..))), 0);
+    }
+}

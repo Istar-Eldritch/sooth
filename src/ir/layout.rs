@@ -761,3 +761,505 @@ impl LayoutBuilder<'_> {
         });
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ast::{Line, BOOL_ENUM_ID};
+    use crate::check::check;
+    use crate::ir::test_helpers::*;
+    use crate::lexer::lex;
+    use crate::parser::{parse, parse_line};
+
+    #[test]
+    fn ir_registers_overridden_struct_as_linear_despite_all_copy_fields() {
+        // Criterion 20/R2: `StructLayout::is_linear` is the IR's own,
+        // separately computed bit, folded from declared field types alone --
+        // for a scalar-only resource that fold says `Copy`, so the override
+        // has to force it. Without the force, no destructor would be
+        // synthesized for `File` at all and `emit_drop`'s guard would discard
+        // an `f drop` silently.
+        let overridden = structs_of(&format!("{FILE_RESOURCE} : main ( -- ) 1 File drop ;"));
+        let file = layout(&overridden, "File");
+        assert!(file.is_linear);
+        assert!(file.has_drop_overload);
+
+        let plain = structs_of("type: File fd i64 ; : main ( -- ) 1 File drop ;");
+        assert!(!layout(&plain, "File").is_linear);
+    }
+
+    #[test]
+    fn carried_slot_bytes_scalar_is_eight_struct_is_aligned_aggregate() {
+        // A scalar always occupies a byte-identical 8-byte carried cell (so
+        // every scalar-only line marshals unchanged); a struct occupies its
+        // aggregate size rounded up to a multiple of 8.
+        let s = structs_of("type: Pair a i8 b i8 ;\ntype: Vec2 x i64 y i64 ;");
+        assert_eq!(
+            carried_slot_bytes(IrType::I64, &s, &Enums::default(), &Arrays::default()),
+            8
+        );
+        assert_eq!(
+            carried_slot_bytes(IrType::Bool, &s, &Enums::default(), &Arrays::default()),
+            8
+        );
+        // Pair is two i8s = 2 bytes, rounded up to one 8-byte cell.
+        assert_eq!(
+            carried_slot_bytes(
+                IrType::Struct(StructId::from_index(0)),
+                &s,
+                &Enums::default(),
+                &Arrays::default()
+            ),
+            8
+        );
+        // Vec2 is two i64s = 16 bytes, already a multiple of 8.
+        assert_eq!(
+            carried_slot_bytes(
+                IrType::Struct(StructId::from_index(1)),
+                &s,
+                &Enums::default(),
+                &Arrays::default()
+            ),
+            16
+        );
+    }
+
+    #[test]
+    fn word_width_parameter_sizes_size_types_not_a_literal_eight() {
+        // Criterion 2 (structural): both size types' size/align derive from the
+        // word width parameter, not a hardcoded `8`. At the default width it is
+        // 8; flipping the parameter to 4 changes the derived size of a bare
+        // `usize`/`isize` and of an aggregate that embeds one, proving no stray
+        // literal.
+        assert_eq!(scalar_size_align(IrType::Usize), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Usize, 8), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Usize, 4), (4, 4));
+        assert_eq!(scalar_size_align(IrType::Isize), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Isize, 8), (8, 8));
+        assert_eq!(scalar_size_align_ww(IrType::Isize, 4), (4, 4));
+
+        // A struct with two `usize` fields and an array of `usize`: both resize
+        // with the parameter.
+        let m = module_of(": w ( [usize 4] -- ) drop ;\ntype: Cursor a usize b usize ;");
+        let (s8, _, a8, ..) =
+            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, &m.refs, 8);
+        let (s4, _, a4, ..) =
+            build_registries_ww(&m.structs, &m.enums, &m.arrays, &m.owned_cells, &m.refs, 4);
+        assert_eq!(s8.layouts[0].size, 16, "two usize fields at width 8");
+        assert_eq!(s4.layouts[0].size, 8, "two usize fields at width 4");
+        assert_eq!(a8.layouts[0].size, 32, "[usize 4] at width 8");
+        assert_eq!(a4.layouts[0].size, 16, "[usize 4] at width 4");
+    }
+
+    #[test]
+    fn array_layout_stride_size_align_from_element() {
+        // M2: `stride = round_up(elem_size, elem_align)`, `size = count*stride`,
+        // `align = elem_align`. An `i64` element: stride 8, size 32, align 8.
+        let a = arrays_of(": w ( [i64 4] -- ) drop ;");
+        assert_eq!((a.layouts[0].stride, a.layouts[0].size), (8, 32));
+        assert_eq!(a.layouts[0].align, 8);
+        // A sub-word `u8` element: stride 1, size 3, align 1.
+        let b = arrays_of(": w ( [u8 3] -- ) drop ;");
+        assert_eq!(
+            (b.layouts[0].stride, b.layouts[0].size, b.layouts[0].align),
+            (1, 3, 1)
+        );
+    }
+
+    #[test]
+    fn array_layout_nested_array_of_array_sizes_via_registry() {
+        // M3: `[[i64 4] 2]` sizes its element (the inner `[i64 4]`, 32 bytes)
+        // via the registry: outer stride 32, size 64, align 8.
+        let a = arrays_of(": w ( [[i64 4] 2] -- ) drop ;");
+        let outer = a.layouts.iter().find(|l| l.name == "[[i64 4] 2]").unwrap();
+        assert_eq!((outer.stride, outer.size, outer.align), (32, 64, 8));
+    }
+
+    #[test]
+    fn carried_slot_bytes_array_is_aligned_aggregate() {
+        // R16/M2: a carried array slot occupies its size rounded up to a
+        // multiple of 8. `[u8 3]` is 3 bytes, rounding up to one 8-byte cell.
+        let a = arrays_of(": w ( [u8 3] -- ) drop ;");
+        assert_eq!(
+            carried_slot_bytes(
+                IrType::Array(ArrayId::from_index(0)),
+                &Structs::default(),
+                &Enums::default(),
+                &a
+            ),
+            8
+        );
+    }
+
+    #[test]
+    fn struct_layout_flat_i64_fields_offsets_and_size() {
+        let s = structs_of("type: Vec2 x i64 y i64 ;");
+        let v = layout(&s, "Vec2");
+        assert_eq!(v.size, 16);
+        assert_eq!(v.align, 8);
+        assert_eq!(v.fields[0].offset, 0);
+        assert_eq!(v.fields[1].offset, 8);
+    }
+
+    #[test]
+    fn struct_layout_packed_subword_fields_natural_alignment() {
+        // Two `i8`s pack at 0 and 1; the `i64` aligns to 8; whole size 16.
+        let s = structs_of("type: Packed p i8 q i8 r i64 ;");
+        let p = layout(&s, "Packed");
+        assert_eq!(
+            (p.fields[0].offset, p.fields[1].offset, p.fields[2].offset),
+            (0, 1, 8)
+        );
+        assert_eq!((p.size, p.align), (16, 8));
+    }
+
+    #[test]
+    fn struct_layout_nested_uses_inner_size_and_align() {
+        let s = structs_of("type: Vec2 x i64 y i64 ; type: Segment from Vec2 to Vec2 ;");
+        let seg = layout(&s, "Segment");
+        assert_eq!((seg.fields[0].offset, seg.fields[1].offset), (0, 16));
+        assert_eq!((seg.size, seg.align), (32, 8));
+    }
+
+    #[test]
+    fn struct_layout_zero_field_is_size_0_align_1() {
+        let s = structs_of("type: Unit ;");
+        let u = layout(&s, "Unit");
+        assert_eq!((u.size, u.align), (0, 1));
+        assert!(u.fields.is_empty());
+    }
+
+    #[test]
+    fn enum_layout_tag_first_payload_at_max_variant_align() {
+        // R13/M1: an i32 tag at offset 0, the payload rounded up to the
+        // largest variant's align (8, for the f64 fields), so the tag's 4
+        // trailing bytes are padding; size = payload_offset(8) + max payload
+        // (Rect's two f64s = 16) = 24; align 8.
+        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ;");
+        let s = enum_layout(&e, "Shape");
+        assert_eq!(s.tag_offset, 0);
+        assert_eq!(
+            s.tag_ty,
+            IrType::Int {
+                bits: 32,
+                signed: true
+            }
+        );
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+        // Circle: one f64 at payload-relative 0; Rect: two f64s at 0 and 8.
+        assert_eq!(s.variants[0].fields[0].offset, 0);
+        assert_eq!(
+            (
+                s.variants[1].fields[0].offset,
+                s.variants[1].fields[1].offset
+            ),
+            (0, 8)
+        );
+    }
+
+    #[test]
+    fn zero_payload_enum_lowers_to_scalar_discriminant() {
+        // R1 (D-A): the general rule -- any enum whose every variant carries
+        // an empty payload lowers to a bare 1-byte scalar discriminant, no
+        // payload region, no memory aggregate. Exercised on a *non-`Bool`*
+        // enum, so this proves the rule is general, not a `Bool` carve-out.
+        let e = enums_of("type: Dir | N | E | S | W ;");
+        let d = enum_layout(&e, "Dir");
+        assert!(d.is_scalar);
+        assert_eq!(d.payload_offset, 0);
+        assert_eq!((d.size, d.align), (1, 1));
+        assert_eq!(d.variants.len(), 4);
+        assert!(d.variants.iter().all(|v| v.fields.is_empty()));
+    }
+
+    #[test]
+    fn payload_bearing_enum_layout_unchanged() {
+        // R1: an enum with at least one payload-bearing variant keeps the
+        // pre-existing tagged-aggregate layout untouched by the scalar rule.
+        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ;");
+        let s = enum_layout(&e, "Shape");
+        assert!(!s.is_scalar);
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+    }
+
+    #[test]
+    fn enum_layout_mixed_variant_field_widths_pack_within_payload() {
+        // A variant with sub-word + i64 fields packs at natural alignment
+        // within the payload; the largest variant sizes the payload.
+        let e = enums_of("type: E | A x i8 y i64 | B v i16 ;");
+        let s = enum_layout(&e, "E");
+        // A: i8 at 0, i64 aligned to 8 -> offset 8, variant size 16, align 8.
+        assert_eq!(
+            (
+                s.variants[0].fields[0].offset,
+                s.variants[0].fields[1].offset
+            ),
+            (0, 8)
+        );
+        // payload align 8 (A's i64), payload_offset 8, max payload 16, size 24.
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+    }
+
+    #[test]
+    fn enum_layout_nested_struct_payload_sized_via_combined_registry() {
+        // D9: a variant field of struct type is sized via its layout (16 for a
+        // two-f64 Vec2), not `scalar_size_align`.
+        let (structs, enums, _arrays, _cells, _refs) = {
+            let src = "type: Vec2 x f64 y f64 ; type: Shape | Dot p Vec2 | Unit ;";
+            let tokens = lex(src).unwrap();
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            build_registries(
+                &module.structs,
+                &module.enums,
+                &module.arrays,
+                &module.owned_cells,
+                &module.refs,
+            )
+        };
+        let _ = structs;
+        let s = enum_layout(&enums, "Shape");
+        // Dot's Vec2 payload: 16 bytes at payload-relative 0; payload align 8.
+        assert_eq!(s.variants[0].fields[0].size, 16);
+        assert_eq!(s.payload_offset, 8);
+        assert_eq!((s.size, s.align), (24, 8));
+    }
+
+    #[test]
+    fn struct_field_of_enum_type_sized_via_combined_registry() {
+        // D9: a struct field of enum type is sized via the enum's layout, not
+        // `scalar_size_align`; the struct places the next field past it.
+        let (structs, _enums, _arrays, _cells, _refs) = {
+            let src =
+                "type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Tagged k Shape n i64 ;";
+            let tokens = lex(src).unwrap();
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            build_registries(
+                &module.structs,
+                &module.enums,
+                &module.arrays,
+                &module.owned_cells,
+                &module.refs,
+            )
+        };
+        let t = layout(&structs, "Tagged");
+        // Shape is 24 bytes align 8: k at 0 (size 24), n (i64) at 24; size 32.
+        assert_eq!((t.fields[0].offset, t.fields[0].size), (0, 24));
+        assert_eq!(t.fields[1].offset, 24);
+        assert_eq!((t.size, t.align), (32, 8));
+    }
+
+    #[test]
+    fn carried_slot_bytes_enum_is_aligned_aggregate() {
+        // R17: a carried enum slot occupies its size rounded up to a multiple
+        // of 8. Shape is 24 bytes (already a multiple of 8); a tag-only enum
+        // (4 bytes pre-Slice-9, now a 1-byte scalar) rounds up to one 8-byte
+        // cell either way. `enums_of` parses through the full pipeline, so
+        // `bool` occupies the reserved index 0 (Slice 9, R2) ahead of the
+        // source's own `Shape`/`Dir`.
+        let e = enums_of("type: Shape | Circle r f64 | Rect w f64 h f64 ; type: Dir | N | S ;");
+        assert_eq!(
+            carried_slot_bytes(
+                IrType::Enum(EnumId::from_index(1)),
+                &Structs::default(),
+                &e,
+                &Arrays::default()
+            ),
+            24
+        );
+        assert_eq!(
+            carried_slot_bytes(
+                IrType::Enum(EnumId::from_index(2)),
+                &Structs::default(),
+                &e,
+                &Arrays::default()
+            ),
+            8
+        );
+    }
+
+    #[test]
+    fn struct_layout_is_linear_iff_a_field_is_transitively() {
+        let ir = lower_src(&format!(
+            "{SPY_DEF}type: Plain x i64 y i64 ; \
+             type: Holds a Spy b i64 ; \
+             type: Wraps h Holds ; \
+             : w ( -- ) ;"
+        ));
+        assert!(ir.structs[0].is_linear, "Spy has a drop overload");
+        assert!(!ir.structs[1].is_linear, "Plain has no linear field");
+        assert!(ir.structs[2].is_linear, "Holds carries a Spy directly");
+        assert!(ir.structs[3].is_linear, "Wraps carries one transitively");
+    }
+
+    #[test]
+    fn struct_with_owned_cell_field_is_linear_and_pointer_sized() {
+        // R4/R17: a cell is linear whatever its payload, so a struct holding one
+        // is linear and gets drop glue; its field is a pointer, sized by the
+        // same convention as `Ptr` rather than a second width assumption.
+        let ir = lower_src("type: Boxed b ^i64 ; : w ( -- ) ;");
+        let layout = &ir.structs[0];
+        assert!(layout.is_linear, "a cell field makes its struct linear");
+        assert_eq!((layout.size, layout.align), (8, 8));
+        assert!(
+            matches!(layout.fields[0].ty, IrType::OwnedCell(_)),
+            "a cell field keeps its own `IrType`, not a bare `Ptr`: {:?}",
+            layout.fields[0].ty
+        );
+        assert_eq!(scalar_size_align(layout.fields[0].ty), (8, 8));
+    }
+
+    #[test]
+    fn struct_linearity_agrees_across_the_checker_and_both_lowering_folds() {
+        // Linearity is decided in three places over the same field lists:
+        // `check::is_copy` walks `Type`, `ensure_struct` folds `IrType` inline
+        // while `layouts` is still being built, and `field_is_linear` is what
+        // every drop-glue site consults. If they ever disagree the checker
+        // gates a `dup` the lowering then emits no glue for (or the reverse),
+        // so pin all three rather than trusting three hand-kept matches.
+        let src = format!(
+            "{SPY_DEF}type: Plain x i64 y i64 ; \
+                   type: Holds a Spy b i64 ; \
+                   type: Wraps h Holds ; \
+                   type: Deep w Wraps p Plain ; \
+                   type: Item | Empty | Full v Spy ; \
+                   type: EnumInStruct e Item ; \
+                   type: StructInEnum | Some h Holds | None ; \
+                   type: EnumInEnum | Inner i EnumInStruct | Outer ; \
+                   type: PlainArr xs [i64 4] ; \
+                   type: Boxed b ^i64 ; \
+                   type: BoxedPlain p ^Plain ; \
+                   type: MaybeBoxed | Full b ^i64 | Empty ; \
+                   : w ( -- ) ;"
+        );
+        let tokens = lex(&src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        // `SpyArr` (a `[Spy 4]` field) is spliced in directly rather than
+        // through source: Item 1's array-type-use rejection means no source
+        // program can spell this declaration any more, but the predicate
+        // must still be correct on the type alone. Reuses the real `Spy`
+        // struct from `SPY_DEF` (already `has_drop_overload`, set by `check`
+        // above) rather than hand-building a fixture, since `SPY_DEF` is
+        // always prepended first and so is always struct index 0.
+        let spy_id = StructId::from_index(0);
+        let spy_name_static = module.structs[spy_id.index()].name_static;
+        let spy_ty = Type::Struct(spy_id, spy_name_static);
+        let spy_array_id = ArrayId::from_index(module.arrays.len());
+        let spy_array_name: &'static str = "[Spy 4]";
+        module.arrays.push(ArrayDecl {
+            element: spy_ty,
+            count: 4,
+            name_static: spy_array_name,
+        });
+        module.structs.push(StructDecl {
+            name: "SpyArr".to_string(),
+            name_static: "SpyArr",
+            fields: vec![("xs".to_string(), Type::Array(spy_array_id, spy_array_name))],
+            span: crate::ast::Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        });
+        let (structs, enums, arrays, ..) = build_registries(
+            &module.structs,
+            &module.enums,
+            &module.arrays,
+            &module.owned_cells,
+            &module.refs,
+        );
+        for (idx, layout) in structs.layouts.iter().enumerate() {
+            let ty = Type::Struct(StructId::from_index(idx), layout.name);
+            assert_eq!(
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                !layout.is_linear,
+                "`{}`: checker says Copy={}, `ensure_struct` says linear={}",
+                layout.name,
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                layout.is_linear
+            );
+            // `Spy` itself is excluded here: it is linear purely because of
+            // its `has_drop_overload` bit (an override on all-Copy fields),
+            // not because any field is `field_is_linear`, a distinct case
+            // already pinned by
+            // `ir_registers_overridden_struct_as_linear_despite_all_copy_fields`.
+            if idx != spy_id.index() {
+                assert_eq!(
+                    layout
+                        .fields
+                        .iter()
+                        .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
+                    layout.is_linear,
+                    "`{}`: `field_is_linear` disagrees with the `ensure_struct` fold",
+                    layout.name
+                );
+            }
+        }
+        // R7/R12 (Phase 4): the same three-way pin, over the enum registry's
+        // `Type::Enum` arm of `is_copy` and the variant-payload fold
+        // (`ensure_enum`/`layout_field_is_linear`), including transitivity
+        // through a struct-in-enum and an enum-in-enum.
+        for (idx, layout) in enums.layouts.iter().enumerate() {
+            let ty = Type::Enum(EnumId::from_index(idx), layout.name);
+            assert_eq!(
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                !layout.is_linear,
+                "`{}`: checker says Copy={}, `ensure_enum` says linear={}",
+                layout.name,
+                crate::check::is_copy(ty, &module.structs, &module.enums, &module.arrays),
+                layout.is_linear
+            );
+            assert_eq!(
+                layout
+                    .variants
+                    .iter()
+                    .flat_map(|v| v.fields.iter())
+                    .any(|f| field_is_linear(f.ty, &structs, &enums, &arrays)),
+                layout.is_linear,
+                "`{}`: `field_is_linear` disagrees with the `ensure_enum` fold",
+                layout.name
+            );
+        }
+        // Criterion (item 3): an array field is linear iff its element is,
+        // transitively; `PlainArr` (an `[i64 4]` field) stays Copy, `SpyArr`
+        // (a `[Spy 4]` field, spliced in above) is linear even though no
+        // source program can declare that field any more, so the predicate
+        // must be correct on the type alone.
+        let plain_arr_idx = structs
+            .layouts
+            .iter()
+            .position(|l| l.name == "PlainArr")
+            .unwrap();
+        let spy_arr_idx = structs
+            .layouts
+            .iter()
+            .position(|l| l.name == "SpyArr")
+            .unwrap();
+        assert!(!structs.layouts[plain_arr_idx].is_linear);
+        assert!(structs.layouts[spy_arr_idx].is_linear);
+        let plain_arr_ty = Type::Struct(
+            StructId::from_index(plain_arr_idx),
+            structs.layouts[plain_arr_idx].name,
+        );
+        let spy_arr_ty = Type::Struct(
+            StructId::from_index(spy_arr_idx),
+            structs.layouts[spy_arr_idx].name,
+        );
+        assert!(crate::check::is_copy(
+            plain_arr_ty,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+        assert!(!crate::check::is_copy(
+            spy_arr_ty,
+            &module.structs,
+            &module.enums,
+            &module.arrays
+        ));
+    }
+}
