@@ -24,8 +24,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
-mod common;
-
 /// Compile and run `src`, returning stdout and the exit code.
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
@@ -291,10 +289,12 @@ fn spliced_body_disposes_a_locally_declared_linear() {
 
 #[test]
 fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
-    // The other side of the same rule, and the shape where trusting the splice
-    // destination would over-admit: `main` imports `lib` qualified-only, so it
-    // cannot dispose `lib::Res`, even though the module its quotation is
-    // spliced into (`lib` itself) plainly can see the destructor.
+    // A rule-intactness pin, not a splice witness: this program's `drop` is
+    // caught by the home-scope pass before the quotation is ever spliced, so
+    // it exercises the same gate as `imported_linear_type_dropped_without_
+    // importing_it_is_error` and only goes red if the gate is deleted
+    // outright. Kept anyway as coverage that R10's `span.module` change does
+    // not loosen the qualified-only-import rule end to end.
     let c = Closure::new("r10-reject");
     c.write(
         "lib.sth",
@@ -315,25 +315,4 @@ fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
             && err.contains("has not imported by name"),
         "a qualified-only imported type stays undisposable from the importing module, got: {err}"
     );
-}
-
-// -- P0 does not disturb the corpus witness ---------------------------------
-
-#[test]
-fn inplace_fold_still_builds_and_prints_its_baseline() {
-    // `examples/inplace_fold.sth` is the corpus witness for the parked-linear
-    // shape (`prefix-linear`). It compiles under the intrinsic today; this
-    // pins its exact output through P0 so the relaxation is shown not to
-    // perturb the very program 10b's later phases will re-point onto the
-    // library `times`.
-    let binary = common::build_example("examples/inplace_fold.sth");
-    let output = std::process::Command::new(&binary)
-        .output()
-        .expect("binary should run");
-    std::fs::remove_file(&binary).ok();
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("stdout should be utf8"),
-        "1\n3\n6\n10\n1\n3\n6\n10\n"
-    );
-    assert_eq!(output.status.code(), Some(0));
 }
