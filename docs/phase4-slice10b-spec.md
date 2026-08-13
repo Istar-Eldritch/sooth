@@ -460,12 +460,22 @@ hole: `drop_res` (`src/check/engine.rs:1324-1341`) hardcodes `span.module: 0` wh
 set the synthetic span's module to `caller` in `drop_of_qualified_only_imported_type_is_error`
 and `drop_of_transitively_reachable_type_with_no_direct_import_is_error`. R10 needs its own
 golden: a library-spliced combinator body that disposes a locally-declared linear through its
-own `drop` overload compiles and runs with exact expected stdout. It also needs a **reject**
-golden for the other side of the rule, verified constructible: a spliced quotation body that
-disposes a *qualified-only-imported* type through a combinator declared in that type's own
-module. That is the exact shape where naively trusting the splice destination would over-admit
-(the destination module *can* see the destructor, the authoring module cannot), and nothing
-else pins it. R9's mutation (d) is R10's discriminating mutation.
+own `drop` overload compiles and runs with exact expected stdout. That accept golden is R10's
+only witness, and R9's mutation (d) is its discriminating mutation. It is paired with a
+**reject** golden, a spliced quotation body that disposes a *qualified-only-imported* type
+through a combinator declared in that type's own module. Measured in Phase 1, that program is
+rejected by the home-scope pass *before* the quotation is ever spliced: it survives mutation
+(d) and goes red only if the gate is deleted outright. It is therefore a **rule-intactness
+pin**, evidence that R10 does not loosen the qualified-only rule end to end, and **not** a
+splice witness. Whether the splice-site over-admission shape (the destination module *can* see
+the destructor, the authoring module cannot) is constructible at all is unresolved; nothing in
+the suite pins it, and no later phase should read a splice witness into that golden.
+
+`drop_import_visibility_error`'s caller derivation is unwitnessed for the same reason:
+measured in Phase 1, reverting that one line to `ctx.module()` while leaving the gate on
+`span.module` turns nothing red suite-wide, exactly as the "masked only by evaluation order"
+note above predicts. It changes because the gate and the message must agree, not because a
+test pins it; R9's audit must not count it as covered.
 
 Out of scope, recorded because it frames how much the rule is worth: the visibility gate never
 fires at all for a disposal inside a **generic** word body. A library exporting
@@ -648,8 +658,9 @@ P0), the own-frame-before-the-tail-if reject golden holds, and
 `while_body_linear_local_across_back_edge_is_error` is re-pointed to the if-arm shape rather
 than dropped (R8); a library-spliced combinator body disposes a locally-declared linear
 through its own `drop` overload, both `check_drop_import_visibility`'s gate and
-`drop_import_visibility_error`'s caller derivation use `span.module`, the qualified-only-import
-rejection stays intact end to end, and the spliced qualified-only reject golden holds (R10); no
+`drop_import_visibility_error`'s caller derivation use `span.module`, and the
+qualified-only-import rejection stays intact end to end, pinned by a reject golden the
+home-scope pass catches before splicing (a rule-intactness pin, not a splice witness) (R10); no
 prose in README, ROADMAP or DESIGN still calls `times` an intrinsic (R11); and all four R9
 mutations have been run, each flipping the goldens R9 predicts and no others (R9).
 
