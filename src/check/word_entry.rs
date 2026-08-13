@@ -21,7 +21,22 @@ pub(super) fn check_word(
             reject_variant_local(&ctx, name, "parameter")?;
         }
     }
-    check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+    // Slice 11 (R5/D5): the no-reference-output rule is skipped for an
+    // always-spliced word, phrased over the shared `is_combinator` predicate so
+    // the exemption covers a mono combinator, an `inline` word and (via the
+    // concrete stand-in `check_poly_combinator_standalone` builds) a poly
+    // combinator uniformly. Its own message names the fault it guards -- "a
+    // `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the
+    // time the caller reads it" -- and a spliced word has no such frame:
+    // `alpha_rename_locals` makes the callee's locals caller locals, so the
+    // returned reference cannot outlive the frame that owns its referent. Every
+    // lifetime and linearity pass that makes the relaxation safe still runs on
+    // both the standalone body and each spliced copy (the must-consume rule, the
+    // capture/escape guards, the loop back-edge reference guard); a real
+    // (non-combinator) word declaring a reference output is still rejected.
+    if !is_combinator(word) {
+        check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+    }
     match &word.body {
         WordBody::Terms { terms } => check_terms_word(
             word, enums, terms, env, arrays, cells, refs, structs, modules, dropped, poly,
@@ -510,6 +525,34 @@ mod tests {
         );
         check_src(": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;")
             .expect("a `~`-bearing but variable-free `inline` effect is monomorphic");
+    }
+
+    /// Slice 11 (R5/D5): the no-reference-output rule is skipped for an
+    /// always-spliced word. The skip is keyed on `is_combinator`, not on
+    /// `declares_inline`, and the middle case is what discriminates the two
+    /// phrasings: a quotation-taking word declares no `inline` and is exempt all
+    /// the same. The third is the outermost boundary -- a real word, which does
+    /// have a frame of its own to lose, is still rejected.
+    #[test]
+    fn check_reference_free_signature_skipped_for_combinator() {
+        check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n")
+            .expect("an `inline` word may declare a reference output");
+        check_src("type: P n u32 ;\n: pick ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n")
+            .expect("a quotation-taking word is exempt too (the skip reads `is_combinator`)");
+        // A *poly* combinator takes the same exemption by the same guard: it
+        // reaches `check_word` through the concrete stand-in
+        // `check_poly_combinator_standalone` builds, which carries the quotation
+        // parameter (and the flag) across and so is itself `is_combinator`.
+        check_src(
+            "type: P n u32 ;\n: pick ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!P>n ;\n",
+        )
+        .expect("a poly combinator is exempt through its concrete stand-in");
+        let err =
+            check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!P>n ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
     }
 
     /// Slice 11 (R3): a builtin-operator name is resolved by `check_operator`,

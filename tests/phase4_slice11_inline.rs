@@ -1,4 +1,4 @@
-//! Phase 4 Slice 11, phase 1 goldens: `inline` as a *declared* word property.
+//! Phase 4 Slice 11 goldens: `inline` as a *declared* word property.
 //! A word marked `inline` is spliced at every call site whatever its
 //! parameters, so it mints no `IrFunc`, no symbol, and no `Instr::Call` -- and
 //! where splicing is impossible the definition is a located error (D2), never a
@@ -320,6 +320,82 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "0\n");
     assert_eq!(code, 0);
+}
+
+#[test]
+fn inline_reference_output_pair() {
+    // R5/Feature C: `check_reference_free_signature` rejects a `&T`/`&!T` output
+    // because it "borrows a local of the callee's own frame, which is gone by
+    // the time the caller reads it". A spliced word has no such frame:
+    // `alpha_rename_locals` makes its locals caller locals. So the rule is
+    // skipped for a combinator and the pair is the witness that the relaxation
+    // is scoped to the splice -- the same word, the same body, differing only in
+    // the keyword, is accepted and then rejected.
+    //
+    // The run proves the returned reference really points at the caller's local
+    // rather than at dead frame storage: `+!` through it, and the caller reads
+    // the new value back out of its own struct (7 then 12).
+    let src = "type: P n u32 ;\n\
+               : pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n\
+               : main ( -- )\n\
+                 7 >u32 P | s |\n\
+                 &!s pick | r |\n\
+                 r @ >i64 .\n\
+                 r 5 >u32 +!\n\
+                 &s &P>n @ >i64 .\n\
+                 s drop ;\n";
+    let (binary, stdout, code) = build_and_run("slice11-ref-output", src);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "7\n12\n");
+    assert_eq!(code, 0);
+
+    let err = check_error(&src.replace("pick inline", "pick"));
+    assert_eq!(
+        err,
+        "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+    );
+}
+
+#[test]
+fn quotation_taking_word_reference_output_is_accepted() {
+    // The exemption is phrased over the shared `is_combinator` predicate (D5),
+    // not over the new flag, so it covers every always-spliced word uniformly.
+    // This word declares no `inline` at all: had R5's guard been written
+    // `if !word.declares_inline`, this would still be rejected. It is also the
+    // recon-5 shape, whose reference is derived from an *input* reference and so
+    // is rooted in the caller either way.
+    let src = "type: P n u32 ;\n\
+               : pick ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n\
+               : main ( -- )\n\
+                 7 >u32 P | s |\n\
+                 &!s [ 1 . ] pick | r |\n\
+                 r 2 >u32 +!\n\
+                 &s &P>n @ >i64 .\n\
+                 s drop ;\n";
+    let (binary, stdout, code) = build_and_run("slice11-ref-output-quot", src);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "1\n9\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn inline_reference_to_linear_local_is_rejected() {
+    // The one adversarial shape R5 leaves standing (Feature C): the returned
+    // reference borrows a *linear* local the callee itself declared. Post-splice
+    // the caller would inherit that local's drop obligation and the shape would
+    // be safe, but the standalone def-site check sees the local borrowed and
+    // never consumed and rejects it by the pre-existing must-consume rule --
+    // reject-safe, and reached with no special case for references. Deleting the
+    // borrow-and-return is not what makes this pass; consuming `b` is.
+    let src = "type: Buf  data ^[u8 64]  len usize ;\n\
+               : fresh inline ( -- &!usize )\n\
+                 0 >u8 64 fill ^ 0 >usize Buf | b |\n\
+                 &!b &!Buf>len ;\n";
+    let err = check_error(src);
+    assert_eq!(
+        err,
+        "error: linear value `b` is never consumed in `fresh` (line 4)\n  `b` has type `Buf`, which is linear: drop it or return it (nothing is dropped for you)\n  note: declared ( -- &!usize )"
+    );
 }
 
 #[test]

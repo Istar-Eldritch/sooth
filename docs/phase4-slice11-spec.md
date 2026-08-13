@@ -244,10 +244,14 @@ if !is_combinator(word) {
 ```
 
 Phrased over the shared predicate (Decision 5), so the exemption covers a mono
-combinator, an `inline` word, and — by the fact that `check_word` is never
-reached for a poly word — a poly combinator too, uniformly. The rest of
-`check_word` (the input-slot variant-name check, `word_entry.rs:19-23`) still
-runs. See "Feature C" for why this is sound.
+combinator, an `inline` word, and a poly combinator too, uniformly. **Correction
+to the drafted rationale:** a poly word *does* reach `check_word` —
+`check_poly_combinator_standalone` (`src/check/poly.rs:164`) builds a concrete
+stand-in `WordDef` with `poly: None` and hands it to `check_word`. The stand-in
+keeps the quotation parameter and the `declares_inline` flag, so it satisfies
+`is_combinator` and takes the exemption by the same guard rather than by
+not arriving. The rest of `check_word` (the input-slot variant-name check,
+`word_entry.rs:19-23`) still runs. See "Feature C" for why this is sound.
 
 ### R6 — no lowering changes
 
@@ -425,6 +429,15 @@ happy path plus at least one error/edge case; every new test is mutation-tested
   and its caller reads the returned reference with the right value; the *same*
   word without `inline` still fails with the `check_reference_free_signature`
   message. The pair is the witness that Decision 5 is scoped to the splice.
+  Note the pair's `pick` must take **no** quotation: the recon-5 shape
+  (`&!Buf ~[ -- ]`) is a combinator with or without the keyword, so dropping
+  `inline` from *it* changes nothing and the pair would be a placebo. That shape
+  earns a separate positive golden instead — a reference output accepted on a
+  word that declares no `inline` at all is what discriminates R5's
+  `is_combinator` phrasing from a `declares_inline` one (Decision 5).
+- The caller's half of the positive witness writes through the returned
+  reference and reads the new value back out of its own struct, so the golden
+  fails if the reference points at anything but the caller's live local.
 - The surviving adversarial shape from Feature C (the linear-referent rejection)
   gets its own negative golden: an `inline` word borrowing-and-returning a
   reference to a linear callee-declared local is rejected by must-consume.
