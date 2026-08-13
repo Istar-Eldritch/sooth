@@ -35,8 +35,9 @@ pub(super) fn check_word(
     // capture/escape guards, the loop back-edge reference guard); a real
     // (non-combinator) word declaring a reference output is still rejected.
     if !is_combinator(word) {
-        check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+        check_reference_free_output(&word.name, &word.effect, structs, enums, arrays)?;
     }
+    check_reference_free_input(&word.name, &word.effect, structs, enums, arrays)?;
     match &word.body {
         WordBody::Terms { terms } => check_terms_word(
             word, enums, terms, env, arrays, cells, refs, structs, modules, dropped, poly,
@@ -113,14 +114,12 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
     Ok(())
 }
 
-/// The effect-signature half of the no-stored-reference rule: no declared
-/// **output** may transitively
-/// contain a reference (returning one would outlive the frame that owns the
-/// referent), and an **input** may only be a reference at the top level — a
-/// type that merely *contains* one nested inside an array or a cell is
-/// rejected there too, so the carve-out stays closed if a future aggregate
-/// constructor arrives.
-pub(super) fn check_reference_free_signature(
+/// The output half of the no-stored-reference rule: no declared **output** may
+/// transitively contain a reference (returning one would outlive the frame
+/// that owns the referent). This is the half R5 skips for a combinator: a
+/// spliced copy's locals become caller locals (`alpha_rename_locals`), so a
+/// combinator's returned reference cannot outlive the frame that owns it.
+pub(super) fn check_reference_free_output(
     name: &str,
     effect: &StackEffect,
     structs: &[StructDecl],
@@ -135,6 +134,23 @@ pub(super) fn check_reference_free_signature(
             ));
         }
     }
+    Ok(())
+}
+
+/// The input half of the no-stored-reference rule: an **input** may only be a
+/// reference at the top level -- a type that merely *contains* one nested
+/// inside an array or a cell is rejected there too, so the carve-out stays
+/// closed if a future aggregate constructor arrives. Unlike the output half,
+/// R5 does not skip this for a combinator: splicing does not change what a
+/// stored (aggregate-nested) reference would mean, so it stays unconditional
+/// in `check_word`.
+pub(super) fn check_reference_free_input(
+    name: &str,
+    effect: &StackEffect,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
     for slot in &effect.inputs {
         if !slot.ty.is_ref() && contains_reference(slot.ty, structs, enums, arrays) {
             return Err(format!(
@@ -144,6 +160,20 @@ pub(super) fn check_reference_free_signature(
         }
     }
     Ok(())
+}
+
+/// The combined signature check `check_extern_decls` (`declarations.rs`) uses
+/// for an `extern:` declaration, which has no splice to exempt and so always
+/// wants both halves.
+pub(super) fn check_reference_free_signature(
+    name: &str,
+    effect: &StackEffect,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    check_reference_free_output(name, effect, structs, enums, arrays)?;
+    check_reference_free_input(name, effect, structs, enums, arrays)
 }
 
 #[allow(clippy::too_many_arguments)]

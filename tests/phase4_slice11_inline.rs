@@ -399,6 +399,26 @@ fn inline_reference_to_linear_local_is_rejected() {
 }
 
 #[test]
+fn inline_reference_to_nonlinear_callee_local_is_accepted() {
+    // The adversarial shape `inline_reference_output_pair` does *not* cover:
+    // there the reference is derived from an *input* reference, so it is
+    // caller-rooted whether or not the word is spliced. Here the referent is a
+    // struct the callee itself declares and pushes fresh, non-linear (`u32`
+    // fields), so this is the shape that actually turns on
+    // `alpha_rename_locals`: post-splice, `b` is a caller local, so the
+    // returned reference into it survives past the (no longer existing)
+    // callee frame. `+!` through the reference and reading the new value back
+    // out proves it is not dangling.
+    let src = "type: P n u32 ;\n\
+               : fresh inline ( -- &!u32 ) 7 >u32 P | b | &!b &!P>n ;\n\
+               : main ( -- ) fresh | r | r @ >i64 . r 5 >u32 +! r @ >i64 . ;\n";
+    let (binary, stdout, code) = build_and_run("slice11-ref-callee-local", src);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "7\n12\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn repl_inline_word_is_retained_not_lowered() {
     // R7: the REPL's retention gate was `word_declares_quotation_parameter`, so
     // an `inline` word taking no quotation fell through to the ordinary
