@@ -56,6 +56,7 @@ use self::operators::*;
 use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
 use self::terms::check_terms;
+use self::terms::check_terms_relaxed;
 use self::word_entry::{check_reference_free_signature, check_word};
 use self::word_families::*;
 
@@ -1356,6 +1357,7 @@ fn check_literal_against_declared_effect(
     prov: &mut Provenance,
     scope: &mut Scope,
     poly: &mut PolyCtx,
+    granted: &HashSet<String>,
 ) -> Result<(), String> {
     let body = prov.quotations[id.0].body.clone();
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
@@ -1371,8 +1373,8 @@ fn check_literal_against_declared_effect(
     let mut fresh: Vec<Slot> = row.iter().map(|t| Slot::computed(*t)).collect();
     fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t)));
     let depth = scope.depth();
-    let result = check_terms(
-        &body, fresh, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+    let result = check_terms_relaxed(
+        &body, fresh, ctx, env, arrays, cells, refs, prov, scope, false, poly, granted, true,
     )?;
     // R12: a linear enclosing local the literal consumed (move-state changed
     // from `Live`).

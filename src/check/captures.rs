@@ -332,6 +332,7 @@ pub(super) fn materialize_quotation_at_boundary(
         prov,
         scope,
         poly,
+        &HashSet::new(),
     )?;
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the

@@ -236,6 +236,7 @@ pub(super) fn inline_combinator(
     prov: &mut Provenance,
     scope: &mut Scope,
     poly: &mut PolyCtx,
+    granted: &HashSet<String>,
 ) -> Result<Vec<Slot>, String> {
     let name = comb.word.name.as_str();
     // A polymorphic combinator (`each`/`map`/`fold`, or any `'T`-carrying
@@ -247,7 +248,7 @@ pub(super) fn inline_combinator(
     // check, so the two paths agree.
     let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
         Some(check_poly_combinator_args(
-            sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly,
+            sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly, granted,
         )?)
     } else {
         let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
@@ -280,6 +281,7 @@ pub(super) fn inline_combinator(
                         prov,
                         scope,
                         poly,
+                        granted,
                     )?;
                 } else if crate::ast::is_quotation_type(found.ty).is_some() {
                     // R21: forwarding an abstract quotation parameter. `found`
@@ -371,7 +373,7 @@ pub(super) fn inline_combinator(
     // not `ctx.module()` -- otherwise a library combinator disposing its own
     // resource gets attributed to whichever module happened to call it.
     let spliced_ctx = ctx.with_module(comb.word.module);
-    let result = check_terms(
+    let result = check_terms_relaxed(
         &renamed,
         stack,
         &spliced_ctx,
@@ -383,6 +385,8 @@ pub(super) fn inline_combinator(
         scope,
         splice_tail,
         poly,
+        granted,
+        true,
     );
     if let Some(saved) = saved_marker {
         prov.self_tail_combinator = saved;
@@ -424,6 +428,7 @@ fn check_poly_combinator_args(
     prov: &mut Provenance,
     scope: &mut Scope,
     poly: &mut PolyCtx,
+    granted: &HashSet<String>,
 ) -> Result<Subst, String> {
     let n = sig.inputs.len();
     if stack.len() < n {
@@ -479,7 +484,7 @@ fn check_poly_combinator_args(
             let is_inline = matches!(concrete, Type::InlineQuotation(_));
             check_literal_against_declared_effect(
                 id, eff, is_inline, &row, name, span, ctx, env, arrays, cells, refs, prov, scope,
-                poly,
+                poly, granted,
             )?;
         } else if crate::ast::is_quotation_type(found.ty).is_some() {
             // R21 (poly): a forwarded abstract quotation parameter, accepted

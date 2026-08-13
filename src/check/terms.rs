@@ -681,8 +681,17 @@ fn check_term(
                             no_combinator_overload_matches_error(ctx, span, name, candidates)
                         })?,
                 };
+                let granted = releasable_into(
+                    scope,
+                    base_depth,
+                    outer_releasable,
+                    &siblings[at + 1..],
+                    live,
+                    at,
+                );
                 return inline_combinator(
                     &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                    &granted,
                 );
             }
             // R5/R14: a call to a polymorphic word is intercepted before the
@@ -992,6 +1001,7 @@ fn check_term(
                                     prov,
                                     scope,
                                     poly,
+                                    &HashSet::new(),
                                 )?;
                                 check_literal_against_declared_effect(
                                     b,
@@ -1008,6 +1018,7 @@ fn check_term(
                                     prov,
                                     scope,
                                     poly,
+                                    &HashSet::new(),
                                 )?;
                                 // R23: the merged erased slot's surviving set is
                                 // the union of both arms' -- a fresh interned

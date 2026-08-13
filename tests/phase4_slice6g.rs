@@ -35,10 +35,44 @@ fn run_src(name: &str, src: &str) -> (String, i32) {
     )
 }
 
+/// An `import:` line for a committed library by *absolute* path, so a temp
+/// source built under `temp_dir()` resolves it regardless of cwd. Generalizes
+/// `combinators_import` (`tests/phase4_combinators.rs`), which is hardcoded to
+/// `lib/combinators.sth` and cannot be repointed at `lib/arrays.sth`.
+fn lib_import(qualifier: &str, lib_file: &str) -> String {
+    format!(
+        "import: {qualifier} \"{}/{lib_file}\" ;\n",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 fn check_error(src: &str) -> String {
     let tokens = sooth::lexer::lex(src).expect("lexing should succeed");
     let mut module = sooth::parser::parse(&tokens).expect("parsing should succeed");
     sooth::check::check(&mut module).expect_err("check should fail")
+}
+
+/// Write `src` (which carries its own `import:` line) to a temp file and
+/// build it through the driver, so a multi-module program actually resolves
+/// its import (unlike `check_ok`/`check_error`, which check a single parsed
+/// module and never see an imported word). `name` distinguishes the temp
+/// source per test (the goldens run in parallel).
+fn build_ok_with_import(name: &str, src: &str) {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let result = sooth::driver::build(&path);
+    std::fs::remove_file(&path).ok();
+    let binary = result.expect("build should succeed");
+    std::fs::remove_file(&binary).ok();
+}
+
+/// The reject twin of `build_ok_with_import`.
+fn build_err_with_import(name: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build(&path).expect_err("build should fail its check");
+    std::fs::remove_file(&path).ok();
+    err
 }
 
 /// The aliasing rejection every R1 golden expects, named identifiers and all:
@@ -212,4 +246,105 @@ fn binding_a_poly_local_named_after_a_builtin_is_rejected() {
         err.contains("`len`") && err.contains("collides with the callable name"),
         "expected the D5 collision wording naming `len`: {err}"
     );
+}
+
+// -- D1/R2: a combinator splice learns the same granting rule ---------------
+
+#[test]
+fn bound_array_passed_to_filter_is_accepted() {
+    // T-splice (P-splice). The identical aliasing shape the `times`/`call`/`if`
+    // doorways already grant, routed through a combinator splice instead:
+    // `filter` mutates the array in place through its own body-local name, and
+    // the caller's `a` is never mentioned again. Rejected pre-D1 (`aliased by
+    // a`), because `inline_combinator`'s body-check ran the plain `check_terms`
+    // -- the root entry point, which grants nothing -- instead of
+    // `check_terms_relaxed` with a `releasable_into`-computed grant. D1 is the
+    // whole fix here: `filter`'s own predicate literal `[ 4 > ]` never mentions
+    // the array, so R2's pass has nothing to do with this shape (M-D1 reds
+    // this test, M-R2 does not; see Q-witness).
+    build_ok_with_import(
+        "6g-splice",
+        &format!(
+            "{}\n\
+             : main ( -- )\n\
+             0 4 fill | a |\n\
+             a [ 4 > ] c::filter drop drop ;\n",
+            lib_import("c", "lib/combinators.sth")
+        ),
+    );
+}
+
+#[test]
+fn while_over_an_aliased_array_local_is_accepted() {
+    // T-while. `input` returns a fresh array via a producer word; `a` binds
+    // it, then `arr` re-binds it (arrays are `Copy`, so this duplicates the
+    // handle, not the storage -- `a` and `arr` now alias one region). `a` is
+    // never read again. `while`'s own body threads the loop predicate through
+    // `c::while`, writing `arr[i] = 9` for `i` in `0..4`, then prints
+    // `arr[0]`. Accepted only under D1+R2: reverting either reds it with the
+    // same `aliased by a` error (Q-witness) -- the literal-check pass (R2)
+    // sees the rebind directly in the literal it type-checks, and the
+    // body-splice pass (D1) re-checks the same literal against the real
+    // runtime slots once `while`'s own `p call` actually executes it.
+    let (out, code) = run_src(
+        "6g-while",
+        &format!(
+            "{}\n\
+             : input ( -- [i64 4] ) 0 4 fill | s | s ;\n\
+             : main ( -- )\n\
+             input | a |\n\
+             a | arr |\n\
+             0 [ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             &arr 0 >usize &> @ . ;\n",
+            lib_import("c", "lib/combinators.sth")
+        ),
+    );
+    assert_eq!(out, "9\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the_loop() {
+    // M-T-while-bounds variant 1: mention the original name `a` anywhere
+    // inside the while-literal (here, a no-op read at the top of the loop
+    // body). R1's `IMMORTAL_IN_BODY` marking correctly withholds the grant, a
+    // name mentioned anywhere in a back-edge body is never dead there. Proves
+    // T-while is not accidentally over-permissive.
+    let err = build_err_with_import(
+        "6g-while-read",
+        &format!(
+            "{}\n\
+             : input ( -- [i64 4] ) 0 4 fill | s | s ;\n\
+             : main ( -- )\n\
+             input | a |\n\
+             a | arr |\n\
+             0 [ | i | &a 0 >usize &> @ drop &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             &arr 0 >usize &> @ . ;\n",
+            lib_import("c", "lib/combinators.sth")
+        ),
+    );
+    assert_aliased_by(&err, "arr", "a");
+}
+
+#[test]
+fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_the_loop() {
+    // M-T-while-bounds variant 2: use `a` again in `main` after the loop. The
+    // ordinary `references(rest, name)` rule correctly excludes it from
+    // `releasable_into`'s output. Proves T-while is not accidentally
+    // over-permissive.
+    let err = build_err_with_import(
+        "6g-while-after",
+        &format!(
+            "{}\n\
+             : input ( -- [i64 4] ) 0 4 fill | s | s ;\n\
+             : main ( -- )\n\
+             input | a |\n\
+             a | arr |\n\
+             0 [ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             &arr 0 >usize &> @ .\n\
+             &a 0 >usize &> @ drop ;\n",
+            lib_import("c", "lib/combinators.sth")
+        ),
+    );
+    assert_aliased_by(&err, "arr", "a");
 }
