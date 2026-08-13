@@ -820,13 +820,9 @@ fn check_term(
             // each arm is also a block, so a name it binds is gone by the join
             // and the two arms' name sets agree there again.
             let depth = scope.depth();
-            // D6: a name safe past this `if` term (no use in the remaining
-            // sibling terms, composed with whatever this invocation was
-            // itself granted) is safe inside *either* arm: an arm's own use
-            // of a sibling arm's-only names is invisible here (it lives
-            // inside `siblings[at]`, not after it), and an arm executes
-            // exactly once, so it may die at its own last use inside
-            // (`back_edge = false`).
+            // D6: `releasable_into` (see its doc) decides what's safe to grant
+            // into either arm; an arm executes exactly once, so it may die at
+            // its own last use inside (`back_edge = false`).
             let granted = releasable_into(
                 scope,
                 base_depth,

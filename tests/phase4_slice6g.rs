@@ -2,10 +2,15 @@
 //! loop-aware (R1), and combinator splices learn the same granting rule the
 //! `call`/`times`/`if` doorways already follow.
 //!
-//! R1's goldens are behaviour *changes*: each reject below compiles on the
-//! pre-6g compiler, and the first and last of them run and print a silently
-//! wrong value (a mutation through one name visible through another across a
-//! loop back-edge). `releasable_into` asked only "is this name used in the
+//! The four ancestor-grant rejects below (T-wrap, T-danger, T-bcall, T-d2)
+//! are behaviour *changes*: each compiles on the pre-6g compiler. The first
+//! two (T-wrap, T-danger) are genuine wrong-value witnesses -- they run and
+//! print `0` then `9`, a mutation through one name visible through another
+//! across a loop back-edge. The other two (T-bcall, T-d2) are the accepted
+//! cost of R1's conservative approximation: sound programs rejected because
+//! the checker cannot distinguish "mentioned inside the granted-into term"
+//! from "read across the edge". T-doorway-no is pre-existing behaviour,
+//! unchanged by R1. `releasable_into` asked only "is this name used in the
 //! remaining sibling terms", which is the wrong question inside a body that
 //! wraps around to its own first term.
 
