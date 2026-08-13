@@ -24,8 +24,6 @@ mod types;
 
 pub(crate) use self::destructors::synthesize_aggregate_destructors;
 use self::destructors::PathStep;
-#[cfg(test)]
-use self::destructors::{recursive_disposal_path, synthesize_struct_destructor};
 use self::func_builder::{lower_materialized, lower_word_parts, word_ret_ty, EnvPlan, FuncBuilder};
 
 use self::types::QuotId;
@@ -43,22 +41,14 @@ pub(crate) use self::layout::{
 // `repl.rs` test constructs one); it is still part of the historical `ir::*`
 // re-export contract (spec surface list), so it stays reachable for tests
 // without tripping `unused_imports` on a plain (non-test) build.
+pub(crate) use self::driver::{collect_quot_sigs, lower_instantiation, lower_word};
+pub use self::driver::{lower, lower_line};
 #[cfg(test)]
 pub(crate) use self::layout::VariantLayout;
 use self::layout::{
     cell_drop_symbol, enum_drop_symbol, field_is_linear, scalar_size_align, struct_drop_symbol,
     EnumWord, StructWord,
 };
-// `build_registries_ww`/`scalar_size_align_ww` have no non-test caller in
-// `ir.rs` today.
-#[cfg(test)]
-use self::layout::{build_registries_ww, scalar_size_align_ww};
-
-pub(crate) use self::driver::{collect_quot_sigs, lower_instantiation, lower_word};
-pub use self::driver::{lower, lower_line};
-
-#[cfg(test)]
-use self::driver::subst_polytype;
 
 /// A shared empty instantiation table for lowering paths with no polymorphic
 /// call sites (the REPL, D2; destructor synthesis; unit tests), so

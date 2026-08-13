@@ -342,9 +342,8 @@ impl Structs {
     /// Build just the struct registry (no enums). A thin wrapper over
     /// `build_registries` for struct-only callers; a struct with an enum field
     /// needs the full `build_registries` (its enums must be present to size
-    /// the field, D9). Test-only: `pub(super)` makes it invisible to the lib's
-    /// public-API dead-code exemption, and its only caller is `#[cfg(test)]`.
-    #[allow(dead_code)]
+    /// the field, D9). Test-only: its only caller is `test_helpers::structs_of`.
+    #[cfg(test)]
     pub(super) fn from_structs(structs: &[StructDecl]) -> Structs {
         build_registries(structs, &[], &[], &[], &[]).0
     }

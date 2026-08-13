@@ -1,5 +1,6 @@
 //! Shared test helpers for the `ir` module tree.
 
+use super::destructors::recursive_disposal_path;
 use super::*;
 use crate::ast::{Line, BOOL_ENUM_ID};
 use crate::check::check;
