@@ -1751,7 +1751,7 @@ then find out what the compiler owes it.
    form into a combinator splice — 10b for every `times` loop, 10c for every `if` in the
    language — so fixing this first keeps neither slice from silently multiplying a
    pre-existing, already-load-bearing false rejection across most existing Sooth code.
-7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
+7. **Functions as values: closures.** ✅ done. The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
    array of quotations, a strategy in a struct field, and genuine non-inlined higher-order
@@ -1862,7 +1862,7 @@ then find out what the compiler owes it.
    table of same-frame capturing closures against a hand-spliced twin reading the same elements
    directly.
 
-8. **Ad-hoc dispatch: static overloading.** One word name, several statically-known input
+8. **Ad-hoc dispatch: static overloading.** ✅ done. One word name, several statically-known input
    types (`+` over `i64`/`f64`/`Vec2`). After slice 1 because a resolution rule defined over
    concrete types is a rule that gets rewritten once type variables exist.
    **Split 8a/8b, the same reason 7 split into 7a/7b: one piece is bounded, the other is the

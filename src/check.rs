@@ -838,7 +838,7 @@ pub(crate) fn infer_line(
     // phantom the spill would marshal. Reject a quotation left here.
     if final_stack.iter().any(|s| s.quot.is_some()) {
         return Err(
-            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (a runtime quotation value is slice 7)".to_string(),
+            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (a runtime quotation value exists since slice 7a/7b, but the REPL line boundary is not yet a materialization boundary, so nothing has been pushed for the session to carry)".to_string(),
         );
     }
     // The sixth position of the no-stored-reference rule: the session's
