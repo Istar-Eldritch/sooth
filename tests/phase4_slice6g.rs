@@ -6,13 +6,13 @@
 //! are behaviour *changes*: each compiles on the pre-6g compiler. The first
 //! two (T-wrap, T-danger) are genuine wrong-value witnesses -- they run and
 //! print `0` then `9`, a mutation through one name visible through another
-//! across a loop back-edge. The other two (T-bcall, T-d2) are the accepted
-//! cost of R1's conservative approximation: sound programs rejected because
-//! the checker cannot distinguish "mentioned inside the granted-into term"
-//! from "read across the edge". T-doorway-no is pre-existing behaviour,
-//! unchanged by R1. `releasable_into` asked only "is this name used in the
-//! remaining sibling terms", which is the wrong question inside a body that
-//! wraps around to its own first term.
+//! across a loop back-edge, because `releasable_into` asked only "is this
+//! name used in the remaining sibling terms", which is the wrong question
+//! inside a body that wraps around to its own first term. The other two
+//! (T-bcall, T-d2) are the accepted cost of R1's conservative approximation:
+//! sound programs rejected because the checker cannot distinguish "mentioned
+//! inside the granted-into term" from "read across the edge". T-doorway-no
+//! is pre-existing behaviour, unchanged by R1.
 
 /// Compile and run `src`, returning stdout and the exit code. `name`
 /// distinguishes the temp source per test (the goldens run in parallel).

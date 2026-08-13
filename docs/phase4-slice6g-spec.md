@@ -28,7 +28,10 @@ re-exported via `check.rs`'s `use self::terms::check_terms;` at `src/check.rs:58
 `check.rs`) both need to call `check_terms_relaxed` from outside `terms.rs`. **Fix: bump
 `check_terms_relaxed` to `pub(super)` and add a sibling `use self::terms::check_terms_relaxed;`
 next to the existing `check_terms` import in `check.rs`**, mirroring the exact pattern
-`check_terms` already uses. No other visibility change is needed:
+`check_terms` already uses. **The import must land in the same change as R2's call site, not
+earlier: until `check.rs` actually calls the function the import is dead and `cargo clippy -- -D
+warnings` fails it as `unused import`.** The `pub(super)` bump is independent and can land alone.
+No other visibility change is needed:
 `live`/`at`/`base_depth`/`outer_releasable`/`siblings` are already in scope at all three
 `releasable_into` call sites and at the `inline_combinator` call site in `terms.rs` (same
 `check_term` function), so R1's added `live`/`at` parameters and D1's `granted`-computation both
@@ -151,20 +154,29 @@ same set.
   the one call site on the wrong side of 6f's contract; the three correct sites are the pattern.
 
 - **D2 (from the brief).** No change to `Moves`, `aliasing_origin` (`src/check/engine.rs:1067`),
-  or Copy-array move-blindness. `fill` is the only array constructor and rejects a linear element
-  outright, so every array is `Copy`; a `Copy` local never enters the move map, so `moved_site`
-  is `None` forever and `aliasing_origin`'s `moved_site(&b.name).is_none()` filter can never
-  exclude an array. This is a permanent property of the language, not a gap.
+  or Copy-array move-blindness. Every array is `Copy` because `check_no_linear_array_elements`
+  (`src/check/declarations.rs:587`, invoked at `src/check/declarations.rs:495`) rejects, at
+  declaration/registry time, any array *type* whose element is non-`Copy` — independent of which
+  constructor built the value (post-6h there are two: `fill` and the raw `[ Type ; Count ]`
+  constructor). So a `Copy` local never enters the move map, `moved_site` is `None` forever, and
+  `aliasing_origin`'s `moved_site(&b.name).is_none()` filter can never exclude an array. This is a
+  permanent property of the language, not a gap.
 
 - **D3 (from the brief).** `lib/arrays.sth`'s header paragraph blaming aliasing for the
   inline-everything/no-`while` shape (`lib/arrays.sth:18`–`28`, the block "`sort`'s merge logic
   is inlined … Inlining and dropping `while` are the only shapes found that dodge both.") is
   deleted, its rationale retested and found false. **`sort`'s code is not restructured**, and
   **`sort`'s own per-word doc comment justifying a fixed-bound `times` over stopping early on the
-  `u32` length bound is unrelated to aliasing and must stay.** `lib/arrays.sth` is currently
-  untracked (`git status`: `?? lib/arrays.sth`); if it has not landed in a tracked commit when 6g
-  starts, the `sort` dogfood golden and this edit move to whichever commit brings it in, and
-  nothing else in the slice is affected.
+  `u32` length bound is unrelated to aliasing and must stay.**
+
+  **Blocker, measured: `lib/arrays.sth` does not exist.** Not tracked on any branch
+  (`git log --all -- lib/arrays.sth` is empty), not untracked in the worktree; `lib/` holds only
+  `combinators.sth`. So D3's paragraph deletion and T-sort are both unbuildable as written, and
+  the line/paragraph anchors above are unverifiable. Phase 4 must first establish whether the file
+  is arriving: if it is not in the tree when Phase 4 starts, **drop D3 and T-sort from the slice**
+  and record that the dogfood is unmeasured, rather than authoring an `arrays.sth` (out of scope,
+  and the deliverable is the deletion of a claim, not new library code). Nothing else in the slice
+  depends on either.
 
 - **D4 (from the brief).** Both new relaxed calls pass `back_edge = true`.
   - At `check_literal_against_declared_effect` this is **required for soundness**: the terms
@@ -193,10 +205,13 @@ same set.
   (`src/check/poly.rs:316`) has no `PolyCtx` parameter at all: reaching `poly.env`/`poly.combinators`
   there means changing the signature of `pub fn check_poly_body` and editing `src/repl.rs`, which
   is out of this slice's sanctioned files. **Recorded gap:** after 6g, a polymorphic word may still
-  bind a local named after a combinator or poly word — this compiles:
+  bind a local named after a combinator or poly word — names the poly arm does **not** check,
+  since combinators/poly words are only in `poly.combinators`/`poly.env`, unreachable from
+  `poly_term`. A builtin- or `env`-word-named bind (e.g. `| len |`, `len` being a builtin) *is*
+  caught by the poly arm; the gap is specifically a combinator/poly-word name, so this compiles:
 
   ```sooth
-  : pick ( 'T 'T -- 'T ) | len | | other | other drop len ;
+  : pick ( 'T 'T -- 'T ) | filter | | other | other drop filter ;
   ```
 
   Nobody has been able to construct a wrong-value witness through the poly arm — the hygiene
@@ -351,23 +366,59 @@ longer the deciding cost; the decision now rests on keeping the byte-for-byte cl
 and not touching a corpus-pinned source.) The example's comment is left as-is: its code genuinely
 still binds-through-producer, so the comment still accurately describes the code.
 
-**Q-witness — which accept goldens witness D1 versus R2?** Decided by recon 8: D1 is the body
-splice, R2 is the argument-path literal check, and the `while`-in-a-combinator shape rejects at R2
-*before* the body splice runs. So:
+**Q-witness — which accept goldens witness D1 versus R2?** Decided by recon 8, and empirically
+confirmed by hand-implementing R1+D1+R2 and building every combination (see the verification note
+below): D1 is the body splice, R2 is the argument-path literal check, and for any combinator over
+an **aliased local** both passes see the same name, so **T-while needs both, and no clean
+single-decision witness for R2 exists.**
 
 - **T-splice** (P-splice: `filter` over a bound array) needs only the body grant. Reverting D1
-  turns it red; reverting R2 leaves it green. It is the D1 witness.
-- **T-while** (a combinator whose body nests `c::while` with the mutable borrow inside the
-  `while`'s quotation, over caller-bound arrays) rejects at the literal check without R2. Reverting
-  R2 turns it red; reverting D1 does not reach it. It is the R2 witness.
+  turns it red; reverting R2 **leaves it green** (verified: `filter`'s own predicate literal
+  `[ 4 > ]` never mentions the array, so `check_literal_against_declared_effect`'s pass has
+  nothing to do with it). It is the clean D1 witness.
+- **T-while** (`while` over an array bound to a local, then re-bound to a second local the loop
+  actually borrows) rejects at **both** passes without the corresponding fix: the literal-check
+  pass (`check_literal_against_declared_effect`, R2) sees the rebind directly in the literal it
+  type-checks; the body-splice pass (`while`'s own prewritten `p call`, spliced by
+  `inline_combinator`, D1) re-checks the same literal against the real runtime slots once it
+  actually executes. Reverting **either** reds it.
 
-Each reversion turns a *different, named* test red, so R2 is not redundant with D1. **But the
-converse separation is not clean and the spec must say so:** every `while`-with-a-borrowing-literal
-shape goes red under a D1 revert *too*, because `while` is itself a combinator and therefore
-traverses the argument path and its own body splice. No discriminating shape is known to exist.
-**T-while pins D1+R2 jointly**; R2's non-redundancy rests on the half that *does* discriminate
-(reverting R2 with D1 present turns T-while red while T-splice stays green), not on a clean
-separation.
+R2 is not redundant with D1 despite this: reverting R2 alone (D1 present) still turns T-while red
+while **T-splice stays green** — R2's own pass is the one that actively rejects T-while when
+unrelaxed, it is simply never the *only* pass in play for this shape, since `while` is itself a
+combinator and its own body-splice (D1) touches the same literal a second time. No shape is known
+to exist where R2 alone (D1 absent) accepts something D1 alone (R2 absent) rejects, or vice versa,
+for this bug class — the two passes are structurally coupled for any combinator literal. **T-while
+pins D1+R2 jointly; its non-redundancy argument rests on the half that does discriminate against
+T-splice, not on a clean separation from D1.**
+
+**Verification note.** R1+D1+R2 were hand-implemented and built in a scratch tree (not merely read)
+specifically to find this witness, after an earlier draft's constructed T-while program turned out
+to already compile clean on HEAD (not a witness of anything). The program below was confirmed by
+actually building all four configurations — true HEAD, full R1+D1+R2, R2 reverted alone, D1 reverted
+alone — and matches every claim above exactly; see the mutation criteria below for the two
+confirming variants (M1: mentioning the alias anywhere in the literal reds it, per R1; M2: using the
+original name again after the loop reds it, per the ordinary `references(rest, name)` rule).
+
+The T-while program:
+
+```sooth
+\ T-while: `input` returns a fresh array via a producer word (so the harness's
+\ absolute-path import works the same way T-splice's does); `a` binds it, then
+\ `arr` re-binds it (arrays are Copy, so this duplicates the handle, not the
+\ storage -- `a` and `arr` now alias one region). `a` is never read again. The
+\ loop writes `arr[i]=9` for i in 0..4 via `c::while`, then prints `arr[0]`.
+\ Accepts only under D1+R2; reverting EITHER reds it with the exact same
+\ `aliased by a` error (verified) -- pins D1+R2 JOINTLY, not R2 alone (Q-witness).
+\ Builds, prints 9.
+import: c "<lib>/combinators.sth" ;   \ absolute path supplied by the harness helper
+: input ( -- [i64 4] ) 0 4 fill | s | s ;
+: main ( -- )
+  input | a |
+  a | arr |
+  0 [ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop
+  &arr 0 >usize &> @ . ;
+```
 
 **Q-sort-array — which of the two arrays `sort` returns holds the sorted result?** The dogfood
 golden must say. `sort` returns `ra rs` (`lib/arrays.sth:124`): sorted first, leftover scratch on
@@ -376,6 +427,32 @@ top-of-stack array after `a::sort` reads the scratch and prints zeros, which loo
 fix and invites a golden written to expect zeros. Measured: fed by producer words, `sort` prints
 `1 2 3 4`; the same call with both arrays bound to locals fails today with `cannot borrow cs__inl0
 mutably: it is aliased by s0`, which is the bug this slice fixes.
+
+The T-sort program, constructed from `sort`'s signature and `examples/array_totals_hand.sth`'s
+array-write idiom (the Phase-4 implementer must confirm it prints `1 2 3 4`; the harness supplies the
+absolute import path via the lib-path helper of [Sanctioned files](#sanctioned-files)):
+
+```sooth
+\ T-sort: data and same-length scratch arrays BOUND TO LOCALS before the call —
+\ that binding is exactly what fails today (`aliased by s0`) and what 6g fixes.
+\ `sort` returns `ra rs` (sorted deeper, scratch on top): drop the scratch `rs`,
+\ read the sorted `ra`. Expects 1 2 3 4.
+import: a "<lib>/arrays.sth" ;   \ absolute path supplied by the harness helper
+: main ( -- )
+  0 4 fill | d |
+  &!d 0 >usize &!> 4 !
+  &!d 1 >usize &!> 2 !
+  &!d 2 >usize &!> 1 !
+  &!d 3 >usize &!> 3 !
+  0 4 fill | s |
+  d s [ | x y | x y - ] a::sort
+  | ra rs | rs drop
+  &ra 0 >usize &> @ .
+  &ra 1 >usize &> @ .
+  &ra 2 >usize &> @ .
+  &ra 3 >usize &> @ .
+  ra drop ;
+```
 
 **Q-order — ordering of D5 against D1/R2.** D5 is what makes D4's splice-side argument hold, so it
 lands **before** the relaxation (Phase 2, ahead of Phase 3's D1/R2). R1 lands **first** (Phase 1),
@@ -408,10 +485,11 @@ does not touch the R1 soundness argument.)
 
 ## Mechanism
 
-1. `check_terms_relaxed` (`src/check/terms.rs:50`) is bumped from bare `fn` to `pub(super)`, and
-   `check.rs` gains `use self::terms::check_terms_relaxed;` beside its existing
-   `use self::terms::check_terms;` (`src/check.rs:58`). No signature change to `check_terms`,
-   `check_terms_relaxed`, or `Liveness`.
+1. `check_terms_relaxed` (`src/check/terms.rs:50`) is bumped from bare `fn` to `pub(super)`. No
+   signature change to `check_terms`, `check_terms_relaxed`, or `Liveness`. The matching
+   `use self::terms::check_terms_relaxed;` in `check.rs`, beside its existing
+   `use self::terms::check_terms;` (`src/check.rs:58`), belongs to **step 4** — it is an unused
+   import until R2's call site exists, and unused imports are a `clippy -- -D warnings` error.
 2. `releasable_into` (`src/check/engine.rs:811`) gains `live: &Liveness, at: usize` and R1's split
    filter. Its three existing call sites (`call` `src/check/terms.rs:288`, `times`
    `src/check/terms.rs:376`, `if` `src/check/terms.rs:818`) and the new fourth already have both in
@@ -423,8 +501,8 @@ does not touch the R1 soundness argument.)
    exactly as its three neighbours do, and passes the result as `granted`.
 4. `check_poly_combinator_args` (`src/check/combinators.rs:414`) and
    `check_literal_against_declared_effect` (`src/check.rs:1318`) gain the same `granted` parameter;
-   the latter's `check_terms` (`src/check.rs:1348`) becomes `check_terms_relaxed(..., granted,
-   true)`. Its three non-combinator callers (`src/check/captures.rs:320`, `src/check/terms.rs:954`,
+   `check.rs` gains `use self::terms::check_terms_relaxed;` (step 1) and the latter's `check_terms`
+   (`src/check.rs:1348`) becomes `check_terms_relaxed(..., granted, true)`. Its three non-combinator callers (`src/check/captures.rs:320`, `src/check/terms.rs:954`,
    `src/check/terms.rs:970`) pass `&HashSet::new()`.
 5. The mono `TermKind::Bind` arm (`src/check/terms.rs:141`) rejects a local name that is a builtin
    (`is_builtin_word_name`, `src/check/declarations.rs:101`), a word in `env`, a poly word
@@ -446,17 +524,25 @@ One new diagnostic (D5). No lowering, IR, or `Type` change.
 - `src/check/combinators.rs` — `inline_combinator` and `check_poly_combinator_args` gain `granted`;
   the body-splice `check_terms` (`:374`) becomes `check_terms_relaxed(..., granted, true)`.
 - `src/check/poly.rs` — D5 at the poly `Bind` arm (`:333`), builtins/`env` only.
-- `src/check.rs` — add `use self::terms::check_terms_relaxed;`; `check_literal_against_declared_effect`
-  gains `granted` and its `check_terms` (`:1348`) becomes `check_terms_relaxed(..., granted, true)`.
-- `tests/phase4_slice6g.rs` (new) — the goldens below. Reuse the absolute-path import helper pattern
-  from `tests/phase4_combinators.rs:69` (`combinators_import`), because `run_src` writes the source
-  under `temp_dir()` so a relative `import:` does not resolve; the `sort` dogfood needs the same
-  helper pointed at `lib/arrays.sth`.
+- `src/check.rs` — `check_literal_against_declared_effect` gains `granted` and its `check_terms`
+  (`:1348`) becomes `check_terms_relaxed(..., granted, true)`, in the same change as the
+  `use self::terms::check_terms_relaxed;` import (unused earlier, so clippy-fatal earlier).
+- `tests/phase4_slice6g.rs` (new) — the goldens below. `combinators_import`
+  (`tests/phase4_combinators.rs:69`) builds an absolute-path `import:` line because `run_src` writes
+  the source under `temp_dir()` so a relative `import:` does not resolve — but it is **hardcoded** to
+  `"{}/lib/combinators.sth"` and cannot be repointed at `lib/arrays.sth` as-is. Phase 3/4 add a
+  lib-path-parameterized version (e.g. `fn lib_import(qualifier, lib_file)` generalizing the existing
+  one, or a second `arrays_import` mirroring its shape) so T-sort can import `lib/arrays.sth` while
+  T-splice/T-while import `lib/combinators.sth`.
 - `lib/arrays.sth` — delete only the aliasing-workaround paragraph (`:18`–`28`, D3). No code change;
-  `sort`'s fixed-bound-`times` rationale stays. (Untracked; see D3.)
-- `ROADMAP.md` — mark 6g implemented; correct the two stale texts named in the brief: the "Next
-  action" pointer (`ROADMAP.md:589`, still reads "Phase 4 Slice 10a"), and the 6g entry's
-  `self_tail`-conditioned `back_edge` that D4 rejects (constant `true` is correct).
+  `sort`'s fixed-bound-`times` rationale stays. (**Does not exist in this tree; see D3.**)
+- `ROADMAP.md` — mark 6g implemented; correct the stale texts named in the brief: the "Next
+  action" pointer (`ROADMAP.md:608`, still reads "Phase 4 Slice 10a"); the 6g entry's
+  `self_tail`-conditioned `back_edge` that D4 rejects (`ROADMAP.md:1719`, the 6g entry starts
+  `ROADMAP.md:1691`; constant `true` is correct); and the 6g entry's stale "no other array
+  constructor exists" claim (`ROADMAP.md:1699`), superseded post-6h by D2's reworded reasoning
+  (Copy-ness comes from `check_no_linear_array_elements`, not from `fill` being the sole
+  constructor).
 
 ## Exit criteria (goldens in `tests/phase4_slice6g.rs`)
 
@@ -469,16 +555,17 @@ One new diagnostic (D5). No lowering, IR, or `Type` change.
 | T-danger | `read_and_mutate_inside_a_looped_grant_is_an_error` (danger) | reject | 1 | `aliased by`. **Behaviour change**: accepted today, runs and prints `0` then `9` |
 | T-nest2 | `two_level_execute_once_grant_still_accepted` (P-nest2) | accept | 1 | builds, prints `9`. Discriminates `at + 1` from `at` (the `at` form rejects it) |
 | T-doorway-ok | `times_doorway_grants_the_bound_alias` (P-times-accept) | accept | 1 | builds, prints `2` |
-| T-doorway-no | `later_use_withholds_the_times_grant` (P-times-reject) | reject | 1 | `aliased by a` |
+| T-doorway-no | `later_use_withholds_the_times_grant` (P-times-reject) | reject | 1 | `aliased by a`. **Pre-existing-behaviour regression guard, not a 6g pin**: the `references(rest, "a")` rule that withholds the times-doorway grant on a later use is unchanged by R1, so no mutation in [Mutation-required criteria](#mutation-required-criteria) reds it. It guards the doorway boundary against future drift; it does not pin anything 6g introduces. |
 | T-shadow | `binding_a_local_named_after_a_builtin_is_rejected` (`len`) | reject | 2 | D5 diagnostic naming the collided builtin. **Behaviour change**: accepted today, prints `1` silently |
 | T-splice | `bound_array_passed_to_filter_is_accepted` (P-splice) | accept | 3 | builds. **D1 witness** |
-| T-while | `while_nested_in_a_combinator_body_over_bound_arrays_is_accepted` | accept | 3 | builds, prints the copied element. **R2 witness (pins D1+R2 jointly; see Q-witness)** |
+| T-while | `while_over_an_aliased_array_local_is_accepted` | accept | 3 | builds, prints `9`. **Joint D1+R2 witness (reverting either reds it with the same `aliased by` error; see Q-witness)** |
 | T-sort | `sort_called_with_bound_array_locals_runs` | accept | 4 | `lib/arrays.sth`'s shipped `sort` over a bound array + comparator; reads the sorted array (`ra`, not the scratch `rs`) and prints `1 2 3 4` |
 | T-green | whole suite green | regression | 1–4 | `cargo fmt --check && cargo clippy -- -D warnings && cargo test` |
 | T-roadmap | ROADMAP 6g implemented; both stale texts corrected | doc | 4 | prose |
 
 T-sort is the dogfood and the honest measure of the bug's cost: today you cannot call the library's
-own `sort` on arrays you have named.
+own `sort` on arrays you have named. It is also **blocked**: `lib/arrays.sth` is absent from the
+tree (see D3).
 
 ## Mutation-required criteria
 
@@ -514,14 +601,25 @@ compile** — the Phase 1 witnesses use no combinator, so they compile in an R1-
   compiles and prints `1` again (the shadowing silent wrong value). Assert the value `1`, not just
   "compiles".
 - **M-D1 (Phase 3).** Revert `inline_combinator`'s body-check to plain `check_terms` → **T-splice**
-  red (the recon-1 rejection is raised inside the spliced body, at `filter`'s own `&!arr`).
-  **T-while** must stay green under this reversion; if it goes red too, it is pinning R2 as well
-  (recon 8: `while` traverses both paths) and must say so in its own test comment. This is the
-  brief's asked-for mutation test.
+  red (the recon-1 rejection is raised inside the spliced body, at `filter`'s own `&!arr`) **and**
+  **T-while** red (verified: `while`'s own prewritten body re-checks the caller's literal against
+  the real runtime slots via its internal `p call`, gated by this same body-splice grant). Do not
+  claim T-while stays green here — it does not, and an earlier draft's claim that it did was wrong.
 - **M-R2 (Phase 3).** Revert `check_literal_against_declared_effect` to plain `check_terms` →
-  **T-while** red and **T-splice** green. Both halves matter: without the second, R2 looks redundant
-  with D1; without the first, M-R2 could pass by accident. This is the half of Q-witness that
-  *does* discriminate.
+  **T-while** red and **T-splice green** (verified: `filter`'s own predicate literal never mentions
+  the array, so this pass has nothing to reject there). Both halves matter: without the second, R2
+  looks redundant with D1; without the first, M-R2 could pass by accident. T-splice staying green is
+  the half of Q-witness that *does* discriminate R2 from D1 — T-while going red under *both*
+  M-D1 and M-R2 is expected and correct, not a sign either mutation is redundant.
+- **M-T-while-bounds (Phase 3, T-while's own soundness boundary, not a revert).** Two variants of
+  T-while's own source, built and confirmed against the full R1+D1+R2 tree, must both still
+  **reject**, proving the accept golden is not accidentally over-permissive: (1) mention the
+  original name (`a`) anywhere inside the while-literal (e.g. read it once, mid-loop) — R1's
+  `IMMORTAL_IN_BODY` marking correctly withholds the grant, since a name mentioned anywhere in a
+  back-edge body is never dead there; (2) use `a` again in `main` after the loop — the ordinary
+  `references(rest, name)` rule correctly excludes it from `releasable_into`'s output. Both keep
+  rejecting with the same `aliased by` error under the full fix; if either newly accepts, the grant
+  computation has become unsound, not merely stricter.
 - **M-compose (Phase 3, the phasing trap).** R1 lands in Phase 1 and D1 in Phase 3, so a
   composition failure would not surface for two phases. Build R1+D1+R2 together and assert: the
   splice shape (T-splice) accepts, the `sort` dogfood (T-sort) accepts and sorts, recon 9 (T-wrap)
@@ -557,8 +655,8 @@ folded in above.
 
 ## Phased delivery
 
-**Phase 1 (hard) — R1, the tightening, alone.** Bump `check_terms_relaxed` to `pub(super)` and add
-the `check.rs` import (harmless ahead of Phase 3, and it keeps Phase 3 a pure call-site change);
+**Phase 1 (hard) — R1, the tightening, alone.** Bump `check_terms_relaxed` to `pub(super)` — the
+`check.rs` import waits for Phase 3, which is the first phase with a call site there;
 `releasable_into` gains `live`/`at` and the `at + 1` split filter; the three existing call sites are
 updated; U1 unit test; T-wrap / T-bcall / T-d2 / T-danger / T-doorway-no reject goldens; T-nest2 /
 T-doorway-ok accept goldens; mutations M-R1-full, M-R1-index, M-U1. Lands first and independently:
@@ -573,23 +671,28 @@ construction. Measured blast radius (brief) is zero, so no existing golden chang
 
 **Phase 3 (standard) — D1 + R2, the relaxation.** `granted` threaded through `inline_combinator`,
 `check_poly_combinator_args`, `check_literal_against_declared_effect`; both `check_terms` calls
-become `check_terms_relaxed(..., granted, true)`; T-splice (D1 witness) and T-while (R2 witness,
-pins D1+R2 jointly) accept goldens; mutations M-D1, M-R2, M-compose. T-wrap / T-bcall / T-d2 /
-T-danger / T-doorway-no / T-shadow must stay red across this phase.
+become `check_terms_relaxed(..., granted, true)`; `check.rs` gains
+`use self::terms::check_terms_relaxed;` here, with its first call site; T-splice (clean D1 witness) and T-while (joint
+D1+R2 witness, reds under either revert) accept goldens; mutations M-D1, M-R2,
+M-T-while-bounds, M-compose. T-wrap / T-bcall / T-d2 / T-danger / T-doorway-no / T-shadow must
+stay red across this phase.
 
-**Phase 4 (standard) — dogfood, D3, docs.** T-sort over `lib/arrays.sth`'s shipped `sort` with bound
+**Phase 4 (standard) — dogfood, D3, docs.** **Start by checking whether `lib/arrays.sth` exists; it
+does not as of Phase 1, and D3 says to drop T-sort and the paragraph deletion if it is still absent.**
+If present: T-sort over its shipped `sort` with bound
 array locals (absolute-path import helper), reading the sorted array `ra` not the scratch `rs`;
 delete the stale aliasing-workaround paragraph in `lib/arrays.sth` (`:18`–`28`); correct ROADMAP's
-"Next action" pointer (`:589`) and the 6g entry's stale `self_tail`-conditioned `back_edge` text;
-mark 6g implemented (T-roadmap).
+"Next action" pointer (`ROADMAP.md:608`), the 6g entry's stale `self_tail`-conditioned `back_edge`
+text (`ROADMAP.md:1719`), and the 6g entry's stale "no other array constructor exists" claim
+(`ROADMAP.md:1699`) when that entry is rewritten; mark 6g implemented (T-roadmap).
 
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "releasable_into loop-aware grant with at+1 index; check_terms_relaxed to pub(super); unit test; four reject and two accept goldens (no combinator, R1-only tree); mutations M-R1-full/M-R1-index/M-U1", "difficulty": "hard" },
+    { "phase": 1, "focus": "releasable_into loop-aware grant with at+1 index; check_terms_relaxed to pub(super) only, no check.rs import (unused there until phase 3, clippy-fatal); unit test; four reject and two accept goldens (no combinator, R1-only tree); mutations M-R1-full/M-R1-index/M-U1", "difficulty": "hard" },
     { "phase": 2, "focus": "D5 reject a local name colliding with a callable at both Bind arms (mono builtin/word/poly/combinator, poly builtin/word only); T-shadow reject golden; mutation M-D5", "difficulty": "standard" },
-    { "phase": 3, "focus": "D1+R2 grant threaded into inline_combinator and the literal check; T-splice (D1 witness) and T-while (R2 witness) accept goldens; mutations M-D1/M-R2/M-compose", "difficulty": "standard" },
-    { "phase": 4, "focus": "sort dogfood golden reading ra via absolute-path import; delete stale arrays.sth workaround paragraph; correct ROADMAP next-action and self_tail back_edge text", "difficulty": "standard" }
+    { "phase": 3, "focus": "D1+R2 grant threaded into inline_combinator and the literal check, adding the check.rs check_terms_relaxed import alongside its first call site; T-splice (clean D1 witness) and T-while (joint D1+R2 witness) accept goldens; mutations M-D1/M-R2/M-T-while-bounds/M-compose", "difficulty": "standard" },
+    { "phase": 4, "focus": "if lib/arrays.sth exists (absent as of phase 1 - if still absent, drop T-sort and D3 per D3's blocker note): sort dogfood golden reading ra via absolute-path import, delete stale arrays.sth workaround paragraph; correct ROADMAP next-action and self_tail back_edge text", "difficulty": "standard" }
   ]
 }
 ```
