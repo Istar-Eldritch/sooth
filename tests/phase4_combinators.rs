@@ -2318,3 +2318,63 @@ fn combinator_called_from_drop_override_body_lowers_correctly() {
     assert_eq!(code, 0, "stdout was: {stdout}");
     assert_eq!(stdout, "3\n");
 }
+
+// -- a self-tail combinator whose quotation parameter is never bound ---------
+
+/// A self-tail combinator keeps its quotation parameter loop-invariant by
+/// hoisting it out of the carried row. That hoist used to be recognised only
+/// when the body *named* the parameter with a leading `| p |` (the `while`
+/// idiom); a body that reaches it with `dup` instead left the phantom in the
+/// row, where `begin_loop` staged it as an aggregate (`is_aggregate` answers
+/// `true` for `IrType::Quotation`) and blitted from a phantom that owns no
+/// bytes. The first `call` then found no `quot_bodies` entry, fell to the
+/// indirect path, and hit its `unreachable!` -- an ICE, not a diagnostic.
+#[test]
+fn self_tail_combinator_dups_its_quotation_instead_of_binding_it() {
+    let (stdout, code) = run_src(
+        "dup-quot-self-tail",
+        ": rep ( i64 [ -- ] -- )\n\
+         dup call swap 1 - dup 0 > if swap rep else drop drop end ;\n\
+         : main ( -- ) 3 [ 7 . ] rep ;\n",
+    );
+    assert_eq!(code, 0, "stdout was: {stdout}");
+    // Three iterations, not two or four: the count proves the back-edge
+    // carries the decremented state while the quotation stays invariant.
+    assert_eq!(stdout, "7\n7\n7\n");
+}
+
+/// The `~` twin of the above: an inline-only quotation parameter takes the
+/// same hoist, so retyping a combinator's parameter cannot change its
+/// lowering.
+#[test]
+fn self_tail_combinator_dups_an_inline_quotation_parameter() {
+    let (stdout, code) = run_src(
+        "dup-inline-quot-self-tail",
+        ": rep ( i64 ~[ -- ] -- )\n\
+         dup call swap 1 - dup 0 > if swap rep else drop drop end ;\n\
+         : main ( -- ) 3 [ 9 . ] rep ;\n",
+    );
+    assert_eq!(code, 0, "stdout was: {stdout}");
+    assert_eq!(stdout, "9\n9\n9\n");
+}
+
+/// The hoisted parameter must leave a real loop behind, not recursion: 1M
+/// iterations at a 1 MB stack would die by `SIGSEGV` if the self-call still
+/// grew a frame.
+#[test]
+fn dup_quotation_self_tail_loop_runs_in_constant_stack() {
+    let binary = build_binary(
+        "dup-quot-constant-stack",
+        ": rep ( i64 [ -- ] -- )\n\
+         dup call swap 1 - dup 0 > if swap rep else drop drop end ;\n\
+         : main ( -- ) 1000000 [ ] rep 42 . ;\n",
+    );
+    let (code, stdout) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        code,
+        Some(0),
+        "died by signal or non-zero; stdout: {stdout}"
+    );
+    assert_eq!(stdout, "42");
+}

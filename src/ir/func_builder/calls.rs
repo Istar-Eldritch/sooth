@@ -177,6 +177,27 @@ impl<'a> FuncBuilder<'a> {
             break;
         }
 
+        // A quotation phantom the body never bound to a name (`dup call ...`
+        // rather than `| p | p call ...`) is loop-invariant for the same
+        // reason the bound one is: the parameter threads through the back-edge
+        // unchanged, so every iteration sees the same literal. It must stay out
+        // of the carried row -- `is_aggregate` is true for `IrType::Quotation`,
+        // so `begin_loop` would stage it as an aggregate and blit from a
+        // phantom that owns no bytes, leaving a pointer where the splice
+        // machinery expects a phantom (the `call` below then finds no
+        // `quot_bodies` entry and reaches `lower_indirect_call` with a
+        // non-quotation type). Splitting only a contiguous top run keeps the
+        // invariant-args-above-the-row shape `lower_call`'s back-edge assumes.
+        let mut invariant_top = 0;
+        while invariant_top < self.stack.len() {
+            let v = self.stack[self.stack.len() - 1 - invariant_top];
+            if !self.quot_bodies.contains_key(&v) {
+                break;
+            }
+            invariant_top += 1;
+        }
+        let invariant = self.stack.split_off(self.stack.len() - invariant_top);
+
         // The carried row is whatever remains: the caller's residual plus the
         // threaded state. `begin_loop` seals the entry block, opens the
         // header, and returns one value per carried slot (a scalar phi output
@@ -185,6 +206,7 @@ impl<'a> FuncBuilder<'a> {
         let params = mem::take(&mut self.stack);
         let outs = self.begin_loop(&params, true);
         self.stack = outs;
+        self.stack.extend(invariant);
         self.cur_combinator = Some((name.to_string(), row_len));
 
         // Lower the loop body with `tail = true`, so its tail-position
