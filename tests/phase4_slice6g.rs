@@ -13,6 +13,12 @@
 //! sound programs rejected because the checker cannot distinguish "mentioned
 //! inside the granted-into term" from "read across the edge". T-doorway-no
 //! is pre-existing behaviour, unchanged by R1.
+//!
+//! T-sort (the `lib/arrays.sth` `sort` dogfood) and the paired D3 header-comment
+//! deletion are dropped from this slice: `lib/arrays.sth` does not exist in
+//! this tree (not tracked on any branch, not untracked in the worktree), so
+//! both are unbuildable as specced. The dogfood is unmeasured; whichever
+//! commit later brings that library in inherits both as follow-up.
 
 /// Compile and run `src`, returning stdout and the exit code. `name`
 /// distinguishes the temp source per test (the goldens run in parallel).
