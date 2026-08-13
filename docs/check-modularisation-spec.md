@@ -8,9 +8,14 @@ All existing goldens, examples, and unit tests pass unmodified.
 
 ## Outcome
 
-`src/check.rs` is now a thin shim: `mod` declarations + `pub(crate) use` re-exports that
-keep the exact `crate::check::*` surface reachable, so no call site outside `check.rs`
-changed. The ~11.3k non-test lines live in twelve cluster files:
+`src/check.rs` is the hub of a dependency star: `mod` declarations + `pub(crate) use`
+re-exports that keep the exact `crate::check::*` surface reachable (no call site outside
+`check.rs` changed), plus the code genuinely shared by two or more cluster files — per
+CLAUDE.md's lowest-common-ancestor rule, shared code belongs at the LCA, not pushed into
+one arbitrary consumer. It is not a fully-emptied "thin shim": ~1.9k non-test lines remain
+by design (the `check()` driver, shared types like `Slot`/`PolyCtx`, and helpers/error
+builders used by 2+ submodules). Everything used by exactly one submodule lives in that
+submodule instead. The twelve cluster files hold everything else:
 
 | File | Cluster | Engine-dep |
 |------|---------|-----------|
@@ -66,7 +71,9 @@ grep -rhoE "check::[a-zA-Z_][a-zA-Z0-9_]*" src/repl.rs src/driver.rs src/ir.rs \
 `selective_collision_error`, `SelectiveName`, `selective_not_exported_error`, `sig_of`,
 `struct_generated_sigs`, `word_declares_quotation_parameter`, `word_span`.
 
-Surface is entirely `pub(crate)`: nothing was promoted to `pub`. Moved items got the
+No item was promoted from its pre-refactor visibility. `check_structs` was already `pub`
+(not `pub(crate)`) before the refactor and is re-exported via a bare `pub use`, unchanged;
+everything else on the moved/re-exported surface is `pub(crate)`. Moved items got the
 minimum visibility (`pub(super)` when only `check.rs`/siblings use them; a `pub(crate) use`
 re-export in `check.rs` when an external module names them). A name that would drop from
 the snapshot was fixed with a re-export, never a call-site edit.
@@ -105,6 +112,11 @@ hub), then the seven engine-dependent clusters (any order), then test relocation
 11. `operators.rs` — `b93ee732` (+ `7492c9c1` restored `operand_pair_mismatch_error` doc comment)
 12. `word_families.rs` — `dc884f5c`
 13. test relocation into each cluster module — `b0c4a610`
+14. (review-round fix) relocated 4 single-consumer items + 6 private error builders to
+    `terms.rs`, and `check_array_index` + 3 error builders to `word_families.rs` — `23ba13e`
+15. (review-round fix) relocated 19 more single-consumer items to their sole-consuming
+    cluster (12 to `word_families.rs`, 6 to `terms.rs`, 1 to `word_entry.rs`); restored a
+    doc comment on the back-edge witness test dropped in step 14; this doc reconciliation
 
 ## Out of scope
 
@@ -115,8 +127,9 @@ hub), then the seven engine-dependent clusters (any order), then test relocation
 
 ## Exit criteria (met)
 
-- `src/check.rs` is a thin `mod` + `pub(crate) use` shim; non-test code lives across the
-  twelve cluster files.
+- `src/check.rs` is the dependency-star hub: `mod` + `pub(crate) use` shim plus code shared
+  by 2+ cluster files per the LCA rule; single-consumer code lives across the twelve
+  cluster files instead.
 - Every relocated test lives in the module of the function it tests.
 - `cargo build && cargo fmt --check && cargo clippy -- -D warnings && cargo test` green.
 - Surface grep diffs empty against `/tmp/check-surface-before.txt`: `crate::check::*`

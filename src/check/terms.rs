@@ -1319,10 +1319,120 @@ fn times_body_row_effect_error(ctx: &Ctx, span: Span) -> String {
     )
 }
 
+/// The borrow-suspension bookkeeping must agree at a branch join, real
+/// content the type-only shape unification above does not supply. One arm
+/// suspending a place the other leaves unsuspended (or suspending a
+/// *different* place) is rejected rather than silently picking one arm's
+/// answer, since a later hazard check would then reason about the wrong arm's
+/// runtime path.
+fn borrow_join_disagreement_error(
+    ctx: &Ctx,
+    span: Span,
+    t_then: Option<&Deriv>,
+    t_else: Option<&Deriv>,
+) -> String {
+    let describe = |d: Option<&Deriv>| match d.map(Deriv::suspension) {
+        None => "no live borrow".to_string(),
+        Some((Some(root), Some(place))) => {
+            format!("a borrow of `{root}` reborrowed from `{place}`")
+        }
+        Some((Some(root), None)) => format!("a borrow of `{root}`"),
+        Some((None, Some(place))) => format!("a reborrow of `{place}`"),
+        Some((None, None)) => "a borrow with no local root".to_string(),
+    };
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: borrow state disagrees at the `if`/`else` join in `{}` (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
+            name, span.line, describe(t_then), describe(t_else), effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: borrow state disagrees at the `if`/`else` join (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}",
+            span.line, describe(t_then), describe(t_else),
+        ),
+    }
+}
+/// R7, both arms leave a quotation but not the *same* literal: a quotation's
+/// body must be statically known where it is used, and a branch merge that
+/// picked one arm's would need a runtime code value (D4). Fires at the join,
+/// not at consumption (R12's containment rests on it).
+fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: these two branches leave different quotations at line {}{}; give the quotation a declared type (a word output or field) so it can be materialized, or make both arms the same literal (a runtime quotation value is slice 7)",
+        span.line,
+        in_word(ctx),
+    )
+}
+/// R7, one arm leaves a quotation and the other a value: the `Cstr`
+/// placeholder makes the two `ty`s compare equal, so the ordinary branch-type
+/// mismatch never catches this; the join guard does.
+fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (a runtime quotation value is slice 7)",
+        span.line,
+        in_word(ctx),
+    )
+}
+/// Naming a `&!` local reborrows it, and a reborrow may not be taken
+/// while anything derived from the previous one is still live — the two would be
+/// two simultaneous mutable references into the same place.
+fn suspended_place_error(ctx: &Ctx, span: Span, place: &str, live: &Deriv) -> String {
+    format!(
+        "error: cannot reborrow `{place}`{} while a reference derived from it is live (line {}, col {})\n  the derivation taken at line {}, col {} is still live\n  a mutable borrow suspends its place until every reference derived from it is consumed",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
+    )
+}
+/// Consuming a place — moving it into a word, or disposing of it — while a
+/// reference derived from it is still live. The reference would be left aimed at
+/// storage its owner has given away.
+fn consume_of_borrowed_place_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    ty: Type,
+    live: &Deriv,
+) -> String {
+    let held = if live.mutable { "mutable" } else { "shared" };
+    format!(
+        "error: cannot consume the borrowed local `{place}` of type `{ty}`{} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
+    )
+}
+/// The symmetric direction: naming an aggregate while a mutable borrow of
+/// its storage is live. The converse of an exclusivity rule is
+/// easy to omit, and this is that omission: checking only at the borrow
+/// catches `v ... &!v` and misses `&!v ... v`, which is the same hazard with the
+/// two terms swapped.
+fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: &Deriv) -> String {
+    format!(
+        "error: cannot name `{name}`{} (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy",
+        in_word(ctx),
+        span.line,
+        span.col,
+        live.span.line,
+        live.span.col,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Slice 10a (R14): white-box proof that `back_edge_outs` forwards the
+    /// surviving capture set along the index map. The witness is an aggregate
+    /// carrying an erased quotation (`ty` a struct, `surviving: Some(..)`,
+    /// `quot: None`), and the shape yields a `Some(0)` map entry, so the
+    /// produced output must inherit the carried input's surviving set --
+    /// bypassing `union_surviving`, which a conditional join would otherwise
+    /// use to reconstruct the set from a sibling arm and mask a dropped
+    /// forward (`d1b3f0a`/`bee407c`).
     #[test]
     fn back_edge_outs_forwards_surviving_set_along_index_map() {
         let set = SurvivingCaptureSetId(0);

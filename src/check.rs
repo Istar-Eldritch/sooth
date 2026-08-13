@@ -880,17 +880,6 @@ fn is_registered_variant(name: &str, enums: &[EnumDecl]) -> bool {
         .any(|e| e.variants.iter().any(|v| v.name == name))
 }
 
-/// D8's clause-vs-binding disambiguation is global (`is_variant_name` scans
-/// every enum in scope), so a `|` followed by a registered variant always
-/// opens the next clause and is never read as a binding (R8). Every clause
-/// the parser produces leads with a registered name, so this note states the
-/// rule that was applied wherever a clause's variant is rejected.
-fn clause_variant_ambiguity_note(name: &str) -> String {
-    format!(
-        "\n  note: `| {name}` is read as a clause because `{name}` is a variant name; a binding may not lead with one"
-    )
-}
-
 /// A parameter / word-entry / clause-body binding name equal to a registered
 /// variant name is a sharp error (D8 backstop, X12): it would make the
 /// clause-vs-locals `|` disambiguation ambiguous.
@@ -1086,21 +1075,6 @@ fn type_mismatch_error(ctx: &Ctx, span: Span, op: &str, expected: Type, found: T
         ),
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
-        }
-    }
-}
-
-/// `cstr` applied to something other than `str` (R7): the only legal source
-/// for the discard-the-length conversion, so the error names it by name
-/// rather than as a generic type mismatch.
-fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `cstr` converts a `str`, found `{}`\n  note: declared {}",
-            name, span.line, found, effect_str(effect),
-        ),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `cstr` converts a `str`, found `{found}`")
         }
     }
 }
@@ -1578,39 +1552,6 @@ fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type)
     }
 }
 
-/// The borrow-suspension bookkeeping must agree at a branch join, real
-/// content the type-only shape unification above does not supply. One arm
-/// suspending a place the other leaves unsuspended (or suspending a
-/// *different* place) is rejected rather than silently picking one arm's
-/// answer, since a later hazard check would then reason about the wrong arm's
-/// runtime path.
-fn borrow_join_disagreement_error(
-    ctx: &Ctx,
-    span: Span,
-    t_then: Option<&Deriv>,
-    t_else: Option<&Deriv>,
-) -> String {
-    let describe = |d: Option<&Deriv>| match d.map(Deriv::suspension) {
-        None => "no live borrow".to_string(),
-        Some((Some(root), Some(place))) => {
-            format!("a borrow of `{root}` reborrowed from `{place}`")
-        }
-        Some((Some(root), None)) => format!("a borrow of `{root}`"),
-        Some((None, Some(place))) => format!("a reborrow of `{place}`"),
-        Some((None, None)) => "a borrow with no local root".to_string(),
-    };
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: borrow state disagrees at the `if`/`else` join in `{}` (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
-            name, span.line, describe(t_then), describe(t_else), effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: borrow state disagrees at the `if`/`else` join (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}",
-            span.line, describe(t_then), describe(t_else),
-        ),
-    }
-}
-
 /// An array word (`fill`/`len`) applied to a non-array operand: names the
 /// array word and the offending operand type (X8).
 fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
@@ -1623,57 +1564,6 @@ fn array_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> Str
         Ctx::Line { .. } => {
             format!("error: type mismatch: `{op}` requires an array operand, found `{found}`")
         }
-    }
-}
-
-/// `S|>fi` (R10) applied to a linear field: unlike `S>fi`, a peek must leave
-/// the aggregate live, so it can't also transfer ownership of a linear
-/// field's value; the workaround is `S>` (destructure the whole aggregate).
-fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
-            op, name, span.line, found, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: cannot `{op}` a linear field: the field has type `{found}`, which is linear and has no `Copy` instance"
-        ),
-    }
-}
-
-/// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
-/// word and the offending operand type, mirroring `array_word_operand_error`.
-fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
-            name, span.line, op, found, effect_str(effect),
-        ),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `{op}` requires an owning-cell operand, found `{found}`")
-        }
-    }
-}
-
-/// `^|>` on a linear payload: the cell stays live afterward, so peeking
-/// would leave a second, unowned reference to a resource the cell still
-/// owns. `^>` (consuming unwrap) is the workaround.
-fn peek_of_linear_owned_payload_error(
-    ctx: &Ctx,
-    span: Span,
-    cell_ty: Type,
-    payload: Type,
-) -> String {
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: cannot `^|>` a linear payload in `{}` (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
-            name, span.line, cell_ty, payload, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: cannot `^|>` a linear payload: `{cell_ty}` holds a payload of type `{payload}`, which is linear and has no `Copy` instance"
-        ),
     }
 }
 
@@ -1735,18 +1625,6 @@ fn ref_parts(ty: Type, refs: &[RefDecl]) -> Option<(Type, bool)> {
     }
 }
 
-/// `&x`/`&!x` applied to something that is not a local. A place is a
-/// local name and nothing more, so the diagnostic names what was found there
-/// and points at the binding that would make it one.
-fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) -> String {
-    format!(
-        "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name; bind the value with `| name |` first, then borrow that name",
-        in_word(ctx),
-        span.line,
-        span.col
-    )
-}
-
 /// ` in `word`` for a word body, empty for a bare REPL line: the suffix the
 /// slice's own diagnostics use to place themselves the way every other
 /// located error here does.
@@ -1771,19 +1649,6 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
     )
 }
 
-/// R8: a quotation stored into an array (`fill`'s element) or through a
-/// reference (`!`/`+!`'s value, whether the referent is an array slot, a
-/// struct field, or an owned cell) would have to become a runtime value,
-/// which this slice cannot represent. The wording names no container because
-/// two of the three store paths have none. Shared by all of them (D4).
-fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: a quotation cannot be stored (escaping quotations are slice 7){} (line {})",
-        in_word(ctx),
-        span.line,
-    )
-}
-
 /// R10/R26: a quotation passed to a parameter position that is *not* a
 /// declared `Type::Quotation`. A quotation argument to a declared quotation
 /// parameter is now accepted and inlined (R18); this fires only for the other
@@ -1796,104 +1661,6 @@ fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
         "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (a runtime quotation value is slice 7){} (line {})",
         in_word(ctx),
         span.line,
-    )
-}
-
-/// R7, both arms leave a quotation but not the *same* literal: a quotation's
-/// body must be statically known where it is used, and a branch merge that
-/// picked one arm's would need a runtime code value (D4). Fires at the join,
-/// not at consumption (R12's containment rests on it).
-fn different_quotations_at_join_error(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: these two branches leave different quotations at line {}{}; give the quotation a declared type (a word output or field) so it can be materialized, or make both arms the same literal (a runtime quotation value is slice 7)",
-        span.line,
-        in_word(ctx),
-    )
-}
-
-/// R7, one arm leaves a quotation and the other a value: the `Cstr`
-/// placeholder makes the two `ty`s compare equal, so the ordinary branch-type
-/// mismatch never catches this; the join guard does.
-fn quotation_versus_value_at_join_error(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: one branch of the `if` at line {}{} leaves a quotation and the other does not; a quotation cannot be a runtime value (a runtime quotation value is slice 7)",
-        span.line,
-        in_word(ctx),
-    )
-}
-
-/// Only an aggregate or cell local may be borrowed. A scalar local is an
-/// SSA temporary with no address, and giving it one is work no criterion
-/// needs.
-fn borrow_of_scalar_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
-    format!(
-        "error: cannot borrow the scalar local `{local}` of type `{ty}`{} (line {}, col {})\n  a scalar has no address; borrow a field or an aggregate instead",
-        in_word(ctx),
-        span.line,
-        span.col
-    )
-}
-
-/// `&x`/`&!x` applied to a local that is *already* a reference. A borrow
-/// is only ever taken of a plain aggregate local, and the remedy is to drop
-/// the sigil: naming a reference local reborrows it.
-fn borrow_of_reference_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
-    format!(
-        "error: cannot borrow `{local}`{}: it is already the reference `{ty}` (line {}, col {})\n  write `{local}`, not `{spelled}{local}`; naming a reference local reborrows it",
-        in_word(ctx),
-        span.line,
-        span.col,
-        spelled = if matches!(ty, Type::Ref(_, true, _)) { "&!" } else { "&" },
-    )
-}
-
-/// A reference-mode word applied to something that is not the reference shape
-/// it projects through (`&[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
-fn reference_word_operand_error(
-    ctx: &Ctx,
-    span: Span,
-    op: &str,
-    expected: &str,
-    found: Type,
-) -> String {
-    let op = crate::resolve::demangle_call(op);
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{name}` (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
-            span.line,
-            effect_str(effect),
-        ),
-        Ctx::Line { .. } => {
-            format!("error: type mismatch: `{op}` expected {expected}, found `{found}`")
-        }
-    }
-}
-
-/// `!`/`+!` through a shared reference. Storing through a `&T` is
-/// meaningless, and the mutable spelling is right there.
-fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
-    let op = crate::resolve::demangle_call(op);
-    format!(
-        "error: `{op}` cannot store through the shared reference `{found}`{} (line {})\n  borrow it mutably with `&!` (and project with the `&!`-spelled accessors) to write through it",
-        in_word(ctx),
-        span.line
-    )
-}
-
-/// `@`/`!`/`+!` are restricted to a `Copy` referent. Fetching a linear
-/// value through a reference would manufacture a second owner; storing over
-/// one would silently leak the value being overwritten (nothing auto-drops).
-fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Type) -> String {
-    let op = crate::resolve::demangle_call(op);
-    let why = if op == "@" {
-        "fetching one would make a second owner of a value that is used exactly once"
-    } else {
-        "storing over one would silently leak the value being overwritten; nothing auto-drops"
-    };
-    format!(
-        "error: `{op}` cannot access the linear referent `{referent}`{} (line {})\n  {why}",
-        in_word(ctx),
-        span.line
     )
 }
 
@@ -1918,91 +1685,6 @@ fn conflicting_borrow_error(
     };
     format!(
         "error: `{sigil}{place}` conflicts with a live borrow of `{place}`{} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first{note}",
-        in_word(ctx),
-        span.line,
-        span.col,
-        live.span.line,
-        live.span.col,
-    )
-}
-
-/// Naming a `&!` local reborrows it, and a reborrow may not be taken
-/// while anything derived from the previous one is still live — the two would be
-/// two simultaneous mutable references into the same place.
-fn suspended_place_error(ctx: &Ctx, span: Span, place: &str, live: &Deriv) -> String {
-    format!(
-        "error: cannot reborrow `{place}`{} while a reference derived from it is live (line {}, col {})\n  the derivation taken at line {}, col {} is still live\n  a mutable borrow suspends its place until every reference derived from it is consumed",
-        in_word(ctx),
-        span.line,
-        span.col,
-        live.span.line,
-        live.span.col,
-    )
-}
-
-/// Consuming a place — moving it into a word, or disposing of it — while a
-/// reference derived from it is still live. The reference would be left aimed at
-/// storage its owner has given away.
-fn consume_of_borrowed_place_error(
-    ctx: &Ctx,
-    span: Span,
-    place: &str,
-    ty: Type,
-    live: &Deriv,
-) -> String {
-    let held = if live.mutable { "mutable" } else { "shared" };
-    format!(
-        "error: cannot consume the borrowed local `{place}` of type `{ty}`{} (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed",
-        in_word(ctx),
-        span.line,
-        span.col,
-        live.span.line,
-        live.span.col,
-    )
-}
-
-/// A mutable borrow of a place a second live name denotes. Naming an
-/// aggregate does not copy it, so two locals — or a local and a value still on
-/// the virtual stack — can denote one region; mutating through one would then be
-/// silently observable through the other, which is exactly the class of silent
-/// failure the language exists to reject.
-fn aliased_place_borrow_error(
-    ctx: &Ctx,
-    span: Span,
-    place: &str,
-    origin: &AliasOrigin<'_>,
-) -> String {
-    let (alias, other, remedy) = match origin {
-        AliasOrigin::Name(name) => (
-            format!("`{name}`"),
-            format!("`{name}`"),
-            "use `dup` for an independent copy",
-        ),
-        AliasOrigin::Stack(pushed) => (
-            format!(
-                "a value on the stack (pushed at line {}, col {})",
-                pushed.line, pushed.col
-            ),
-            "that value".to_string(),
-            "`dup` that value for an independent copy, or consume it before taking the borrow",
-        ),
-    };
-    format!(
-        "error: cannot borrow `{place}` mutably{} (line {}, col {}): it is aliased by {alias}\n  both denote one region of memory, so a mutation through `{place}` would be silently visible through {other}\n  {remedy}",
-        in_word(ctx),
-        span.line,
-        span.col,
-    )
-}
-
-/// The symmetric direction: naming an aggregate while a mutable borrow of
-/// its storage is live. The converse of an exclusivity rule is
-/// easy to omit, and this is that omission: checking only at the borrow
-/// catches `v ... &!v` and misses `&!v ... v`, which is the same hazard with the
-/// two terms swapped.
-fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: &Deriv) -> String {
-    format!(
-        "error: cannot name `{name}`{} (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy",
         in_word(ctx),
         span.line,
         span.col,

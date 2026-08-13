@@ -893,6 +893,195 @@ fn check_array_index(
     }
 }
 
+/// `cstr` applied to something other than `str` (R7): the only legal source
+/// for the discard-the-length conversion, so the error names it by name
+/// rather than as a generic type mismatch.
+fn cstr_conversion_source_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `cstr` converts a `str`, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `cstr` converts a `str`, found `{found}`")
+        }
+    }
+}
+/// `S|>fi` (R10) applied to a linear field: unlike `S>fi`, a peek must leave
+/// the aggregate live, so it can't also transfer ownership of a linear
+/// field's value; the workaround is `S>` (destructure the whole aggregate).
+fn peek_of_linear_field_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `{}` a linear field in `{}` (line {})\n  the field has type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the aggregate; use `S>` to destructure instead\n  note: declared {}",
+            op, name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `{op}` a linear field: the field has type `{found}`, which is linear and has no `Copy` instance"
+        ),
+    }
+}
+/// An owning-cell word (`^>`/`^|>`) applied to a non-cell operand: names the
+/// word and the offending operand type, mirroring `array_word_operand_error`.
+fn owned_cell_word_operand_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` requires an owning-cell operand, found `{}`\n  note: declared {}",
+            name, span.line, op, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` requires an owning-cell operand, found `{found}`")
+        }
+    }
+}
+/// `^|>` on a linear payload: the cell stays live afterward, so peeking
+/// would leave a second, unowned reference to a resource the cell still
+/// owns. `^>` (consuming unwrap) is the workaround.
+fn peek_of_linear_owned_payload_error(
+    ctx: &Ctx,
+    span: Span,
+    cell_ty: Type,
+    payload: Type,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: cannot `^|>` a linear payload in `{}` (line {})\n  `{}` holds a payload of type `{}`, which is linear and has no `Copy` instance, so it cannot be peeked without consuming the cell; use `^>` to unwrap instead\n  note: declared {}",
+            name, span.line, cell_ty, payload, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot `^|>` a linear payload: `{cell_ty}` holds a payload of type `{payload}`, which is linear and has no `Copy` instance"
+        ),
+    }
+}
+/// `&x`/`&!x` applied to something that is not a local. A place is a
+/// local name and nothing more, so the diagnostic names what was found there
+/// and points at the binding that would make it one.
+fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) -> String {
+    format!(
+        "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name; bind the value with `| name |` first, then borrow that name",
+        in_word(ctx),
+        span.line,
+        span.col
+    )
+}
+/// R8: a quotation stored into an array (`fill`'s element) or through a
+/// reference (`!`/`+!`'s value, whether the referent is an array slot, a
+/// struct field, or an owned cell) would have to become a runtime value,
+/// which this slice cannot represent. The wording names no container because
+/// two of the three store paths have none. Shared by all of them (D4).
+fn reject_quotation_stored(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: a quotation cannot be stored (escaping quotations are slice 7){} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+/// Only an aggregate or cell local may be borrowed. A scalar local is an
+/// SSA temporary with no address, and giving it one is work no criterion
+/// needs.
+fn borrow_of_scalar_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
+    format!(
+        "error: cannot borrow the scalar local `{local}` of type `{ty}`{} (line {}, col {})\n  a scalar has no address; borrow a field or an aggregate instead",
+        in_word(ctx),
+        span.line,
+        span.col
+    )
+}
+/// `&x`/`&!x` applied to a local that is *already* a reference. A borrow
+/// is only ever taken of a plain aggregate local, and the remedy is to drop
+/// the sigil: naming a reference local reborrows it.
+fn borrow_of_reference_local_error(ctx: &Ctx, span: Span, local: &str, ty: Type) -> String {
+    format!(
+        "error: cannot borrow `{local}`{}: it is already the reference `{ty}` (line {}, col {})\n  write `{local}`, not `{spelled}{local}`; naming a reference local reborrows it",
+        in_word(ctx),
+        span.line,
+        span.col,
+        spelled = if matches!(ty, Type::Ref(_, true, _)) { "&!" } else { "&" },
+    )
+}
+/// A reference-mode word applied to something that is not the reference shape
+/// it projects through (`&[T N]` for `&>`, `&^T` for `&^`, `&T` for `@`).
+fn reference_word_operand_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    expected: &str,
+    found: Type,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{name}` (line {})\n  `{op}` expected {expected}, found `{found}`\n  note: declared {}",
+            span.line,
+            effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` expected {expected}, found `{found}`")
+        }
+    }
+}
+/// `!`/`+!` through a shared reference. Storing through a `&T` is
+/// meaningless, and the mutable spelling is right there.
+fn store_through_shared_reference_error(ctx: &Ctx, span: Span, op: &str, found: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
+    format!(
+        "error: `{op}` cannot store through the shared reference `{found}`{} (line {})\n  borrow it mutably with `&!` (and project with the `&!`-spelled accessors) to write through it",
+        in_word(ctx),
+        span.line
+    )
+}
+/// `@`/`!`/`+!` are restricted to a `Copy` referent. Fetching a linear
+/// value through a reference would manufacture a second owner; storing over
+/// one would silently leak the value being overwritten (nothing auto-drops).
+fn access_of_linear_referent_error(ctx: &Ctx, span: Span, op: &str, referent: Type) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let why = if op == "@" {
+        "fetching one would make a second owner of a value that is used exactly once"
+    } else {
+        "storing over one would silently leak the value being overwritten; nothing auto-drops"
+    };
+    format!(
+        "error: `{op}` cannot access the linear referent `{referent}`{} (line {})\n  {why}",
+        in_word(ctx),
+        span.line
+    )
+}
+/// A mutable borrow of a place a second live name denotes. Naming an
+/// aggregate does not copy it, so two locals — or a local and a value still on
+/// the virtual stack — can denote one region; mutating through one would then be
+/// silently observable through the other, which is exactly the class of silent
+/// failure the language exists to reject.
+fn aliased_place_borrow_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    origin: &AliasOrigin<'_>,
+) -> String {
+    let (alias, other, remedy) = match origin {
+        AliasOrigin::Name(name) => (
+            format!("`{name}`"),
+            format!("`{name}`"),
+            "use `dup` for an independent copy",
+        ),
+        AliasOrigin::Stack(pushed) => (
+            format!(
+                "a value on the stack (pushed at line {}, col {})",
+                pushed.line, pushed.col
+            ),
+            "that value".to_string(),
+            "`dup` that value for an independent copy, or consume it before taking the borrow",
+        ),
+    };
+    format!(
+        "error: cannot borrow `{place}` mutably{} (line {}, col {}): it is aliased by {alias}\n  both denote one region of memory, so a mutation through `{place}` would be silently visible through {other}\n  {remedy}",
+        in_word(ctx),
+        span.line,
+        span.col,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

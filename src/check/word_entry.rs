@@ -371,6 +371,17 @@ fn check_clause_body(
     leave_block(&ctx, &mut scope, 0, BlockEnd::Body(line))
 }
 
+/// D8's clause-vs-binding disambiguation is global (`is_variant_name` scans
+/// every enum in scope), so a `|` followed by a registered variant always
+/// opens the next clause and is never read as a binding (R8). Every clause
+/// the parser produces leads with a registered name, so this note states the
+/// rule that was applied wherever a clause's variant is rejected.
+fn clause_variant_ambiguity_note(name: &str) -> String {
+    format!(
+        "\n  note: `| {name}` is read as a clause because `{name}` is a variant name; a binding may not lead with one"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
