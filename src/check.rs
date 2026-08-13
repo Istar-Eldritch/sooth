@@ -899,6 +899,31 @@ fn reject_variant_local(ctx: &Ctx, name: &str, kind: &str) -> Result<(), String>
     })
 }
 
+/// D5: reject a local whose name collides with any callable name — a
+/// builtin, a user word, a poly word, or a combinator. `alpha_rename_locals`
+/// (`src/ast.rs`) renames a callee's locals but `rename_call` deliberately
+/// leaves a call to a word or builtin untouched, so a caller local sharing a
+/// builtin's name is read in place of that builtin inside a spliced body
+/// (recon 10). This closes it at the root: it is never legal to bind such a
+/// name, on either the mono or poly path, so no splice can ever observe one.
+fn reject_callable_local(ctx: &Ctx, name: &str, span: Span, collides: bool) -> Result<(), String> {
+    if !collides {
+        return Ok(());
+    }
+    Err(match ctx {
+        Ctx::Word {
+            name: word_name, ..
+        } => format!(
+            "error: local `{name}` in `{word_name}` collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
+            span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: local `{name}` collides with the callable name `{name}` (line {})\n  a local cannot shadow a builtin, word, poly word, or combinator name",
+            span.line
+        ),
+    })
+}
+
 /// A name repeated in a binding list (`| a a |`) collapses to last-wins when
 /// zipped into the name -> type map, so the earlier binding (and any linear
 /// value held in it) is tracked by nothing and never disposed. Reject

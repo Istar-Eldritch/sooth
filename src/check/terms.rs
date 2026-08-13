@@ -147,6 +147,11 @@ fn check_term(
             for name in names {
                 reject_variant_local(ctx, name, "local")?;
                 reject_duplicate_local(ctx, name, span, &mut seen)?;
+                let collides = is_builtin_word_name(name)
+                    || env.contains_key(name)
+                    || poly.env.contains_key(name)
+                    || poly.combinators.contains_key(name);
+                reject_callable_local(ctx, name, span, collides)?;
                 if scope.local_type(name).is_some() {
                     return Err(rebound_local_error(ctx, span, name));
                 }

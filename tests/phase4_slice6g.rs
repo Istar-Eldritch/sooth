@@ -177,3 +177,24 @@ fn later_use_withholds_the_times_grant() {
     );
     assert_aliased_by(&err, "arr", "a");
 }
+
+// -- D5: a local can never collide with a callable name ---------------------
+
+#[test]
+fn binding_a_local_named_after_a_builtin_is_rejected() {
+    // T-shadow. `len` is a builtin name. `scope.local` is checked ahead of
+    // every builtin/word lookup at a `Call` (see the `TermKind::Call` arm),
+    // so a local named `len` would shadow the builtin at every later call to
+    // `len` -- recon 10's hygiene defect, generalized: it needs no combinator
+    // splice, the local's name alone is enough. D5 rejects the bind itself.
+    // Accepted pre-6g, printing `1` silently instead of running the builtin.
+    let err = check_error(
+        ": main ( -- )\n\
+         1 | len |\n\
+         len . ;\n",
+    );
+    assert!(
+        err.contains("`len`"),
+        "expected the diagnostic to name the collided builtin `len`: {err}"
+    );
+}

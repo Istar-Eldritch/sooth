@@ -344,6 +344,11 @@ pub(super) fn poly_term(
             for name in names {
                 reject_variant_local(ctx, name, "local")?;
                 reject_duplicate_local(ctx, name, span, &mut seen)?;
+                // D5, poly coverage: builtins and `env` only. `poly_term` has
+                // no `PolyCtx`, so `poly.env`/`poly.combinators` are
+                // unreachable here (recorded gap, D5).
+                let collides = is_builtin_word_name(name) || env.contains_key(name);
+                reject_callable_local(ctx, name, span, collides)?;
                 if scope.locals.contains_key(name) {
                     return Err(rebound_local_error(ctx, span, name));
                 }
