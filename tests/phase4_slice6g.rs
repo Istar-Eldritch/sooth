@@ -17,7 +17,7 @@
 //! T-sort is the `lib/arrays.sth` `sort` dogfood: the library's own merge
 //! sort, called with the data and scratch arrays bound to locals before the
 //! call. That binding shape is exactly what the pre-6g compiler rejects
-//! (`cannot borrow cs__inl0 mutably: it is aliased by s0`), so it is the
+//! (`cannot borrow cs__inl0 mutably: it is aliased by s`), so it is the
 //! honest measure of the bug's cost, not just a synthetic repro.
 
 /// Compile and run `src`, returning stdout and the exit code. `name`
@@ -352,7 +352,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
 fn sort_called_with_bound_array_locals_runs() {
     // T-sort. `sort`'s data and scratch arrays are BOUND TO LOCALS before the
     // call -- that binding is exactly what the pre-6g compiler rejects
-    // (`aliased by s0`). `sort` returns `ra rs` (sorted deeper, scratch on
+    // (`aliased by s`). `sort` returns `ra rs` (sorted deeper, scratch on
     // top): drop the scratch `rs`, read the sorted `ra`.
     let (out, code) = run_src(
         "6g-sort",

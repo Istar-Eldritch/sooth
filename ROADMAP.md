@@ -1725,9 +1725,13 @@ then find out what the compiler owes it.
    involved: `releasable_into` gains `live`/`at`, granting an ancestor name only when
    `live.dead(name, at + 1)`. A second, unrelated defect: `alpha_rename_locals` renames a
    callee's locals but leaves a call to a word/builtin untouched, so a caller local sharing a
-   builtin's name was read in place of that builtin inside a spliced body. **D5:** binding a
-   local whose name collides with a builtin, an `env` word, a poly word, or a combinator is now
-   a compile error.
+   builtin's name was read in place of that builtin inside a spliced body. **D5:** in a
+   monomorphic word body, binding a local whose name collides with a builtin, an `env` word, a
+   poly word, or a combinator is now a compile error. Inside a generic word's body the check
+   covers builtins and `env` words only: `poly_term` has no `PolyCtx`, so `poly.env` and
+   `poly.combinators` are out of reach there (`src/check/poly.rs`), and a local named after a
+   poly word or a poly combinator still binds. A recorded D5 gap, not a later slice's
+   deliverable unless a witness turns up.
    **Fix:** a `releasable_into`-computed `outer_releasable` set, with `back_edge` a constant
    `true` (matching `times`'s own back-edge; not conditioned on self-tail-ness), is threaded
    through `inline_combinator`'s body-check and through the caller-literal check run against a
