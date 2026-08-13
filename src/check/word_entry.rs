@@ -36,16 +36,18 @@ pub(super) fn check_word(
 /// guarantee is unconditional (D2), so each is a located error at the
 /// definition rather than a silent fall-back to a real call: a clause-bodied
 /// word is not a combinator (`is_combinator` requires `WordBody::Terms`) and
-/// would lower as an ordinary clause word; a variable-bearing signature would
-/// route through the poly checker as a poly combinator with no quotation
-/// parameter to resolve its variables against; and `main` is an entry point,
-/// not a combinator, so splicing it away leaves the runtime shim's call to it
-/// unresolved at link time.
+/// would lower as an ordinary clause word; `main` is an entry point, not a
+/// combinator, so splicing it away leaves the runtime shim's call to it
+/// unresolved at link time; a builtin-operator name is claimed by
+/// `check_operator` before the splice is reached, and the two then disagree;
+/// and a variable-bearing signature is excluded by Decision 3.
 ///
 /// The monomorphism rule is phrased over *declared variables*, not
 /// `poly.is_some()`: a `~`-bearing but otherwise concrete effect is
 /// poly-forced by the parser (`effect_has_variable`) while carrying no
-/// variable, and is accepted.
+/// variable, and is accepted. It is a policy rule, not a soundness one: the
+/// splice itself handles a variable-bearing body, so `inline` on a poly
+/// signature is not unsound, merely excluded.
 pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
     if !word.declares_inline {
         return Ok(());
@@ -77,6 +79,21 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
                 span.line, span.col
             ));
         }
+    }
+    // A builtin-operator name reaches `check_operator` first, which resolves
+    // the overload and records `poly.builtin_overloads[span]` so lowering emits
+    // a real `Instr::Call`; only then does the call fall through to the
+    // combinator interception, which splices instead. The record survives the
+    // splice, and lowering trusts it and looks the symbol up in an `env` a
+    // combinator is excluded from -- a checker contradicting itself, and a
+    // panic downstream. Widening `is_combinator` (R2) made the shape
+    // reachable: an operator call site rejects a quotation operand outright,
+    // so a builtin-name overload could not previously be a combinator.
+    if BUILTIN_TABLE.contains_key(name) {
+        return Err(format!(
+            "error: `inline` on `{name}`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line {}, col {})",
+            span.line, span.col
+        ));
     }
     Ok(())
 }
@@ -493,5 +510,31 @@ mod tests {
         );
         check_src(": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;")
             .expect("a `~`-bearing but variable-free `inline` effect is monomorphic");
+    }
+
+    /// Slice 11 (R3): a builtin-operator name is resolved by `check_operator`,
+    /// which records the site for a real call, *before* the same call falls
+    /// through to the combinator splice -- so an `inline` overload of one leaves
+    /// the checker contradicting itself and lowering panicking. Rejected at the
+    /// definition instead. The name is demangled first: `mangle` suffixes an
+    /// operator name per module (`+__m0`), so a raw comparison never matches.
+    #[test]
+    fn check_inline_builtin_operator_overload_is_error() {
+        let err = check_src(
+            "type: A n i64 ;\n\
+             : + inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `inline` on `+`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
+        );
+        // A non-operator name with the identical shape is accepted, so the
+        // rejection is keyed on the name, not on the overload.
+        check_src(
+            "type: A n i64 ;\n\
+             : add inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+        )
+        .expect("an `inline` word whose name no operator claims is accepted");
     }
 }

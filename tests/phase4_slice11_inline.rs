@@ -175,6 +175,31 @@ fn inline_on_main_is_located_error() {
 }
 
 #[test]
+fn inline_on_builtin_operator_overload_is_located_error() {
+    // A builtin-operator name is claimed by `check_operator` first, which
+    // records the site for a real `Instr::Call`; the call then *also* falls
+    // through to the combinator interception and is spliced, and lowering
+    // trusts the stale record and looks the symbol up in an `env` a combinator
+    // is excluded from. Before the rejection this panicked in
+    // `ir/func_builder/calls.rs` ("checked user overload exists").
+    let src = "type: A n i64 ;\n\
+               : + inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n\
+               : main ( -- ) 1 A 2 A + . ;\n";
+    let err = check_error(src);
+    assert_eq!(
+        err,
+        "error: `inline` on `+`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
+    );
+    // The same overload without `inline` builds and runs, so the rejection is
+    // the keyword's, not the overload's.
+    let (binary, stdout, code) =
+        build_and_run("slice11-op-overload", &src.replace("+ inline", "+"));
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "1000\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn inline_tilde_parameter_word_is_accepted_and_spliced() {
     // The discriminating positive for R3's monomorphism rule: a `~`-bearing
     // effect is poly-forced by the parser (`effect_has_variable`) but declares

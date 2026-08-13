@@ -164,12 +164,37 @@ combinator regardless of the flag; R3 rejects a clause-bodied `inline` word
 before this predicate is consulted for lowering, so the two never disagree in a
 way that reaches codegen.
 
-### R3 — two new definition-site rejections
+### R3 — four new definition-site rejections
 
-Both run in `check_word` (`src/check/word_entry.rs`), before the body is checked,
-located at `word.span`, and phrased so the diagnostic tests assert the *right*
-error:
+All four run as a pre-pass over `module.words` (`check_inline_declaration`,
+`src/check/word_entry.rs`), before any body is checked and before
+`is_combinator` is consulted, located at `word.span`, and phrased so the
+diagnostic tests assert the *right* error:
 
+- **`inline` on `main`.** The entry point is called by the runtime shim, so
+  splicing it away leaves that call unresolved: without this the program dies as
+  a raw `ld: undefined reference to 'sooth_main'`, not a Sooth diagnostic. This
+  is the same `main`-is-not-a-combinator invariant
+  `audit_word_quotation_positions` already enforces on the *quotation* route
+  ("an input of `main`", D6/R28); the declared flag is a second route to it.
+  Message:
+  `error:`inline` on `main`, which is the program entry point; the entry point is called by the runtime shim and cannot be spliced`.
+- **`inline` on a builtin-operator name.** When the demangled name is a
+  `BUILTIN_TABLE` key (`mangle` suffixes an operator name per module, so the
+  comparison must demangle first). `check_operator` claims the call site first,
+  resolves the user overload and records `poly.builtin_overloads[span]` so
+  lowering emits a real `Instr::Call` (`src/check/terms.rs:556`); the call then
+  *also* falls through to the combinator interception (`terms.rs:676`), which
+  splices. The record survives the splice, and lowering trusts it and looks the
+  symbol up in an `env` a combinator is excluded from (`src/ir/driver.rs:117`) —
+  a checker contradicting itself, and a panic in `ir/func_builder/calls.rs`
+  downstream. Widening `is_combinator` (R2) is what made the shape reachable: an
+  operator call site rejects a quotation operand outright, so a builtin-name
+  overload could not previously be a combinator. Message:
+  `error:`inline` on `{name}`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced`.
+  Making the splice win instead (resolving an operator name against the live
+  stack before `check_operator`) is the better feature but not a rewording — see
+  "Out of scope".
 - **`inline` on a clause body.** When `word.declares_inline` and
   `matches!(word.body, WordBody::Clauses(_))`:
   `error:`inline` on `{name}`, which has a clause body;`inline`requires a term body`.
@@ -184,6 +209,9 @@ error:
   otherwise concrete effect has `poly = Some` with all three empty and is
   **accepted**. Message:
   `error:`inline` on `{name}`, which declares a polymorphic signature;`inline`requires a monomorphic effect`.
+  This one is **policy, not soundness** (Decision 3): with the guard disabled,
+  `: swp inline ( 'A 'B -- 'B 'A )` compiles and runs correctly, so do not carry
+  "poly `inline` is unsound" forward as a reason for it.
   Because a poly word is not routed through `check_word` (the poly arm of
   `check.rs`'s final loop calls `check_poly_body` / `check_poly_combinator_standalone`),
   this specific rejection is placed at the point where `word.poly.is_some()` is
@@ -356,6 +384,10 @@ happy path plus at least one error/edge case; every new test is mutation-tested
   input, returns `true`; flipping the flag to `false` returns `false`. (Direct
   construction, not e2e, per the resolve-mangle / discrimination memory.)
 - `check_inline_clause_body_is_error` — asserts the exact R3 clause-body message.
+- `check_inline_builtin_operator_overload_is_error` — an `inline` overload of
+  `+` asserts the exact R3 operator-name message; the identical shape under a
+  non-operator name is accepted (the rejection is keyed on the name, not the
+  overload).
 - `check_inline_polymorphic_signature_is_error` — a `'T`-bearing `inline` word
   asserts the exact R3 monomorphism message; a `~`-bearing (variable-free)
   `inline` word is **accepted** (the discriminating pair for "phrased over
@@ -384,8 +416,11 @@ happy path plus at least one error/edge case; every new test is mutation-tested
   checks its own).
 - `inline_word_caller_emits_no_call` — a caller of `ClkDiv` has no `Instr::Call`
   for it, asserted on lowered IR, not inferred from output.
-- The three R3/R4 rejections as located-error goldens (source in → exact
-  diagnostic out).
+- The five R3/R4 rejections as located-error goldens (source in → exact
+  diagnostic out): `main`, builtin-operator name, clause body,
+  variable-bearing signature, and the reworded cycle. The operator-name golden
+  pairs its rejection with the same overload *without* `inline` building and
+  running, so the rejection is shown to be the keyword's.
 - `inline_reference_output_pair` — `pick` (Feature C positive witness) compiles
   and its caller reads the returned reference with the right value; the *same*
   word without `inline` still fails with the `check_reference_free_signature`
@@ -406,6 +441,22 @@ happy path plus at least one error/edge case; every new test is mutation-tested
 - `times` and `lib/combinators.sth`'s ownership of it (10b).
 - `if`/`cond` as ordinary words (10c).
 - Statics, `volatile`, fixed-address MMIO (separate, larger language design).
+- **Making combinator resolution authoritative for an operator name.** R3
+  rejects an `inline` overload of a builtin operator name rather than making it
+  work. The feature version — resolve an operator name against the live stack as
+  a combinator first, falling back to `check_operator` when no candidate matches
+  — is worth doing (an inline `+` on a struct is exactly this slice's embedded
+  motivation) but is not a one-liner: suppressing the stale
+  `poly.builtin_overloads` record alone moves the failure to
+  `src/backend/qbe.rs:1144` ("an aggregate is not a printable scalar"), so the
+  splice does not land correctly at an operator site either. Its own slice.
+- **The name-keyed combinator graph vs. overload sets.** Two `inline` `drop`
+  overrides for different types are rejected as
+  `an always-spliced word cannot be recursive: 'drop' -> 'drop' -> 'drop'` — a
+  false cycle, because `check_combinator_cycles` keys on the bare name while
+  `drop` is an overload set (the non-`inline` pair is fine). Same root class as
+  the operator rejection above. A located error, not a miscompile, so it is
+  deferred with it.
 
 ## Sequencing
 
@@ -419,7 +470,7 @@ Phase 3 (the library retype) is the piece that must wait for 10b.
 
 | Phase | Focus | Difficulty |
 | --- | --- | --- |
-| 1 | `inline` keyword: grammar, `WordDef.declares_inline`, widen `is_combinator`, the three definition-site rejections (clause body, variable-bearing signature, reworded cycle), and REPL retention. Goldens: no-symbol, no-`Instr::Call`, three located-error rejections. | hard |
+| 1 | `inline` keyword: grammar, `WordDef.declares_inline`, widen `is_combinator`, the five definition-site rejections (`main`, builtin-operator name, clause body, variable-bearing signature, reworded cycle), and REPL retention. Goldens: no-symbol, no-`Instr::Call`, five located-error rejections. | hard |
 | 2 | Reference outputs on spliced words: skip `check_reference_free_signature` under `is_combinator`; the with/without-`inline` witness pair and the linear-referent adversarial negative golden; the standalone-check treatment. | hard |
 | 3 | Library retype (Feature B): `lib/combinators.sth` quotation parameters to `~[ ... ]`; byte-identical corpus-output golden; stored/returned quotation still requires `[ ... ]`. | standard |
 
@@ -428,7 +479,7 @@ Phase 3 (the library retype) is the piece that must wait for 10b.
   "phases": [
     {
       "phase": 1,
-      "focus": "inline keyword grammar, WordDef.declares_inline field, widen is_combinator, three definition-site rejections, REPL retention",
+      "focus": "inline keyword grammar, WordDef.declares_inline field, widen is_combinator, five definition-site rejections, REPL retention",
       "difficulty": "hard"
     },
     {
