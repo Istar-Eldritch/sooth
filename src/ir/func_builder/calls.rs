@@ -699,11 +699,8 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Line, BOOL_ENUM_ID};
-    use crate::check::check;
+    use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
-    use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
 
     #[test]
     fn quotation_literal_emits_no_instr_and_records_body() {

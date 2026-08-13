@@ -3,6 +3,12 @@
 
 use super::*;
 
+/// The single target word-width parameter (R15, M2): the byte width of a
+/// target machine word, from which `usize` size/align and every array/aggregate
+/// offset that embeds a `usize` derive. It is `8` for the QBE/x86-64 target
+/// today; `Ptr` retrofits to the same parameter in Slice 7. Every layout path
+/// routes through this rather than a literal `8`, so a re-target is one edit
+/// (criterion 2's structural test flips it to prove no stray literal remains).
 pub const WORD_WIDTH: u32 = 8;
 
 /// The runtime out-of-bounds trap helper (R19/D6): Sooth's first runtime
@@ -400,11 +406,10 @@ pub type Resolver<'a> = &'a dyn Fn(&str) -> String;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Line, BOOL_ENUM_ID};
-    use crate::check::check;
+    use crate::ast::BOOL_ENUM_ID;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
+    use crate::parser::parse;
 
     #[test]
     fn ir_type_of_array_and_usize_map() {

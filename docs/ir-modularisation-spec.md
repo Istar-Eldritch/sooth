@@ -97,15 +97,15 @@ Each phase was a single code-motion commit, verified green (`cargo build && carg
 
 | Phase | Area | Commits | Key files |
 |------|------|--------|----------|
-| 1 | Extract `types.rs` — IR data model + symbol-name consts | `c31b9dbd` | `src/ir/types.rs` |
-| 2 | Extract `layout.rs` — layout computation + registries | `ae87a9ed`, `a6bb09ec` | `src/ir/layout.rs` |
-| 3 | Extract `destructors.rs` — destructor synthesis | `afc4bbfc` | `src/ir/destructors.rs` |
-| 4 | Move `FuncBuilder` + state types + shared helpers into `func_builder/mod.rs` (hard) | `1611a1e4` | `src/ir/func_builder/mod.rs` |
-| 5 | Carve `calls` method group | `d956091b` | `src/ir/func_builder/calls.rs` |
-| 6 | Carve `word_families` method group | `3248afec` | `src/ir/func_builder/word_families.rs` |
-| 7 | Carve `quotation` method group | `e2809cd5` | `src/ir/func_builder/quotation.rs` |
-| 8 | Carve `control_flow` method group | `8c1c4ee3` | `src/ir/func_builder/control_flow.rs` |
-| 9 | Extract `driver.rs` — `lower()` kept intact, plus all driver functions | `31e2a1f8`, `278730b6`, `bd73a549` | `src/ir/driver.rs` |
-| 10 | Relocate all `#[test]` fns into subject modules + final full-crate check | `8f259837`, `4a03631c` | all `src/ir/` modules, `src/ir/test_helpers.rs` |
+| 1 | Extract `types.rs` — IR data model + symbol-name consts | `62e08d3` | `src/ir/types.rs` |
+| 2 | Extract `layout.rs` — layout computation + registries | `dbbd86e`, `d201561` | `src/ir/layout.rs` |
+| 3 | Extract `destructors.rs` — destructor synthesis | `dfa1749` | `src/ir/destructors.rs` |
+| 4 | Move `FuncBuilder` + state types + shared helpers into `func_builder/mod.rs` (hard) | `01d46bf` | `src/ir/func_builder/mod.rs` |
+| 5 | Carve `calls` method group | `2667d90` | `src/ir/func_builder/calls.rs` |
+| 6 | Carve `word_families` method group | `28acb9b` | `src/ir/func_builder/word_families.rs` |
+| 7 | Carve `quotation` method group | `40cabf8` | `src/ir/func_builder/quotation.rs` |
+| 8 | Carve `control_flow` method group | `8a5203f` | `src/ir/func_builder/control_flow.rs` |
+| 9 | Extract `driver.rs` — `lower()` kept intact, plus all driver functions | `52678a7`, `e9f1462`, `eae7f32` | `src/ir/driver.rs` |
+| 10 | Relocate all `#[test]` fns into subject modules + final full-crate check | `21cfa5d`, `eda7fb0` | all `src/ir/` modules, `src/ir/test_helpers.rs` |
 
-The `a6bb09ec`, `278730b6`, `bd73a549`, and `4a03631c` commits address review feedback within their respective phases. Phase 10 also introduced `src/ir/test_helpers.rs`, a shared test-utility module not anticipated in the original module shape table.
+The `d201561`, `e9f1462`, `eae7f32`, and `eda7fb0` commits address review feedback within their respective phases. Phase 10 also introduced `src/ir/test_helpers.rs`, a shared test-utility module not anticipated in the original module shape table.

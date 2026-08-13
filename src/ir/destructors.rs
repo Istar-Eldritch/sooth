@@ -481,11 +481,9 @@ fn synthesize_cell_destructor(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Line, BOOL_ENUM_ID};
-    use crate::check::check;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
+    use crate::parser::parse;
 
     #[test]
     fn two_drop_overloads_for_different_structs_do_not_collide() {

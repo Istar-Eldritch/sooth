@@ -2,7 +2,7 @@
 
 use super::destructors::recursive_disposal_path;
 use super::*;
-use crate::ast::{Line, BOOL_ENUM_ID};
+use crate::ast::Line;
 use crate::check::check;
 use crate::lexer::lex;
 use crate::parser::{parse, parse_line};

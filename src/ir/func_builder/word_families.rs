@@ -758,11 +758,7 @@ impl<'a> FuncBuilder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Line, BOOL_ENUM_ID};
-    use crate::check::check;
     use crate::ir::test_helpers::*;
-    use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
 
     #[test]
     fn lower_borrow_of_cell_local_gives_the_pointer_a_place() {

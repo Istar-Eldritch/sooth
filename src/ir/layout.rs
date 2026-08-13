@@ -764,11 +764,10 @@ impl LayoutBuilder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Line, BOOL_ENUM_ID};
     use crate::check::check;
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
+    use crate::parser::parse;
 
     #[test]
     fn ir_registers_overridden_struct_as_linear_despite_all_copy_fields() {

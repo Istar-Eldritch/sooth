@@ -886,11 +886,7 @@ pub(super) fn lower_materialized(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Line, BOOL_ENUM_ID};
-    use crate::check::check;
     use crate::ir::test_helpers::*;
-    use crate::lexer::lex;
-    use crate::parser::{parse, parse_line};
 
     #[test]
     fn func_builder_new_threads_current_word_name() {
