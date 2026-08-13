@@ -457,6 +457,10 @@ happy path plus at least one error/edge case; every new test is mutation-tested
   `drop` is an overload set (the non-`inline` pair is fine). Same root class as
   the operator rejection above. A located error, not a miscompile, so it is
   deferred with it.
+- **`tree-sitter-sooth/grammar.js`.** The editor grammar has not tracked the
+  language since it was added: it already does not know 10a's `~[`, and `inline`
+  widens the gap. A single sweep that re-syncs it with the real lexer/parser,
+  not a per-slice patch.
 
 ## Sequencing
 
@@ -470,7 +474,7 @@ Phase 3 (the library retype) is the piece that must wait for 10b.
 
 | Phase | Focus | Difficulty |
 | --- | --- | --- |
-| 1 | `inline` keyword: grammar, `WordDef.declares_inline`, widen `is_combinator`, the five definition-site rejections (`main`, builtin-operator name, clause body, variable-bearing signature, reworded cycle), and REPL retention. Goldens: no-symbol, no-`Instr::Call`, five located-error rejections. | hard |
+| 1 | `inline` keyword: grammar, `WordDef.declares_inline`, widen `is_combinator`, the five definition-site rejections (`main`, builtin-operator name, clause body, variable-bearing signature, reworded cycle), and REPL retention. Goldens: no-symbol, no-`Instr::Call`, five located-error rejections, plus R2's two unpinned splice routes (an imported `inline` word, and `inline` calling `inline`). | hard |
 | 2 | Reference outputs on spliced words: skip `check_reference_free_signature` under `is_combinator`; the with/without-`inline` witness pair and the linear-referent adversarial negative golden; the standalone-check treatment. | hard |
 | 3 | Library retype (Feature B): `lib/combinators.sth` quotation parameters to `~[ ... ]`; byte-identical corpus-output golden; stored/returned quotation still requires `[ ... ]`. | standard |
 

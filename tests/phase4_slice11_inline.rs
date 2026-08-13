@@ -36,6 +36,30 @@ fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     )
 }
 
+/// Build and run a two-file closure, returning the built binary's path, its
+/// stdout and its exit code. The binary is built inside the closure dir, so the
+/// caller removes that whole dir once it has read the symbol table.
+fn build_and_run_closure(name: &str, lib: &str, main: &str) -> (std::path::PathBuf, String, i32) {
+    let dir = std::env::temp_dir().join(format!("sooth-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("creating the closure dir should succeed");
+    std::fs::write(dir.join("lib.sth"), lib).expect("writing the library should succeed");
+    let entry = dir.join("main.sth");
+    std::fs::write(&entry, main).expect("writing the entry should succeed");
+    let binary = sooth::driver::build(&entry).expect("build should succeed");
+    let output = std::process::Command::new(&binary)
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("binary should run");
+    (
+        binary,
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        output
+            .status
+            .code()
+            .expect("process should exit normally, not die by signal"),
+    )
+}
+
 fn check_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
@@ -111,6 +135,79 @@ fn inline_word_caller_emits_no_call() {
     assert!(
         calls.is_empty(),
         "the caller of an `inline` word emits no call: {calls:?}"
+    );
+}
+
+#[test]
+fn inline_word_imported_across_modules_is_spliced() {
+    // R2 claims the widened predicate reaches call-site splicing with no
+    // further plumbing; an imported call site is the route the single-file
+    // goldens above cannot reach, and the only one where the splice competes
+    // with name mangling. The non-inline sibling is the discriminator: it keeps
+    // a symbol out of the very module the `inline` word mints none in, so the
+    // absence is the keyword's doing and not a whole-module omission.
+    let (binary, stdout, code) = build_and_run_closure(
+        "slice11-cross-module",
+        ": Fast inline ( -- i64 ) 7 ;\n: slow ( -- i64 ) 5 ;\nexport: Fast slow ;\n",
+        "import: lib \"lib.sth\" ;\n: main ( -- ) lib::Fast . lib::slow . ;\n",
+    );
+    assert_eq!(stdout, "7\n5\n");
+    assert_eq!(code, 0);
+
+    let nm = std::process::Command::new("nm")
+        .arg(&binary)
+        .output()
+        .expect("nm should run");
+    std::fs::remove_dir_all(binary.parent().expect("the binary sits in the closure dir")).ok();
+    let symbols = String::from_utf8_lossy(&nm.stdout);
+    assert!(
+        !symbols.contains("Fast"),
+        "an imported `inline` word mints no symbol; nm found:\n{symbols}"
+    );
+    assert!(
+        symbols.contains("slow"),
+        "its non-inline sibling in the same module still does:\n{symbols}"
+    );
+}
+
+#[test]
+fn inline_word_calling_inline_word_splices_transitively() {
+    // The inliner walks its own output, so an `inline` word whose body calls
+    // another one leaves no residue at either level -- neither a surviving
+    // `IrFunc` for the inner word nor a call in the outer one's splice.
+    let src = ": inner inline ( i64 -- i64 ) 2 * ;\n\
+               : outer inline ( i64 -- i64 ) inner 2 * ;\n\
+               : main ( -- ) 3 outer . ;\n";
+    let (binary, stdout, code) = build_and_run("slice11-transitive", src);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "12\n");
+    assert_eq!(code, 0);
+
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = lower(&module).expect("lowering should succeed");
+    let names: Vec<&String> = ir.funcs.iter().map(|f| &f.name).collect();
+    assert!(
+        !names
+            .iter()
+            .any(|n| n.contains("inner") || n.contains("outer")),
+        "neither level of an `inline` chain mints an `IrFunc`: {names:?}"
+    );
+    let main = ir
+        .funcs
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("`main` is lowered");
+    let calls: Vec<&Instr> = main
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::Call(..)))
+        .collect();
+    assert!(
+        calls.is_empty(),
+        "the inner splice leaves no call behind either: {calls:?}"
     );
 }
 
