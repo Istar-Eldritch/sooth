@@ -12,17 +12,34 @@ It silently drops one capability that only the intrinsic had, and closing that g
 checker change outside the brief's sanctioned edits. That change is **folded into this slice
 as Phase 1** (Decision P0), not deferred to a prerequisite slice.
 
-A working prototype of the whole thing (intrinsic deletion, the library word, and the Phase 1
-relaxation) is committed beside this spec as
+A prototype covering the intrinsic deletion, the library word, and the Phase 1 relaxation is
+committed beside this spec as
 [`phase4-slice10b-p0-prototype.patch`](./phase4-slice10b-p0-prototype.patch). It builds, and
 the soundness evidence in the P0 section below was measured against it. Treat it as reference,
-not as the delivery: it carries no tests and none of the corpus or test-suite sweep.
+not as the delivery: it carries no tests and none of the corpus or test-suite sweep, and it
+does **not** contain R10's `span.module` fix, so it is short of Phase 1 as specified here.
 
-**Warning:** the patch was generated before commit `9ee7b6a`, so its first two hunks *delete*
-`docs/phase4-slice11-brief.md` and `docs/phase4-slice11-spec.md` (a concurrent effort's docs).
-Apply only its `src/`, `lib/`, and `examples/` hunks. It also deliberately leaves the four dead
-`times_*` diagnostics in place, so it emits 4 `dead_code` warnings and is **not**
-clippy-clean: R1's warning-free state is only reached once they are deleted.
+**Warnings, all measured against the patch as committed:**
+
+- It was generated before commit `9ee7b6a`, so its first two hunks *delete*
+  `docs/phase4-slice11-brief.md` and `docs/phase4-slice11-spec.md` (a concurrent effort's docs).
+  Apply only its `src/`, `lib/`, and `examples/` hunks.
+- It deliberately leaves the four dead `times_*` diagnostics in place, so it emits 4
+  `dead_code` warnings and is **not** clippy-clean: R1's warning-free state is only reached
+  once they are deleted.
+- Its inline comment on the relaxation carries the **retired** argument verbatim ("a local
+  bound below the splice's frame floor lives in an ancestor frame that outlives every
+  iteration, exactly as `check_reference_across_back_edge` lets an ancestor-rooted reference
+  cross"). P0 disowns that parallel. Do not copy the comment; write the relocated-diagnostic
+  rationale instead.
+- The parameter is named `frame_floor`, which contradicts what P0 establishes it to be (an
+  if-arm entry depth, not a frame floor). **Keep the name** rather than churn the call sites:
+  it is the floor below which a local is exempt, and P0's text is the authority on what the
+  quantity is. Do not reintroduce a frame-lifetime reading of the name.
+- Q2's binary-size figures are not reproducible from the patch as-is: its `examples/times.sth`
+  carries no import and fails with `` unknown word `times` `` until one is added. With the
+  import added the figures are exact (17112 bytes both ways, output `500000500000`, and `nm`
+  mints no `times`/`times-helper` symbol).
 
 ## The blocker: a linear local held across a `times` loop stops compiling
 
@@ -64,12 +81,13 @@ linear half is the corpus witness, and `tests/phase4_slice6f.rs`'s
 (`AccC`, `prefix-copy`) is unaffected: a Copy local never enters `check_linear_across_back_edge`.
 
 **No sanctioned edit fixes this.** The brief sanctions terms.rs only for *deletion*. The
-fix is a relaxation of `check_linear_across_back_edge` so a spliced self-tail combinator's
-back-edge check scopes to the combinator's own frame (`>= base_depth`) rather than the whole
-enclosing scope. That relaxation is sound because consumption of an enclosing linear local is
-separately rejected already (a `times`/`while` body that *consumes* `acc` still fails, see
-Q1 below): the only thing the relaxation newly admits is an enclosing linear local the body
-merely parks and never touches, which the loop provably cannot re-enter or double-dispose.
+fix is a relaxation of `check_linear_across_back_edge`: it gains a `frame_floor` parameter,
+passed only at the self-tail combinator's splice site, that suppresses its second clause for a
+local bound below the floor. The relaxation relocates a diagnostic; it does not add a
+permission. See Decision P0 below for the argument: consumption of an enclosing linear local
+is independently rejected by the existing capture-admission and end-of-scope guards, so the
+clause was never a soundness guard, only the thing that located the rejection at the
+back-edge instead of scope-end.
 
 This is the linear analog of 6g's borrow-grant hole, and like 6g it also benefits `while`.
 **Decision P0 (below) folds it into this slice as Phase 1.** Without it 10b cannot go green:
@@ -83,8 +101,8 @@ not.
 
 1. **The intrinsic deletes cleanly and `back_edge_outs` survives.** Removing the interception
    (`terms.rs:326-458`, comment through the closing brace at 458), `check_abstract_quotation_times`
-   (`terms.rs:1246-1293`), and the four diagnostics (`times_needs_quotation_error` through
-   `times_body_row_effect_error`, `terms.rs:1314-1357`) leaves a warning-free `cargo build`.
+   (`terms.rs:1246-1278`), and the four diagnostics (`times_needs_quotation_error` through
+   `times_body_row_effect_error`, `terms.rs:1312-1357`) leaves a warning-free `cargo build`.
    `back_edge_outs` (`terms.rs:1294`) sits between them and is **not** dead: it backs the
    self-tail marker (10a R11) and must stay. The four diagnostics are contiguous only if you
    skip `back_edge_outs`; delete around it.
@@ -169,6 +187,15 @@ with the edit each needs (measured, not inferred):
 | `phase4_slice10a_exit_witnesses.rs` | 2 | resolved per Decision 4 below |
 | `qbe_baseline.rs` | 1 | regenerate `.ssa` for the times-using corpus (sanctioned baseline diff) |
 
+**These counts are a measurement snapshot, not a gate.** They were taken on a tree carrying the
+prototype's `examples/` hunk (so `inplace_fold.sth` already has its import). An independent
+re-measurement on a *bare* deletion-only tree agreed on every row except `phase4_generics`,
+which came out at 11 rather than 12, for a total of 54 (55 with the relaxation). Every other
+per-target count matched exactly both times, and the qualitative claim (the relaxation adds
+exactly one failure and fixes none) was confirmed target by target both times. Phase 2 must
+**re-measure at entry** rather than treat any of these numbers as a target; the exit criteria
+are deliberately count-independent ("every failing target listed in Q3 is green").
+
 Row counts sum to 55 (5 + 3 + 20 + 12 + 2 + 2 + 6 + 1 + 1 + 2 + 1), across 11 unique targets
 (13 rows, three of them `--lib`). The measured 55 already assumes `times-helper` is exported
 (Decision 2, delivered alongside R2 in the intrinsic-deletion phase, not a separate "P1"
@@ -185,6 +212,11 @@ fixing none. That it fixes none is itself a finding: the shape it enables is pin
 working test today, because `phase4_slice6f.rs`'s two tests' `fold_body` calls cannot even
 reach the checker (this table's `phase4_slice6f.rs` row). Phase 1 must therefore add its own
 golden.
+
+That 56 and Sequencing's 55 are the same measurement seen from two points in the delivery
+order, not a contradiction: 56 is the deletion tree with the relaxation added on top, while
+Phase 1 lands *first* and re-points the one extra test, so the number actually observed on
+entering Phase 2 is 55 again. Do not read the difference as a regression.
 
 **Q4 (REPL). Resolved: `times-helper` must be exported.** Two REPL tests
 (`repl_imported_filter_runs`, `repl_combinators_dogfood_matches_native`) fail with
@@ -289,14 +321,21 @@ pins the over-approximation, so Phase 1 re-points it to a genuinely different sh
 test-local self-tail combinator whose own body binds a linear *inside the tail-`if` arm* and
 reaches the back-edge with it unconsumed (not a linear bound inside a spliced quotation
 argument, which closes its own scope first and would only ever produce the scope-end message,
-never the kept assertion). Measured: with the combinator-site call present, this produces both
-`` linear values across a loop are not supported yet `` and `` is live across the
-self-tail-call back-edge ``, the same substrings the current test asserts, so the assertion
-survives verbatim; with the call deleted it degrades to `` linear value ... is never consumed
-``. It is therefore a genuine mutation witness, but of **diagnostic location**, not of leak
-prevention: nothing here would leak if clause 2 were absent, since the same guards in the
-hazard table would still catch it, one step later and with a worse message. The spec drops any
-"load-bearing" framing that implies this test prevents a leak.
+never the kept assertion). The current test asserts exactly three substrings: `` `Spy` ``,
+`` `while` ``, and `` live across the self-tail-call back-edge ``; it does not assert
+`` linear values across a loop are not supported yet ``. The message names the *callee*, so
+the assertion survives unchanged only if the re-pointed test's own self-tail combinator is
+named `while`: measured, with that name and the combinator-site call present, the message
+contains all three substrings unchanged. Naming the test-local combinator anything else (e.g.
+`myloop`) yields `` is live across the self-tail-call back-edge to `myloop` ``, and the
+existing `err.contains("`while`")` check then fails; if a different name is chosen for other
+reasons, the callee substring in the assertion must be updated to match it. With the
+combinator-site call deleted, the message degrades to `` linear value ... is never consumed
+``, dropping the back-edge substring regardless of the combinator's name. It is therefore a
+genuine mutation witness, but of **diagnostic location**, not of leak prevention: nothing here
+would leak if clause 2 were absent, since the same guards in the hazard table would still
+catch it, one step later and with a worse message. The spec drops any "load-bearing" framing
+that implies this test prevents a leak.
 
 **A permanent reject golden covers the shape the floor wrongly exempts.** An own-frame linear
 bound in the combinator's own frame *before* the tail-`if` (the case the floor treats as
@@ -371,7 +410,8 @@ e.g. `tmp__inl0`). All of it mutation-audited per R9.
    path (Q1) already produces a rejection for each of the three bug classes they messaged.
 
 6. **Corpus stdout and exit codes stay byte-identical** everywhere `times` still compiles.
-   Verified for all eight non-linear files (`array_totals`, `array_totals_hand`,
+   Verified for all eight files that still compile unchanged, i.e. every times-using corpus file
+   other than `inplace_fold` (`array_totals`, `array_totals_hand`,
    `combinator_in_times`, `combinator_in_times_hand`, `filter_while`, `filter_while_hand`,
    `array_ctor`, `times`). `inplace_fold` is the one exception, and only until Phase 1's
    relaxation lands within this slice; with it, `inplace_fold` builds and prints
@@ -396,6 +436,13 @@ file. Cause: `check_drop_import_visibility` (`src/check/word_families.rs:756-768
 not the module where the quotation literal was written. `ast::Span` already carries a `module`
 field (`src/ast.rs:11-15`). Fix: gate on `span.module` instead of `ctx.module()`; `span.module`
 equals `ctx.module()` everywhere except under splicing, where it is strictly more correct.
+**Both lines must change, not just the gate.** `drop_import_visibility_error`
+(`src/check/word_families.rs:775`) also derives its `caller` from `ctx.module()`, and would
+then disagree with the gate that admitted or rejected the term. Today that disagreement is
+masked only by evaluation order: a home-scope pass runs first, where the two agree. If any
+quotation shape is ever checked at a splice site with no prior home-scope pass, the qualifier
+lookup runs against `lib/combinators.sth`'s import map and emits the fabricated-transitive note
+for what is really a plain qualified-only import. One line each.
 Verified: the failing case then compiles and runs; and a real two-file multi-module program
 using a qualified-only import still rejects with its exact expected diagnostic
 (`` cannot `drop` a value of type `lib::Res` in `main` `` plus the "has not imported by name"
@@ -405,13 +452,25 @@ hole: `drop_res` (`src/check/engine.rs:1324-1341`) hardcodes `span.module: 0` wh
 set the synthetic span's module to `caller` in `drop_of_qualified_only_imported_type_is_error`
 and `drop_of_transitively_reachable_type_with_no_direct_import_is_error`. R10 needs its own
 golden: a library-spliced combinator body that disposes a locally-declared linear through its
-own `drop` overload compiles and runs with exact expected stdout.
+own `drop` overload compiles and runs with exact expected stdout. It also needs a **reject**
+golden for the other side of the rule, verified constructible: a spliced quotation body that
+disposes a *qualified-only-imported* type through a combinator declared in that type's own
+module. That is the exact shape where naively trusting the splice destination would over-admit
+(the destination module *can* see the destructor, the authoring module cannot), and nothing
+else pins it. R9's mutation (d) is R10's discriminating mutation.
+
+Out of scope, recorded because it frames how much the rule is worth: the visibility gate never
+fires at all for a disposal inside a **generic** word body. A library exporting
+`: dispose ( 'T -- ) drop ;`, called on a caller-declared linear, produces zero gate hits and
+runs the destructor. That predates R10 and is not a splice artefact, so it is not fixed here,
+but it means the rule is import hygiene rather than a soundness guarantee, which is the right
+frame for judging R10's relaxation.
 
 ## Requirements
 
 **R1**. Delete the intrinsic: the `check_term` `if name == "times"` interception
-(`terms.rs:326-458`), `check_abstract_quotation_times` (`terms.rs:1246-1293`), the four
-diagnostics (`terms.rs:1314-1357`, working around `back_edge_outs` at `:1294`, which stays),
+(`terms.rs:326-458`), `check_abstract_quotation_times` (`terms.rs:1246-1278`), the four
+diagnostics (`terms.rs:1312-1357`, working around `back_edge_outs` at `:1294`, which stays),
 and the `calls.rs` `"times" =>` arm (`:326-418`) with its two unit tests (`:782`, `:840`).
 `cargo build` warning-free afterward proves the four functions were the only dead code.
 
@@ -419,7 +478,9 @@ and the `calls.rs` `"times" =>` arm (`:326-418`) with its two unit tests (`:782`
 `export:` line per Decision 2.
 
 **R3**: Add the corpus imports per Decision 3 (seven example files plus `lib/arrays.sth`,
-eight files total), with stdout and exit code held byte-identical (Decision 6).
+eight files in total: the seven examples that contain a bare `times`, plus `lib/arrays.sth`).
+Note this is a different set of eight from Decision 6's, which counts the corpus files whose
+output is verified unchanged. Stdout and exit code stay byte-identical (Decision 6).
 
 **R4**: Resolve `phase4_slice10a_exit_witnesses.rs` per Decision 4.
 
@@ -441,6 +502,18 @@ baseline diff). Machine-code size is unchanged (Q2); the `.ssa` differs only in 
 numbering. Mechanism: `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline` (documented at
 `tests/qbe_baseline.rs:8`).
 
+**R10**: The disposal-visibility splice fix, specified in full as Decision R10 above (both
+`check_drop_import_visibility`'s gate at `src/check/word_families.rs:756-768` and
+`drop_import_visibility_error`'s caller derivation at `:775` move from `ctx.module()` to
+`span.module`; the two `engine.rs` synthetic spans take `module: caller`; an accept golden, a
+reject golden, and R9's mutation (d)). Delivered in Phase 1 alongside P0.
+
+**R11**: Correct the prose that still calls `times` a compiler intrinsic, since this project
+keeps ROADMAP and DESIGN as current-state documents rather than history: `README.md:54` and
+`:61`, `ROADMAP.md:304` ("The one compiler-known intrinsic, `times`") and `:308-312`,
+`DESIGN.md:352-357` and `:513`. After 10b there is no compiler-known intrinsic at all, so the
+claim is not merely stale but false.
+
 **R7 (exit witnesses on the real `times`, not `my-times`)**: new goldens, each an
 `assert_eq!` on full stdout plus exit code, never a bare "runs" or "produces correct values"
 claim, living in `tests/phase4_slice10b.rs` (new file):
@@ -458,11 +531,15 @@ claim, living in `tests/phase4_slice10b.rs` (new file):
 
 **R8 (Phase 1 / P0 witnesses, in this slice)**: `check_linear_across_back_edge` takes
 `frame_floor`, passed `Some(base_depth)` at the combinator site and `None` at the whole-word
-TCO site (P0). `inplace_fold.sth`'s `prefix-linear` compiles again and prints identically.
+TCO site (P0). `inplace_fold.sth`'s `prefix-linear` compiles again and prints exactly
+`"1\n3\n6\n10\n1\n3\n6\n10\n"` with exit code 0. That assertion already exists and does not need
+writing: `tests/phase4_slice6f.rs:81` and `:98` both assert it via `run_dogfood` ->
+`common::build_example` -> the driver, so it is an exact-stdout enforcer, not a "it runs" check.
 Phase 1's own goldens, in `tests/phase4_slice10b.rs` (new file): an accept for the
 parked-linear shape over both a library-style self-tail combinator and `while`, asserting the
 value; `while_body_linear_local_across_back_edge_is_error` re-pointed to the if-arm shape per
-P0 (a diagnostic-location witness, not a leak-prevention one); a new reject golden for the
+P0, with its test-local self-tail combinator **named `while`** so the existing three-substring
+assertion survives unchanged (a diagnostic-location witness, not a leak-prevention one); a new reject golden for the
 own-frame-before-the-tail-if shape the floor wrongly exempts, asserting the scope-end message
 (the tripwire for end-of-scope disposal and the branch-join guard); and the four pre-existing
 hazard rejections from P0's table, correctly labelled as pinning those guards, not P0. Every
@@ -471,12 +548,23 @@ span points into `lib/combinators.sth`, not the caller) and never a bare local n
 local is reported mangled, e.g. `tmp__inl0`).
 
 **R9**: Mutation-test each new guard and each reworded rejection, in a throwaway copy of the
-tree (never the shared worktree; keep `target/` copies off the `/tmp` tmpfs). Exactly three
-mutations are required: (a) neuter `frame_floor` (make it always `None`): the parked-linear
-accept goldens go red; (b) delete the combinator-site call at `terms.rs:615`: the re-pointed
-if-arm diagnostic witness goes red (degrading to the scope-end message); (c) remove
-`MaybeMoved(_)` from the match arm at `src/check.rs:1385`: the branch-only-consume hazard
-golden goes red.
+tree (never the shared worktree; keep `target/` copies off the `/tmp` tmpfs). Exactly four
+mutations are required:
+
+- (a) neuter `frame_floor` (make it always `None`): the parked-linear accept goldens go red.
+  **This mutation is not exclusive to them**: it also flips the own-frame-before-the-tail-`if`
+  tripwire golden, whose message changes from the scope-end wording to the back-edge wording.
+  Expect both, or the audit will read as a failed prediction.
+- (b) delete the combinator-site call at `terms.rs:615`: the re-pointed if-arm diagnostic
+  witness goes red (degrading to the scope-end message). Nothing else moves.
+- (c) remove `MaybeMoved(_)` from the match arm at `src/check.rs:1385`: the branch-only-consume
+  hazard golden goes red. Note what this mutation does **not** do: it does not admit the
+  hazard. Measured, the program is still rejected, with `` use after move `` instead of the D3
+  capture-admission message. That golden is therefore a **wording** witness, exactly as the
+  re-pointed test is a diagnostic-location witness, and it must assert the D3 wording. Written
+  as `is_err()` or "still rejects" it would pass under this mutation and be a placebo.
+- (d) revert R10's gate to `ctx.module()`: R10's accept golden goes red (measured: the spliced
+  disposal is rejected again).
 
 ## Sanctioned files, and the scope this spec adds
 
@@ -509,7 +597,7 @@ maintainer can veto:
 - `README.md`, `ROADMAP.md`, `DESIGN.md`: still describe `times` as a compiler intrinsic
   (`README.md:54`, `:61`; `ROADMAP.md:304`, `:308-312`; `DESIGN.md:352-357`, `:513`), which is
   now current-state-wrong; the project keeps these as current-state documents, so they are
-  corrected as part of this slice.
+  corrected as part of this slice, under **R11**, and verified by its exit criterion.
 
 ## Sequencing
 
@@ -519,6 +607,12 @@ must land and be green before Phase 3's corpus imports, since `inplace_fold.sth`
 without it. Phase 1 is independently verifiable: it is green against the *unmodified*
 intrinsic, so the relaxation is reviewed on its own evidence before anything is deleted;
 applying only P0 to HEAD leaves exactly one failing test, the one Phase 1 re-points.
+
+Phase 1's real entry state is that one P0 failure **plus two** from R10, which flips
+`drop_of_qualified_only_imported_type_is_error` and
+`drop_of_transitively_reachable_type_with_no_direct_import_is_error` until its harness fix
+(the synthetic span's `module: caller`) lands in the same phase. Three failures on entry, zero
+on exit; do not read the extra two as a regression.
 
 The suite is **red by design** through Phases 2 and 3: the intrinsic-deletion tree alone fails
 55 tests over 11 cargo targets (Q3), and that count does not clear until Phase 4's sweep
@@ -543,19 +637,21 @@ combinator and `while`, the four pre-existing hazard rejections hold (pinning th
 P0), the own-frame-before-the-tail-if reject golden holds, and
 `while_body_linear_local_across_back_edge_is_error` is re-pointed to the if-arm shape rather
 than dropped (R8); a library-spliced combinator body disposes a locally-declared linear
-through its own `drop` overload, `check_drop_import_visibility` gates on `span.module`, and the
-qualified-only-import rejection stays intact (R10); and every new guard has been shown capable
-of failing by mutation in a throwaway tree (R9).
+through its own `drop` overload, both `check_drop_import_visibility`'s gate and
+`drop_import_visibility_error`'s caller derivation use `span.module`, the qualified-only-import
+rejection stays intact end to end, and the spliced qualified-only reject golden holds (R10); no
+prose in README, ROADMAP or DESIGN still calls `times` an intrinsic (R11); and all four R9
+mutations have been run, each flipping the goldens R9 predicts and no others (R9).
 
 ## Phases (JSON)
 
 ```json
 {
   "phases": [
-    { "phase": 1, "focus": "P0: check_linear_across_back_edge gains frame_floor, Some(base_depth) at the combinator site and None at the whole-word TCO site; parked-linear accept goldens over a library self-tail combinator and over while; the re-pointed if-arm reject golden for while_body_linear_local_across_back_edge_is_error (diagnostic location, not leak prevention); a new reject golden for the own-frame-before-the-tail-if shape the floor exempts; the four pre-existing hazard rejections, labelled as pinning those guards, not P0. R10: check_drop_import_visibility gates on span.module instead of ctx.module(), fixing the drop-overload splice gap, plus the two engine.rs tests with hardcoded span.module: 0. No intrinsic deletion yet: this phase is green against the unmodified intrinsic. Reference: docs/phase4-slice10b-p0-prototype.patch, applying only its src/, lib/, and examples/ hunks", "difficulty": "hard" },
+    { "phase": 1, "focus": "P0: check_linear_across_back_edge gains frame_floor, Some(base_depth) at the combinator site and None at the whole-word TCO site; parked-linear accept goldens over a library self-tail combinator and over while; the re-pointed if-arm reject golden for while_body_linear_local_across_back_edge_is_error, whose test-local self-tail combinator must be NAMED while so the existing three-substring assertion survives unchanged (diagnostic location, not leak prevention); a new reject golden for the own-frame-before-the-tail-if shape the floor exempts; the four pre-existing hazard rejections, labelled as pinning those guards, not P0. R10: BOTH check_drop_import_visibility's gate and drop_import_visibility_error's caller derivation move from ctx.module() to span.module, fixing the drop-overload splice gap, plus an accept golden, a reject golden for a qualified-only-imported type disposed in a spliced body, and the two engine.rs tests whose synthetic span hardcodes module: 0. NO intrinsic deletion in this phase: it is green against the unmodified intrinsic, and its entry state is three failing tests (one P0 re-point, two R10 harness). Reference: docs/phase4-slice10b-p0-prototype.patch, but take ONLY its three check_linear_across_back_edge hunks; the patch's other src/ hunks are the Phase 2 intrinsic deletion and its lib/ and examples/ hunks are Phases 2 and 3, and it does not contain R10 at all", "difficulty": "hard" },
     { "phase": 2, "focus": "delete the intrinsic (interception, check_abstract_quotation_times, four dead diagnostics, calls.rs lowering arm and its two unit tests) and add exported times/times-helper to lib/combinators.sth; the suite is red by design from here through Phase 3 (55 failing tests over 11 targets measured on the deletion alone)", "difficulty": "hard" },
     { "phase": 3, "focus": "corpus imports across the seven bare-times example files and arrays.sth library-to-library import, with byte-identical stdout including inplace_fold; still red by design, green restored only at Phase 4", "difficulty": "standard" },
-    { "phase": 4, "focus": "test-suite sweep across the 11 remaining targets including the in-process-check category, slice10a witness resolution, stale check.rs diagnostic correction, qbe baseline regeneration, real-times exit witnesses, and the mutation audit; restores green", "difficulty": "hard" }
+    { "phase": 4, "focus": "test-suite sweep across the remaining targets (re-measure the Q3 counts at entry rather than trusting them) including the in-process-check category, slice10a witness resolution, stale check.rs diagnostic correction, qbe baseline regeneration via REGEN_QBE_BASELINE=1, real-times exit witnesses each asserting exact stdout and exit code, R11's README/ROADMAP/DESIGN prose correction, and R9's four-mutation audit; restores green", "difficulty": "hard" }
   ]
 }
 ```
