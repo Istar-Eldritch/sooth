@@ -628,8 +628,14 @@ compile** — the Phase 1 witnesses use no combinator, so they compile in an R1-
 - **Not pinnable, stated so it is not faked (D4).** Flipping the *body splice's* `back_edge` from
   `true` to `false` changes no test and no probe once D5 has closed recon 10's hygiene defect. Do
   not write a test that claims to pin it; do not treat a green suite as evidence the value is right.
-  The literal check's `back_edge = true` **is** load-bearing (D4) and is pinned by M-R2's value
-  assertion, not by a flag-flip test.
+  **The literal check's `back_edge = true` is not pinned by M-R2 or by anything else in this
+  slice's corpus either** (measured: flipping it alone, flipping the splice's flag alone, and
+  flipping both together each leave the full suite green, including a constructed
+  read-through-`a`-then-write-through-`arr` witness inside a `c::while` literal that re-executes
+  per iteration). It is still the correct value under D4's soundness argument above — the terms
+  scanned are the caller's own literal, re-executed per iteration, so treating a granted name's
+  last use as final would be wrong — but that argument is unobserved by any test today, not
+  pinned by one. Do not write a test that claims to pin this flag either.
 
 The R1 unit test (U1) is warranted directly because the end-to-end goldens reach `releasable_into`
 only through several nested invocations. Precedent: 6f's R6 walk-stop test, which became a unit

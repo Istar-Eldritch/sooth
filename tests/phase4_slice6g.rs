@@ -52,21 +52,8 @@ fn check_error(src: &str) -> String {
     sooth::check::check(&mut module).expect_err("check should fail")
 }
 
-/// Write `src` (which carries its own `import:` line) to a temp file and
-/// build it through the driver, so a multi-module program actually resolves
-/// its import (unlike `check_ok`/`check_error`, which check a single parsed
-/// module and never see an imported word). `name` distinguishes the temp
-/// source per test (the goldens run in parallel).
-fn build_ok_with_import(name: &str, src: &str) {
-    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
-    std::fs::write(&path, src).expect("writing temp source should succeed");
-    let result = sooth::driver::build(&path);
-    std::fs::remove_file(&path).ok();
-    let binary = result.expect("build should succeed");
-    std::fs::remove_file(&binary).ok();
-}
-
-/// The reject twin of `build_ok_with_import`.
+/// The reject twin of `run_src`, for a program whose import needs the
+/// multi-module driver but whose check is expected to fail before it runs.
 fn build_err_with_import(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -262,7 +249,7 @@ fn bound_array_passed_to_filter_is_accepted() {
     // whole fix here: `filter`'s own predicate literal `[ 4 > ]` never mentions
     // the array, so R2's pass has nothing to do with this shape (M-D1 reds
     // this test, M-R2 does not; see Q-witness).
-    build_ok_with_import(
+    let (out, code) = run_src(
         "6g-splice",
         &format!(
             "{}\n\
@@ -272,6 +259,8 @@ fn bound_array_passed_to_filter_is_accepted() {
             lib_import("c", "lib/combinators.sth")
         ),
     );
+    assert_eq!(out, "");
+    assert_eq!(code, 0);
 }
 
 #[test]
@@ -307,9 +296,11 @@ fn while_over_an_aliased_array_local_is_accepted() {
 fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the_loop() {
     // M-T-while-bounds variant 1: mention the original name `a` anywhere
     // inside the while-literal (here, a no-op read at the top of the loop
-    // body). R1's `IMMORTAL_IN_BODY` marking correctly withholds the grant, a
-    // name mentioned anywhere in a back-edge body is never dead there. Proves
+    // body). Must keep rejecting under the full R1+D1+R2 fix -- proves
     // T-while is not accidentally over-permissive.
+    // (This still rejects under a full R1 revert and under both `back_edge`
+    // flags false, so it is a boundary guard, not a witness that any single
+    // mechanism -- `IMMORTAL_IN_BODY` included -- is what does the work.)
     let err = build_err_with_import(
         "6g-while-read",
         &format!(
