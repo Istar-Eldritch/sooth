@@ -1,0 +1,113 @@
+\ Phase 4 slice 6a follow-on: generic array search/sort, comparator-driven
+\ rather than bound-driven. There is no trait/impl mechanism connecting a
+\ bound to a type's capability (`Ord`'s `is_ord` is `ty.is_numeric()` and
+\ nothing else), so a hypothetical `Cmp` bound would only ever admit the same
+\ numerics `Ord` already does -- worthless for comparing a user struct. Both
+\ words below instead take an explicit three-way comparator quotation
+\ (negative/zero/positive, `strcmp`/`qsort` convention), which is the only
+\ mechanism that actually reaches a user type today.
+\
+\ `sort` is a plain bottom-up (non-adaptive) merge sort, not powersort: a
+\ generic word's body cannot construct an array (`fill` is unreachable inside
+\ a poly body, confirmed directly, literal count or not), so any scratch
+\ memory a generic sort needs has to be a caller-supplied argument. Real
+\ powersort needs two such buffers -- the merge scratch and a growable
+\ run-descriptor stack for its power-based merge-order policy -- and a
+\ three-array call site for an ordinary `sort` call was judged not worth it.
+
+export: bin_search sort ;
+
+\ Binary search over an array kept sorted by `cmp`. Converges to the
+\ leftmost insertion point (`lower_bound`) using only `cmp`'s sign, then
+\ checks equality once at the end -- so duplicates report their leftmost
+\ index. The loop runs a fixed 32 iterations rather than `ceil(log2(n))`:
+\ every Sooth array's length is a `u32` (`fill`'s own range check), so 32
+\ halvings always converge regardless of `n`, and an already-converged
+\ iteration (`lo == hi`) is a no-op, not wasted merge work.
+: bin_search ( ['T: Copy 'N] 'T [ 'T 'T -- i64 ] -- ['T 'N] usize bool )
+  | cmp | | key | len >i64 | n | | arr |
+  0 n 32 [ | i |
+    over over < if
+      | lo hi |
+      lo hi + 1 shr | mid |
+      &arr mid >usize &> @ key cmp call 0 < if
+        mid 1 + hi
+      else
+        lo mid
+      end
+    end
+  ] times
+  | lo hi |
+  lo n < if
+    &arr lo >usize &> @ key cmp call 0 =
+  else
+    false
+  end
+  | found |
+  arr lo >usize found
+;
+
+: min2 ( i64 i64 -- i64 )
+  over over < if drop else swap drop end ;
+
+\ In-place (caller-supplied scratch) bottom-up merge sort. `scratch` must be
+\ the same length as `arr`; its contents on entry are irrelevant, and the
+\ array returned in its place is the other one -- whichever of the two
+\ physical buffers did *not* end up holding the sorted result.
+\
+\ The outer `times` row (`ca`/`cs`/`cw`: current source, current
+\ destination, current run width) is reassigned to the fresh merge output
+\ every active pass and passed through unchanged on an idle one, so whichever
+\ value `ca` holds at the end already holds the answer -- no separate
+\ "which physical buffer is which" flag is needed. Both the outer pass loop
+\ and the inner per-block loop run a fixed 32/`n`-bounded `times` rather than
+\ stopping early: an array's length is a `u32`, so `ceil(log2(n)) <= 32`
+\ passes always suffice, and `n` block-start attempts always suffice to walk
+\ every block, with the excess iterations idling as a no-op once `cw >= n`
+\ (outer) or `j >= n` (inner).
+: sort ( ['T: Copy 'N] ['T 'N] [ 'T 'T -- i64 ] -- ['T 'N] ['T 'N] )
+  | cmp | | scratch |
+  len >i64 | n | | arr |
+  arr scratch 1 32 [ | i |
+    | ca cs cw |
+    cw n < if
+      0 n [ | k |
+        | j |
+        j n < if
+          j cw + n min2 | mid |
+          j cw 2 * + n min2 | hi |
+          j mid hi j - [ | step |
+            | l r |
+            l mid < r hi < and if
+              &ca l >usize &> @ &ca r >usize &> @ cmp call 0 < if
+                &!cs j step + >usize &!> &ca l >usize &> @ !
+                l 1 + r
+              else
+                &!cs j step + >usize &!> &ca r >usize &> @ !
+                l r 1 +
+              end
+            else
+              l mid < if
+                &!cs j step + >usize &!> &ca l >usize &> @ !
+                l 1 + r
+              else
+                &!cs j step + >usize &!> &ca r >usize &> @ !
+                l r 1 +
+              end
+            end
+          ] times
+          drop drop
+          j cw 2 * +
+        else
+          j
+        end
+      ] times
+      drop
+      cs ca cw 2 *
+    else
+      ca cs cw
+    end
+  ] times
+  | ra rs rw | rw drop
+  ra rs
+;

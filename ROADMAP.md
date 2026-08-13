@@ -609,9 +609,10 @@ combinator is monomorphized and checked by the ordinary concrete `check_word`.
 library combinators, now that 6g has closed the splice-granting bug both would otherwise
 multiply). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
-module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), 10a (row
-variables inside a quotation's declared effect), and 6g (combinator splices learning 6f's
-granting rule) are all done on `main`. Slice 9 shipped P1–P2 only (`Bool` as a library
+module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), and 10a (row
+variables inside a quotation's declared effect) are all done on `main`; 6g (combinator
+splices learning 6f's granting rule) is implemented, pending merge from `impl/`. Slice 9
+shipped P1–P2 only (`Bool` as a library
 enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
 quotation's declared effect, which does not parse before slice 10a, and is split out as
 **slice 10c** (`docs/phase4-slice10c-brief.md`), renumbered into slice 10's lineage since it
@@ -1692,12 +1693,13 @@ then find out what the compiler owes it.
 
    **6g — combinator splices never learned 6f's granting rule, so a consumed `Copy`-array
    local is misread as a live alias at every combinator call. Implemented.** `check_terms`
-   (`src/check.rs:8037`) is the plain root-invocation entry point 6f's own contract names:
+   (`src/check/terms.rs:11`) is the plain root-invocation entry point 6f's own contract names:
    "nothing is ancestor to those, so both [`outer_releasable`, `back_edge`] are empty/false."
-   `inline_combinator` (`:7194`) called it unconditionally when splicing a combinator's body
-   (`filter`/`map`/`fold`/`while`/any user quotation-taking word), even though a splice is
-   exactly the nested-invocation shape `times`/`if`/`call` (`:8311`, `:8397`, `:8797`) already
-   routed through `check_terms_relaxed` with a `releasable_into`-computed set. Every array in
+   `inline_combinator` (`src/check/combinators.rs:227`) called it unconditionally when splicing
+   a combinator's body (`filter`/`map`/`fold`/`while`/any user quotation-taking word), even
+   though a splice is exactly the nested-invocation shape `times`/`if`/`call`
+   (`src/check/terms.rs:400`, `:856`, `:306`) already routed through `check_terms_relaxed` with
+   a `releasable_into`-computed set. Every array in
    Sooth is `Copy`, not because `fill` is the sole constructor (6h added a second, the raw
    `[ Type ; Count ]` constructor) but because `check_no_linear_array_elements` rejects any
    array *type* whose element is non-`Copy` at declaration/registry time, independent of which
@@ -1717,28 +1719,28 @@ then find out what the compiler owes it.
 
    Reported and deferred at 6b's own recon 10 ("a pre-existing 6a inliner limitation... whether
    to fix the underlying alias-after-move tracking is 6a's business, not this slice's") but
-   not root-caused until now. Fixing the splice alone was not shippable: the same granting
-   rule was independently wrong at a loop back-edge (a name used earlier in a `times`/`call`
-   body was still granted at a later back-edge index), silently accepting a stale read through
-   an alias with no combinator involved; that tightening (`releasable_into` gains `live`/`at`,
-   granting an ancestor name only when `live.dead(name, at + 1)`) landed first, alone, so it
-   could be validated green before the splice relaxation could mask a mistake in it. A second
-   prerequisite closed a name-hygiene defect (`alpha_rename_locals` renames a callee's locals
-   but a call to a word/builtin was left untouched, so a caller local sharing a builtin's name
-   was read in place of that builtin inside a spliced body): binding a local whose name
-   collides with a builtin, an `env` word, a poly word, or a combinator is now a compile error.
+   not root-caused until now. The same granting rule was also independently wrong at a loop
+   back-edge (a name used earlier in a `times`/`call` body was still granted at a later
+   back-edge index), silently accepting a stale read through an alias with no combinator
+   involved: `releasable_into` gains `live`/`at`, granting an ancestor name only when
+   `live.dead(name, at + 1)`. A second, unrelated defect: `alpha_rename_locals` renames a
+   callee's locals but leaves a call to a word/builtin untouched, so a caller local sharing a
+   builtin's name was read in place of that builtin inside a spliced body. **D5:** binding a
+   local whose name collides with a builtin, an `env` word, a poly word, or a combinator is now
+   a compile error.
    **Fix:** a `releasable_into`-computed `outer_releasable` set, with `back_edge` a constant
    `true` (matching `times`'s own back-edge; not conditioned on self-tail-ness), is threaded
    through `inline_combinator`'s body-check and through the caller-literal check run against a
    combinator's declared parameter effect, switching both from `check_terms` to
    `check_terms_relaxed`, mirroring the three sites that already did this correctly.
    **Exit:** the recon-10 minimal case above compiles clean, as does the same shape through
-   `while`. `lib/arrays.sth` does not exist in this tree (not tracked on any branch, not
-   untracked in the worktree), so the `sort` dogfood this slice's exit criterion named is
-   unmeasured, and the header-comment deletion it also named has nothing to delete; whichever
-   commit later brings that library in inherits both as follow-up. Mutation tests prove the
-   fix by reverting each of the three pieces independently and confirming the corresponding
-   accept goldens fail again.
+   `while`, and `lib/arrays.sth`'s own `sort` called with the data and scratch arrays bound to
+   locals -- this slice's exit criterion's `sort` dogfood -- runs and returns the sorted array.
+   The stale aliasing-workaround paragraph that library's header comment carried for this bug
+   (blaming a false "inlining and no-`while`" restructure) is deleted; `sort`'s code and its own
+   fixed-bound-`times` rationale are untouched. Mutation tests prove the fix by reverting each
+   of the three pieces independently and confirming the corresponding accept goldens fail
+   again.
    Depends on 6f (uses its exact granting machinery); independent of 7-10's own mechanisms.
    **Sequenced after slice 10a lands** (avoid disrupting in-flight work) **and before 10b/10c
    begin**: both widen this bug's blast radius by turning a compiler-intrinsic control-flow
