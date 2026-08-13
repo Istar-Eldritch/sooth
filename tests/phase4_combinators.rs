@@ -960,20 +960,27 @@ fn while_empty_false_arm_falls_through() {
 
 #[test]
 fn while_body_linear_local_across_back_edge_is_error() {
-    // Criterion 10 (R8, load-bearing): an outer linear local (`sp`, a `Spy`)
-    // is unconsumed when `while`'s back-edge is reached, so it would ride into
-    // the next iteration with nobody to dispose it. Located at the self-call,
-    // naming the live linear type and `while`. Removing the
-    // `check_linear_across_back_edge` call from the self-tail splice path
-    // would let this through.
+    // Criterion 10 (R8), re-pointed by 10b's P0. The shape this used to use
+    // (an outer linear parked across the loop and disposed on the next line)
+    // now compiles: it was a false rejection, and its own justification --
+    // "it would ride into the next iteration with nobody to dispose it" -- was
+    // false about its own program. The golden moves to a self-tail combinator
+    // whose *own* body binds a linear inside the tail `if` arm and reaches the
+    // back-edge with it unconsumed, which is above the floor and still
+    // rejected here.
+    //
+    // What this witnesses is where the rejection is *located*, not that a leak
+    // is prevented: delete the combinator-site `check_linear_across_back_edge`
+    // call and the program is still rejected, by end-of-scope disposal, losing
+    // only the back-edge wording. The combinator is named `while` because the
+    // message names the callee, which is what the assertion below reads.
     let src = format!(
-        "{SPY_DEF}{}: main ( -- )\n\
-           7 Spy | sp |\n\
-           0 [ dup 5 < if 1 + true else false end ] c::while .\n\
-           sp drop ;\n",
-        combinators_import("c")
+        "{SPY_DEF}\
+         : while ( i64 [ i64 -- i64 bool ] -- i64 )\n\
+           | p | p call if 3 Spy | leak | p while else end ;\n\
+         : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n"
     );
-    let err = build_check_error("while_linear_back_edge", &src);
+    let err = check_error(&src);
     assert!(
         err.contains("`Spy`")
             && err.contains("`while`")

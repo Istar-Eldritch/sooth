@@ -303,9 +303,17 @@ P0 stands on the mutation evidence below, not on that parallel.
 | enclosing linear never disposed at all | `work` binds `acc`, loops, returns nothing | end-of-scope disposal: `` drop it or return it `` |
 
 All four are pre-existing guards, not P0's own code: they were true before P0 and stay true
-after it. None leans on the relaxed clause, so none of them witnesses P0 or would go red under
-a P0 regression; they are kept as reject goldens because they are correct and worth pinning,
-not because they guard the relaxation.
+after it. None leans on the relaxed clause; they are kept as reject goldens because they are
+correct and worth pinning, not because they guard the relaxation.
+
+Corrected in Phase 1, measured: three of the four are indifferent to P0, but the fourth is
+not. "Enclosing linear never disposed at all" is the accept golden minus its disposal, so
+neutering the floor makes the back-edge clause reject the same program one step earlier, with
+the back-edge wording instead of `` drop it or return it ``. Its golden asserts the scope-end
+wording (that being what the guard actually says), so R9's mutation (a) flips it too. Also
+measured: hazard row 1's probe must put the consume *outside* the body's own `if`, or the
+local reaches the literal's exit `MaybeMoved` rather than `Moved` and the row collapses into
+row 2, flipping under mutation (c) as well.
 
 **Blast radius, measured.** Full `cargo test --no-fail-fast` on the prototype, then the same
 run with only the relaxation reverted, diffing the failure sets: exactly one test is red only
@@ -553,8 +561,10 @@ mutations are required:
 
 - (a) neuter `frame_floor` (make it always `None`): the parked-linear accept goldens go red.
   **This mutation is not exclusive to them**: it also flips the own-frame-before-the-tail-`if`
-  tripwire golden, whose message changes from the scope-end wording to the back-edge wording.
-  Expect both, or the audit will read as a failed prediction.
+  tripwire golden and the "enclosing linear never disposed at all" hazard golden, both of
+  whose messages change from the scope-end wording to the back-edge wording. Expect all four,
+  or the audit will read as a failed prediction. (Measured in Phase 1: exactly those four,
+  suite-wide.)
 - (b) delete the combinator-site call at `terms.rs:615`: the re-pointed if-arm diagnostic
   witness goes red (degrading to the scope-end message). Nothing else moves.
 - (c) remove `MaybeMoved(_)` from the match arm at `src/check.rs:1385`: the branch-only-consume

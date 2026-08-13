@@ -1331,10 +1331,13 @@ mod tests {
         let ctx = word_ctx(&word, structs, &enums, modules);
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
+        // The term is written in the caller's own module, so its span says so:
+        // a hardcoded `module: 0` contradicts what a real build produces, and
+        // the visibility gate reads `span.module`.
         let span = Span {
             line: 2,
             col: 1,
-            module: 0,
+            module: caller,
         };
         let mut stack = vec![Slot::computed(Type::Struct(StructId::from_index(0), "Res"))];
         check_shuffle("drop", span, &mut stack, &ctx, &arrays, &mut prov)

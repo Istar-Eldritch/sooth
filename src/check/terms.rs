@@ -611,8 +611,18 @@ fn check_term(
                 }
                 let base = stack.len() - n;
                 // R8: no linear value live across the edge (below the args, or
-                // an unconsumed frame local).
-                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
+                // an unconsumed frame local). `base_depth` is this `if` arm's
+                // entry depth; it is passed here and nowhere else (see
+                // `check_linear_across_back_edge`).
+                check_linear_across_back_edge(
+                    ctx,
+                    span,
+                    name,
+                    &stack[..base],
+                    scope,
+                    arrays,
+                    Some(base_depth),
+                )?;
                 // R9: no reference into a frame local carried by the args.
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
                 // R12: the self-call's arguments are checked against the ground
@@ -784,7 +794,15 @@ fn check_term(
                 }
             }
             if tail && ctx.mangled_name() == Some(name.as_str()) {
-                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
+                check_linear_across_back_edge(
+                    ctx,
+                    span,
+                    name,
+                    &stack[..base],
+                    scope,
+                    arrays,
+                    None,
+                )?;
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
             }
             // R19/R22: a struct/enum constructor consuming an erased closure
@@ -1165,6 +1183,18 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
 /// self-tail-call, either stranded on the stack below the call's arguments or
 /// held by a local that was never consumed. A value *moved into* the call's
 /// arguments is forwarded, not live across the edge, so it stays legal.
+///
+/// `frame_floor` is `Some` only at a spliced self-tail combinator's site, where
+/// it is the entry depth of the `if` arm the back-edge sits in; a local bound
+/// below it is exempt from the second clause. That clause is not what makes
+/// disposal safe: an unconsumed linear is caught anyway by end-of-scope
+/// disposal and the branch-join `MaybeMoved` guard, and a self-tail call has no
+/// position after it, so the clause's only job is to *locate* that same
+/// rejection at the back-edge. Below the floor the location is wrong: the loop
+/// neither rebinds nor carries the local, and the enclosing word still owns and
+/// disposes it. At the whole-word TCO site there is nothing below the floor to
+/// admit (a self-call must supply the word's full declared inputs), so passing
+/// a floor there would only open a hole.
 fn check_linear_across_back_edge(
     ctx: &Ctx,
     span: Span,
@@ -1172,6 +1202,7 @@ fn check_linear_across_back_edge(
     below_args: &[Slot],
     scope: &Scope,
     arrays: &[ArrayDecl],
+    frame_floor: Option<usize>,
 ) -> Result<(), String> {
     if let Some(slot) = below_args
         .iter()
@@ -1179,7 +1210,20 @@ fn check_linear_across_back_edge(
     {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
-    if let Some(local) = scope.moves.unconsumed().first() {
+    let below_floor = |name: &str| match frame_floor {
+        Some(floor) => scope
+            .bound
+            .iter()
+            .position(|b| b.name == name)
+            .is_some_and(|at| at < floor),
+        None => false,
+    };
+    if let Some(local) = scope
+        .moves
+        .unconsumed()
+        .into_iter()
+        .find(|name| !below_floor(name))
+    {
         let ty = scope
             .local_type(local)
             .expect("a tracked local is in scope");

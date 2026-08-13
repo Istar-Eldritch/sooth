@@ -753,6 +753,12 @@ pub(super) fn scoped_operator_overloads(
 /// `drop` override is not visible to the calling module. The name checked is the
 /// struct's demangled source spelling, since `ModuleInfo::selective` is keyed by
 /// source names while `decl.name` is mangled (`Res__m1`) in a >=2-module build.
+///
+/// The visible-from module is `span.module`, the module the term was *written*
+/// in, not `ctx.module()`, the module it is being checked in. The two differ
+/// only under splicing, where `ctx.module()` is the splice destination (a
+/// library's own module for a combinator body), which would judge the caller's
+/// `drop` against the library's imports.
 pub(super) fn check_drop_import_visibility(
     ctx: &Ctx,
     span: Span,
@@ -760,7 +766,7 @@ pub(super) fn check_drop_import_visibility(
     decl: &StructDecl,
 ) -> Result<(), String> {
     let source = crate::resolve::demangle_word(&decl.name);
-    if is_name_visible_to_module(m, ctx.module(), decl.module, source) {
+    if is_name_visible_to_module(m, span.module, decl.module, source) {
         Ok(())
     } else {
         Err(drop_import_visibility_error(ctx, span, m, decl, source))
@@ -780,7 +786,10 @@ fn drop_import_visibility_error(
     decl: &StructDecl,
     source: &str,
 ) -> String {
-    let caller = ctx.module() as usize;
+    // `span.module`, matching the gate above: deriving the qualifier from
+    // `ctx.module()` would look it up in the splice destination's import map
+    // and describe an import the authoring module never wrote.
+    let caller = span.module as usize;
     let qualifier = m[caller]
         .imports
         .iter()
