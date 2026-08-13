@@ -59,7 +59,6 @@ use self::layout::{build_registries_ww, scalar_size_align_ww};
 pub(crate) use self::driver::{collect_quot_sigs, lower_instantiation, lower_word};
 pub use self::driver::{lower, lower_line};
 
-use self::driver::lower_word_parts;
 #[cfg(test)]
 use self::driver::subst_polytype;
 
@@ -67,7 +66,7 @@ use self::driver::subst_polytype;
 /// call sites (the REPL, D2; destructor synthesis; unit tests), so
 /// `FuncBuilder::new` can hand out a valid reference without every caller
 /// threading one.
-pub(super) fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
+fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, CallInst>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
@@ -75,13 +74,13 @@ pub(super) fn empty_instantiations() -> &'static HashMap<Span, CallInst> {
 /// Slice 8a phase 2: the builtin-overload companion of `empty_instantiations`,
 /// handed to every lowering path with no user builtin overloads (the REPL,
 /// destructor synthesis, unit tests, and every corpus program).
-pub(super) fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
+fn empty_builtin_overloads() -> &'static HashMap<Span, String> {
     static EMPTY: std::sync::OnceLock<HashMap<Span, String>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
 
 /// The poly-arity companion of `empty_instantiations`.
-pub(super) fn empty_poly_arities() -> &'static HashMap<String, usize> {
+fn empty_poly_arities() -> &'static HashMap<String, usize> {
     static EMPTY: std::sync::OnceLock<HashMap<String, usize>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
@@ -89,7 +88,7 @@ pub(super) fn empty_poly_arities() -> &'static HashMap<String, usize> {
 /// R19: the combinator-body companion of `empty_instantiations`. A path with
 /// no monomorphic quotation-taking words to inline (the REPL, D2; destructor
 /// synthesis; unit tests) hands out this empty map.
-pub(super) fn empty_combinators() -> &'static HashMap<String, Vec<Term>> {
+fn empty_combinators() -> &'static HashMap<String, Vec<Term>> {
     static EMPTY: std::sync::OnceLock<HashMap<String, Vec<Term>>> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
