@@ -1,0 +1,1090 @@
+diff --git a/docs/phase4-slice11-brief.md b/docs/phase4-slice11-brief.md
+deleted file mode 100644
+index adf7b5f..0000000
+--- a/docs/phase4-slice11-brief.md
++++ /dev/null
+@@ -1,240 +0,0 @@
+-# Phase 4 Slice 11: `inline` as a declared word property (brief)
+-
+-Sooth already splices some words instead of calling them: a quotation-taking word
+-(a combinator) mints no `IrFunc` and has its body substituted at every call site
+-(`is_combinator`, `src/check/combinators.rs:66`, the single predicate `check` and
+-`ir::lower` share). That property is currently *inferred* — a word gets it by
+-happening to declare a quotation parameter — and is unavailable to any other word.
+-
+-This slice makes it **declared**. `: ClkDiv inline ( -- u32 u32 ) 8 4 ;` is a word
+-the compiler must splice at every call site, checked at the definition, with no
+-silent fallback to a real call. The motivation is not micro-optimisation: it is that
+-on the embedded/RT target a reader must be able to tell from the source whether a
+-call site costs a call, rather than trusting that an optimiser recognised a shape
+-today and will still recognise it after an edit. The same reasoning already justifies
+-`~[ ... ]` (10a): a guarantee the type system states beats one that merely happens to
+-hold.
+-
+-Two consequences fall out and are in scope because they are the same mechanism, not
+-adjacent features:
+-
+-- **`~` stops being `times`-only.** 10a shipped the inline-only quotation type but
+-  its ROADMAP entry deliberately left "whether the rest of the library becomes the
+-  explicit combinator/closure boundary" open. Recon 4 below shows the *compiler* side
+-  of that is already done; what remains is a library decision.
+-- **An `inline` word may declare a reference output.** The rule that forbids it
+-  (`check_reference_free_signature`) is justified by a callee frame that an `inline`
+-  word does not have. Recon 5.
+-
+-## Recon (measured against the built compiler, 2026-08-13, `main` at `86aee0a`
+-
+-plus `0313b74`)
+-
+-Two of this recon's findings began as wrong diagnoses that static reading produced and
+-running the compiler corrected. Both corrections are kept below, because in each case
+-the wrong answer is the plausible one.
+-
+-1. **`is_combinator` is the whole gate, and it is one boolean away from serving this
+-   slice.** `matches!(word.body, WordBody::Terms { .. }) && word_declares_quotation_parameter(word)`
+-   (`src/check/combinators.rs:66-68`). Every consumer reads that one predicate:
+-   `check.rs:570`, `src/ir/driver.rs:59` and `:65` (which build `combinator_indices`
+-   and `combinator_bodies`, excluding such words from `IrFunc` minting), and the REPL
+-   (`src/repl.rs:157`, `:2490`). Widening it to `|| word.declares_inline` therefore
+-   reaches lowering and the REPL with no further plumbing.
+-
+-2. **The splice machinery is already generic over the callee's shape.**
+-   `inline_combinator` (`src/check/combinators.rs:227`) validates declared inputs by
+-   iterating `comb.word.effect.inputs` and only branches into quotation-specific logic
+-   per input, via `is_quotation_type(*want)`; a word with no quotation input runs zero
+-   iterations of that branch. Local hygiene is already solved generically
+-   (`alpha_rename_locals`, keyed on a per-splice `prov.inline_uid`, so a callee's
+-   `| x |` cannot collide with a caller's or with an outer splice's). Cycle rejection
+-   (`check_combinator_cycles`, `:117`) walks the call graph by name and is not
+-   quotation-aware; its one relaxation (R4: a *self-tail-only* cycle is permitted,
+-   because the loop transform makes it finite) is likewise shape-agnostic.
+-
+-3. **A monomorphic combinator's body is already checked twice, and that is the
+-   intended design.** Once standalone at its definition against its own declared
+-   effect (`check_word`, reached unconditionally for any `word.poly == None` word,
+-   `check.rs:614`), and once per call site against the caller's live stack
+-   (`inline_combinator` → `check_terms`). Nothing about that changes for an `inline`
+-   word.
+-
+-4. **`~[ ... ]` on an ordinary, non-generic word already works. Corrected: an
+-   earlier reading of this recon said the parser blocked it.** `parse_slot` does
+-   reject `Token::TildeLBracket` outright (`src/parser.rs:1559`), and its comment says
+-   `~` is "only legal as a poly combinator's own declared parameter" — but
+-   `parse_worddef` never routes a `~`-bearing effect through `parse_slot` at all:
+-   `effect_has_variable` returns `true` on `Token::TildeLBracket`
+-   (`src/parser.rs:1224`), so any effect mentioning `~[` goes to `parse_poly_effect`
+-   and becomes a `PolySig` carrying no actual variables. The rejection in `parse_slot`
+-   is live only for the positions the error names (a field, output, referent, or
+-   `extern:` parameter), which should stay rejected. Verified end-to-end, including a
+-   capturing literal, which is the case that matters for a polling loop:
+-
+-   ```
+-   : spin ( ~[ -- bool ] -- )
+-     | p | p call if else p spin end ;
+-   : main ( -- ) 42 | n | [ n . true ] spin ;
+-   => prints 42, exit 0
+-   ```
+-
+-   So there is no compiler work in "`~` beyond `times`". What is left is a library
+-   decision (decision 4).
+-
+-5. **`check_reference_free_signature` applies to combinators today, and its stated
+-   rationale does not.** It runs unconditionally from `check_word`
+-   (`src/check/word_entry.rs:24`), so a word that mints no `IrFunc` and is spliced at
+-   every call site is still rejected for declaring a `&T`/`&!T` output. Verified:
+-
+-   ```
+-   : pick ( &!Buf [ -- ] -- &!u32 ) | b f | f call b &!Buf>n ;
+-   => error: a reference cannot be stored: `pick__m0` declares the output `&!u32`
+-        a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the
+-        time the caller reads it; take the reference as an input instead
+-   ```
+-
+-   The diagnostic's own reason names a frame that a spliced word does not have: after
+-   `alpha_rename_locals`, a callee local *is* a caller local, living exactly as long
+-   as any local the caller declared itself. The rule remains correct and unchanged at
+-   every real function boundary, because it is applied per `WordDef` and only a
+-   non-spliced word has a frame that ends.
+-
+-6. **A `dup`-shaped self-tail combinator used to ICE, which would have made this
+-   slice's own exit witnesses unwritable. Fixed in `0313b74`, ahead of this brief.**
+-   `is_aggregate` answers `true` for `IrType::Quotation`
+-   (`src/ir/func_builder/mod.rs:46`) — right for a materialized `(code, env)` closure,
+-   wrong for a phantom that owns no bytes. A self-tail combinator hoists its quotation
+-   out of the carried row, but that hoist was recognised only when the body *named*
+-   the parameter with a leading `| p |`; `dup call if ... else self end` left the
+-   phantom in the row, where `begin_loop` staged it as an aggregate and blitted from
+-   nothing, so the first `call` reached `lower_indirect_call` with a pointer and hit
+-   its `unreachable!`. **Corrected: the first diagnosis of this blamed
+-   `materialize_join_quotations`' use of raw `Value` identity at a branch join, which
+-   is not on the crash path at all** — a backtrace, not more reading, is what
+-   distinguished them. The fix hoists any contiguous top run of phantoms; a quotation
+-   parameter positioned *below* a non-quotation input would still reach the row
+-   (out of scope, decision 6).
+-
+-7. **Nothing in the corpus is named `inline`.** No `.sth` file under `lib/` or
+-   `examples/` defines or calls such a word, so the keyword costs no migration. It
+-   need not become globally reserved either: the grammar position is fixed (between a
+-   word's name and its `(`), where nothing else can appear.
+-
+-## Decisions (settled here, not reopened by the spec)
+-
+-1. **`inline` is a property of the definition, not of a call site.** Spelled between
+-   the name and the effect: `: ClkDiv inline ( -- u32 u32 ) 8 4 ;`. Parsed at
+-   `parse_worddef` (`src/parser.rs:975`) between `expect_word_any_spanned` and
+-   `expect(Token::LParen)`, recorded as a new `WordDef` field. A per-call-site sigil
+-   is rejected: the point is that reading the declaration answers the question for
+-   every call site at once, which a per-site marker cannot do.
+-
+-2. **The guarantee is unconditional, and unmeetable shapes are rejected at the
+-   definition.** Every call to an `inline` word is a splice; no path emits a real
+-   call. Where that is impossible the definition is a located error, never a silent
+-   fallback — a fallback would reintroduce exactly the "did the optimiser take it
+-   today?" question the slice exists to remove. Concretely, `inline` inherits
+-   `check_combinator_cycles` verbatim, including its R4 self-tail relaxation, so
+-   mutual or non-tail self recursion is the existing "the inliner would splice it
+-   forever" rejection and a self-tail-only cycle stays legal as a loop.
+-
+-3. **`inline` requires a term body and a monomorphic effect in this slice.** A
+-   clause-bodied word is already outside `is_combinator` (`WordBody::Terms`); combining
+-   `inline` with a variable-bearing signature (`'T`, `'N`, `..s`) is a located error,
+-   deferred rather than designed here. A `~`-bearing effect is *not* a poly signature
+-   for this purpose even though `effect_has_variable` routes it through the poly parser
+-   (recon 4), so the spec must phrase this rule over declared variables, not over
+-   `word.poly.is_some()`.
+-
+-4. **`~` generalises by library migration, not by compiler change.** Since recon 4
+-   shows the mechanism is already available, this slice retypes the quotation
+-   parameters of the hand-written combinators in `lib/combinators.sth` to `~[ ... ]`
+-   and keeps ordinary `[ ... ]` for genuinely first-class capturing quotations (7b's
+-   territory), which is the boundary 10a's ROADMAP entry left open. `times` is
+-   excluded: 10b is moving it to the library concurrently and the two must not race on
+-   the same file.
+-
+-5. **`check_reference_free_signature` is skipped exactly when `is_combinator(word)`
+-   is true.** One condition at `src/check/word_entry.rs:24`, phrased over the shared
+-   predicate rather than over the new `inline` flag alone, so the exemption covers
+-   every always-spliced word uniformly (an `inline` word, a mono combinator, a poly
+-   one) and rests on a single invariant: a word that mints no `IrFunc` has no frame
+-   whose end a reference could outlive. This widens what is *accepted*; no existing
+-   corpus word declares a reference output, so corpus output stays byte-identical.
+-
+-6. **The residual hoist gap from `0313b74` stays open.** Only a contiguous top run of
+-   quotation phantoms is hoisted out of a self-tail loop's carried row. Widening that
+-   to an interleaved quotation parameter also means changing `lower_call`'s back-edge
+-   `drop_n` contract, which assumes invariant args sit on top. No corpus combinator has
+-   that shape.
+-
+-## Open questions for the spec
+-
+-- **Whether decision 5's exemption is actually sound under adversarial shapes, and
+-  what witnesses prove it.** The frame argument is clean for a reference derived from
+-  the caller's own operand (`&!Buf>n` on an input). It needs explicit treatment for: a
+-  reference to a *callee-declared* local, which post-splice is a caller-frame local
+-  that outlives the splice and must still be answerable to the ordinary must-consume
+-  rule; a **linear** (non-`Copy`) such local, whose drop obligation now belongs to the
+-  caller; transitive inlining, where an `inline` word returning a reference is called
+-  by another `inline` word; and the outermost boundary, where the existing rule must
+-  still fire for the real word that tries to make such a reference *its* output. If
+-  any of these does not hold, decision 5 narrows rather than the slice growing a
+-  special case.
+-- **Whether an `inline` word's standalone definition-site check (recon 3) stays
+-  meaningful when its effect declares a reference output.** That check runs against
+-  the declared effect with no caller context, which is precisely the context the
+-  frame argument needs. The spec should say what it verifies for such a word rather
+-  than let it fall out.
+-- **Diagnostic wording and numbering** for the three new rejections: `inline` on a
+-  clause body, `inline` on a variable-bearing signature (decision 3), and `inline` in
+-  a splice cycle (decision 2, if its inherited message needs rewording now that the
+-  member is not necessarily quotation-taking — its current text says "a quotation-taking
+-  word cannot be recursive").
+-- **Whether `inline` should appear in the REPL's `defined`/signature rendering**, given
+-  a retained combinator already mints no `.so` and no symbol (`eval_combinator_def`,
+-  `src/repl.rs:2468`) and an `inline` word joins that path.
+-
+-## Out of scope
+-
+-- Any *call-site* inlining request, and any heuristic or automatic folding of a word
+-  the author did not mark. Decision 1.
+-- Interleaved quotation parameters in a self-tail combinator. Decision 6.
+-- `times` itself, and `lib/combinators.sth`'s ownership of it: 10b.
+-- `if`/`cond` as ordinary words: 10c.
+-- Statics, `volatile`, and fixed-address MMIO. The driver sketch that motivated this
+-  slice (`lib/uart_mmio.sth`) needs those too, but they are a separate, larger piece of
+-  language design (DESIGN.md's "Embedded: statics, MMIO, and interrupts") and nothing
+-  here depends on them.
+-
+-## Sequencing
+-
+-Depends on 10a (shipped, `e87bcae`) for `~`, and on `0313b74` for a `dup`-shaped
+-self-tail combinator that does not ICE. Touches `check/combinators.rs`'s predicate,
+-`check/word_entry.rs`'s signature gate, `parser.rs`'s word-definition grammar, and
+-`lib/combinators.sth`.
+-
+-10b is in flight against `lib/combinators.sth` and `src/check/terms.rs`, and 10c will
+-touch the dispatch spine. Decision 4 already keeps this slice off `times`, but the
+-library edits still collide, so **this slice starts after 10b merges**. Nothing here
+-depends on 10b's outcome, only on not editing the same file concurrently.
+-
+-## Exit
+-
+-- `: ClkDiv inline ( -- u32 u32 ) 8 4 ;` compiles, and `nm` shows no symbol for it
+-  (the `is_combinator`/no-`IrFunc` contract, checked the way
+-  `quotation_taking_word_mints_no_symbol` already checks its own).
+-- A caller of an `inline` word emits no `Instr::Call` for it, asserted on lowered IR
+-  rather than inferred from output.
+-- The three decision-2/3 rejections are located-error goldens.
+-- An `inline` word declaring `&!u32` as an output compiles and its caller reads
+-  through the returned reference with the right value; the same word *without*
+-  `inline` still fails with the existing `check_reference_free_signature` message
+-  (the pair is the witness that decision 5 is scoped to the splice, not a blanket
+-  relaxation).
+-- Whichever adversarial shape from open question 1 survives review has a golden of its
+-  own, positive or negative.
+-- `lib/combinators.sth`'s retyped parameters (decision 4) leave corpus output
+-  byte-identical, and a stored/returned quotation still requires ordinary `[ ... ]`.
+-- Every new test is mutation-tested: reverting the change it guards must fail it.
+diff --git a/docs/phase4-slice11-spec.md b/docs/phase4-slice11-spec.md
+deleted file mode 100644
+index a6126f2..0000000
+--- a/docs/phase4-slice11-spec.md
++++ /dev/null
+@@ -1,446 +0,0 @@
+-# Phase 4 Slice 11: `inline` as a declared word property (spec)
+-
+-## Goal
+-
+-Turn the *inferred* "this word is spliced at every call site" property into a
+-**declared** one. Today a word is spliced iff `is_combinator` holds, and
+-`is_combinator` is true iff the word has a `WordBody::Terms` body and declares a
+-quotation parameter (`src/check/combinators.rs:66`). This slice adds a keyword,
+-`inline`, that makes the property declarable independently of whether the word
+-takes a quotation:
+-
+-```sooth
+-: ClkDiv inline ( -- u32 u32 ) 8 4 ;
+-```
+-
+-`ClkDiv` mints no `IrFunc`, no symbol, and no `Instr::Call` at any call site; it
+-is spliced. The guarantee is **unconditional**: where splicing is impossible the
+-definition is a located error, never a silent fall-back to a real call
+-(Decision 2). The motivation is the embedded/RT target, where a reader must be
+-able to tell from the source whether a call site costs a call, rather than
+-trusting an optimiser to recognise a shape and keep recognising it after an edit
+-(the same argument that already justifies `~[ ... ]` from slice 10a).
+-
+-Two consequences fall out of the *same* mechanism and are in scope:
+-
+-- **`~` stops being `times`-only** (Feature B). This needs **no compiler
+-  change**: recon 4 (verified below) shows `~[ ... ]` already parses and
+-  type-checks on an ordinary word. It reduces to a library retyping decision in
+-  `lib/combinators.sth`.
+-- **A spliced word may declare a reference output** (Feature C). The rule that
+-  forbids it, `check_reference_free_signature`, is justified by a callee frame
+-  that a spliced word does not have. This is real but was provisional in the
+-  brief; §"Feature C" below resolves it: it survives **without a special case**,
+-  because the only thing relaxed is the blanket structural rule, while every
+-  lifetime/linearity pass that makes the relaxation safe still runs.
+-
+-## Recon (re-verified against `main` at `86aee0a` plus `0313b74`, 2026-08-13)
+-
+-Each anchor below was re-read, not trusted from the brief.
+-
+-1. **`is_combinator` is the whole gate.**
+-   `matches!(word.body, WordBody::Terms { .. }) && word_declares_quotation_parameter(word)`
+-   at `src/check/combinators.rs:66-68`. Its readers are `check.rs:571`
+-   (`if is_combinator(word)`, the poly branch), `src/ir/driver.rs:59` and `:65`
+-   (which build `combinator_indices` / `combinator_bodies`, excluding such words
+-   from `IrFunc` minting), `collect_combinators` via `src/check/combinators.rs:29`
+-   (the call-site splice env), and the REPL projections
+-   (`checker_combinators`, `src/repl.rs:160`; `combinator_of`, `:2482`).
+-   Widening the predicate reaches the batch checker, batch lowering, and the
+-   REPL's *view* construction. **Correction to the brief:** it does **not** reach
+-   the REPL's *retention decision* — see recon 8.
+-
+-2. **The splice machinery is generic over the callee's shape.**
+-   `inline_combinator` (`src/check/combinators.rs:227`) validates a monomorphic
+-   callee by iterating `comb.word.effect.inputs`; a callee with no inputs runs
+-   zero iterations of the quotation branch and then splices its body
+-   (`src/check/combinators.rs:334` onward). Local hygiene is solved generically
+-   (`alpha_rename_locals`, keyed per-splice on `prov.inline_uid`). The cycle
+-   check `check_combinator_cycles` (`:159`) walks the call graph by name and is
+-   not quotation-aware; its one relaxation (R4: a self-tail-only cycle is legal,
+-   because the loop transform makes it finite) is shape-agnostic.
+-
+-3. **A monomorphic combinator's body is checked twice, by design.** Once
+-   standalone at its definition against its own declared effect (`check_word`,
+-   reached for any `word.poly == None` word via `check.rs`'s final loop, which
+-   dispatches to `check_word` in the non-poly arm), and once per call site
+-   against the caller's live stack (`inline_combinator` → `check_terms`). An
+-   `inline` word inherits both, unchanged.
+-
+-4. **`~[ ... ]` on an ordinary word already works.** `parse_slot` rejects
+-   `Token::TildeLBracket` (`src/parser.rs:1559`, `tilde_quotation_position_error`),
+-   but `parse_worddef` never routes a `~`-bearing effect through `parse_slot`:
+-   `effect_has_variable` returns `true` on `Token::TildeLBracket`
+-   (`src/parser.rs:1224`), so any effect mentioning `~[` takes `parse_poly_effect`.
+-   The `parse_slot` rejection is live only for the positions its message names (a
+-   field, output, referent, or `extern:` parameter), which stay rejected. So
+-   there is no compiler work in "`~` beyond `times`"; what remains is the library
+-   decision (Feature B).
+-
+-5. **`check_reference_free_signature` applies to combinators today, and its
+-   stated reason does not.** It runs unconditionally from `check_word`
+-   (`src/check/word_entry.rs:24`), so a word that mints no `IrFunc` is still
+-   rejected for a `&T`/`&!T` output. Its own message names the fault: "a `&T`/`&!T`
+-   borrows a local of the callee's own frame, which is gone by the time the
+-   caller reads it" (`word_entry.rs:52`). After `alpha_rename_locals`, a spliced
+-   callee local *is* a caller local, living as long as any caller local — so the
+-   named frame does not exist for a spliced word.
+-
+-6. **The `dup`-shaped self-tail ICE is fixed** (`0313b74`, ahead of this brief),
+-   so this slice's own self-tail witnesses are writable. The residual hoist gap
+-   (only a contiguous top run of quotation phantoms is hoisted out of a self-tail
+-   loop's carried row) stays open (Decision 6, out of scope).
+-
+-7. **Nothing in the corpus is named `inline`.** No `.sth` under `lib/` or
+-   `examples/` defines or calls such a word (grep for `inline` returns only this
+-   slice's docs). The keyword need not be globally reserved: its grammar slot is
+-   fixed, between a word's name and its `(`, where nothing else can appear. The
+-   name slot is consumed *first* (`expect_word_any_spanned`, `src/parser.rs:977`),
+-   so `: inline ( -- ) ;` still defines a word named `inline`.
+-
+-8. **New finding — the REPL retention gate is `word_declares_quotation_parameter`,
+-   not `is_combinator`.** In `eval_def` the retention route is
+-   `if check::word_declares_quotation_parameter(&word) { return self.eval_combinator_def(...) }`
+-   (`src/repl.rs:2560`, gate declared at `word_entry.rs`/`combinators.rs:78`).
+-   For an `inline` word that declares **no** quotation parameter (the `ClkDiv`
+-   case), that gate is `false`, so the REPL would fall through to the ordinary
+-   lowering path and mint a `.so` and a symbol — directly violating Decision 2 in
+-   the REPL. Recon 1's claim that widening `is_combinator` reaches the REPL "with
+-   no further plumbing" is therefore imprecise: the retention gate must be
+-   widened too (Requirement R7).
+-
+-## Decisions (from the brief; settled, not reopened)
+-
+-1. `inline` is a property of the definition, spelled between the name and the
+-   effect. No per-call-site sigil.
+-2. The guarantee is unconditional; unmeetable shapes are located errors at the
+-   definition, never a silent fall-back.
+-3. `inline` requires a term body and a monomorphic effect. The monomorphism rule
+-   is phrased over **declared variables** (`'T`/`'N`/`..s`), not over
+-   `word.poly.is_some()` — a `~`-bearing effect sets `poly` but carries no
+-   variable (recon 4).
+-4. `~` generalises by library migration, not compiler change. `times` is
+-   excluded (10b owns it concurrently).
+-5. `check_reference_free_signature` is skipped exactly when `is_combinator(word)`
+-   is true, phrased over the shared predicate so the exemption covers every
+-   always-spliced word uniformly.
+-6. The residual hoist gap from `0313b74` stays open.
+-
+-## Requirements
+-
+-### R1 — grammar and AST field
+-
+-- Add `pub declares_inline: bool` to `WordDef` (`src/ast.rs:563`). Every
+-  construction site is updated (parser `src/parser.rs:1002`; test helpers and
+-  the two real non-parser constructors `src/check/poly.rs:164` and
+-  `bool_print_word_def` `src/ast.rs:358`; REPL `remap_imported_combinator`
+-  `src/repl.rs:363`; and every `#[cfg(test)]` `WordDef { .. }` literal). A
+-  synthesized or remapped word carries the source word's flag where one exists
+-  and `false` otherwise; `bool_print_word_def` is `false`.
+-- `parse_worddef` (`src/parser.rs:975`) reads an **optional** `inline` keyword
+-  between `expect_word_any_spanned` (name, `:977`) and `expect(Token::LParen)`
+-  (`:984`): peek for `Some((Token::Word(w), _))` with `w == "inline"`, consume it
+-  and set `declares_inline = true` if present. A second `inline` is not consumed,
+-  so it falls through to `expect(Token::LParen)` and fails with the existing
+-  located parse error — one optional keyword only.
+-- `inline` is **not** added to any reserved-name list (recon 7): the position is
+-  unambiguous because the name is consumed first.
+-
+-### R2 — widen the shared predicate
+-
+-`is_combinator` (`src/check/combinators.rs:66`) becomes:
+-
+-```rust
+-matches!(word.body, WordBody::Terms { .. })
+-    && (word_declares_quotation_parameter(word) || word.declares_inline)
+-```
+-
+-This is the single load-bearing read of the new field. It reaches, with no
+-further plumbing: `collect_combinators` (call-site splicing in the batch
+-checker), `driver.rs`'s `combinator_indices`/`combinator_bodies` (no `IrFunc`,
+-body registered for the inliner), and the REPL's `checker_combinators`. The
+-`WordBody::Terms` conjunct is retained so a clause-bodied word is never a
+-combinator regardless of the flag; R3 rejects a clause-bodied `inline` word
+-before this predicate is consulted for lowering, so the two never disagree in a
+-way that reaches codegen.
+-
+-### R3 — two new definition-site rejections
+-
+-Both run in `check_word` (`src/check/word_entry.rs`), before the body is checked,
+-located at `word.span`, and phrased so the diagnostic tests assert the *right*
+-error:
+-
+-- **`inline` on a clause body.** When `word.declares_inline` and
+-  `matches!(word.body, WordBody::Clauses(_))`:
+-  `error:`inline` on `{name}`, which has a clause body;`inline`requires a term body`.
+-  (An `inline` clause word would otherwise be `is_combinator == false` and lower
+-  as an ordinary clause word — a silent fall-back Decision 2 forbids, so it is a
+-  located error instead.)
+-- **`inline` on a variable-bearing signature.** Phrased over declared variables,
+-  not `poly.is_some()` (Decision 3): reject when `word.declares_inline` and the
+-  effect declares any of `'T`/`'N`/`..s`. Concretely, when `word.poly` is `Some`
+-  **and** the `PolySig` carries at least one variable (a non-empty
+-  `ty_var_names`, `len_var_names`, or a row variable). A `~`-bearing but
+-  otherwise concrete effect has `poly = Some` with all three empty and is
+-  **accepted**. Message:
+-  `error:`inline` on `{name}`, which declares a polymorphic signature;`inline`requires a monomorphic effect`.
+-  Because a poly word is not routed through `check_word` (the poly arm of
+-  `check.rs`'s final loop calls `check_poly_body` / `check_poly_combinator_standalone`),
+-  this specific rejection is placed at the point where `word.poly.is_some()` is
+-  first known for an `inline` word — i.e. a guard at the top of `check`'s per-word
+-  loop (`check.rs`, before the `if let Some(sig) = &word.poly` branch), or an
+-  equivalent pre-pass over `module.words`. It must fire for a poly `inline` word
+-  *before* the poly checker runs, so a variable-bearing `inline` word never
+-  reaches a code path that assumes it is a legitimate poly combinator.
+-
+-### R4 — reword the cycle rejection
+-
+-`combinator_cycle_error` (`src/check/combinators.rs:201`) currently reads
+-`error: a quotation-taking word cannot be recursive (the inliner would splice it
+-forever): ...` (`:214`). An `inline` word need not take a quotation, so reword
+-the umbrella term to `an always-spliced word`:
+-`error: an always-spliced word cannot be recursive (the inliner would splice it
+-forever): ...`. The mechanism (`check_combinator_cycles`, its R4 self-tail
+-relaxation, the located chain) is unchanged; only the message string changes.
+-An `inline` word thus inherits cycle rejection verbatim, including the R4
+-allowance for a self-tail-only cycle (Decision 2).
+-
+-### R5 — skip `check_reference_free_signature` for spliced words
+-
+-At `src/check/word_entry.rs:24`, guard the call:
+-
+-```rust
+-if !is_combinator(word) {
+-    check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+-}
+-```
+-
+-Phrased over the shared predicate (Decision 5), so the exemption covers a mono
+-combinator, an `inline` word, and — by the fact that `check_word` is never
+-reached for a poly word — a poly combinator too, uniformly. The rest of
+-`check_word` (the input-slot variant-name check, `word_entry.rs:19-23`) still
+-runs. See "Feature C" for why this is sound.
+-
+-### R6 — no lowering changes
+-
+-`driver.rs` already excludes every `is_combinator` word from `env`, the per-word
+-`funcs` pass, `combinator_indices`, and mints its body into `combinator_bodies`
+-(`src/ir/driver.rs:55-72`). Widening `is_combinator` (R2) is the whole lowering
+-change; there is no new code in `driver.rs` or the inliner. `lower_call` splices
+-a zero-quotation-input combinator (recon 2) with no special case.
+-
+-### R7 — widen the REPL retention gate
+-
+-In `eval_def` (`src/repl.rs:2560`) the retention route becomes:
+-
+-```rust
+-if word.declares_inline || check::word_declares_quotation_parameter(&word) {
+-    return self.eval_combinator_def(word, writer);
+-}
+-```
+-
+-Without this, an `inline` word with no quotation parameter is lowered by the
+-REPL to a `.so` and a symbol (recon 8), violating Decision 2. Inside
+-`eval_combinator_def`, the mono branch (`check::check_def`) already checks such a
+-word identically to any term word, and `combinator_of` / `combinator_bodies`
+-project it by its `WordBody::Terms` shape, so no further REPL change is needed.
+-The `defined {name}` output is unchanged: an `inline` word takes the identical
+-retained-combinator path and prints the same line (this resolves brief open
+-question 4 — no new REPL rendering, which would be scope creep with no exit
+-criterion; R7 is a required plumbing fix, not a rendering feature).
+-
+-### Feature B — library retype (`lib/combinators.sth`)
+-
+-Retype the quotation parameters of the five hand-written combinators
+-(`each`, `map`, `fold`, `filter`, `while`) from `[ ... ]` to `~[ ... ]`,
+-e.g. `: each ( ['T 'N] ~[ 'T -- ] -- )`. These are poly combinators, so the
+-`~` sits in each word's own declared parameter and routes through the poly
+-parser / `parse_poly_slot` (recon 4; the `parse_slot` rejection at
+-`parser.rs:1559` is not on this path). No compiler change; a call site passing a
+-literal `[ ... ]` still type-checks against a `~[ ... ]` parameter, and because
+-all five are already inlined, the emitted QBE is byte-identical. A genuinely
+-first-class capturing/stored quotation still requires ordinary `[ ... ]` (7b's
+-territory) and is rejected against a `~[ ... ]` parameter by 10a's inline-only
+-rule. `times` is not touched (Decision 4; 10b owns it).
+-
+-## Feature C — reference outputs on spliced words (resolving brief open questions 1 and 2)
+-
+-R5 relaxes exactly one thing: the blanket structural rule
+-`check_reference_free_signature`, which rejects *any* `&T`/`&!T` output before
+-the body is even looked at. Every other pass that constrains a reference's
+-lifetime still runs on both the standalone def-site body and each spliced copy:
+-
+-- the linear must-consume rule (`leave_block` at frame end);
+-- the capture/escape guards (`past_owning_frame_error`,
+-  `multi_capture_escaping_error`, `src/check/word_entry.rs` and `captures.rs`);
+-- the loop back-edge reference guard (`check_reference_across_back_edge`,
+-  `src/check.rs:1264`).
+-
+-A `&T`/`&!T` is neither `Copy` nor linear (`src/check/builtins.rs:244`), so a
+-returned reference carries no drop obligation of its own; the obligation lives on
+-its *referent*.
+-
+-**The adversarial shapes (brief open question 1), resolved:**
+-
+-- **Reference derived from an input reference** (the recon-5 witness,
+-  `: pick ( &!Buf ~[ -- ] -- &!u32 ) | b f | f call b &!Buf>n ;`). The referent
+-  is outer-rooted (the caller's `Buf`). Sound; this is the positive exit witness.
+-- **Reference to a callee-declared local, referent non-linear.** Post-splice the
+-  local is a caller-frame local (`alpha_rename_locals`), living as long as any
+-  caller local, so the returned reference does not outlive its frame. Sound.
+-- **Reference to a callee-declared local, referent linear.** The referent carries
+-  a drop obligation. At the standalone def-site check, `leave_block` sees the
+-  linear local borrowed but not consumed and rejects it as unconsumed **by the
+-  pre-existing must-consume rule** — R5 does not touch that path. This is
+-  strictly conservative: post-splice the caller would inherit the obligation and
+-  it would be safe, but rejecting it is *reject-safe*, never accept-unsafe. This
+-  is the narrowing the brief asked for, achieved with **no special case**: the
+-  linear spine already forbids the dangerous shape.
+-- **Transitive inlining** (an `inline` word returning a reference, called by
+-  another `inline` word). Each splice layer alpha-renames; the chain bottoms out
+-  at the outermost non-spliced (real) word, whose frame owns every spliced local.
+-  Sound.
+-- **The outermost boundary.** A real (non-combinator) word declaring a reference
+-  output is still rejected: R5's guard is `if !is_combinator(word)`, and a real
+-  word is not a combinator. Unchanged.
+-
+-**What the standalone def-site check verifies for such a word (brief open
+-question 2):** with `check_reference_free_signature` skipped, the standalone
+-check (recon 3) still verifies (a) body type-correctness against the declared
+-effect, including that the returned reference's referent is a live slot of the
+-matching referent type (`check_outputs`), and (b) the full linear discipline over
+-every local, including a linear referent (`leave_block`). What it does **not**
+-verify is the blanket "no reference output" — because that property is not true
+-for a spliced word. The frame-lifetime guarantee is not a check at the standalone
+-site (there is no caller to check against); it is a *theorem about the splice*:
+-`alpha_rename_locals` makes the referent a caller local, so the returned
+-reference cannot outlive its caller frame. The standalone check therefore stays
+-meaningful as a type-plus-linearity check, and the lifetime property is
+-discharged structurally by the inliner rather than asserted at the definition.
+-
+-**Conclusion:** Decision 5 survives as stated. No special case is added; the
+-apparent adversarial holes are already closed by the must-consume rule and by
+-R5's `is_combinator` scoping.
+-
+-## Growth-structure check (per CLAUDE.md, re-run at phase exit)
+-
+-The edits land in existing stage files (`parser.rs`, `check/word_entry.rs`,
+-`check/combinators.rs`, `ir/driver.rs` untouched-but-reached, `repl.rs`,
+-`ast.rs`). None introduces import divergence, a module doing unrelated X/Y/Z, or
+-a would-be circular dependency. `is_combinator` stays the single shared
+-predicate — the opposite of a split. No module split is warranted; re-check at
+-exit.
+-
+-## Test plan
+-
+-Unit tests beside each stage function (`thing_condition_expected` naming),
+-happy path plus at least one error/edge case; every new test is mutation-tested
+-(reverting the guarded change must fail it).
+-
+-**Parser (`src/parser.rs` `#[cfg(test)]`)**
+-
+-- `parse_worddef_inline_keyword_sets_flag` — `: ClkDiv inline ( -- u32 u32 ) 8 4 ;`
+-  parses with `declares_inline == true`.
+-- `parse_worddef_no_inline_keyword_flag_false` — an ordinary word has
+-  `declares_inline == false`.
+-- `parse_worddef_word_named_inline_is_not_inline` — `: inline ( -- ) ;` names a
+-  word `inline` with `declares_inline == false` (name consumed first, recon 7).
+-- `parse_worddef_double_inline_is_parse_error` — `: foo inline inline ( -- ) ;`
+-  fails at `expect(LParen)`.
+-
+-**Checker (`src/check/word_entry.rs` and `src/check/combinators.rs`
+-`#[cfg(test)]`)**
+-
+-- `is_combinator_true_for_inline_non_quotation_word` — a direct `WordDef`
+-  construction with `declares_inline == true`, `WordBody::Terms`, no quotation
+-  input, returns `true`; flipping the flag to `false` returns `false`. (Direct
+-  construction, not e2e, per the resolve-mangle / discrimination memory.)
+-- `check_inline_clause_body_is_error` — asserts the exact R3 clause-body message.
+-- `check_inline_polymorphic_signature_is_error` — a `'T`-bearing `inline` word
+-  asserts the exact R3 monomorphism message; a `~`-bearing (variable-free)
+-  `inline` word is **accepted** (the discriminating pair for "phrased over
+-  declared variables, not `poly.is_some()`").
+-- `check_inline_self_nontail_cycle_is_error` — asserts the R4-reworded
+-  `always-spliced word cannot be recursive` message; a self-*tail* `inline` word
+-  is accepted.
+-- `check_reference_free_signature_skipped_for_combinator` — a direct-construction
+-  test that the guard is keyed on `is_combinator`: an `inline` word with a `&!u32`
+-  output passes `check_word`, and the same effect on a non-combinator word still
+-  errors with the `word_entry.rs:52` message.
+-
+-**REPL (`src/repl.rs` `#[cfg(test)]`)**
+-
+-- `repl_inline_word_is_retained_not_lowered` — defining `ClkDiv inline` retains it
+-  in the combinator store and prints `defined ClkDiv`; asserts no `.so`/symbol is
+-  produced (mirroring how the existing retained-combinator tests assert
+-  retention, and asserting the exact stack/`defined` line per the REPL-placebo
+-  memory).
+-
+-**Goldens (exit criteria)**
+-
+-- `inline_word_mints_no_symbol` — `: ClkDiv inline ( -- u32 u32 ) 8 4 ;` compiles
+-  and `nm` shows no symbol for it (built the way
+-  `quotation_taking_word_mints_no_symbol`, `src/check/combinators.rs:539`,
+-  checks its own).
+-- `inline_word_caller_emits_no_call` — a caller of `ClkDiv` has no `Instr::Call`
+-  for it, asserted on lowered IR, not inferred from output.
+-- The three R3/R4 rejections as located-error goldens (source in → exact
+-  diagnostic out).
+-- `inline_reference_output_pair` — `pick` (Feature C positive witness) compiles
+-  and its caller reads the returned reference with the right value; the *same*
+-  word without `inline` still fails with the `check_reference_free_signature`
+-  message. The pair is the witness that Decision 5 is scoped to the splice.
+-- The surviving adversarial shape from Feature C (the linear-referent rejection)
+-  gets its own negative golden: an `inline` word borrowing-and-returning a
+-  reference to a linear callee-declared local is rejected by must-consume.
+-- `combinators_retype_output_byte_identical` — after Feature B, a corpus program
+-  exercising `each`/`map`/`fold`/`filter`/`while` emits QBE byte-identical to the
+-  pre-retype baseline; a stored/returned quotation still requires `[ ... ]`
+-  (rejected against a `~[ ... ]` parameter).
+-
+-## Out of scope
+-
+-- Any call-site inlining request or automatic folding of an unmarked word
+-  (Decision 1).
+-- Interleaved quotation parameters in a self-tail combinator (Decision 6).
+-- `times` and `lib/combinators.sth`'s ownership of it (10b).
+-- `if`/`cond` as ordinary words (10c).
+-- Statics, `volatile`, fixed-address MMIO (separate, larger language design).
+-
+-## Sequencing
+-
+-Depends on 10a (`~`, shipped `e87bcae`) and `0313b74` (the self-tail ICE fix).
+-**Starts after 10b merges**: nothing here depends on 10b's outcome, but both edit
+-`lib/combinators.sth` and must not race on it. Phase 1 (the mechanism) and
+-Phase 2 (the reference exemption) are compiler-only and independent of 10b;
+-Phase 3 (the library retype) is the piece that must wait for 10b.
+-
+-## Phases
+-
+-| Phase | Focus | Difficulty |
+-| --- | --- | --- |
+-| 1 | `inline` keyword: grammar, `WordDef.declares_inline`, widen `is_combinator`, the three definition-site rejections (clause body, variable-bearing signature, reworded cycle), and REPL retention. Goldens: no-symbol, no-`Instr::Call`, three located-error rejections. | hard |
+-| 2 | Reference outputs on spliced words: skip `check_reference_free_signature` under `is_combinator`; the with/without-`inline` witness pair and the linear-referent adversarial negative golden; the standalone-check treatment. | hard |
+-| 3 | Library retype (Feature B): `lib/combinators.sth` quotation parameters to `~[ ... ]`; byte-identical corpus-output golden; stored/returned quotation still requires `[ ... ]`. | standard |
+-
+-```json
+-{
+-  "phases": [
+-    {
+-      "phase": 1,
+-      "focus": "inline keyword grammar, WordDef.declares_inline field, widen is_combinator, three definition-site rejections, REPL retention",
+-      "difficulty": "hard"
+-    },
+-    {
+-      "phase": 2,
+-      "focus": "reference outputs on spliced words: skip check_reference_free_signature under is_combinator, witness pair and adversarial golden",
+-      "difficulty": "hard"
+-    },
+-    {
+-      "phase": 3,
+-      "focus": "library retype of lib combinators quotation parameters to tilde-bracket, byte-identical corpus output",
+-      "difficulty": "standard"
+-    }
+-  ]
+-}
+-```
+diff --git a/examples/inplace_fold.sth b/examples/inplace_fold.sth
+index 0d769b2..6f7abf9 100644
+--- a/examples/inplace_fold.sth
++++ b/examples/inplace_fold.sth
+@@ -1,3 +1,4 @@
++import: c | times | "../lib/combinators.sth" ;
+ \ Dogfood: Phase 4 slice 6f. A named-accumulator in-place fold, the payoff of
+ \ ending a bound borrow at its last use. `acc` is a named local, so it lives in
+ \ a stable frame slot rather than being threaded through the `times` back-edge;
+diff --git a/lib/combinators.sth b/lib/combinators.sth
+index fddd34c..ac1097a 100644
+--- a/lib/combinators.sth
++++ b/lib/combinators.sth
+@@ -15,7 +15,19 @@
+ \ counter cell; a leaf keeps the library flat at depth 1. They share the loop
+ \ shape, not a call.
+ 
+-export: each map fold filter while ;
++export: each map fold filter while times times-helper ;
++
++: times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
++  | f | | to | | from |
++  from to < if
++    from f call
++    from 1 + to f times-helper
++  else
++  end ;
++
++: times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
++  | f | | n |
++  0 n f times-helper ;
+ 
+ : each ( ['T 'N] [ 'T -- ] -- )
+   | f | len >i64 | count | | arr |
+diff --git a/src/check/terms.rs b/src/check/terms.rs
+index e0cefc2..079309c 100644
+--- a/src/check/terms.rs
++++ b/src/check/terms.rs
+@@ -318,144 +318,6 @@ fn check_term(
+                 )?;
+                 return Ok(stack);
+             }
+-            // R18: `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, the
+-            // constant-stack loop primitive. Intercepted alongside `call`. The
+-            // body is spliced against the row plus a synthesized index and must
+-            // return the row unchanged (D6); nested `times` is rejected here,
+-            // not in lowering, which has no error channel (R14 step 0).
+-            if name == "times" {
+-                let Some(top) = stack.pop() else {
+-                    return Err(underflow_error(ctx, span, "times", 2, 0));
+-                };
+-                // R9: an *abstract* quotation (a declared parameter, no known
+-                // literal) checks against its declared effect: pop the count,
+-                // require the effect be row-preserving with a trailing `i64`
+-                // index (`[ ..row i64 -- ..row ]`), and leave the row
+-                // unchanged. The three `times` obligations reduce to checks on
+-                // the declared rows (a declared effect names no local and
+-                // captures no borrow, so move/borrow identity hold trivially).
+-                if top.quot.is_none() {
+-                    // Slice 10a (R2): a `~` abstract parameter is accepted by
+-                    // `times` exactly like an ordinary quotation parameter.
+-                    if let Some(eff) = crate::ast::is_quotation_type(top.ty) {
+-                        return check_abstract_quotation_times(eff, span, stack, ctx);
+-                    }
+-                    return Err(times_needs_quotation_error(ctx, span));
+-                }
+-                let Some(QuotRef::Known(id)) = top.quot else {
+-                    return Err(times_needs_quotation_error(ctx, span));
+-                };
+-                let Some(count) = stack.pop() else {
+-                    return Err(underflow_error(ctx, span, "times", 2, 1));
+-                };
+-                // The count is also a type-directed read, so a quotation there
+-                // is the default-deny wording, not a `Cstr`-placeholder mismatch.
+-                if count.quot.is_some() {
+-                    return Err(reject_quotation_operand(ctx, span, "times"));
+-                }
+-                if count.ty != Type::I64 {
+-                    return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
+-                }
+-                // 6d/R6: a `times` nested in a loop -- inside a self-tail word,
+-                // another `times` body, or a self-tail combinator body -- is no
+-                // longer rejected. Lowering's hoist-target split (R1-R3) keeps
+-                // every such nesting constant-stack, so the old R18/R14b
+-                // rejection and its `loop_depth` bookkeeping are gone.
+-                // R18: the row is the remaining stack; a quotation anywhere in
+-                // it would reach `begin_loop`'s phi over a phantom (R14). Guard
+-                // the whole row, not just the consumed top.
+-                if stack.iter().any(|s| s.quot.is_some()) {
+-                    return Err(reject_quotation_operand(ctx, span, "times"));
+-                }
+-                // R18: the body is spliced once but runs N times, so it must be
+-                // identity on the move/borrow state (clone-and-compare), or a
+-                // linear local it consumes would be disposed N times. Snapshot
+-                // before the splice; `leave_block` drops the body's own
+-                // bindings, so what remains changed is an *outer* local.
+-                let moves_before = scope.moves.states.clone();
+-                let derivs_before: HashSet<DerivId> =
+-                    live_derivs(&stack, scope, prov, live, at).collect();
+-                let row = stack.clone();
+-                // Splice the body against the row plus a synthesized index (the
+-                // body's top input), bracketed like `call` (R6), `tail = false`.
+-                // 6d/R6: a `times` nested in the body is now legal, so no
+-                // `loop_depth` is raised across the splice.
+-                stack.push(Slot::computed(Type::I64));
+-                let body = prov.quotations[id.0].body.clone();
+-                let depth = scope.depth();
+-                // D6: the row-preservation guard below already rejects a
+-                // body that carries a reference across the back-edge, so a
+-                // granted outer name is tracked the same back-edge way as a
+-                // quotation's own body (used anywhere inside pins it live
+-                // throughout, per-iteration re-entry means it cannot die
+-                // early inside).
+-                let granted = releasable_into(
+-                    scope,
+-                    base_depth,
+-                    outer_releasable,
+-                    &siblings[at + 1..],
+-                    live,
+-                    at,
+-                );
+-                let result = check_terms_relaxed(
+-                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
+-                    &granted, true,
+-                )?;
+-                leave_block(
+-                    ctx,
+-                    scope,
+-                    depth,
+-                    BlockEnd::Arm {
+-                        token: "times",
+-                        span,
+-                    },
+-                )?;
+-                // R18: identity on the move state. A body's own bindings are
+-                // already gone (`leave_block`), so a local left `Moved`/
+-                // `MaybeMoved` where it was `Live` is an outer linear local the
+-                // body consumed; name the first such one.
+-                if let Some(local) = moves_before.iter().find_map(|(n, before)| {
+-                    match (before, scope.moves.states.get(n)) {
+-                        (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
+-                            Some(n.clone())
+-                        }
+-                        _ => None,
+-                    }
+-                }) {
+-                    return Err(times_body_consumes_local_error(ctx, span, &local));
+-                }
+-                // R18: identity on the borrow state. A borrow is idempotent per
+-                // iteration, so a well-formed body leaves `live_derivs`
+-                // unchanged; a difference means a reference would cross the
+-                // back-edge into the next iteration.
+-                let derivs_after: HashSet<DerivId> =
+-                    live_derivs(&result, scope, prov, live, at).collect();
+-                if derivs_after != derivs_before {
+-                    return Err(times_body_borrow_across_loop_error(ctx, span));
+-                }
+-                // D6: the body's net effect on the row must equal the row.
+-                let same_shape = row.len() == result.len()
+-                    && result.iter().zip(&row).all(|(found, want)| {
+-                        matches!(
+-                            match_slot(*found, want.ty),
+-                            SlotMatch::Exact | SlotMatch::LiteralSizeType
+-                        )
+-                    });
+-                if !same_shape {
+-                    return Err(times_body_row_effect_error(ctx, span));
+-                }
+-                // R18: the whole-row guard runs on the *entry* row, but a body
+-                // that consumes a real value and constructs a quotation into
+-                // its place leaves a phantom in the output row that `match_slot`
+-                // accepts as `Exact` against the `Cstr` placeholder. That
+-                // phantom would be carried into the loop's back-edge phis, so
+-                // reject it here with the same whole-row wording.
+-                if result.iter().any(|s| s.quot.is_some()) {
+-                    return Err(reject_quotation_operand(ctx, span, "times"));
+-                }
+-                stack = result;
+-                return Ok(stack);
+-            }
+             if let Some(stack) = check_reference_word(
+                 name, span, &mut stack, ctx, scope, arrays, cells, refs, prov, live, at,
+             )? {
+@@ -612,7 +474,9 @@ fn check_term(
+                 let base = stack.len() - n;
+                 // R8: no linear value live across the edge (below the args, or
+                 // an unconsumed frame local).
+-                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
++                check_linear_across_back_edge(
++                    ctx, span, name, &stack[..base], scope, arrays, Some(base_depth),
++                )?;
+                 // R9: no reference into a frame local carried by the args.
+                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
+                 // R12: the self-call's arguments are checked against the ground
+@@ -784,7 +648,7 @@ fn check_term(
+                 }
+             }
+             if tail && ctx.mangled_name() == Some(name.as_str()) {
+-                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
++                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays, None)?;
+                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
+             }
+             // R19/R22: a struct/enum constructor consuming an erased closure
+@@ -1172,6 +1036,7 @@ fn check_linear_across_back_edge(
+     below_args: &[Slot],
+     scope: &Scope,
+     arrays: &[ArrayDecl],
++    frame_floor: Option<usize>,
+ ) -> Result<(), String> {
+     if let Some(slot) = below_args
+         .iter()
+@@ -1179,7 +1044,24 @@ fn check_linear_across_back_edge(
+     {
+         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
+     }
+-    if let Some(local) = scope.moves.unconsumed().first() {
++    // A local bound below the splice's frame floor lives in an ancestor frame
++    // that outlives every iteration, exactly as `check_reference_across_back_edge`
++    // lets an ancestor-rooted reference cross. Its disposal obligation stays with
++    // the enclosing word; the loop neither rebinds it nor carries it.
++    let parked = |name: &str| match frame_floor {
++        Some(floor) => scope
++            .bound
++            .iter()
++            .position(|b| b.name == name)
++            .is_some_and(|idx| idx < floor),
++        None => false,
++    };
++    if let Some(local) = scope
++        .moves
++        .unconsumed()
++        .into_iter()
++        .find(|name| !parked(name))
++    {
+         let ty = scope
+             .local_type(local)
+             .expect("a tracked local is in scope");
+@@ -1239,45 +1121,6 @@ fn check_abstract_quotation_call(
+     Ok(stack)
+ }
+ 
+-/// R9: check `f times` for an *abstract* quotation `f`. The count is already
+-/// verified as an `i64` by the caller path's guard below; here the declared
+-/// effect must be row-preserving with a trailing `i64` index
+-/// (`inputs == outputs ++ [i64]`), and the row on the stack is left unchanged.
+-fn check_abstract_quotation_times(
+-    eff: &QuotEffect,
+-    span: Span,
+-    mut stack: Vec<Slot>,
+-    ctx: &Ctx,
+-) -> Result<Vec<Slot>, String> {
+-    let Some(count) = stack.pop() else {
+-        return Err(underflow_error(ctx, span, "times", 2, 1));
+-    };
+-    if count.quot.is_some() {
+-        return Err(reject_quotation_operand(ctx, span, "times"));
+-    }
+-    if count.ty != Type::I64 {
+-        return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
+-    }
+-    let row_preserving = eff.inputs.last() == Some(&Type::I64)
+-        && eff.inputs.len() == eff.outputs.len() + 1
+-        && eff.inputs[..eff.outputs.len()] == eff.outputs[..];
+-    if !row_preserving {
+-        return Err(times_body_row_effect_error(ctx, span));
+-    }
+-    let row_len = eff.outputs.len();
+-    if stack.len() < row_len {
+-        return Err(underflow_error(ctx, span, "times", row_len, stack.len()));
+-    }
+-    let base = stack.len() - row_len;
+-    for (i, want) in eff.outputs.iter().enumerate() {
+-        let found = stack[base + i];
+-        match match_slot(found, *want) {
+-            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
+-            _ => return Err(type_mismatch_error(ctx, span, "times", *want, found.ty)),
+-        }
+-    }
+-    Ok(stack)
+-}
+ 
+ /// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
+ /// declared output. Extracted as a named, callable function (R14a) so phase 6
+diff --git a/src/ir/func_builder/calls.rs b/src/ir/func_builder/calls.rs
+index 00d1e33..49e1d1c 100644
+--- a/src/ir/func_builder/calls.rs
++++ b/src/ir/func_builder/calls.rs
+@@ -318,104 +318,6 @@ impl<'a> FuncBuilder<'a> {
+                     None => self.lower_indirect_call(v),
+                 }
+             }
+-            // R14: `times` lowers into a constant-stack loop, reusing
+-            // `begin_loop`/`finalize_loop` (D6). A synthesized index drives a
+-            // header `Jnz(index < count)`; the body reads the index as its top
+-            // input and returns the row on the back-edge (R18). `tail = false`
+-            // for the same reason as `call`.
+-            "times" => {
+-                // 6d/R5: a nested `times` is now legal (the checker's R18
+-                // rejection retired), so no `debug_assert` on `header.is_none()`
+-                // here; the hoist-target split (R1-R3) keeps it constant-stack.
+-                // R15: save the loop state (see `save_loop_state`'s doc) and
+-                // restore it after the loop, so a nested `times` composes and a
+-                // later `Alloc` in the same word does not hoist into this now-
+-                // dead `times` preheader.
+-                let saved_loop_state = self.save_loop_state();
+-
+-                let qv = self.stack.pop().expect("times: quotation on stack");
+-                // R10/D1/D6: provenance decides, exactly as `call`. A phantom
+-                // the checker resolved to a literal splices its body per
+-                // iteration; a materialized value whose identity was erased is
+-                // indirect-called once per iteration (still constant stack).
+-                let quot_id = self.quot_bodies.get(&qv).copied();
+-                let count = self.stack.pop().expect("times: count on stack");
+-
+-                // Synthesize the induction variable seeded 0; the row is the
+-                // remaining stack. `stage_aggregates = true` (R17): a carried
+-                // aggregate rides slice 3's entry-hoisted stable slot, and the
+-                // index gets a scalar phi.
+-                let seed = self.fresh_value(IrType::I64);
+-                self.push_instr(Instr::Const(seed, 0));
+-                self.const_vals.insert(seed, 0);
+-                let mut params = mem::take(&mut self.stack);
+-                params.push(seed);
+-                let outs = self.begin_loop(&params, true);
+-                let index_phi = *outs.last().expect("times: index phi");
+-                let row_phis: Vec<Value> = outs[..outs.len() - 1].to_vec();
+-
+-                // Header (current after `begin_loop`): loop while index < count.
+-                let cmp = self.fresh_value(IrType::Bool);
+-                self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, count));
+-                let body_block = self.fresh_block();
+-                let exit_block = self.fresh_block();
+-                self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
+-
+-                // Body: the row plus the index (top input), spliced `tail =
+-                // false`. `alloca_home` stays `Some` across the splice, so an
+-                // aggregate the body constructs hoists its `Alloc` into the
+-                // invariant alloca home (R17/6d), not the per-iteration body
+-                // block, at any nesting depth.
+-                self.start_block(body_block);
+-                self.terminated = false;
+-                self.stack = row_phis;
+-                self.stack.push(index_phi);
+-                let locals_depth = self.locals.len();
+-                match quot_id {
+-                    Some(id) => {
+-                        let body = self.quot_defs[id.0].clone();
+-                        self.lower_terms(&body, false);
+-                    }
+-                    None => self.lower_indirect_call(qv),
+-                }
+-                self.locals.truncate(locals_depth);
+-
+-                // Back-edge: the body's result row plus index + 1.
+-                let one = self.fresh_value(IrType::I64);
+-                self.push_instr(Instr::Const(one, 1));
+-                self.const_vals.insert(one, 1);
+-                let index_next = self.fresh_value(IrType::I64);
+-                self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
+-                // With `tail = false` and no `Return` in a body, nothing can
+-                // terminate the body block, so a double seal is impossible.
+-                debug_assert!(
+-                    !self.terminated,
+-                    "a `tail = false` `times` body cannot terminate"
+-                );
+-                let mut args = mem::take(&mut self.stack);
+-                args.push(index_next);
+-                self.back_edges.push((self.cur_id, args));
+-                self.seal_block(Terminator::Jmp(self.header.expect("times loop header")));
+-
+-                // Back-patch the scalar phis (row scalars + index) and append
+-                // the aggregate staging blits on the back-edge (unchanged from
+-                // slice 3).
+-                self.finalize_loop();
+-
+-                // Exit: the carried row (scalar header-phi outputs / aggregate
+-                // stable slots), minus the trailing index. Reset `terminated`
+-                // (the body seal set it) or every term after the `times` is
+-                // silently dropped.
+-                self.start_block(exit_block);
+-                self.terminated = false;
+-                let mut exit_stack = outs;
+-                exit_stack.pop();
+-                self.stack = exit_stack;
+-
+-                // R15: restore the pre-`times` loop state so the `times`
+-                // composes with a later `Alloc` or a second sequential `times`.
+-                self.restore_loop_state(saved_loop_state);
+-            }
+             "dup" => {
+                 let top = *self.stack.last().expect("dup: non-empty stack");
+                 // A scalar is `Copy`: reuse the value id (dup emits nothing). A
