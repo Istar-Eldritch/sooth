@@ -802,24 +802,44 @@ pub(super) fn references(terms: &[Term], name: &str) -> bool {
 
 /// D6 relaxation: the set of ancestor-bound names safe to grant into a nested
 /// block starting right after term index `at` in the current invocation.
-/// A name qualifies iff it is either bound *within* the current invocation
-/// (position `>= base_depth`, so nothing outside this invocation could ever
-/// need it) or already granted to the current invocation by its own caller,
-/// and it is not referenced anywhere in `rest` (the current invocation's own
-/// remaining sibling terms after `at`) -- a sibling `if` arm's own uses stay
-/// invisible here because they live *inside* `terms[at]`, not in `rest`.
+///
+/// A name bound *within* the current invocation (position `>= base_depth`, so
+/// nothing outside this invocation could ever need it) qualifies iff it is not
+/// referenced anywhere in `rest` (the current invocation's own remaining
+/// sibling terms after `at`) -- a sibling `if` arm's own uses stay invisible
+/// here because they live *inside* `terms[at]`, not in `rest`.
+///
+/// A name bound by an *ancestor* invocation must already have been granted to
+/// this one, and is asked of this invocation's own `Liveness` instead: `rest`
+/// alone is the wrong question inside a `back_edge = true` body, where
+/// execution wraps around to term 0 and so a use *earlier* in the body is
+/// still ahead of this block. `dead` answers that correctly, because a granted
+/// name mentioned anywhere in a back-edge body is recorded `IMMORTAL_IN_BODY`.
+/// The index is `at + 1`, not `at`: `nested_uses` attributes a use found
+/// inside `terms[at]` to `at` itself, so `dead(name, at)` is false exactly
+/// when the block being granted into is the user -- the entire reason to
+/// grant. Asking at `at + 1` reproduces "no residual use after this term",
+/// which is what `!references(rest, name)` meant, and since `scan` and
+/// `references` traverse the identical nesting variants this branch grants a
+/// strict subset of what the plain rule would.
 pub(super) fn releasable_into(
     scope: &Scope,
     base_depth: usize,
     outer_releasable: &HashSet<String>,
     rest: &[Term],
+    live: &Liveness,
+    at: usize,
 ) -> HashSet<String> {
     scope
         .bound
         .iter()
         .enumerate()
         .filter(|(idx, b)| {
-            (*idx >= base_depth || outer_releasable.contains(&b.name)) && !references(rest, &b.name)
+            if *idx >= base_depth {
+                !references(rest, &b.name)
+            } else {
+                outer_releasable.contains(&b.name) && live.dead(&b.name, at + 1)
+            }
         })
         .map(|(_, b)| b.name.clone())
         .collect()
@@ -1980,5 +2000,62 @@ mod tests {
                    : main ( -- ) 0 0 5 [ + ] my-times . ;\n";
         check_src(src)
             .expect("my-times checks: the back-edge produces the ground declared outputs");
+    }
+
+    /// U1 (R1): a `Copy` binding as `releasable_into` reads it -- only `name`
+    /// is consulted, so the provenance side channels stay empty.
+    fn binding(name: &str) -> Binding {
+        Binding {
+            name: name.to_string(),
+            ty: Type::I64,
+            aliases: None,
+            deriv: None,
+            quot: None,
+            surviving: None,
+        }
+    }
+
+    /// U1 (R1): the grant handed into a nested block of a `back_edge = true`
+    /// body, over a `Liveness` really built by `scan`. `a` is mentioned at
+    /// term 0, *before* the block, so the pre-R1 rule ("not referenced in the
+    /// remaining siblings") grants it -- and a back-edge body wraps around to
+    /// term 0, so the next iteration reads it again. `unused` is the control
+    /// for the other half: an ancestor name the body never mentions at all is
+    /// still granted, through `dead`'s `None` arm, so the tightening is shown
+    /// not to withhold from every ancestor indiscriminately.
+    #[test]
+    fn releasable_into_withholds_a_name_used_in_a_back_edge_body() {
+        let tokens = lex("a drop true if 1 . else end").expect("lexing should succeed");
+        let terms = match crate::parser::parse_line(&tokens).expect("parsing should succeed") {
+            crate::ast::Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let at = terms
+            .iter()
+            .position(|t| matches!(t.kind, TermKind::If { .. }))
+            .expect("the line ends in an `if`");
+        let rest = &terms[at + 1..];
+        let outer: HashSet<String> = ["a", "unused"].iter().map(|n| n.to_string()).collect();
+        let live = Liveness::scan(&terms, &outer, true);
+        // Both names are ancestor-bound relative to this invocation
+        // (`base_depth` past the last of them), so both take R1's new branch.
+        let scope = Scope {
+            bound: vec![binding("a"), binding("unused")],
+            moves: Moves::default(),
+        };
+        let granted = releasable_into(&scope, 2, &outer, rest, &live, at);
+        assert!(
+            !references(rest, "a"),
+            "the pre-R1 rule would grant `a`: nothing after the block mentions it"
+        );
+        assert!(
+            !granted.contains("a"),
+            "`a` is used earlier in a back-edge body, so it is live again on the \
+             next iteration and must not be granted into the block: {granted:?}"
+        );
+        assert!(
+            granted.contains("unused"),
+            "an ancestor name the body never mentions is still granted: {granted:?}"
+        );
     }
 }

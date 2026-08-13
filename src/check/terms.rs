@@ -47,7 +47,7 @@ pub(super) fn check_terms(
 /// entry point every root invocation (a word body, a REPL line, a `case`
 /// clause) uses: nothing is ancestor to those, so both are empty/`false`.
 #[allow(clippy::too_many_arguments)]
-fn check_terms_relaxed(
+pub(super) fn check_terms_relaxed(
     terms: &[Term],
     mut stack: Vec<Slot>,
     ctx: &Ctx,
@@ -284,8 +284,14 @@ fn check_term(
                 // throughout), never at its own last use inside.
                 let body = prov.quotations[id.0].body.clone();
                 let depth = scope.depth();
-                let granted =
-                    releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+                let granted = releasable_into(
+                    scope,
+                    base_depth,
+                    outer_releasable,
+                    &siblings[at + 1..],
+                    live,
+                    at,
+                );
                 stack = check_terms_relaxed(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
                     &granted, true,
@@ -372,8 +378,14 @@ fn check_term(
                 // quotation's own body (used anywhere inside pins it live
                 // throughout, per-iteration re-entry means it cannot die
                 // early inside).
-                let granted =
-                    releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+                let granted = releasable_into(
+                    scope,
+                    base_depth,
+                    outer_releasable,
+                    &siblings[at + 1..],
+                    live,
+                    at,
+                );
                 let result = check_terms_relaxed(
                     &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
                     &granted, true,
@@ -815,7 +827,14 @@ fn check_term(
             // inside `siblings[at]`, not after it), and an arm executes
             // exactly once, so it may die at its own last use inside
             // (`back_edge = false`).
-            let granted = releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..]);
+            let granted = releasable_into(
+                scope,
+                base_depth,
+                outer_releasable,
+                &siblings[at + 1..],
+                live,
+                at,
+            );
             let mut then_scope = scope.clone();
             let mut else_scope = scope.clone();
             let then_stack = check_terms_relaxed(
