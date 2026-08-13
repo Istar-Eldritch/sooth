@@ -4,12 +4,12 @@
 lets a nested invocation — an `if` arm, a `call`'d quotation body, a `times` body — learn
 that the caller has already proven an ancestor-bound name has no residual use past this
 point, so that name can die inside the nested body instead of defaulting to "never dead
-here". `inline_combinator` (`src/check.rs:7359`), which splices a combinator's body
-(`filter`/`map`/`fold`/`while`/any user quotation-taking word) at its call site, is a
+here". `inline_combinator` (`src/check/combinators.rs:227`), which splices a combinator's
+body (`filter`/`map`/`fold`/`while`/any user quotation-taking word) at its call site, is a
 fourth nested-invocation shape and was never wired into it: it calls the plain
-`check_terms` (`:8318`) — the entry point 6f's own doc comment reserves for "a word body, a
-REPL line, a `case` clause: nothing is ancestor to those" — instead of
-`check_terms_relaxed` (`:8357`) with a computed `outer_releasable` set.
+`check_terms` (`src/check/terms.rs:11`) — the entry point 6f's own doc comment reserves for
+"a word body, a REPL line, a `case` clause: nothing is ancestor to those" — instead of
+`check_terms_relaxed` (`src/check/terms.rs:50`) with a computed `outer_releasable` set.
 
 **Anchors are against `e87bcae` (post-10a).** 10a has merged; every anchor below was
 re-verified against that commit, and every behavioural claim was built and run, not read.
@@ -18,19 +18,55 @@ superseded: 10a moved every function this slice touches by 100+ lines and gave
 `check_literal_against_declared_effect` a new `row: &[Type]` parameter. The *shape* of the
 mechanism survived 10a unchanged; only positions and that one signature moved.
 
-**Every anchor below will move again before this slice lands: slice 6h is in flight.**
-`impl/phase4_slice6h_spec-2608111725` inserts ~99 lines at `src/check.rs:558`, above every
-anchor here, and has further hunks inside two functions this slice edits (`poly_term`, the
-D5 poly bind site; `check_term`, the `releasable_into` sites and the `inline_combinator`
-call site). It also regenerates every `tests/qbe_baseline/*.ssa`. **Re-anchor after 6h
-merges rather than resolving a conflict; re-run the R1-only suite-green check and the
-R1+D1+R2 composition check on the merged tree, since 6h re-lowers `fill` and touches almost
-every example.** What 6h does *not* do is disturb this slice's premises, checked directly
-against that branch: its raw `[ Type ; Count ]` constructor still rejects linear elements
-(it reuses `fill_of_linear_element_error` and adds a module-wide sweep), so recon 2 and D2
-hold; `fill` remains in `BUILTIN_WORDS`, so D5's predicate is unaffected; and its new
-`TermKind::ArrayCtor(Type)` carries a type, not nested terms, so it is not a nesting variant
-and the R1 soundness argument below is untouched by it.
+**Both blockers this note warned about have since landed, and a third, bigger one arrived
+with them: re-anchored against current `main` (`6b7094f`).** Slice 6h merged
+(`ab14a9f`), and separately `src/check.rs` was split into `src/check/*.rs` submodules
+(`6b7094f`) — every function this slice touches moved to a different *file*, not just a
+different line, so every anchor below is a fresh lookup, not an offset. Re-verified directly
+against the current tree rather than assumed from either merge's branch snapshot:
+
+- `fill` remains in `BUILTIN_WORDS` (now `src/check/declarations.rs:63`), so D5's predicate
+  is unaffected by 6h.
+- 6h's raw `[ Type ; Count ]` constructor still rejects linear elements, so recon 2 and D2
+  hold, and its `TermKind::ArrayCtor(Type)` carries a type, not nested terms, so it is not a
+  nesting variant and does not touch the R1 soundness argument below.
+- `Liveness`/`scan`/`dead`/`references`/`nested_uses`/`record_granted_use`/
+  `IMMORTAL_IN_BODY`/`releasable_into`/`capture_alive_names`/`live_derivs`/`aliasing_origin`
+  all moved together into **`src/check/engine.rs`** (`struct Liveness` `:629`,
+  `IMMORTAL_IN_BODY` `:637`, `Liveness::scan` `:640`, `record_granted_use` `:712`,
+  `nested_uses` `:723`, `dead` `:777`, `references` `:790`, `releasable_into` `:811`,
+  `capture_alive_names` `:849`, `live_derivs` `:953`, `aliasing_origin` `:1067`).
+- `check_terms`/`check_terms_relaxed`/the mono `TermKind::Bind` arm/the three existing
+  `releasable_into` call sites (`if`/`call`/`times`)/the `inline_combinator` call site all
+  moved into **`src/check/terms.rs`** (`check_terms` `:11`, `check_terms_relaxed` `:50`, mono
+  `Bind` arm `:141`, `check_term` `:98`, the `call`-site `releasable_into` call `:288`, the
+  `times`-site call `:376`, the `if`-site call `:818`, the `inline_combinator` call site
+  `:661`).
+- `inline_combinator` and `check_poly_combinator_args` moved into
+  **`src/check/combinators.rs`** (`inline_combinator` `:227`, its body-splice `check_terms`
+  call `:374`, `check_poly_combinator_args` `:414`).
+- The poly `TermKind::Bind` arm (inside `poly_term`) moved into **`src/check/poly.rs`**
+  (`poly_term` `:316`, poly `Bind` arm `:333`).
+- `is_builtin_word_name`/`BUILTIN_WORDS`/`extern_redeclaration_error` moved into
+  **`src/check/declarations.rs`** (`BUILTIN_WORDS` `:63`, `is_builtin_word_name` `:101`,
+  `extern_redeclaration_error` `:107`).
+- `check_literal_against_declared_effect`, its `check_terms` call, `reject_variant_local`,
+  `reject_duplicate_local` and `find_zero_unsafe_element` (6h's D3) **stayed in the
+  top-level `src/check.rs`** (now 2530 lines): `find_zero_unsafe_element` `:320`,
+  `reject_variant_local` `:886`, `reject_duplicate_local` `:906`,
+  `check_literal_against_declared_effect` `:1318`, its `check_terms` call `:1348`.
+
+**One real plumbing consequence, not just relocation: `check_terms_relaxed` is currently
+module-private (a bare `fn`, no `pub(super)`) in `terms.rs`, unlike `check_terms` (already
+`pub(super)`, re-exported via `check.rs`'s `use self::terms::check_terms;`).** D1
+(`inline_combinator` in `combinators.rs`) and R2 (`check_literal_against_declared_effect` in
+`check.rs`) both need to call it from outside `terms.rs`. Fix: bump `check_terms_relaxed` to
+`pub(super)` and add a sibling `use self::terms::check_terms_relaxed;` next to the existing
+`check_terms` import in `check.rs` — mirroring the exact pattern `check_terms` already uses.
+No other visibility change is needed: `live`/`at`/`base_depth`/`outer_releasable`/`siblings`
+are already in scope at all three `releasable_into` call sites and at the `inline_combinator`
+call site in `terms.rs` (same `check_term` function), so R1's added `live`/`at` parameters and
+D1's `granted`-computation both drop into an already-live scope with no further threading.
 
 ## Recon: measured against the built compiler
 
@@ -46,17 +82,19 @@ a [ 4 > ] c::filter drop drop
 **2. Every array in Sooth is `Copy`, so naming one never enters move-tracking.** `fill` is
 the only array constructor and rejects a linear element outright. A `Copy` local is, by
 `Moves`' own doc comment, absent from the map, so `moved_site` is `None` forever and
-`aliasing_origin`'s (`:1609`) `moved_site(&b.name).is_none()` filter can never exclude an
-array. `Liveness::dead` (`:1319`) is the only remaining guard. This is a correct, permanent
+`aliasing_origin`'s (`src/check/engine.rs:1067`) `moved_site(&b.name).is_none()` filter can
+never exclude an array. `Liveness::dead` (`src/check/engine.rs:777`) is the only remaining
+guard. This is a correct, permanent
 property of the language, not a gap (D2).
 
 **3. `check_terms` vs `check_terms_relaxed` is the fork, and `inline_combinator` is on the
-wrong side.** `call` (`:8595`), `times` (`:8683`) and an `if` arm (`:9125`) all compute
+wrong side.** `call` (`src/check/terms.rs:288`), `times` (`src/check/terms.rs:376`) and an
+`if` arm (`src/check/terms.rs:818`) all compute
 `releasable_into(scope, base_depth, outer_releasable, &siblings[at + 1..])` and pass the
-result into `check_terms_relaxed`. `inline_combinator`'s body splice (`:7506`, the tail of
+result into `check_terms_relaxed`. `inline_combinator`'s body splice (`src/check/combinators.rs:374`, the tail of
 the function, shared by every combinator regardless of `comb.word.poly`) calls plain
 `check_terms`, which hardcodes an empty `outer_releasable` and `back_edge = false`
-(`:8331`).
+(`src/check/terms.rs:11` area, `check_terms`'s own call sites).
 
 **4. The doorway grant is load-bearing, and the splice path lacks it.** Three programs, all
 run on `e87bcae`:
@@ -98,24 +136,27 @@ to implement D1 itself as unplanned scope.
 
 **6. `inline_combinator`'s `check_terms` is one shared exit point for mono and poly.**
 `comb.word.poly.is_some()` branches only the *argument* check
-(`check_poly_combinator_args` `:7546` vs the mono loop inside `inline_combinator`); the
-body splice at `:7506` runs unconditionally for both. `while` is itself polymorphic, so one
+(`check_poly_combinator_args` `src/check/combinators.rs:414` vs the mono loop inside
+`inline_combinator`); the body splice at `src/check/combinators.rs:374` runs unconditionally
+for both. `while` is itself polymorphic, so one
 fix site covers both.
 
 **7. `inline_combinator` lacks `siblings`/`at`/`base_depth`/`outer_releasable`, and its one
-call site has all four.** It is called from exactly one place (`:8968`, inside
+call site has all four.** It is called from exactly one place (`src/check/terms.rs:661`, inside
 `check_term`'s `TermKind::Call` dispatch), and `check_term` takes `live`, `at`, `terms`,
 `base_depth` and `outer_releasable` as its own parameters, the same values `call`/`times`/
 `if` use a few hundred lines away in the same function.
 
 **8. There is a second wrong-side `check_terms`, on the argument path.**
-`check_literal_against_declared_effect` (`:7644`) runs the caller's quotation *literal*
+`check_literal_against_declared_effect` (`src/check.rs:1318`) runs the caller's quotation *literal*
 against the declared parameter effect, in the caller's own scope, through the plain root
-entry point (`:7674`). It is reached from both of `inline_combinator`'s argument paths (the
-mono loop at `:7400`, `check_poly_combinator_args` at `:7612`) and rejects *before* the
+entry point (`src/check.rs:1348`). It is reached from both of `inline_combinator`'s argument
+paths (the mono loop at `src/check/combinators.rs:268`, `check_poly_combinator_args` at
+`src/check/combinators.rs:480`) and rejects *before* the
 body splice does, so D1 alone cannot discharge the `while`-nested-in-a-combinator shape.
-Its three non-combinator callers are `materialize_quotation_at_boundary` (`:8058`) and the
-two `if`-arm quotation-merge sites (`:9261`, `:9277`); whether those deserve a grant is
+Its three non-combinator callers are `materialize_quotation_at_boundary`
+(`src/check/captures.rs:320`) and the two `if`-arm quotation-merge sites
+(`src/check/terms.rs:954`, `src/check/terms.rs:970`); whether those deserve a grant is
 7b's and 10c's question, not this slice's.
 
 **9. The same hole is already open today, with no 6g change, and it is a silent wrong
@@ -137,7 +178,8 @@ for a silent wrong answer, which is not a trade this slice may make.
 
 **Placebo warning, measured.** Appending `a drop` after that loop flips the program to a
 *rejection on today's compiler* — for an unrelated reason (`references(rest, "a")` at
-`:1332` sees the trailing use and withholds the grant). A reject golden written that way
+`references` (`src/check/engine.rs:790`) sees the trailing use and withholds the grant). A
+reject golden written that way
 passes green with and without the fix and pins nothing. The golden's program must have no
 use of `a` after the loop.
 
@@ -159,7 +201,7 @@ Any argument that a splice's `back_edge` is unobservable depends on closing it (
 
 ## Decided (locked)
 
-**D1. `inline_combinator`'s body check (`:7506`) becomes `check_terms_relaxed` with a
+**D1. `inline_combinator`'s body check (`src/check/combinators.rs:374`) becomes `check_terms_relaxed` with a
 `releasable_into`-computed grant.** Forced by recon 3/6/7: this is the one call site on the
 wrong side of 6f's own contract, and the three correct sites are the pattern to copy.
 
@@ -190,10 +232,12 @@ soundness one. Do not write a test claiming to pin the splice's flag, and do not
 green suite as evidence it is right.
 
 **D5 (new). Reject binding a local whose name collides with a callable name.** Sites: the
-mono `TermKind::Bind` arm (`:8448`) and the poly one (`:5201`), alongside the existing
-`reject_variant_local` (`:3886`) and `reject_duplicate_local` (`:3906`) checks.
-`is_builtin_word_name` (`:2527`) already exists as the predicate, and
-`extern_redeclaration_error` (`:2533`) is the existing precedent for rejecting a declaration
+mono `TermKind::Bind` arm (`src/check/terms.rs:141`) and the poly one
+(`src/check/poly.rs:333`, inside `poly_term` `:316`), alongside the existing
+`reject_variant_local` (`src/check.rs:886`) and `reject_duplicate_local` (`src/check.rs:906`)
+checks. `is_builtin_word_name` (`src/check/declarations.rs:101`) already exists as the
+predicate, and `extern_redeclaration_error` (`src/check/declarations.rs:107`) is the existing
+precedent for rejecting a declaration
 that reuses a builtin or word name; `reject_variant_local` is the precedent for rejecting a
 *local* that collides with another namespace (enum variants). This closes recon 10 at the
 root rather than patching splice hygiene, and it turns "a granted caller name can never
@@ -218,7 +262,7 @@ program. Blast radius is zero. (A regex over `|...|` is *not* a valid way to che
 is overloaded between bind groups and clause dispatch, and a naive scan reports false
 clashes on clause bodies like `examples/shapes.sth:9`'s `| Circle dup * 3.14159 *`.)
 
-**R1 (new, forced by recon 9). `releasable_into` (`:1353`) gains `live: &Liveness, at:
+**R1 (new, forced by recon 9). `releasable_into` (`src/check/engine.rs:811`) gains `live: &Liveness, at:
 usize`, and its filter splits: a name bound in the current invocation
 (`idx >= base_depth`) keeps today's `!references(rest, name)` rule verbatim; an ancestor
 name is granted only if the caller's own liveness says it is dead there.**
@@ -234,17 +278,20 @@ name is granted only if the caller's own liveness says it is dead there.**
 ```
 
 **The index is `at + 1`, not `at`, and this is the whole correctness of the rule.**
-`nested_uses` (`:1265`) attributes a use found *inside* `terms[at]` to index `at` itself,
-and `dead` (`:1319`) is `last < at`, so `live.dead(name, at)` is always false whenever the
+`nested_uses` (`src/check/engine.rs:723`) attributes a use found *inside* `terms[at]` to
+index `at` itself, and `dead` (`src/check/engine.rs:777`) is `last < at`, so
+`live.dead(name, at)` is always false whenever the
 term being granted into is itself the thing that uses the name — which is the entire reason
 one grants. Asking at `at + 1` reproduces exactly what `!references(rest, name)` already
 meant ("no residual use *after* this term") while still catching recon 9's wrap-around,
 because a use anywhere in a `back_edge = true` body is recorded as `IMMORTAL_IN_BODY`
-(`:1183`, via `record_granted_use` `:1254`), which is not `<` any index.
+(`src/check/engine.rs:637`, via `record_granted_use` `src/check/engine.rs:712`), which is not
+`<` any index.
 
 **R1 is provably sound relative to today's compiler, not merely measured green.**
-`Liveness::scan` (`:1186`) records a `Call` use at its index and `nested_uses` (`:1265`)
-records uses inside `If`/`Quotation` at the containing index; `references` (`:1332`)
+`Liveness::scan` (`src/check/engine.rs:640`) records a `Call` use at its index and
+`nested_uses` (`src/check/engine.rs:723`) records uses inside `If`/`Quotation` at the
+containing index; `references` (`src/check/engine.rs:790`)
 recurses over exactly the same three `TermKind` variants, and `TermKind` has no other
 nesting variant. So if `references(rest, name)` is true, some use sits at index `>= at + 1`
 and `dead(name, at + 1)` is false: **`dead(name, at + 1)` implies `!references(rest, name)`,
@@ -253,7 +300,7 @@ impossible by construction. The `idx >= base_depth` branch is unchanged verbatim
 no new risk.
 
 **What R1 actually does, stated plainly, because it is broader than "a wrap-around fix".**
-Inside a `back_edge = true` body, `record_granted_use` (`:1254`) writes `IMMORTAL_IN_BODY`
+Inside a `back_edge = true` body, `record_granted_use` (`src/check/engine.rs:712`) writes `IMMORTAL_IN_BODY`
 for *any* mention of a granted ancestor name, including one `nested_uses` finds inside
 `terms[at]` itself, and `usize::MAX < at + 1` is never true. Therefore: **an ancestor name
 mentioned anywhere inside a back-edge body is never re-granted into a block nested in that
@@ -331,7 +378,7 @@ failure would not surface for two phases.**
 ```
 
 **R2 (new, forced by recon 8). `check_literal_against_declared_effect` takes the same grant
-and its `check_terms` (`:7674`) becomes `check_terms_relaxed`.** Its three non-combinator
+and its `check_terms` (`src/check.rs:1348`) becomes `check_terms_relaxed`.** Its three non-combinator
 callers pass an empty set, preserving their behaviour exactly: with an empty grant,
 `back_edge` only feeds `record_granted_use`, which fires only for names in
 `outer_releasable`.
@@ -344,19 +391,22 @@ One `HashSet` threaded down beats re-deriving position in a function that has no
 ## Invariant worth recording while it is still true
 
 Grants are handed out **capture-blind** — `releasable_into` never consults captures — and
-capture-awareness lives at the *use* site: `live_derivs` (`:1495`) and `aliasing_origin`
-(`:1609`) each compute `capture_alive_names` (`:1391`) and check
+capture-awareness lives at the *use* site: `live_derivs` (`src/check/engine.rs:953`) and
+`aliasing_origin` (`src/check/engine.rs:1067`) each compute `capture_alive_names`
+(`src/check/engine.rs:849`) and check
 `!live.dead(name, at) || captured.contains(name)`. `capture_alive_names` is a fixpoint over
 stack slots and bound locals covering both `Known` markers and 7b's erased-closure
 `surviving` sets. `live.dead` has exactly four call sites: those two, plus two internal to
-the capture machinery (`:1419`, `past_last_use_capture` `:1459`). R1 adds a fifth, inside
+the capture machinery (`src/check/engine.rs:859` area, `past_last_use_capture`
+`src/check/engine.rs:923`). R1 adds a fifth, inside
 `releasable_into` — but that is a *grant* site, not an aliasing-use site, so it needs no
 disjunct. A future slice adding a consumer of `live.dead` on an aliasing path without the
 capture disjunct would break this silently, and nothing currently records it.
 
 Second half of the same invariant: **`dead`'s `None` arm is fail-open.** It returns
 `outer_releasable.contains(name)`, so a name `Liveness::scan` fails to record is granted,
-not withheld. Today that is safe because `scan` (`:1186`) and `references` (`:1332`)
+not withheld. Today that is safe because `scan` (`src/check/engine.rs:640`) and `references`
+(`src/check/engine.rs:790`)
 traverse the identical three nesting variants, which is exactly what makes R1 a strict
 subset of HEAD's grants. **A future `TermKind` with nested terms added to `references` but
 not to `scan` would silently open a hole.** (Checked against the in-flight 6h: its
