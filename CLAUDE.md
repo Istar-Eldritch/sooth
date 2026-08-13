@@ -49,6 +49,9 @@ produces it.
   divergence (different sections of a file pull different dependencies); a module doing
   X and Y and Z; high- and low-level code mixed in one file; functions in a file that
   never call each other; a split forced by a would-be circular dependency.
+- **Re-run these signals at phase exit, not later.** Before closing out any phase that
+  added meaningfully to an existing file, re-check the signals above against that file
+  as it now stands.
 
 ## Load-bearing invariants (do not break silently)
 
