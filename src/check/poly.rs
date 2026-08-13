@@ -1,0 +1,2162 @@
+use super::*;
+
+/// R6: whether a concrete type satisfies an `Ord` bound. The numeric tower
+/// (every integer width, `usize`/`isize`, and both floats) is totally ordered
+/// for the comparison operators; nothing else is (`bool`, a struct, an array).
+/// `max`'s float carve-out (X9) lives at its own builtin arm, not here.
+pub(super) fn is_ord(ty: Type) -> bool {
+    ty.is_numeric()
+}
+
+/// R7: whether a `PolyType` slot is `Copy`. A bare variable answers *only*
+/// from its bound set (never a concrete-type predicate), a concrete slot
+/// delegates to `is_copy`, and an array is `Copy` iff its element is.
+pub(super) fn poly_is_copy(
+    pt: &PolyType,
+    sig: &PolySig,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> bool {
+    match pt {
+        PolyType::Concrete(t) => is_copy(*t, structs, enums, arrays),
+        PolyType::Var(v) => sig.has_bound(*v, Bound::Copy),
+        PolyType::Array(elem, _) => poly_is_copy(elem, sig, structs, enums, arrays),
+        // Slice 6a (D3): a quotation parameter is always `Copy`, so it may be
+        // called repeatedly and carries no move obligation.
+        PolyType::Quotation(..) => true,
+    }
+}
+
+/// R7 companion to the monomorphic `Scope`/`Moves`: the locals a polymorphic
+/// body binds, paired with the move state of the ones that are not `Copy`. A
+/// `Copy` local is read freely and never enters `moves`; a non-`Copy` local
+/// (a bare variable with no `Copy` bound, or a concrete linear slot) is
+/// consumed on its first read, so a second read is use-after-move and never
+/// reading it leaks at the word's end (nothing is dropped for you).
+#[derive(Debug, Clone, Default)]
+pub(super) struct PolyScope {
+    locals: HashMap<String, PolyType>,
+    moves: Moves,
+}
+
+impl PolyScope {
+    /// The non-`Copy` locals still holding an unconsumed value, name-sorted so
+    /// a body with two of them always reports the same one. A `MaybeMoved`
+    /// local (consumed on one `if` arm only) counts as still-unconsumed here,
+    /// which is the whole point of tracking three move states (D2).
+    fn unconsumed(&self) -> Vec<&str> {
+        self.moves.unconsumed()
+    }
+
+    /// The names bound before an `if` arm is walked; a name absent from this
+    /// set after the arm was bound inside it. `PolyScope` has no depth concept
+    /// and reports leaks name-sorted, so a keys-snapshot is the faithful twin
+    /// of `Scope::depth` here, not an ordered `Vec`.
+    fn snapshot(&self) -> HashSet<String> {
+        self.locals.keys().cloned().collect()
+    }
+
+    /// `leave_block`'s poly twin: reject an arm-local non-`Copy` value never
+    /// consumed inside the arm, then drop every arm-local from scope so the two
+    /// arms' name sets agree at the join and `Moves::join` cannot panic on a
+    /// key mismatch. `token` names the arm's closing keyword ("else" or "end")
+    /// for the diagnostic. The removal happens whether or not a leak fired, so
+    /// a successful arm always leaves the pre-`if` name set behind.
+    fn leave_arm(
+        &mut self,
+        before: &HashSet<String>,
+        token: &str,
+        ctx: &Ctx,
+        span: Span,
+        sig: &PolySig,
+    ) -> Result<(), String> {
+        let mut arm_locals: Vec<String> = self
+            .locals
+            .keys()
+            .filter(|k| !before.contains(k.as_str()))
+            .cloned()
+            .collect();
+        arm_locals.sort_unstable();
+        let unconsumed: HashSet<String> = self
+            .moves
+            .unconsumed()
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        // An arm-local cannot be `MaybeMoved` (it does not exist in the other
+        // arm), so its leak is always a plain unconsumed; take the first in
+        // sort order, capturing its type before the removal drops it.
+        let leak = arm_locals
+            .iter()
+            .find(|n| unconsumed.contains(n.as_str()))
+            .map(|n| (n.clone(), self.locals[n].clone()));
+        for name in &arm_locals {
+            self.locals.remove(name);
+            self.moves.states.remove(name);
+        }
+        if let Some((name, pt)) = leak {
+            return Err(poly_arm_local_unconsumed_error(
+                ctx, span, &name, &pt, token, sig,
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// R14-R17: check a polymorphic combinator standalone by instantiating its
+/// signature at concrete stand-in types and running the ordinary concrete
+/// checker on the body. `i64` is Copy/Ord/numeric, so a body that only moves,
+/// reads, and hands an element to its quotation parameter checks exactly as it
+/// will at every Copy instantiation; the abstract `call`/`times` paths (R8/R9)
+/// type `f call`/`f times` against the declared effect, and the three `times`
+/// obligations (R16) fall out of the ordinary `times` check at the def site.
+/// Instantiating every type variable at the same `i64` cannot mask a real
+/// error the library relies on: the combinators never combine two distinct
+/// element/accumulator variables directly (that arithmetic lives in the
+/// caller's literal), and a type-specific misuse in some other combinator's
+/// body is caught at its concrete splice site, the same place obligation 2's
+/// borrow re-check lands (D4/R21). The array length is irrelevant to type
+/// checking (`times` supplies a runtime index), so any value serves.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn check_poly_combinator_standalone(
+    word: &WordDef,
+    sig: &PolySig,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    structs: &[StructDecl],
+    modules: Option<&[ModuleInfo]>,
+    poly: &mut PolyCtx,
+) -> Result<(), String> {
+    const STANDALONE_LEN: u32 = 4;
+    let ctx = word_ctx(word, structs, enums, modules);
+    let span = word_span(word);
+    let mut subst = Subst::default();
+    for v in 0..sig.ty_var_names.len() as u32 {
+        subst.ty.push((v, Type::I64));
+    }
+    for ln in 0..sig.len_var_names.len() as u32 {
+        subst.len.push((ln, STANDALONE_LEN));
+    }
+    let mut inputs = Vec::with_capacity(sig.inputs.len());
+    for pty in &sig.inputs {
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        inputs.push(TypedSlot { name: None, ty });
+    }
+    let mut outputs = Vec::with_capacity(sig.outputs.len());
+    for pty in &sig.outputs {
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        outputs.push(TypedSlot { name: None, ty });
+    }
+    let terms = match &word.body {
+        WordBody::Terms { terms } => terms.clone(),
+        WordBody::Clauses(_) => {
+            return Err(format!(
+                "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
+                crate::resolve::demangle_word(&word.name)
+            ));
+        }
+    };
+    // A concrete stand-in for the combinator, checked by the ordinary path.
+    let concrete = WordDef {
+        name: word.name.clone(),
+        effect: StackEffect { inputs, outputs },
+        body: WordBody::Terms { terms },
+        poly: None,
+        module: word.module,
+        span: word.span,
+    };
+    let mut dropped = Vec::new();
+    check_word(
+        &concrete,
+        enums,
+        env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        modules,
+        &mut dropped,
+        poly,
+    )
+}
+
+/// R9 (Slice 6c): the REPL's entry to the standalone poly-combinator check.
+/// Builds a scratch `PolyCtx` (the instantiation records a spliced combinator
+/// produces are never lowered, R20) around the session's poly-env and combinator
+/// view, so `eval_combinator_def` need not name the private `PolyCtx`. Mirrors
+/// native's `is_combinator` branch in `check`, deliberately bypassing
+/// `eval_poly_def`'s `>= 2`-output deferral: a combinator is spliced inline and
+/// never lowered to a bundle-returning `IrFunc`, so that gate cannot fire.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn check_poly_combinator_repl(
+    word: &WordDef,
+    sig: &PolySig,
+    enums: &[EnumDecl],
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    structs: &[StructDecl],
+    poly_env: &PolyEnv,
+    combinators: &CombinatorEnv,
+) -> Result<(), String> {
+    let mut scratch: HashMap<Span, CallInst> = HashMap::new();
+    let mut scratch_overloads: HashMap<Span, String> = HashMap::new();
+    let mut poly = PolyCtx {
+        env: poly_env,
+        insts: &mut scratch,
+        builtin_overloads: &mut scratch_overloads,
+        combinators,
+    };
+    // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
+    // import-visibility gate never fires on a session-checked combinator body.
+    check_poly_combinator_standalone(
+        word, sig, enums, env, arrays, cells, refs, structs, None, &mut poly,
+    )
+}
+
+/// R7: check a polymorphic word's body once, over a virtual stack of
+/// `PolyType` (never the concrete `Slot` stack, S1/R4). Seeded from the
+/// declared fixed inputs; the input row variable is an opaque below-stack
+/// marker (the stack beneath the fixed inputs is passed through untouched, so
+/// nothing is pushed for it and the residual stack is compared against the
+/// declared fixed outputs). A bare variable supports only the five shuffles,
+/// an operation its bound set permits (`dup`/`over` need `Copy`, the
+/// comparisons need `Ord`), local bind/read, and being returned; every other
+/// type-directed operation on it is a located error naming the variable, so a
+/// body a real instantiation would reject can never slip through.
+#[allow(clippy::too_many_arguments)]
+pub fn check_poly_body(
+    word: &WordDef,
+    sig: &PolySig,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    modules: Option<&[ModuleInfo]>,
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<(), String> {
+    // R12 (slice 8b, 8a): the caller module's operator visibility rides on
+    // `ctx`, so a bare operator in a poly body resolves against the same
+    // scoped candidate set a concrete body does. `Some` from `check::check`,
+    // `None` from `repl.rs` (the REPL path is unscoped, R8).
+    let ctx = word_ctx(word, structs, enums, modules);
+    let terms = match &word.body {
+        WordBody::Terms { terms } => terms,
+        WordBody::Clauses(_) => {
+            return Err(format!(
+                "error: `{}` combines a clause-style body with a polymorphic signature, which is not supported",
+                crate::resolve::demangle_word(&word.name)
+            ));
+        }
+    };
+    let stack = sig.inputs.clone();
+    let mut scope = PolyScope::default();
+    let residual = poly_walk(
+        terms,
+        stack,
+        &mut scope,
+        sig,
+        &ctx,
+        env,
+        structs,
+        enums,
+        arrays,
+        builtin_overloads,
+    )?;
+    if residual != sig.outputs {
+        return Err(poly_output_mismatch_error(word, sig, &residual));
+    }
+    // A non-`Copy` local never read still holds its value here; nothing is
+    // auto-dropped, so it leaks. The monomorphic sibling rejects the same
+    // shape at `leave_block`; the residual check above cannot see a value
+    // parked in a local.
+    if let Some(local) = scope.unconsumed().first().map(|s| s.to_string()) {
+        let pt = scope.locals[&local].clone();
+        return Err(poly_local_unconsumed_error(word, sig, &local, &pt));
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poly_walk(
+    terms: &[Term],
+    mut stack: Vec<PolyType>,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<Vec<PolyType>, String> {
+    for term in terms {
+        stack = poly_term(
+            term,
+            stack,
+            scope,
+            sig,
+            ctx,
+            env,
+            structs,
+            enums,
+            arrays,
+            builtin_overloads,
+        )?;
+    }
+    Ok(stack)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poly_term(
+    term: &Term,
+    mut stack: Vec<PolyType>,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<Vec<PolyType>, String> {
+    let span = term.span;
+    match &term.kind {
+        TermKind::IntLit(_) => stack.push(PolyType::Concrete(Type::I64)),
+        TermKind::FloatLit(_) => stack.push(PolyType::Concrete(Type::F64)),
+        TermKind::StrLit(_) => stack.push(PolyType::Concrete(Type::Str)),
+        TermKind::Bind(names) => {
+            if stack.len() < names.len() {
+                let op = format!("| {} |", names.join(" "));
+                return Err(underflow_error(ctx, span, &op, names.len(), stack.len()));
+            }
+            // R4 twin of the monomorphic binder: a duplicate name inside this
+            // one bind group would orphan the earlier binding, and re-binding a
+            // name still in scope from an earlier group would do the same; a
+            // non-`Copy` value parked in either could then never be consumed (a
+            // silent leak).
+            let mut seen = HashSet::new();
+            for name in names {
+                reject_variant_local(ctx, name, "local")?;
+                reject_duplicate_local(ctx, name, span, &mut seen)?;
+                if scope.locals.contains_key(name) {
+                    return Err(rebound_local_error(ctx, span, name));
+                }
+            }
+            let bound = stack.split_off(stack.len() - names.len());
+            for (name, pt) in names.iter().zip(bound) {
+                // A non-`Copy` binding carries a consume-exactly-once
+                // obligation tracked in `moves`; a `Copy` one does not.
+                if !poly_is_copy(&pt, sig, structs, enums, arrays) {
+                    scope.moves.states.insert(name.clone(), MoveState::Live);
+                }
+                scope.locals.insert(name.clone(), pt);
+            }
+        }
+        TermKind::If {
+            then_branch,
+            else_branch,
+            else_span,
+            end_span: _,
+        } => {
+            // Mirrors the monomorphic arm minus all quotation handling (D3): a
+            // `PolyType` is provably never a quotation (the literal is rejected
+            // eagerly at the `Quotation` arm above), so the condition-pop skips
+            // `reject_quotation_operand` and the join skips the two
+            // quotation-identity cases.
+            let cond = stack
+                .pop()
+                .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
+            if cond != PolyType::Concrete(Type::BOOL) {
+                return Err(match cond {
+                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::BOOL, t),
+                    other => poly_op_on_variable_error(ctx, span, "if", &other, sig),
+                });
+            }
+            // R14/R2: each arm advances its own copy of the move-state and its
+            // own name set; the join reconciles the moves into `MaybeMoved`
+            // wherever they disagree, and `leave_arm` drops each arm's locals
+            // so the two name sets agree at the join.
+            let before = scope.snapshot();
+            let mut then_scope = scope.clone();
+            let mut else_scope = scope.clone();
+            let then_stack = poly_walk(
+                then_branch,
+                stack.clone(),
+                &mut then_scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+                builtin_overloads,
+            )?;
+            let then_token = if else_span.is_some() { "else" } else { "end" };
+            then_scope.leave_arm(&before, then_token, ctx, span, sig)?;
+            let else_stack = poly_walk(
+                else_branch,
+                stack,
+                &mut else_scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+                builtin_overloads,
+            )?;
+            else_scope.leave_arm(&before, "end", ctx, span, sig)?;
+            scope.moves = Moves::join(then_scope.moves, else_scope.moves);
+            if then_stack.len() != else_stack.len() {
+                return Err(poly_branch_mismatch_error(
+                    ctx,
+                    span,
+                    then_stack.len(),
+                    else_stack.len(),
+                ));
+            }
+            for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
+                if t_then != t_else {
+                    return Err(poly_branch_type_mismatch_error(
+                        ctx, span, t_then, t_else, sig,
+                    ));
+                }
+            }
+            stack = then_stack;
+        }
+        TermKind::Call(name) => {
+            return poly_call_term(
+                name,
+                span,
+                stack,
+                scope,
+                sig,
+                ctx,
+                env,
+                structs,
+                enums,
+                arrays,
+                builtin_overloads,
+            );
+        }
+        // R5p: a quotation in a polymorphic body is rejected eagerly at the
+        // literal. `poly_term`'s stack is `Vec<PolyType>`, not `Vec<Slot>`, so
+        // there is nowhere to hang the `quot` marker, and D1 forbids a
+        // `PolyType` variant; pushing a placeholder would erase the identity
+        // into output unification/`Subst`/mangling. Mirrors the
+        // `if`-in-a-polymorphic-body rejection above.
+        TermKind::Quotation(_) => {
+            return Err(format!(
+                "error: a quotation in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
+        }
+        // Slice 6h: no interning route exists for a body-internal array
+        // shape absent from a poly signature (`subst_polytype`/`array_id_of`
+        // both look up an already-interned shape and panic otherwise), so
+        // this is rejected eagerly, mirroring the quotation rejection above.
+        TermKind::ArrayCtor(_) => {
+            return Err(format!(
+                "error: an array constructor in the polymorphic body of `{}` (line {}) is not yet supported",
+                ctx.word_name().unwrap_or("<line>"),
+                span.line
+            ));
+        }
+    }
+    Ok(stack)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poly_call_term(
+    name: &str,
+    span: Span,
+    mut stack: Vec<PolyType>,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<Vec<PolyType>, String> {
+    // A named local reads back its bound `PolyType`. A non-`Copy` local is
+    // consumed on read (R3/D2): a second read is use-after-move, exactly as
+    // the monomorphic checker treats a linear local; a `Copy` local carries no
+    // such obligation and is absent from `moves`.
+    if let Some(pt) = scope.locals.get(name).cloned() {
+        scope
+            .moves
+            .take(name, span)
+            .map_err(|site| poly_use_after_move_error(ctx, span, name, site))?;
+        stack.push(pt);
+        return Ok(stack);
+    }
+    let need = |n: usize, holds: usize| underflow_error(ctx, span, name, n, holds);
+    // The five core shuffles move `PolyType` slots verbatim; `dup`/`over` gate
+    // on `Copy` (a bare variable answers from its bound set, X7).
+    match name {
+        "dup" => {
+            let top = stack.last().ok_or_else(|| need(1, stack.len()))?.clone();
+            poly_copy_gate(&top, "dup", sig, ctx, span, structs, enums, arrays)?;
+            stack.push(top);
+            return Ok(stack);
+        }
+        "over" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(2, n));
+            }
+            let below = stack[n - 2].clone();
+            poly_copy_gate(&below, "over", sig, ctx, span, structs, enums, arrays)?;
+            stack.push(below);
+            return Ok(stack);
+        }
+        "swap" => {
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(2, n));
+            }
+            stack.swap(n - 1, n - 2);
+            return Ok(stack);
+        }
+        "rot" => {
+            let n = stack.len();
+            if n < 3 {
+                return Err(need(3, n));
+            }
+            let a = stack.remove(n - 3);
+            stack.push(a);
+            return Ok(stack);
+        }
+        "drop" => {
+            stack.pop().ok_or_else(|| need(1, 0))?;
+            return Ok(stack);
+        }
+        "len" => {
+            let top = stack.last().ok_or_else(|| need(1, stack.len()))?;
+            match top {
+                PolyType::Array(..) | PolyType::Concrete(Type::Array(..)) => {
+                    // Non-consuming: the array stays, `len` folds to `usize`.
+                    stack.push(PolyType::Concrete(Type::Usize));
+                }
+                PolyType::Concrete(Type::Str) => {
+                    stack.pop();
+                    stack.push(PolyType::Concrete(Type::Usize));
+                }
+                _ => return Err(poly_op_on_variable_error(ctx, span, "len", top, sig)),
+            }
+            return Ok(stack);
+        }
+        _ => {}
+    }
+    // Comparisons: on a bare variable they need `Ord` (X8); on two concrete
+    // operands they delegate to the ordinary operator check below.
+    if matches!(name, "=" | "<" | ">" | "<=" | ">=" | "<>") {
+        let n = stack.len();
+        if n >= 2 {
+            let a = stack[n - 2].clone();
+            let b = stack[n - 1].clone();
+            let (av, bv) = (poly_var_id(&a), poly_var_id(&b));
+            if av.is_some() || bv.is_some() {
+                match (av, bv) {
+                    (Some(v), Some(w)) if v == w => {
+                        if !sig.has_bound(v, Bound::Ord) {
+                            return Err(poly_ord_body_error(
+                                ctx,
+                                span,
+                                name,
+                                &sig.ty_var_names[v as usize],
+                            ));
+                        }
+                    }
+                    _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
+                }
+                stack.truncate(n - 2);
+                stack.push(PolyType::Concrete(Type::BOOL));
+                return Ok(stack);
+            }
+        }
+    }
+    // A monomorphic word: its concrete inputs must be met by concrete slots;
+    // a bare variable passed to a concrete-typed argument is a located error.
+    // Slice 8a fix 2 (R6/R7): a builtin-named env candidate (a user overload
+    // of an operator, e.g. `+`) does not intercept here on a *mismatch* --
+    // unlike an ordinary word, a builtin name also has `BUILTIN_TABLE` to
+    // fall back to, so a mismatched candidate defers to `poly_delegate_op`
+    // below instead of erroring outright. An exact match still wins here
+    // (R2, same priority as any other env candidate), but the call site is
+    // recorded for lowering (R7): the literal name would otherwise hit the
+    // builtin's own hardcoded `Instr::Bin`/`Instr::Cmp`/`Instr::Print` arm.
+    // R1/R2: resolve among this name's candidates by exact operand match; a
+    // lone candidate is the ordinary case and is used as-is, matching the
+    // single-signature behaviour this path had before overloading.
+    //
+    // D3 (slice 8b): this is the poly-body twin of the concrete path's own
+    // call ahead of `check_struct_get_word` -- a generated accessor
+    // (`S>`/`S>field`) is just another `env` candidate here, so the guard
+    // must run before this lookup dispatches one for a drop-overloaded
+    // struct, or a generic word could destructure it and skip the destructor.
+    check_destructure_drop_guard(name, span, ctx)?;
+    let chosen = env.get(name).and_then(|candidates| match &candidates[..] {
+        [only] => Some(only),
+        _ => candidates.iter().find(|o| {
+            stack.len() >= o.sig.inputs.len()
+                && stack[stack.len() - o.sig.inputs.len()..]
+                    .iter()
+                    .zip(&o.sig.inputs)
+                    .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp))
+        }),
+    });
+    if let Some(chosen) = chosen {
+        let msig = &chosen.sig;
+        let n_in = msig.inputs.len();
+        let is_builtin_name = BUILTIN_TABLE.contains_key(name);
+        let exact = stack.len() >= n_in
+            && stack[stack.len() - n_in..]
+                .iter()
+                .zip(&msig.inputs)
+                .all(|(s, inp)| matches!(s, PolyType::Concrete(t) if t == inp));
+        if exact || !is_builtin_name {
+            if stack.len() < n_in {
+                return Err(need(n_in, stack.len()));
+            }
+            let base = stack.len() - n_in;
+            for (i, inp) in msig.inputs.iter().enumerate() {
+                match &stack[base + i] {
+                    PolyType::Concrete(t) if t == inp => {}
+                    PolyType::Var(v) => {
+                        return Err(poly_var_to_concrete_error(
+                            ctx,
+                            span,
+                            name,
+                            &sig.ty_var_names[*v as usize],
+                            *inp,
+                        ));
+                    }
+                    other => {
+                        return Err(poly_op_on_variable_error(ctx, span, name, other, sig));
+                    }
+                }
+            }
+            stack.truncate(base);
+            for out in &msig.outputs {
+                stack.push(PolyType::Concrete(*out));
+            }
+            if exact && (is_builtin_name || chosen.symbol != name) {
+                builtin_overloads.insert(span, chosen.symbol.clone());
+            }
+            return Ok(stack);
+        }
+    }
+    // Everything else is an ordinary operator over concrete operands. Extract
+    // the maximal concrete suffix, run the concrete check, reflect it back; a
+    // variable operand (a too-short suffix) surfaces as the op's own error.
+    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
+        return Ok(next);
+    }
+    Err(unknown_word_error(ctx, span, name))
+}
+
+/// The variable id of a bare `PolyType::Var`, else `None` (a concrete or
+/// array slot is not a bare variable).
+pub(super) fn poly_var_id(pt: &PolyType) -> Option<u32> {
+    match pt {
+        PolyType::Var(v) => Some(*v),
+        _ => None,
+    }
+}
+
+/// R7: `dup`/`over`'s `Copy` gate on a `PolyType` slot. A bare variable
+/// missing the `Copy` bound is X7 (naming the variable and the missing bound,
+/// with the linear-spine reason); a concrete linear slot reuses the ordinary
+/// `cannot_copy` diagnostic.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poly_copy_gate(
+    pt: &PolyType,
+    op: &str,
+    sig: &PolySig,
+    ctx: &Ctx,
+    span: Span,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    if poly_is_copy(pt, sig, structs, enums, arrays) {
+        return Ok(());
+    }
+    match pt {
+        PolyType::Var(v) => Err(poly_copy_body_error(
+            ctx,
+            span,
+            op,
+            &sig.ty_var_names[*v as usize],
+        )),
+        PolyType::Concrete(t) => Err(cannot_copy_error(ctx, span, op, *t)),
+        // A variable-bearing array is non-`Copy` exactly when its element is
+        // (a length-variable array is never interned, so the declaration-time
+        // `check_no_linear_array_elements` never sees it). Recurse so the
+        // error names the real offending element, an unbounded variable or a
+        // linear concrete type, never a fabricated one.
+        PolyType::Array(elem, _) => {
+            poly_copy_gate(elem, op, sig, ctx, span, structs, enums, arrays)
+        }
+        // Unreachable: `poly_is_copy` returns `true` for a quotation effect
+        // (D3), so this gate returns above before reaching the error arm.
+        PolyType::Quotation(..) => {
+            unreachable!("a quotation effect is always Copy (D3); the gate returns above")
+        }
+    }
+}
+
+/// Delegate an operator whose operands are concrete: run it over the maximal
+/// concrete suffix of the `PolyType` stack, then map the result back to
+/// concrete slots. `None` if the name is not a concrete operator (the caller
+/// then reports an unknown word).
+pub(super) fn poly_delegate_op(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<PolyType>,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    builtin_overloads: &mut HashMap<Span, String>,
+) -> Result<Option<Vec<PolyType>>, String> {
+    let mut split = stack.len();
+    while split > 0 {
+        if matches!(stack[split - 1], PolyType::Concrete(_)) {
+            split -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut cstack: Vec<Slot> = stack[split..]
+        .iter()
+        .map(|pt| match pt {
+            PolyType::Concrete(t) => Slot::computed(*t),
+            _ => unreachable!("suffix is all concrete by construction"),
+        })
+        .collect();
+    // R12 (slice 8b, 8a): the poly operator path scopes candidates to the
+    // calling module exactly like the concrete path; `None` (REPL /
+    // single-module) falls back to the flat `env.get(name)`.
+    let scoped_ops = scoped_operator_overloads(ctx, env, name);
+    let op_candidates = match &scoped_ops {
+        Some(v) => Some(&v[..]),
+        None => env.get(name).map(|v| &v[..]),
+    };
+    let handled = match check_operator(name, span, &mut cstack, ctx, op_candidates)? {
+        OpDispatch::Builtin(s) => {
+            cstack = s;
+            true
+        }
+        // R6/R7: a builtin-row exact miss whose operands exactly match one of
+        // this name's scoped candidates dispatches to that user word, same as
+        // `check_term`'s call site: apply the chosen candidate's own outputs
+        // (the resolver already confirmed its inputs equal the operands).
+        OpDispatch::UserOverload(symbol) => {
+            let sig = &op_candidates
+                .and_then(|c| c.iter().find(|o| o.symbol == symbol))
+                .expect("check_operator resolved this symbol from this scoped candidate set")
+                .sig;
+            cstack.truncate(cstack.len() - sig.inputs.len());
+            cstack.extend(sig.outputs.iter().map(|ty| Slot::computed(*ty)));
+            builtin_overloads.insert(span, symbol);
+            true
+        }
+        OpDispatch::NotOperator => {
+            if let Some(s) = check_str_word(name, span, &mut cstack, ctx)? {
+                cstack = s;
+                true
+            } else {
+                false
+            }
+        }
+    };
+    if !handled {
+        return Ok(None);
+    }
+    stack.truncate(split);
+    for slot in cstack {
+        stack.push(PolyType::Concrete(slot.ty));
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// R5/R6/R14: a call to a polymorphic word from a concrete body. Unifies the
+/// word's `PolySig` against the concrete top of stack (deepest-first),
+/// building the ground substitution `θ`, checks `θ` against the declared
+/// bounds (X5/X6), records the per-call-site `CallInst` for lowering (R14),
+/// and pushes the substituted concrete outputs. The row variable is a pure
+/// pass-through: the stack beneath the fixed inputs is untouched, so `θ`
+/// carries no row types and the word's ABI never sees the caller's deeper
+/// stack (S2 rejected the carried runtime stack).
+/// R5/R14 (Slice 8a): the outcome of resolving a name with more than one
+/// polymorphic candidate. Kept distinct from a plain `None` so the caller can
+/// still raise R9p's specific rejection (a quotation operand disqualifies
+/// every candidate the same way, since binding `'T` to the placeholder would
+/// monomorphize a call over a phantom) rather than a generic no-match message
+/// that would misdescribe the reason.
+pub(super) enum PolyOverloadMiss {
+    Quotation,
+    NoMatch,
+}
+
+/// The first candidate among `candidates` whose declared inputs unify against
+/// the tail of `stack`, tried in declaration order -- the same shape as
+/// `resolve_overload`'s exact-match resolution for concrete words, adapted to
+/// unification since a poly input may be a type variable rather than a fixed
+/// `Type`. Only reached with 2+ candidates; the caller keeps the exact
+/// existing single-candidate path (and its position-specific diagnostics)
+/// untouched. Bounds (R6) are checked only against the chosen candidate by
+/// the caller, matching the single-candidate path: they gate a resolved
+/// instantiation, not resolution itself.
+pub(super) fn resolve_poly_overload(
+    candidates: &[(PolySig, Option<u64>)],
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Result<(PolySig, Option<u64>), PolyOverloadMiss> {
+    let mut saw_quotation = false;
+    for (sig, generation) in candidates {
+        let n_in = sig.inputs.len();
+        if stack.len() < n_in {
+            continue;
+        }
+        let base = stack.len() - n_in;
+        if stack[base..].iter().any(|s| s.quot.is_some()) {
+            saw_quotation = true;
+            continue;
+        }
+        if poly_sig_unifies(sig, stack, name, span, ctx, arrays) {
+            return Ok((sig.clone(), *generation));
+        }
+    }
+    Err(if saw_quotation {
+        PolyOverloadMiss::Quotation
+    } else {
+        PolyOverloadMiss::NoMatch
+    })
+}
+
+/// R5/R14: a named call matching no polymorphic candidate's declared inputs,
+/// listing each candidate's whole signature (`poly_sig_str`) the way
+/// `no_overload_matches_error` lists concrete candidates' input shapes.
+pub(super) fn no_poly_overload_matches_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    candidates: &[(PolySig, Option<u64>)],
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|(sig, _)| poly_sig_str(name, sig))
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{demangled}` accepts these operands{listed}")
+        }
+    }
+}
+
+/// Whether `sig`'s declared inputs unify against the tail of `stack`,
+/// without committing any successful bindings past this call: a fresh
+/// `Subst` per attempt, discarded either way. The shared predicate behind
+/// resolving an overloaded polymorphic word (`resolve_poly_overload`) and an
+/// overloaded polymorphic combinator (`resolve_combinator_overload`) alike --
+/// unlike `resolve_poly_overload`'s own caller, a combinator's declared
+/// inputs legitimately include a quotation type, so this makes no R9p
+/// judgement about one; that stays the caller's decision.
+pub(super) fn poly_sig_unifies(
+    sig: &PolySig,
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> bool {
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return false;
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    (0..n_in).all(|i| {
+        unify_poly_input(
+            sig,
+            &sig.inputs[i],
+            stack[base + i].ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )
+        .is_ok()
+    })
+}
+
+/// Whether `sig`'s declared inputs *could* match the tail of `stack`, for
+/// selecting among 2+ poly combinator candidates only. A declared quotation
+/// position (`poly_input_is_quotation`) contributes no constraint and is
+/// skipped: a stack slot standing for a quotation carries a placeholder `ty`
+/// (`Slot::quot`'s own doc -- "no user op accepts" it) rather than the
+/// literal's real effect until `inline_combinator` materializes it, and
+/// checking that for real means running the literal's body, which this
+/// selection step must not do speculatively once per candidate (unlike a
+/// concrete type or a bare `'T`, a quotation's real effect is not known
+/// without side-effecting work). Every other declared position unifies for
+/// real. Whichever candidate this selects still has every declared position,
+/// quotation included, validated for real exactly once by the existing
+/// single-candidate path this only decides which candidate reaches.
+pub(super) fn poly_sig_could_match(
+    sig: &PolySig,
+    stack: &[Slot],
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> bool {
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return false;
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    (0..n_in).all(|i| {
+        if poly_input_is_quotation(&sig.inputs[i]) {
+            return true;
+        }
+        unify_poly_input(
+            sig,
+            &sig.inputs[i],
+            stack[base + i].ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )
+        .is_ok()
+    })
+}
+
+/// The first candidate among `candidates` whose declared shape matches the
+/// tail of `stack`, tried in declaration order: exact type match for a mono
+/// candidate (the same exact-match philosophy `resolve_overload` uses for an
+/// ordinary word, R2), a could-match probe for a poly one. `inline_combinator`
+/// already branches the same way for the sole-candidate case; this only
+/// decides which candidate reaches that branch. A declared quotation
+/// position never distinguishes a mono candidate either, for the identical
+/// placeholder-`ty` reason `poly_sig_could_match` skips one -- treated as a
+/// wildcard on both branches. Only reached with 2+ candidates sharing one
+/// name.
+///
+/// Accepted narrowing: two candidates identical in every *non*-quotation
+/// position, differing only in a declared quotation's effect, are
+/// indistinguishable here; the first declared wins, the same trade
+/// `resolve_poly_overload` already accepts on an ambiguous unification.
+pub(super) fn resolve_combinator_overload<'a>(
+    candidates: &[Combinator<'a>],
+    stack: &[Slot],
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+) -> Option<Combinator<'a>> {
+    for comb in candidates {
+        let matched = match comb.word.poly.as_ref() {
+            Some(sig) => {
+                poly_sig_could_match(sig, stack, comb.word.name.as_str(), span, ctx, arrays)
+            }
+            None => {
+                let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
+                let n = inputs.len();
+                stack.len() >= n
+                    && stack[stack.len() - n..]
+                        .iter()
+                        .zip(inputs.iter())
+                        .all(|(s, want)| matches!(want, Type::Quotation(_)) || s.ty == *want)
+            }
+        };
+        if matched {
+            return Some(*comb);
+        }
+    }
+    None
+}
+
+/// R18: a call to an overloaded combinator name matching no candidate's
+/// declared shape, listing each candidate the way an ordinary overload's miss
+/// does -- a rendered signature for a poly candidate, input types for a mono
+/// one.
+pub(super) fn no_combinator_overload_matches_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    candidates: &[Combinator],
+) -> String {
+    let demangled = crate::resolve::demangle_call(name);
+    let mut shapes: Vec<String> = candidates
+        .iter()
+        .map(|comb| match comb.word.poly.as_ref() {
+            Some(sig) => poly_sig_str(name, sig),
+            None => {
+                let inputs: Vec<String> = comb
+                    .word
+                    .effect
+                    .inputs
+                    .iter()
+                    .map(|s| format!("`{}`", s.ty))
+                    .collect();
+                match inputs.is_empty() {
+                    true => "no operands".to_string(),
+                    false => inputs.join(" "),
+                }
+            }
+        })
+        .collect();
+    shapes.sort();
+    let listed = shapes
+        .iter()
+        .map(|s| format!("\n  candidate: {s}"))
+        .collect::<String>();
+    match ctx {
+        Ctx::Word { name: wname, .. } => format!(
+            "error: no overload of `{demangled}` in `{wname}` (line {}) accepts these operands{listed}",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: no overload of `{demangled}` accepts these operands{listed}")
+        }
+    }
+}
+
+pub(super) fn check_poly_call(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+    poly: &mut PolyCtx,
+) -> Result<Vec<Slot>, String> {
+    let candidates = poly.env.get(name).expect("caller checked membership");
+    let (sig, generation) = match candidates.as_slice() {
+        [(sig, generation)] => (sig.clone(), *generation),
+        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays) {
+            Ok(chosen) => chosen,
+            Err(PolyOverloadMiss::Quotation) => {
+                return Err(reject_quotation_argument(ctx, span, name))
+            }
+            Err(PolyOverloadMiss::NoMatch) => {
+                return Err(no_poly_overload_matches_error(ctx, span, name, candidates))
+            }
+        },
+    };
+    let n_in = sig.inputs.len();
+    if stack.len() < n_in {
+        return Err(underflow_error(ctx, span, name, n_in, stack.len()));
+    }
+    let base = stack.len() - n_in;
+    let mut subst = Subst::default();
+    for i in 0..n_in {
+        // R9p: `unify_poly_input` binds a `Var` to *any* concrete type, so a
+        // quotation would silently bind `'T` to the placeholder and
+        // monomorphize a call over a phantom. Reject before unification.
+        if stack[base + i].quot.is_some() {
+            return Err(reject_quotation_argument(ctx, span, name));
+        }
+        let slot_ty = stack[base + i].ty;
+        unify_poly_input(
+            &sig,
+            &sig.inputs[i],
+            slot_ty,
+            name,
+            span,
+            ctx,
+            arrays,
+            &mut subst,
+        )?;
+    }
+    // R6: each declared bound must hold of the concrete type `θ` bound the
+    // variable to.
+    for (v, bound) in &sig.bounds {
+        let Some(ty) = subst.ty_of(*v) else { continue };
+        let ok = match bound {
+            Bound::Copy => is_copy(ty, ctx.structs(), ctx.enums(), arrays),
+            Bound::Ord => is_ord(ty),
+        };
+        if !ok {
+            let var = &sig.ty_var_names[*v as usize];
+            return Err(match bound {
+                Bound::Copy => poly_copy_bound_error(ctx, span, name, var, ty),
+                Bound::Ord => poly_ord_bound_error(ctx, span, name, var, ty),
+            });
+        }
+    }
+    let mut outputs: Vec<Type> = Vec::with_capacity(sig.outputs.len());
+    for pty in &sig.outputs {
+        outputs.push(apply_subst(&sig, pty, &subst, name, span, ctx, arrays)?);
+    }
+    // R14: record the instantiation for lowering, keyed by the call-site span.
+    // The bundle is filled later (a resolved output count >= 2 interns one).
+    let symbol = instantiation_symbol(name, &subst, generation);
+    poly.insts.insert(
+        span,
+        CallInst {
+            callee: name.to_string(),
+            subst,
+            symbol,
+            out_arity: outputs.len(),
+            output_types: outputs.clone(),
+            bundle: None,
+            generation,
+        },
+    );
+    stack.truncate(base);
+    for ty in outputs {
+        stack.push(Slot::computed(ty));
+    }
+    Ok(std::mem::take(stack))
+}
+
+/// R5: unify one declared input `PolyType` against a concrete slot type,
+/// extending `subst`. A repeated variable forced to two concretes is X4; a
+/// non-array where an array is declared, or a mismatched concrete, is the
+/// ordinary type-mismatch error.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn unify_poly_input(
+    sig: &PolySig,
+    pty: &PolyType,
+    slot_ty: Type,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &[ArrayDecl],
+    subst: &mut Subst,
+) -> Result<(), String> {
+    match pty {
+        PolyType::Concrete(t) => {
+            if *t != slot_ty {
+                return Err(type_mismatch_error(ctx, span, name, *t, slot_ty));
+            }
+        }
+        PolyType::Var(v) => {
+            if let Some(prev) = subst.ty_of(*v) {
+                if prev != slot_ty {
+                    return Err(poly_var_conflict_error(
+                        ctx,
+                        span,
+                        name,
+                        &sig.ty_var_names[*v as usize],
+                        prev,
+                        slot_ty,
+                    ));
+                }
+            } else {
+                subst.ty.push((*v, slot_ty));
+            }
+        }
+        PolyType::Array(elem, len) => {
+            let Type::Array(id, _) = slot_ty else {
+                return Err(poly_array_expected_error(ctx, span, name, slot_ty));
+            };
+            let (elem_ty, count) = (arrays[id.index()].element, arrays[id.index()].count);
+            unify_poly_input(sig, elem, elem_ty, name, span, ctx, arrays, subst)?;
+            match len {
+                Len::Concrete(k) => {
+                    if *k != count {
+                        return Err(poly_array_expected_error(ctx, span, name, slot_ty));
+                    }
+                }
+                Len::Var(ln) => {
+                    if let Some(prev) = subst.len_of(*ln) {
+                        if prev != count {
+                            return Err(poly_len_conflict_error(
+                                ctx,
+                                span,
+                                name,
+                                &sig.len_var_names[*ln as usize],
+                                prev,
+                                count,
+                            ));
+                        }
+                    } else {
+                        subst.len.push((*ln, count));
+                    }
+                }
+            }
+        }
+        // Slice 6a (R6): a declared quotation parameter unifies against a
+        // concrete quotation slot by matching rows pointwise, binding any
+        // variable a row mentions (`[ 'T -- ]` against `[ i64 -- ]` binds
+        // `'T = i64`). Equal arity is required on both sides; else it is a
+        // located mismatch, never a silent bind.
+        PolyType::Quotation(ins, outs, _, _, _) => {
+            // Slice 10a (R1): accept a `~` slot as well as an ordinary
+            // quotation slot (accessor), so a declared quotation parameter
+            // unifies against either. Slice 10a (R10): the mismatch
+            // messages below render the declared `PolyType` (`pty`) itself
+            // through `poly_type_str`, rather than fabricating a `Type` --
+            // `Type::Quotation`'s `QuotEffect` has no row field to hold R7's
+            // row, so an expected type nobody wrote (e.g. `[ -- ]`) or a
+            // rendering that silently drops the row are both avoided by
+            // never building one.
+            let Some(eff) = crate::ast::is_quotation_type(slot_ty) else {
+                return Err(poly_quotation_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    slot_ty,
+                ));
+            };
+            // Slice 10a (R8): the row is a separate field, never a slot in
+            // `ins`/`outs`, so this arity check already excludes it.
+            if ins.len() != eff.inputs.len() || outs.len() != eff.outputs.len() {
+                return Err(poly_quotation_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    slot_ty,
+                ));
+            }
+            for (p, c) in ins.iter().zip(&eff.inputs) {
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, subst)?;
+            }
+            for (p, c) in outs.iter().zip(&eff.outputs) {
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, subst)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Slice 10a (R10): `type_mismatch_error`'s twin for a declared quotation
+/// mismatch, taking the expected side as an already-rendered `PolyType`
+/// string (`poly_type_str`, which knows the `~` sigil and the row) rather
+/// than a `Type` -- a row cannot live in a `Type::Quotation`'s `QuotEffect`.
+pub(super) fn poly_quotation_type_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    expected: &str,
+    found: Type,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `{}` expected `{}`, found `{}`\n  note: declared {}",
+            name, span.line, op, expected, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{op}` expected `{expected}`, found `{found}`")
+        }
+    }
+}
+
+/// R5: apply the ground `θ` to a declared output `PolyType`, yielding a
+/// concrete `Type`. A variable-bearing array folds to a concrete interned
+/// array shape. A variable the inputs never bound is an under-determined
+/// signature (a located error rather than a panic).
+pub(super) fn apply_subst(
+    sig: &PolySig,
+    pty: &PolyType,
+    subst: &Subst,
+    name: &str,
+    span: Span,
+    ctx: &Ctx,
+    arrays: &mut Vec<ArrayDecl>,
+) -> Result<Type, String> {
+    match pty {
+        PolyType::Concrete(t) => Ok(*t),
+        PolyType::Var(v) => subst.ty_of(*v).ok_or_else(|| {
+            poly_unbound_output_error(ctx, span, name, &sig.ty_var_names[*v as usize])
+        }),
+        PolyType::Array(elem, len) => {
+            let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays)?;
+            let count = match len {
+                Len::Concrete(k) => *k,
+                Len::Var(ln) => subst.len_of(*ln).ok_or_else(|| {
+                    poly_unbound_output_error(ctx, span, name, &sig.len_var_names[*ln as usize])
+                })?,
+            };
+            Ok(intern_array_type(arrays, elem_ty, count))
+        }
+        // Slice 6a (R6): substitute both rows of a declared quotation effect,
+        // yielding a concrete `Type::Quotation`. Slice 10a (R9): a row on
+        // this `PolyType::Quotation` is left ungrounded here -- splicing a
+        // caller region into an *interned* effect would mint one no literal
+        // could ever equal; grounding happens at the callee side instead
+        // (`check_literal_against_declared_effect`, phase 4).
+        PolyType::Quotation(ins, outs, is_inline, _, _) => {
+            let mut cins = Vec::with_capacity(ins.len());
+            for p in ins {
+                cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+            }
+            let mut couts = Vec::with_capacity(outs.len());
+            for p in outs {
+                couts.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+            }
+            // Slice 10a (R1): ground a `~` effect to `Type::InlineQuotation`
+            // rather than `Type::Quotation`, so the materialization
+            // boundaries reject it by type inequality.
+            Ok(if *is_inline {
+                crate::ast::inline_quotation_type(cins, couts)
+            } else {
+                crate::ast::quotation_type(cins, couts)
+            })
+        }
+    }
+}
+
+/// R7 twin of `linear_local_unconsumed_error` for the polymorphic body
+/// checker: a local bound to a non-`Copy` slot still holds its value at the
+/// word's end. Names the local and its slot so the diagnostic matches the one
+/// a concrete instantiation would already get from the monomorphic checker.
+pub(super) fn poly_local_unconsumed_error(
+    word: &WordDef,
+    sig: &PolySig,
+    local: &str,
+    pt: &PolyType,
+) -> String {
+    format!(
+        "error: linear value `{}` is never consumed in `{}`\n  `{}` has type `{}`, which is linear: drop it or return it (nothing is dropped for you)",
+        local,
+        crate::resolve::demangle_word(&word.name),
+        local,
+        poly_type_str(pt, sig),
+    )
+}
+
+/// R7 twin of `use_after_move_error` for the polymorphic body checker: a
+/// non-`Copy` local read again after its first read (which consumed it),
+/// citing the earlier read site.
+pub(super) fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site: Span) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: use after move in `{where_}` (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
+        span.line, site.line, site.col,
+    )
+}
+
+/// R14 twin of `branch_mismatch_error` for the polymorphic body checker: the
+/// two `if` arms leave stacks of different depth. Takes `usize` depths, so no
+/// `PolyType` argument is needed here.
+pub(super) fn poly_branch_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    d_then: usize,
+    d_else: usize,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
+            name, span.line, d_then, d_else, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
+        ),
+    }
+}
+
+/// R14 twin of `branch_type_mismatch_error`: the two `if` arms leave differing
+/// types in the same slot. Compares `PolyType`, which is why the monomorphic
+/// `Type`-taking sibling cannot be reused; `sig` renders each variable's
+/// surface spelling.
+pub(super) fn poly_branch_type_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    t_then: &PolyType,
+    t_else: &PolyType,
+    sig: &PolySig,
+) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
+            name,
+            span.line,
+            poly_type_str(t_then, sig),
+            poly_type_str(t_else, sig),
+            effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: `if` branches leave different types (then: `{}`, else: `{}`)",
+            poly_type_str(t_then, sig),
+            poly_type_str(t_else, sig),
+        ),
+    }
+}
+
+/// R14/R2 twin of `linear_local_out_of_scope_error`: a non-`Copy` local bound
+/// inside one `if` arm is never consumed before that arm ends. `token` names
+/// the arm's closing keyword ("else" or "end").
+pub(super) fn poly_arm_local_unconsumed_error(
+    ctx: &Ctx,
+    span: Span,
+    local: &str,
+    pt: &PolyType,
+    token: &str,
+    sig: &PolySig,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    match ctx {
+        Ctx::Word { .. } => format!(
+            "error: linear value `{}` is never consumed in `{}` (line {})\n  local `{}` (`{}`) is never consumed, and its scope ends at the `{}` (nothing is dropped for you)",
+            local,
+            where_,
+            span.line,
+            local,
+            poly_type_str(pt, sig),
+            token,
+        ),
+        Ctx::Line { .. } => format!(
+            "error: local `{}` (`{}`) is never consumed, and its scope ends at the `{}`",
+            local,
+            poly_type_str(pt, sig),
+            token,
+        ),
+    }
+}
+
+pub(super) fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot `{op}` the type variable `{var}` in `{where_}` (line {})\n  `{var}` has no `Copy` bound, and a linear value cannot be duplicated; declare `{var}: Copy` if every instantiation is `Copy`",
+        span.line
+    )
+}
+
+pub(super) fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{op}` on the type variable `{var}` in `{where_}` (line {}) requires an `Ord` bound\n  declare `{var}: Ord` so every instantiation is comparable",
+        span.line
+    )
+}
+
+pub(super) fn poly_op_on_variable_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    pt: &PolyType,
+    sig: &PolySig,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    let what = match pt {
+        PolyType::Var(v) => format!("the type variable `{}`", sig.ty_var_names[*v as usize]),
+        PolyType::Array(..) => "an array with a variable".to_string(),
+        PolyType::Concrete(t) => format!("`{t}`"),
+        PolyType::Quotation(..) => "a quotation".to_string(),
+    };
+    format!(
+        "error: `{op}` is not permitted on {what} in `{where_}` (line {})",
+        span.line
+    )
+}
+
+pub(super) fn poly_op_operand_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    a: &PolyType,
+    b: &PolyType,
+    sig: &PolySig,
+) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{op}` in `{where_}` (line {}) needs two operands of one type, found `{}` and `{}`",
+        span.line,
+        poly_type_str(a, sig),
+        poly_type_str(b, sig),
+    )
+}
+
+pub(super) fn poly_var_to_concrete_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    expected: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{callee}` in `{where_}` (line {}) expects `{expected}`, but the type variable `{var}` is not a concrete type",
+        span.line
+    )
+}
+
+pub(super) fn poly_output_mismatch_error(
+    word: &WordDef,
+    sig: &PolySig,
+    residual: &[PolyType],
+) -> String {
+    let got: Vec<String> = residual.iter().map(|pt| poly_type_str(pt, sig)).collect();
+    let want: Vec<String> = sig
+        .outputs
+        .iter()
+        .map(|pt| poly_type_str(pt, sig))
+        .collect();
+    format!(
+        "error: stack effect mismatch in `{}`\n  body leaves `{}`, but the declared outputs are `{}`",
+        crate::resolve::demangle_word(&word.name),
+        got.join(" "),
+        want.join(" "),
+    )
+}
+
+pub(super) fn poly_copy_bound_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    ty: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is linear and has no `Copy` instance, so a linear value cannot be duplicated; `{var}: Copy` is unsatisfied",
+            span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with linear type `{ty}`: `{var}: Copy` is unsatisfied"
+        ),
+    }
+}
+
+pub(super) fn poly_ord_bound_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    ty: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}` in `{name}` (line {})\n  `{ty}` is not `Ord`; `{var}: Ord` is unsatisfied",
+            span.line
+        ),
+        Ctx::Line { .. } => format!(
+            "error: cannot instantiate `{var}` of `{callee}` with `{ty}`: `{var}: Ord` is unsatisfied"
+        ),
+    }
+}
+
+pub(super) fn poly_var_conflict_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    a: Type,
+    b: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let line = span.line;
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `{callee}` in `{name}` (line {line}) resolved `{var}` to both `{a}` and `{b}`"
+        ),
+        Ctx::Line { .. } => {
+            format!("error: `{callee}` resolved `{var}` to both `{a}` and `{b}`")
+        }
+    }
+}
+
+pub(super) fn poly_len_conflict_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    var: &str,
+    a: u32,
+    b: u32,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let line = span.line;
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: `{callee}` in `{name}` (line {line}) resolved length `{var}` to both `{a}` and `{b}`"
+        ),
+        Ctx::Line { .. } => {
+            format!("error: `{callee}` resolved length `{var}` to both `{a}` and `{b}`")
+        }
+    }
+}
+
+pub(super) fn poly_array_expected_error(
+    ctx: &Ctx,
+    span: Span,
+    callee: &str,
+    found: Type,
+) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    match ctx {
+        Ctx::Word { name, .. } => format!(
+            "error: type mismatch in `{name}` (line {})\n  `{callee}` expected an array operand, found `{found}`",
+            span.line
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `{callee}` expected an array operand, found `{found}`")
+        }
+    }
+}
+
+pub(super) fn poly_unbound_output_error(ctx: &Ctx, span: Span, callee: &str, var: &str) -> String {
+    let callee = crate::resolve::demangle_call(callee);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{callee}` in `{where_}` (line {}) has output variable `{var}` that no input binds",
+        span.line
+    )
+}
+
+/// Render a `PolyType` for a diagnostic: a variable by its declared spelling,
+/// a concrete type by its name, an array structurally.
+pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
+    match pt {
+        PolyType::Concrete(t) => t.name().to_string(),
+        PolyType::Var(v) => sig.ty_var_names[*v as usize].clone(),
+        PolyType::Array(elem, len) => {
+            let l = match len {
+                Len::Concrete(n) => n.to_string(),
+                Len::Var(id) => sig.len_var_names[*id as usize].clone(),
+            };
+            format!("[{} {}]", poly_type_str(elem, sig), l)
+        }
+        PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => {
+            // Slice 10a (R10): the row is a separate field, not a slot in
+            // `ins`/`outs`, so it is rendered as the leading element of its
+            // side, exactly as `poly_sig_str` renders the top-level row.
+            let row = |r: &[PolyType], row_var: Option<u32>| {
+                let mut parts: Vec<String> = Vec::new();
+                if let Some(v) = row_var {
+                    parts.push(sig.row_var_names[v as usize].clone());
+                }
+                parts.extend(r.iter().map(|p| poly_type_str(p, sig)));
+                parts.join(" ")
+            };
+            let (i, o) = (row(ins, *row_in), row(outs, *row_out));
+            let sigil = if *is_inline { "~" } else { "" };
+            match (i.is_empty(), o.is_empty()) {
+                (true, true) => format!("{sigil}[ -- ]"),
+                (true, false) => format!("{sigil}[ -- {o} ]"),
+                (false, true) => format!("{sigil}[ {i} -- ]"),
+                (false, false) => format!("{sigil}[ {i} -- {o} ]"),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lexer::lex;
+    use crate::parser::parse;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    // A one-field struct with a `drop` overload: linear for the same reason any
+    // resource is, used to force the `Copy`-bound failure (X5).
+    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
+    /// D3's leaf resource: one field, a `drop` override implemented exactly
+    /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
+    /// inside `drop`'s own body -- exempted, since a word literally named
+    /// `drop` can only be the recognized override for the struct its declared
+    /// effect names).
+    const FD_DEF: &str = "type: Fd n i64 ;\n: drop ( Fd -- ) | h | h Fd>n drop ;\n";
+    /// A checked module, for the tests that read a type fact back out of the
+    /// registries rather than only asserting a diagnostic.
+    fn checked_module(src: &str) -> Module {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+    /// Slice 10a (R1): a fully-concrete `~` folds to `Concrete(InlineQuotation)`,
+    /// which the routing predicate must recognize -- else the word is not a
+    /// combinator, is lowered as an ordinary call, and reaches `ir_type_of`'s
+    /// `unreachable!`. Constructed directly, no parser.
+    #[test]
+    fn poly_input_is_quotation_recognizes_inline() {
+        let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
+        let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
+        assert!(poly_input_is_quotation(&PolyType::Concrete(inl)));
+        assert!(poly_input_is_quotation(&PolyType::Concrete(ord)));
+        assert!(!poly_input_is_quotation(&PolyType::Concrete(Type::I64)));
+    }
+    #[test]
+    fn poly_body_destructuring_drop_overloaded_type_is_error() {
+        // Bug 2 (round-1 review): `poly_call_term` resolved a generated
+        // accessor through the ordinary `env` lookup with no D3 guard at all,
+        // so a generic word could destructure any drop-overloaded type and
+        // skip its destructor.
+        let err = check_src(&format!(
+            "{FD_DEF}: sneak ( 'T -- 'T i64 ) 7 Fd Fd>n ;\n: main ( -- ) 1 sneak drop drop ;\n"
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot destructure `Fd` in `sneak` (line 3): it defines `drop`, so moving its fields out would skip its destructor\n  note: dispose it with `drop`, or read a field through a borrow (`&`) instead of moving it out"
+        );
+    }
+    #[test]
+    fn check_poly_call_rejects_a_quotation_argument() {
+        // R9p: `check_poly_call` reads only `stack[base + i].ty`, so a quotation
+        // does not *fail* unification, it *succeeds* binding `'T` to the
+        // placeholder and monomorphizes a real call over a phantom. The guard
+        // before `unify_poly_input` is what makes the R9 rejection reachable.
+        let err = check_src(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) [ + ] dupit drop drop ;\n",
+        )
+        .expect_err("a quotation passed to a polymorphic word should be rejected");
+        assert!(
+            err.contains("a quotation cannot be passed to `dupit`"),
+            "check_poly_call should name `dupit`, got: {err}"
+        );
+    }
+    #[test]
+    fn poly_term_rejects_a_quotation_literal() {
+        // R5p: a quotation literal in a polymorphic body is rejected eagerly at
+        // the literal (the polymorphic path cannot yet carry the marker).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ + ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("a quotation literal in a polymorphic body should be rejected");
+        assert!(
+            err.contains("a quotation in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+    #[test]
+    fn poly_term_rejects_an_array_constructor() {
+        // Slice 6h: an array constructor in a polymorphic body is rejected
+        // eagerly, mirroring the quotation rejection above (no interning
+        // route exists for a body-internal shape absent from the signature).
+        let err = check_src(
+            ": bad ( 'T: Copy -- 'T ) [ i64 ; 4 ] drop ;\n\
+             : main ( -- ) 1 bad . ;\n",
+        )
+        .expect_err("an array constructor in a polymorphic body should be rejected");
+        assert!(
+            err.contains("an array constructor in the polymorphic body of `bad`")
+                && err.contains("not yet supported"),
+            "poly_term should name `bad`, got: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_copy_word_accepts_and_instantiates() {
+        // R1/R4–R7: a `'T: Copy` word `dup`s its variable and is called at a
+        // concrete `Copy` type; the body and the instantiation both check.
+        check_src(": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) 5 dupit drop drop ;")
+            .unwrap();
+    }
+    #[test]
+    fn check_poly_word_records_one_instantiation_per_concrete_shape() {
+        // R8/R14: each distinct ground θ is recorded once, keyed by call span.
+        let module = checked_module(
+            ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n\
+             : main ( -- ) 5 dupit drop drop true dupit drop drop ;",
+        );
+        // Two call sites, two distinct θ (i64 and bool): two instantiations.
+        let symbols: std::collections::HashSet<&str> = module
+            .instantiations
+            .values()
+            .map(|c| c.symbol.as_str())
+            .collect();
+        assert_eq!(module.instantiations.len(), 2);
+        assert_eq!(symbols.len(), 2);
+    }
+    #[test]
+    fn check_poly_ord_word_accepts_comparison_body() {
+        // R7: a `'T: Ord` variable may be compared; the body and a numeric
+        // instantiation both check.
+        check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) 3 4 less drop ;").unwrap();
+    }
+    #[test]
+    fn check_poly_length_word_accepts_and_monomorphizes_len() {
+        // R1/R5/R9: a length variable is opaque through `len`; the same word
+        // instantiates at `[i64 4]` and `[i64 8]`.
+        check_src(
+            ": alen ( [i64 'N] -- [i64 'N] usize ) len ;\n\
+             : main ( -- ) 5 4 fill alen . drop 5 8 fill alen . drop ;",
+        )
+        .unwrap();
+    }
+    #[test]
+    fn check_poly_row_word_accepts_and_expands_outputs() {
+        // R1/R5/R7: a row-variable word passes its deeper stack through
+        // untouched and duplicates the two `Copy` variables; the resolved
+        // instantiation has four concrete outputs, so it interns a bundle.
+        let module = checked_module(
+            ": dup2 ( ..s 'a: Copy 'b: Copy -- ..s 'a 'b 'a 'b ) over over ;\n\
+             : main ( -- ) 1 2 dup2 . . . . ;",
+        );
+        assert_eq!(module.instantiations.len(), 1);
+        let inst = module.instantiations.values().next().unwrap();
+        assert_eq!(inst.out_arity, 4);
+        assert!(inst.bundle.is_some());
+    }
+    #[test]
+    fn check_x4_type_variable_forced_to_two_concretes_names_both() {
+        // X4: one `'T` unified to both `i64` and `bool` at one call site names
+        // both concrete types.
+        let err = check_src(": pairwise ( 'T 'T -- ) drop drop ;\n: main ( -- ) 1 true pairwise ;")
+            .unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("i64"), "unexpected message: {err}");
+        assert!(err.contains("bool"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x5_copy_bound_on_linear_type_names_variable_type_and_reason() {
+        // X5: instantiating a `'T: Copy` word with a linear type is a located
+        // call-site error naming the variable, the type, and the linear reason.
+        let src = format!("{SPY}: idc ( 'T: Copy -- 'T ) ;\n: main ( -- ) 0 Spy idc drop ;");
+        let err = check_src(&src).unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Spy"), "unexpected message: {err}");
+        assert!(err.contains("linear"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x6_ord_bound_on_non_ord_type_is_error() {
+        // X6: instantiating a `'T: Ord` requirement with a non-`Ord` type is a
+        // located error.
+        let err =
+            check_src(": less ( 'T: Ord 'T -- bool ) > ;\n: main ( -- ) true false less drop ;")
+                .unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Ord"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x7_dup_of_unbounded_variable_names_missing_copy_bound() {
+        // X7: `dup` of an unbounded `'T` inside a body names the variable and
+        // the missing `Copy` bound.
+        let err = check_src(": bad ( 'T -- 'T 'T ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Copy"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_x8_compare_of_unbounded_variable_requires_ord() {
+        // X8: `>` on an unbounded `'T` inside a body requires an `Ord` bound.
+        let err = check_src(": bad ( 'T 'T -- bool ) > ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Ord"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_local_bound_and_never_read_is_unconsumed_error() {
+        // A `'T` bound to a local and never read leaks: the polymorphic body
+        // checker rejects it exactly as the monomorphic sibling rejects
+        // `( ^i64 -- ) | x | ;`, naming the variable.
+        let err = check_src(": leaky ( 'T -- ) | x | ;\n: main ( -- ) ;").unwrap_err();
+        assert!(
+            err.contains("linear value `x` is never consumed"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_local_read_twice_is_use_after_move() {
+        // Reading a non-`Copy` local a second time is use-after-move: the
+        // polymorphic checker rejects it as the monomorphic sibling rejects
+        // `( ^i64 -- ^i64 ^i64 ) | x | x x ;`, naming the variable.
+        let err = check_src(": twice ( 'T -- 'T 'T ) | x | x x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains("local `x`"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_local_rebound_while_in_scope_is_error() {
+        // R4 twin of the monomorphic rebinding rejection: a second `| x |`
+        // while `x` is still in scope would orphan the first binding, leaking
+        // the non-`Copy` value parked in it. Reject at compile time, naming the
+        // variable, exactly as `( ^i64 ^i64 -- ^i64 ) | x | | x | x ;` is.
+        let err =
+            check_src(": shadow ( 'T 'T -- 'T ) | x | | x | x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("already bound"), "unexpected message: {err}");
+        assert!(err.contains('x'), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_duplicate_local_in_bind_group_is_error() {
+        // A name repeated inside one bind group (`| x x |`) orphans the first
+        // binding before the cross-group rebind guard can see it: the poly
+        // checker rejects it as the monomorphic sibling rejects
+        // `( ^i64 ^i64 -- ^i64 ) | x x | x ;`, naming the variable.
+        let err = check_src(": bad ( 'T 'T -- 'T ) | x x | x ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("duplicate local"), "unexpected message: {err}");
+        assert!(err.contains('x'), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_local_named_after_variant_is_error() {
+        // A local named after a registered variant would make the clause-vs-
+        // locals `|` disambiguation ambiguous: the poly binder rejects it as
+        // the monomorphic sibling `( i64 i64 -- i64 )` of the same body does,
+        // naming the collision.
+        let err = check_src(
+            "type: Maybe | None | Some v i64 ;\n: f ( 'T i64 -- 'T ) drop | Some | Some ;\n: main ( -- ) 1 2 f drop ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("collides with the variant name `Some`"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_body_with_if_accepts_choose() {
+        // T1: a polymorphic body may branch. `choose` consumes `a` and `b` on
+        // both arms but at different sites; the move-join must recognise
+        // `Moved`+`Moved` as consumed-once (not a leak), or `choose` would be
+        // wrongly rejected at the word end (M1).
+        assert!(
+            check_src(
+                ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n: main ( -- ) 1 2 true choose drop ;",
+            )
+            .is_ok(),
+            "choose should type-check"
+        );
+    }
+    #[test]
+    fn check_poly_arm_local_unconsumed_is_error() {
+        // T2: `y` is bound inside the `then` arm and never consumed in it;
+        // `leave_arm` must catch the arm-local leak (M2).
+        let err = check_src(
+            ": arm_leak ( 'T 'T bool -- 'T ) | a b flag | flag if a b | y | else a drop b end ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(err.contains('y'), "names the arm-local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_if_moved_on_both_arms_is_accepted() {
+        // T3: `a`/`b` consumed on both arms (`Moved`+`Moved` => `Moved`), so
+        // nothing leaks at the word end.
+        assert!(
+            check_src(
+                ": both ( 'T 'T bool -- ) | a b flag | flag if a drop b drop else b drop a drop end ;\n: main ( -- ) ;",
+            )
+            .is_ok(),
+            "both should type-check"
+        );
+    }
+    #[test]
+    fn check_poly_if_moved_on_one_arm_leaks() {
+        // T4: `x` consumed on the `then` arm only (`Moved`+`Live` =>
+        // `MaybeMoved`), which the leak check must count as still-unconsumed
+        // (M3).
+        let err =
+            check_src(": one ( 'T bool -- ) | x flag | flag if x drop else end ;\n: main ( -- ) ;")
+                .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_if_moved_on_neither_arm_leaks() {
+        // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
+        // parked in a local across an `if` still leaks at the word end (M4).
+        let err = check_src(": none ( 'T bool -- ) | x flag | flag if else end ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_if_condition_not_bool_is_error() {
+        // T6: the `if` condition must be `bool`; here the popped condition is
+        // the type variable `'T`, so the condition guard fires before anything
+        // else (an output-mismatch never mentions `if`).
+        let err = check_src(": bad ( 'T 'T -- 'T ) if drop else drop end ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains("if"), "names the `if`: {err}");
+        assert!(err.contains("'T"), "names the variable condition: {err}");
+    }
+    #[test]
+    fn check_poly_if_branch_depth_mismatch_is_error() {
+        // T7: the arms leave different stack depths (then: 1, else: 2). `'T`
+        // carries a `Copy` bound so the repeated reads are not use-after-move,
+        // leaving the depth mismatch as the sole failure this test proves.
+        let err = check_src(
+            ": bad ( 'T: Copy bool -- 'T ) | x flag | flag if x else x x end ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("different stack depths"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_poly_if_use_after_join_is_error() {
+        // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
+        // after `end` is a second read: use-after-move, not a leak.
+        let err = check_src(
+            ": bad ( 'T bool -- ) | x flag | flag if x drop else x drop end x drop ;\n: main ( -- ) ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("use after move"), "unexpected message: {err}");
+        assert!(err.contains('x'), "names the moved local: {err}");
+    }
+    #[test]
+    fn check_poly_dup_of_variable_element_array_names_type_variable() {
+        // R7/`poly_copy_gate` array arm: `dup` of an array whose element is an
+        // unbounded `'T` recurses to the element and names the variable, not a
+        // fabricated `i64`.
+        let err =
+            check_src(": bad ( ['T 'N] -- ['T 'N] ['T 'N] ) dup ;\n: main ( -- ) ;").unwrap_err();
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Copy"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_poly_dup_of_linear_element_array_names_element_type() {
+        // `poly_copy_gate` array arm: `dup` of a length-variable array whose
+        // element is a concrete linear struct names that struct, never `i64`.
+        let err = check_src(&format!(
+            "{SPY}: bad ( [Spy 'N] -- [Spy 'N] [Spy 'N] ) dup ;\n: main ( -- ) ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains("Spy"), "unexpected message: {err}");
+        assert!(err.contains("linear"), "unexpected message: {err}");
+    }
+    #[test]
+    fn quotation_effect_unifies_and_binds_variable() {
+        // Criterion 2 (R6): a declared `[ 'T -- ]` unified against a concrete
+        // `[ i64 -- ]` binds `'T = i64`; an arity mismatch is a located type
+        // mismatch, never a silent bind. Exercises `unify_poly_input`'s
+        // `PolyType::Quotation` arm directly (the concrete poly path is Phase
+        // 2), so deleting the pointwise-row unify makes this fail.
+        use crate::ast::quotation_type;
+        let sig = PolySig {
+            row_in: None,
+            inputs: vec![PolyType::Quotation(
+                vec![PolyType::Var(0)],
+                Vec::new(),
+                false,
+                None,
+                None,
+            )],
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: Vec::new(),
+            row_var_names: Vec::new(),
+        };
+        let structs: [StructDecl; 0] = [];
+        let enums: [EnumDecl; 0] = [];
+        let arrays: [ArrayDecl; 0] = [];
+        let ctx = Ctx::Line {
+            structs: &structs,
+            enums: &enums,
+        };
+        let mut subst = Subst::default();
+        unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            quotation_type(vec![Type::I64], Vec::new()),
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst,
+        )
+        .expect("`[ 'T -- ]` should unify against `[ i64 -- ]`");
+        assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
+
+        let mut subst2 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            quotation_type(vec![Type::I64, Type::I64], Vec::new()),
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst2,
+        )
+        .expect_err("an arity mismatch must be a located type mismatch");
+        // Slice 10a (R10/R20): pin the *exact* mismatch text. The expected
+        // side must render the declared `PolyType` (`[ 'T -- ]`) through
+        // `poly_type_str`, never a fabricated `[ -- ]`; a substring like
+        // "`f`" would survive that rendering vanishing, so it is not enough.
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `[ 'T -- ]`, found `[ i64 i64 -- ]`",
+        );
+        assert!(
+            subst2.ty_of(0).is_none(),
+            "an arity mismatch must not silently bind `'T`"
+        );
+
+        // Slice 10a (R10): the `is_quotation_type` let-else arm -- a
+        // non-quotation slot against a declared quotation parameter -- routes
+        // through the same row-aware renderer, so its expected side is the
+        // declared `[ 'T -- ]`, not a fabricated quotation `Type`.
+        let mut subst3 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &sig.inputs[0],
+            Type::I64,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &mut subst3,
+        )
+        .expect_err("a non-quotation slot must be a located type mismatch");
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `[ 'T -- ]`, found `i64`",
+        );
+        assert!(
+            subst3.ty_of(0).is_none(),
+            "a non-quotation slot must not silently bind `'T`"
+        );
+    }
+    #[test]
+    fn poly_type_str_renders_a_quotation_row() {
+        // Slice 10a (R10): the row is a separate field on `PolyType::Quotation`,
+        // not a slot in `ins`/`outs`, so `poly_type_str` must render it
+        // explicitly as the leading element of each side -- dropping that
+        // rendering must leave no trace of the row name in the output.
+        let sig = PolySig {
+            row_in: Some(0),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: Some(0),
+            bounds: Vec::new(),
+            ty_var_names: Vec::new(),
+            len_var_names: Vec::new(),
+            row_var_names: vec!["..s".to_string()],
+        };
+        let quot = PolyType::Quotation(
+            vec![PolyType::Concrete(Type::I64)],
+            Vec::new(),
+            true,
+            Some(0),
+            Some(0),
+        );
+        assert_eq!(poly_type_str(&quot, &sig), "~[ ..s i64 -- ..s ]");
+    }
+}
