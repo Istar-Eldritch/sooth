@@ -63,8 +63,17 @@ pub(crate) fn combinator_of(word: &WordDef) -> Option<Combinator<'_>> {
 /// only drives the standalone def-site check, R17). The quotation parameter
 /// sits in `sig.inputs` as either a variable-bearing `PolyType::Quotation` or,
 /// when its effect is fully concrete, a `Concrete(Type::Quotation)`.
+///
+/// Slice 11 (R2): a word that declares `inline` is always spliced too, whatever
+/// its parameters, so the property is no longer inferred from the signature's
+/// shape alone. The `WordBody::Terms` conjunct is retained, so a clause-bodied
+/// word is never a combinator regardless of the flag; a clause-bodied `inline`
+/// word is rejected at its definition (`check_inline_declaration`) rather than
+/// silently lowered as an ordinary clause word, so the two never disagree in a
+/// way that reaches codegen.
 pub(crate) fn is_combinator(word: &WordDef) -> bool {
-    matches!(word.body, WordBody::Terms { .. }) && word_declares_quotation_parameter(word)
+    matches!(word.body, WordBody::Terms { .. })
+        && (word_declares_quotation_parameter(word) || word.declares_inline)
 }
 
 /// R23 (D7): whether a word's declared effect names a quotation parameter,
@@ -211,7 +220,7 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
         .join(" -> ");
     let span = word_span(members[cycle[0]].word);
     format!(
-        "error: a quotation-taking word cannot be recursive (the inliner would splice it forever): {} (line {}, col {})",
+        "error: an always-spliced word cannot be recursive (the inliner would splice it forever): {} (line {}, col {})",
         rendered, span.line, span.col
     )
 }
@@ -530,6 +539,7 @@ mod tests {
             },
             body: WordBody::Terms { terms: Vec::new() },
             poly: None,
+            declares_inline: false,
             module: 0,
             span: Span::default(),
         };
@@ -551,5 +561,59 @@ mod tests {
         let plain = module.words.iter().find(|w| w.name == "plain").unwrap();
         assert!(is_combinator(apply), "`apply` is a combinator (no symbol)");
         assert!(!is_combinator(plain), "`plain` is an ordinary word");
+    }
+
+    /// Slice 11 (R2): the declared flag alone makes a word always-spliced, with
+    /// no quotation parameter anywhere in its effect. Constructed directly (an
+    /// e2e build cannot discriminate the flag from the quotation clause) and
+    /// asserted both ways round, so the `|| word.declares_inline` disjunct is
+    /// what the `true` rests on.
+    #[test]
+    fn is_combinator_true_for_inline_non_quotation_word() {
+        use crate::ast::TypedSlot;
+        let mut w = WordDef {
+            name: "ClkDiv".to_string(),
+            effect: StackEffect {
+                inputs: Vec::new(),
+                outputs: vec![TypedSlot {
+                    name: None,
+                    ty: Type::I64,
+                }],
+            },
+            body: WordBody::Terms { terms: Vec::new() },
+            poly: None,
+            declares_inline: true,
+            module: 0,
+            span: Span::default(),
+        };
+        assert!(!word_declares_quotation_parameter(&w));
+        assert!(is_combinator(&w), "`inline` alone makes a word spliced");
+        w.declares_inline = false;
+        assert!(
+            !is_combinator(&w),
+            "the same word without `inline` is an ordinary word"
+        );
+    }
+
+    /// Slice 11 (R4): an `inline` word inherits the cycle rejection verbatim,
+    /// under the reworded umbrella term (it need not take a quotation), and
+    /// inherits R4's self-*tail* allowance too -- that shape lowers to a
+    /// back-edge, so it is finite rather than a splice-forever cycle.
+    #[test]
+    fn check_inline_self_nontail_cycle_is_error() {
+        let src = ": loopy inline ( i64 -- i64 ) 1 + loopy 2 * ;";
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        let err = check(&mut module).unwrap_err();
+        assert_eq!(
+            err,
+            "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
+        );
+
+        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > if 1 - down else end ;";
+        let tokens = lex(tail_src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+            .expect("a self-tail `inline` word is the R4-relaxed shape, not a cycle error");
     }
 }

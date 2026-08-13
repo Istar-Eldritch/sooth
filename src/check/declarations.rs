@@ -1263,6 +1263,7 @@ mod tests {
             },
             body: WordBody::Terms { terms: Vec::new() },
             poly: None,
+            declares_inline: false,
             module: 0,
             span: Span::default(),
         };
@@ -1319,6 +1320,7 @@ mod tests {
                 effect: StackEffect::default(),
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
+                declares_inline: false,
                 module,
                 span: Span::default(),
             }
@@ -1443,6 +1445,7 @@ mod tests {
                 effect: StackEffect::default(),
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
+                declares_inline: false,
                 module,
                 span: Span {
                     line,
@@ -1639,6 +1642,7 @@ mod tests {
                 },
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: None,
+                declares_inline: false,
                 module,
                 span: Span::default(),
             }
@@ -1662,6 +1666,7 @@ mod tests {
                 },
                 body: WordBody::Terms { terms: Vec::new() },
                 poly: Some(Box::new(sig)),
+                declares_inline: false,
                 module,
                 span: Span::default(),
             }

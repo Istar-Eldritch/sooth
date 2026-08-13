@@ -1710,7 +1710,7 @@ fn repl_cross_line_combinator_cycle_is_error() {
     // The cycle chain names both words; its starting node depends on hash-map
     // iteration order, so the direction is not pinned.
     assert!(
-        transcript.contains("a quotation-taking word cannot be recursive")
+        transcript.contains("an always-spliced word cannot be recursive")
             && (transcript.contains("`a` -> `b` -> `a`")
                 || transcript.contains("`b` -> `a` -> `b`")),
         "the cross-line cycle is the located cycle error: {transcript}"

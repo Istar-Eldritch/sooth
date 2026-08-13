@@ -32,6 +32,55 @@ pub(super) fn check_word(
     }
 }
 
+/// Slice 11 (R3): the shapes a declared `inline` cannot deliver on. The
+/// guarantee is unconditional (D2), so each is a located error at the
+/// definition rather than a silent fall-back to a real call: a clause-bodied
+/// word is not a combinator (`is_combinator` requires `WordBody::Terms`) and
+/// would lower as an ordinary clause word; a variable-bearing signature would
+/// route through the poly checker as a poly combinator with no quotation
+/// parameter to resolve its variables against; and `main` is an entry point,
+/// not a combinator, so splicing it away leaves the runtime shim's call to it
+/// unresolved at link time.
+///
+/// The monomorphism rule is phrased over *declared variables*, not
+/// `poly.is_some()`: a `~`-bearing but otherwise concrete effect is
+/// poly-forced by the parser (`effect_has_variable`) while carrying no
+/// variable, and is accepted.
+pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
+    if !word.declares_inline {
+        return Ok(());
+    }
+    let name = crate::resolve::demangle_word(&word.name);
+    let span = word.span;
+    // The same `main`-is-not-a-combinator invariant
+    // `audit_word_quotation_positions` enforces on the quotation route ("an
+    // input of `main`", D6/R28); the declared flag is a second route to it.
+    if word.name == "main" {
+        return Err(format!(
+            "error: `inline` on `main`, which is the program entry point; the entry point is called by the runtime shim and cannot be spliced (line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    if matches!(word.body, WordBody::Clauses(_)) {
+        return Err(format!(
+            "error: `inline` on `{name}`, which has a clause body; `inline` requires a term body (line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    if let Some(sig) = &word.poly {
+        if !sig.ty_var_names.is_empty()
+            || !sig.len_var_names.is_empty()
+            || !sig.row_var_names.is_empty()
+        {
+            return Err(format!(
+                "error: `inline` on `{name}`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line {}, col {})",
+                span.line, span.col
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// The effect-signature half of the no-stored-reference rule: no declared
 /// **output** may transitively
 /// contain a reference (returning one would outlive the frame that owns the
@@ -398,5 +447,51 @@ mod tests {
         // Regression: a plain term word with `| ... |` entry locals is
         // unaffected by the clause-body path (no enum in scope).
         check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
+    }
+
+    /// Slice 11 (R3): a clause-bodied `inline` word is `is_combinator == false`
+    /// (the predicate requires `WordBody::Terms`), so accepting it would lower
+    /// it as an ordinary clause word -- the silent fall-back to a real call D2
+    /// forbids. It is a located error instead.
+    #[test]
+    fn check_inline_clause_body_is_error() {
+        let err = check_src(
+            "type: E | A | B ;\n\
+             : pick inline ( E -- i64 )\n\
+             | A  1\n\
+             | B  2\n\
+             ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `inline` on `pick`, which has a clause body; `inline` requires a term body (line 2, col 3)"
+        );
+        // The same clause body without `inline` is accepted, so the rejection is
+        // the keyword's, not the body's.
+        check_src(
+            "type: E | A | B ;\n\
+             : pick ( E -- i64 )\n\
+             | A  1\n\
+             | B  2\n\
+             ;\n",
+        )
+        .expect("an ordinary clause word is unaffected");
+    }
+
+    /// Slice 11 (R3): the monomorphism rule is phrased over *declared
+    /// variables*, not `poly.is_some()`. The `~`-bearing half of the pair is
+    /// what discriminates the two phrasings: the parser poly-forces a `~` effect
+    /// (`effect_has_variable`), so `poly` is `Some` while carrying no variable,
+    /// and it must still be accepted.
+    #[test]
+    fn check_inline_polymorphic_signature_is_error() {
+        let err = check_src(": id inline ( 'T -- 'T ) ;").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `inline` on `id`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line 1, col 3)"
+        );
+        check_src(": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;")
+            .expect("a `~`-bearing but variable-free `inline` effect is monomorphic");
     }
 }
