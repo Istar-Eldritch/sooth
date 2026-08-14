@@ -475,3 +475,112 @@ fn repl_inline_polymorphic_signature_is_rejected() {
         "error: `inline` on `id`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line 1, col 3)\n"
     );
 }
+
+// -- Phase 3 (Feature B): `lib/combinators.sth` retyped to `~[ ... ]` --------
+
+/// `lib/combinators.sth` before this slice's retype (`each`/`map`/`fold`/
+/// `filter`/`while` each took `[ ... ]`), embedded so the byte-identical claim
+/// below is checked against the actual pre-retype source rather than trusted.
+fn combinators_source(quotation_kind: &str) -> String {
+    format!(
+        r#"export: each map fold filter while ;
+
+: each ( ['T 'N] {quotation_kind}[ 'T -- ] -- )
+  | f | len >i64 | count | | arr |
+  count [ | i | &arr i >usize &> @ f call ] times
+  arr drop ;
+
+: map ( ['T 'N] {quotation_kind}[ 'T -- 'T ] -- ['T 'N] )
+  | f | len >i64 | count | | arr |
+  count [ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times
+  arr ;
+
+: fold ( ['T 'N] 'A {quotation_kind}[ 'A 'T -- 'A ] -- 'A )
+  | f | | acc | len >i64 | count | | arr |
+  acc count [ | i | &arr i >usize &> @ f call ] times
+  arr drop ;
+
+: filter ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
+  | p | len >i64 | n | | arr |
+  0 n [ | i | &arr i >usize &> @ dup p call if
+          | v | &!arr over >usize &!> v ! 1 +
+        else drop end ] times
+  | wf | arr wf >usize ;
+
+: while ( 'a {quotation_kind}[ 'a -- 'a bool ] -- 'a )
+  | p | p call if p while else end ;
+"#
+    )
+}
+
+/// A corpus program exercising all five combinators (`each`/`map`/`fold`/
+/// `filter`/`while`) in a single build.
+const COMBINATORS_MAIN: &str = "\
+: mkarr ( -- [i64 4] ) 0 4 fill ;
+
+: main ( -- )
+  mkarr [ 1 + drop ] each
+  mkarr [ 2 * ] map [ 1 + drop ] each
+  mkarr 0 [ + ] fold .
+  mkarr [ 2 > ] filter drop drop
+  0 [ | n | n 3 < if n 1 + true else n false end ] while . ;
+";
+
+#[test]
+fn combinators_retype_output_byte_identical() {
+    // Feature B: retyping each/map/fold/filter/while's quotation parameter
+    // from `[ ... ]` to `~[ ... ]` is a pure library edit -- every call site
+    // already only ever passed a literal `[ ... ]`, so the emitted QBE for a
+    // program exercising all five combinators must be byte-identical before
+    // and after the retype.
+    let pre = combinators_source("") + COMBINATORS_MAIN;
+    let post = combinators_source("~") + COMBINATORS_MAIN;
+
+    let pre_path =
+        std::env::temp_dir().join(format!("sooth-slice11-pre-{}.sth", std::process::id()));
+    let post_path =
+        std::env::temp_dir().join(format!("sooth-slice11-post-{}.sth", std::process::id()));
+    std::fs::write(&pre_path, &pre).expect("writing pre-retype source should succeed");
+    std::fs::write(&post_path, &post).expect("writing post-retype source should succeed");
+
+    let pre_ssa =
+        sooth::driver::emit_ssa(&pre_path).expect("emitting pre-retype QBE should succeed");
+    let post_ssa =
+        sooth::driver::emit_ssa(&post_path).expect("emitting post-retype QBE should succeed");
+    std::fs::remove_file(&pre_path).ok();
+    std::fs::remove_file(&post_path).ok();
+
+    assert_eq!(
+        pre_ssa, post_ssa,
+        "retyping the quotation parameters to `~[ ... ]` must not change emitted QBE"
+    );
+}
+
+#[test]
+fn combinators_retype_stored_quotation_still_rejected() {
+    // A `~[ ... ]` parameter is `Type::InlineQuotation`, distinct from
+    // `Type::Quotation` (`PartialEq` gives them unequal, `ast.rs`). A literal
+    // `[ ... ]` bound straight to a local before the call still infers
+    // `InlineQuotation` from the call site (D3/D6's directional check), but a
+    // *genuinely first-class* quotation -- one that already crossed a
+    // materialization boundary and so is grounded to ordinary `Type::Quotation`
+    // (here, `give`'s declared `[ i64 -- ]` output) -- type-mismatches against
+    // `each`'s retyped `~[ 'T -- ]` parameter. A stored/returned quotation still
+    // requires an ordinary `[ ... ]`-typed parameter (7b's territory).
+    let src = format!(
+        "{}\
+         : give ( -- [ i64 -- ] ) [ 1 + drop ] ;
+
+         : main ( -- )
+  0 4 fill | arr |
+  give | f |
+  arr f each ;
+",
+        combinators_source("~")
+    );
+    let err = check_error(&src);
+    assert_eq!(
+        err,
+        "error: `each` expects a quotation `~[ i64 -- ]` here, found `[ i64 -- ]` in `main` (line 32)"
+    );
+}
