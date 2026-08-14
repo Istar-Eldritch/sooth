@@ -1754,11 +1754,10 @@ then find out what the compiler owes it.
    of the three pieces independently and confirming the corresponding accept goldens fail
    again.
    Depends on 6f (uses its exact granting machinery); independent of 7-10's own mechanisms.
-   **Sequenced after slice 10a lands** (avoid disrupting in-flight work) **and before 10b/10c
-   begin**: both widen this bug's blast radius by turning a compiler-intrinsic control-flow
-   form into a combinator splice — 10b for every `times` loop, 10c for every `if` in the
-   language — so fixing this first keeps neither slice from silently multiplying a
-   pre-existing, already-load-bearing false rejection across most existing Sooth code.
+   **Lands before 10c**, which widens this bug's blast radius by turning the last
+   compiler-known control-flow form, `if`, into a combinator splice: fixing this first keeps
+   that slice from silently multiplying a pre-existing, already-load-bearing false rejection
+   across most existing Sooth code.
 7. **Functions as values: closures.** The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
@@ -2058,17 +2057,22 @@ then find out what the compiler owes it.
    representation and grounding code. Findings, including why the two-differing-rows shape
    this entry first assumed was wrong, in `docs/phase4-slice10c-brief.md`.
 
-10. **Rows in quotation effects: `times` stops being a compiler intrinsic.** The self-tail-
-    call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6) are both
-    already general, keyword-free machinery; the one loop shape user code still cannot write
-    is `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can be
-    declared at a word's own top level but not inside a nested quotation's declared effect
+10. **Rows in quotation effects: `times` is a library combinator. 10a ✅ done; 10b
+    implemented.** The
+    self-tail-call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6)
+    are both already general, keyword-free machinery; the one loop shape user code could not
+    write was `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can
+    be declared at a word's own top level but not inside a nested quotation's declared effect
     (slice 6a's R2/R28, deliberately deferred). Split 10a/10b/10c, the same shape as 6/7/8's
-    splits: 10a adds the mechanism (parsing and checking a row inside a quotation effect, plus
-    the `~` inline-only quotation type below) and exits on a user-space `my-times` compiling
-    beside the untouched intrinsic; 10b then deletes the intrinsic
-    (`check_abstract_quotation_times`, the `check_term`/`ir.rs` `"times"` arms) and moves
-    `times` itself into `lib/combinators.sth`, 8c-shaped lightweight process; **10c** is
+    splits: **10a** adds the mechanism (parsing and checking a row inside a quotation effect,
+    plus the `~` inline-only quotation type below); **10b**
+    (`docs/phase4-slice10b-spec.md`) makes `times` an ordinary exported word in
+    `lib/combinators.sth` over a private self-tail-recursive `times-helper`, leaving no
+    compiler-known combinator at all — no `check_abstract_quotation_times`, no
+    `check_term`/`ir.rs` `"times"` arms. It carries one checker change of its own, not the
+    pure delete-and-import it looks like: `check_linear_across_back_edge` takes a frame floor
+    (`src/check/terms.rs:1049`), exempting a linear local the *enclosing* frame owns and
+    disposes from a rejection meant for one the loop actually carries. **10c** is
     `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
     9b), which extends 10a's row representation to a row that legitimately differs between a
     quotation's input and output side, and gates on 10a phases 1–4 only (the `~` type, its
@@ -2091,9 +2095,7 @@ then find out what the compiler owes it.
     Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
     smaller half of the gap: at every check point a combinator's row is concrete (combinators
     are spliced per call site and mint no `IrFunc`, per slice 6's R18/R20), so there is no
-    abstract row unification or `Subst` change, only per-splice depth arithmetic (which the
-    intrinsic's `check_abstract_quotation_times` does *not* prototype — see the correction
-    below). The bigger,
+    abstract row unification or `Subst` change, only per-splice depth arithmetic. The bigger,
     row-independent bug the brief's paper pre-check found: the self-tail back-edge arm
     (`src/check.rs`) models its result as the combinator's non-quotation inputs, true only
     for `while`'s state-threading shape and false for any loop that consumes its counters —
@@ -2102,11 +2104,8 @@ then find out what the compiler owes it.
     explicit unify of the self-call's arguments against the ground declared inputs)
     independent of whether rows land. Sequenced after 7b and 8a land (all three touch
     `check_term`'s dispatch spine), not gated on 9. Spec written
-    (`docs/phase4-slice10-spec.md`); a first review round found real gaps — among them that
-    the brief's "the intrinsic already prototypes the depth arithmetic" claim above does not
-    survive reading `check_abstract_quotation_times`, which checks declared-effect
-    self-similarity and pointwise-matches only the top slots rather than decomposing a row —
-    so phase 3 derives its grounding rather than generalising a prototype. A second review
+    (`docs/phase4-slice10-spec.md`); a first review round found real gaps, so phase 3 derives
+    its grounding from scratch rather than generalising a prototype. A second review
     round then rejected the draft on three blockers (the `~` representation was left to the
     implementer while one requirement demanded an outcome only one choice delivers; the
     back-edge rewrite destroyed the positional correspondence the surviving-set forward needs;

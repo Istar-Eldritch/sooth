@@ -390,16 +390,18 @@ fn times_runs_one_million_iterations_in_constant_stack() {
 
 #[test]
 fn times_carries_an_aggregate_through_the_row() {
-    // A `map`-shaped body: the array rides the row through every iteration
-    // while the body borrows it mutably and writes each doubled element back
-    // in place. This is the aliasing-sensitive shape (a loop-carried aggregate
-    // staged across the back-edge), and the printed elements pin the values.
+    // A `map`-shaped body: the array rides the *row* through every iteration --
+    // the body pops it into a frame local, borrows it mutably, writes the
+    // doubled element back in place and returns it to the row -- rather than
+    // staying a caller frame local the body borrows. This is the
+    // aliasing-sensitive shape (a loop-carried aggregate staged across the
+    // back-edge), and the printed elements pin the values.
     let src = format!(
         "{}: main ( -- )\n\
-         \x20 0 4 fill | a |\n\
-         \x20 4 [ | i | &!a i >usize &!> i 2 * ! ] times\n\
-         \x20 4 [ | i | &a i >usize &> @ . ] times\n\
-         \x20 a drop ;\n",
+         \x20 0 4 fill\n\
+         \x20 4 [ | i | | a | &!a i >usize &!> i 2 * ! a ] times\n\
+         \x20 4 [ | i | | a | &a i >usize &> @ . a ] times\n\
+         \x20 drop ;\n",
         combinators_import("c | times |")
     );
     let (stdout, code) = run_src("10b_times_aggregate", &src);

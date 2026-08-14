@@ -1,7 +1,6 @@
-// Each helper below is consumed by only some of the test binaries that
-// include this module, so an individual binary using a subset is not dead
-// code.
-#![allow(dead_code)]
+// Each helper carries its own `#[allow(dead_code)]` rather than the module
+// taking a blanket one: a test binary including this module may use only a
+// subset, but a helper nothing uses at all should still be reported.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,6 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// example's own directory so relative imports still resolve, and its `.tmpsth`
 /// extension keeps both the copy and its binary under `.gitignore`'s
 /// `/examples/*`.
+#[allow(dead_code)]
 pub fn build_example(rel: &str) -> PathBuf {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -38,6 +38,7 @@ pub fn build_example(rel: &str) -> PathBuf {
 
 /// Strip `\` line comments and collapse all whitespace to single spaces, so
 /// two Sooth source snippets can be compared up to formatting.
+#[allow(dead_code)]
 fn normalize_sooth(src: &str) -> String {
     src.lines()
         .map(|line| line.split('\\').next().unwrap_or(""))
@@ -57,6 +58,7 @@ fn normalize_sooth(src: &str) -> String {
 /// whole-token identifier in `hand_copy` before comparing, for a copy that
 /// must bind its quotation parameter under a different local name (see
 /// `phase3_refs.rs`, which cannot shadow its own `f` word).
+#[allow(dead_code)]
 pub fn assert_pinned_to_combinators_lib(hand_copy: &str, renames: &[(&str, &str)]) {
     let mut normalized = normalize_sooth(hand_copy);
     for (from, to) in renames {
