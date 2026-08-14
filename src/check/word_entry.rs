@@ -21,7 +21,22 @@ pub(super) fn check_word(
             reject_variant_local(&ctx, name, "parameter")?;
         }
     }
-    check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+    // Slice 11 (R5/D5): the no-stored-reference signature check is skipped for
+    // an always-spliced word, phrased over the shared `is_combinator` predicate so
+    // the exemption covers a mono combinator, an `inline` word and (via the
+    // concrete stand-in `check_poly_combinator_standalone` builds) a poly
+    // combinator uniformly. Its own message names the fault it guards -- "a
+    // `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the
+    // time the caller reads it" -- and a spliced word has no such frame:
+    // `alpha_rename_locals` makes the callee's locals caller locals, so the
+    // returned reference cannot outlive the frame that owns its referent. Every
+    // lifetime and linearity pass that makes the relaxation safe still runs on
+    // both the standalone body and each spliced copy (the must-consume rule, the
+    // capture/escape guards, the loop back-edge reference guard); a real
+    // (non-combinator) word declaring a reference output is still rejected.
+    if !is_combinator(word) {
+        check_reference_free_signature(&word.name, &word.effect, structs, enums, arrays)?;
+    }
     match &word.body {
         WordBody::Terms { terms } => check_terms_word(
             word, enums, terms, env, arrays, cells, refs, structs, modules, dropped, poly,
@@ -32,6 +47,72 @@ pub(super) fn check_word(
     }
 }
 
+/// Slice 11 (R3): the shapes a declared `inline` cannot deliver on. The
+/// guarantee is unconditional (D2), so each is a located error at the
+/// definition rather than a silent fall-back to a real call: a clause-bodied
+/// word is not a combinator (`is_combinator` requires `WordBody::Terms`) and
+/// would lower as an ordinary clause word; `main` is an entry point, not a
+/// combinator, so splicing it away leaves the runtime shim's call to it
+/// unresolved at link time; a builtin-operator name is claimed by
+/// `check_operator` before the splice is reached, and the two then disagree;
+/// and a variable-bearing signature is excluded by Decision 3.
+///
+/// The monomorphism rule is phrased over *declared variables*, not
+/// `poly.is_some()`: a `~`-bearing but otherwise concrete effect is
+/// poly-forced by the parser (`effect_has_variable`) while carrying no
+/// variable, and is accepted. It is a policy rule, not a soundness one: the
+/// splice itself handles a variable-bearing body, so `inline` on a poly
+/// signature is not unsound, merely excluded.
+pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
+    if !word.declares_inline {
+        return Ok(());
+    }
+    let name = crate::resolve::demangle_word(&word.name);
+    let span = word.span;
+    // The same `main`-is-not-a-combinator invariant
+    // `audit_word_quotation_positions` enforces on the quotation route ("an
+    // input of `main`", D6/R28); the declared flag is a second route to it.
+    if word.name == "main" {
+        return Err(format!(
+            "error: `inline` on `main`, which is the program entry point; the entry point is called by the runtime shim and cannot be spliced (line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    if matches!(word.body, WordBody::Clauses(_)) {
+        return Err(format!(
+            "error: `inline` on `{name}`, which has a clause body; `inline` requires a term body (line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    if let Some(sig) = &word.poly {
+        if !sig.ty_var_names.is_empty()
+            || !sig.len_var_names.is_empty()
+            || !sig.row_var_names.is_empty()
+        {
+            return Err(format!(
+                "error: `inline` on `{name}`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line {}, col {})",
+                span.line, span.col
+            ));
+        }
+    }
+    // A builtin-operator name reaches `check_operator` first, which resolves
+    // the overload and records `poly.builtin_overloads[span]` so lowering emits
+    // a real `Instr::Call`; only then does the call fall through to the
+    // combinator interception, which splices instead. The record survives the
+    // splice, and lowering trusts it and looks the symbol up in an `env` a
+    // combinator is excluded from -- a checker contradicting itself, and a
+    // panic downstream. Widening `is_combinator` (R2) made the shape
+    // reachable: an operator call site rejects a quotation operand outright,
+    // so a builtin-name overload could not previously be a combinator.
+    if BUILTIN_TABLE.contains_key(name) {
+        return Err(format!(
+            "error: `inline` on `{name}`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line {}, col {})",
+            span.line, span.col
+        ));
+    }
+    Ok(())
+}
+
 /// The effect-signature half of the no-stored-reference rule: no declared
 /// **output** may transitively
 /// contain a reference (returning one would outlive the frame that owns the
@@ -39,6 +120,10 @@ pub(super) fn check_word(
 /// type that merely *contains* one nested inside an array or a cell is
 /// rejected there too, so the carve-out stays closed if a future aggregate
 /// constructor arrives.
+///
+/// Slice 11 (R5): `check_word` skips this whole check for a combinator, which
+/// has no frame of its own to outlive. `check_extern_decls`
+/// (`declarations.rs`) has no splice to exempt and always runs it.
 pub(super) fn check_reference_free_signature(
     name: &str,
     effect: &StackEffect,
@@ -398,5 +483,105 @@ mod tests {
         // Regression: a plain term word with `| ... |` entry locals is
         // unaffected by the clause-body path (no enum in scope).
         check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
+    }
+
+    /// Slice 11 (R3): a clause-bodied `inline` word is `is_combinator == false`
+    /// (the predicate requires `WordBody::Terms`), so accepting it would lower
+    /// it as an ordinary clause word -- the silent fall-back to a real call D2
+    /// forbids. It is a located error instead.
+    #[test]
+    fn check_inline_clause_body_is_error() {
+        let err = check_src(
+            "type: E | A | B ;\n\
+             : pick inline ( E -- i64 )\n\
+             | A  1\n\
+             | B  2\n\
+             ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `inline` on `pick`, which has a clause body; `inline` requires a term body (line 2, col 3)"
+        );
+        // The same clause body without `inline` is accepted, so the rejection is
+        // the keyword's, not the body's.
+        check_src(
+            "type: E | A | B ;\n\
+             : pick ( E -- i64 )\n\
+             | A  1\n\
+             | B  2\n\
+             ;\n",
+        )
+        .expect("an ordinary clause word is unaffected");
+    }
+
+    /// Slice 11 (R3): the monomorphism rule is phrased over *declared
+    /// variables*, not `poly.is_some()`. The `~`-bearing half of the pair is
+    /// what discriminates the two phrasings: the parser poly-forces a `~` effect
+    /// (`effect_has_variable`), so `poly` is `Some` while carrying no variable,
+    /// and it must still be accepted.
+    #[test]
+    fn check_inline_polymorphic_signature_is_error() {
+        let err = check_src(": id inline ( 'T -- 'T ) ;").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `inline` on `id`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line 1, col 3)"
+        );
+        check_src(": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;")
+            .expect("a `~`-bearing but variable-free `inline` effect is monomorphic");
+    }
+
+    /// Slice 11 (R5/D5): the no-reference-output rule is skipped for an
+    /// always-spliced word. The skip is keyed on `is_combinator`, not on
+    /// `declares_inline`, and the middle case is what discriminates the two
+    /// phrasings: a quotation-taking word declares no `inline` and is exempt all
+    /// the same. The third is the outermost boundary -- a real word, which does
+    /// have a frame of its own to lose, is still rejected.
+    #[test]
+    fn check_reference_free_signature_skipped_for_combinator() {
+        check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n")
+            .expect("an `inline` word may declare a reference output");
+        check_src("type: P n u32 ;\n: pick ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n")
+            .expect("a quotation-taking word is exempt too (the skip reads `is_combinator`)");
+        // A *poly* combinator takes the same exemption by the same guard: it
+        // reaches `check_word` through the concrete stand-in
+        // `check_poly_combinator_standalone` builds, which carries the quotation
+        // parameter (and the flag) across and so is itself `is_combinator`.
+        check_src(
+            "type: P n u32 ;\n: pick ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!P>n ;\n",
+        )
+        .expect("a poly combinator is exempt through its concrete stand-in");
+        let err =
+            check_src("type: P n u32 ;\n: pick ( &!P -- &!u32 ) | p | p &!P>n ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `pick` declares the output `&!u32`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
+    }
+
+    /// Slice 11 (R3): a builtin-operator name is resolved by `check_operator`,
+    /// which records the site for a real call, *before* the same call falls
+    /// through to the combinator splice -- so an `inline` overload of one leaves
+    /// the checker contradicting itself and lowering panicking. Rejected at the
+    /// definition instead. The name is demangled first: `mangle` suffixes an
+    /// operator name per module (`+__m0`), so a raw comparison never matches.
+    #[test]
+    fn check_inline_builtin_operator_overload_is_error() {
+        let err = check_src(
+            "type: A n i64 ;\n\
+             : + inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `inline` on `+`, which overloads a builtin operator name; a call site of a builtin operator name dispatches through a real call and cannot be spliced (line 2, col 3)"
+        );
+        // A non-operator name with the identical shape is accepted, so the
+        // rejection is keyed on the name, not on the overload.
+        check_src(
+            "type: A n i64 ;\n\
+             : add inline ( A A -- i64 ) | x y | x A>n drop y A>n drop 1000 ;\n",
+        )
+        .expect("an `inline` word whose name no operator claims is accepted");
     }
 }

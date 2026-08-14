@@ -979,6 +979,15 @@ impl<'t> Parser<'t> {
         if ACCESS_WORDS.contains(&name.as_str()) {
             return Err(shadowed_access_word_error(&name, name_span));
         }
+        // Slice 11 (R1): the optional `inline` keyword sits in the one slot
+        // between a word's name and its `(`, where nothing else can appear, so
+        // it needs no global reservation: the name is consumed above, and
+        // `: inline ( -- ) ;` still defines a word *named* `inline`. Only one is
+        // consumed, so a second falls through to the `(` below and fails there.
+        let declares_inline = matches!(self.peek(), Some((Token::Word(w), _)) if w == "inline");
+        if declares_inline {
+            self.pos += 1;
+        }
         self.expect(Token::LParen)?;
         // R1/R2: a variable-bearing effect (`'T`, `'N`, `..s`) parses into a
         // `PolySig`; every other effect stays a concrete `StackEffect`, byte
@@ -1004,6 +1013,7 @@ impl<'t> Parser<'t> {
             effect,
             body,
             poly,
+            declares_inline,
             module: self.module,
             span: name_span,
         })
@@ -3752,6 +3762,47 @@ mod tests {
         let err = parse_src(": w ( -- ) [ 1 2 drop").unwrap_err();
         assert!(
             err.contains("unterminated quotation"),
+            "unexpected message: {err}"
+        );
+    }
+
+    // -- Slice 11 (R1): the `inline` keyword ---------------------------------
+
+    #[test]
+    fn parse_worddef_inline_keyword_sets_flag() {
+        let module = parse_src(": ClkDiv inline ( -- i64 i64 ) 8 4 ;").unwrap();
+        let word = &module.words[0];
+        assert_eq!(word.name, "ClkDiv");
+        assert!(word.declares_inline);
+        // The keyword is consumed, not read as the effect's first token: the
+        // declared effect is still the one written after it.
+        assert_eq!(word.effect.inputs.len(), 0);
+        assert_eq!(word.effect.outputs.len(), 2);
+    }
+
+    #[test]
+    fn parse_worddef_no_inline_keyword_flag_false() {
+        let module = parse_src(": ClkDiv ( -- i64 i64 ) 8 4 ;").unwrap();
+        assert!(!module.words[0].declares_inline);
+    }
+
+    #[test]
+    fn parse_worddef_word_named_inline_is_not_inline() {
+        // The name slot is consumed first, so `inline` in *that* position is an
+        // ordinary word name and the definition declares nothing. This is why
+        // the keyword needs no global reservation.
+        let module = parse_src(": inline ( i64 -- i64 ) 1 + ;").unwrap();
+        assert_eq!(module.words[0].name, "inline");
+        assert!(!module.words[0].declares_inline);
+    }
+
+    #[test]
+    fn parse_worddef_double_inline_is_parse_error() {
+        // One optional keyword only: the second `inline` is not consumed, so it
+        // falls through to `expect(LParen)` and fails there, located.
+        let err = parse_src(": foo inline inline ( -- ) ;").unwrap_err();
+        assert!(
+            err.contains("expected LParen") && err.contains("line 1, col 14"),
             "unexpected message: {err}"
         );
     }

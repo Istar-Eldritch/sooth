@@ -608,10 +608,11 @@ combinator is monomorphized and checked by the ordinary concrete `check_word`.
 control-flow word, now that 6g has closed the splice-granting bug it would otherwise
 multiply). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
-module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), and 10a (row
-variables inside a quotation's declared effect) are all done on `main`; 6g (combinator
-splices learning 6f's granting rule) and 10b (`times` moved into `lib/combinators.sth`) are
-implemented, pending merge from `impl/`. Slice 9
+module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), 10a (row
+variables inside a quotation's declared effect), 6g (combinator splices learning 6f's
+granting rule), 10b (`times` moved into `lib/combinators.sth`), and 11 (`inline` as a
+declared word property, `~` generalised beyond `times` to `lib/combinators.sth`, and a
+reference-output exemption for every always-spliced word) are all done on `main`. Slice 9
 shipped P1–P2 only (`Bool` as a library
 enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
 quotation's declared effect, which does not parse before slice 10a, and is split out as

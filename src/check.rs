@@ -57,6 +57,7 @@ use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
+pub(crate) use self::word_entry::check_inline_declaration;
 use self::word_entry::{check_reference_free_signature, check_word};
 use self::word_families::*;
 
@@ -539,6 +540,14 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // type by the walk that checks it. Collected per word so the graph below
     // knows which body each site sits in.
     let mut dropped: Vec<Vec<Type>> = Vec::with_capacity(words.len());
+    // Slice 11 (R3): reject a declared `inline` the splice cannot deliver on
+    // *before* `is_combinator` is consulted, so a clause-bodied or
+    // variable-bearing `inline` word never enters the splice env, the cycle
+    // graph, or the poly checker (which would take it for a legitimate poly
+    // combinator).
+    for word in words.iter() {
+        check_inline_declaration(word)?;
+    }
     // R18: the monomorphic quotation-taking words, gathered once so a call to
     // one is intercepted and inlined (term-splice) rather than lowered to a
     // call. A polymorphic combinator's body is checked by the poly pass, so it

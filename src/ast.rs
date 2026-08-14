@@ -366,6 +366,7 @@ pub fn bool_print_word_def() -> WordDef {
         },
         body: WordBody::Clauses(vec![clause("False", "false\n"), clause("True", "true\n")]),
         poly: None,
+        declares_inline: false,
         module: 0,
         span: Span::default(),
     }
@@ -574,6 +575,16 @@ pub struct WordDef {
     /// or the row variable `..s`. `None` for a monomorphic word, whose whole
     /// signature is `effect`.
     pub poly: Option<Box<PolySig>>,
+    /// Slice 11 (R1): the declared `inline` keyword, spelled between the name
+    /// and the effect. It makes "always spliced at the call site" a *declared*
+    /// property rather than one inferred from the signature's shape, so a word
+    /// taking no quotation can still mint no `IrFunc` and no call
+    /// (`is_combinator`, the single predicate `check` and `ir::lower` share, is
+    /// the only load-bearing reader). The guarantee is unconditional: a shape
+    /// that cannot be spliced (a clause body, a variable-bearing signature) is
+    /// a located error at the definition, never a silent fall-back to a real
+    /// call.
+    pub declares_inline: bool,
     /// Phase 4 slice 5a (R10): the owning module id, mirroring
     /// `StructDecl::module`.
     pub module: u32,
@@ -1800,6 +1811,7 @@ mod tests {
             },
             body: WordBody::Terms { terms: Vec::new() },
             poly: None,
+            declares_inline: false,
             module: 0,
             span: Span::default(),
         }

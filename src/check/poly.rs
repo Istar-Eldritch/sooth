@@ -166,6 +166,7 @@ pub(super) fn check_poly_combinator_standalone(
         effect: StackEffect { inputs, outputs },
         body: WordBody::Terms { terms },
         poly: None,
+        declares_inline: word.declares_inline,
         module: word.module,
         span: word.span,
     };

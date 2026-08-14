@@ -367,6 +367,7 @@ fn remap_imported_combinator(
             terms: rewrite_combinator_body_calls(terms, body_rename),
         },
         poly,
+        declares_inline: w.declares_inline,
         module: module_base + w.module,
         span: w.span,
     }
@@ -2551,12 +2552,22 @@ impl Session {
         // in a non-input position is still rejected). A poly word's effect is
         // empty, so its output-position check runs on the poly path.
         check::audit_word_quotation_positions(&word)?;
+        // Slice 11 (R3): the same per-word `inline` rejections native `check`
+        // runs as a pre-pass, at the REPL's own per-word gate -- the poly half
+        // in particular, which the retention route below would otherwise carry
+        // into `check_poly_combinator_repl` as a legitimate poly combinator.
+        check::check_inline_declaration(&word)?;
         // R6 (Slice 6c): a quotation-taking word is now *retained* rather than
         // R23-rejected. It routes here (both mono and poly, D2), skipping
         // lowering entirely (D3): the session keeps its body as raw terms and
         // re-splices it, fresh, at every later call site under that site's own
         // live env, which is what the inliner needs (R20).
-        if check::word_declares_quotation_parameter(&word) {
+        // Slice 11 (R7): a declared `inline` word takes the same route even
+        // when it declares no quotation parameter. Without this it would fall
+        // through to the ordinary lowering path below and mint a `.so` and a
+        // symbol, which is exactly the silent fall-back to a real call that
+        // D2's unconditional guarantee forbids.
+        if word.declares_inline || check::word_declares_quotation_parameter(&word) {
             return self.eval_combinator_def(word, writer);
         }
         // R3 (Slice 2): a polymorphic word's signature lives entirely in

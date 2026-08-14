@@ -353,6 +353,7 @@ mod tests {
             effect: StackEffect::default(),
             body: WordBody::Terms { terms: Vec::new() },
             poly: None,
+            declares_inline: false,
             module,
             span: Span::default(),
         }

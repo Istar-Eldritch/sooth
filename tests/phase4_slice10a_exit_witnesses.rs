@@ -173,12 +173,14 @@ fn my_times_nested_in_itself_produces_correct_output() {
 // -- R19: no regression ------------------------------------------------------
 
 #[test]
-fn combinators_library_declares_exactly_the_two_times_tildes() {
-    // R19, inverted by 10b: the library now uses 10a's inline-quotation syntax,
-    // but only where `times` needs it. Both signatures are pinned literally,
-    // and the *total* `~` count is pinned at two, so a stray `~` anywhere else
-    // (a third signature, or one in a prose comment) fails rather than
-    // satisfying a bare `contains` pair.
+fn combinators_library_declares_exactly_seven_tildes() {
+    // R19, inverted by 10b and again by slice 11: the library now uses 10a's
+    // inline-quotation syntax everywhere a combinator takes a quotation, not
+    // just where `times` needs it. `times`/`times-helper`'s signatures are
+    // pinned literally (10b), and the *total* `~` count is pinned at seven --
+    // those two plus the five slice-11 retyped combinators (each/map/fold/
+    // filter/while) -- so a stray `~` anywhere else (an eighth signature, or
+    // one in a prose comment) fails rather than satisfying a bare `contains`.
     let current_src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/combinators.sth"),
     )
@@ -193,8 +195,8 @@ fn combinators_library_declares_exactly_the_two_times_tildes() {
     );
     assert_eq!(
         current_src.matches('~').count(),
-        2,
-        "lib/combinators.sth must carry exactly the two `~` signatures above"
+        7,
+        "lib/combinators.sth must carry exactly the seven `~` signatures: times, times-helper, and the five slice-11 retyped combinators"
     );
 }
 
