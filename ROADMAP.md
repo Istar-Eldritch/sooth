@@ -2131,6 +2131,63 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
     phases; the audit of every silent `Type::Quotation` site is phase 1's deliverable and is
     pinned to a pasted grep, since four rounds established that enumerating those sites on
     paper does not converge.
+11. **`inline` as a declared word property. ✅ done** (brief + spec:
+    `docs/phase4-slice11-brief.md`, `docs/phase4-slice11-spec.md`). `: ClkDiv inline
+    ( -- u32 u32 ) 8 4 ;` is spliced at every call site with no silent fallback to a real
+    call, `~` is generalised beyond `times` to `lib/combinators.sth`, and
+    `check_reference_free_signature` is exempted for every always-spliced word.
+12. **Combinator recognition becomes declared, not inferred.** `is_combinator`
+    (`src/check/combinators.rs:74`) grants the always-spliced property by two routes: the word
+    declares a quotation parameter, or it declares `inline`. The first is an inference from the
+    shape of a signature, and it is the route every library combinator actually travels, since
+    `check_inline_declaration` (`src/check/word_entry.rs:66`) rejects a variable-bearing
+    signature and so `times`/`each`/`map`/`fold`/`filter`/`while` cannot declare the keyword at
+    all. This slice lifts that rejection and makes the declaration the single route: a word
+    declaring a `~[ ... ]` parameter must say `inline` (a located error where it does not),
+    `word_declares_quotation_parameter`'s leg in `is_combinator` retires, and
+    `lib/combinators.sth` plus 10c's injected `if`/`cond` are migrated. The predicate itself
+    stays: `is_quotation_type` has ~20 parameter-level callers across
+    `check/{poly,terms,audits,captures}.rs` that ask what a slot is, not whether a word splices.
+
+    Splicing a polymorphic word is already the shipped behaviour — `times` is polymorphic and
+    spliced — so the rejection is a policy gate, not a capability gate, and lifting it changes
+    no lowering. The reason to prefer the declaration is the embedded/RT reading argument slice
+    11 was built on: a reader must see at the definition whether a call site costs a call,
+    rather than deriving it from `~`'s non-representability. This is the linear spine's own
+    trade, where `drop` is written out because the compiler *could* infer it.
+
+    The second payoff is a capability, not a restatement: `is_quotation_type` matches
+    `Type::Quotation` and `Type::InlineQuotation` alike, so the inference also splices a word
+    taking an *ordinary* runtime `[ ... ]`, and no word taking a first-class capturing
+    quotation (7b's territory) can be a genuine call today. Retiring the inference is what
+    makes that shape expressible.
+
+    **The same rule applies to the literal, not just the word.** `~[ ... ]` is legal only in a
+    type position: `Token::TildeLBracket` is consumed by the signature parsers
+    (`src/parser.rs:1305,1569,1622,1910`) and never by `parse_term`, so a call site writes an
+    ordinary `[ ... ]` and it satisfies a `~[ ... ]` parameter silently — the literal's flavour
+    is inferred from the callee's signature. This slice adds the `parse_term` arm and makes the
+    tilde **required**: a `~` parameter takes a `~` literal, an ordinary parameter an ordinary
+    one, neither substituting for the other. Permitting it without requiring it would add
+    syntax and close nothing. The distinction is unobservable today, since every
+    quotation-taking word splices either way, and becomes observable in this slice at the
+    moment it decides whether a call site pays a call — which is also why the migration is
+    corpus-wide: every combinator call site in `lib/` and `examples/` gains a tilde
+    (`count [ | i | ... ] times` → `count ~[ | i | ... ] times`). 10c's desugar already emits
+    `~`-flavoured branch literals, which this makes writable by hand.
+
+    Gates on 10c, which extends `is_combinator`/`collect_combinators`/`inline_combinator` to
+    clause bodies and injects `if`/`cond` as combinators this slice must then mark.
+    Open for the brief: whether the ordinary-`[ ... ]` real-call path lowers at all. The
+    two-slot `IrType::Quotation` aggregate is ABI-handled, but no word receives one through a
+    real call today, since the inference splices them all, and an argument position is not
+    currently a `materialize_quotation_at_boundary` site. Prototype it before the plan locks.
+
+    The "must declare `inline`" rule needs no carve-out against 11's builtin-operator
+    rejection, which would otherwise make a `~`-bearing overload of a builtin name both
+    required and forbidden to declare it: a `~`-bearing effect routes through the poly parser,
+    every builtin name has concrete rows by construction, and a name cannot mix a generic and
+    a concrete overload, so the shape is undeclarable. Pin it with a test rather than a guard.
 
 ### Phase 5 — Errors as values  `[S]`
 
