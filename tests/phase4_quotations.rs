@@ -518,12 +518,14 @@ fn capturing_scalar_at_join_snapshots() {
 // -- T-times: a loop over an erased quotation is one indirect call in a loop --
 
 #[test]
-fn loop_over_erased_quotation_runs_constant_stack() {
+fn loop_over_erased_quotation_emits_one_indirect_call() {
     // `acc` returns an *erased* quotation (a word-output materialization
     // boundary) and a self-tail combinator drives it. The checker accepts the
     // abstract `[ i64 i64 -- i64 ]` effect and lowering emits exactly one
-    // `CallIndirect` inside the loop body (D6: constant stack, one indirect
-    // call per iteration), summing 0+1+2+3+4 = 10.
+    // `CallIndirect` inside the loop body (one indirect call per iteration,
+    // no per-element call), summing 0+1+2+3+4 = 10. This does not run under a
+    // stack limit -- the constant-stack guarantee itself is pinned by
+    // `tests/phase4_slice10b.rs`'s `times_runs_one_million_iterations_in_constant_stack`.
     //
     // The driver is declared here rather than being `lib/combinators.sth`'s
     // `times`: 10b's `times` takes 10a's *inline-only* `~[ ... ]` parameter,

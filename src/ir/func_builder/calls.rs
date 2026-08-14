@@ -1414,6 +1414,15 @@ mod tests {
         );
     }
 
+    // Shared with `each_lowering_test_times_def_is_pinned_to_the_library` so
+    // the two tests cannot drift apart: one exercises this exact source, the
+    // other pins it against `lib/combinators.sth`.
+    const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+         | f | | to | | from |\n\
+         from to < if from f call from 1 + to f times-helper else end ;\n\
+         : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+         | f | | n | 0 n f times-helper ;\n";
+
     #[test]
     fn each_lowers_to_a_loop_not_a_per_element_call() {
         // Criterion 14b (R19, load-bearing): the inlined `each` lowers to a
@@ -1426,18 +1435,14 @@ mod tests {
         // unrolling per element would drop the back-edge. `each` is defined
         // inline here, over an inline `times`/`times-helper` mirroring
         // `lib/combinators.sth`, so the unit needs no import closure.
-        let ir = lower_src(
-            ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
-             | f | | to | | from |\n\
-             from to < if from f call from 1 + to f times-helper else end ;\n\
-             : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
-             | f | | n | 0 n f times-helper ;\n\
+        let ir = lower_src(&format!(
+            "{TIMES_DEF}\
              : each ( ['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
              count [ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
-             : main ( -- ) 0 4 fill [ . ] each ;\n",
-        );
+             : main ( -- ) 0 4 fill [ . ] each ;\n"
+        ));
         assert!(
             ir.funcs
                 .iter()
@@ -1481,10 +1486,10 @@ mod tests {
 
     #[test]
     fn each_lowering_test_times_def_is_pinned_to_the_library() {
-        // The inline `times`/`times-helper` above exists so this unit needs
-        // no import closure. Pin it against the real library so a future
-        // body change cannot leave this copy silently exercising the old
-        // shape.
+        // Pins the same `TIMES_DEF` that `each_lowers_to_a_loop_not_a_per_element_call`
+        // actually compiles (not a second, independently-typed copy) against the
+        // real library, so a future body change cannot leave that test silently
+        // exercising a stale shape.
         let lib =
             std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
                 .expect("the combinator library should be readable");
@@ -1497,13 +1502,8 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" ")
         };
-        let hand_copy = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
-             | f | | to | | from |\n\
-             from to < if from f call from 1 + to f times-helper else end ;\n\
-             : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
-             | f | | n | 0 n f times-helper ;\n";
         assert!(
-            normalize(&lib).contains(&normalize(hand_copy)),
+            normalize(&lib).contains(&normalize(TIMES_DEF)),
             "each_lowers_to_a_loop_not_a_per_element_call's inline times/times-helper has drifted from lib/combinators.sth"
         );
     }

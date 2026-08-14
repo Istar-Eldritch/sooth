@@ -1038,21 +1038,22 @@ fn times_body_consuming_a_linear_local_is_error() {
 }
 
 #[test]
-fn row_quotation_left_on_the_stack_is_error() {
-    // Criterion R18b: a quotation riding *below* the consumed top of the row.
-    // The intrinsic's whole-row guard went with it in 10b, and no general
-    // guard replaced it: what rejects this program is the outputs check on
-    // `main`, one step later. A row quotation that is disposed rather than
-    // left on the stack is *not* rejected at all -- it reaches the backend as
-    // an invalid phi. That hole predates 10b (it reproduces on any
-    // user-declared row combinator, `my-times` included) and is recorded in
-    // `docs/phase4-slice10b-spec.md`; this golden pins only what does reject.
+fn quotation_left_as_a_declared_output_is_error() {
+    // Not R18b-specific: the intrinsic's whole-row guard that used to reject
+    // this shape went with it in 10b, and no general guard replaced it. What
+    // rejects this program is the ordinary outputs check on `main` -- a
+    // quotation left on the stack doesn't match the declared (empty) output
+    // row. A row quotation that is disposed rather than left on the stack is
+    // *not* rejected at all -- it reaches the backend as an invalid phi. That
+    // hole predates 10b (it reproduces on any user-declared row combinator,
+    // `my-times` included) and is recorded in `docs/phase4-slice10b-spec.md`;
+    // this golden pins only what does reject.
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- ) [ + ] 3 [ drop ] times ;\n"
     ));
     assert!(
         err.contains("leaves a quotation on the stack"),
-        "R18b should reject a quotation left in the row, got: {err}"
+        "an unconsumed quotation should reject against the declared outputs, got: {err}"
     );
 }
 

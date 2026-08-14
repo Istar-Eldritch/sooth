@@ -1072,6 +1072,10 @@ fn check_linear_across_back_edge(
     {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
+    // `position` resolves to the *first* matching binding; this is only correct
+    // because Sooth forbids rebinding a live name, so `name` names at most one
+    // live position at a time. If that rule were ever relaxed, a shadowing
+    // local could inherit an ancestor's floor-exempt index here.
     let below_floor = |name: &str| match frame_floor {
         Some(floor) => scope
             .bound

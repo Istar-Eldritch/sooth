@@ -302,7 +302,7 @@ consumption site (type-checking identically to writing the body inline), and eve
 position that would need a runtime quotation value (an array element, a branch join, a
 user or polymorphic word argument, an operator operand, a REPL residual stack) is a located
 rejection instead of a panic. `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` is an ordinary
-exported word in `lib/combinators.sth` (slice 10b), a thin wrapper over a private
+exported word in `lib/combinators.sth` (slice 10b), a thin wrapper over a
 self-tail-recursive `times-helper`: its recursive call in tail position lowers to a
 `begin_loop`/`finalize_loop` back-edge like any other self-tail combinator, giving a runnable
 constant-stack loop (a header `Phi`/`Jnz` reached by a back-edge `Jmp`, no per-iteration
@@ -2067,7 +2067,9 @@ then find out what the compiler owes it.
     splits: **10a** adds the mechanism (parsing and checking a row inside a quotation effect,
     plus the `~` inline-only quotation type below); **10b**
     (`docs/phase4-slice10b-spec.md`) makes `times` an ordinary exported word in
-    `lib/combinators.sth` over a private self-tail-recursive `times-helper`, leaving no
+    `lib/combinators.sth` over a self-tail-recursive `times-helper`, itself exported too
+    (a private helper reached only transitively would be unresolvable through the REPL's
+    `dlopen` import path, which retains exported words only), leaving no
     compiler-known combinator at all — no `check_abstract_quotation_times`, no
     `check_term`/`ir.rs` `"times"` arms. It carries one checker change of its own, not the
     pure delete-and-import it looks like: `check_linear_across_back_edge` takes a frame floor

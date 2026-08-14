@@ -57,7 +57,7 @@ itself (`lib/combinators.sth`: `each`/`map`/`fold`/`filter`/`while`/`times`), in
 term-splicing compiler pass rather than minting a function per call site; multi-file
 modules with word/type imports, natively and at the REPL; and quotations as real runtime
 values (non-capturing closures, storable and passable to non-inlined higher-order code).
-No combinator is compiler-known: `times` is ordinary Sooth source over a private
+No combinator is compiler-known: `times` is ordinary Sooth source over a
 self-tail-recursive helper, like the rest.
 In progress: capturing closures and static ad-hoc overloading (`docs/phase4-slice7b-brief.md`,
 `docs/phase4-slice8a-brief.md`); briefed but not started: `if` becoming an ordinary

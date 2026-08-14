@@ -789,6 +789,15 @@ fn drop_import_visibility_error(
     // `span.module`, matching the gate above: deriving the qualifier from
     // `ctx.module()` would look it up in the splice destination's import map
     // and describe an import the authoring module never wrote.
+    //
+    // This derivation is unpinned by construction: a caller-supplied literal's
+    // full body is always validated once, up front, at the outermost
+    // receiving combinator's own argument check, under the caller's own
+    // (unspliced) `ctx` -- which by then always equals `span.module` -- before
+    // any nested splice could ever reach this gate under a different `ctx`, so
+    // no reject golden exists where `ctx.module()` and `span.module` diverge
+    // while this line is what fires. `m[ctx.module()]` is always a valid
+    // index either way, so there is no panic risk from the choice.
     let caller = span.module as usize;
     let qualifier = m[caller]
         .imports
