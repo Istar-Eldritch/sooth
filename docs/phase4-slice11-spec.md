@@ -101,6 +101,12 @@ site passing a literal `[ ... ]` still checks, and since all five were already
 inlined the emitted QBE is byte-identical. A stored or returned quotation still
 requires `[ ... ]` and is rejected against a `~[ ... ]` parameter.
 
+This retype deliberately falsifies 10a's own regression guard,
+`combinators_library_contains_no_tilde` (`tests/phase4_slice10a_exit_witnesses.rs`),
+which asserted the library contained no `~` at all; that test is deleted here,
+not an accidental coverage loss but the guard's premise being exactly what this
+slice reverses.
+
 ## Feature C: why the reference exemption is safe
 
 R5 relaxes exactly one thing, the blanket structural rule that rejects any

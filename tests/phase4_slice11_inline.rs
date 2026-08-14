@@ -307,6 +307,31 @@ fn inline_tilde_parameter_word_is_accepted_and_spliced() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);
+
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = lower(&module).expect("lowering should succeed");
+    assert!(
+        !ir.funcs.iter().any(|f| f.name.contains("twice")),
+        "an `inline` word with a `~`-bearing effect mints no `IrFunc`: {:?}",
+        ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let main = ir
+        .funcs
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("`main` is lowered");
+    let calls: Vec<&Instr> = main
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::Call(..)))
+        .collect();
+    assert!(
+        calls.is_empty(),
+        "`twice` is spliced, not called: {calls:?}"
+    );
 }
 
 #[test]
@@ -320,6 +345,31 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "0\n");
     assert_eq!(code, 0);
+
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = lower(&module).expect("lowering should succeed");
+    assert!(
+        !ir.funcs.iter().any(|f| f.name.contains("down")),
+        "the self-tail `inline` word mints no `IrFunc`: {:?}",
+        ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let main = ir
+        .funcs
+        .iter()
+        .find(|f| f.name == "main")
+        .expect("`main` is lowered");
+    let calls: Vec<&Instr> = main
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::Call(..)))
+        .collect();
+    assert!(
+        calls.is_empty(),
+        "the self-tail recursion lowers to a back-edge loop, not a call: {calls:?}"
+    );
 }
 
 #[test]
@@ -583,4 +633,27 @@ fn combinators_retype_stored_quotation_still_rejected() {
         err,
         "error: `each` expects a quotation `~[ i64 -- ]` here, found `[ i64 -- ]` in `main` (line 32)"
     );
+}
+
+#[test]
+fn combinators_library_uses_tilde_quotation_parameters() {
+    // The retype itself, checked against the shipped file rather than the
+    // isolated copy above: without it, reverting Feature B (`~[` back to `[`
+    // in `lib/combinators.sth`) leaves the rest of this suite green, since the
+    // byte-identical and stored-quotation-rejection tests above both build
+    // their own copy of the library text and never read the file on disk.
+    let lib = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
+        .expect("the combinator library should be readable");
+    for (word, quotation) in [
+        ("each", "~[ 'T -- ]"),
+        ("map", "~[ 'T -- 'T ]"),
+        ("fold", "~[ 'A 'T -- 'A ]"),
+        ("filter", "~[ 'T -- bool ]"),
+        ("while", "~[ 'a -- 'a bool ]"),
+    ] {
+        assert!(
+            lib.contains(quotation),
+            "`{word}` in lib/combinators.sth should declare `{quotation}`, got:\n{lib}"
+        );
+    }
 }
