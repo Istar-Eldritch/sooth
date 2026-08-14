@@ -47,6 +47,23 @@ fn check_error(src: &str) -> String {
 /// so a source prefixed with it shifts every line number up by 2.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
 
+/// `lib/combinators.sth`'s `times`, inlined: `check_error` runs the checker in
+/// process, where an `import:` line never resolves.
+const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | f | | to | | from |\n\
+     from to < if from f call from 1 + to f times-helper else end ;\n\
+     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | f | | n | 0 n f times-helper ;\n";
+
+/// An `import:` line for the committed combinator library by *absolute* path,
+/// so a temp source built under `temp_dir()` resolves it regardless of cwd.
+fn combinators_import(qualifier: &str) -> String {
+    format!(
+        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
 /// Compile and run `src`, returning its stdout and exit code. `name`
 /// distinguishes the temp source (and so the emitted binary) per test, since
 /// the goldens run in parallel in one process. `trace` sets the allocation
@@ -848,13 +865,17 @@ fn linear_bound_inside_a_quotation_body_is_error() {
 
 #[test]
 fn times_body_constructing_a_quotation_into_the_row_is_error() {
-    // Blocker 2: the entry-row guard runs before the splice, but a body that
-    // consumes a real value and constructs a quotation into that slot leaves a
-    // phantom in the *output* row. The output-row guard rejects it before it
-    // reaches `begin_loop`'s back-edge phis (where it died as a backend error).
-    let err = check_error(": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n");
+    // Blocker 2: a body that consumes a real value and constructs a quotation
+    // into that slot leaves a phantom in the *output* row. With `times` an
+    // ordinary library word (10b), the intrinsic's own output-row guard is
+    // gone; the rejection now comes from the branch-join guard inside the
+    // spliced `times-helper`, whose tail `if` sees a quotation on one arm only.
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n"
+    ));
     assert!(
-        err.contains("`times`") && err.contains("cannot take a quotation as an operand"),
+        err.contains("leaves a quotation and the other does not")
+            && err.contains("a quotation cannot be a runtime value"),
         "blocker 2 should reject the body-output row quotation, got: {err}"
     );
 }
@@ -879,7 +900,10 @@ fn times_loop_computes_the_index_sum() {
     // 0..1e6, so the loop runs exactly `count` iterations passing each index.
     let (stdout, code) = run_src(
         "times-sum",
-        ": main ( -- ) 0 1000000 [ + ] times . ;\n",
+        &format!(
+            "{}: main ( -- ) 0 1000000 [ + ] times . ;\n",
+            combinators_import("c | times |")
+        ),
         false,
     );
     assert_eq!(stdout, "499999500000\n");
@@ -894,7 +918,10 @@ fn times_loop_runs_in_constant_stack() {
     // `Alloc` assertion.
     let code = run_stack_bounded_src(
         "times-sum-bounded",
-        ": main ( -- ) 0 1000000 [ + ] times . ;\n",
+        &format!(
+            "{}: main ( -- ) 0 1000000 [ + ] times . ;\n",
+            combinators_import("c | times |")
+        ),
     );
     assert_eq!(code, Some(0));
 }
@@ -906,8 +933,11 @@ fn times_body_constructing_aggregate_computes_expected() {
     // this value golden and 5b together witness the constant-stack guarantee.
     let (stdout, code) = run_src(
         "times-aggregate",
-        "type: Vec2 x i64 y i64 ;\n\
-         : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;\n",
+        &format!(
+            "{}type: Vec2 x i64 y i64 ;\n\
+             : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;\n",
+            combinators_import("c | times |")
+        ),
         false,
     );
     assert_eq!(stdout, "499999500000\n");
@@ -921,8 +951,11 @@ fn times_body_constructing_aggregate_runs_in_constant_stack() {
     // entry block (one reused slot), not the body block.
     let code = run_stack_bounded_src(
         "times-aggregate-bounded",
-        "type: Vec2 x i64 y i64 ;\n\
-         : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;\n",
+        &format!(
+            "{}type: Vec2 x i64 y i64 ;\n\
+             : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;\n",
+            combinators_import("c | times |")
+        ),
     );
     assert_eq!(code, Some(0));
 }
@@ -934,8 +967,11 @@ fn times_carrying_an_aggregate_through_the_row_runs() {
     // stable slot on the back-edge, never re-allocated.
     let (stdout, code) = run_src(
         "times-carry-aggregate",
-        "type: Vec2 x i64 y i64 ;\n\
-         : main ( -- ) 3 4 Vec2 0 1000000 [ drop over Vec2>x + ] times . drop ;\n",
+        &format!(
+            "{}type: Vec2 x i64 y i64 ;\n\
+             : main ( -- ) 3 4 Vec2 0 1000000 [ drop over Vec2>x + ] times . drop ;\n",
+            combinators_import("c | times |")
+        ),
         false,
     );
     assert_eq!(stdout, "3000000\n");
@@ -947,7 +983,14 @@ fn times_zero_trip_yields_seed_row() {
     // Criterion 5z: a zero count runs the body zero times, so the row leaves the
     // loop untouched (the seed `7`), and a non-zero, non-index seed proves the
     // exit reads the carried row, not the index.
-    let (stdout, code) = run_src("times-zero", ": main ( -- ) 7 0 [ + ] times . ;\n", false);
+    let (stdout, code) = run_src(
+        "times-zero",
+        &format!(
+            "{}: main ( -- ) 7 0 [ + ] times . ;\n",
+            combinators_import("c | times |")
+        ),
+        false,
+    );
     assert_eq!(stdout, "7\n");
     assert_eq!(code, 0);
 }
@@ -962,8 +1005,11 @@ fn two_sequential_times_in_one_word_both_run() {
     // save-and-truncate, the first body's stale `i` would shadow the second's.
     let (stdout, code) = run_src(
         "times-sequential",
-        "type: Vec2 x i64 y i64 ;\n\
-         : main ( -- ) 0 10 [ | i | i + ] times . 5 6 Vec2 Vec2>x . 0 10 [ | i | i + ] times . ;\n",
+        &format!(
+            "{}type: Vec2 x i64 y i64 ;\n\
+             : main ( -- ) 0 10 [ | i | i + ] times . 5 6 Vec2 Vec2>x . 0 10 [ | i | i + ] times . ;\n",
+            combinators_import("c | times |")
+        ),
         false,
     );
     assert_eq!(stdout, "45\n5\n45\n");
@@ -976,24 +1022,32 @@ fn times_body_consuming_a_linear_local_is_error() {
     // runs N times, so consuming the outer linear `s` would dispose it N times.
     // Named `s`, with the "body runs more than once" wording.
     let err = check_error(&format!(
-        "{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 [ | i | i s drop + ] times . ;\n"
+        "{TIMES_DEF}{SPY_DEF}: main ( -- ) 5 Spy | s | 0 1000000 [ | i | i s drop + ] times . ;\n"
     ));
     assert!(
-        err.contains("a `times` body cannot consume `s`")
-            && err.contains("the body runs more than once"),
-        "R18a should name `s` and cite repeated disposal, got: {err}"
+        err.contains(
+            "the quotation passed to `times` consumes the enclosing local `s`, which is linear"
+        ) && err.contains("may only read a `Copy` enclosing local by value"),
+        "R18a should name `s` and cite the capture-admission rule, got: {err}"
     );
 }
 
 #[test]
 fn times_with_a_quotation_in_its_row_is_error() {
-    // Criterion R18b (R18 whole-row guard): a quotation anywhere in the row --
-    // not just the consumed top -- would reach `begin_loop`'s phi over a phantom,
-    // so it is rejected (same wording family as R9/R11).
-    let err = check_error(": main ( -- ) [ + ] 3 [ drop ] times ;\n");
+    // Criterion R18b: a quotation riding *below* the consumed top of the row.
+    // The intrinsic's whole-row guard went with it in 10b, and no general
+    // guard replaced it: what rejects this program is the outputs check on
+    // `main`, one step later. A row quotation that is disposed rather than
+    // left on the stack is *not* rejected at all -- it reaches the backend as
+    // an invalid phi. That hole predates 10b (it reproduces on any
+    // user-declared row combinator, `my-times` included) and is recorded in
+    // `docs/phase4-slice10b-spec.md`; this golden pins only what does reject.
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- ) [ + ] 3 [ drop ] times ;\n"
+    ));
     assert!(
-        err.contains("`times`") && err.contains("cannot take a quotation as an operand"),
-        "R18b should reject a quotation in the row, got: {err}"
+        err.contains("leaves a quotation on the stack"),
+        "R18b should reject a quotation left in the row, got: {err}"
     );
 }
 
@@ -1001,10 +1055,13 @@ fn times_with_a_quotation_in_its_row_is_error() {
 fn times_body_changing_the_row_is_error() {
     // Criterion R18c (D6 row-effect equality): `[ + 1 ]` leaves the row one
     // deeper than it received, so the body's net effect is not identity.
-    let err = check_error(": main ( -- ) 0 1000000 [ + 1 ] times . ;\n");
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- ) 0 1000000 [ + 1 ] times . ;\n"
+    ));
     assert!(
-        err.contains("`times` body must leave the row unchanged"),
-        "R18c should fire the row-effect error, got: {err}"
+        err.contains("the quotation passed to `times` was declared `~[ i64 -- ]`")
+            && err.contains("but its body has effect `[ i64 -- i64 ]`"),
+        "R18c should reject the body whose effect is not the declared row identity, got: {err}"
     );
 }
 

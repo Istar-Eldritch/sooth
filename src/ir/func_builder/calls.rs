@@ -1424,17 +1424,25 @@ mod tests {
         // criterion 14's equivalence witness: deleting the `lower_call` inline
         // branch would leave an `Instr::Call` for `each` and no loop, and
         // unrolling per element would drop the back-edge. `each` is defined
-        // inline here so the unit needs no import closure.
+        // inline here, over an inline `times`/`times-helper` mirroring
+        // `lib/combinators.sth`, so the unit needs no import closure.
         let ir = lower_src(
-            ": each ( ['T 'N] [ 'T -- ] -- )\n\
+            ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+             | f | | to | | from |\n\
+             from to < if from f call from 1 + to f times-helper else end ;\n\
+             : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+             | f | | n | 0 n f times-helper ;\n\
+             : each ( ['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
              count [ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
              : main ( -- ) 0 4 fill [ . ] each ;\n",
         );
         assert!(
-            ir.funcs.iter().all(|f| f.name != "each"),
-            "the inlined `each` mints no IrFunc, got: {:?}",
+            ir.funcs
+                .iter()
+                .all(|f| !matches!(f.name.as_str(), "each" | "times" | "times-helper")),
+            "the inlined `each` and its `times` splices mint no IrFunc, got: {:?}",
             ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
         let main = func(&ir, "main");

@@ -301,16 +301,15 @@ shuffles and binds, and consumed only by fusion: `call` splices a literal's body
 consumption site (type-checking identically to writing the body inline), and every other
 position that would need a runtime quotation value (an array element, a branch join, a
 user or polymorphic word argument, an operator operand, a REPL residual stack) is a located
-rejection instead of a panic. The one compiler-known intrinsic, `times ( ..s i64
-[ ..s i64 -- ..s ] -- ..s )`, drives the existing `begin_loop`/`finalize_loop` staging with a
-synthesized index, giving a runnable constant-stack loop (a header `Phi`/`Jnz` reached by a
-back-edge `Jmp`, no per-iteration `Instr::Call`, every loop-body `Alloc` entry-hoisted,
-verified at 1M+ iterations under a 1MB stack); a `times` nested inside another loop is
-rejected in the checker, which also restores loop state after a `times` returns so a second
-loop in the same word still runs. `while` was weighed as a second floor member and declined:
-its condition quotation returns a `bool` on a passthrough row, strictly harder than `times`
-needs. `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same
-total as `examples/countdown.sth`'s hand-threaded self-recursion.
+rejection instead of a panic. `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` is an ordinary
+exported word in `lib/combinators.sth` (slice 10b), a thin wrapper over a private
+self-tail-recursive `times-helper`: its recursive call in tail position lowers to a
+`begin_loop`/`finalize_loop` back-edge like any other self-tail combinator, giving a runnable
+constant-stack loop (a header `Phi`/`Jnz` reached by a back-edge `Jmp`, no per-iteration
+`Instr::Call`, every loop-body `Alloc` entry-hoisted, verified at 1M+ iterations under a 1MB
+stack), and loops nest at any depth. `examples/times.sth`
+(`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same total as
+`examples/countdown.sth`'s hand-threaded self-recursion.
 **Phase 4 Slice 5a (native multi-file compilation, word and type imports, and
 encapsulation) is complete**: a file is a compilation unit, and `import: q "path.sth" ;`
 resolves the import graph from the entry file, canonicalizes and dedupes by path,
@@ -605,13 +604,14 @@ has nothing to intern a body-internal shape against, so this is deferred to a fu
 slice. A concrete element inside a combinator body already works today, since a
 combinator is monomorphized and checked by the ordinary concrete `check_word`.
 
-**Next action: Phase 4 Slice 10b/10c** (deleting the `times`/`if` intrinsics in favour of
-library combinators, now that 6g has closed the splice-granting bug both would otherwise
+**Next action: Phase 4 Slice 10c** (`if` as an ordinary combinator, the last compiler-known
+control-flow word, now that 6g has closed the splice-granting bug it would otherwise
 multiply). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
 module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), and 10a (row
 variables inside a quotation's declared effect) are all done on `main`; 6g (combinator
-splices learning 6f's granting rule) is implemented, pending merge from `impl/`. Slice 9
+splices learning 6f's granting rule) and 10b (`times` moved into `lib/combinators.sth`) are
+implemented, pending merge from `impl/`. Slice 9
 shipped P1–P2 only (`Bool` as a library
 enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
 quotation's declared effect, which does not parse before slice 10a, and is split out as
@@ -1276,19 +1276,17 @@ then find out what the compiler owes it.
 4. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
    primitive they compile down to for constant-stack iteration, plus call-site inlining.
    **Scoped by `docs/phase4-slice4-brief.md`; the decisions below are settled, not open.**
-   The floor is one compiler-known intrinsic, `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`,
-   passing the iteration index: its body quotation returns the row it received, so effect
-   inference only ever unifies an inner row against itself. `while` was weighed as a second
-   floor member (DESIGN.md:285 allows "one or two") and declined here, because its condition
-   quotation returns a `bool` on a passthrough row, which is strictly harder inference.
+   `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` passes the iteration index and its body
+   quotation returns the row it received, so effect inference only ever unifies an inner row
+   against itself.
    The slice ships a runnable constant-stack loop rather than inert plumbing, so the phase's
    riskiest integration (type machinery against quotations against the loop primitive) gets
    a witness in the slice that builds it; the headline is `0 1000000 [ + ] times .` printing
    `499999500000` in constant stack, next to `examples/countdown.sth`'s hand-threaded
-   self-recursive equivalent. The floor is permanent, not a bootstrap: DESIGN.md:281-289
-   makes the loop primitive internal ("not surface syntax, not user-facing") and the thin
-   intrinsic floor user-facing by design, so slice 6 builds on `times` rather than retiring
-   it. A quotation here is a **compile-time marker** carrying its inferred effect and body,
+   self-recursive equivalent. The loop primitive stays internal (DESIGN.md:281-289: "not
+   surface syntax, not user-facing"); what reaches it is the self-tail-call transform, so
+   every combinator including `times` is library source (slice 10b).
+   A quotation here is a **compile-time marker** carrying its inferred effect and body,
    fused at its `call`, never a runtime value: that defers the `Type`/`PolyType`/`IrType`/
    unification/mangling change to slice 7, where a consumer for it finally exists. The two
    "inlining"s the plan used to seem to double-book are different mechanisms and both are

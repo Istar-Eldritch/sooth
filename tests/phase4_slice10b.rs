@@ -316,3 +316,132 @@ fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
         "a qualified-only imported type stays undisposable from the importing module, got: {err}"
     );
 }
+
+// -- R7: exit witnesses on the real, library `times` -------------------------
+//
+// Each asserts full stdout plus the exit code. `times` is now ordinary Sooth
+// source, so these are the only tests that pin what it *computes*; the goldens
+// the intrinsic had asserted the compiler's own arm.
+
+/// Build `src` and return the binary's path, so a golden can run it under a
+/// reduced `ulimit -s` (the constant-stack witnesses) rather than plainly.
+fn build_binary(name: &str, src: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    binary
+}
+
+/// Run `binary` under `ulimit -s {limit_kb}`, returning the exit code (`None`
+/// if it died by signal, e.g. a `SIGSEGV` from an overflowed stack) and stdout.
+fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -s {limit_kb} && exec \"{}\"",
+            binary.display()
+        ))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("binary should run");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
+}
+
+#[test]
+fn times_sums_the_index_over_five_iterations() {
+    // The headline value: `[ + ]` adds each 0-based index into the row seed,
+    // so 0+1+2+3+4 = 10 -- the library `times` hands the body the same index
+    // sequence the intrinsic did.
+    let src = format!(
+        "{}: main ( -- ) 0 5 [ + ] times . ;\n",
+        combinators_import("c | times |")
+    );
+    let (stdout, code) = run_src("10b_times_sum", &src);
+    assert_eq!(stdout, "10\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_runs_one_million_iterations_in_constant_stack() {
+    // The constant-stack guarantee, which is what makes `times-helper`'s
+    // self-tail call a loop back-edge rather than a million splices. The
+    // *printed value* is asserted, not just the exit code: a loop that runs
+    // zero iterations also exits 0.
+    let src = format!(
+        "{}: main ( -- ) 0 1000000 [ drop 1 + ] times . ;\n",
+        combinators_import("c | times |")
+    );
+    let binary = build_binary("10b_times_1m", &src);
+    let (code, out) = run_at_stack_limit(&binary, 1024);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!((code, out.as_str()), (Some(0), "1000000"));
+}
+
+#[test]
+fn times_carries_an_aggregate_through_the_row() {
+    // A `map`-shaped body: the array rides the row through every iteration
+    // while the body borrows it mutably and writes each doubled element back
+    // in place. This is the aliasing-sensitive shape (a loop-carried aggregate
+    // staged across the back-edge), and the printed elements pin the values.
+    let src = format!(
+        "{}: main ( -- )\n\
+         \x20 0 4 fill | a |\n\
+         \x20 4 [ | i | &!a i >usize &!> i 2 * ! ] times\n\
+         \x20 4 [ | i | &a i >usize &> @ . ] times\n\
+         \x20 a drop ;\n",
+        combinators_import("c | times |")
+    );
+    let (stdout, code) = run_src("10b_times_aggregate", &src);
+    assert_eq!(stdout, "0\n2\n4\n6\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_nested_inside_each_map_fold_and_filter_runs() {
+    // The novel risk beyond 10a: a leaf combinator's call site is now three
+    // splices deep (leaf -> `times` -> `times-helper`), and a `times` written
+    // *inside* the leaf's own quotation argument doubles that again. All four
+    // leaves are exercised in one program, each with a `times` in its body.
+    //
+    // `each` prints twice per element (1 1 2 2), `map` adds the inner loop's
+    // 0+1 to each element (2 3), `fold` adds each element twice (2*(1+2) = 6),
+    // and `filter` keeps both elements after running an inner loop per element
+    // (2).
+    let src = format!(
+        "{}: pair ( -- [i64 2] )\n\
+         \x20 0 2 fill | s |\n\
+         \x20 &!s 0 >usize &!> 1 !\n\
+         \x20 &!s 1 >usize &!> 2 !\n\
+         \x20 s ;\n\
+         : main ( -- )\n\
+         \x20 pair [ | v | 2 [ drop v . ] c::times ] c::each\n\
+         \x20 pair [ 2 [ | i | i + ] c::times ] c::map [ . ] c::each\n\
+         \x20 pair 0 [ | acc v | acc 2 [ drop v + ] c::times ] c::fold .\n\
+         \x20 pair [ | v | 0 2 [ drop 1 + ] c::times drop v 0 > ] c::filter . drop ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("10b_times_in_leaves", &src);
+    assert_eq!(stdout, "1\n1\n2\n2\n2\n3\n6\n2\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_nested_inside_an_outer_times_runs() {
+    // The other doubled-depth shape: `times` inside `times`, and a `times`
+    // inside a `while` body. The outer `times` counts 3 rounds of an inner
+    // 2-iteration loop (3*2 = 6), and the `while` runs its own inner `times`
+    // each step while counting to 5.
+    let src = format!(
+        "{}: main ( -- )\n\
+         \x20 0 3 [ | i | 2 [ | j | 1 + ] c::times ] c::times .\n\
+         \x20 0 [ 2 [ | i | ] c::times dup 5 < if 1 + true else false end ] c::while . ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("10b_times_in_times", &src);
+    assert_eq!(stdout, "6\n5\n");
+    assert_eq!(code, 0);
+}

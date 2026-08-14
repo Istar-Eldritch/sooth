@@ -838,7 +838,7 @@ pub(crate) fn infer_line(
     // phantom the spill would marshal. Reject a quotation left here.
     if final_stack.iter().any(|s| s.quot.is_some()) {
         return Err(
-            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` and `times` accept a quotation (a runtime quotation value is slice 7)".to_string(),
+            "error: a quotation cannot be left on the stack at the end of a line: the session carries it into the next line, and only `call` accepts a quotation (a runtime quotation value is slice 7)".to_string(),
         );
     }
     // The sixth position of the no-stored-reference rule: the session's
@@ -1667,11 +1667,11 @@ fn in_word(ctx: &Ctx) -> String {
 /// audited default-deny. A quotation is a compile-time-only marker with a
 /// `Cstr` placeholder `ty` (R4) that ordinary matching would silently accept
 /// or spell into a mismatch, so every consumer that inspects a popped slot's
-/// `ty` names itself through this one guard instead. Only `call`/`times`
-/// consume a quotation; the shuffles forward it and `drop` discards it.
+/// `ty` names itself through this one guard instead. Only `call`
+/// consumes a quotation; the shuffles forward it and `drop` discards it.
 fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
     format!(
-        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` and `times` accept a quotation (a runtime quotation value is slice 7)",
+        "error: `{op}`{} (line {}) cannot take a quotation as an operand; only `call` accepts a quotation (a runtime quotation value is slice 7)",
         in_word(ctx),
         span.line,
     )
@@ -1686,7 +1686,7 @@ fn reject_quotation_operand(ctx: &Ctx, span: Span, op: &str) -> String {
 fn reject_quotation_argument(ctx: &Ctx, span: Span, word: &str) -> String {
     let word = crate::resolve::demangle_word(word);
     format!(
-        "error: a quotation cannot be passed to `{word}`; only `call` and `times` accept one (a runtime quotation value is slice 7){} (line {})",
+        "error: a quotation cannot be passed to `{word}`; only `call` accepts one (a runtime quotation value is slice 7){} (line {})",
         in_word(ctx),
         span.line,
     )

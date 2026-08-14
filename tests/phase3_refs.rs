@@ -54,6 +54,25 @@ fn check_error(src: &str) -> String {
 /// any compiler-known bit.
 const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" . s Spy>tag . ;\n";
 
+/// An `import:` line for the committed combinator library by *absolute* path,
+/// so a temp source built under `temp_dir()` resolves it regardless of cwd.
+fn combinators_import(qualifier: &str) -> String {
+    format!(
+        "import: {qualifier} \"{}/lib/combinators.sth\" ;\n",
+        env!("CARGO_MANIFEST_DIR")
+    )
+}
+
+/// `lib/combinators.sth`'s `times`, inlined: `check_error` runs the checker in
+/// process, where an `import:` line never resolves. Its quotation local is
+/// named `body` rather than the library's `f`, since a local may not shadow a
+/// word name and this file's goldens routinely declare a word `f`.
+const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | body | | to | | from |\n\
+     from to < if from body call from 1 + to body times-helper else end ;\n\
+     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | body | | n | 0 n body times-helper ;\n";
+
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");
     parser::parse(&tokens).expect_err("parsing should fail")
@@ -770,11 +789,14 @@ fn mutable_borrow_dead_before_a_times_body_is_accepted() {
     // throughout" half, not the fine per-use half `if` arms get).
     let (stdout, code) = run_src(
         "borrow-dead-before-times-body",
-        "type: Buf data ^[u8 64] len usize ;\n\
-         : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  p @ drop\n  \
-         3 [ drop b &!Buf>len 1 +! ] times ;\n\
-         : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
-         &!a f\n  &a &Buf>len @ .\n  a drop ;\n",
+        &format!(
+            "{}type: Buf data ^[u8 64] len usize ;\n\
+             : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  p @ drop\n  \
+             3 [ drop b &!Buf>len 1 +! ] times ;\n\
+             : main ( -- )\n  0 >u8 64 fill ^ 0 >usize Buf | a |\n  \
+             &!a f\n  &a &Buf>len @ .\n  a drop ;\n",
+            combinators_import("c | times |")
+        ),
     );
     assert_eq!(stdout, "3\n");
     assert_eq!(code, 0);
@@ -845,12 +867,12 @@ fn mutable_borrow_used_across_a_times_back_edge_is_still_error() {
     // (`IMMORTAL_IN_BODY`), not die at its own last use the way OR-4's `if`
     // arm does -- iteration N's use of `p` follows iteration N-1 reaching the
     // body end while `p` is still meant to be live.
-    let err = check_error(
-        "type: Buf data ^[u8 64] len usize ;\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}type: Buf data ^[u8 64] len usize ;\n\
          : f ( &!Buf -- )\n  | b |\n  b &!Buf>len | p |\n  \
          3 [ drop p @ drop b &!Buf>len 1 +! ] times ;\n\
-         : main ( -- ) ;\n",
-    );
+         : main ( -- ) ;\n"
+    ));
     assert!(
         err.contains("cannot reborrow `b`") && err.contains("a reference derived from it is live"),
         "expected the suspended-place rejection: {err}"
@@ -1989,11 +2011,11 @@ fn reference_carried_into_loop_body_stays_live() {
     // only expires bindings created *within* the current `check_terms`
     // invocation, so `r`, inherited into the `times` body, is never relaxed
     // there and a second `&!v` inside the body conflicts with it.
-    let err = check_error(
-        "type: V x i64 ;\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}type: V x i64 ;\n\
          : main ( -- )\n  1 V | v |\n  &!v | r |\n  \
-         3 [ r &!V>x @ drop  &!v &!V>x 1 +! ] times\n  v drop ;\n",
-    );
+         3 [ r &!V>x @ drop  &!v &!V>x 1 +! ] times\n  v drop ;\n"
+    ));
     assert!(
         err.contains("conflicts with a live borrow of `v`"),
         "a reference inherited into a loop body must stay live across it: {err}"

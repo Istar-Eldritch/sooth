@@ -1250,22 +1250,18 @@ mod tests {
             w(
                 ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n",
                 "passed to `foo`",
-                "only `call` and `times` accept one",
+                "only `call` accepts one",
             ),
             w(
                 ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
                 "passed to `dupit`",
-                "only `call` and `times` accept one",
+                "only `call` accepts one",
             ),
-            // check_outputs (R10) and the `times` body-output row (blocker 2).
+            // check_outputs (R10).
             w(
                 ": f ( -- i64 ) [ + ] ;\n",
                 "declared output",
                 "leaves a quotation on the stack",
-            ),
-            op(
-                ": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n",
-                "`times`",
             ),
             // the REPL residual (R19), checked through `infer_line`.
             Row {

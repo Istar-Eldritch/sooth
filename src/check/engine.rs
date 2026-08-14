@@ -1292,9 +1292,6 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
-    // A one-field struct with a `drop` overload: linear for the same reason any
-    // resource is, used to force the `Copy`-bound failure (X5).
-    const SPY: &str = "type: Spy tag i64 ;\n: drop ( Spy -- ) | s | s Spy>tag drop ;\n";
     fn bare_word(name: &str, module: u32) -> WordDef {
         WordDef {
             name: name.to_string(),
@@ -1570,48 +1567,6 @@ mod tests {
         // never gated -- disposing it is byte-for-byte what it was before 8b.
         let structs = vec![res_struct(0, true)];
         assert!(drop_res(&structs, None, 1).is_ok());
-    }
-    #[test]
-    fn times_typing_obligations() {
-        // R18u: the three `times` typing obligations, each its own row, since a
-        // missed guard is a silent accept (the well-typed witness never trips
-        // them). Move-state identity, the whole-row guard, and row-effect
-        // equality.
-
-        // A well-typed `times` accepts (the body consumes the index and returns
-        // the row unchanged, touching no linear local).
-        check_src(": main ( -- ) 0 10 [ + ] times . ;\n").unwrap();
-
-        // (1) Move-state identity: consuming an outer linear local is rejected,
-        // named, with the repeated-disposal reason.
-        let consume = check_src(&format!(
-            "{SPY}: main ( -- ) 5 Spy | s | 0 10 [ | i | i s drop + ] times . ;\n"
-        ))
-        .expect_err("consuming a linear local should be rejected");
-        assert!(
-            consume.contains("a `times` body cannot consume `s`")
-                && consume.contains("the body runs more than once"),
-            "move-state identity should name `s`, got: {consume}"
-        );
-
-        // (2) Whole-row guard: a quotation anywhere in the row, not just the
-        // consumed top, is rejected.
-        let row_quot = check_src(": main ( -- ) [ + ] 3 [ drop ] times ;\n")
-            .expect_err("a quotation in the row should be rejected");
-        assert!(
-            row_quot.contains("`times`")
-                && row_quot.contains("cannot take a quotation as an operand"),
-            "whole-row guard should reject a row quotation, got: {row_quot}"
-        );
-
-        // (3) Row-effect equality: a body that changes the row's depth is
-        // rejected.
-        let row_effect = check_src(": main ( -- ) 0 10 [ + 1 ] times . ;\n")
-            .expect_err("a body that changes the row should be rejected");
-        assert!(
-            row_effect.contains("`times` body must leave the row unchanged"),
-            "row-effect equality should reject a changed row, got: {row_effect}"
-        );
     }
     #[test]
     fn merged_quotations_are_rejected_at_the_join() {

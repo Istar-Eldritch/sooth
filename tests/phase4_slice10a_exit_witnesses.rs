@@ -1,11 +1,15 @@
 //! Slice 10a, phase 7: the exit witnesses (R15-R19). `my-times`, the recon-4
-//! user-space quotation loop the whole slice exists to make writable, compiles
-//! beside the untouched `times` intrinsic, sums correctly, runs a million
-//! iterations in constant stack, nests, carries an aggregate without
+//! user-space quotation loop the whole slice exists to make writable, runs a
+//! million iterations in constant stack, nests, carries an aggregate without
 //! aliasing, and its row grounding is pinned to lose provenance (a borrow can
-//! be substituted for an unrelated one of the same referent type). R19 pins
-//! that nothing else moved: the intrinsic, `while`, the corpus, and the
-//! library are unchanged against the base commit this slice branches from.
+//! be substituted for an unrelated one of the same referent type).
+//!
+//! Two of these witnesses were written against the `times` intrinsic that 10b
+//! deleted. `my_times_compiles_beside_the_untouched_intrinsic_and_sums` went
+//! with it (there is no intrinsic to compile beside, and 10b's own goldens in
+//! `tests/phase4_slice10b.rs` cover summing on the real `times`), and R19's
+//! "the library contains no `~`" is inverted below: `lib/combinators.sth` now
+//! carries exactly the two `~` signatures 10b's `times` needed.
 
 static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -68,21 +72,7 @@ const MY_TIMES: &str = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      else\n\
      end ;\n";
 
-// -- R15: user-space `my-times` compiles beside the untouched intrinsic -----
-
-#[test]
-fn my_times_compiles_beside_the_untouched_intrinsic_and_sums() {
-    // Both the intrinsic `times` and the user-space `my-times` are called in
-    // the same program, so this pins that 10a added a *writable signature*
-    // rather than replacing the intrinsic: `times` still exists, unchanged
-    // shape (`( ..s i64 -- ..s )`). `0 0 5 [ + ] my-times` sums 0+1+2+3+4 =
-    // 10; `0 3 [ 1 + + ] times` sums (0+1)+(1+1)+(2+1) = 6.
-    let src =
-        format!("{MY_TIMES}: main ( -- )\n  0 0 5 [ + ] my-times .\n  0 3 [ 1 + + ] times . ;\n");
-    let (stdout, code) = run_src("my-times-sum", &src);
-    assert_eq!(stdout, "10\n6\n");
-    assert_eq!(code, 0);
-}
+// -- R15: a user-space `my-times` runs in constant stack --------------------
 
 #[test]
 fn my_times_runs_one_million_iterations_in_constant_stack() {
@@ -183,17 +173,28 @@ fn my_times_nested_in_itself_produces_correct_output() {
 // -- R19: no regression ------------------------------------------------------
 
 #[test]
-fn combinators_library_contains_no_tilde() {
-    // R19: `lib/combinators.sth` contains no `~`, i.e. 10a changed no
-    // shipped signature to the new inline-quotation syntax; the intrinsic's
-    // callers were not touched.
+fn combinators_library_declares_exactly_the_two_times_tildes() {
+    // R19, inverted by 10b: the library now uses 10a's inline-quotation syntax,
+    // but only where `times` needs it. Both signatures are pinned literally,
+    // and the *total* `~` count is pinned at two, so a stray `~` anywhere else
+    // (a third signature, or one in a prose comment) fails rather than
+    // satisfying a bare `contains` pair.
     let current_src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("lib/combinators.sth"),
     )
     .expect("reading lib/combinators.sth should succeed");
     assert!(
-        !current_src.contains('~'),
-        "lib/combinators.sth must contain no `~`"
+        current_src.contains(": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )"),
+        "lib/combinators.sth must declare `times-helper` over an inline quotation"
+    );
+    assert!(
+        current_src.contains(": times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )"),
+        "lib/combinators.sth must declare `times` over an inline quotation"
+    );
+    assert_eq!(
+        current_src.matches('~').count(),
+        2,
+        "lib/combinators.sth must carry exactly the two `~` signatures above"
     );
 }
 

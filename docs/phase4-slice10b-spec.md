@@ -679,6 +679,56 @@ home-scope pass catches before splicing (a rule-intactness pin, not a splice wit
 prose in README, ROADMAP or DESIGN still calls `times` an intrinsic (R11); and all four R9
 mutations have been run, each flipping the goldens R9 predicts and no others (R9).
 
+## Delivery findings (measured at Phase 4)
+
+**Q3's counts, re-measured at Phase 4 entry: 46 failures over 9 targets**, not the snapshot's
+55 over 11. The two differences are both accounted for and neither is a regression:
+`phase4_slice6h` and `phase4_slice6h_fill_corpus` were already cleared by Phase 3's corpus
+imports (so 9 targets, not 11), and `phase4_combinators` came in at 17 rather than 20 and
+`phase4_generics` at 11 rather than 12 (the snapshot's own footnote already recorded that
+second one). Every listed target is green on exit.
+
+**Q2's binary-size delta, re-measured across the times-using corpus** (build at the
+pre-slice base `91f6193`, build at Phase 4, `stat -c%s` each emitted binary): **zero for
+eight of nine files** (`array_totals`, `array_totals_hand`, `combinator_in_times`,
+`combinator_in_times_hand`, `filter_while`, `filter_while_hand`, `times`, `inplace_fold`,
+all byte-for-byte identical in size), and `array_ctor` grows 8 bytes (17608 -> 17616).
+That is alignment noise, not the KB-scale growth that would mean a per-iteration indirect
+call replaced the spliced loop. The `.ssa` baselines do change (R6): the spliced
+`times-helper` adds a self-phi for the loop bound and an empty join block per loop, which
+QBE folds away.
+
+**Two rejections the intrinsic owned are now compiler crashes, both pre-existing.** The
+intrinsic's whole-row guard rejected a quotation riding *below* the consumed top of the row.
+No general guard replaced it, and the shape reaches the backend: `[ + ] 3 [ drop ] times
+drop` dies as `qbe: invalid type for operand %v0 in phi %v4`, and calling the row quotation
+afterwards hits `unreachable!()` in `func_builder/quotation.rs`. This is **not** 10b's doing:
+both reproduce identically at `91f6193` on a user-declared row combinator (10a's own
+`my-times` shape), and 10b only widens the reach to the library `times`. A third, same
+family: `while` over an *erased* quotation (`: pred ( -- [ i64 -- i64 bool ] ) ... ;`) panics
+in `control_flow.rs`, also at `91f6193`. `tests/phase4_generics.rs`'s
+`times_with_a_quotation_in_its_row_is_error` now pins only what still rejects (the outputs
+check on `main`, one step later) and says so; the crashes want a slice that puts a general
+guard on a row-typed combinator's call, since three shapes now share one hole.
+
+**`times` no longer drives an erased quotation.** The library `times` declares 10a's
+inline-only `~[ ... ]` parameter, so a materialized quotation value is rejected
+(`` `times` expects a quotation `~[ i64 -- ]` here, found `[ i64 i64 -- i64 ]` ``) where the
+intrinsic accepted it and emitted one indirect call in the loop body. The capability itself
+survives on any combinator declared over a plain `[ ... ]` parameter, so
+`phase4_quotations.rs`'s witness is re-pointed to a test-local self-tail driver of that shape
+(renamed `loop_over_erased_quotation_runs_constant_stack`) and still asserts exactly one
+`CallIndirect`.
+
+**R9's four mutations, all run against a throwaway copy of the tree:**
+
+| Mutation | Flipped | Matches prediction |
+| --- | --- | --- |
+| (a) `frame_floor` always `None` | both parked-linear accepts, the own-frame tripwire, `parked_linear_local_never_disposed_at_all_is_rejected`, plus `phase4_slice6f`'s two, `phase4_slice6h_fill_corpus` and `qbe_baseline` | yes, and wider than predicted: the last four are all `examples/inplace_fold.sth` failing to compile, which is the same relaxation seen through Phase 3's corpus imports (the prediction was written when `fold_body` could not reach the checker at all) |
+| (b) delete the combinator-site `check_linear_across_back_edge` call | `while_body_linear_local_across_back_edge_is_error`, alone | exactly |
+| (c) drop `MaybeMoved(_)` from `src/check.rs`'s match arm | `quotation_consuming_an_enclosing_linear_on_one_branch_is_rejected`, alone | exactly (a wording witness: the program is still rejected, with different text) |
+| (d) revert R10's gate to `ctx.module()` | `spliced_body_disposes_a_locally_declared_linear`, alone | exactly |
+
 ## Phases (JSON)
 
 ```json
