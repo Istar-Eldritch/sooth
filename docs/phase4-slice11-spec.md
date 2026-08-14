@@ -441,6 +441,16 @@ happy path plus at least one error/edge case; every new test is mutation-tested
 - The surviving adversarial shape from Feature C (the linear-referent rejection)
   gets its own negative golden: an `inline` word borrowing-and-returning a
   reference to a linear callee-declared local is rejected by must-consume.
+- The two remaining Feature C shapes get positive goldens, since the shapes the
+  witness pair covers are all caller-rooted through an *input* reference and so
+  never exercise `alpha_rename_locals`:
+  `inline_reference_to_nonlinear_callee_local_is_accepted` (referent is a
+  non-linear struct the callee itself pushes) and
+  `transitive_inline_reference_output_is_accepted` (an `inline` word returning a
+  reference, called by another `inline` word that returns it on). Both write
+  through the returned reference and read the new value back; in the transitive
+  one a write in the middle layer and a write in `main` must land in the same
+  referent, and dropping `inline` from either layer rejects the program.
 - `combinators_retype_output_byte_identical` — after Feature B, a corpus program
   exercising `each`/`map`/`fold`/`filter`/`while` emits QBE byte-identical to the
   pre-retype baseline; a stored/returned quotation still requires `[ ... ]`

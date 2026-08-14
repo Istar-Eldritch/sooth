@@ -419,6 +419,25 @@ fn inline_reference_to_nonlinear_callee_local_is_accepted() {
 }
 
 #[test]
+fn transitive_inline_reference_output_is_accepted() {
+    // Feature C's transitive shape: an `inline` word returning a reference,
+    // called by another `inline` word that returns it on. Each splice layer
+    // alpha-renames, so the chain bottoms out at `main`, whose frame owns the
+    // referent. Both layers are load-bearing -- dropping `inline` from either
+    // one rejects the program with the reference-output message. The write in
+    // the middle layer and the write in `main` must land in the *same* `P`,
+    // which they only do if the two splices resolved to one caller local.
+    let src = "type: P n u32 ;\n\
+               : fresh inline ( -- &!u32 ) 7 >u32 P | b | &!b &!P>n ;\n\
+               : bump inline ( -- &!u32 ) fresh | r | r 5 >u32 +! r ;\n\
+               : main ( -- ) bump | r | r @ >i64 . r 2 >u32 +! r @ >i64 . ;\n";
+    let (binary, stdout, code) = build_and_run("slice11-ref-transitive", src);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "12\n14\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn repl_inline_word_is_retained_not_lowered() {
     // R7: the REPL's retention gate was `word_declares_quotation_parameter`, so
     // an `inline` word taking no quotation fell through to the ordinary
