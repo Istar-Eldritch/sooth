@@ -49,7 +49,7 @@ impl<'a> FuncBuilder<'a> {
             } => self.lower_if(then_branch, else_branch, tail),
             // R12: a quotation literal interns its body and lowers to a phantom
             // `Value` with a placeholder `IrType` and *no* `Instr`. The checker
-            // guarantees this phantom reaches only `call`/`times`/shuffle/bind
+            // guarantees this phantom reaches only `call`/shuffle/bind
             // or a materialization boundary (a store, a word output, or a
             // branch join, R11) -- where it is turned into a real `(code, env)`
             // aggregate *before* it enters a `Phi`, operand, terminator, or
@@ -129,9 +129,10 @@ impl<'a> FuncBuilder<'a> {
 
                 // Exit: the array is the constructor's result. The fixed loop
                 // body never terminates, so `terminated` is already false here
-                // (unlike the `times` arm, whose spliced user body can); the
-                // reset keeps this arm identical to the loop template so it
-                // stays correct if the body ever gains a terminating term.
+                // (unlike a self-tail combinator's spliced body, whose user
+                // code can terminate); the reset keeps this arm identical to
+                // the loop template so it stays correct if the body ever
+                // gains a terminating term.
                 self.start_block(exit_block);
                 self.terminated = false;
                 self.stack.push(dst);
@@ -141,17 +142,18 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// R10: lower a self-tail combinator (`while`) as a splice-time loop,
-    /// composing the `times` arm's mid-body loop opening with the whole-word
-    /// transform's self-call-driven back-edge. The body's leading quotation
-    /// binding(s) are lowered *before* `begin_loop`, so the loop-invariant
-    /// `Copy` quotation phantom is bound to a local (resolved statically each
-    /// iteration) and excluded from the loop-carried phis; only the state row
-    /// is carried. `stage_aggregates = true` reuses the slice-3 aggregate
-    /// staging verbatim for a carried-aggregate state. The enclosing loop
-    /// state is saved and restored so loops compose, exactly as the `times`
-    /// arm does. A tail-position self-call inside the body is emitted as a
-    /// back-edge (`lower_call`, keyed on `cur_combinator`), never a re-splice.
+    /// R10: lower a self-tail combinator (`while`, `times-helper`) as a
+    /// splice-time loop: a `begin_loop`-opened header composed with the
+    /// whole-word transform's self-call-driven back-edge. The body's leading
+    /// quotation binding(s) are lowered *before* `begin_loop`, so the
+    /// loop-invariant `Copy` quotation phantom is bound to a local (resolved
+    /// statically each iteration) and excluded from the loop-carried phis;
+    /// only the state row is carried. `stage_aggregates = true` reuses the
+    /// slice-3 aggregate staging verbatim for a carried-aggregate state. The
+    /// enclosing loop state is saved and restored so loops compose (see
+    /// `save_loop_state`). A tail-position self-call inside the body is
+    /// emitted as a back-edge (`lower_call`, keyed on `cur_combinator`),
+    /// never a re-splice.
     pub(in crate::ir) fn lower_self_tail_combinator(&mut self, name: &str, body: &[Term]) {
         let saved_loop_state = self.save_loop_state();
         let saved_combinator = self.cur_combinator.take();
@@ -507,7 +509,7 @@ impl<'a> FuncBuilder<'a> {
                 // caller's quotation literals sit on `self.stack` as phantom
                 // `Value`s already (a `TermKind::Quotation` earlier in this
                 // body recorded each `Value -> QuotId`), so the spliced body's
-                // own `call`/`times` resolves them with no extra plumbing.
+                // own `call` resolves them with no extra plumbing.
                 // `tail = false` and the locals-truncate mirror the `call`
                 // splice above. Checked before the `&`/conversion/struct
                 // dispatch since a combinator name is an ordinary word name.

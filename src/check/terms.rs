@@ -43,9 +43,10 @@ pub(super) fn check_terms(
 /// past this block (`releasable_into`), and `back_edge` is whether this
 /// invocation's own body can run more than once or be entered from elsewhere
 /// (a spliced quotation or combinator body), which changes how a granted
-/// name's use inside is tracked (see the `Liveness` struct doc). `check_terms` above is the plain
-/// entry point every root invocation (a word body, a REPL line, a `case`
-/// clause) uses: nothing is ancestor to those, so both are empty/`false`.
+/// name's use inside is tracked (see the `Liveness` struct doc).
+/// `check_terms` above is the plain entry point every root invocation (a
+/// word body, a REPL line, a `case` clause) uses: nothing is ancestor to
+/// those, so both are empty/`false`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_terms_relaxed(
     terms: &[Term],
@@ -984,9 +985,8 @@ fn check_term(
         // R5: a quotation literal interns its body into the side table and
         // pushes a compile-time-only marker (D1/D2). The body is *not* checked
         // here (D3): a bare body's input row is unknown until its consumption
-        // site (`call`). The placeholder `ty` is `Cstr`, a
-        // registry-free scalar no user op accepts once R11's default-deny is
-        // in place (R4).
+        // site (`call`). The placeholder `ty` is `Cstr`, a registry-free
+        // scalar no user op accepts once R11's default-deny is in place (R4).
         TermKind::Quotation(body) => {
             let id = QuotId(prov.quotations.len());
             prov.quotations.push(QuotBody {
