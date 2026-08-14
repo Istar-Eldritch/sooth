@@ -3,7 +3,9 @@
 \ `times` loop with no per-element call and runs in constant stack.
 \
 \ Each is a leaf combinator: it drives a `times` loop directly and hands one
-\ element to its quotation parameter per iteration. `map`/`fold` are NOT built
+\ element to its quotation parameter per iteration. `times` is itself ordinary
+\ Sooth source below, not a compiler intrinsic, and splices the same way, so a
+\ leaf combinator's call site sits one splice above `times`/`times-helper`. `map`/`fold` are NOT built
 \ on `each`, but this is a cost choice, not an impossibility: `fold` over `each`
 \ is expressible by riding the accumulator in a captured one-element array
 \ reached by balanced `&`/`&!` borrows inside the literal (D3 accepts balanced
@@ -15,7 +17,25 @@
 \ counter cell; a leaf keeps the library flat at depth 1. They share the loop
 \ shape, not a call.
 
-export: each map fold filter while ;
+export: each map fold filter while times times-helper ;
+
+\ `times` runs its quotation `n` times, handing it the 0-based index as its top
+\ input and threading the row `..s` through untouched. It is a thin wrapper
+\ over `times-helper`, a self-*tail* combinator carrying a from/to pair: the
+\ recursive `times-helper` in tail position lowers to a loop back-edge (D8),
+\ not an endless splice, so `times` runs in constant stack. `times-helper` is
+\ exported because the REPL's dlopen import path retains only a module's
+\ exported words, and every caller of `times` splices its body.
+: times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
+  | f | | to | | from |
+  from to < if
+    from f call
+    from 1 + to f times-helper
+  else
+  end ;
+
+: times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
+  | f | | n | 0 n f times-helper ;
 
 : each ( ['T 'N] [ 'T -- ] -- )
   | f | len >i64 | count | | arr |
