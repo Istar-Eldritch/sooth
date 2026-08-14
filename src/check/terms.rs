@@ -42,10 +42,11 @@ pub(super) fn check_terms(
 /// names this invocation's caller has already proven have no residual use
 /// past this block (`releasable_into`), and `back_edge` is whether this
 /// invocation's own body can run more than once or be entered from elsewhere
-/// (`times`/quotation), which changes how a granted name's use inside is
-/// tracked (see the `Liveness` struct doc). `check_terms` above is the plain
-/// entry point every root invocation (a word body, a REPL line, a `case`
-/// clause) uses: nothing is ancestor to those, so both are empty/`false`.
+/// (a spliced quotation or combinator body), which changes how a granted
+/// name's use inside is tracked (see the `Liveness` struct doc).
+/// `check_terms` above is the plain entry point every root invocation (a
+/// word body, a REPL line, a `case` clause) uses: nothing is ancestor to
+/// those, so both are empty/`false`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_terms_relaxed(
     terms: &[Term],
@@ -254,9 +255,9 @@ fn check_term(
                 }
                 return Ok(stack);
             }
-            // R6: `call`/`times` are compiler-known words intercepted before
-            // every builtin family and user-word lookup (a local named `call`
-            // already won above). `call` requires a statically-known
+            // R6: `call` is a compiler-known word intercepted before every
+            // builtin family and user-word lookup (a local named `call`
+            // already won above). It requires a statically-known
             // quotation literal on top (D4) and splices its interned body
             // against the live stack, so `[ 1 + ] call` checks as `1 +` (D3).
             if name == "call" {
@@ -316,144 +317,6 @@ fn check_term(
                         span,
                     },
                 )?;
-                return Ok(stack);
-            }
-            // R18: `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, the
-            // constant-stack loop primitive. Intercepted alongside `call`. The
-            // body is spliced against the row plus a synthesized index and must
-            // return the row unchanged (D6); nested `times` is rejected here,
-            // not in lowering, which has no error channel (R14 step 0).
-            if name == "times" {
-                let Some(top) = stack.pop() else {
-                    return Err(underflow_error(ctx, span, "times", 2, 0));
-                };
-                // R9: an *abstract* quotation (a declared parameter, no known
-                // literal) checks against its declared effect: pop the count,
-                // require the effect be row-preserving with a trailing `i64`
-                // index (`[ ..row i64 -- ..row ]`), and leave the row
-                // unchanged. The three `times` obligations reduce to checks on
-                // the declared rows (a declared effect names no local and
-                // captures no borrow, so move/borrow identity hold trivially).
-                if top.quot.is_none() {
-                    // Slice 10a (R2): a `~` abstract parameter is accepted by
-                    // `times` exactly like an ordinary quotation parameter.
-                    if let Some(eff) = crate::ast::is_quotation_type(top.ty) {
-                        return check_abstract_quotation_times(eff, span, stack, ctx);
-                    }
-                    return Err(times_needs_quotation_error(ctx, span));
-                }
-                let Some(QuotRef::Known(id)) = top.quot else {
-                    return Err(times_needs_quotation_error(ctx, span));
-                };
-                let Some(count) = stack.pop() else {
-                    return Err(underflow_error(ctx, span, "times", 2, 1));
-                };
-                // The count is also a type-directed read, so a quotation there
-                // is the default-deny wording, not a `Cstr`-placeholder mismatch.
-                if count.quot.is_some() {
-                    return Err(reject_quotation_operand(ctx, span, "times"));
-                }
-                if count.ty != Type::I64 {
-                    return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
-                }
-                // 6d/R6: a `times` nested in a loop -- inside a self-tail word,
-                // another `times` body, or a self-tail combinator body -- is no
-                // longer rejected. Lowering's hoist-target split (R1-R3) keeps
-                // every such nesting constant-stack, so the old R18/R14b
-                // rejection and its `loop_depth` bookkeeping are gone.
-                // R18: the row is the remaining stack; a quotation anywhere in
-                // it would reach `begin_loop`'s phi over a phantom (R14). Guard
-                // the whole row, not just the consumed top.
-                if stack.iter().any(|s| s.quot.is_some()) {
-                    return Err(reject_quotation_operand(ctx, span, "times"));
-                }
-                // R18: the body is spliced once but runs N times, so it must be
-                // identity on the move/borrow state (clone-and-compare), or a
-                // linear local it consumes would be disposed N times. Snapshot
-                // before the splice; `leave_block` drops the body's own
-                // bindings, so what remains changed is an *outer* local.
-                let moves_before = scope.moves.states.clone();
-                let derivs_before: HashSet<DerivId> =
-                    live_derivs(&stack, scope, prov, live, at).collect();
-                let row = stack.clone();
-                // Splice the body against the row plus a synthesized index (the
-                // body's top input), bracketed like `call` (R6), `tail = false`.
-                // 6d/R6: a `times` nested in the body is now legal, so no
-                // `loop_depth` is raised across the splice.
-                stack.push(Slot::computed(Type::I64));
-                let body = prov.quotations[id.0].body.clone();
-                let depth = scope.depth();
-                // D6: the row-preservation guard below already rejects a
-                // body that carries a reference across the back-edge, so a
-                // granted outer name is tracked the same back-edge way as a
-                // quotation's own body (used anywhere inside pins it live
-                // throughout, per-iteration re-entry means it cannot die
-                // early inside).
-                let granted = releasable_into(
-                    scope,
-                    base_depth,
-                    outer_releasable,
-                    &siblings[at + 1..],
-                    live,
-                    at,
-                );
-                let result = check_terms_relaxed(
-                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
-                    &granted, true,
-                )?;
-                leave_block(
-                    ctx,
-                    scope,
-                    depth,
-                    BlockEnd::Arm {
-                        token: "times",
-                        span,
-                    },
-                )?;
-                // R18: identity on the move state. A body's own bindings are
-                // already gone (`leave_block`), so a local left `Moved`/
-                // `MaybeMoved` where it was `Live` is an outer linear local the
-                // body consumed; name the first such one.
-                if let Some(local) = moves_before.iter().find_map(|(n, before)| {
-                    match (before, scope.moves.states.get(n)) {
-                        (MoveState::Live, Some(MoveState::Moved(_) | MoveState::MaybeMoved(_))) => {
-                            Some(n.clone())
-                        }
-                        _ => None,
-                    }
-                }) {
-                    return Err(times_body_consumes_local_error(ctx, span, &local));
-                }
-                // R18: identity on the borrow state. A borrow is idempotent per
-                // iteration, so a well-formed body leaves `live_derivs`
-                // unchanged; a difference means a reference would cross the
-                // back-edge into the next iteration.
-                let derivs_after: HashSet<DerivId> =
-                    live_derivs(&result, scope, prov, live, at).collect();
-                if derivs_after != derivs_before {
-                    return Err(times_body_borrow_across_loop_error(ctx, span));
-                }
-                // D6: the body's net effect on the row must equal the row.
-                let same_shape = row.len() == result.len()
-                    && result.iter().zip(&row).all(|(found, want)| {
-                        matches!(
-                            match_slot(*found, want.ty),
-                            SlotMatch::Exact | SlotMatch::LiteralSizeType
-                        )
-                    });
-                if !same_shape {
-                    return Err(times_body_row_effect_error(ctx, span));
-                }
-                // R18: the whole-row guard runs on the *entry* row, but a body
-                // that consumes a real value and constructs a quotation into
-                // its place leaves a phantom in the output row that `match_slot`
-                // accepts as `Exact` against the `Cstr` placeholder. That
-                // phantom would be carried into the loop's back-edge phis, so
-                // reject it here with the same whole-row wording.
-                if result.iter().any(|s| s.quot.is_some()) {
-                    return Err(reject_quotation_operand(ctx, span, "times"));
-                }
-                stack = result;
                 return Ok(stack);
             }
             if let Some(stack) = check_reference_word(
@@ -611,8 +474,18 @@ fn check_term(
                 }
                 let base = stack.len() - n;
                 // R8: no linear value live across the edge (below the args, or
-                // an unconsumed frame local).
-                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
+                // an unconsumed frame local). `base_depth` is this `if` arm's
+                // entry depth; it is passed here and nowhere else (see
+                // `check_linear_across_back_edge`).
+                check_linear_across_back_edge(
+                    ctx,
+                    span,
+                    name,
+                    &stack[..base],
+                    scope,
+                    arrays,
+                    Some(base_depth),
+                )?;
                 // R9: no reference into a frame local carried by the args.
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
                 // R12: the self-call's arguments are checked against the ground
@@ -621,8 +494,8 @@ fn check_term(
                 // used to get from the produced-inputs fiction, so this is made
                 // explicit. Sound because the marker matches only in tail
                 // position. A quotation-typed declared input matches any
-                // quotation-carrying arg (its own `call`/`times` already
-                // checked the body); everything else matches by type.
+                // quotation-carrying arg (its own `call` already checked the
+                // body); everything else matches by type.
                 for (i, want) in ground_inputs.iter().enumerate() {
                     let found = stack[base + i];
                     if crate::ast::is_quotation_type(*want).is_some() {
@@ -784,7 +657,15 @@ fn check_term(
                 }
             }
             if tail && ctx.mangled_name() == Some(name.as_str()) {
-                check_linear_across_back_edge(ctx, span, name, &stack[..base], scope, arrays)?;
+                check_linear_across_back_edge(
+                    ctx,
+                    span,
+                    name,
+                    &stack[..base],
+                    scope,
+                    arrays,
+                    None,
+                )?;
                 check_reference_across_back_edge(ctx, span, name, &stack[base..], prov)?;
             }
             // R19/R22: a struct/enum constructor consuming an erased closure
@@ -1104,9 +985,8 @@ fn check_term(
         // R5: a quotation literal interns its body into the side table and
         // pushes a compile-time-only marker (D1/D2). The body is *not* checked
         // here (D3): a bare body's input row is unknown until its consumption
-        // site (`call`/`times`). The placeholder `ty` is `Cstr`, a
-        // registry-free scalar no user op accepts once R11's default-deny is
-        // in place (R4).
+        // site (`call`). The placeholder `ty` is `Cstr`, a registry-free
+        // scalar no user op accepts once R11's default-deny is in place (R4).
         TermKind::Quotation(body) => {
             let id = QuotId(prov.quotations.len());
             prov.quotations.push(QuotBody {
@@ -1165,6 +1045,18 @@ fn linear_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, ty: Type) 
 /// self-tail-call, either stranded on the stack below the call's arguments or
 /// held by a local that was never consumed. A value *moved into* the call's
 /// arguments is forwarded, not live across the edge, so it stays legal.
+///
+/// `frame_floor` is `Some` only at a spliced self-tail combinator's site, where
+/// it is the entry depth of the `if` arm the back-edge sits in; a local bound
+/// below it is exempt from the second clause. That clause is not what makes
+/// disposal safe: an unconsumed linear is caught anyway by end-of-scope
+/// disposal and the branch-join `MaybeMoved` guard, and a self-tail call has no
+/// position after it, so the clause's only job is to *locate* that same
+/// rejection at the back-edge. Below the floor the location is wrong: the loop
+/// neither rebinds nor carries the local, and the enclosing word still owns and
+/// disposes it. At the whole-word TCO site there is nothing below the floor to
+/// admit (a self-call must supply the word's full declared inputs), so passing
+/// a floor there would only open a hole.
 fn check_linear_across_back_edge(
     ctx: &Ctx,
     span: Span,
@@ -1172,6 +1064,7 @@ fn check_linear_across_back_edge(
     below_args: &[Slot],
     scope: &Scope,
     arrays: &[ArrayDecl],
+    frame_floor: Option<usize>,
 ) -> Result<(), String> {
     if let Some(slot) = below_args
         .iter()
@@ -1179,7 +1072,24 @@ fn check_linear_across_back_edge(
     {
         return Err(linear_across_back_edge_error(ctx, span, callee, slot.ty));
     }
-    if let Some(local) = scope.moves.unconsumed().first() {
+    // `position` resolves to the *first* matching binding; this is only correct
+    // because Sooth forbids rebinding a live name, so `name` names at most one
+    // live position at a time. If that rule were ever relaxed, a shadowing
+    // local could inherit an ancestor's floor-exempt index here.
+    let below_floor = |name: &str| match frame_floor {
+        Some(floor) => scope
+            .bound
+            .iter()
+            .position(|b| b.name == name)
+            .is_some_and(|at| at < floor),
+        None => false,
+    };
+    if let Some(local) = scope
+        .moves
+        .unconsumed()
+        .into_iter()
+        .find(|name| !below_floor(name))
+    {
         let ty = scope
             .local_type(local)
             .expect("a tracked local is in scope");
@@ -1239,46 +1149,6 @@ fn check_abstract_quotation_call(
     Ok(stack)
 }
 
-/// R9: check `f times` for an *abstract* quotation `f`. The count is already
-/// verified as an `i64` by the caller path's guard below; here the declared
-/// effect must be row-preserving with a trailing `i64` index
-/// (`inputs == outputs ++ [i64]`), and the row on the stack is left unchanged.
-fn check_abstract_quotation_times(
-    eff: &QuotEffect,
-    span: Span,
-    mut stack: Vec<Slot>,
-    ctx: &Ctx,
-) -> Result<Vec<Slot>, String> {
-    let Some(count) = stack.pop() else {
-        return Err(underflow_error(ctx, span, "times", 2, 1));
-    };
-    if count.quot.is_some() {
-        return Err(reject_quotation_operand(ctx, span, "times"));
-    }
-    if count.ty != Type::I64 {
-        return Err(type_mismatch_error(ctx, span, "times", Type::I64, count.ty));
-    }
-    let row_preserving = eff.inputs.last() == Some(&Type::I64)
-        && eff.inputs.len() == eff.outputs.len() + 1
-        && eff.inputs[..eff.outputs.len()] == eff.outputs[..];
-    if !row_preserving {
-        return Err(times_body_row_effect_error(ctx, span));
-    }
-    let row_len = eff.outputs.len();
-    if stack.len() < row_len {
-        return Err(underflow_error(ctx, span, "times", row_len, stack.len()));
-    }
-    let base = stack.len() - row_len;
-    for (i, want) in eff.outputs.iter().enumerate() {
-        let found = stack[base + i];
-        match match_slot(found, *want) {
-            SlotMatch::Exact | SlotMatch::LiteralSizeType => {}
-            _ => return Err(type_mismatch_error(ctx, span, "times", *want, found.ty)),
-        }
-    }
-    Ok(stack)
-}
-
 /// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
 /// declared output. Extracted as a named, callable function (R14a) so phase 6
 /// can drive it from a white-box test: `#[ignore]` skips execution, not
@@ -1307,53 +1177,6 @@ fn back_edge_outs(
             out
         })
         .collect()
-}
-
-/// R18: `times` reached without a statically-known quotation literal on top
-/// (D4). Parallel to `call_needs_quotation_error`.
-fn times_needs_quotation_error(ctx: &Ctx, span: Span) -> String {
-    match ctx {
-        Ctx::Word { name, .. } => format!(
-            "error: `times` in `{}` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
-            name, span.line
-        ),
-        Ctx::Line { .. } => format!(
-            "error: `times` (line {}) expects a quotation on the stack (a quotation cannot be a runtime value; a runtime quotation value is slice 7)",
-            span.line
-        ),
-    }
-}
-
-/// R18: the body is spliced once but runs N times, so a linear outer local it
-/// consumes would be disposed of more than once. The single most important
-/// `times` checker rule.
-fn times_body_consumes_local_error(ctx: &Ctx, span: Span, name: &str) -> String {
-    format!(
-        "error: a `times` body cannot consume `{name}`{} (line {}): the body runs more than once, so the value would be disposed of more than once",
-        in_word(ctx),
-        span.line,
-    )
-}
-
-/// R18: a reference the body derives would cross the back-edge into the next
-/// iteration. A borrow is idempotent per iteration, so a well-formed body
-/// leaves `live_derivs` unchanged; this fires when it does not.
-fn times_body_borrow_across_loop_error(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: a `times` body cannot leave a reference live across the loop{} (line {}): the local it borrows does not survive to the next iteration",
-        in_word(ctx),
-        span.line,
-    )
-}
-
-/// R18/D6: the body's net effect on the row is not identity -- it must consume
-/// the index and return the row it received unchanged.
-fn times_body_row_effect_error(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: a `times` body must leave the row unchanged{} (line {}): it takes `( ..s i64 -- ..s )`, consuming the index and returning the same row",
-        in_word(ctx),
-        span.line,
-    )
 }
 
 /// The borrow-suspension bookkeeping must agree at a branch join, real

@@ -753,6 +753,12 @@ pub(super) fn scoped_operator_overloads(
 /// `drop` override is not visible to the calling module. The name checked is the
 /// struct's demangled source spelling, since `ModuleInfo::selective` is keyed by
 /// source names while `decl.name` is mangled (`Res__m1`) in a >=2-module build.
+///
+/// The visible-from module is `span.module`, the module the term was *written*
+/// in, not `ctx.module()`, the module it is being checked in. The two differ
+/// only under splicing, where `ctx.module()` is the splice destination (a
+/// library's own module for a combinator body), which would judge the caller's
+/// `drop` against the library's imports.
 pub(super) fn check_drop_import_visibility(
     ctx: &Ctx,
     span: Span,
@@ -760,7 +766,7 @@ pub(super) fn check_drop_import_visibility(
     decl: &StructDecl,
 ) -> Result<(), String> {
     let source = crate::resolve::demangle_word(&decl.name);
-    if is_name_visible_to_module(m, ctx.module(), decl.module, source) {
+    if is_name_visible_to_module(m, span.module, decl.module, source) {
         Ok(())
     } else {
         Err(drop_import_visibility_error(ctx, span, m, decl, source))
@@ -780,7 +786,23 @@ fn drop_import_visibility_error(
     decl: &StructDecl,
     source: &str,
 ) -> String {
-    let caller = ctx.module() as usize;
+    // `span.module`, matching the gate above: deriving the qualifier from
+    // `ctx.module()` would look it up in the splice destination's import map
+    // and describe an import the authoring module never wrote.
+    //
+    // The gate above already decided accept/reject as a pure function of
+    // `span.module`, so `ctx` cannot change whether this function runs at
+    // all, only what it prints once it does: a quotation literal is
+    // re-validated against each nesting level's own live row
+    // (`check_poly_combinator_args`, row = `stack[..base]`), so `ctx` here can
+    // be a splice destination several levels removed from `span.module`, and
+    // that divergence is routine, not a corner case, including in programs
+    // that pass. `drop_visibility_error_is_worded_from_the_authoring_module_
+    // under_nested_splicing` (`tests/phase4_slice10b.rs`) pins the print side:
+    // `m[ctx.module()]` would name a different qualifier than `m[caller]`
+    // there, and the wrong one. `m[ctx.module()]` is always a valid index
+    // either way, so there is no panic risk from the choice.
+    let caller = span.module as usize;
     let qualifier = m[caller]
         .imports
         .iter()
@@ -1241,22 +1263,18 @@ mod tests {
             w(
                 ": foo ( i64 -- i64 ) ;\n: main ( -- ) [ + ] foo drop ;\n",
                 "passed to `foo`",
-                "only `call` and `times` accept one",
+                "only `call` accepts one",
             ),
             w(
                 ": dupit ( 'T: Copy -- 'T 'T ) dup ;\n: main ( -- ) [ + ] dupit drop drop ;\n",
                 "passed to `dupit`",
-                "only `call` and `times` accept one",
+                "only `call` accepts one",
             ),
-            // check_outputs (R10) and the `times` body-output row (blocker 2).
+            // check_outputs (R10).
             w(
                 ": f ( -- i64 ) [ + ] ;\n",
                 "declared output",
                 "leaves a quotation on the stack",
-            ),
-            op(
-                ": main ( -- ) \"x\" cstr 0 [ drop drop [ + ] ] times drop ;\n",
-                "`times`",
             ),
             // the REPL residual (R19), checked through `infer_line`.
             Row {

@@ -1,3 +1,5 @@
+import: c | times | "../lib/combinators.sth" ;
+
 : main ( -- )
   0 1000000 [ 1 + + ] times . ;    \ prints 500000500000: sums i+1 for i in
                                     \ 0..999999, the same total as

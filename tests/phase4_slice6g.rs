@@ -20,6 +20,8 @@
 //! (`cannot borrow cs__inl0 mutably: it is aliased by s`), so it is the
 //! honest measure of the bug's cost, not just a synthetic repro.
 
+mod common;
+
 /// Compile and run `src`, returning stdout and the exit code. `name`
 /// distinguishes the temp source per test (the goldens run in parallel).
 fn run_src(name: &str, src: &str) -> (String, i32) {
@@ -58,6 +60,19 @@ fn check_error(src: &str) -> String {
     sooth::check::check(&mut module).expect_err("check should fail")
 }
 
+/// `lib/combinators.sth`'s `times`, inlined: `check_error` runs the checker in
+/// process, where an `import:` line never resolves.
+const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | f | | to | | from |\n\
+     from to < if from f call from 1 + to f times-helper else end ;\n\
+     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | f | | n | 0 n f times-helper ;\n";
+
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[]);
+}
+
 /// The reject twin of `run_src`, for a program whose import needs the
 /// multi-module driver but whose check is expected to fail before it runs.
 fn build_err_with_import(name: &str, src: &str) -> String {
@@ -90,11 +105,11 @@ fn if_inside_a_loop_reading_an_alias_is_an_error() {
     // the terms *after* it, missing the wrap-around: iteration 2's read through
     // `a` sees iteration 1's write through `arr`. Accepted pre-6g, printing
     // `0` then `9`.
-    let err = check_error(
-        ": main ( -- )\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | a | arr | &a 0 >usize &> @ . true if &!arr 0 >usize &!> 9 ! else end arr drop ] times ;\n",
-    );
+         2 [ | i | a | arr | &a 0 >usize &> @ . true if &!arr 0 >usize &!> 9 ! else end arr drop ] times ;\n"
+    ));
     assert_aliased_by(&err, "arr", "a");
 }
 
@@ -104,11 +119,11 @@ fn read_and_mutate_inside_a_looped_grant_is_an_error() {
     // the granted-into term, so the use is invisible to a rule that only scans
     // siblings. Accepted pre-6g, printing `0` then `9`. This shape is why R1
     // cannot be refined to "unmentioned in the siblings before and after".
-    let err = check_error(
-        ": main ( -- )\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | true if a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop else end ] times ;\n",
-    );
+         2 [ | i | true if a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop else end ] times ;\n"
+    ));
     assert_aliased_by(&err, "arr", "a");
 }
 
@@ -135,11 +150,11 @@ fn write_only_across_a_back_edge_is_an_error() {
     // is observable. Accepted pre-6g. The checker cannot tell "mentioned inside
     // the granted-into term" from "read across the edge" without machinery
     // beyond this slice, so this rejects too.
-    let err = check_error(
-        ": main ( -- )\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | true if a | arr | &!arr 0 >usize &!> 9 ! arr drop else end ] times ;\n",
-    );
+         2 [ | i | true if a | arr | &!arr 0 >usize &!> 9 ! arr drop else end ] times ;\n"
+    ));
     assert_aliased_by(&err, "arr", "a");
 }
 
@@ -176,12 +191,15 @@ fn times_doorway_grants_the_bound_alias() {
     // bound-in-this-invocation name through the ancestor branch reds it.
     let (out, code) = run_src(
         "6g-doorway-ok",
-        ": main ( -- )\n\
-         0 4 fill | a |\n\
-         a | arr |\n\
-         4 [ | i | &!arr i >usize &!> i ! ] times\n\
-         &arr 2 >usize &> @ .\n\
-         arr drop ;\n",
+        &format!(
+            "{}: main ( -- )\n\
+             0 4 fill | a |\n\
+             a | arr |\n\
+             4 [ | i | &!arr i >usize &!> i ! ] times\n\
+             &arr 2 >usize &> @ .\n\
+             arr drop ;\n",
+            lib_import("c | times |", "lib/combinators.sth")
+        ),
     );
     assert_eq!(out, "2\n");
     assert_eq!(code, 0);
@@ -193,15 +211,15 @@ fn later_use_withholds_the_times_grant() {
     // the doorway's grant. Pre-existing behaviour, unchanged by R1 (the
     // `references(rest, name)` rule still governs a name bound in this
     // invocation): a boundary guard against future drift, not a 6g pin.
-    let err = check_error(
-        ": main ( -- )\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
          a | arr |\n\
          4 [ | i | &!arr i >usize &!> i ! ] times\n\
          arr drop\n\
          &a 0 >usize &> @ .\n\
-         a drop ;\n",
-    );
+         a drop ;\n"
+    ));
     assert_aliased_by(&err, "arr", "a");
 }
 

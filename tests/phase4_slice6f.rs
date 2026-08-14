@@ -7,12 +7,11 @@
 //! (structure side), since a runtime golden cannot tell "mutated in place" from
 //! "rebuilt correctly".
 
-use sooth::{backend, check, ir, lexer, parser};
 use std::process::Command;
 
 mod common;
 
-const DOGFOOD: &str = include_str!("../examples/inplace_fold.sth");
+const DOGFOOD: &str = "examples/inplace_fold.sth";
 
 /// Build and run the committed dogfood, returning stdout and the exit code.
 fn run_dogfood() -> (String, i32) {
@@ -27,8 +26,10 @@ fn run_dogfood() -> (String, i32) {
 
 /// The emitted QBE body of `word`, mangled name and all. `qbe_name` escapes each
 /// non-alphanumeric character as `.{hex}.` to stay injective, so `-` (0x2d) makes
-/// the fold words emit as `prefix.2d.copy`/`prefix.2d.linear`. Panics if the word
-/// is absent, so a rename that silences the assertion fails loudly. Every
+/// the fold words emit as `prefix.2d.copy`/`prefix.2d.linear`, and `resolve`
+/// appends the module component, so the entry file's words emit as
+/// `prefix.2d.copy__m0`. Panics if the word is absent, so a rename that silences
+/// the assertion fails loudly. Every
 /// function definition's whole line starts with `export function ` (see
 /// `src/backend/qbe.rs`'s `"export function {ret_ty}${}("`; `ret_ty` sits
 /// between `function` and the `$name`, so a bare `function `-prefix check on
@@ -36,13 +37,13 @@ fn run_dogfood() -> (String, i32) {
 /// rather than the header alone, picking the definition even if a call site
 /// (`${word}(` with no `export function ` on its own line) appears earlier
 /// in the emitted module.
+///
+/// This routes through the driver rather than calling `lex`/`parse`/`check` on
+/// the source text: since 10b the dogfood `import:`s `times` from
+/// `lib/combinators.sth`, and only the driver resolves an import closure.
 fn fold_body(word: &str) -> String {
-    let tokens = lexer::lex(DOGFOOD).expect("dogfood should lex");
-    let mut module = parser::parse(&tokens).expect("dogfood should parse");
-    check::check(&mut module).expect("dogfood should check");
-    let irm = ir::lower(&module).expect("dogfood should lower");
-    let il = backend::qbe::emit(&irm).expect("dogfood should emit");
-    let header = format!("${word}(");
+    let il = sooth::driver::emit_ssa(std::path::Path::new(DOGFOOD)).expect("dogfood should emit");
+    let header = format!("${word}__m0(");
     let def_at = il
         .match_indices(&header)
         .map(|(i, _)| i)

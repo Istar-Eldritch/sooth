@@ -51,16 +51,17 @@ to Phase 6, alongside the rest of the stdlib layering.
 
 Phase 4 adds bounded polymorphism (`'T`/`'N`/`..s` type, length, and row variables,
 monomorphized per instantiation, no vtables) and quotations: `[ ... ]` literals, `call`,
-and a `times` loop primitive that lowers self-tail recursion to a constant-stack back-edge
+and an internal loop primitive that lowers self-tail recursion to a constant-stack back-edge
 rather than an unrolled splice. On top of that, a combinator library written in Sooth
-itself (`lib/combinators.sth`: `each`/`map`/`fold`/`filter`/`while`), inlined by a
+itself (`lib/combinators.sth`: `each`/`map`/`fold`/`filter`/`while`/`times`), inlined by a
 term-splicing compiler pass rather than minting a function per call site; multi-file
 modules with word/type imports, natively and at the REPL; and quotations as real runtime
 values (non-capturing closures, storable and passable to non-inlined higher-order code).
+No combinator is compiler-known: `times` is ordinary Sooth source over a
+self-tail-recursive helper, like the rest.
 In progress: capturing closures and static ad-hoc overloading (`docs/phase4-slice7b-brief.md`,
-`docs/phase4-slice8a-brief.md`); briefed but not started: retiring `times` as a compiler
-intrinsic in favor of a library word once quotation effects can carry a row variable
-(`docs/phase4-slice10-brief.md`), and `if` becoming an ordinary combinator.
+`docs/phase4-slice8a-brief.md`); briefed but not started: `if` becoming an ordinary
+combinator (`docs/phase4-slice10c-brief.md`).
 
 The compiler is a Rust bootstrap; the language will later self-host.
 

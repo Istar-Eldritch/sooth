@@ -301,16 +301,15 @@ shuffles and binds, and consumed only by fusion: `call` splices a literal's body
 consumption site (type-checking identically to writing the body inline), and every other
 position that would need a runtime quotation value (an array element, a branch join, a
 user or polymorphic word argument, an operator operand, a REPL residual stack) is a located
-rejection instead of a panic. The one compiler-known intrinsic, `times ( ..s i64
-[ ..s i64 -- ..s ] -- ..s )`, drives the existing `begin_loop`/`finalize_loop` staging with a
-synthesized index, giving a runnable constant-stack loop (a header `Phi`/`Jnz` reached by a
-back-edge `Jmp`, no per-iteration `Instr::Call`, every loop-body `Alloc` entry-hoisted,
-verified at 1M+ iterations under a 1MB stack); a `times` nested inside another loop is
-rejected in the checker, which also restores loop state after a `times` returns so a second
-loop in the same word still runs. `while` was weighed as a second floor member and declined:
-its condition quotation returns a `bool` on a passthrough row, strictly harder than `times`
-needs. `examples/times.sth` (`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same
-total as `examples/countdown.sth`'s hand-threaded self-recursion.
+rejection instead of a panic. `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` is an ordinary
+exported word in `lib/combinators.sth` (slice 10b), a thin wrapper over a
+self-tail-recursive `times-helper`: its recursive call in tail position lowers to a
+`begin_loop`/`finalize_loop` back-edge like any other self-tail combinator, giving a runnable
+constant-stack loop (a header `Phi`/`Jnz` reached by a back-edge `Jmp`, no per-iteration
+`Instr::Call`, every loop-body `Alloc` entry-hoisted, verified at 1M+ iterations under a 1MB
+stack), and loops nest at any depth. `examples/times.sth`
+(`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same total as
+`examples/countdown.sth`'s hand-threaded self-recursion.
 **Phase 4 Slice 5a (native multi-file compilation, word and type imports, and
 encapsulation) is complete**: a file is a compilation unit, and `import: q "path.sth" ;`
 resolves the import graph from the entry file, canonicalizes and dedupes by path,
@@ -605,19 +604,30 @@ has nothing to intern a body-internal shape against, so this is deferred to a fu
 slice. A concrete element inside a combinator body already works today, since a
 combinator is monomorphized and checked by the ordinary concrete `check_word`.
 
-**Next action: Phase 4 Slice 10b/10c** (deleting the `times`/`if` intrinsics in favour of
-library combinators, now that 6g has closed the splice-granting bug both would otherwise
+**Next action: Phase 4 Slice 10c** (`if` as an ordinary combinator, the last compiler-known
+control-flow word, now that 6g has closed the splice-granting bug it would otherwise
 multiply). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
 module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), and 10a (row
 variables inside a quotation's declared effect) are all done on `main`; 6g (combinator
-splices learning 6f's granting rule) is implemented, pending merge from `impl/`. Slice 9
+splices learning 6f's granting rule) and 10b (`times` moved into `lib/combinators.sth`) are
+implemented, pending merge from `impl/`. Slice 9
 shipped P1–P2 only (`Bool` as a library
 enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
 quotation's declared effect, which does not parse before slice 10a, and is split out as
 **slice 10c** (`docs/phase4-slice10c-brief.md`), renumbered into slice 10's lineage since it
 extends 10a's row mechanism and gates on 10a phases 1–4, i.e. everything up to and including
 grounding (not on 10b).
+
+**Known gap, not yet scheduled:** a row-typed combinator call over a quotation left in (or
+read back out of) the row crashes the backend instead of being rejected. `[ + ] 3 [ drop ]
+times drop` (and the same shape over any user-declared row combinator, e.g. 10a's
+`my-times`) reaches QBE as an invalid-type phi; calling the row quotation afterward hits
+`unreachable!()` in `func_builder/quotation.rs`; a third, same family, `while` over an
+*erased* quotation panics in `control_flow.rs`. All three are recorded in
+`docs/phase4-slice10b-spec.md`. No general guard covers any of them: this is one slice's
+worth of work (a single check at a row-typed combinator's call site covering all three
+shapes), not three.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
@@ -1276,19 +1286,17 @@ then find out what the compiler owes it.
 4. **Quotations + the internal loop primitive.** `[ ... ]` + `call`, plus the loop
    primitive they compile down to for constant-stack iteration, plus call-site inlining.
    **Scoped by `docs/phase4-slice4-brief.md`; the decisions below are settled, not open.**
-   The floor is one compiler-known intrinsic, `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`,
-   passing the iteration index: its body quotation returns the row it received, so effect
-   inference only ever unifies an inner row against itself. `while` was weighed as a second
-   floor member (DESIGN.md:285 allows "one or two") and declined here, because its condition
-   quotation returns a `bool` on a passthrough row, which is strictly harder inference.
+   `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` passes the iteration index and its body
+   quotation returns the row it received, so effect inference only ever unifies an inner row
+   against itself.
    The slice ships a runnable constant-stack loop rather than inert plumbing, so the phase's
    riskiest integration (type machinery against quotations against the loop primitive) gets
    a witness in the slice that builds it; the headline is `0 1000000 [ + ] times .` printing
    `499999500000` in constant stack, next to `examples/countdown.sth`'s hand-threaded
-   self-recursive equivalent. The floor is permanent, not a bootstrap: DESIGN.md:281-289
-   makes the loop primitive internal ("not surface syntax, not user-facing") and the thin
-   intrinsic floor user-facing by design, so slice 6 builds on `times` rather than retiring
-   it. A quotation here is a **compile-time marker** carrying its inferred effect and body,
+   self-recursive equivalent. The loop primitive stays internal (DESIGN.md:281-289: "not
+   surface syntax, not user-facing"); what reaches it is the self-tail-call transform, so
+   every combinator including `times` is library source (slice 10b).
+   A quotation here is a **compile-time marker** carrying its inferred effect and body,
    fused at its `call`, never a runtime value: that defers the `Type`/`PolyType`/`IrType`/
    unification/mangling change to slice 7, where a consumer for it finally exists. The two
    "inlining"s the plan used to seem to double-book are different mechanisms and both are
@@ -1746,11 +1754,10 @@ then find out what the compiler owes it.
    of the three pieces independently and confirming the corresponding accept goldens fail
    again.
    Depends on 6f (uses its exact granting machinery); independent of 7-10's own mechanisms.
-   **Sequenced after slice 10a lands** (avoid disrupting in-flight work) **and before 10b/10c
-   begin**: both widen this bug's blast radius by turning a compiler-intrinsic control-flow
-   form into a combinator splice — 10b for every `times` loop, 10c for every `if` in the
-   language — so fixing this first keeps neither slice from silently multiplying a
-   pre-existing, already-load-bearing false rejection across most existing Sooth code.
+   **Lands before 10c**, which widens this bug's blast radius by turning the last
+   compiler-known control-flow form, `if`, into a combinator splice: fixing this first keeps
+   that slice from silently multiplying a pre-existing, already-load-bearing false rejection
+   across most existing Sooth code.
 7. **Functions as values: closures.** ✅ done. The slice that makes a quotation a real runtime value
    rather than a compile-time marker, so it can be branched to, stored, returned, and passed
    to something that is not inlined: `cond [ fast ] [ slow ] if call`, a dispatch table as an
@@ -2050,17 +2057,24 @@ then find out what the compiler owes it.
    representation and grounding code. Findings, including why the two-differing-rows shape
    this entry first assumed was wrong, in `docs/phase4-slice10c-brief.md`.
 
-10. **Rows in quotation effects: `times` stops being a compiler intrinsic.** The self-tail-
-    call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6) are both
-    already general, keyword-free machinery; the one loop shape user code still cannot write
-    is `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can be
-    declared at a word's own top level but not inside a nested quotation's declared effect
+10. **Rows in quotation effects: `times` is a library combinator. 10a ✅ done; 10b
+    implemented.** The
+    self-tail-call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6)
+    are both already general, keyword-free machinery; the one loop shape user code could not
+    write was `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can
+    be declared at a word's own top level but not inside a nested quotation's declared effect
     (slice 6a's R2/R28, deliberately deferred). Split 10a/10b/10c, the same shape as 6/7/8's
-    splits: 10a adds the mechanism (parsing and checking a row inside a quotation effect, plus
-    the `~` inline-only quotation type below) and exits on a user-space `my-times` compiling
-    beside the untouched intrinsic; 10b then deletes the intrinsic
-    (`check_abstract_quotation_times`, the `check_term`/`ir.rs` `"times"` arms) and moves
-    `times` itself into `lib/combinators.sth`, 8c-shaped lightweight process; **10c** is
+    splits: **10a** adds the mechanism (parsing and checking a row inside a quotation effect,
+    plus the `~` inline-only quotation type below); **10b**
+    (`docs/phase4-slice10b-spec.md`) makes `times` an ordinary exported word in
+    `lib/combinators.sth` over a self-tail-recursive `times-helper`, itself exported too
+    (a private helper reached only transitively would be unresolvable through the REPL's
+    `dlopen` import path, which retains exported words only), leaving no
+    compiler-known combinator at all — no `check_abstract_quotation_times`, no
+    `check_term`/`ir.rs` `"times"` arms. It carries one checker change of its own, not the
+pure delete-and-import it looks like: `check_linear_across_back_edge` takes a frame floor
+    (`src/check/terms.rs:1060`), exempting a linear local the *enclosing* frame owns and
+    disposes from a rejection meant for one the loop actually carries. **10c** is
     `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
     9b), which extends 10a's row representation to a row that legitimately differs between a
     quotation's input and output side, and gates on 10a phases 1–4 only (the `~` type, its
@@ -2083,9 +2097,7 @@ then find out what the compiler owes it.
     Brief written (`docs/phase4-slice10-brief.md`), which found the row is the
     smaller half of the gap: at every check point a combinator's row is concrete (combinators
     are spliced per call site and mint no `IrFunc`, per slice 6's R18/R20), so there is no
-    abstract row unification or `Subst` change, only per-splice depth arithmetic (which the
-    intrinsic's `check_abstract_quotation_times` does *not* prototype — see the correction
-    below). The bigger,
+    abstract row unification or `Subst` change, only per-splice depth arithmetic. The bigger,
     row-independent bug the brief's paper pre-check found: the self-tail back-edge arm
     (`src/check.rs`) models its result as the combinator's non-quotation inputs, true only
     for `while`'s state-threading shape and false for any loop that consumes its counters —
@@ -2094,11 +2106,8 @@ then find out what the compiler owes it.
     explicit unify of the self-call's arguments against the ground declared inputs)
     independent of whether rows land. Sequenced after 7b and 8a land (all three touch
     `check_term`'s dispatch spine), not gated on 9. Spec written
-    (`docs/phase4-slice10-spec.md`); a first review round found real gaps — among them that
-    the brief's "the intrinsic already prototypes the depth arithmetic" claim above does not
-    survive reading `check_abstract_quotation_times`, which checks declared-effect
-    self-similarity and pointwise-matches only the top slots rather than decomposing a row —
-    so phase 3 derives its grounding rather than generalising a prototype. A second review
+    (`docs/phase4-slice10-spec.md`); a first review round found real gaps, so phase 3 derives
+    its grounding from scratch rather than generalising a prototype. A second review
     round then rejected the draft on three blockers (the `~` representation was left to the
     implementer while one requirement demanded an outcome only one choice delivers; the
     back-edge rewrite destroyed the positional correspondence the surviving-set forward needs;

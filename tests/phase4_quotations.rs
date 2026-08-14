@@ -44,6 +44,19 @@ fn check_error(src: &str) -> String {
     check::check(&mut module).expect_err("check should fail")
 }
 
+/// `lib/combinators.sth`'s `times`, inlined: the lowering-shape helpers below
+/// run in process, where an `import:` line never resolves.
+const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | f | | to | | from |\n\
+     from to < if from f call from 1 + to f times-helper else end ;\n\
+     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     | f | | n | 0 n f times-helper ;\n";
+
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[]);
+}
+
 /// Whether the lowered module emits at least one indirect call: the witness
 /// that a `call` resolved to a runtime dispatch through a materialized value,
 /// not a compile-time body splice.
@@ -440,7 +453,7 @@ fn capturing_literal_spliced_through_combinator_stays_splice() {
     // adding the env parameter to the materialized path (R17) must leave this
     // splice path bit-identical -- no materialization, no `CallIndirect`.
     // acc over i=0..4 of (acc + i + x=10): 10, 21, 33, 46, 60.
-    let src = ": main ( -- ) 10 | x | 0 5 [ + x + ] times . ;\n";
+    let src = &format!("{TIMES_DEF}: main ( -- ) 10 | x | 0 5 [ + x + ] times . ;\n");
     let (stdout, code) = run_src("qcaptimes", src);
     assert_eq!(stdout, "60\n");
     assert_eq!(code, 0);
@@ -502,24 +515,36 @@ fn capturing_scalar_at_join_snapshots() {
     assert_eq!(code, 0);
 }
 
-// -- T-times: `times` over an erased quotation is one indirect call in a loop -
+// -- T-times: a loop over an erased quotation is one indirect call in a loop --
 
 #[test]
-fn times_over_erased_quotation_runs_constant_stack() {
+fn loop_over_erased_quotation_emits_one_indirect_call() {
     // `acc` returns an *erased* quotation (a word-output materialization
-    // boundary); `times` drives it. The checker accepts the abstract
-    // `[ i64 i64 -- i64 ]` effect and lowering emits exactly one `CallIndirect`
-    // inside the loop body (D6: constant stack, one indirect call per
-    // iteration), summing 0+1+2+3+4 = 10.
-    let src = ": acc ( -- [ i64 i64 -- i64 ] ) [ + ] ;\n\
-               : main ( -- ) 0 5 acc times . ;\n";
+    // boundary) and a self-tail combinator drives it. The checker accepts the
+    // abstract `[ i64 i64 -- i64 ]` effect and lowering emits exactly one
+    // `CallIndirect` inside the loop body (one indirect call per iteration,
+    // no per-element call), summing 0+1+2+3+4 = 10. This does not run under a
+    // stack limit -- the constant-stack guarantee itself is pinned by
+    // `tests/phase4_slice10b.rs`'s `times_runs_one_million_iterations_in_constant_stack`.
+    //
+    // The driver is declared here rather than being `lib/combinators.sth`'s
+    // `times`: 10b's `times` takes 10a's *inline-only* `~[ ... ]` parameter,
+    // which an erased quotation cannot satisfy (it is rejected with `` `times`
+    // expects a quotation `~[ i64 -- ]` here ``). So the erased-driver shape
+    // this pins now needs a plain `[ ... ]` parameter, which is what the
+    // intrinsic effectively had.
+    let src = ": spin ( i64 i64 i64 [ i64 i64 -- i64 ] -- i64 )\n\
+               | f | | to | | from |\n\
+               from to < if from f call from 1 + to f spin else end ;\n\
+               : acc ( -- [ i64 i64 -- i64 ] ) [ + ] ;\n\
+               : main ( -- ) 0 0 5 acc spin . ;\n";
     let (stdout, code) = run_src("qtimes", src);
     assert_eq!(stdout, "10\n");
     assert_eq!(code, 0);
     assert_eq!(
         count_call_indirect(src),
         1,
-        "a `times`-erased loop has exactly one indirect call, in the body"
+        "an erased-quotation loop has exactly one indirect call, in the body"
     );
 }
 

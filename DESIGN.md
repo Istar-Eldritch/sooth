@@ -315,9 +315,9 @@ The iteration story, top to bottom:
   exists.
 - **Combinators are library words, not keywords.** `each`, `map`, `filter`, `fold`,
   `while`, `times` are ordinary higher-order words that take quotations, written in
-  Sooth on top of the loop primitive. A thin floor (one or two intrinsic combinators)
-  bottoms out on the loop primitive; the rest are pure library. Reserving them as
-  keywords would bloat the core for no reason.
+  Sooth. None is compiler-known: each bottoms out on a self-tail call, which the
+  compiler lowers to the loop primitive. Reserving them as keywords would bloat the
+  core for no reason.
 - **Combinators are inlined.** The compiler inlines the common combinators and their
   quotation arguments at the call site, so `[ ... ] each` lowers to a tight loop with
   the body inlined, not a higher-order `call` per element. This is what makes "loops
@@ -349,16 +349,16 @@ need a real runtime value instead (a branch join, an array element, a user or po
 word argument, an operator operand, a REPL residual stack) is a located rejection, not a
 panic (D4). This defers the `Type`/`PolyType`/`IrType`/unification/mangling change a real
 runtime quotation type implies to the slice that gives escaping quotations a consumer for
-it (Phase 4 Slice 6). The floor is one intrinsic, `times ( ..s i64 [ ..s i64 -- ..s ] -- ..s )`,
-passing the iteration index and requiring the body return the row it received, so effect
-realization only ever checks an inner row against itself (D6); `while` was weighed as a
-second floor member and declined, since its condition quotation returns a `bool` on a
-passthrough row, strictly harder than `times` needs. `times` drives the existing internal
-loop primitive (`begin_loop`/`finalize_loop`) unchanged, with a synthesized index; a `times`
-nested inside another loop is rejected in the checker rather than taught to the lowering
-primitive. The quotation-literal fusion this slice owns (splicing a literal's body at its
-`call` or `times`) never crosses a `:` word boundary (D5); the interprocedural user-word
-inliner that lowers the combinator library itself is Slice 5's.
+it (Phase 4 Slice 6). `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )` passes the iteration index
+and requires the body return the row it received, so effect realization only ever checks an
+inner row against itself (D6). It is library source, not a compiler-known word (slice 10b):
+a thin wrapper over a self-tail-recursive `times-helper`, whose tail call is what
+reaches the internal loop primitive (`begin_loop`/`finalize_loop`), and loops nest at any
+depth. Both names are exported: the REPL's `dlopen` import path retains only
+exported words, so a helper reached only transitively through a splice would
+be unresolvable. The quotation-literal fusion this slice owns (splicing a literal's body at its
+`call`) never crosses a `:` word boundary (D5); the interprocedural user-word inliner that
+lowers the combinator library itself is Slice 5's.
 
 **Phase 4 Slice 6a made a quotation nameable and shipped the inliner.** `Type`/`PolyType`
 gain a `Quotation` variant carrying an interned declared effect (`[ 'T -- ]`), with
@@ -510,8 +510,8 @@ The shuffles sit just above this floor: `swap`/`over`/`rot` move and `dup` copie
 today as compiler-known names, but each is an ordinary combinator's job once generics
 land — `dup ( ..s 'a: Copy -- ..s 'a 'a )` needs only the `Copy` bound that already
 parses, and combinator splicing is what lets a quotation literal ride through them
-unchanged. `times` demotes the same way (slice 10b), leaving the loop underneath
-carried by quotations and `call` alone.
+unchanged. `times` has already demoted this way (slice 10b): the loop underneath is
+carried by quotations, `call` and the self-tail-call transform alone.
 
 ## Modules and encapsulation
 

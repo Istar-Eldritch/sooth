@@ -11,6 +11,7 @@ data $freefmt = { b "free %ld\n", b 0 }
 data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
 data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
 data $strfmt = { b "%.*s", b 0 }
+type :arr_0 = align 8 { b 32 }
 
 export function $sooth_main() {
 @start
@@ -19,18 +20,21 @@ export function $sooth_main() {
 	%v3 =l copy 0
 	jmp @blk1
 @blk1
-	%v4 =l phi @start %v0, @blk2 %v9
-	%v5 =l phi @start %v3, @blk2 %v11
-	%v6 =w csltl %v5, %v1
-	jnz %v6, @blk2, @blk3
+	%v4 =l phi @start %v0, @blk2 %v10
+	%v5 =l phi @start %v3, @blk2 %v12
+	%v6 =l phi @start %v1, @blk2 %v6
+	%v7 =w csltl %v5, %v6
+	jnz %v7, @blk2, @blk3
 @blk2
-	%v7 =l copy 1
-	%v8 =l add %v5, %v7
-	%v9 =l add %v4, %v8
-	%v10 =l copy 1
-	%v11 =l add %v5, %v10
+	%v8 =l copy 1
+	%v9 =l add %v5, %v8
+	%v10 =l add %v4, %v9
+	%v11 =l copy 1
+	%v12 =l add %v5, %v11
 	jmp @blk1
 @blk3
+	jmp @blk4
+@blk4
 	call $printf(l $fmt, l %v4, ...)
 	ret
 }

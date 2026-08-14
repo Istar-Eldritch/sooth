@@ -92,43 +92,49 @@ export function $sooth_main() {
 	%v2 =l copy 0
 	jmp @blk1
 @blk1
-	%v3 =l phi @start %v2, @blk6 %v24
-	%v4 =w csltl %v3, %v0
-	jnz %v4, @blk2, @blk3
+	%v3 =l phi @start %v2, @blk8 %v26
+	%v4 =l phi @start %v0, @blk8 %v4
+	%v5 =w csltl %v3, %v4
+	jnz %v5, @blk2, @blk3
 @blk2
-	%v5 =:arr_0 call $mk__m0(l %v3)
-	%v7 =l copy 3
-	%v8 =l copy %v7
-	%v10 =l copy 0
-	jmp @blk4
-@blk4
-	%v11 =l phi @blk2 %v10, @blk7 %v22
-	%v12 =w csltl %v11, %v8
-	jnz %v12, @blk5, @blk6
+	%v6 =:arr_0 call $mk__m0(l %v3)
+	%v8 =l copy 3
+	%v9 =l copy %v8
+	%v11 =l copy 0
+	jmp @blk5
 @blk5
-	%v13 =l add %v5, 0
-	%v14 =l copy %v11
-	%v15 =l copy 3
-	%v16 =w cultl %v14, %v15
-	jnz %v16, @blk7, @blk8
-@blk8
-	%v17 =l copy 22
-	%v18 =l copy 3
-	call $sooth_oob_trap(l %v17, l %v14, l %v18)
-	jmp @blk7
-@blk7
-	%eoff0 =l mul %v14, 8
-	%v19 =l add %v13, %eoff0
-	%v20 =l loadl %v19
-	call $printf(l $fmt, l %v20, ...)
-	%v21 =l copy 1
-	%v22 =l add %v11, %v21
-	jmp @blk4
+	%v12 =l phi @blk2 %v11, @blk9 %v24
+	%v13 =l phi @blk2 %v9, @blk9 %v13
+	%v14 =w csltl %v12, %v13
+	jnz %v14, @blk6, @blk7
 @blk6
+	%v15 =l add %v6, 0
+	%v16 =l copy %v12
+	%v17 =l copy 3
+	%v18 =w cultl %v16, %v17
+	jnz %v18, @blk9, @blk10
+@blk10
+	%v19 =l copy 43
+	%v20 =l copy 3
+	call $sooth_oob_trap(l %v19, l %v16, l %v20)
+	jmp @blk9
+@blk9
+	%eoff0 =l mul %v16, 8
+	%v21 =l add %v15, %eoff0
+	%v22 =l loadl %v21
+	call $printf(l $fmt, l %v22, ...)
 	%v23 =l copy 1
-	%v24 =l add %v3, %v23
+	%v24 =l add %v12, %v23
+	jmp @blk5
+@blk7
+	jmp @blk8
+@blk8
+	%v25 =l copy 1
+	%v26 =l add %v3, %v25
 	jmp @blk1
 @blk3
+	jmp @blk4
+@blk4
 	ret
 }
 

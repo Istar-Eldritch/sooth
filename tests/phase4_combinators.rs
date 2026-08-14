@@ -78,6 +78,17 @@ fn combinators_import(qualifier: &str) -> String {
 const SPY_DEF: &str = "type: Spy tag i64 ;\n\
     : drop ( Spy -- )  | s | s Spy>tag . ;\n";
 
+/// `lib/combinators.sth`'s `times`, inlined: `check_error`/`check_ok` run the
+/// checker in process, where an `import:` line never resolves, and a REPL
+/// session takes one definition per line.
+const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | to | | from | from to < if from f call from 1 + to f times-helper else end ;\n\
+    : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | n | 0 n f times-helper ;\n";
+
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[]);
+}
+
 // -- criterion 1: the type parses --------------------------------------------
 
 #[test]
@@ -459,19 +470,20 @@ fn quotation_against_non_quotation_parameter_is_error() {
 
 #[test]
 fn stale_phase6_diagnostics_are_reworded() {
-    // R26: eight diagnostics that used to say "higher-order values are Phase
+    // R26: seven diagnostics that used to say "higher-order values are Phase
     // 6" now name slice 7 (a *runtime* quotation value), since this slice
     // makes the type nameable and a quotation-taking word a library word --
     // "Phase 6" was never a real milestone name and is now flatly wrong.
+    //
+    // An eighth row, `times` without a resolvable quotation on top, went with
+    // the intrinsic in 10b: `times` is an ordinary library word now, and its
+    // rejection comes from the general inline-quotation-parameter path
+    // (`` `times` expects a quotation `~[ i64 -- ]` here, found `i64` ``),
+    // which is not one of the R26 sites and names no milestone at all.
     let checked_rows: &[(&str, &str)] = &[
         // `call` without a resolvable quotation on top.
         (
             ": main ( -- ) 5 call ;\n",
-            "expects a quotation on the stack",
-        ),
-        // `times` without a resolvable quotation on top.
-        (
-            ": main ( -- ) 3 5 times ;\n",
             "expects a quotation on the stack",
         ),
         // an operator operand.
@@ -511,7 +523,7 @@ fn stale_phase6_diagnostics_are_reworded() {
         );
     }
 
-    // The ninth site (R19's residual REPL line) is checked through the REPL,
+    // The last site (R19's residual REPL line) is checked through the REPL,
     // not `check_error`.
     let transcript = repl_error("1 [ + ]\n:quit\n");
     assert!(
@@ -650,7 +662,7 @@ fn each_checks_standalone() {
                 | f | len >i64 | count | | arr |\n\
                 count [ | i | &arr i >usize &> @ f call ] times\n\
                 arr drop ;\n";
-    check_ok(each);
+    check_ok(&format!("{TIMES_DEF}{each}"));
 
     // Pin the isolated copy to the committed library: if the real file stopped
     // checking standalone, the copy above could silently drift from it.
@@ -680,22 +692,24 @@ fn map_and_fold_check_compositionally() {
                 | f | | acc | len >i64 | count | | arr |\n\
                 acc count [ | i | &arr i >usize &> @ f call ] times\n\
                 arr drop ;\n";
-    check_ok(map);
-    check_ok(fold);
+    check_ok(&format!("{TIMES_DEF}{map}"));
+    check_ok(&format!("{TIMES_DEF}{fold}"));
 
     // ...and the compositional check bites at the def site: declaring `f` as
     // `[ 'T -- 'T ]` (producing a value) but leaving that value on the floor
     // unbalances the `times` row. That this is located -- naming `m`, at its
     // own def site -- is proof `f call` was checked to *produce* a `'T` per the
     // declared effect, not rubber-stamped.
-    let err = check_error(
-        ": m ( ['T 'N] [ 'T -- 'T ] -- )\n\
+    let err = check_error(&format!(
+        "{TIMES_DEF}: m ( ['T 'N] [ 'T -- 'T ] -- )\n\
          | f | len >i64 | count | | arr |\n\
          count [ | i | &arr i >usize &> @ f call ] times\n\
-         arr drop ;\n",
-    );
+         arr drop ;\n"
+    ));
     assert!(
-        err.contains("`m`") && err.contains("times") && err.contains("leave the row unchanged"),
+        err.contains("`m`")
+            && err.contains("the quotation passed to `times` was declared")
+            && err.contains("but its body has effect"),
         "mishandling `f`'s declared result should be a located def-site row error naming `m`, got: {err}"
     );
 }
@@ -760,7 +774,7 @@ fn filter_checks_standalone() {
                           | v | &!arr over >usize &!> v ! 1 +\n\
                         else drop end ] times\n\
                   | wf | arr wf >usize ;\n";
-    check_ok(filter);
+    check_ok(&format!("{TIMES_DEF}{filter}"));
 }
 
 // -- criterion 2: `filter` over `[i64 4]` inlines, runs, and compacts --------
@@ -960,20 +974,27 @@ fn while_empty_false_arm_falls_through() {
 
 #[test]
 fn while_body_linear_local_across_back_edge_is_error() {
-    // Criterion 10 (R8, load-bearing): an outer linear local (`sp`, a `Spy`)
-    // is unconsumed when `while`'s back-edge is reached, so it would ride into
-    // the next iteration with nobody to dispose it. Located at the self-call,
-    // naming the live linear type and `while`. Removing the
-    // `check_linear_across_back_edge` call from the self-tail splice path
-    // would let this through.
+    // Criterion 10 (R8), re-pointed by 10b's P0. The shape this used to use
+    // (an outer linear parked across the loop and disposed on the next line)
+    // now compiles: it was a false rejection, and its own justification --
+    // "it would ride into the next iteration with nobody to dispose it" -- was
+    // false about its own program. The golden moves to a self-tail combinator
+    // whose *own* body binds a linear inside the tail `if` arm and reaches the
+    // back-edge with it unconsumed, which is above the floor and still
+    // rejected here.
+    //
+    // What this witnesses is where the rejection is *located*, not that a leak
+    // is prevented: delete the combinator-site `check_linear_across_back_edge`
+    // call and the program is still rejected, by end-of-scope disposal, losing
+    // only the back-edge wording. The combinator is named `while` because the
+    // message names the callee, which is what the assertion below reads.
     let src = format!(
-        "{SPY_DEF}{}: main ( -- )\n\
-           7 Spy | sp |\n\
-           0 [ dup 5 < if 1 + true else false end ] c::while .\n\
-           sp drop ;\n",
-        combinators_import("c")
+        "{SPY_DEF}\
+         : while ( i64 [ i64 -- i64 bool ] -- i64 )\n\
+           | p | p call if 3 Spy | leak | p while else end ;\n\
+         : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n"
     );
-    let err = build_check_error("while_linear_back_edge", &src);
+    let err = check_error(&src);
     assert!(
         err.contains("`Spy`")
             && err.contains("`while`")
@@ -1017,7 +1038,7 @@ fn while_inside_a_times_body_runs_to_fixpoint() {
     // counts `0` up to `5` with the inner `while` and prints it.
     let src = format!(
         "{}: main ( -- )\n\
-           3 [ | i | 0 [ dup 5 < if 1 + true else false end ] c::while . ] times ;\n",
+           3 [ | i | 0 [ dup 5 < if 1 + true else false end ] c::while . ] c::times ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_times", &src);
@@ -1039,7 +1060,7 @@ fn times_inside_a_self_tail_combinator_body_runs() {
     // counts `0` up to `5`.
     let src = format!(
         "{}: main ( -- )\n\
-           0 [ 2 [ | i | ] times dup 5 < if 1 + true else false end ] c::while . ;\n",
+           0 [ 2 [ | i | ] c::times dup 5 < if 1 + true else false end ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("times_in_while", &src);
@@ -1085,7 +1106,10 @@ fn times_nested_in_a_times_runs_with_correct_output() {
     // and adds 1 each inner iteration, so the accumulator is 3*2 = 6.
     let (out, code) = run_src(
         "times_in_times",
-        ": main ( -- ) 0 3 [ | i | 2 [ | j | 1 + ] times ] times . ;\n",
+        &format!(
+            "{}: main ( -- ) 0 3 [ | i | 2 [ | j | 1 + ] times ] times . ;\n",
+            combinators_import("c | times |")
+        ),
     );
     assert_eq!((out.as_str(), code), ("6\n", 0));
 }
@@ -1098,7 +1122,10 @@ fn times_in_times_with_inner_allocation_runs() {
     // does not grow; the constant-stack side is pinned by criterion 9c below.
     let (out, code) = run_src(
         "times_in_times_alloc",
-        ": main ( -- ) 0 3 [ | i | 2 [ | j | 0 4 fill | a | a drop 1 + ] times ] times . ;\n",
+        &format!(
+            "{}: main ( -- ) 0 3 [ | i | 2 [ | j | 0 4 fill | a | a drop 1 + ] times ] times . ;\n",
+            combinators_import("c | times |")
+        ),
     );
     assert_eq!((out.as_str(), code), ("6\n", 0));
 }
@@ -1116,9 +1143,12 @@ fn reentered_inner_accumulator_reseeds_per_outer_iteration() {
     // aliasing class of bug and the single highest-risk regression.
     let (out, code) = run_src(
         "reseed_probe",
-        ": main ( -- )\n\
-           2 [ drop 0 4 fill 3 [ drop | a | &!a 0 >usize &!> 1 +! a ] times\n\
-               | b | &b 0 >usize &> @ . b drop ] times ;\n",
+        &format!(
+            "{}: main ( -- )\n\
+               2 [ drop 0 4 fill 3 [ drop | a | &!a 0 >usize &!> 1 +! a ] times\n\
+                   | b | &b 0 >usize &> @ . b drop ] times ;\n",
+            combinators_import("c | times |")
+        ),
     );
     assert_eq!((out.as_str(), code), ("3\n3\n", 0));
 }
@@ -1131,9 +1161,12 @@ fn three_deep_times_nesting_runs_in_constant_stack() {
     // constrained `ulimit -s`, so arbitrary depth falls out of the
     // per-function alloca home plus the recursively-nesting preheader
     // save/restore.
-    let src = ": main ( -- )\n\
-         0 50000 [ | i | 2 [ | j | 2 [ | k | 0 8 fill | a | a drop 1 + ] times ] times ] times . ;\n";
-    let binary = build_binary("three_deep", src);
+    let src = format!(
+        "{}: main ( -- )\n\
+         0 50000 [ | i | 2 [ | j | 2 [ | k | 0 8 fill | a | a drop 1 + ] times ] times ] times . ;\n",
+        combinators_import("c | times |")
+    );
+    let binary = build_binary("three_deep", &src);
     let (code, out) = run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
@@ -1154,9 +1187,11 @@ fn nested_times_large_outer_holds_constant_stack() {
     // it runs to completion (exit 0, prints 99) even at `ulimit -s 1024`. A
     // large-inner / small-outer shape is explicitly NOT the witness: it
     // passes while the bug is live (recon 4).
-    let src =
-        ": main ( -- ) 200000 [ drop 2 [ drop 0 32 fill | a | a drop ] times ] times 99 . ;\n";
-    let binary = build_binary("nested_big_outer", src);
+    let src = format!(
+        "{}: main ( -- ) 200000 [ drop 2 [ drop 0 32 fill | a | a drop ] times ] times 99 . ;\n",
+        combinators_import("c | times |")
+    );
+    let binary = build_binary("nested_big_outer", &src);
     let (code, out) = run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
@@ -1178,7 +1213,8 @@ fn destructor_call_inside_a_times_body_holds_constant_stack() {
     // *called* from inside a user loop runs in a fresh per-call frame freed on
     // return, never the nesting case R1-R3 fix. This pins that inheritance
     // rather than re-testing R3 itself (criteria 3 and 9c already do that).
-    let src = "type: List | Nil | Cons v i64 next ^List ;\n\
+    let src = format!(
+        "{}type: List | Nil | Cons v i64 next ^List ;\n\
          : build ( i64 List -- List )\n  \
            | n acc |\n  \
            n 0 = if\n    \
@@ -1186,8 +1222,10 @@ fn destructor_call_inside_a_times_body_holds_constant_stack() {
            else\n    \
              n 1 - n acc ^ Cons build\n  \
            end ;\n\
-         : main ( -- ) 200000 [ drop 5 Nil build drop ] times ;\n";
-    let binary = build_binary("destructor_in_times", src);
+         : main ( -- ) 200000 [ drop 5 Nil build drop ] times ;\n",
+        combinators_import("c | times |")
+    );
+    let binary = build_binary("destructor_in_times", &src);
     let (code, out) = run_at_stack_limit(&binary, 1024);
     std::fs::remove_file(&binary).ok();
     assert_eq!(
@@ -1251,7 +1289,7 @@ fn poly_combinator_consuming_local_is_error() {
     // disposed N times -- with no call site involved. Pins *where* the check
     // lives (def site, not splice site).
     let src = format!(
-        "{SPY_DEF}\
+        "{TIMES_DEF}{SPY_DEF}\
          : bad ( ['T 'N] Spy [ 'T -- ] -- )\n\
          | f | | s | len >i64 | count | | arr |\n\
          count [ | i | &arr i >usize &> @ f call s drop ] times\n\
@@ -1259,7 +1297,8 @@ fn poly_combinator_consuming_local_is_error() {
     );
     let err = check_error(&src);
     assert!(
-        err.contains("`bad`") && err.contains("cannot consume `s`"),
+        err.contains("`bad`")
+            && err.contains("consumes the enclosing local `s`, which is linear"),
         "consuming a linear local in a poly `times` body should be located at the def site naming `bad` and `s`, got: {err}"
     );
 }
@@ -1271,14 +1310,16 @@ fn poly_combinator_borrow_across_loop_is_error() {
     // whose `times` body leaves a reference to an outer local (`v`) live on the
     // row rides the back-edge into the next iteration, and is located at the
     // def site.
-    let src = "type: V x i64 ;\n\
-               : bad ( ['T 'N] V [ 'T -- ] -- )\n\
-               | f | | v | len >i64 | count | | arr |\n\
-               count [ | i | &arr i >usize &> @ f call &v ] times\n\
-               arr drop v drop ;\n";
-    let err = check_error(src);
+    let src = format!(
+        "{TIMES_DEF}type: V x i64 ;\n\
+         : bad ( ['T 'N] V [ 'T -- ] -- )\n\
+         | f | | v | len >i64 | count | | arr |\n\
+         count [ | i | &arr i >usize &> @ f call &v ] times\n\
+         arr drop v drop ;\n"
+    );
+    let err = check_error(&src);
     assert!(
-        err.contains("`bad`") && err.contains("cannot leave a reference live across the loop"),
+        err.contains("`bad`") && err.contains("borrows the enclosing place `v`"),
         "a borrow crossing the back-edge in a poly `times` body should be located at the def site naming `bad`, got: {err}"
     );
 }
@@ -1337,16 +1378,18 @@ fn literal_created_borrow_across_loop_is_error_at_splice_site() {
     // exit row, which R12 rejects before the body is ever spliced into the
     // loop. So obligation 2's literal-created-borrow half is discharged at the
     // argument site, naming `refout` and `b`.
-    let src = "type: Box v i64 ;\n\
-               : refout ( ['T 4] [ 'T -- &i64 ] -- )\n\
-               | f | | arr |\n\
-               4 [ | i | &arr i >usize &> @ f call drop ] times\n\
-               arr drop ;\n\
-               : main ( -- )\n\
-               7 Box | b |\n\
-               0 4 fill [ | x | &b &Box>v ] refout\n\
-               b drop ;\n";
-    let err = check_error(src);
+    let src = format!(
+        "{TIMES_DEF}type: Box v i64 ;\n\
+         : refout ( ['T 4] [ 'T -- &i64 ] -- )\n\
+         | f | | arr |\n\
+         4 [ | i | &arr i >usize &> @ f call drop ] times\n\
+         arr drop ;\n\
+         : main ( -- )\n\
+         7 Box | b |\n\
+         0 4 fill [ | x | &b &Box>v ] refout\n\
+         b drop ;\n"
+    );
+    let err = check_error(&src);
     assert!(
         err.contains("`refout`")
             && err.contains("borrows the enclosing place `b`")
@@ -1440,7 +1483,8 @@ fn combinator_and_hand_threaded_loops_agree_across_stack_limits() {
         combinators_import("c")
     );
     let hand = format!(
-        ": main ( -- ) 1 {N} fill | arr | 0 {N} [ | i | &arr i >usize &> @ + ] times . arr drop ;\n"
+        "{}: main ( -- ) 1 {N} fill | arr | 0 {N} [ | i | &arr i >usize &> @ + ] times . arr drop ;\n",
+        combinators_import("c | times |")
     );
     let comb_bin = build_binary("eq-comb", &comb);
     let hand_bin = build_binary("eq-hand", &hand);
@@ -1484,8 +1528,9 @@ fn repl_error(input: &str) -> String {
 }
 
 // A polymorphic self-tail `while` and a two-output `filter`, reused across the
-// 6c REPL goldens. Their bodies name only builtins and their quotation
-// parameter, so a session define exercises the splice, not a library import.
+// 6c REPL goldens. Their bodies name only builtins, their quotation parameter,
+// and (for `filter`, since 10b retired the intrinsic) a session-defined
+// `times`, so a session define exercises the splice, not a library import.
 const WHILE_DEF: &str =
     ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n";
 const FILTER_DEF: &str = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n [ | i | &arr i >usize &> @ dup p call if | v | &!arr over >usize &!> v ! 1 + else drop end ] times | wf | arr wf >usize ;\n";
@@ -1570,8 +1615,13 @@ fn repl_two_output_combinator_define_and_call() {
     // is three 7s; `[ 5 > ]` keeps all three, so the residual is the array then
     // `3`. If R9 routed `filter` through `eval_poly_def`, its two outputs would
     // be wrongly deferred as "resolves to 2 outputs".
-    let transcript = repl_error(&format!("{FILTER_DEF}7 3 fill [ 5 > ] filter\n:quit\n"));
-    assert_eq!(transcript, "defined filter\nstack: <[i64 3]> 3\n");
+    let transcript = repl_error(&format!(
+        "{TIMES_DEF}{FILTER_DEF}7 3 fill [ 5 > ] filter\n:quit\n"
+    ));
+    assert_eq!(
+        transcript,
+        "defined times-helper\ndefined times\ndefined filter\nstack: <[i64 3]> 3\n"
+    );
 }
 
 #[test]

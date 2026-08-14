@@ -14,6 +14,8 @@
 \ (`AccL`, made linear by a `drop` overload): the borrow half carries both, and
 \ no aliasing rule fires for the linear case.
 
+import: c | times | "../lib/combinators.sth" ;
+
 type: AccC arr [i64 4] ;
 type: AccL arr [i64 4] ;
 

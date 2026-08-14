@@ -8,6 +8,8 @@
 \ dirtier's residue lands on 8-byte-strided offsets only and never overlaps
 \ the [i8;10]/[bool;4] probes' own byte-granular slots.
 
+import: c | times | "../lib/combinators.sth" ;
+
 : dirty ( -- ) 99 10 fill drop ;
 : dirty_i8 ( -- ) 99 >i8 200 fill drop ;
 : dirty_bool ( -- ) true 200 fill drop ;

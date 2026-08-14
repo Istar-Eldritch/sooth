@@ -49,7 +49,7 @@ impl<'a> FuncBuilder<'a> {
             } => self.lower_if(then_branch, else_branch, tail),
             // R12: a quotation literal interns its body and lowers to a phantom
             // `Value` with a placeholder `IrType` and *no* `Instr`. The checker
-            // guarantees this phantom reaches only `call`/`times`/shuffle/bind
+            // guarantees this phantom reaches only `call`/shuffle/bind
             // or a materialization boundary (a store, a word output, or a
             // branch join, R11) -- where it is turned into a real `(code, env)`
             // aggregate *before* it enters a `Phi`, operand, terminator, or
@@ -129,9 +129,10 @@ impl<'a> FuncBuilder<'a> {
 
                 // Exit: the array is the constructor's result. The fixed loop
                 // body never terminates, so `terminated` is already false here
-                // (unlike the `times` arm, whose spliced user body can); the
-                // reset keeps this arm identical to the loop template so it
-                // stays correct if the body ever gains a terminating term.
+                // (unlike a self-tail combinator's spliced body, whose user
+                // code can terminate); the reset keeps this arm identical to
+                // the loop template so it stays correct if the body ever
+                // gains a terminating term.
                 self.start_block(exit_block);
                 self.terminated = false;
                 self.stack.push(dst);
@@ -141,17 +142,18 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
-    /// R10: lower a self-tail combinator (`while`) as a splice-time loop,
-    /// composing the `times` arm's mid-body loop opening with the whole-word
-    /// transform's self-call-driven back-edge. The body's leading quotation
-    /// binding(s) are lowered *before* `begin_loop`, so the loop-invariant
-    /// `Copy` quotation phantom is bound to a local (resolved statically each
-    /// iteration) and excluded from the loop-carried phis; only the state row
-    /// is carried. `stage_aggregates = true` reuses the slice-3 aggregate
-    /// staging verbatim for a carried-aggregate state. The enclosing loop
-    /// state is saved and restored so loops compose, exactly as the `times`
-    /// arm does. A tail-position self-call inside the body is emitted as a
-    /// back-edge (`lower_call`, keyed on `cur_combinator`), never a re-splice.
+    /// R10: lower a self-tail combinator (`while`, `times-helper`) as a
+    /// splice-time loop: a `begin_loop`-opened header composed with the
+    /// whole-word transform's self-call-driven back-edge. The body's leading
+    /// quotation binding(s) are lowered *before* `begin_loop`, so the
+    /// loop-invariant `Copy` quotation phantom is bound to a local (resolved
+    /// statically each iteration) and excluded from the loop-carried phis;
+    /// only the state row is carried. `stage_aggregates = true` reuses the
+    /// slice-3 aggregate staging verbatim for a carried-aggregate state. The
+    /// enclosing loop state is saved and restored so loops compose (see
+    /// `save_loop_state`). A tail-position self-call inside the body is
+    /// emitted as a back-edge (`lower_call`, keyed on `cur_combinator`),
+    /// never a re-splice.
     pub(in crate::ir) fn lower_self_tail_combinator(&mut self, name: &str, body: &[Term]) {
         let saved_loop_state = self.save_loop_state();
         let saved_combinator = self.cur_combinator.take();
@@ -317,104 +319,6 @@ impl<'a> FuncBuilder<'a> {
                     }
                     None => self.lower_indirect_call(v),
                 }
-            }
-            // R14: `times` lowers into a constant-stack loop, reusing
-            // `begin_loop`/`finalize_loop` (D6). A synthesized index drives a
-            // header `Jnz(index < count)`; the body reads the index as its top
-            // input and returns the row on the back-edge (R18). `tail = false`
-            // for the same reason as `call`.
-            "times" => {
-                // 6d/R5: a nested `times` is now legal (the checker's R18
-                // rejection retired), so no `debug_assert` on `header.is_none()`
-                // here; the hoist-target split (R1-R3) keeps it constant-stack.
-                // R15: save the loop state (see `save_loop_state`'s doc) and
-                // restore it after the loop, so a nested `times` composes and a
-                // later `Alloc` in the same word does not hoist into this now-
-                // dead `times` preheader.
-                let saved_loop_state = self.save_loop_state();
-
-                let qv = self.stack.pop().expect("times: quotation on stack");
-                // R10/D1/D6: provenance decides, exactly as `call`. A phantom
-                // the checker resolved to a literal splices its body per
-                // iteration; a materialized value whose identity was erased is
-                // indirect-called once per iteration (still constant stack).
-                let quot_id = self.quot_bodies.get(&qv).copied();
-                let count = self.stack.pop().expect("times: count on stack");
-
-                // Synthesize the induction variable seeded 0; the row is the
-                // remaining stack. `stage_aggregates = true` (R17): a carried
-                // aggregate rides slice 3's entry-hoisted stable slot, and the
-                // index gets a scalar phi.
-                let seed = self.fresh_value(IrType::I64);
-                self.push_instr(Instr::Const(seed, 0));
-                self.const_vals.insert(seed, 0);
-                let mut params = mem::take(&mut self.stack);
-                params.push(seed);
-                let outs = self.begin_loop(&params, true);
-                let index_phi = *outs.last().expect("times: index phi");
-                let row_phis: Vec<Value> = outs[..outs.len() - 1].to_vec();
-
-                // Header (current after `begin_loop`): loop while index < count.
-                let cmp = self.fresh_value(IrType::Bool);
-                self.push_instr(Instr::Cmp(cmp, CmpOp::Lt, index_phi, count));
-                let body_block = self.fresh_block();
-                let exit_block = self.fresh_block();
-                self.seal_block(Terminator::Jnz(cmp, body_block, exit_block));
-
-                // Body: the row plus the index (top input), spliced `tail =
-                // false`. `alloca_home` stays `Some` across the splice, so an
-                // aggregate the body constructs hoists its `Alloc` into the
-                // invariant alloca home (R17/6d), not the per-iteration body
-                // block, at any nesting depth.
-                self.start_block(body_block);
-                self.terminated = false;
-                self.stack = row_phis;
-                self.stack.push(index_phi);
-                let locals_depth = self.locals.len();
-                match quot_id {
-                    Some(id) => {
-                        let body = self.quot_defs[id.0].clone();
-                        self.lower_terms(&body, false);
-                    }
-                    None => self.lower_indirect_call(qv),
-                }
-                self.locals.truncate(locals_depth);
-
-                // Back-edge: the body's result row plus index + 1.
-                let one = self.fresh_value(IrType::I64);
-                self.push_instr(Instr::Const(one, 1));
-                self.const_vals.insert(one, 1);
-                let index_next = self.fresh_value(IrType::I64);
-                self.push_instr(Instr::Bin(index_next, BinOp::Add, index_phi, one));
-                // With `tail = false` and no `Return` in a body, nothing can
-                // terminate the body block, so a double seal is impossible.
-                debug_assert!(
-                    !self.terminated,
-                    "a `tail = false` `times` body cannot terminate"
-                );
-                let mut args = mem::take(&mut self.stack);
-                args.push(index_next);
-                self.back_edges.push((self.cur_id, args));
-                self.seal_block(Terminator::Jmp(self.header.expect("times loop header")));
-
-                // Back-patch the scalar phis (row scalars + index) and append
-                // the aggregate staging blits on the back-edge (unchanged from
-                // slice 3).
-                self.finalize_loop();
-
-                // Exit: the carried row (scalar header-phi outputs / aggregate
-                // stable slots), minus the trailing index. Reset `terminated`
-                // (the body seal set it) or every term after the `times` is
-                // silently dropped.
-                self.start_block(exit_block);
-                self.terminated = false;
-                let mut exit_stack = outs;
-                exit_stack.pop();
-                self.stack = exit_stack;
-
-                // R15: restore the pre-`times` loop state so the `times`
-                // composes with a later `Alloc` or a second sequential `times`.
-                self.restore_loop_state(saved_loop_state);
             }
             "dup" => {
                 let top = *self.stack.last().expect("dup: non-empty stack");
@@ -605,7 +509,7 @@ impl<'a> FuncBuilder<'a> {
                 // caller's quotation literals sit on `self.stack` as phantom
                 // `Value`s already (a `TermKind::Quotation` earlier in this
                 // body recorded each `Value -> QuotId`), so the spliced body's
-                // own `call`/`times` resolves them with no extra plumbing.
+                // own `call` resolves them with no extra plumbing.
                 // `tail = false` and the locals-truncate mirror the `call`
                 // splice above. Checked before the `&`/conversion/struct
                 // dispatch since a combinator name is an ordinary word name.
@@ -779,74 +683,17 @@ mod tests {
     }
 
     #[test]
-    fn times_lowers_to_a_loop_header_not_a_per_iteration_call() {
-        // Criterion 6 (R14/R17): `times` builds a header `Block` carrying the
-        // index `Phi`, sealed with a `Terminator::Jnz`, reached by a back-edge
-        // `Terminator::Jmp`, with no per-iteration `Instr::Call`. The index
-        // `Phi` + header `Jnz` are pinned because "header + back-edge `Jmp` + no
-        // `Call`" alone also describes a one-trip or infinite loop.
-        let simple = lower_src(": main ( -- ) 0 1000000 [ + ] times . ;");
-        let main = func(&simple, "main");
-        let header = loop_header(main);
-        let hblock = header_block(main, header);
-        assert!(
-            !header_phis(hblock).is_empty(),
-            "the header carries the index phi"
-        );
-        assert!(
-            matches!(hblock.term, Terminator::Jnz(..)),
-            "the header is sealed with a Jnz (index < count), got {:?}",
-            hblock.term
-        );
-        let entry_id = main.blocks[0].id;
-        assert!(
-            main.blocks
-                .iter()
-                .any(|b| b.id != entry_id && matches!(b.term, Terminator::Jmp(h) if h == header)),
-            "a non-entry body block back-edges to the header"
-        );
-        assert_eq!(
-            count(main, is_call_instr),
-            0,
-            "no per-iteration Instr::Call"
-        );
-
-        // On 5a's source (a `Vec2` constructed each iteration): every `Alloc`
-        // hoists into the entry block, none into the body block (R17). This is
-        // the deterministic R17 witness, not the coarse `ulimit` run.
-        let agg = lower_src(
-            "type: Vec2 x i64 y i64 ;\n\
-             : main ( -- ) 0 1000000 [ | i | i i Vec2 Vec2>x + ] times . ;",
-        );
-        let main = func(&agg, "main");
-        let header = loop_header(main);
-        let entry = &main.blocks[0];
-        let body = main
-            .blocks
-            .iter()
-            .find(|b| b.id != entry.id && matches!(b.term, Terminator::Jmp(h) if h == header))
-            .expect("a body block back-edging to the header");
-        assert!(
-            entry.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
-            "the per-iteration Vec2 Alloc hoists into the entry block"
-        );
-        assert!(
-            !body.instrs.iter().any(|i| matches!(i, Instr::Alloc(..))),
-            "no Alloc in the loop body block (R17)"
-        );
-    }
-
-    #[test]
-    fn times_saves_and_restores_loop_state() {
-        // R15u/U12: after the `times` arm returns, all five loop-state fields
-        // (`header`/`entry_block`/`alloca_home`/`carried_slots`/`back_edges`)
-        // are back to their pre-`times` values. `finalize_loop` clears only
-        // two of them, so the arm's explicit save/restore is what lets a later
-        // `Alloc` (or a second sequential `times`) not hoist into the dead
-        // `times` preheader, and lets a second top-level loop reseat the
-        // alloca home to its own entry. Dropping the `alloca_home` member from
-        // the shared helper leaves it stuck at the first loop's entry and this
-        // fails (mutation-test the guard, U12).
+    fn self_tail_combinator_saves_and_restores_loop_state() {
+        // R15u/U12/D4: after `lower_self_tail_combinator` returns, all five
+        // loop-state fields (`header`/`entry_block`/`alloca_home`/
+        // `carried_slots`/`back_edges`) are back to their pre-call values.
+        // `finalize_loop` clears only two of them, so the explicit
+        // save/restore is what lets a later `Alloc` (or a second sequential
+        // loop) not hoist into the dead preheader, and lets a second
+        // top-level loop reseat the alloca home to its own entry. Dropping
+        // the `alloca_home` member from the shared helper leaves it stuck at
+        // the first loop's entry and this fails (mutation-test the guard,
+        // U12).
         let env: HashMap<String, Arity> = HashMap::new();
         let structs = Structs::default();
         let enums = Enums::default();
@@ -865,42 +712,10 @@ mod tests {
                 refs: &refs,
             },
         );
-        // A `times` over an empty row: push the count, then intern a body that
-        // consumes just the synthesized index (`[ drop ]`) so the row stays
-        // empty and the back-edge arity matches the single index slot.
-        let count = b.fresh_value(IrType::I64);
-        b.push_instr(Instr::Const(count, 3));
-        b.const_vals.insert(count, 3);
-        b.stack.push(count);
-        let quot_term = &line_terms("[ drop ]")[0];
-        b.lower_term(quot_term, false);
-        assert_eq!(b.stack.len(), 2, "count beneath the quotation phantom");
-
-        let saved_header = b.header;
-        let saved_entry = b.entry_block;
-        let saved_alloca_home = b.alloca_home;
-        b.lower_call(
-            "times",
-            Span {
-                line: 1,
-                col: 1,
-                module: 0,
-            },
-            false,
-        );
-
-        assert_eq!(b.header, saved_header, "header restored");
-        assert_eq!(b.entry_block, saved_entry, "entry_block restored");
-        assert_eq!(b.alloca_home, saved_alloca_home, "alloca_home restored");
-        assert!(b.carried_slots.is_empty(), "carried_slots restored");
-        assert!(b.back_edges.is_empty(), "back_edges restored");
-
-        // D4: the combinator mid-body site shares the same save/restore
-        // helper as the `times` arm above. `lower_self_tail_combinator` is
-        // called directly (bypassing the `self_tail` dispatch gate) with a
-        // body that is itself the self-call (`foo`), so it back-edges to the
-        // header exactly as a real `while` body would, and this exercises the
-        // same four-field save/restore.
+        // `lower_self_tail_combinator` is called directly (bypassing the
+        // `self_tail` dispatch gate) with a body that is itself the self-call
+        // (`foo`), so it back-edges to the header exactly as a real `while`
+        // body would.
         let state = b.fresh_value(IrType::I64);
         b.push_instr(Instr::Const(state, 7));
         b.const_vals.insert(state, 7);
@@ -910,23 +725,11 @@ mod tests {
         let saved_alloca_home = b.alloca_home;
         b.lower_self_tail_combinator("foo", &line_terms("foo"));
 
-        assert_eq!(b.header, saved_header, "header restored (combinator site)");
-        assert_eq!(
-            b.entry_block, saved_entry,
-            "entry_block restored (combinator site)"
-        );
-        assert_eq!(
-            b.alloca_home, saved_alloca_home,
-            "alloca_home restored (combinator site)"
-        );
-        assert!(
-            b.carried_slots.is_empty(),
-            "carried_slots restored (combinator site)"
-        );
-        assert!(
-            b.back_edges.is_empty(),
-            "back_edges restored (combinator site)"
-        );
+        assert_eq!(b.header, saved_header, "header restored");
+        assert_eq!(b.entry_block, saved_entry, "entry_block restored");
+        assert_eq!(b.alloca_home, saved_alloca_home, "alloca_home restored");
+        assert!(b.carried_slots.is_empty(), "carried_slots restored");
+        assert!(b.back_edges.is_empty(), "back_edges restored");
     }
 
     #[test]
@@ -1611,6 +1414,15 @@ mod tests {
         );
     }
 
+    // Shared with `each_lowering_test_times_def_is_pinned_to_the_library` so
+    // the two tests cannot drift apart: one exercises this exact source, the
+    // other pins it against `lib/combinators.sth`.
+    const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+         | f | | to | | from |\n\
+         from to < if from f call from 1 + to f times-helper else end ;\n\
+         : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+         | f | | n | 0 n f times-helper ;\n";
+
     #[test]
     fn each_lowers_to_a_loop_not_a_per_element_call() {
         // Criterion 14b (R19, load-bearing): the inlined `each` lowers to a
@@ -1621,17 +1433,21 @@ mod tests {
         // criterion 14's equivalence witness: deleting the `lower_call` inline
         // branch would leave an `Instr::Call` for `each` and no loop, and
         // unrolling per element would drop the back-edge. `each` is defined
-        // inline here so the unit needs no import closure.
-        let ir = lower_src(
-            ": each ( ['T 'N] [ 'T -- ] -- )\n\
+        // inline here, over an inline `times`/`times-helper` mirroring
+        // `lib/combinators.sth`, so the unit needs no import closure.
+        let ir = lower_src(&format!(
+            "{TIMES_DEF}\
+             : each ( ['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
              count [ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
-             : main ( -- ) 0 4 fill [ . ] each ;\n",
-        );
+             : main ( -- ) 0 4 fill [ . ] each ;\n"
+        ));
         assert!(
-            ir.funcs.iter().all(|f| f.name != "each"),
-            "the inlined `each` mints no IrFunc, got: {:?}",
+            ir.funcs
+                .iter()
+                .all(|f| !matches!(f.name.as_str(), "each" | "times" | "times-helper")),
+            "the inlined `each` and its `times` splices mint no IrFunc, got: {:?}",
             ir.funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
         );
         let main = func(&ir, "main");
@@ -1665,6 +1481,30 @@ mod tests {
         assert!(
             user_calls.is_empty(),
             "the inlined `each` body is spliced, not called; unexpected calls: {user_calls:?}"
+        );
+    }
+
+    #[test]
+    fn each_lowering_test_times_def_is_pinned_to_the_library() {
+        // Pins the same `TIMES_DEF` that `each_lowers_to_a_loop_not_a_per_element_call`
+        // actually compiles (not a second, independently-typed copy) against the
+        // real library, so a future body change cannot leave that test silently
+        // exercising a stale shape.
+        let lib =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
+                .expect("the combinator library should be readable");
+        let normalize = |s: &str| -> String {
+            s.lines()
+                .map(|line| line.split('\\').next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        assert!(
+            normalize(&lib).contains(&normalize(TIMES_DEF)),
+            "each_lowers_to_a_loop_not_a_per_element_call's inline times/times-helper has drifted from lib/combinators.sth"
         );
     }
 
