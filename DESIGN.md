@@ -354,9 +354,9 @@ and requires the body return the row it received, so effect realization only eve
 inner row against itself (D6). It is library source, not a compiler-known word (slice 10b):
 a thin wrapper over a self-tail-recursive `times-helper`, whose tail call is what
 reaches the internal loop primitive (`begin_loop`/`finalize_loop`), and loops nest at any
-depth. `times-helper` is exported too, not truly private: the REPL's `dlopen` import path
-retains only exported words, so a transitively-reached private helper would be
-unresolvable. The quotation-literal fusion this slice owns (splicing a literal's body at its
+depth. Both names are exported: the REPL's `dlopen` import path retains only
+exported words, so a helper reached only transitively through a splice would
+be unresolvable. The quotation-literal fusion this slice owns (splicing a literal's body at its
 `call`) never crosses a `:` word boundary (D5); the interprocedural user-word inliner that
 lowers the combinator library itself is Slice 5's.
 

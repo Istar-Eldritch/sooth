@@ -2072,8 +2072,8 @@ then find out what the compiler owes it.
     `dlopen` import path, which retains exported words only), leaving no
     compiler-known combinator at all — no `check_abstract_quotation_times`, no
     `check_term`/`ir.rs` `"times"` arms. It carries one checker change of its own, not the
-    pure delete-and-import it looks like: `check_linear_across_back_edge` takes a frame floor
-    (`src/check/terms.rs:1049`), exempting a linear local the *enclosing* frame owns and
+pure delete-and-import it looks like: `check_linear_across_back_edge` takes a frame floor
+    (`src/check/terms.rs:1060`), exempting a linear local the *enclosing* frame owns and
     disposes from a rejection meant for one the loop actually carries. **10c** is
     `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
     9b), which extends 10a's row representation to a row that legitimately differs between a

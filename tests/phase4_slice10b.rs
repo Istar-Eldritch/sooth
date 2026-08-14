@@ -324,6 +324,52 @@ fn spliced_body_disposing_a_qualified_only_imported_type_is_error() {
     );
 }
 
+#[test]
+fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splicing() {
+    // A quotation literal is re-validated against each nesting level's own
+    // live row (`check_poly_combinator_args`, row = `stack[..base]`), so an
+    // inner combinator can push its own type into the row before the
+    // caller's literal is re-checked under that inner combinator's `ctx`.
+    // Here `main`'s quotation `[ drop 0 ]` is re-validated inside `c::inner`'s
+    // splice, where `ctx.module()` is `c`, but `drop`'s span still names
+    // `main`, the module it was written in. `Res` is declared in `b`, which
+    // `main` imports only as a bare `import: b "b.sth"`, not by name, so the
+    // drop is rejected -- but which module's import map supplies the
+    // qualifier depends on which of `span.module` (`main`, which does import
+    // `b`) or `ctx.module()` (`c`, which does not) is used: the two give a
+    // different qualifier and a different remedy. This is the accept-side
+    // twin of `spliced_body_disposing_a_qualified_only_imported_type_is_error`
+    // and, unlike that one, only goes red under R9 mutation (d) (revert the
+    // gate's `caller` derivation to `ctx.module()`).
+    let c = Closure::new("nested-splice-divergence");
+    c.write(
+        "c.sth",
+        "export: inner ;\n\
+         : inner ( ..s ~[ ..s -- ..s ] -- ..s )  | f | f call ;\n",
+    );
+    c.write(
+        "b.sth",
+        "import: c \"c.sth\" ;\n\
+         export: outer Res ;\n\
+         type: Res n i64 ;\n\
+         : drop ( Res -- )  | r | r Res>n . ;\n\
+         : outer ( ..s ~[ ..s -- ..s ] -- ..s )  | f | 9 Res f c::inner ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: b \"b.sth\" ;\n\
+         : main ( -- ) 1 [ drop 0 ] b::outer . ;\n",
+    );
+    let err = driver::build(&entry).expect_err("build should fail its check");
+    assert!(
+        err.contains("cannot `drop` a value of type `b::Res` in `main`")
+            && err.contains("has not imported by name"),
+        "the span-authoring module (`main`, which imports `b`) supplies the \
+         qualifier and remedy, not the splice-time `ctx` (`c`, which does \
+         not import `b`), got: {err}"
+    );
+}
+
 // -- R7: exit witnesses on the real, library `times` -------------------------
 //
 // Each asserts full stdout plus the exit code. `times` is now ordinary Sooth
