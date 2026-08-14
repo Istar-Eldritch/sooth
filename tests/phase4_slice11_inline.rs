@@ -535,6 +535,17 @@ fn combinators_source(quotation_kind: &str) -> String {
     format!(
         r#"export: each map fold filter while ;
 
+: times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
+  | f | | to | | from |
+  from to < if
+    from f call
+    from 1 + to f times-helper
+  else
+  end ;
+
+: times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
+  | f | | n | 0 n f times-helper ;
+
 : each ( ['T 'N] {quotation_kind}[ 'T -- ] -- )
   | f | len >i64 | count | | arr |
   count [ | i | &arr i >usize &> @ f call ] times
@@ -631,7 +642,7 @@ fn combinators_retype_stored_quotation_still_rejected() {
     let err = check_error(&src);
     assert_eq!(
         err,
-        "error: `each` expects a quotation `~[ i64 -- ]` here, found `[ i64 -- ]` in `main` (line 32)"
+        "error: `each` expects a quotation `~[ i64 -- ]` here, found `[ i64 -- ]` in `main` (line 43)"
     );
 }
 
