@@ -516,9 +516,13 @@ only the import. Audit for the `fold_body` pattern elsewhere rather than assumin
 `phase4_slice6f.rs` is the only instance.
 
 **R6**: Regenerate the `qbe_baseline` `.ssa` for the times-using corpus (a sanctioned
-baseline diff). Machine-code size is unchanged (Q2); the `.ssa` differs only in value
-numbering. Mechanism: `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline` (documented at
-`tests/qbe_baseline.rs:8`).
+baseline diff). Mechanism: `REGEN_QBE_BASELINE=1 cargo test --test qbe_baseline` (documented at
+`tests/qbe_baseline.rs:8`). Correction from Phase 2, which built the library `times` and
+inspected its emitted QBE: the diff is **not** "only value numbering". The library `times`
+adds a loop-invariant phi carrying `to` and an extra empty join block from `times-helper`'s
+`else`/`end`, so the baseline diff is structural. QBE is expected to fold both, but Q2's
+"machine-code size unchanged" must be **measured** at this phase (compare stripped `.o`/text
+section sizes before and after), not asserted from the `.ssa`.
 
 **R10**: The disposal-visibility splice fix, specified in full as Decision R10 above (both
 `check_drop_import_visibility`'s gate at `src/check/word_families.rs:756-768` and
@@ -531,6 +535,17 @@ keeps ROADMAP and DESIGN as current-state documents rather than history: `README
 `:61`, `ROADMAP.md:304` ("The one compiler-known intrinsic, `times`") and `:308-312`,
 `DESIGN.md:352-357` and `:513`. After 10b there is no compiler-known intrinsic at all, so the
 claim is not merely stale but false.
+
+Also in R11's scope, deferred here from Phase 2 (which corrected only the two files it
+touched, `src/check/terms.rs` and `src/ir/func_builder/calls.rs`): the `src/` doc comments
+that still pair `times` with `call` as a compiler-known splice site, in `src/check.rs`,
+`src/check/combinators.rs`, `src/check/engine.rs`, `src/check/captures.rs`,
+`src/check/poly.rs`, `src/check/word_families.rs`, `src/ir/types.rs`,
+`src/ir/func_builder/mod.rs` and `src/ir/func_builder/quotation.rs`. Re-derive the list by
+grep at this phase rather than trusting a line-number list written two phases earlier, and
+note that a plain `grep times` over-matches: several hits are ordinary English ("stores the
+seed `n` times", "name `b` three times") and `calls.rs:145`'s `times-helper` reference is now
+correct as written.
 
 **R7 (exit witnesses on the real `times`, not `my-times`)**: new goldens, each an
 `assert_eq!` on full stdout plus exit code, never a bare "runs" or "produces correct values"
