@@ -84,6 +84,11 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n\
 const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | to | | from | from to < if from f call from 1 + to f times-helper else end ;\n\
     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | n | 0 n f times-helper ;\n";
 
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[]);
+}
+
 // -- criterion 1: the type parses --------------------------------------------
 
 #[test]

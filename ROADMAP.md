@@ -619,6 +619,16 @@ quotation's declared effect, which does not parse before slice 10a, and is split
 extends 10a's row mechanism and gates on 10a phases 1–4, i.e. everything up to and including
 grounding (not on 10b).
 
+**Known gap, not yet scheduled:** a row-typed combinator call over a quotation left in (or
+read back out of) the row crashes the backend instead of being rejected. `[ + ] 3 [ drop ]
+times drop` (and the same shape over any user-declared row combinator, e.g. 10a's
+`my-times`) reaches QBE as an invalid-type phi; calling the row quotation afterward hits
+`unreachable!()` in `func_builder/quotation.rs`; a third, same family, `while` over an
+*erased* quotation panics in `control_flow.rs`. All three are recorded in
+`docs/phase4-slice10b-spec.md`. No general guard covers any of them: this is one slice's
+worth of work (a single check at a row-typed combinator's call site covering all three
+shapes), not three.
+
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires
 it, since LLVM and Z3 were dropped. Free choice.

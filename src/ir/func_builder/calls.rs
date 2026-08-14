@@ -1480,6 +1480,35 @@ mod tests {
     }
 
     #[test]
+    fn each_lowering_test_times_def_is_pinned_to_the_library() {
+        // The inline `times`/`times-helper` above exists so this unit needs
+        // no import closure. Pin it against the real library so a future
+        // body change cannot leave this copy silently exercising the old
+        // shape.
+        let lib =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/lib/combinators.sth"))
+                .expect("the combinator library should be readable");
+        let normalize = |s: &str| -> String {
+            s.lines()
+                .map(|line| line.split('\\').next().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let hand_copy = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+             | f | | to | | from |\n\
+             from to < if from f call from 1 + to f times-helper else end ;\n\
+             : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+             | f | | n | 0 n f times-helper ;\n";
+        assert!(
+            normalize(&lib).contains(&normalize(hand_copy)),
+            "each_lowers_to_a_loop_not_a_per_element_call's inline times/times-helper has drifted from lib/combinators.sth"
+        );
+    }
+
+    #[test]
     fn while_lowers_to_a_back_edge_not_an_infinite_splice() {
         // U12 (R10, load-bearing): a self-tail combinator `while` lowers to a
         // real mid-body loop -- an entry `Jmp` to a header carrying the state

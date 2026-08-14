@@ -9,6 +9,8 @@ use std::process::{Command, Stdio};
 
 use sooth::{check, lexer, parser};
 
+mod common;
+
 /// Compile and run `src`, returning its stdout and exit code. `name`
 /// distinguishes the temp source (and so the emitted binary) per test, since
 /// the goldens run in parallel in one process.
@@ -72,6 +74,11 @@ const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s
      from to < if from body call from 1 + to body times-helper else end ;\n\
      : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | body | | n | 0 n body times-helper ;\n";
+
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[("body", "f")]);
+}
 
 fn parse_error(src: &str) -> String {
     let tokens = lexer::lex(src).expect("lexing should succeed");

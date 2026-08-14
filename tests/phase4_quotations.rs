@@ -52,6 +52,11 @@ const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s
      : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[]);
+}
+
 /// Whether the lowered module emits at least one indirect call: the witness
 /// that a `call` resolved to a runtime dispatch through a materialized value,
 /// not a compile-time body splice.

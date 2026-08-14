@@ -707,9 +707,10 @@ both reproduce identically at `91f6193` on a user-declared row combinator (10a's
 `my-times` shape), and 10b only widens the reach to the library `times`. A third, same
 family: `while` over an *erased* quotation (`: pred ( -- [ i64 -- i64 bool ] ) ... ;`) panics
 in `control_flow.rs`, also at `91f6193`. `tests/phase4_generics.rs`'s
-`times_with_a_quotation_in_its_row_is_error` now pins only what still rejects (the outputs
+`row_quotation_left_on_the_stack_is_error` now pins only what still rejects (the outputs
 check on `main`, one step later) and says so; the crashes want a slice that puts a general
-guard on a row-typed combinator's call, since three shapes now share one hole.
+guard on a row-typed combinator's call, since three shapes now share one hole. ROADMAP.md
+names all three shapes as one slice's worth of not-yet-scheduled work.
 
 **`times` no longer drives an erased quotation.** The library `times` declares 10a's
 inline-only `~[ ... ]` parameter, so a materialized quotation value is rejected

@@ -55,6 +55,11 @@ const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s
      : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
+#[test]
+fn times_def_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_DEF, &[]);
+}
+
 /// An `import:` line for the committed combinator library by *absolute* path,
 /// so a temp source built under `temp_dir()` resolves it regardless of cwd.
 fn combinators_import(qualifier: &str) -> String {
@@ -1033,7 +1038,7 @@ fn times_body_consuming_a_linear_local_is_error() {
 }
 
 #[test]
-fn times_with_a_quotation_in_its_row_is_error() {
+fn row_quotation_left_on_the_stack_is_error() {
     // Criterion R18b: a quotation riding *below* the consumed top of the row.
     // The intrinsic's whole-row guard went with it in 10b, and no general
     // guard replaced it: what rejects this program is the outputs check on

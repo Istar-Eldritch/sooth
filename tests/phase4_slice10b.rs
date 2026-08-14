@@ -24,6 +24,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use sooth::driver;
 
+mod common;
+
 /// Compile and run `src`, returning stdout and the exit code.
 fn run_src(name: &str, src: &str) -> (String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
@@ -77,6 +79,11 @@ const TIMES_HELPER: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- 
     \x20   from 1 + to f times-helper\n\
     \x20 else\n\
     \x20 end ;\n";
+
+#[test]
+fn times_helper_hand_copy_is_pinned_to_the_library() {
+    common::assert_pinned_to_combinators_lib(TIMES_HELPER, &[]);
+}
 
 /// A scratch closure of source files, removed on drop.
 struct Closure(PathBuf);
