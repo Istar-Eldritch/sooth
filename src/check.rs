@@ -1566,15 +1566,19 @@ fn combinator_branch_output_mismatch_error(
     found: &[Type],
 ) -> String {
     let word = crate::resolve::demangle_word(word);
-    let render = |types: &[Type]| {
-        types
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" ")
+    let render = |types: &[Type]| match types.is_empty() {
+        true => "nothing".to_string(),
+        false => format!(
+            "`{}`",
+            types
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
     };
     format!(
-        "error: the quotations passed to `{word}` leave different stack shapes: `{}` vs `{}`{} (line {})",
+        "error: the quotations passed to `{word}` leave different stack shapes: an earlier one leaves {}, this one leaves {}{} (line {})",
         render(expected),
         render(found),
         in_word(ctx),

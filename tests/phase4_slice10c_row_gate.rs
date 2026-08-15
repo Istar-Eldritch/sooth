@@ -98,20 +98,20 @@ fn check_error(src: &str) -> String {
 
 #[test]
 fn shape_changing_myif_checks_and_runs_with_a_surviving_carried_value() {
-    // `..i` grounds to one carried `i64` (the caller's `5`); each branch
-    // leaves *two* values (`..o`), so the declared rows genuinely differ.
-    // Both branches read the carried value with `dup` rather than consuming
-    // it, so it survives the call untouched underneath the freshly computed
-    // one -- the point of the "carried value survives" half of E-P2-2.
+    // `..i` grounds to two carried `i64`s (the caller's `99 5`); each branch
+    // leaves *three* values (`..o`), so the declared rows genuinely differ.
+    // The bottom value (`99`) is below everything either branch reads or
+    // writes, so it survives the call untouched -- the "carried value
+    // survives" half of E-P2-2.
     let src = format!(
-        "{MYIF}: demo ( i64 bool -- i64 i64 )\n\
+        "{MYIF}: demo ( i64 i64 bool -- i64 i64 i64 )\n\
          [ dup 10 + ] [ dup 20 + ] myif ;\n\
-         : main ( -- ) 5 true demo . . 5 false demo . . ;\n"
+         : main ( -- ) 99 5 true demo . . . 99 5 false demo . . . ;\n"
     );
     let out = run(&src);
     assert_eq!(
-        out, "15\n5\n25\n5",
-        "the surviving carried value (5) and the branch's computed value both print correctly"
+        out, "15\n5\n99\n25\n5\n99",
+        "the untouched carried value (99) and the branch's computed values both print correctly"
     );
 }
 
@@ -131,17 +131,10 @@ fn contradicting_branch_output_is_rejected_at_the_argument_site() {
          [ dup 10 + ] [ drop ] myif ;\n"
     );
     let err = check_error(&src);
-    assert!(
-        err.contains("different stack shapes"),
-        "unexpected message: {err}"
-    );
-    assert!(
-        !err.contains("needs 2 values") && !err.contains("needs 1 value"),
-        "must not be the generic splice-site underflow/overflow message: {err}"
-    );
-    assert!(
-        err.contains("line 4"),
-        "must be located at the second (contradicting) literal, line 4: {err}"
+    assert_eq!(
+        err,
+        "error: the quotations passed to `myif` leave different stack shapes: \
+         an earlier one leaves `i64 i64`, this one leaves nothing in `demo` (line 4)"
     );
 }
 
