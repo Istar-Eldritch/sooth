@@ -604,20 +604,37 @@ has nothing to intern a body-internal shape against, so this is deferred to a fu
 slice. A concrete element inside a combinator body already works today, since a
 combinator is monomorphized and checked by the ordinary concrete `check_word`.
 
-**Next action: Phase 4 Slice 12** (combinator recognition becomes declared, not inferred).
-7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
-8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
-module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), 10a (row
-variables inside a quotation's declared effect), 6g (combinator splices learning 6f's
-granting rule), 10b (`times` moved into `lib/combinators.sth`), 10c (`if`/`unless`/`while` as
-ordinary `lib/core.sth`/`lib/combinators.sth` words over the `branch`/`tag`/comparison
-primitives, no `cond`, no compiler-known `bool`), and 11 (`inline` as a
-declared word property, `~` generalised beyond `times` to `lib/combinators.sth`, and a
-reference-output exemption for every always-spliced word) are all done on `main`. Slice 9
-shipped `Bool` as a library enum (P1–P2 only, merged at `c5db035`); its `if`/`cond` half was
-renumbered into slice 10's lineage as slice 10c, since what it depended on was 10a's row
-mechanism, not 9's own scope, and shipped a different mechanism than this entry originally
+**Phase 4 Slice 12 (combinator recognition becomes declared, not inferred) is complete**
+and merged to `main`: a word declaring a `~[ ... ]` parameter must say `inline` (a located
+error where it does not), `is_combinator`'s quotation-parameter inference leg is retired
+(`inline` is the single route to "this word splices"), and every library combinator
+(`times`, `each`, `map`, `fold`, `filter`, `while`, `if`, `unless`) is migrated. `~[ ... ]`
+is now writable as a term literal and required at a `~` parameter — an ordinary `[ ... ]`
+no longer silently satisfies one — closing the gap that kept a first-class capturing
+quotation (7b's territory) from ever being a genuine call.
+
+**Phase 4 Slice 13 (`PolyType::Ref` — poly borrow support) is complete** and merged to
+`main`: a plain (non-combinator) generic word can borrow (`&x`/`&!x`, `&>`/`&!>`, `@`, `!`)
+at its own top level, and a signature slot can declare a borrow of a still-generic type
+(`&'T`, `&['T 4]`, `&!...`). `PolyType` gained a `Ref` variant threaded through the parser,
+unification, substitution, Copy-gating, and IR lowering. A poly body's borrow gets full
+exclusivity/liveness/use-after-move checking at check time (a conservative
+`PolyScope`-local approximation, sound by construction: it can only over-reject, never miss
+a hazard), since a plain poly word is checked once, abstractly, and never re-checked per
+instantiation. Scope is bounded to the array case: `'N`-length (fully generic-length)
+element access, `&^`/`&Struct>field` accessors in a generic body, `+!`, and full
+`Provenance`/`Liveness` acceptance parity with the monomorphic checker are each a located
+error or an explicit deferral, not a silent gap.
+
+Slice 9 shipped `Bool` as a library enum (P1–P2 only, merged at `c5db035`); its `if`/`cond`
+half was renumbered into slice 10's lineage as slice 10c, since what it depended on was
+10a's row mechanism, not 9's own scope, and shipped a different mechanism than originally
 assumed — full account in `docs/phase4-slice10c-spec.md`.
+
+**Next action: none locked.** Two independent, previously-identified gaps remain open and
+unscheduled (see below and `docs/phase4-slice13-brief.md`'s Deferred section): the
+row-typed-combinator quotation crash, and closing slice 13's conservative borrow-liveness
+fallback to full mono-checker parity.
 
 **Known gap, not yet scheduled:** a row-typed combinator call over a quotation left in (or
 read back out of) the row crashes the backend instead of being rejected. `[ + ] 3 [ drop ]
