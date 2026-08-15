@@ -40,8 +40,20 @@ pub(crate) fn mangle(name: &str, module: u32) -> String {
 /// mangling them per module would bind each module's `if` to a spelling only
 /// the injected copy's own module could resolve, leaving every other module's
 /// bare `if` unresolvable. Same reasoning as `main` and `drop`.
+///
+/// Read off `lib/core.sth` rather than listed here: the file is meant to grow,
+/// and a hand-mirrored list would leave each word added to it unresolvable
+/// from every module but the entry one.
 pub(crate) fn is_prelude_word_name(name: &str) -> bool {
-    matches!(name, "if" | "unless" | "=" | "<" | ">" | "<=" | ">=" | "<>")
+    static NAMES: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            crate::parser::prelude_words()
+                .into_iter()
+                .map(|w| w.name)
+                .collect()
+        })
+        .contains(name)
 }
 
 /// `check::builtin_table`'s keys, mirrored by hand (that table's own

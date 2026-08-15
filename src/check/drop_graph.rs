@@ -59,19 +59,19 @@ pub(super) fn check_main_effect(
 /// R1 (D2, D7): the callee names of every tail-position call in a word body.
 ///
 /// Tail position is a purely *syntactic* property: a call is in tail position
-/// iff it is the final term of a terms body, the final term of a clause body,
-/// or the final term of an arm of a *terminal* `if` (an `if` that is itself
-/// the final term hands tail position to the last term of both arms,
-/// recursively). Any term after a call, arithmetic, a shuffle, a consumer, or
-/// another call, breaks tail position, and a call inside a non-terminal `if`
-/// is not tail. Output-equality with the declared outputs is a *consequence*
-/// of this rule for a well-typed final call, not a second check.
+/// iff it is the final term of a terms body or the final term of a clause
+/// body. Any term after a call, arithmetic, a shuffle, a consumer, or another
+/// call, breaks tail position. Output-equality with the declared outputs is a
+/// *consequence* of this rule for a well-typed final call, not a second check.
 ///
-/// Slice 10c (R-P1-1) adds the third way a term inherits tail position: a
+/// Slice 10c (R-P1-1) adds the second way a term inherits tail position: a
 /// splice. An always-spliced callee's body runs *in place of* the call, so its
 /// own tail terms are the caller's, and a quotation literal the callee
 /// `call`s in tail position is spliced there too. `[ ... ] call` at a tail is
-/// the same thing one step shorter. See `TailWalk`.
+/// the same thing one step shorter. A trailing `[ t ] [ e ] if` hands tail
+/// position to both arms through that rule rather than as a form of its own:
+/// `if` splices, and `branch` tail-calls both quotation parameters. See
+/// `TailWalk`.
 ///
 /// Shared by the checker (R2 predicate, R3 tail-call graph); the lowerer
 /// re-encodes the same syntactic rule via positional `tail` threading in

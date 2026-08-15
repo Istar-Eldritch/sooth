@@ -60,17 +60,17 @@ lacks: statically-checked stack effects and named locals.
 order as the effect comment, and a word calls itself directly (no `recurse`). A
 binding is a term, not just an entry declaration: `| names |` is legal at any point
 in a body, popping that many values off the stack where it appears, with its extent
-running to the end of the enclosing block (a word body, a clause body, or an
-`if`/`else` arm) rather than the whole word:
+running to the end of the enclosing block (a word body, a clause body, or a
+quotation body) rather than the whole word:
 
 ```forth
 : gcd ( int int -- int )
   | a b |
-  b 0 = if
+  b 0 = [
     a
-  else
+  ] [
     b  a b mod  gcd
-  end ;
+  ] if ;
 ```
 
 Locals are opt-in, not the default. Prefer the stack: with `dup`/`swap`/`drop` most
@@ -299,10 +299,11 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 
 ## Control flow and iteration
 
-Boolean branching is `if ... else ... end` (which later becomes a combinator, see
-below); structural dispatch is `match`. There are deliberately **no loop keywords** (no `begin/until`, `do/loop`);
-dropping them keeps the surface small and matches the Factor/Kitten lineage, where
-iteration is expressed with combinators rather than syntax.
+Boolean branching is the library word `if` (`[ then ] [ else ] if`, see below);
+structural dispatch is clause-bodied definition. There are deliberately **no loop
+keywords** (no `begin/until`, `do/loop`); dropping them keeps the surface small and
+matches the Factor/Kitten lineage, where iteration is expressed with combinators
+rather than syntax.
 
 The iteration story, top to bottom:
 
@@ -671,9 +672,9 @@ Codegen model (unchanged from first principles, it's the good part): don't model
 the data stack at runtime. Simulate it at compile time as an array of typed slots;
 push/pop manipulate the array, and when IR is emitted the slots become ordinary
 SSA/register values. Each word compiles to a function taking N stack args and
-returning M results. `if`/`end` become basic blocks and branches; there are no loop
-keywords (see Control flow and iteration), and iteration lowers to an internal loop
-primitive with a back-edge. Branch and loop join points unify the virtual-stack state
+returning M results. The `branch` primitive becomes basic blocks and a conditional
+jump; there are no loop keywords (see Control flow and iteration), and iteration
+lowers to an internal loop primitive with a back-edge. Branch and loop join points unify the virtual-stack state
 (depth and type) across predecessors; mismatched depth or type across arms is a
 compile error.
 
@@ -1020,9 +1021,9 @@ rows, no borrow analysis needed to write the compiler in it.
 - Signature idea: linear (use exactly once) by default, `dup` is the explicit copy,
   `drop` is the explicit destructor point the checker enforces.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
-- Control flow: `if/else/end` for boolean branching (demotes to an ordinary
-  clause-bodied word over the library `Bool` enum once slice 10a's quotation rows
-  land; see The irreducible core); clause-bodied definitions as the sole, exhaustive
+- Control flow: `if`/`unless`, ordinary `lib/core.sth` words taking a `bool` and two
+  quotations over the `branch` and `tag` primitives (see The machine layer and the
+  library layer); clause-bodied definitions as the sole, exhaustive
   eliminator for enums (no inline `match`, no guards or literal patterns); a `cond`
   combinator (library word) for multi-way branching. No loop keywords.
 - Iteration: quotations (`[ ]` + `call`) are the sole primitive; lowers to an internal
@@ -1342,7 +1343,7 @@ be written without it, never on principle.
 
 - **Immediate-word / defining-word / macro facility** (would have replaced Forth's
   `CREATE`/`DOES>`). Declined. Sooth already sent the non-metaprogramming uses of
-  Forth immediate words elsewhere (`if/else/end` is a keyword, then a combinator;
+  Forth immediate words elsewhere (`if` is a library combinator over `branch`;
   iteration is quotations + combinators; comments/strings are lexer-level), leaving
   only metaprogramming, which splits into two capabilities both covered without a
   comptime facility: defining new words is a plain nullary word (`: answer 42 ;` is

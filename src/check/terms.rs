@@ -1401,11 +1401,11 @@ fn borrow_join_disagreement_error(
     };
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: borrow state disagrees at the `if`/`else` join in `{}` (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
+            "error: borrow state disagrees at the branch join in `{}` (line {})\n  the first arm leaves {}, the second arm leaves {}: both arms must agree on which place, if any, stays borrowed past the join\n  note: declared {}",
             name, span.line, describe(t_then), describe(t_else), effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: borrow state disagrees at the `if`/`else` join (line {})\n  the `then` arm leaves {}, the `else` arm leaves {}",
+            "error: borrow state disagrees at the branch join (line {})\n  the first arm leaves {}, the second arm leaves {}",
             span.line, describe(t_then), describe(t_else),
         ),
     }
