@@ -319,7 +319,15 @@ fn audit_poly_reference_free_signature(
         }
     }
     for pt in &sig.inputs {
-        if !matches!(pt, PolyType::Ref(..)) && contains_poly_reference(pt, structs, enums, arrays) {
+        // A top-level borrow is a legal input; only a *nested* one is not.
+        // Both spellings count as top-level: a variable-bearing `&'T` stays
+        // `PolyType::Ref`, while a fully concrete `&i64` folds to
+        // `Concrete(Type::Ref)` (R-A4). Testing only the former rejected the
+        // concrete spelling the monomorphic rule (`!slot.ty.is_ref()`,
+        // `word_entry.rs`) accepts.
+        let top_level_ref =
+            matches!(pt, PolyType::Ref(..)) || matches!(pt, PolyType::Concrete(t) if t.is_ref());
+        if !top_level_ref && contains_poly_reference(pt, structs, enums, arrays) {
             return Err(format!(
                 "error: a reference cannot be stored: `{word}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
                 poly_type_str(pt, sig)
@@ -509,6 +517,16 @@ mod tests {
             err,
             "error: a reference cannot be stored: `g` declares the input `[&'T 4]`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
         );
+    }
+
+    #[test]
+    fn poly_input_that_is_a_concrete_reference_is_accepted() {
+        // Phase 2 review blocker: a fully concrete `&i64` input folds to
+        // `Concrete(Type::Ref)`, not `PolyType::Ref` (R-A4), so a top-level
+        // test written only against the latter rejected a signature the
+        // monomorphic rule accepts.
+        check_src(": g ( &i64 'T: Copy -- 'T ) | r t | r drop t ;\n")
+            .expect("a top-level concrete reference input is legal");
     }
 
     /// Slice 10a (R2): the declaration-position rejection is no longer fail-open

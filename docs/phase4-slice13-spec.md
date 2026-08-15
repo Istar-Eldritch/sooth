@@ -289,11 +289,15 @@ in `poly_op_on_variable_error` (`:1296`, `"a reference"`);
 `poly_var_id` (`:561`) needs no arm (its `_ => None` already answers "not a bare
 variable"); assert this with a unit test rather than editing it.
 
-**R-A10 (exit, Part A).** A poly word may *declare* a borrow: `: peek ( ['T 4] -- &['T 4] )`
-parses, and its signature round-trips through `poly_type_str` as `&['T 4]`. Producing
-the borrow (a body `&a`) is still an unknown-word error at this point — Part A adds no
-`poly_call_term` dispatch. Unit tests beside the parser (fold of `&'T`, `&['T 4]`,
-`&!'T`; the concrete-referent fold to `Concrete(Type::Ref)`) and beside `poly_type_str`.
+**R-A10 (exit, Part A).** A poly word may *declare* a borrow, in an **input**
+position: `: pick ( &i64 'T: Copy -- 'T )` parses, and its signature round-trips
+through `poly_type_str`. A borrow in an *output* position (the earlier
+`: peek ( ['T 4] -- &['T 4] )` example) is rejected outright by
+`audit_poly_reference_free_signature` (R-B9), the poly twin of the monomorphic
+reference-free-signature rule. Producing the borrow (a body `&a`) is still an
+unknown-word error at this point — Part A adds no `poly_call_term` dispatch. Unit
+tests beside the parser (fold of `&'T`, `&['T 4]`, `&!'T`; the concrete-referent fold
+to `Concrete(Type::Ref)`) and beside `poly_type_str`.
 
 ### Part B — production and checking
 
@@ -369,7 +373,12 @@ also compiled at its concrete twin to prove the borrow lowers, not just checks:
 - *R-B6 negative* (P2, E4): `&Struct>field` (or `&^`) in a generic body rejects with
   E4's text, parametrized on the operator.
 - *Parser negatives* carried from Part A: `&q` (quotation local) rejected; a mutability
-  mismatch at a `&`-slot unification rejected.
+  mismatch at a `&`-slot unification rejected. **Corrected in P2:** the `&q` rejection
+  does not come from `poly_reference_word`, which never sees a quotation local — a
+  quotation input makes the word a combinator, and a combinator is checked by splicing
+  it at the call site, so the rejection is the *monomorphic* "cannot borrow the scalar
+  local" one naming the instantiated effect. Pinned as that behaviour, not as a poly
+  diagnostic.
 
 Assertion shapes are load-bearing (a placebo hazard this project has shipped before):
 the value goldens assert the *number*, the negatives assert the *message and site*, and
@@ -432,6 +441,27 @@ are written *against* one of these two pinned texts (E1-E5 fixed, E6
 fallback-conditional), never invented ad hoc per the placebo-test concern CLAUDE.md
 and this project's history (repeatedly shipped placebo tests) both flag.
 
+**R-B9 (signature audit, added in P2).** `check_reference_free_signature`
+(`word_entry.rs`) runs on `word.effect`, which is empty for a poly word, so no
+generic signature was audited at all. Once Part B lets a body *produce* a
+`PolyType::Ref`, an escaping borrow reaches lowering and panics
+(`checked: every reference value records its referent`). Add
+`audit_poly_reference_free_signature`, the poly twin, mirroring the monomorphic
+rule exactly:
+
+- Any **output** transitively containing a reference is rejected.
+- An **input** may *be* a top-level borrow, but not carry one nested inside an
+  aggregate. Top-level means *either* representation: a variable-bearing `&'T`
+  stays `PolyType::Ref`, while a fully concrete `&i64` folds to
+  `Concrete(Type::Ref)` (R-A4). Testing only the former rejects
+  `: pick ( &i64 'T: Copy -- 'T )`, which the monomorphic rule
+  (`!slot.ty.is_ref()`) accepts and which compiles and runs.
+- Skipped for a combinator, mirroring `check_word`'s own skip: a spliced word has
+  no frame of its own for the returned reference to outlive.
+
+Both input arms need coverage: the nested `[&'T 4]` rejection *and* the top-level
+concrete-fold acceptance.
+
 ## Phased delivery plan
 
 Sequenced so each phase is independently green (`cargo fmt --check && cargo clippy -- -D
@@ -463,9 +493,9 @@ implementer: P1 is wide but mechanical; P2 introduces production with the simple
 
 - **Phase 2 — Part B, shared read path.** R-B1, R-B2, R-B3 (read `&>` only), R-B4 (`@`
   only), R-B5 (use-after-move via `scope.moves`, no `Provenance`), R-B6, R-B7, and the
-  P2 witnesses in R-B8. `&x`, `&>`, `@` on a concrete-length generic-element array;
-  `first` runs. No mutable borrow, so no exclusivity machinery. Standalone value: a
-  generic word can read through a borrow. **Difficulty: standard.**
+  P2 witnesses in R-B8, plus R-B9. `&x`, `&>`, `@` on a concrete-length
+  generic-element array; `first` runs. No mutable borrow, so no exclusivity machinery.
+  Standalone value: a generic word can read through a borrow. **Difficulty: standard.**
 
 - **Phase 3 — Part B, mutable path + exclusivity.** `&!x`, `&!>`, `!`, and the
   exclusivity check (R-B5, mutable half) — reusing `Provenance`/`Liveness` in

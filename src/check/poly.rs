@@ -278,6 +278,11 @@ pub(super) fn poly_walk(
             arrays,
             builtin_overloads,
         )?;
+        // `lits` is indexed off `stack.len()` (`over` reads `lits[n - 2]`,
+        // `dup` `.expect`s a last entry), so a desync is either an ICE or,
+        // worse, a silently wrong bounds decision at `&>`. Every arm that
+        // pushes or truncates one must do the same to the other.
+        debug_assert_eq!(stack.len(), lits.len(), "stack/lits length invariant");
     }
     Ok(stack)
 }
@@ -692,7 +697,19 @@ pub(super) fn poly_reference_word(
                 return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
             };
             if recv_mut != mutable {
-                return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
+                // A mutability mismatch is a *type* mismatch, not "this op
+                // rejects references" -- the monomorphic twin says
+                // `` `&>` expected `&[i64 4]`, found `&![i64 4]` ``, and the
+                // two sides here are the same array shape under the two
+                // sigils, so both render off one normalized referent.
+                let referent = PolyType::Array(Box::new(elem), len);
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(&PolyType::Ref(Box::new(referent.clone()), mutable), sig),
+                    &poly_type_str(&PolyType::Ref(Box::new(referent), recv_mut), sig),
+                ));
             }
             let count = match len {
                 Len::Concrete(count) => count,
@@ -1406,7 +1423,7 @@ pub(super) fn unify_poly_input(
                     span,
                     name,
                     &poly_type_str(pty, sig),
-                    slot_ty,
+                    &slot_ty.to_string(),
                 ));
             };
             // Slice 10a (R8): the row is a separate field, never a slot in
@@ -1417,7 +1434,7 @@ pub(super) fn unify_poly_input(
                     span,
                     name,
                     &poly_type_str(pty, sig),
-                    slot_ty,
+                    &slot_ty.to_string(),
                 ));
             }
             for (p, c) in ins.iter().zip(&eff.inputs) {
@@ -1438,7 +1455,7 @@ pub(super) fn unify_poly_input(
                     span,
                     name,
                     &poly_type_str(pty, sig),
-                    slot_ty,
+                    &slot_ty.to_string(),
                 ));
             };
             if slot_mutable != *mutable {
@@ -1447,7 +1464,7 @@ pub(super) fn unify_poly_input(
                     span,
                     name,
                     &poly_type_str(pty, sig),
-                    slot_ty,
+                    &slot_ty.to_string(),
                 ));
             }
             unify_poly_input(
@@ -1471,12 +1488,14 @@ pub(super) fn unify_poly_input(
 /// `PolyType` string (`poly_type_str`) instead. A row cannot live in a
 /// `Type::Quotation`'s `QuotEffect`, and Slice 13's `PolyType::Ref` has no
 /// `RefId` until its referent grounds, so neither can be rendered as a `Type`.
+/// The *found* side is rendered too, for the same reason: a poly-body operand
+/// (`&>`'s receiver) is a `PolyType` that may never ground to a `Type`.
 pub(super) fn poly_rendered_type_mismatch_error(
     ctx: &Ctx,
     span: Span,
     op: &str,
     expected: &str,
-    found: Type,
+    found: &str,
 ) -> String {
     let op = crate::resolve::demangle_call(op);
     match ctx {
@@ -2706,6 +2725,36 @@ mod tests {
     }
 
     #[test]
+    fn poly_reference_word_rejects_borrowing_a_concrete_scalar_local() {
+        // Phase 2 review: D5's aggregate gate has two arms and only the
+        // bare-variable one was covered. A concrete scalar local is not an
+        // aggregate either, and takes the non-variable arm.
+        let err = check_src(": g ( i64 'T: Copy -- 'T ) | n t | &n drop n drop t ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot borrow the local `n` of type `i64` in `g` (line 1, col 36)\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `i64` is not"
+        );
+    }
+
+    #[test]
+    fn borrowing_a_quotation_local_is_rejected_by_the_splice_path() {
+        // Phase 2 review, R-B8's `&q` witness: `poly_reference_word` never
+        // sees a quotation local. A quotation input makes the word a
+        // combinator, and a combinator is checked by splicing it at the call
+        // site -- so the rejection is the *monomorphic* one, naming the
+        // instantiated `[ i64 -- i64 ]` rather than a poly type. Pinned as
+        // the actual behaviour: the borrow is rejected, just not here.
+        let err = check_src(
+            ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 + ] ap . ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot borrow the scalar local `f` of type `[ i64 -- i64 ]` in `ap` (line 1, col 42)\n  a scalar has no address; borrow a field or an aggregate instead"
+        );
+    }
+
+    #[test]
     fn poly_reference_word_rejects_indexing_a_generic_length_array() {
         // E3/D6: `['T 'N]` has no known count, so its element cannot be
         // statically bounds-checked; only a concrete-length array's element
@@ -2806,11 +2855,14 @@ mod tests {
         // Phase 2 review: the `recv_mut != mutable` guard in `&>`'s arm was
         // reachable (a declared `&![...]` input) but untested -- deleting it
         // broke no test. `&>` on a mutable reference must still be rejected
-        // rather than silently reading through it.
+        // rather than silently reading through it, and it names both sides
+        // the way the monomorphic twin does (`&>` expected `&[i64 4]`, found
+        // `&![i64 4]`) rather than the operand-family text, which reads as
+        // if `&>` never accepts a reference at all.
         let err = check_src(": rd ( &!['T: Copy 4] -- 'T )\n  0 &> @\n;\n").unwrap_err();
         assert_eq!(
             err,
-            "error: `&>` is not permitted on a reference in `rd` (line 2)"
+            "error: type mismatch in `rd` (line 2)\n  `&>` expected `&['T 4]`, found `&!['T 4]`\n  note: declared ( -- )"
         );
     }
 
