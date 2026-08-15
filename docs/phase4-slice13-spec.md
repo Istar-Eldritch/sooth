@@ -78,7 +78,12 @@ tail (`Struct | Enum | Array | OwnedCell`), `&x`/`&!x` requires `PolyType::Array
 `Concrete(_)` in those four. A bare `PolyType::Var` local is rejected (E2): `'T` might
 instantiate to a scalar, which has no address, and the rule refuses uniformly rather than
 deferring the question to instantiation. A non-aggregate *concrete* local gets its own
-wording.
+wording. A **quotation** local is carved out into a third wording (added after review,
+post-slice-12 rebase): "not an aggregate" is true at the type level this slice reasons
+over, but false at the ABI a non-`inline` word's ordinary `[ ... ]` parameter actually
+lowers to (a real two-word `(code, env)` aggregate), so the message instead says a
+quotation is simply not borrowable in a generic body -- borrowing one is 7b territory,
+not this slice's.
 
 **D6 — element access needs a concrete length.** `&>`/`&!>` statically bounds-check the
 index, so a `['T 'N]` receiver is a located error (E3). Element access is available only on

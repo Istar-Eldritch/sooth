@@ -860,7 +860,12 @@ pub(super) fn poly_reference_word(
                 );
             if !is_aggregate {
                 let ty_str = poly_type_str(&local_pt, sig);
+                let is_quotation = matches!(local_pt, PolyType::Quotation(..))
+                    || matches!(local_pt, PolyType::Concrete(t) if crate::ast::is_quotation_type(t).is_some());
                 return Err(match local_pt {
+                    _ if is_quotation => {
+                        poly_borrow_of_quotation_local_error(ctx, span, rest, &ty_str)
+                    }
                     PolyType::Var(_) => {
                         poly_borrow_of_variable_local_error(ctx, span, rest, &ty_str)
                     }
@@ -1879,6 +1884,22 @@ fn poly_borrow_of_non_aggregate_local_error(
     let where_ = ctx.word_name().unwrap_or("<line>");
     format!(
         "error: cannot borrow the local `{local}` of type `{ty}` in `{where_}` (line {}, col {})\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `{ty}` is not",
+        span.line, span.col
+    )
+}
+
+/// A quotation local, split out from `poly_borrow_of_non_aggregate_local_error`
+/// (review, post-slice-12 rebase): a non-`inline` word's ordinary `[ ... ]`
+/// parameter lowers to a real two-word `(code, env)` aggregate at the ABI
+/// level, so "is not an aggregate" is false at the representation the
+/// backend actually emits, even though it is true at the type-system level
+/// this slice reasons over. Naming the actual reason -- unsupported, not
+/// shapeless -- avoids a claim the ABI contradicts; borrowing a quotation is
+/// 7b territory (a first-class capturing closure), not this slice's.
+fn poly_borrow_of_quotation_local_error(ctx: &Ctx, span: Span, local: &str, ty: &str) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot borrow the local `{local}` of type `{ty}` in `{where_}` (line {}, col {})\n  a quotation is not borrowable in a generic body",
         span.line, span.col
     )
 }
@@ -2934,15 +2955,20 @@ mod tests {
         // non-`inline` `[ 'T -- 'T ]` parameter no longer makes it a
         // combinator -- it is checked as a genuine poly body, and
         // `poly_reference_word` itself rejects the quotation-typed local `f`
-        // (D5: only an aggregate is borrowable) directly, rather than the
-        // splice path naming a monomorphic instantiation.
+        // directly, rather than the splice path naming a monomorphic
+        // instantiation. Second update (review): a quotation gets its own
+        // wording (`poly_borrow_of_quotation_local_error`), not the generic
+        // "not an aggregate" text -- a non-`inline` word's ordinary `[ ... ]`
+        // parameter *is* a two-word aggregate at the ABI level, so that claim
+        // is false at the representation the backend emits even though the
+        // type system still refuses the borrow.
         let err = check_src(
             ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 + ] ap . ;\n",
         )
         .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot borrow the local `f` of type `[ 'T -- 'T ]` in `ap` (line 1, col 42)\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `[ 'T -- 'T ]` is not"
+            "error: cannot borrow the local `f` of type `[ 'T -- 'T ]` in `ap` (line 1, col 42)\n  a quotation is not borrowable in a generic body"
         );
     }
 
