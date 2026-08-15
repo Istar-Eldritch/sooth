@@ -1513,6 +1513,38 @@ mod tests {
         .expect("`myif`'s own definition forwards its abstract `~` parameters into `branch`");
     }
 
+    /// The third, *mixed* shape: one literal arm and one forwarded parameter.
+    /// The `Forwarded` arm wins the match, so the declared effect is applied
+    /// and the literal arm is never walked at all -- `[ 999 888 ]` disagrees
+    /// with the declared `~[ -- i64 ]` and `w`'s own definition still passes.
+    ///
+    /// Recorded rather than fixed. It is not unsound: nothing reaches the
+    /// unchecked body without a real caller, and the caller's splice checks
+    /// both arms for real (asserted below). The fix would be to check the
+    /// literal against the sibling's declared effect via
+    /// `check_literal_against_declared_effect`, which is exactly the helper
+    /// the spec's out-of-scope section documents as re-splicing without bound
+    /// on a combinator's own body -- this shape -- overflowing the stack with
+    /// no diagnostic. So the def-site check is *partial* here, and the test
+    /// says so instead of reading as full coverage.
+    #[test]
+    fn check_branch_leaves_a_literal_arm_unchecked_beside_a_forwarded_one() {
+        check_src(
+            ": w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
+             : main ( -- ) ;\n",
+        )
+        .expect("the mismatched literal arm goes unchecked at `w`'s own definition");
+        let err = check_src(
+            ": w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
+             : main ( -- ) 1 2 u= [ 5 ] w . ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("the two branch arms leave different stack depths"),
+            "a real caller splices both arms and catches it: {err}"
+        );
+    }
+
     /// `branch` is the *single* builtin exempt from R11's quotation-operand
     /// default-deny, and only for its two branch slots: a quotation in the
     /// condition position is still rejected, naming `branch`.

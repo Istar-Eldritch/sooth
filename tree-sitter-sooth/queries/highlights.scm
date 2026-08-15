@@ -71,8 +71,10 @@
 ; control flow / booleans / common stack-and-arith words: fixed sets, so an
 ; exact-match predicate (no pattern-syntax pitfalls) is both simplest and
 ; the most robust in the face of stray sigil chars.
+; `else`/`end` are gone: slice 10c deleted the `if ... else ... end` keywords.
+; `branch` is the primitive; `if`/`unless` are the `lib/core.sth` words over it.
 ((word) @keyword.conditional
- (#any-of? @keyword.conditional "if" "else" "end"))
+ (#any-of? @keyword.conditional "if" "unless" "branch"))
 
 ((word) @boolean
  (#any-of? @boolean "true" "false"))

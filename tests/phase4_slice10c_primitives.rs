@@ -88,6 +88,23 @@ fn if_resolves_to_a_library_word_definition() {
     );
 }
 
+/// A user program is free to define `cond`, `then-arm` and `else-arm`: `if`
+/// and `unless`'s own locals are `if--cond`/`if--then-arm`/`if--else-arm` (and
+/// the `unless--` equivalents), not the bare names, so they never collide with
+/// a word a program defines under those names -- including `cond`, which
+/// DESIGN.md documents as a future multi-way branch word this same file would
+/// otherwise grow into colliding with.
+#[test]
+fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
+    let src = ": cond ( i64 -- i64 ) 1 + ;\n\
+               : then-arm ( i64 -- i64 ) 1 + ;\n\
+               : else-arm ( i64 -- i64 ) 1 + ;\n\
+               : main ( -- ) 1 cond then-arm else-arm . ;\n";
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+}
+
 /// The `if` a program actually calls is that definition, spliced: a body using
 /// it mints no symbol for it and emits the jump-and-join directly.
 #[test]
@@ -395,7 +412,8 @@ fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
 /// gate and P3's primitives together in one program.
 #[test]
 fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
-    let src = "import: c \"lib/combinators.sth\" ;\n\
+    let src = format!(
+        "import: c \"{}/lib/combinators.sth\" ;\n\
                : classify ( i64 -- i64 ) dup 10 < [ 1 ] [ 2 ] if swap drop ;\n\
                : countdown ( i64 i64 -- i64 )\n  \
                | n | | acc | n 0 = [ acc ] [ acc n + n 1 - countdown ] if ;\n\
@@ -404,12 +422,11 @@ fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
                30 classify .\n  \
                true [ 0 ] [ 1 ] unless .\n  \
                0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while .\n  \
-               0 100 countdown . ;\n";
+               0 100 countdown . ;\n",
+        env!("CARGO_MANIFEST_DIR")
+    );
     let path = std::env::temp_dir().join(format!("sooth-10c-witness-{}.sth", std::process::id()));
-    // The import is resolved relative to the source's own directory.
-    let dir = std::env::current_dir().expect("a working directory");
-    let path = dir.join(path.file_name().expect("a file name"));
-    std::fs::write(&path, src).expect("writing the witness should succeed");
+    std::fs::write(&path, &src).expect("writing the witness should succeed");
     let binary = sooth::driver::build(&path).expect("the witness builds");
     let out = std::process::Command::new(&binary)
         .output()

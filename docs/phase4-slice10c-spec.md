@@ -632,6 +632,20 @@ only place a register class is spelled. Requirement text says '32-bit unsigned'.
   shape-changing-rows-in-quotation-effects parser limit (recon 3's territory,
   `parser.rs:813`); the probe used a monomorphic condition and branches instead,
   which exercises the identical R21 classification path.
+  **The def-site check is partial in the mixed case.** When one arm is a literal
+  and the other a forwarded parameter, the `Forwarded` match arm wins, the declared
+  effect is applied, and **the literal arm is never walked**:
+  `: w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;` passes its own
+  definition despite the literal disagreeing with the declared `~[ -- i64 ]`. Not
+  unsound — no reachable use skips the splice, and a real caller checks both arms
+  and reports the depth disagreement — but it is less than R-P3-1a's def-site check
+  reads as. Closing it means checking the literal against the sibling's declared
+  effect through `check_literal_against_declared_effect`, which is the helper the
+  out-of-scope section records as re-splicing without bound on a combinator's own
+  body — precisely this shape — so it must wait for whichever slice terminates that
+  splice. Pinned meanwhile by
+  `check_branch_leaves_a_literal_arm_unchecked_beside_a_forwarded_one`, which
+  asserts both halves so the gap cannot close silently or widen unnoticed.
 - **R-P3-1b (keep the tail passes honest about `branch`).** The doc comment on
   `body_tail_calls_self` at `src/ir/func_builder/mod.rs:83-98` (`:99` is the fn) is a
   standing warning: check and lowering ``only agree today because a builtin-named
@@ -989,6 +1003,13 @@ golden that ties P1+P2+P3 together.
 - Dispatch-after-locals (`lib/binary_search.sth`'s `Ordering` sketch) — unrelated,
   still unbuildable after this slice.
 - Early return — no `TermKind` for it; the two-way branch plus a join suffices.
+- **Branching inside a polymorphic non-`inline` word.** A user-visible narrowing this
+  slice introduces rather than inherits: `if` now takes quotation literals and
+  `poly_walk` rejects a quotation in a polymorphic body outright, so a polymorphic
+  word that branches must be declared `inline` (which R-P3-3b enables). Migrating is
+  a one-word edit — `examples/poly_if.sth` and the poly-branch tests take `inline`
+  and their output is unchanged — but it is a narrowing, not a pure addition. Lifting
+  `poly_walk`'s quotation rejection is a separate slice.
 - First-class runtime quotations / closures — slice 7b (where
   INV-INLINE-COMBINATOR must be revisited).
 - **Combinator-argument splice termination.** A word that is *itself* a combinator

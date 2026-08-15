@@ -1242,6 +1242,50 @@ mod tests {
     }
 
     #[test]
+    fn tail_splice_a_builtin_named_word_is_self_tail_to_neither_pass() {
+        // R-P3-1b, asked of the two predicates directly. Nothing routes a
+        // builtin-named word through the production splice sites -- which is
+        // exactly the problem: the refusal `terms_tail_call_self` carries is
+        // the counterpart of `has_self_tail_call`'s, and with no source shape
+        // reaching it the suite stays green if it is deleted, so it is pinned
+        // here or not at all (the `collect_drop_targets` precedent).
+        //
+        // Both words end in their own builtin name, so a walk with no refusal
+        // reports a self-tail. `<` resolves against the builtin table, and
+        // `branch` is the narrowing that made this live: it is the one builtin
+        // sanctioned to take quotation operands (R-P3-1a), so it is also the
+        // one that can reach the env combinator lookup a builtin name used to
+        // be kept away from.
+        for src in [
+            "type: Vec2 x i64 y i64 ;\n\
+             : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n",
+            ": branch ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c t e branch ;\n",
+        ] {
+            let words = words_of(src);
+            // The word under test is the source's own, at index 0: `words_of`
+            // appends the `lib/core.sth` prelude, which now defines `<` too,
+            // so both `last()` and a name lookup can find the wrong one.
+            let word = words.first().expect("the builtin-named word");
+            let WordBody::Terms { terms } = &word.body else {
+                unreachable!("a terms body")
+            };
+            let combs = combinator_index(&words);
+            assert!(
+                !has_self_tail_call(word, &combs),
+                "`{}`: the checker must not read a builtin name as a self-call",
+                word.name
+            );
+            assert!(
+                !terms_tail_call_self(terms, &word.name, &combs),
+                "`{}`: lowering must refuse it too, or the two passes disagree \
+                 about whether a splice is a loop",
+                word.name
+            );
+        }
+    }
+
+    #[test]
     fn tail_splice_forwarding_cycle_declines() {
         // Two combinators each forwarding a tail-called parameter into the
         // other would loop the static closure `C -> D -> C`; the visited set

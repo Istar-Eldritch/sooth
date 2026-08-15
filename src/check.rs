@@ -1724,14 +1724,20 @@ fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -
     }
 }
 
+/// Slice 10c: the two arms of a `branch` disagree. Named for the *arms*, not
+/// for `if`: `branch` is the primitive and `if`/`unless` are ordinary
+/// `lib/core.sth` words over it, so by the time this fires the surface word
+/// the user wrote has been spliced away and could equally have been `branch`
+/// itself. (The span still points at the first arm, which is the user's own
+/// literal either way -- see `check_branch_join`.)
 fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
+            "error: stack effect mismatch in `{}` (line {})\n  the two branch arms leave different stack depths (then: {}, else: {})\n  note: declared {}",
             name, span.line, d_then, d_else, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
+            "error: the two branch arms leave different stack depths (then: {d_then}, else: {d_else})"
         ),
     }
 }
@@ -1739,11 +1745,11 @@ fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) ->
 fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  the two branch arms leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
             name, span.line, t_then, t_else, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: `if` branches leave different types (then: `{t_then}`, else: `{t_else}`)"
+            "error: the two branch arms leave different types (then: `{t_then}`, else: `{t_else}`)"
         ),
     }
 }
@@ -2307,6 +2313,32 @@ mod tests {
             err.contains("leave different stack shapes"),
             "unexpected message: {err}"
         );
+    }
+    #[test]
+    fn check_branch_arms_disagreeing_at_the_join_name_the_arms_not_if() {
+        // The join's two diagnostics are reachable only through a direct
+        // `branch`: written as `if`, R-P2-3's argument-site check compares the
+        // two arm literals first and reports its own message instead. So a
+        // wording that blames `if` is wrong at every site that can actually
+        // produce it. Nothing else exercises this path -- the two
+        // `check_branch_*_is_error` tests both stop at the argument site -- so
+        // the messages are pinned here.
+        let depth = check_src(": w ( u32 -- i64 ) | c | c [ 1 1 ] [ 1 ] branch ;").unwrap_err();
+        assert!(
+            depth.contains("the two branch arms leave different stack depths (then: 2, else: 1)"),
+            "unexpected message: {depth}"
+        );
+        let ty = check_src(": w ( u32 -- i64 ) | c | c [ 1 ] [ true ] branch ;").unwrap_err();
+        assert!(
+            ty.contains("the two branch arms leave different types (then: `i64`, else: `bool`)"),
+            "unexpected message: {ty}"
+        );
+        for err in [&depth, &ty] {
+            assert!(
+                !err.contains("`if`"),
+                "blames a word the user never wrote: {err}"
+            );
+        }
     }
     #[test]
     fn check_branch_join_types_agree_ok() {
