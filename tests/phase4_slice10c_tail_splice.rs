@@ -1,0 +1,219 @@
+//! Phase 4 slice 10c, P1: shared tail-splice recognition.
+//!
+//! A self-recursive word whose recursive call sits inside a quotation handed to
+//! a combinator that `call`s that parameter in tail position is a *self-tail*
+//! word: the splice runs in place of the call, so the literal inherits the
+//! caller's tail position and the recursion is a loop back-edge. Before this
+//! slice nothing recognised the shape and the word blew the host stack.
+//!
+//! The combinators here are hand-written over the primitive `if` (the library
+//! `if` arrives in P3), and their quotation effects carry no rows (a
+//! shape-changing `~[ ..i -- ..o ]` is P2).
+
+use sooth::ir::{lower, Instr, IrFunc, Terminator};
+use sooth::{check, lexer, parser};
+
+/// A two-way branch whose two quotation parameters are each `call`ed in tail
+/// position, so both inherit their caller's tail position.
+const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+     | e | | t | | c | c if t call else e call end ;\n";
+
+/// Recon 4's negative twin: each arm `call`s one parameter and *then* drops the
+/// other, so `drop` holds the tail position and neither parameter is
+/// tail-called. Identical callers must stay ordinary recursion.
+const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+     | e | | t | | c | c if t call e drop else e call t drop end ;\n";
+
+fn sum_to(branch: &str, iterations: u32) -> String {
+    format!(
+        "{branch}: sum-to ( i64 i64 -- i64 )\n\
+         | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] {caller} ;\n\
+         : main ( -- ) 0 {iterations} sum-to . ;\n",
+        caller = if branch == BOOL_Q { "Bool?" } else { "Bool!?" }
+    )
+}
+
+fn lowered(src: &str) -> Vec<IrFunc> {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    lower(&module).expect("lowering should succeed").funcs
+}
+
+fn func<'f>(funcs: &'f [IrFunc], name: &str) -> &'f IrFunc {
+    funcs
+        .iter()
+        .find(|f| f.name.starts_with(name))
+        .unwrap_or_else(|| panic!("`{name}` is lowered"))
+}
+
+/// Calls the function makes to itself.
+fn self_calls(f: &IrFunc) -> usize {
+    f.blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter(|i| matches!(i, Instr::Call(_, sym, _) if *sym == f.name))
+        .count()
+}
+
+/// Jumps to an already-emitted block: a loop back-edge.
+fn back_edges(f: &IrFunc) -> usize {
+    f.blocks
+        .iter()
+        .filter(|b| matches!(b.term, Terminator::Jmp(target) if target.0 <= b.id.0))
+        .count()
+}
+
+/// Whether a loop was opened at all: `begin_loop` seals the entry block with a
+/// jump into the header it just made, where a loop-free body falls straight
+/// into its first real terminator. Asserted separately from `back_edges`
+/// because a rule that wrongly *recognises* a self-tail opens the header and
+/// then never back-edges, which the back-edge count alone cannot see.
+fn opens_a_loop_header(f: &IrFunc) -> bool {
+    matches!(f.blocks[0].term, Terminator::Jmp(_))
+}
+
+static NEXT_TEMP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn build_binary(name: &str, src: &str) -> std::path::PathBuf {
+    let id = NEXT_TEMP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}-{id}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build(&path).expect("build should succeed");
+    std::fs::remove_file(&path).ok();
+    binary
+}
+
+/// Run `binary` under `ulimit -s {limit_kb}` (KB), returning the exit code
+/// (`None` on a signal death, e.g. a stack-overflow `SIGSEGV`) and stdout.
+fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, String) {
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "ulimit -s {limit_kb} && exec \"{}\"",
+            binary.display()
+        ))
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("binary should run");
+    (
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    )
+}
+
+fn check_error(src: &str) -> String {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect_err("check should fail")
+}
+
+// -- E-P1-1: the spliced self-tail lowers to a back-edge ---------------------
+
+#[test]
+fn spliced_self_tail_lowers_to_a_back_edge() {
+    let funcs = lowered(&sum_to(BOOL_Q, 10));
+    let sum = func(&funcs, "sum");
+    assert_eq!(
+        self_calls(sum),
+        0,
+        "the recursion is a loop, not a call: {:?}",
+        sum.blocks
+            .iter()
+            .flat_map(|b| b.instrs.iter())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(back_edges(sum), 1, "the loop needs exactly one back-edge");
+    assert!(opens_a_loop_header(sum));
+    assert!(
+        !funcs.iter().any(|f| f.name.starts_with("Bool")),
+        "a combinator mints no `IrFunc`: {:?}",
+        funcs.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+}
+
+// -- E-P1-2: constant stack, and the right answer ---------------------------
+
+#[test]
+fn spliced_self_tail_runs_one_million_iterations_in_constant_stack() {
+    // Both halves matter. A 512 KB stack overflows after a few thousand real
+    // frames, so exit 0 pins the loop transform; the printed sum pins the
+    // carried phis, which a back-edge wired to the wrong block would corrupt
+    // while still exiting 0.
+    let binary = build_binary("slice10c-splice-1m", &sum_to(BOOL_Q, 1_000_000));
+    let (code, out) = run_at_stack_limit(&binary, 512);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!((code, out.as_str()), (Some(0), "500000500000"));
+}
+
+// -- E-P1-3: discard-after-call stays ordinary recursion (recon 4) -----------
+
+#[test]
+fn discard_after_the_parameter_call_stays_ordinary_recursion() {
+    // `t call e drop` puts `drop` in tail position, so the literal carrying the
+    // self-call is not spliced at a tail and the word legitimately keeps its
+    // real recursion. Asserted on the IR: a test that only checked "it builds"
+    // would pass under a rule that blanket-accepted a trailing combinator call.
+    let funcs = lowered(&sum_to(BOOL_D, 10));
+    let sum = func(&funcs, "sum");
+    assert_eq!(self_calls(sum), 1, "the self-call must survive as a call");
+    assert_eq!(back_edges(sum), 0, "no loop is built for this shape");
+    assert!(
+        !opens_a_loop_header(sum),
+        "no loop header either: a rule that blanket-accepted a trailing \
+         combinator call would open one and leave it back-edgeless"
+    );
+}
+
+// -- E-P1-5: the linear spine across the spliced back-edge -------------------
+
+#[test]
+fn linear_value_across_the_spliced_back_edge_is_error() {
+    // The R15 guard reaches the spliced back-edge because the checker threads
+    // the same tail flag lowering does. Without the extension the self-call is
+    // not a tail call and the program is rejected for a different reason (`s`
+    // unconsumed at the end of the body), so the exact message, the offending
+    // type and the location are all part of the assertion.
+    let src = format!(
+        "type: Spy tag i64 ;\n\
+         : drop ( Spy -- ) | s | \"drop \" . s Spy>tag . ;\n\
+         {BOOL_Q}: spin ( i64 -- i64 )\n\
+         | n | 9 Spy | s |\n\
+         n 0 = [ 0 ] [ n 1 - spin ] Bool? ;\n\
+         : main ( -- ) 3 spin . ;\n"
+    );
+    let err = check_error(&src);
+    assert!(
+        err.contains("linear values across a loop are not supported yet"),
+        "unexpected message: {err}"
+    );
+    assert!(err.contains("`Spy`"), "unexpected message: {err}");
+    assert!(err.contains("line 7"), "the error should be located: {err}");
+}
+
+#[test]
+fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
+    // Moved *into* the self-call's arguments the resource is forwarded, not
+    // stranded, so the guard must not fire -- and the loop really is built
+    // (the `Spy` rides the carried row) and disposes exactly once.
+    let src = "type: Spy tag i64 ;\n\
+        : drop ( Spy -- ) | s | \"drop \" . s Spy>tag . ;\n\
+        : Bool? ( Spy bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
+        | e | | t | | c | c if t call else e call end ;\n\
+        : spin ( Spy i64 -- i64 )\n\
+        | n | n 0 = [ | s | s drop 0 ] [ | s | s n 1 - spin ] Bool? ;\n\
+        : main ( -- ) 0 Spy 3 spin . ;\n";
+    let funcs = lowered(src);
+    let spin = func(&funcs, "spin");
+    assert_eq!(self_calls(spin), 0, "the forwarded case still loops");
+    assert_eq!(back_edges(spin), 1);
+
+    let binary = build_binary("slice10c-splice-linear", src);
+    let (code, out) = run_at_stack_limit(&binary, 512);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(
+        (code, out.as_str()),
+        (Some(0), "drop 0\n0"),
+        "the resource is disposed once, at the base case"
+    );
+}

@@ -287,8 +287,13 @@ fn check_term(
                 // extent (capture is free, recon 9), bracketed like an `if`
                 // arm so a body that binds does not leak past the `call` and a
                 // linear value bound inside it is caught by `leave_block`
-                // (R6). `tail` is pinned `false`: lowering emits a real call
-                // here, never a self-tail back-edge (R6/R13).
+                // (R6). Slice 10c (R-P1-6): `tail` is threaded, not pinned
+                // `false` -- a spliced literal runs in place of the `call`, so
+                // at a tail `call` its own tail terms are the enclosing word's
+                // and a self-call there is the back-edge. This is how tail
+                // position reaches a combinator's quotation parameter (`t call`
+                // in a hand-written `if`); lowering threads the same flag
+                // through the same splice.
                 //
                 // D6: a quotation body can be called from elsewhere too, so a
                 // granted outer name is tracked as a back-edge body (used
@@ -305,8 +310,8 @@ fn check_term(
                     at,
                 );
                 stack = check_terms_relaxed(
-                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, false, poly,
-                    &granted, true,
+                    &body, stack, ctx, env, arrays, cells, refs, prov, scope, tail, poly, &granted,
+                    true,
                 )?;
                 leave_block(
                     ctx,
@@ -564,7 +569,7 @@ fn check_term(
                 );
                 return inline_combinator(
                     &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
-                    &granted,
+                    &granted, tail,
                 );
             }
             // R5/R14: a call to a polymorphic word is intercepted before the

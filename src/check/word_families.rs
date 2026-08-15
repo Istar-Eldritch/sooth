@@ -1135,7 +1135,7 @@ mod tests {
             &[],
             &bool_enums,
             &HashMap::new(),
-            &HashMap::new(),
+            &CombinatorEnv::default(),
         )
         .map(|(stack, _insts, _overloads)| stack)
     }

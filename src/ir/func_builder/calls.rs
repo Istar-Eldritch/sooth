@@ -297,9 +297,13 @@ impl<'a> FuncBuilder<'a> {
             // R13: `call`-of-literal fusion. Pop the phantom quotation `Value`,
             // resolve its body, and lower the body's terms in place, emitting
             // no `Instr::Call` and creating no runtime code value: `[ 1 + ]
-            // call` lowers exactly as `1 +` (D5). `tail = false` is
-            // load-bearing: the checker never sanctions a spliced term as a
-            // self-tail call (R6/R13), so lowering must not back-edge here.
+            // call` lowers exactly as `1 +` (D5). Slice 10c (R-P1-6): the
+            // caller's `tail` is threaded, not pinned `false` -- the splice runs
+            // in place of the `call`, so at a tail `call` the literal's own tail
+            // terms are the enclosing word's, and the whole-word back-edge below
+            // fires on a self-call there. `check_term`'s `"call"` arm threads the
+            // same flag, so the checker sanctions exactly the splices that
+            // back-edge here.
             "call" => {
                 let v = self.stack.pop().expect("call: quotation on stack");
                 // R10/D1: provenance decides. A phantom the checker resolved to
@@ -314,7 +318,7 @@ impl<'a> FuncBuilder<'a> {
                         // would else read a stale entry on a later same-named
                         // bind. Mirror the `if` arm's save-and-truncate.
                         let locals_depth = self.locals.len();
-                        self.lower_terms(&body, false);
+                        self.lower_terms(&body, tail);
                         self.locals.truncate(locals_depth);
                     }
                     None => self.lower_indirect_call(v),
@@ -510,14 +514,28 @@ impl<'a> FuncBuilder<'a> {
                 // `Value`s already (a `TermKind::Quotation` earlier in this
                 // body recorded each `Value -> QuotId`), so the spliced body's
                 // own `call` resolves them with no extra plumbing.
-                // `tail = false` and the locals-truncate mirror the `call`
-                // splice above. Checked before the `&`/conversion/struct
+                // The `tail` threading and the locals-truncate mirror the
+                // `call` splice above. Checked before the `&`/conversion/struct
                 // dispatch since a combinator name is an ordinary word name.
-                if let Some(body) = self.combinators.get(name) {
+                //
+                // **INV-INLINE-COMBINATOR.** A quotation-taking word is always
+                // inlined (spliced) here and mints no `IrFunc`; it has no opaque
+                // call form, and its declared output row is discovered by
+                // forward checking of the spliced terms, never solved for by row
+                // unification. Threading the caller's `tail` into the splice is
+                // sound only because of that: the body really does run in place
+                // of the call. Slice 7b (first-class runtime quotations) is
+                // where the invariant breaks and this must be revisited,
+                // together with `check::terms_tail_call_self`'s walk.
+                if let Some(entry) = self.combinators.get(name) {
+                    let body = &entry.terms;
                     // R10: a self-tail combinator lowers to a splice-time loop
                     // (back-edge, not re-splice); every other combinator is a
-                    // straight term-splice.
-                    let self_tail = body_tail_calls_self(body, name);
+                    // straight term-splice. R-P1-5: the same predicate the
+                    // checker's `splice_tail` consults, so the two cannot
+                    // disagree about whether this splice is a loop.
+                    let self_tail =
+                        crate::check::terms_tail_call_self(body, name, self.combinators);
                     // R18/R21: alpha-rename the callee body identically to the
                     // checker, so its `| ... |` locals are fresh and a
                     // passed-down literal keeps its lexical capture under
@@ -529,7 +547,7 @@ impl<'a> FuncBuilder<'a> {
                         self.lower_self_tail_combinator(name, &body);
                     } else {
                         let locals_depth = self.locals.len();
-                        self.lower_terms(&body, false);
+                        self.lower_terms(&body, tail);
                         self.locals.truncate(locals_depth);
                     }
                     return;

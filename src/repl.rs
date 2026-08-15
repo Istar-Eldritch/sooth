@@ -162,15 +162,10 @@ fn checker_combinators(store: &HashMap<String, WordDef>) -> check::CombinatorEnv
 }
 
 /// R2 (Slice 6c): project the store into lowering's `combinator_bodies` view
-/// (`ir::lower`'s shape), name -> body terms.
-fn combinator_bodies(store: &HashMap<String, WordDef>) -> HashMap<String, Vec<Term>> {
-    store
-        .iter()
-        .filter_map(|(name, word)| match &word.body {
-            WordBody::Terms { terms } => Some((name.clone(), terms.clone())),
-            WordBody::Clauses(_) => None,
-        })
-        .collect()
+/// (`ir::lower`'s shape), which since slice 10c is the same `CombinatorIndex`
+/// the shared tail-splice predicate reads.
+fn combinator_bodies(store: &HashMap<String, WordDef>) -> check::CombinatorIndex {
+    check::combinator_index(store.values())
 }
 
 /// The mangled export symbol for `name` at `generation`.

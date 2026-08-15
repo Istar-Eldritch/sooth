@@ -43,6 +43,7 @@ pub(crate) use self::combinators::{
     check_combinator_cycles, combinator_of, is_combinator, word_declares_quotation_parameter,
     CombinatorEnv,
 };
+pub(crate) use self::combinators::{combinator_index, CombinatorIndex};
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
@@ -50,7 +51,9 @@ pub(crate) use self::declarations::{
     selective_not_exported_error, struct_generated_sigs, SelectiveName,
 };
 use self::drop_graph::*;
-pub(crate) use self::drop_graph::{check_drop_overload_reachability, has_self_tail_call};
+pub(crate) use self::drop_graph::{
+    check_drop_overload_reachability, has_self_tail_call, terms_tail_call_self,
+};
 use self::engine::*;
 use self::operators::*;
 use self::poly::*;
@@ -564,7 +567,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     check_combinator_cycles(&combinators)?;
     // Reject mutual tail-recursion cycles (D3, X1) on the whole-module
     // tail-call graph, after signature registration and before body checking.
-    check_tail_call_cycles(words, &drop_overload_indices)?;
+    check_tail_call_cycles(words, &drop_overload_indices, combinators.tail())?;
     // R14: the per-call-site instantiation table, filled as each monomorphic
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
@@ -1951,7 +1954,7 @@ mod tests {
             &[],
             &bool_enums,
             &HashMap::new(),
-            &HashMap::new(),
+            &CombinatorEnv::default(),
         )
         .map(|(stack, _insts, _overloads)| stack)
     }

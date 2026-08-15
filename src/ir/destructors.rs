@@ -39,7 +39,7 @@ pub fn synthesize_aggregate_destructors(
     resolve: Resolver,
     regs: Registries,
     overrides: &DropOverrides,
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     let Registries {
         structs,
@@ -360,7 +360,7 @@ fn synthesize_struct_destructor_override(
     env: &HashMap<String, Arity>,
     resolve: Resolver,
     regs: Registries,
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     // R9: element 0 is the override body itself, renamed to the destructor
     // symbol every call site already targets; any materialized quotations it
@@ -369,7 +369,7 @@ fn synthesize_struct_destructor_override(
         &word.name,
         &word.effect,
         &word.body,
-        crate::check::has_self_tail_call(word),
+        crate::check::has_self_tail_call(word, combinators),
         env,
         resolve,
         regs,

@@ -6,7 +6,103 @@ use super::*;
 /// operand types, the same shape as `Overload`/poly-candidate resolution --
 /// a single-value map here would silently shadow a second combinator
 /// overload exactly as env's `Sig` did before B1.
-pub(crate) type CombinatorEnv<'a> = HashMap<String, Vec<Combinator<'a>>>;
+///
+/// Slice 10c (R-P1-5): it also carries the `CombinatorIndex` the shared
+/// tail-splice predicate reads, so every checker site that already threads a
+/// `CombinatorEnv` gets the predicate's view of the same words with no second
+/// channel to keep in step.
+#[derive(Default)]
+pub(crate) struct CombinatorEnv<'a> {
+    candidates: HashMap<String, Vec<Combinator<'a>>>,
+    tail: CombinatorIndex,
+}
+
+impl<'a> CombinatorEnv<'a> {
+    pub(super) fn get(&self, name: &str) -> Option<&Vec<Combinator<'a>>> {
+        self.candidates.get(name)
+    }
+
+    pub(super) fn contains_key(&self, name: &str) -> bool {
+        self.candidates.contains_key(name)
+    }
+
+    /// The shared tail-splice view (`has_self_tail_call`, `terms_tail_call_self`).
+    pub(crate) fn tail(&self) -> &CombinatorIndex {
+        &self.tail
+    }
+
+    /// Register (or replace) one name's candidates, as the REPL does when it
+    /// adds the word being defined to the view it checks the body against.
+    pub(crate) fn insert(&mut self, name: String, candidates: Vec<Combinator<'a>>) {
+        self.candidates.insert(name, candidates);
+        self.tail = combinator_index(self.candidates.values().flatten().map(|c| c.word));
+    }
+
+    fn members(&self) -> impl Iterator<Item = &Combinator<'a>> {
+        self.candidates.values().flatten()
+    }
+}
+
+impl<'a> FromIterator<(String, Vec<Combinator<'a>>)> for CombinatorEnv<'a> {
+    fn from_iter<T: IntoIterator<Item = (String, Vec<Combinator<'a>>)>>(iter: T) -> Self {
+        let candidates: HashMap<String, Vec<Combinator<'a>>> = iter.into_iter().collect();
+        let tail = combinator_index(candidates.values().flatten().map(|c| c.word));
+        Self { candidates, tail }
+    }
+}
+
+/// Slice 10c (R-P1-1): one always-spliced word as the shared tail-splice
+/// predicate and both splice sites need it. Owned rather than borrowed so the
+/// checker, the native lowering driver and the REPL can each build one from
+/// whatever they hold (`&[WordDef]`, a `CombinatorEnv`, a session store)
+/// without a lifetime running through the whole lowering stack.
+#[derive(Clone)]
+pub struct CombinatorEntry {
+    /// The body spliced at every call site.
+    pub terms: Vec<Term>,
+    /// How many declared input slots the body's leading `| ... |` binds pop
+    /// from. A row (`..s`) is not a slot, so this is the `sig.inputs.len()` /
+    /// `effect.inputs.len()` `inline_combinator` itself counts.
+    pub inputs: usize,
+    /// A second always-spliced word shares this name. Which one a bare name
+    /// reaches cannot be decided syntactically, so the tail walk declines
+    /// (R-P1-4) rather than guessing -- the same conservatism
+    /// `has_self_tail_call` already applies to a builtin name.
+    pub ambiguous: bool,
+}
+
+/// Slice 10c: the always-spliced words, by name, as the tail walk reads them.
+pub type CombinatorIndex = HashMap<String, CombinatorEntry>;
+
+/// Build a `CombinatorIndex` over whichever words the caller holds. The
+/// `is_combinator` filter is the same one `collect_combinators` and
+/// `ir::lower`'s splice env apply, so the three views name the same words.
+pub fn combinator_index<'w>(words: impl IntoIterator<Item = &'w WordDef>) -> CombinatorIndex {
+    let mut index = CombinatorIndex::new();
+    for word in words {
+        if !is_combinator(word) {
+            continue;
+        }
+        let WordBody::Terms { terms } = &word.body else {
+            continue;
+        };
+        let inputs = match word.poly.as_ref() {
+            Some(sig) => sig.inputs.len(),
+            None => word.effect.inputs.len(),
+        };
+        match index.entry(word.name.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().ambiguous = true,
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(CombinatorEntry {
+                    terms: terms.clone(),
+                    inputs,
+                    ambiguous: false,
+                });
+            }
+        }
+    }
+    index
+}
 
 /// Slice 6a (R18): one monomorphic quotation-taking word available to inline.
 /// Both fields are shared references into the module, so a `Combinator` is a
@@ -24,7 +120,7 @@ pub(crate) struct Combinator<'a> {
 /// lowered to a call to a word that mints no `IrFunc` (R20). `inline_combinator`
 /// branches on `word.poly` internally to pick the mono or poly splice path.
 pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
-    let mut map: CombinatorEnv<'_> = HashMap::new();
+    let mut map: HashMap<String, Vec<Combinator<'_>>> = HashMap::new();
     for word in words {
         if !is_combinator(word) {
             continue;
@@ -35,7 +131,7 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
                 .push(Combinator { word, terms });
         }
     }
-    map
+    map.into_iter().collect()
 }
 
 /// R2 (Slice 6c): the checker's inline view for one retained combinator, the
@@ -124,7 +220,7 @@ pub(super) fn poly_input_is_quotation(p: &PolyType) -> bool {
 /// cycle error, and every cycle of length >= 2 (a mutual cycle) is untouched.
 /// Reuses `check_tail_call_cycles`'s 3-colour DFS shape (recon 8).
 pub(crate) fn check_combinator_cycles(combinators: &CombinatorEnv) -> Result<(), String> {
-    let members: Vec<&Combinator> = combinators.values().flatten().collect();
+    let members: Vec<&Combinator> = combinators.members().collect();
     // Slice 8a: two combinators may now share a name (an overload set, R1),
     // so a bare callee name can name more than one node. Unlike
     // `check_tail_call_cycles`'s diagnostic -- where treating an ambiguous
@@ -146,7 +242,7 @@ pub(crate) fn check_combinator_cycles(combinators: &CombinatorEnv) -> Result<(),
             .iter()
             .filter(|&&n| n == self_name)
             .count();
-        let self_tail = tail_position_calls(&c.word.body)
+        let self_tail = tail_position_calls(c.word, combinators.tail())
             .iter()
             .filter(|&&n| n == self_name)
             .count();
@@ -229,9 +325,10 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
 /// declared input against the caller's live slot (a quotation parameter takes
 /// a `Known` literal, checked directionally with the D3 capture check, R11/R12;
 /// every other parameter is matched as usual), then splice the callee body
-/// against the live stack (bracketed like a `call`, `tail = false`), so the
-/// callee's own `call`/`times` fuse against the caller's literals. R22
-/// guarantees termination.
+/// against the live stack (bracketed like a `call`), so the callee's own
+/// `call`/`times` fuse against the caller's literals. R22 guarantees
+/// termination. `tail` is the call site's own tail position, threaded into the
+/// splice (R-P1-6).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn inline_combinator(
     comb: &Combinator,
@@ -246,6 +343,7 @@ pub(super) fn inline_combinator(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let name = comb.word.name.as_str();
     // A polymorphic combinator (`each`/`map`/`fold`, or any `'T`-carrying
@@ -340,8 +438,16 @@ pub(super) fn inline_combinator(
     // lowering's hoist-target split keeps a nested loop constant-stack -- so
     // opening this loop inside another is now legal and `splice_tail` is just
     // whether this is a self-tail combinator.
-    let self_tail = crate::check::is_combinator(comb.word) && has_self_tail_call(comb.word);
-    let splice_tail = self_tail;
+    let self_tail = crate::check::is_combinator(comb.word)
+        && has_self_tail_call(comb.word, poly.combinators.tail());
+    // Slice 10c (R-P1-6): the splice is *in place of* the call, so the callee
+    // body's tail terms are the caller's. Threading `tail` here is what carries
+    // tail position into a quotation literal the callee `call`s at its own tail
+    // (`sum-to`'s recursive branch through a hand-written `if`), and is the
+    // checker's half of the same threading `lower_call` does at the lowering
+    // splice: the two must stay identical or the linear-spine guards run over a
+    // back-edge lowering did not build.
+    let splice_tail = self_tail || tail;
     let input_count = match comb.word.poly.as_ref() {
         Some(sig) => sig.inputs.len(),
         None => comb.word.effect.inputs.len(),
