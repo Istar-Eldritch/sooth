@@ -2143,24 +2143,32 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
 12. **Combinator recognition becomes declared, not inferred.** `is_combinator`
     (`src/check/combinators.rs:74`) grants the always-spliced property by two routes: the word
     declares a quotation parameter, or it declares `inline`. The first is an inference from the
-    shape of a signature, and it is the route every library combinator actually travels, since
-    `check_inline_declaration` (`src/check/word_entry.rs:66`) rejects a variable-bearing
-    signature and so `times`/`each`/`map`/`fold`/`filter`/`while` cannot declare the keyword at
-    all. This slice lifts that rejection and makes the declaration the single route: a word
-    declaring a `~[ ... ]` parameter must say `inline` (a located error where it does not),
-    `word_declares_quotation_parameter`'s leg in `is_combinator` retires, and
-    `lib/combinators.sth` is migrated. (10c already shipped `if`/`unless` as ordinary `lib/core.sth`
-    words, not injected, and shipped no `cond`; this slice's own polymorphic-`inline` gate lift was
-    also absorbed into 10c, since 10c's library comparison words needed it as their first consumer.)
-    The predicate itself stays: `is_quotation_type` has ~20 parameter-level callers across
-    `check/{poly,terms,audits,captures}.rs` that ask what a slot is, not whether a word splices.
+    shape of a signature; the second used to be unavailable to any row/type-variable-bearing
+    word, but **10c already lifted that in passing** (`check_inline_declaration`,
+    `src/check/word_entry.rs:69`, "a polymorphic signature is no longer excluded" — its own
+    `=`/`<`/`>`/`<=`/`>=`/`<>` needed a poly `inline` word as their first consumer). Measured
+    against the built compiler, not assumed: a row-poly `~[ ... ]`-taking non-recursive word
+    marked `inline` compiles and runs; `times`/`times-helper`
+    (`lib/combinators.sth`), edited in a scratch copy to add `inline`, compile, run, and hold
+    constant stack at `ulimit -s 1024` — the exact shape that opened this slice. So the
+    capability question that would have been this slice's main risk is already closed; nothing
+    remains but the declaration itself.
 
-    Splicing a polymorphic word is already the shipped behaviour — `times` is polymorphic and
-    spliced — so the rejection is a policy gate, not a capability gate, and lifting it changes
-    no lowering. The reason to prefer the declaration is the embedded/RT reading argument slice
-    11 was built on: a reader must see at the definition whether a call site costs a call,
-    rather than deriving it from `~`'s non-representability. This is the linear spine's own
-    trade, where `drop` is written out because the compiler *could* infer it.
+    What remains: `times`/`times-helper`/`each`/`map`/`fold`/`filter`/`while`
+    (`lib/combinators.sth`) and `if`/`unless` (`lib/core.sth`, 10c) all still take a
+    `~[ ... ]` parameter through the inferred route and declare no `inline` today. This slice
+    makes the declaration the single route: a word declaring a `~[ ... ]` parameter must say
+    `inline` (a located error where it does not), `word_declares_quotation_parameter`'s leg in
+    `is_combinator` retires, and every word above is migrated. `cond` was never built in 10c
+    (fixed-arity nested `if`/`unless` covers its use, per 10c's spec D6) and is out of scope
+    here too. The predicate itself stays: `is_quotation_type` has ~20 parameter-level callers
+    across `check/{poly,terms,audits,captures}.rs` that ask what a slot is, not whether a word
+    splices.
+
+    The reason to prefer the declaration is the embedded/RT reading argument slice 11 was
+    built on: a reader must see at the definition whether a call site costs a call, rather
+    than deriving it from `~`'s non-representability. This is the linear spine's own trade,
+    where `drop` is written out because the compiler *could* infer it.
 
     The second payoff is a capability, not a restatement: `is_quotation_type` matches
     `Type::Quotation` and `Type::InlineQuotation` alike, so the inference also splices a word
@@ -2182,13 +2190,16 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
     (`count [ | i | ... ] times` → `count ~[ | i | ... ] times`). 10c's desugar already emits
     `~`-flavoured branch literals, which this makes writable by hand.
 
-    Gates on 10c only in that `if`/`unless` (`lib/core.sth`) and `while`
-    (`lib/combinators.sth`) already declare a `~[ ... ]` parameter and so must gain the
-    `inline` declaration this slice requires, exactly like every other library combinator;
-    10c introduced no clause-body or dispatch-based combinator mechanism for this slice to
-    build on.
-    The ordinary-`[ ... ]` real-call path does not lower today, and the gap is measured rather
-    than assumed: with `is_combinator` narrowed to `~` parameters only, `: apply
+    Gates on 10c only in that `if`/`unless` (`lib/core.sth`) exist and must gain the `inline`
+    declaration this slice requires, exactly like every other library combinator; 10c
+    introduced no clause-body or dispatch-based combinator mechanism for this slice to build
+    on.
+
+    **In scope for this slice, not deferred**: retiring the inference makes a non-`~`
+    `[ ... ]` parameter reachable by real call for the first time, and the slice is not done
+    until that path lowers and a witness runs — leaving it undelivered would mean the slice
+    makes the shape *expressible* (previous paragraph) without making it *work*. The gap is
+    measured rather than assumed: with `is_combinator` narrowed to `~` parameters only, `: apply
     ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;` emits a **correct callee** —
     `export function l $apply__m0(:Q0 %v0, l %v1)` loading both slots and calling through the
     code pointer — and a **broken caller**: `call $apply__m0(l %v0, l %v1)` where `%v0` is
@@ -2201,13 +2212,19 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
     a `HashMap<String, Arity>` carrying only `(in_arity, out_arity, ret_ty)`, so a call site
     cannot currently tell which argument is a quotation. The checker half already works
     (`check/terms.rs`'s argument-position `materialize_quotation_at_boundary`, which the
-    comment notes covers an ordinary user word declaring a quotation parameter).
+    comment notes covers an ordinary user word declaring a quotation parameter). Exit witness:
+    the `apply` example above compiles to a real `Instr::Call` (not spliced), runs, and prints
+    `6`; a quotation passed down two real-call levels and a word that calls one and returns
+    are the corpus additions that prove it beyond the single-level case.
 
-    The "must declare `inline`" rule needs no carve-out against 11's builtin-operator
-    rejection, which would otherwise make a `~`-bearing overload of a builtin name both
-    required and forbidden to declare it: a `~`-bearing effect routes through the poly parser,
-    every builtin name has concrete rows by construction, and a name cannot mix a generic and
-    a concrete overload, so the shape is undeclarable. Pin it with a test rather than a guard.
+    A `~`-bearing overload of a builtin operator name is still worth a test, not a design
+    question: `=`/`<`/`>`/`<=`/`>=`/`<>` left `BUILTIN_TABLE` entirely in 10c (replaced by
+    `u=`/`u<`/... primitives, which are not surface names), so the `inline`-vs-builtin-name
+    collision slice 11 guards against has one fewer live case than it did, and any remaining
+    builtin name (`+`, `.`, ...) still can't carry a `~`-bearing overload: such an effect
+    routes through the poly parser, every builtin name has concrete rows by construction, and
+    a name cannot mix a generic and a concrete overload. Pin it with a test rather than a
+    guard.
 
 ### Phase 5 — Errors as values  `[S]`
 
