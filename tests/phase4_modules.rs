@@ -606,6 +606,45 @@ fn selectively_imported_operator_does_not_hijack_unrelated_module() {
 }
 
 #[test]
+fn selectively_imported_operator_does_not_hijack_own_modules_plain_use() {
+    // Regression: `main` selectively imports `v`'s `+` overload for `Vec2`
+    // *and* uses plain `+` on two `i64`s elsewhere. Before the fix, the
+    // selective-import rewrite branch mangled every bare `+` in `main` to
+    // `v`'s overload unconditionally (no `is_operator_dispatch_name` guard,
+    // unlike the own-module branch), so the plain `i64 +` failed a type
+    // mismatch expecting `Vec2`. Both uses must now resolve correctly: the
+    // `Vec2` pair to `v`'s overload, the `i64` pair to the builtin.
+    let c = Closure::new("operator-selective-no-self-hijack");
+    c.write(
+        "v.sth",
+        concat!(
+            "type: Vec2 x i64 y i64 ;\n",
+            ": + ( Vec2 Vec2 -- Vec2 )\n",
+            "  | a b |\n",
+            "  a Vec2>x b Vec2>x +\n",
+            "  a Vec2>y b Vec2>y +\n",
+            "  Vec2 ;\n",
+            "export: Vec2 + ;\n",
+        ),
+    );
+    let entry = c.write(
+        "main.sth",
+        concat!(
+            "import: v | Vec2 + | \"v.sth\" ;\n",
+            ": main ( -- )\n",
+            "  1 2 Vec2 3 4 Vec2 + Vec2>x .\n",
+            "  1 2 + . ;\n",
+        ),
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(
+        stdout, "4\n3\n",
+        "the Vec2 pair dispatches to v's overload (4), the i64 pair to the builtin (3)"
+    );
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn single_module_operator_overload_unchanged() {
     // R13 (regression / mutation guard): a single-file program overloading `+`
     // on a struct compiles and runs exactly as before. The decl is left bare in

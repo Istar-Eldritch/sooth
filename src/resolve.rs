@@ -293,7 +293,16 @@ impl NameTables {
                 }
             }
         }
-        if word_ok && suffix.is_empty() {
+        // A selectively imported operator name stays unrewritten here for the
+        // same reason the own-module branch above does: mangling it would force
+        // *every* bare use in the importing module onto the imported overload's
+        // signature, including ones plainly meant for the builtin (a plain
+        // `1 2 +` in a module that selectively imports `Vec2 +`). Left bare,
+        // `scoped_operator_overloads` (R12, `check/word_families.rs`) assembles
+        // the imported overload as a candidate alongside the builtin and any own
+        // overload, so `check_operator`'s per-call-site operand-type dispatch
+        // still finds it -- this only defers the rewrite to that dispatch.
+        if word_ok && suffix.is_empty() && !is_operator_dispatch_name(core) {
             if let Some(&target) = selective.get(core) {
                 if self.words[target as usize].contains(core) {
                     return Ok(Some(format!("{sigil}{}", mangle(core, target))));
