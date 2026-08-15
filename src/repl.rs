@@ -1674,6 +1674,31 @@ impl Session {
         // closure may declare `main`, unlike `driver::build`'s native path,
         // where module 0 is the program's own entry point.
         driver::check_no_main_in_closure(&module, &closure, None)?;
+        // Slice 12 (R-D5/E4): `eval_def` declines an ordinary `[ ... ]`-parameter
+        // word, and the import path has to decline the same shape or the
+        // boundary is only half a boundary. `splice_import`'s two binding loops
+        // would otherwise bind it as an ordinary word, and the later call site
+        // builds its quotation argument in the *session's* translation unit,
+        // where the `__quot0` code pointer is a non-PIC relocation: the line
+        // dies in `ld` instead of at the boundary. Rejected here, above the
+        // commit point, so a refused import leaves the session untouched (R16),
+        // and for both exported and private module-0 words, since a retained
+        // combinator's body can call a private one.
+        if let Some(w) = module.words.iter().find(|w| {
+            w.module == 0
+                && w.poly.is_none()
+                && !check::is_combinator(w)
+                && check::word_declares_quotation_parameter(w)
+        }) {
+            let span = check::word_span(w);
+            return Err(format!(
+                "error: word `{}` takes a `[ ... ]` quotation parameter and lowers to a real call, which is not supported in the REPL ({}, line {}, col {})",
+                crate::resolve::demangle_word(&w.name),
+                closure.path_of(w.module).display(),
+                span.line,
+                span.col
+            ));
+        }
         // R12 (slice 6c): a closure exporting a quotation-taking word is no
         // longer rejected -- `splice_import` retains the combinator (D5).
         // R11: each selectively-imported name must be exported by module 0,

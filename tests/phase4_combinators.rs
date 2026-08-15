@@ -1976,10 +1976,14 @@ fn repl_imported_private_word_still_rejected_by_qualified_name() {
     // still holds, so a session line naming it directly by its qualified
     // name still errors `not exported`, exactly as an ordinary private word
     // does.
+    // `apply2` declares `inline` (like its two siblings above): slice 12's
+    // import gate refuses a closure whose module 0 holds a *non*-combinator
+    // `[ ... ]`-parameter word, so a non-`inline` `apply2` here would fail the
+    // import outright and never reach this test's own subject, `privword6c`.
     let path = temp_lib(
         "private-body-call-qualified",
         ": privword6c ( i64 -- i64 ) 1 + ;\n\
-         : apply2 ( i64 [ i64 -- i64 ] -- i64 ) | q | q call privword6c ;\n\
+         : apply2 inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call privword6c ;\n\
          export: apply2 ;\n",
     );
     let transcript = repl_error(&format!(

@@ -367,6 +367,14 @@ Echoing the brief's Out of scope and OQ4/OQ5 boundaries:
 - Real REPL support for a quotation-taking word that lowers to a real call (OQ4).
   The `(code, env)` ABI across a `dlopen` boundary is an untested surface for its
   own slice; the REPL emits E4 for the shape instead.
+- Rewording `reject_quotation_argument` (`src/check.rs:1927`). Its "only `call`
+  accepts one (a runtime quotation value is slice 7)" is stale once part D lands:
+  a declared ordinary `[ ... ]` parameter accepts one too. The message still fires
+  only at positions that genuinely reject a quotation, so this is wrong prose, not
+  a wrong rule; it belongs to whichever slice next touches these diagnostics. (A
+  poly word with an ordinary `[ ... ]` parameter does *not* reach this message: it
+  fails earlier, `call` being unknown in a poly body and a mono real call being
+  "not permitted on `i64`" against the poly parameter.)
 - First-class runtime quotations and closures generally (7b). This slice makes an
   ordinary `[ ... ]` *parameter* real-callable (part D) but adds no capture,
   storage, or dispatch beyond 7b; `examples/capturing_dispatch.sth` keeps working

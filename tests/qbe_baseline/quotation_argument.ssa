@@ -1,0 +1,148 @@
+data $fmt = { b "%ld\n", b 0 }
+data $ufmt = { b "%lu\n", b 0 }
+data $ffmt = { b "%g\n", b 0 }
+data $sfmt = { b "%s", b 0 }
+data $true_str = { b "true\n", b 0 }
+data $false_str = { b "false\n", b 0 }
+data $boolstrs = { l $false_str, l $true_str }
+data $oobfmt = { b "sooth: array index out of range (line %ld)\n  index %ld is out of bounds for length %ld\n", b 0 }
+data $allocfmt = { b "alloc %ld\n", b 0 }
+data $freefmt = { b "free %ld\n", b 0 }
+data $tracenv = { b "SOOTH_TRACE_ALLOC", b 0 }
+data $oomfmt = { b "sooth: out of memory (allocation of %ld bytes failed)\n", b 0 }
+data $strfmt = { b "%.*s", b 0 }
+type :Q0 = { l, l }
+type :Q1 = { l, l }
+
+export function l $apply__m0(:Q0 %v0, l %v1) {
+@start
+	%v2 =l add %v0, 0
+	%v3 =l loadl %v2
+	%v4 =l add %v0, 8
+	%v5 =l loadl %v4
+	%v6 =l call %v3(l %v1, l %v5)
+	ret %v6
+}
+
+export function l $apply2__m0(:Q0 %v0, l %v1) {
+@start
+	%v2 =l call $apply__m0(:Q0 %v0, l %v1)
+	ret %v2
+}
+
+export function l $run__m0(:Q1 %v0) {
+@start
+	%v1 =l add %v0, 0
+	%v2 =l loadl %v1
+	%v3 =l add %v0, 8
+	%v4 =l loadl %v3
+	%v5 =l call %v2(l %v4)
+	ret %v5
+}
+
+export function $sooth_main() {
+@start
+	%v1 =l copy 5
+	%v2 =l alloc8 16
+	%v3 =l copy $main__quot0
+	%v4 =l add %v2, 0
+	storel %v3, %v4
+	%v5 =l copy 0
+	%v6 =l add %v2, 8
+	storel %v5, %v6
+	%v7 =l call $apply__m0(:Q0 %v2, l %v1)
+	call $printf(l $fmt, l %v7, ...)
+	%v9 =l copy 20
+	%v10 =l alloc8 16
+	%v11 =l copy $main__quot1
+	%v12 =l add %v10, 0
+	storel %v11, %v12
+	%v13 =l copy 0
+	%v14 =l add %v10, 8
+	storel %v13, %v14
+	%v15 =l call $apply2__m0(:Q0 %v10, l %v9)
+	call $printf(l $fmt, l %v15, ...)
+	%v17 =l alloc8 16
+	%v18 =l copy $main__quot2
+	%v19 =l add %v17, 0
+	storel %v18, %v19
+	%v20 =l copy 0
+	%v21 =l add %v17, 8
+	storel %v20, %v21
+	%v22 =l call $run__m0(:Q1 %v17)
+	call $printf(l $fmt, l %v22, ...)
+	ret
+}
+
+export function l $main__quot0(l %v0, l %v1) {
+@start
+	%v2 =l copy 1
+	%v3 =l add %v0, %v2
+	ret %v3
+}
+
+export function l $main__quot1(l %v0, l %v1) {
+@start
+	%v2 =l copy 2
+	%v3 =l mul %v0, %v2
+	ret %v3
+}
+
+export function l $main__quot2(l %v0) {
+@start
+	%v1 =l copy 42
+	ret %v1
+}
+
+function $sooth_oob_trap(l %line, l %idx, l %len) {
+@start
+	call $dprintf(w 2, l $oobfmt, l %line, l %idx, l %len, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function l $sooth_alloc(l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	%p =l call $malloc(l %adj)
+	%isnull =w ceql %p, 0
+	jnz %isnull, @oom, @ok
+@oom
+	call $sooth_oom_trap(l %adj)
+	hlt
+@ok
+	call $sooth_trace_event(l $allocfmt, l %adj)
+	ret %p
+}
+
+function $sooth_free(l %p, l %n) {
+@start
+	%zero =l ceql %n, 0
+	%adj =l add %n, %zero
+	call $free(l %p)
+	call $sooth_trace_event(l $freefmt, l %adj)
+	ret
+}
+
+function $sooth_oom_trap(l %n) {
+@start
+	call $dprintf(w 2, l $oomfmt, l %n, ...)
+	call $exit(w 1)
+	hlt
+}
+
+function $sooth_trace_event(l %fmt, l %n) {
+@start
+	%e =l call $getenv(l $tracenv)
+	%unset =w ceql %e, 0
+	jnz %unset, @off, @set
+@set
+	%c =w loadub %e
+	jnz %c, @on, @off
+@on
+	call $printf(l %fmt, l %n, ...)
+	ret
+@off
+	ret
+}

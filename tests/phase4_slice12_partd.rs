@@ -179,3 +179,84 @@ fn repl_import_gate_retains_an_inline_non_quotation_word() {
     std::fs::remove_file(&lib_path).ok();
     assert_eq!(transcript, "imported c\nstack: 6\n");
 }
+
+/// R-D3 at the *back edge*: a self tail call is not the ordinary dispatch, it
+/// pushes its arguments onto `back_edges` and `finalize_loop` blits each
+/// aggregate one into the header's stable slot. A quotation parameter carried
+/// around the loop must therefore be materialized there too -- otherwise the
+/// phantom's `I64` placeholder is the blit source and QBE rejects the function
+/// (`invalid type for first operand in blit0`). `go` rebinds `f` to a fresh
+/// quotation each iteration, so the back-edge argument is a live phantom, not
+/// the already-materialized parameter forwarded unchanged.
+#[test]
+fn tail_recursive_quotation_argument_is_materialized_at_the_back_edge() {
+    let src = ": go ( [ i64 -- i64 ] i64 -- i64 )\n\
+                 | n | | f |\n\
+                 n 0 = ~[ 7 f call ] ~[ f drop [ 2 * ] n 1 - go ] if ;\n\
+               : main ( -- ) [ 3 * ] 2 go . ;\n";
+
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = lower(&module).expect("lowering should succeed");
+    let go = ir
+        .funcs
+        .iter()
+        .find(|f| f.name == "go")
+        .expect("`go` is lowered");
+    let bad: Vec<_> = go
+        .blocks
+        .iter()
+        .flat_map(|b| b.instrs.iter())
+        .filter_map(|i| match i {
+            Instr::Blit(src, dst, _)
+                if matches!(go.value_types[dst.0 as usize], IrType::Quotation(_))
+                    && !matches!(go.value_types[src.0 as usize], IrType::Quotation(_)) =>
+            {
+                Some(go.value_types[src.0 as usize])
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        bad.is_empty(),
+        "every blit into the carried quotation slot must read a materialized \
+         `(code, env)`, not the phantom's placeholder: {bad:?}"
+    );
+
+    let (binary, stdout, code) = build_and_run("slice12-partd-tailquot", src);
+    std::fs::remove_file(&binary).ok();
+    assert_eq!(stdout, "14\n");
+    assert_eq!(code, 0);
+}
+
+/// X12/R-D5's import half: `eval_def` refuses the ordinary-`[ ... ]`-parameter
+/// shape, and `eval_import` has to refuse it too. Binding an imported one into
+/// `self.env` leaves the later call site building its quotation argument in the
+/// session's own translation unit, where the `__quot0` code pointer is a
+/// non-PIC relocation: the line dies in `ld` ("relocation R_X86_64_PC32 against
+/// symbol `__quot0`") rather than at the boundary. The error names the library
+/// file, since the span is not in the session's own text.
+#[test]
+fn repl_importing_an_ordinary_quotation_parameter_word_is_a_located_error() {
+    let lib_path = std::env::temp_dir().join(format!(
+        "sooth-slice12-partd-importapply-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(&lib_path, format!("export: apply ;\n{APPLY}"))
+        .expect("writing temp library should succeed");
+    let transcript = repl_transcript(&format!(
+        "import: a \"{}\" ;\n[ 1 + ] 5 a::apply\n:quit\n",
+        lib_path.display()
+    ));
+    std::fs::remove_file(&lib_path).ok();
+    assert_eq!(
+        transcript,
+        format!(
+            "error: word `apply` takes a `[ ... ]` quotation parameter and lowers to a real call, \
+             which is not supported in the REPL ({}, line 2, col 3)\n\
+             error: unknown word `a::apply`\n",
+            lib_path.display()
+        )
+    );
+}
