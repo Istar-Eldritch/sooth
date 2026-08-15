@@ -66,45 +66,9 @@ fn free_locals_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut Ha
                     out.insert(local.to_string());
                 }
             }
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                free_locals_into(then_branch, &mut shadowed.clone(), out);
-                free_locals_into(else_branch, &mut shadowed.clone(), out);
-            }
             TermKind::Quotation(inner) => free_locals_into(inner, &mut shadowed.clone(), out),
             _ => {}
         }
-    }
-}
-
-/// R10: whether a combinator body has a tail-position call to itself, the
-/// lowering twin of the checker's `tail_position_calls`/`has_self_tail_call`
-/// (which take a `&WordBody` this splice site does not hold). The syntactic
-/// tail rule is the same: the final term of the body, or the final term of
-/// either arm of a terminal `if`, recursively.
-///
-/// The *conclusion* drawn from it no longer is. Since slice 8a,
-/// `has_self_tail_call` additionally refuses a builtin-named word, because
-/// the same name in tail position may resolve to the builtin rather than to
-/// the enclosing word; this function still decides on the bare name. The two
-/// only agree today because a builtin-named combinator cannot exist: a
-/// combinator takes a quotation operand, and `check_operator`'s R11 guard
-/// rejects a quotation operand to any builtin name before the env combinator
-/// lookup runs. Nothing pins that, so if the R11 guard ever narrows, this
-/// needs the same refusal or check and lowering will disagree about whether a
-/// splice is a loop.
-fn body_tail_calls_self(body: &[Term], name: &str) -> bool {
-    match body.last().map(|t| &t.kind) {
-        Some(TermKind::Call(n)) => n == name,
-        Some(TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        }) => body_tail_calls_self(then_branch, name) || body_tail_calls_self(else_branch, name),
-        _ => false,
     }
 }
 
@@ -208,7 +172,7 @@ pub(super) struct FuncBuilder<'a> {
     /// (R18): the callee mints no `IrFunc` (it is absent from `funcs`/`env`),
     /// so its only reachable form is the splice. Empty on the REPL/destructor/
     /// test paths.
-    pub(super) combinators: &'a HashMap<String, Vec<Term>>,
+    pub(super) combinators: &'a crate::check::CombinatorIndex,
     /// Name of the word currently being lowered, used by the tail-call ->
     /// back-edge transform (R7) to recognize a self-call.
     pub(super) cur_word_name: String,
@@ -678,7 +642,7 @@ pub(super) fn lower_word_parts(
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
     env_plan: EnvPlan,
 ) -> Vec<IrFunc> {
     let mut params: Vec<IrType> = effect.inputs.iter().map(|s| ir_type_of(s.ty)).collect();
@@ -846,7 +810,7 @@ pub(super) fn lower_materialized(
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     let mut out = Vec::new();
     for m in mats {
@@ -1025,7 +989,7 @@ mod tests {
         let ir = lower_src(
             "type: Box n i64 ;\n\
              : mk ( i64 -- Box ) | n | n Box ;\n\
-             : loop ( i64 Box -- Box ) | n prev | n 0 = if prev else n 1 - prev loop end ;",
+             : loop ( i64 Box -- Box ) | n prev | n 0 = [ prev ] [ n 1 - prev loop ] if ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
         let header = loop_header(f);

@@ -1227,6 +1227,13 @@ fn emit_instr(
                 _ => writeln!(out, "\tstorel {}, {}", val(*v), val(*ptr)),
             }
         }
+        // Slice 10c (R-P3-2): a scalar enum's value already *is* its
+        // discriminant, in the same `w` register a `u32` occupies, so reading
+        // the tag is a relabel. QBE coalesces the copy, so the emitted machine
+        // code is the same as if the enum value had been used directly.
+        Instr::Tag(dst, src) => {
+            writeln!(out, "\t{} =w copy {}", val(*dst), val(*src))
+        }
         Instr::Conv(dst, src) => emit_conv(out, *dst, *src, value_types, layouts, ext_id),
         Instr::Phi(r, arms) => {
             let a: Vec<String> = arms
@@ -1627,7 +1634,7 @@ mod tests {
 
     #[test]
     fn emit_if_has_jnz_and_phi() {
-        let il = emit_src(": w ( bool -- i64 ) if 1 else 2 end ;");
+        let il = emit_src(": w ( bool -- i64 ) [ 1 ] [ 2 ] if ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
     }
@@ -1672,9 +1679,11 @@ mod tests {
 
     #[test]
     fn emit_comparison_line_stores_bool_via_extension() {
-        // `5 3 >` from D=0 leaves a `bool` on top; the line-wrapper epilogue
-        // must widen it (`extuw`) before the fixed 8-byte `storel` (R4/RK1).
-        let il = emit_line("5 3 >", 0);
+        // `5 3 u>` from D=0 leaves a 32-bit flag on top; the line-wrapper
+        // epilogue must widen it (`extuw`) before the fixed 8-byte `storel`
+        // (R4/RK1). Slice 10c: the *primitive*, since `>` is a `lib/` word now
+        // and this helper lowers a bare line with no word environment.
+        let il = emit_line("5 3 u>", 0);
         assert!(il.contains("=w csgtl"), "unexpected IL: {il}");
         assert!(il.contains("extuw"), "expected a w->l extension: {il}");
         assert!(il.contains("storel"), "expected a storel: {il}");
@@ -2381,7 +2390,7 @@ mod tests {
         // This structural test verifies the loop IL (a header `phi` with a
         // back-edge predecessor, plus the back-edge `jmp`) is valid QBE text.
         let il = emit_src(
-            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = if acc else acc n + n 1 - sum-to end ;",
+            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = [ acc ] [ acc n + n 1 - sum-to ] if ;",
         );
         assert!(
             il.contains("phi"),

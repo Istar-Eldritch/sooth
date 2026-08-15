@@ -42,11 +42,6 @@ impl<'a> FuncBuilder<'a> {
                     self.locals.push((name.clone(), value));
                 }
             }
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => self.lower_if(then_branch, else_branch, tail),
             // R12: a quotation literal interns its body and lowers to a phantom
             // `Value` with a placeholder `IrType` and *no* `Instr`. The checker
             // guarantees this phantom reaches only `call`/shuffle/bind
@@ -297,9 +292,13 @@ impl<'a> FuncBuilder<'a> {
             // R13: `call`-of-literal fusion. Pop the phantom quotation `Value`,
             // resolve its body, and lower the body's terms in place, emitting
             // no `Instr::Call` and creating no runtime code value: `[ 1 + ]
-            // call` lowers exactly as `1 +` (D5). `tail = false` is
-            // load-bearing: the checker never sanctions a spliced term as a
-            // self-tail call (R6/R13), so lowering must not back-edge here.
+            // call` lowers exactly as `1 +` (D5). Slice 10c (R-P1-6): the
+            // caller's `tail` is threaded, not pinned `false` -- the splice runs
+            // in place of the `call`, so at a tail `call` the literal's own tail
+            // terms are the enclosing word's, and the whole-word back-edge below
+            // fires on a self-call there. `check_term`'s `"call"` arm threads the
+            // same flag, so the checker sanctions exactly the splices that
+            // back-edge here.
             "call" => {
                 let v = self.stack.pop().expect("call: quotation on stack");
                 // R10/D1: provenance decides. A phantom the checker resolved to
@@ -314,7 +313,7 @@ impl<'a> FuncBuilder<'a> {
                         // would else read a stale entry on a later same-named
                         // bind. Mirror the `if` arm's save-and-truncate.
                         let locals_depth = self.locals.len();
-                        self.lower_terms(&body, false);
+                        self.lower_terms(&body, tail);
                         self.locals.truncate(locals_depth);
                     }
                     None => self.lower_indirect_call(v),
@@ -429,18 +428,28 @@ impl<'a> FuncBuilder<'a> {
                 self.push_instr(Instr::Bin(v, BinOp::Xor, operand, mask_v));
                 self.stack.push(v);
             }
-            "=" | "<" | ">" | "<=" | ">=" | "<>" => {
-                let op = match name {
-                    "=" => CmpOp::Eq,
-                    "<" => CmpOp::Lt,
-                    ">" => CmpOp::Gt,
-                    "<=" => CmpOp::Le,
-                    ">=" => CmpOp::Ge,
-                    _ => CmpOp::Ne,
-                };
+            // Slice 10c (R-P3-3): the comparison primitives. Same
+            // `Instr::Cmp`, same operands, same operand-type-driven signed /
+            // unsigned / float dispatch at the backend as the `=`/`<`/... rows
+            // they replace; only the result's `IrType` changed, from the
+            // 32-bit `Bool` to the 32-bit `u32` flag `branch` consumes, which
+            // is the same `w` register. `=`/`<`/... are `lib/` words that wrap
+            // these and construct a `bool`.
+            _ if crate::check::COMPARISON_PRIMITIVES
+                .iter()
+                .any(|(n, _)| *n == name) =>
+            {
+                let op = crate::check::COMPARISON_PRIMITIVES
+                    .iter()
+                    .find(|(n, _)| *n == name)
+                    .expect("guarded by the arm's own predicate")
+                    .1;
                 let rhs = self.stack.pop().expect("cmp: rhs");
                 let lhs = self.stack.pop().expect("cmp: lhs");
-                let v = self.fresh_value(IrType::Bool);
+                let v = self.fresh_value(IrType::Int {
+                    bits: 32,
+                    signed: false,
+                });
                 self.push_instr(Instr::Cmp(v, op, lhs, rhs));
                 self.stack.push(v);
             }
@@ -478,6 +487,39 @@ impl<'a> FuncBuilder<'a> {
                 let v = self.stack.pop().expect("print: value");
                 self.push_instr(Instr::Print(v));
             }
+            // Slice 10c (R-P3-1): `branch` is the machine-level two-way
+            // conditional. Its arms arrive as quotation operands rather than
+            // embedded term lists, but once resolved the lowering is the
+            // jump-and-join `if` always had: a conditional jump on the flag,
+            // each arm in its own block, one join. Both operands are declared
+            // `~` (inline-only), so the checker has already ruled out a
+            // materialized value here; each is a phantom whose body an earlier
+            // `TermKind::Quotation` recorded.
+            "branch" => {
+                let else_q = self.stack.pop().expect("branch: else quotation");
+                let then_q = self.stack.pop().expect("branch: then quotation");
+                let then_id = self.quot_bodies[&then_q];
+                let else_id = self.quot_bodies[&else_q];
+                let then_body = self.quot_defs[then_id.0].clone();
+                let else_body = self.quot_defs[else_id.0].clone();
+                self.lower_if(&then_body, &else_body, tail);
+            }
+            // Slice 10c (R-P3-2): `tag` reads a scalar enum's discriminant.
+            // The checker has already restricted the operand to an enum every
+            // variant of which is payload-free, whose runtime value is the
+            // bare discriminant, so this reads no memory and converts no
+            // width; `Instr::Tag` exists only to give that register an integer
+            // `IrType` (its source carries `IrType::Enum`, which would
+            // mis-dispatch a later `.`/arithmetic on it).
+            "tag" => {
+                let v = self.stack.pop().expect("tag: enum operand");
+                let dst = self.fresh_value(IrType::Int {
+                    bits: 32,
+                    signed: false,
+                });
+                self.push_instr(Instr::Tag(dst, v));
+                self.stack.push(dst);
+            }
             "fill" => self.lower_array_word(name),
             "len" => {
                 let top = *self.stack.last().expect("len: operand");
@@ -510,14 +552,28 @@ impl<'a> FuncBuilder<'a> {
                 // `Value`s already (a `TermKind::Quotation` earlier in this
                 // body recorded each `Value -> QuotId`), so the spliced body's
                 // own `call` resolves them with no extra plumbing.
-                // `tail = false` and the locals-truncate mirror the `call`
-                // splice above. Checked before the `&`/conversion/struct
+                // The `tail` threading and the locals-truncate mirror the
+                // `call` splice above. Checked before the `&`/conversion/struct
                 // dispatch since a combinator name is an ordinary word name.
-                if let Some(body) = self.combinators.get(name) {
+                //
+                // **INV-INLINE-COMBINATOR.** A quotation-taking word is always
+                // inlined (spliced) here and mints no `IrFunc`; it has no opaque
+                // call form, and its declared output row is discovered by
+                // forward checking of the spliced terms, never solved for by row
+                // unification. Threading the caller's `tail` into the splice is
+                // sound only because of that: the body really does run in place
+                // of the call. Slice 7b (first-class runtime quotations) is
+                // where the invariant breaks and this must be revisited,
+                // together with `check::terms_tail_call_self`'s walk.
+                if let Some(entry) = self.combinators.get(name) {
+                    let body = &entry.terms;
                     // R10: a self-tail combinator lowers to a splice-time loop
                     // (back-edge, not re-splice); every other combinator is a
-                    // straight term-splice.
-                    let self_tail = body_tail_calls_self(body, name);
+                    // straight term-splice. R-P1-5: the same predicate the
+                    // checker's `splice_tail` consults, so the two cannot
+                    // disagree about whether this splice is a loop.
+                    let self_tail =
+                        crate::check::terms_tail_call_self(body, name, self.combinators);
                     // R18/R21: alpha-rename the callee body identically to the
                     // checker, so its `| ... |` locals are fresh and a
                     // passed-down literal keeps its lexical capture under
@@ -529,7 +585,7 @@ impl<'a> FuncBuilder<'a> {
                         self.lower_self_tail_combinator(name, &body);
                     } else {
                         let locals_depth = self.locals.len();
-                        self.lower_terms(&body, false);
+                        self.lower_terms(&body, tail);
                         self.locals.truncate(locals_depth);
                     }
                     return;
@@ -874,8 +930,12 @@ mod tests {
     }
 
     #[test]
-    fn lower_comparison_result_is_bool() {
-        let ir = lower_src(": w ( i64 i64 -- bool ) > ;");
+    fn lower_comparison_primitive_result_is_a_32_bit_flag() {
+        // Slice 10c (E-P3-4 part 2): the primitive emits the same `Instr::Cmp`
+        // op over the same operands as the retired `>` builtin row did; only
+        // the result type changed, from the 32-bit `Bool` to the 32-bit
+        // unsigned flag `branch` consumes.
+        let ir = lower_src(": w ( i64 i64 -- u32 ) u> ;");
         let w = &ir.funcs[0];
         let v = instrs(w)
             .iter()
@@ -884,7 +944,47 @@ mod tests {
                 _ => None,
             })
             .expect("a Gt comparison");
-        assert_eq!(w.value_types[v.0 as usize], IrType::Bool);
+        assert_eq!(
+            w.value_types[v.0 as usize],
+            IrType::Int {
+                bits: 32,
+                signed: false
+            }
+        );
+    }
+
+    /// Slice 10c (R-P3-2): `tag` on a scalar enum emits exactly one
+    /// instruction, `Instr::Tag`, which exists only to give the discriminant
+    /// an integer `IrType` -- the value already *is* the discriminant, in the
+    /// same 32-bit register a `u32` occupies, so nothing is loaded and no
+    /// width is converted.
+    #[test]
+    fn lower_tag_of_a_scalar_enum_reads_no_memory_and_converts_no_width() {
+        let ir = lower_src(": w ( bool -- u32 ) tag ;");
+        let w = &ir.funcs[0];
+        let body = instrs(w);
+        let (dst, src) = body
+            .iter()
+            .find_map(|i| match i {
+                Instr::Tag(dst, src) => Some((*dst, *src)),
+                _ => None,
+            })
+            .expect("the `tag` operation is lowered");
+        assert_eq!(src, Value(0), "the operand is the word's own `bool` input");
+        assert_eq!(
+            w.value_types[dst.0 as usize],
+            IrType::Int {
+                bits: 32,
+                signed: false
+            }
+        );
+        assert!(
+            !body.iter().any(|i| matches!(
+                i,
+                Instr::Conv(..) | Instr::Load(..) | Instr::FieldLoad(..) | Instr::Blit(..)
+            )),
+            "no conversion and no memory access"
+        );
     }
 
     #[test]
@@ -1155,7 +1255,7 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ 1 - go ] [ drop ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1182,9 +1282,8 @@ mod tests {
         // shape would diverge from the one below instead of both trivially
         // satisfying the same hard-coded numbers.
         let with_binding =
-            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if | x | 1 - x go else drop end ;");
-        let without_binding =
-            lower_src(": go ( i64 i64 -- i64 ) dup 0 > if 1 - go else drop end ;");
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ | x | 1 - x go ] [ drop ] if ;");
+        let without_binding = lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ 1 - go ] [ drop ] if ;");
         let f1 = &with_binding.funcs[0];
         let f2 = &without_binding.funcs[0];
         let header1 = loop_header(f1);
@@ -1202,7 +1301,7 @@ mod tests {
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact *`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = if drop 1 else dup 1 - fact * end ;");
+        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = [ drop 1 ] [ dup 1 - fact * ] if ;");
         let f = &ir.funcs[0];
         assert_eq!(
             count(f, is_call_instr),
@@ -1220,7 +1319,7 @@ mod tests {
         // R10 over-eager boundary: the `if` is followed by more terms
         // (`drop 5`), so it is non-terminal and its arms are not in tail
         // position; the self-call stays a real `Instr::Call`.
-        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > if w else drop 0 end drop 5 ;");
+        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > [ w ] [ drop 0 ] if drop 5 ;");
         let f = &ir.funcs[0];
         assert_eq!(count(f, is_call_instr), 1);
         assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
@@ -1231,7 +1330,7 @@ mod tests {
         // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
         // arm of a terminal `if` back-edges, so the single header phi gains two
         // back-edge arms on top of the entry arm (three total).
-        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > if 1 - go else 1 + go end ;");
+        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > [ 1 - go ] [ 1 + go ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1419,7 +1518,7 @@ mod tests {
     // other pins it against `lib/combinators.sth`.
     const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | to | | from |\n\
-         from to < if from f call from 1 + to f times-helper else end ;\n\
+         from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
          : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | n | 0 n f times-helper ;\n";
 
@@ -1518,8 +1617,8 @@ mod tests {
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
         let ir = lower_src(
-            ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n\
-             : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n",
+            ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n\
+             : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),

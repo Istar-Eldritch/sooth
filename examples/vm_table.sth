@@ -155,11 +155,11 @@ type: Decoded vm Vm idx usize ;
   target64 >usize | target |
   vm vm-pop VmPop> | vm2 x |
   x 0 =
-  if
+  [
     vm2 target Vm<pc
-  else
+  ] [
     vm2
-  end ;
+  ] if ;
 
 : h-jmp ( Vm -- Vm )
   vm-pop VmPop> | vm target64 |
@@ -196,15 +196,15 @@ type: Decoded vm Vm idx usize ;
   | vm0 table |
   vm0 fetch Fetched> decode Decoded> | vm idx |
   idx 8 >usize =
-  if
+  [
     vm vm-pop VmPop>
     swap drop
-  else
+  ] [
     &table idx &> @ | h |
     vm h call
     table
     dispatch
-  end ;
+  ] if ;
 
 \ Assembles the sum-1..N-via-bytecode program, identical to `examples/vm.sth`'s
 \ `build`:

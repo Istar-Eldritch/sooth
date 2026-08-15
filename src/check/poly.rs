@@ -48,60 +48,6 @@ impl PolyScope {
     fn unconsumed(&self) -> Vec<&str> {
         self.moves.unconsumed()
     }
-
-    /// The names bound before an `if` arm is walked; a name absent from this
-    /// set after the arm was bound inside it. `PolyScope` has no depth concept
-    /// and reports leaks name-sorted, so a keys-snapshot is the faithful twin
-    /// of `Scope::depth` here, not an ordered `Vec`.
-    fn snapshot(&self) -> HashSet<String> {
-        self.locals.keys().cloned().collect()
-    }
-
-    /// `leave_block`'s poly twin: reject an arm-local non-`Copy` value never
-    /// consumed inside the arm, then drop every arm-local from scope so the two
-    /// arms' name sets agree at the join and `Moves::join` cannot panic on a
-    /// key mismatch. `token` names the arm's closing keyword ("else" or "end")
-    /// for the diagnostic. The removal happens whether or not a leak fired, so
-    /// a successful arm always leaves the pre-`if` name set behind.
-    fn leave_arm(
-        &mut self,
-        before: &HashSet<String>,
-        token: &str,
-        ctx: &Ctx,
-        span: Span,
-        sig: &PolySig,
-    ) -> Result<(), String> {
-        let mut arm_locals: Vec<String> = self
-            .locals
-            .keys()
-            .filter(|k| !before.contains(k.as_str()))
-            .cloned()
-            .collect();
-        arm_locals.sort_unstable();
-        let unconsumed: HashSet<String> = self
-            .moves
-            .unconsumed()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        // An arm-local cannot be `MaybeMoved` (it does not exist in the other
-        // arm), so its leak is always a plain unconsumed; take the first in
-        // sort order, capturing its type before the removal drops it.
-        let leak = arm_locals
-            .iter()
-            .find(|n| unconsumed.contains(n.as_str()))
-            .map(|n| (n.clone(), self.locals[n].clone()));
-        for name in &arm_locals {
-            self.locals.remove(name);
-            self.moves.states.remove(name);
-        }
-        if let Some((name, pt)) = leak {
-            return Err(poly_arm_local_unconsumed_error(
-                ctx, span, &name, &pt, token, sig,
-            ));
-        }
-        Ok(())
-    }
 }
 
 /// R14-R17: check a polymorphic combinator standalone by instantiating its
@@ -132,7 +78,7 @@ pub(super) fn check_poly_combinator_standalone(
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     let span = word_span(word);
     let mut subst = Subst::default();
     for v in 0..sig.ty_var_names.len() as u32 {
@@ -245,7 +191,13 @@ pub fn check_poly_body(
     // `ctx`, so a bare operator in a poly body resolves against the same
     // scoped candidate set a concrete body does. `Some` from `check::check`,
     // `None` from `repl.rs` (the REPL path is unscoped, R8).
-    let ctx = word_ctx(word, structs, enums, modules);
+    //
+    // Slice 10c (review fix, Phase 1): `poly_walk` never reaches the
+    // concrete back-edge guard (R15) `ctx.is_self_tail_call()` gates, so an
+    // empty index is correct here, not just convenient -- lowering never
+    // back-edges a polymorphic instantiation either (`lower_instantiation`
+    // hardcodes `self_tail = false`).
+    let ctx = word_ctx(word, structs, enums, modules, &CombinatorIndex::new());
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
         WordBody::Clauses(_) => {
@@ -368,78 +320,6 @@ pub(super) fn poly_term(
                 }
                 scope.locals.insert(name.clone(), pt);
             }
-        }
-        TermKind::If {
-            then_branch,
-            else_branch,
-            else_span,
-            end_span: _,
-        } => {
-            // Mirrors the monomorphic arm minus all quotation handling (D3): a
-            // `PolyType` is provably never a quotation (the literal is rejected
-            // eagerly at the `Quotation` arm above), so the condition-pop skips
-            // `reject_quotation_operand` and the join skips the two
-            // quotation-identity cases.
-            let cond = stack
-                .pop()
-                .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
-            if cond != PolyType::Concrete(Type::BOOL) {
-                return Err(match cond {
-                    PolyType::Concrete(t) => type_mismatch_error(ctx, span, "if", Type::BOOL, t),
-                    other => poly_op_on_variable_error(ctx, span, "if", &other, sig),
-                });
-            }
-            // R14/R2: each arm advances its own copy of the move-state and its
-            // own name set; the join reconciles the moves into `MaybeMoved`
-            // wherever they disagree, and `leave_arm` drops each arm's locals
-            // so the two name sets agree at the join.
-            let before = scope.snapshot();
-            let mut then_scope = scope.clone();
-            let mut else_scope = scope.clone();
-            let then_stack = poly_walk(
-                then_branch,
-                stack.clone(),
-                &mut then_scope,
-                sig,
-                ctx,
-                env,
-                structs,
-                enums,
-                arrays,
-                builtin_overloads,
-            )?;
-            let then_token = if else_span.is_some() { "else" } else { "end" };
-            then_scope.leave_arm(&before, then_token, ctx, span, sig)?;
-            let else_stack = poly_walk(
-                else_branch,
-                stack,
-                &mut else_scope,
-                sig,
-                ctx,
-                env,
-                structs,
-                enums,
-                arrays,
-                builtin_overloads,
-            )?;
-            else_scope.leave_arm(&before, "end", ctx, span, sig)?;
-            scope.moves = Moves::join(then_scope.moves, else_scope.moves);
-            if then_stack.len() != else_stack.len() {
-                return Err(poly_branch_mismatch_error(
-                    ctx,
-                    span,
-                    then_stack.len(),
-                    else_stack.len(),
-                ));
-            }
-            for (t_then, t_else) in then_stack.iter().zip(&else_stack) {
-                if t_then != t_else {
-                    return Err(poly_branch_type_mismatch_error(
-                        ctx, span, t_then, t_else, sig,
-                    ));
-                }
-            }
-            stack = then_stack;
         }
         TermKind::Call(name) => {
             return poly_call_term(
@@ -956,6 +836,17 @@ pub(super) fn poly_sig_could_match(
         if poly_input_is_quotation(&sig.inputs[i]) {
             return true;
         }
+        // Slice 10c: an `Ord`-bounded variable admits only the numeric tower
+        // (`is_ord` is `is_numeric` and nothing else), and the bound is what
+        // keeps `lib/core.sth`'s `: < ( 'T: Copy Ord 'T -- bool )` from
+        // claiming a call site meant for a user's `: < ( Vec2 Vec2 -- bool )`.
+        // Unification alone binds `'T` to anything at all, so without this the
+        // library word swallows every operand type.
+        if let PolyType::Var(v) = &sig.inputs[i] {
+            if sig.has_bound(*v, Bound::Ord) && !stack[base + i].ty.is_numeric() {
+                return false;
+            }
+        }
         unify_poly_input(
             sig,
             &sig.inputs[i],
@@ -1004,7 +895,9 @@ pub(super) fn resolve_combinator_overload<'a>(
                     && stack[stack.len() - n..]
                         .iter()
                         .zip(inputs.iter())
-                        .all(|(s, want)| matches!(want, Type::Quotation(_)) || s.ty == *want)
+                        .all(|(s, want)| {
+                            crate::ast::is_quotation_type(*want).is_some() || s.ty == *want
+                        })
             }
         };
         if matched {
@@ -1367,85 +1260,6 @@ pub(super) fn poly_use_after_move_error(ctx: &Ctx, span: Span, local: &str, site
         "error: use after move in `{where_}` (line {})\n  local `{local}` is linear and was moved at line {}, col {}, so it is used exactly once",
         span.line, site.line, site.col,
     )
-}
-
-/// R14 twin of `branch_mismatch_error` for the polymorphic body checker: the
-/// two `if` arms leave stacks of different depth. Takes `usize` depths, so no
-/// `PolyType` argument is needed here.
-pub(super) fn poly_branch_mismatch_error(
-    ctx: &Ctx,
-    span: Span,
-    d_then: usize,
-    d_else: usize,
-) -> String {
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
-            name, span.line, d_then, d_else, effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
-        ),
-    }
-}
-
-/// R14 twin of `branch_type_mismatch_error`: the two `if` arms leave differing
-/// types in the same slot. Compares `PolyType`, which is why the monomorphic
-/// `Type`-taking sibling cannot be reused; `sig` renders each variable's
-/// surface spelling.
-pub(super) fn poly_branch_type_mismatch_error(
-    ctx: &Ctx,
-    span: Span,
-    t_then: &PolyType,
-    t_else: &PolyType,
-    sig: &PolySig,
-) -> String {
-    match ctx {
-        Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
-            name,
-            span.line,
-            poly_type_str(t_then, sig),
-            poly_type_str(t_else, sig),
-            effect_str(effect),
-        ),
-        Ctx::Line { .. } => format!(
-            "error: `if` branches leave different types (then: `{}`, else: `{}`)",
-            poly_type_str(t_then, sig),
-            poly_type_str(t_else, sig),
-        ),
-    }
-}
-
-/// R14/R2 twin of `linear_local_out_of_scope_error`: a non-`Copy` local bound
-/// inside one `if` arm is never consumed before that arm ends. `token` names
-/// the arm's closing keyword ("else" or "end").
-pub(super) fn poly_arm_local_unconsumed_error(
-    ctx: &Ctx,
-    span: Span,
-    local: &str,
-    pt: &PolyType,
-    token: &str,
-    sig: &PolySig,
-) -> String {
-    let where_ = ctx.word_name().unwrap_or("<line>");
-    match ctx {
-        Ctx::Word { .. } => format!(
-            "error: linear value `{}` is never consumed in `{}` (line {})\n  local `{}` (`{}`) is never consumed, and its scope ends at the `{}` (nothing is dropped for you)",
-            local,
-            where_,
-            span.line,
-            local,
-            poly_type_str(pt, sig),
-            token,
-        ),
-        Ctx::Line { .. } => format!(
-            "error: local `{}` (`{}`) is never consumed, and its scope ends at the `{}`",
-            local,
-            poly_type_str(pt, sig),
-            token,
-        ),
-    }
 }
 
 pub(super) fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
@@ -1939,92 +1753,114 @@ mod tests {
     }
     #[test]
     fn check_poly_body_with_if_accepts_choose() {
-        // T1: a polymorphic body may branch. `choose` consumes `a` and `b` on
+        // T1: a polymorphic body may branch. Slice 10c: `inline`, because
+        // `if` is an ordinary word taking two quotation literals and a
+        // non-spliced polymorphic body rejects a quotation outright; the
+        // branch now runs through the ordinary splice, which is what makes the
+        // move-join below the thing under test. `choose` consumes `a` and `b` on
         // both arms but at different sites; the move-join must recognise
         // `Moved`+`Moved` as consumed-once (not a leak), or `choose` would be
         // wrongly rejected at the word end (M1).
         assert!(
             check_src(
-                ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n: main ( -- ) 1 2 true choose drop ;",
+                ": choose inline ( 'T 'T bool -- 'T ) | a b flag | flag [ a b drop ] [ b a drop ] if ;\n: main ( -- ) 1 2 true choose drop ;",
             )
             .is_ok(),
             "choose should type-check"
         );
     }
+    /// Slice 10c: T2/T4/T5/T8 below drove `poly_walk`'s own `PolyType` move
+    /// tracker, which went with its branch arm -- `if` is an ordinary word
+    /// taking two quotations now, and a spliced body's arms are tracked by the
+    /// shared branch-and-join over concrete `Slot`s. Each is retargeted onto a
+    /// concrete linear type, so the guarantee it pinned (an arm-local leak, a
+    /// one-armed consume joining to `MaybeMoved`, a use after a `Moved` join)
+    /// is still guarded, at the site that now decides it. A stand-in `'T` no
+    /// longer works: the def-site check instantiates it at `i64`, which is
+    /// `Copy`, so nothing could leak.
     #[test]
-    fn check_poly_arm_local_unconsumed_is_error() {
-        // T2: `y` is bound inside the `then` arm and never consumed in it;
-        // `leave_arm` must catch the arm-local leak (M2).
-        let err = check_src(
-            ": arm_leak ( 'T 'T bool -- 'T ) | a b flag | flag if a b | y | else a drop b end ;\n: main ( -- ) ;",
-        )
+    fn check_arm_local_unconsumed_is_error() {
+        // T2: `y` is bound inside the `then` arm and never consumed in it.
+        let err = check_src(&format!(
+            "{SPY}: arm_leak ( Spy Spy bool -- Spy ) | a b flag | flag [ a b | y | ] [ a drop b ] if ;\n: main ( -- ) ;",
+        ))
         .unwrap_err();
         assert!(err.contains('y'), "names the arm-local: {err}");
         assert!(err.contains("never consumed"), "unexpected message: {err}");
     }
     #[test]
-    fn check_poly_if_moved_on_both_arms_is_accepted() {
+    fn check_poly_branch_moved_on_both_arms_is_accepted() {
         // T3: `a`/`b` consumed on both arms (`Moved`+`Moved` => `Moved`), so
         // nothing leaks at the word end.
         assert!(
             check_src(
-                ": both ( 'T 'T bool -- ) | a b flag | flag if a drop b drop else b drop a drop end ;\n: main ( -- ) ;",
+                ": both inline ( 'T 'T bool -- ) | a b flag | flag [ a drop b drop ] [ b drop a drop ] if ;\n: main ( -- ) ;",
             )
             .is_ok(),
             "both should type-check"
         );
     }
     #[test]
-    fn check_poly_if_moved_on_one_arm_leaks() {
+    fn check_branch_moved_on_one_arm_leaks() {
         // T4: `x` consumed on the `then` arm only (`Moved`+`Live` =>
         // `MaybeMoved`), which the leak check must count as still-unconsumed
         // (M3).
-        let err =
-            check_src(": one ( 'T bool -- ) | x flag | flag if x drop else end ;\n: main ( -- ) ;")
-                .unwrap_err();
-        assert!(err.contains('x'), "names the leaked local: {err}");
-        assert!(err.contains("never consumed"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_poly_if_moved_on_neither_arm_leaks() {
-        // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
-        // parked in a local across an `if` still leaks at the word end (M4).
-        let err = check_src(": none ( 'T bool -- ) | x flag | flag if else end ;\n: main ( -- ) ;")
-            .unwrap_err();
-        assert!(err.contains('x'), "names the leaked local: {err}");
-        assert!(err.contains("never consumed"), "unexpected message: {err}");
-    }
-    #[test]
-    fn check_poly_if_condition_not_bool_is_error() {
-        // T6: the `if` condition must be `bool`; here the popped condition is
-        // the type variable `'T`, so the condition guard fires before anything
-        // else (an output-mismatch never mentions `if`).
-        let err = check_src(": bad ( 'T 'T -- 'T ) if drop else drop end ;\n: main ( -- ) ;")
-            .unwrap_err();
-        assert!(err.contains("if"), "names the `if`: {err}");
-        assert!(err.contains("'T"), "names the variable condition: {err}");
-    }
-    #[test]
-    fn check_poly_if_branch_depth_mismatch_is_error() {
-        // T7: the arms leave different stack depths (then: 1, else: 2). `'T`
-        // carries a `Copy` bound so the repeated reads are not use-after-move,
-        // leaving the depth mismatch as the sole failure this test proves.
-        let err = check_src(
-            ": bad ( 'T: Copy bool -- 'T ) | x flag | flag if x else x x end ;\n: main ( -- ) ;",
-        )
+        let err = check_src(&format!(
+            "{SPY}: one ( Spy bool -- ) | x flag | flag [ x drop ] [ ] if ;\n: main ( -- ) ;"
+        ))
         .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
         assert!(
-            err.contains("different stack depths"),
+            err.contains("is not consumed on every path"),
             "unexpected message: {err}"
         );
     }
     #[test]
-    fn check_poly_if_use_after_join_is_error() {
-        // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
-        // after `end` is a second read: use-after-move, not a leak.
+    fn check_branch_moved_on_neither_arm_leaks() {
+        // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
+        // parked in a local across a branch still leaks at the word end (M4).
+        let err = check_src(&format!(
+            "{SPY}: none ( Spy bool -- ) | x flag | flag [ ] [ ] if ;\n: main ( -- ) ;"
+        ))
+        .unwrap_err();
+        assert!(err.contains('x'), "names the leaked local: {err}");
+        assert!(err.contains("never consumed"), "unexpected message: {err}");
+    }
+    #[test]
+    fn check_branch_condition_not_bool_is_error() {
+        // T6: `if`'s condition must be a `bool`. Slice 10c: the guard is now
+        // `if`'s own declared parameter type rather than a hand-written arm,
+        // and a spliced poly body reports the operand at its instantiated
+        // stand-in type.
+        let err = check_src(": bad inline ( 'T 'T -- 'T ) [ drop ] [ drop ] if ;\n: main ( -- ) ;")
+            .unwrap_err();
+        assert!(err.contains("if"), "names the `if`: {err}");
+        assert!(err.contains("`bool`"), "names the expected type: {err}");
+    }
+    #[test]
+    fn check_branch_depth_mismatch_is_error() {
+        // T7: the arms leave different stack depths (then: 1, else: 2). Slice
+        // 10c catches that at the *argument* site (R-P2-3), comparing one arm
+        // literal's actual exit shape against its sibling's, rather than at a
+        // join after both were walked. `'T`
+        // carries a `Copy` bound so the repeated reads are not use-after-move,
+        // leaving the depth mismatch as the sole failure this test proves.
         let err = check_src(
-            ": bad ( 'T bool -- ) | x flag | flag if x drop else x drop end x drop ;\n: main ( -- ) ;",
+            ": bad inline ( 'T: Copy bool -- 'T ) | x flag | flag [ x ] [ x x ] if ;\n: main ( -- ) ;",
         )
+        .unwrap_err();
+        assert!(
+            err.contains("leave different stack shapes"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_branch_use_after_join_is_error() {
+        // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
+        // after the branch is a second read: use-after-move, not a leak.
+        let err = check_src(&format!(
+            "{SPY}: bad ( Spy bool -- ) | x flag | flag [ x drop ] [ x drop ] if x drop ;\n: main ( -- ) ;"
+        ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
         assert!(err.contains('x'), "names the moved local: {err}");

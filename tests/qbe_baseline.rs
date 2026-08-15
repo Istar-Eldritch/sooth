@@ -92,7 +92,12 @@ fn corpus_qbe_stays_byte_identical_to_baseline() {
 fn operator_i64_lowers_identically_after_table() {
     use sooth::{backend, check, ir, lexer, parser};
 
-    let src = ": ops ( i64 i64 -- i64 ) | a b | a b + a b - * a b < drop ;";
+    // Slice 10c: the comparison *primitive*. `<` is a `lib/` word now, and
+    // its branch-and-construct body adds a diamond here that QBE folds away
+    // in the emitted machine code but not in the IL; asserting the IL of `<`
+    // would be asserting the library definition, not the operator lowering
+    // this test exists to pin.
+    let src = ": ops ( i64 i64 -- i64 ) | a b | a b + a b - * a b u< drop ;";
     let tokens = lexer::lex(src).unwrap();
     let mut module = parser::parse(&tokens).unwrap();
     check::check(&mut module).unwrap();

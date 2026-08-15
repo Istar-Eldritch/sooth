@@ -59,15 +59,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         .filter(|(_, w)| crate::check::is_combinator(w))
         .map(|(idx, _)| idx)
         .collect();
-    let combinator_bodies: HashMap<String, Vec<Term>> = module
-        .words
-        .iter()
-        .filter(|w| crate::check::is_combinator(w))
-        .map(|w| match &w.body {
-            WordBody::Terms { terms } => (w.name.clone(), terms.clone()),
-            WordBody::Clauses(_) => unreachable!("a combinator is `WordBody::Terms` (R18)"),
-        })
-        .collect();
+    let combinator_bodies = crate::check::combinator_index(module.words.iter());
     let mut structs_forced: Vec<StructDecl> = module.structs.to_vec();
     for id in drop_overloads.keys() {
         structs_forced[id.index()].has_drop_overload = true;
@@ -180,7 +172,8 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             // recursive on a bare name match: the same name in its body may
             // resolve to the other candidate, the same reasoning that excludes
             // builtin-named words in `has_self_tail_call`.
-            let self_tail = crate::check::has_self_tail_call(w) && symbols[idx] == w.name;
+            let self_tail =
+                crate::check::has_self_tail_call(w, &combinator_bodies) && symbols[idx] == w.name;
             // R9: a word plus every quotation literal it materialized (element
             // 0 is the word itself).
             lower_word_parts(
@@ -383,7 +376,7 @@ pub fn lower_line(
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
 ) -> (IrFunc, Vec<IrFunc>, usize, usize) {
     debug_assert_eq!(entry_types.len(), entry_depth);
     // A REPL line has no word name to self-tail-call against.
@@ -638,9 +631,9 @@ pub(crate) fn lower_word(
     instantiations: &HashMap<Span, CallInst>,
     builtin_overloads: &HashMap<Span, String>,
     poly_arities: &HashMap<String, usize>,
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
-    let self_tail = crate::check::has_self_tail_call(word);
+    let self_tail = crate::check::has_self_tail_call(word, combinators);
     lower_word_parts(
         &word.name,
         &word.effect,
@@ -675,7 +668,7 @@ pub(crate) fn lower_instantiation(
     resolve: Resolver,
     regs: Registries,
     arrays: &[ArrayDecl],
-    combinators: &HashMap<String, Vec<Term>>,
+    combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
     let effect = concrete_effect(sig, subst, arrays);
     lower_word_parts(
@@ -701,6 +694,46 @@ mod tests {
     use crate::ir::test_helpers::*;
     use crate::lexer::lex;
     use crate::parser::parse;
+
+    /// E-P1-4 (slice 10c): the checker's tail-splice predicate and the loop
+    /// lowering actually built must answer the same question. Asked across the
+    /// two sites rather than of one function twice: the checker side is the
+    /// predicate `inline_combinator`/`check_term` consult, the lowering side is
+    /// the emitted back-edge, so a private rule on either side (or dropping the
+    /// `tail` threading at one splice) shows up as a mismatch.
+    #[test]
+    fn tail_splice_check_and_lowering_agree_on_the_loop() {
+        const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c [ t call ] [ e call ] if ;\n";
+        const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
+        for (branch, callee, expected) in [(BOOL_Q, "Bool?", true), (BOOL_D, "Bool!?", false)] {
+            let src = format!(
+                "{branch}: sum-to ( i64 i64 -- i64 )\n\
+                 | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] {callee} ;\n\
+                 : main ( -- ) 0 10 sum-to . ;\n"
+            );
+            let tokens = lex(&src).unwrap();
+            let mut module = parse(&tokens).unwrap();
+            check(&mut module).unwrap();
+            let combs = crate::check::combinator_index(module.words.iter());
+            let word = module.words.iter().find(|w| w.name == "sum-to").unwrap();
+            let checker = crate::check::has_self_tail_call(word, &combs);
+
+            let ir = lower(&module).unwrap();
+            let sum = ir.funcs.iter().find(|f| f.name == "sum-to").unwrap();
+            let lowered_a_loop = sum
+                .blocks
+                .iter()
+                .any(|b| matches!(b.term, Terminator::Jmp(to) if to.0 <= b.id.0));
+
+            assert_eq!(checker, expected, "the checker's decision for {callee}");
+            assert_eq!(
+                checker, lowered_a_loop,
+                "check and lowering must agree on whether the splice is a loop ({callee})"
+            );
+        }
+    }
 
     #[test]
     fn lower_line_marshals_all_inputs_and_outputs() {

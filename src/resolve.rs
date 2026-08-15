@@ -29,10 +29,31 @@ use std::collections::HashSet;
 /// registered under it. Every other name gains a `__m{module}` component,
 /// minted so no punctuation reaches a symbol sanitizer (D8).
 pub(crate) fn mangle(name: &str, module: u32) -> String {
-    if name == "main" || name == "drop" {
+    if name == "main" || name == "drop" || is_prelude_word_name(name) {
         return name.to_string();
     }
     format!("{name}__m{module}")
+}
+
+/// Slice 10c (R-P3-4): the `lib/core.sth` words injected into every closure.
+/// They are declared once but reached by bare name from every module, so
+/// mangling them per module would bind each module's `if` to a spelling only
+/// the injected copy's own module could resolve, leaving every other module's
+/// bare `if` unresolvable. Same reasoning as `main` and `drop`.
+///
+/// Read off `lib/core.sth` rather than listed here: the file is meant to grow,
+/// and a hand-mirrored list would leave each word added to it unresolvable
+/// from every module but the entry one.
+pub(crate) fn is_prelude_word_name(name: &str) -> bool {
+    static NAMES: std::sync::OnceLock<HashSet<String>> = std::sync::OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            crate::parser::prelude_words()
+                .into_iter()
+                .map(|w| w.name)
+                .collect()
+        })
+        .contains(name)
 }
 
 /// `check::builtin_table`'s keys, mirrored by hand (that table's own
@@ -40,6 +61,13 @@ pub(crate) fn mangle(name: &str, module: u32) -> String {
 /// arithmetic/comparison/`max`/`max-total`/`.` names a bare call must reach
 /// `check_operator`'s operand-type dispatch for, never a static rewrite. Keep
 /// in sync when a table operator is added.
+///
+/// Slice 10c (R-P3-3): the six comparison *surface* names stay listed even
+/// though they are no longer table rows. They are `lib/` words now, reached by
+/// bare name from every module, so mangling one per module would bind every
+/// use inside a module to that module's own spelling and leave every other
+/// module's bare `=` unresolvable. The `u`-prefixed primitives that took over
+/// their rows are listed beside them.
 fn is_operator_dispatch_name(name: &str) -> bool {
     matches!(
         name,
@@ -59,6 +87,12 @@ fn is_operator_dispatch_name(name: &str) -> bool {
             | "<="
             | ">="
             | "<>"
+            | "u="
+            | "u<"
+            | "u>"
+            | "u<="
+            | "u>="
+            | "u<>"
             | "max"
             | "max-total"
             | "."
@@ -428,30 +462,6 @@ fn rewrite_terms(
                     }
                 }
             }
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                rewrite_terms(
-                    then_branch,
-                    module,
-                    imports,
-                    selective,
-                    tables,
-                    scope,
-                    exports,
-                )?;
-                rewrite_terms(
-                    else_branch,
-                    module,
-                    imports,
-                    selective,
-                    tables,
-                    scope,
-                    exports,
-                )?;
-            }
             TermKind::Quotation(inner) => {
                 rewrite_terms(inner, module, imports, selective, tables, scope, exports)?;
             }
@@ -715,7 +725,15 @@ mod tests {
         let tokens = lex(": p ( -- i64 ) 1 ; : main ( -- ) p drop ;").unwrap();
         let mut module = crate::parser::parse(&tokens).unwrap();
         resolve_modules(&mut module, false).unwrap();
-        let names: Vec<&str> = module.words.iter().map(|w| w.name.as_str()).collect();
+        // Slice 10c: `parse` appends `lib/core.sth`'s words, which are never
+        // mangled (`is_prelude_word_name`), so only the file's own two are
+        // asserted here.
+        let names: Vec<&str> = module
+            .words
+            .iter()
+            .map(|w| w.name.as_str())
+            .filter(|n| !is_prelude_word_name(n))
+            .collect();
         assert_eq!(names, vec!["p", "main"]);
         let main = module.words.iter().find(|w| w.name == "main").unwrap();
         assert_eq!(
@@ -736,14 +754,6 @@ mod tests {
         for t in terms {
             match &t.kind {
                 TermKind::Call(n) => out.push(n.clone()),
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    collect_calls(then_branch, out);
-                    collect_calls(else_branch, out);
-                }
                 TermKind::Quotation(inner) => collect_calls(inner, out),
                 _ => {}
             }

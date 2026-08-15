@@ -45,19 +45,46 @@ export function w $leap__m0(l %v0) {
 	%v2 =l rem %v0, %v1
 	%v3 =l copy 0
 	%v4 =w ceql %v2, %v3
-	%v5 =l copy 100
-	%v6 =l rem %v0, %v5
-	%v7 =l copy 0
-	%v8 =w ceql %v6, %v7
-	%v9 =w copy 1
-	%v10 =w xor %v8, %v9
-	%v11 =w and %v4, %v10
-	%v12 =l copy 400
-	%v13 =l rem %v0, %v12
-	%v14 =l copy 0
-	%v15 =w ceql %v13, %v14
-	%v16 =w or %v11, %v15
-	ret %v16
+	jnz %v4, @blk1, @blk2
+@blk1
+	%v7 =w copy 1
+	jmp @blk3
+@blk2
+	%v8 =w copy 0
+	jmp @blk3
+@blk3
+	%v9 =w phi @blk1 %v7, @blk2 %v8
+	%v10 =l copy 100
+	%v11 =l rem %v0, %v10
+	%v12 =l copy 0
+	%v13 =w ceql %v11, %v12
+	jnz %v13, @blk4, @blk5
+@blk4
+	%v16 =w copy 1
+	jmp @blk6
+@blk5
+	%v17 =w copy 0
+	jmp @blk6
+@blk6
+	%v18 =w phi @blk4 %v16, @blk5 %v17
+	%v19 =w copy 1
+	%v20 =w xor %v18, %v19
+	%v21 =w and %v9, %v20
+	%v22 =l copy 400
+	%v23 =l rem %v0, %v22
+	%v24 =l copy 0
+	%v25 =w ceql %v23, %v24
+	jnz %v25, @blk7, @blk8
+@blk7
+	%v28 =w copy 1
+	jmp @blk9
+@blk8
+	%v29 =w copy 0
+	jmp @blk9
+@blk9
+	%v30 =w phi @blk7 %v28, @blk8 %v29
+	%v31 =w or %v21, %v30
+	ret %v31
 }
 
 export function $sooth_main() {

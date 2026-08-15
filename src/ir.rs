@@ -76,8 +76,8 @@ fn empty_poly_arities() -> &'static HashMap<String, usize> {
 /// R19: the combinator-body companion of `empty_instantiations`. A path with
 /// no monomorphic quotation-taking words to inline (the REPL, D2; destructor
 /// synthesis; unit tests) hands out this empty map.
-fn empty_combinators() -> &'static HashMap<String, Vec<Term>> {
-    static EMPTY: std::sync::OnceLock<HashMap<String, Vec<Term>>> = std::sync::OnceLock::new();
+fn empty_combinators() -> &'static crate::check::CombinatorIndex {
+    static EMPTY: std::sync::OnceLock<crate::check::CombinatorIndex> = std::sync::OnceLock::new();
     EMPTY.get_or_init(HashMap::new)
 }
 

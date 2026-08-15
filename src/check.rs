@@ -35,13 +35,15 @@ pub(crate) use self::audits::{
     audit_quotation_type_registries, audit_word_quotation_positions, drop_overload_struct_id,
     find_drop_overloads,
 };
+pub use self::builtins::builtin_table;
 use self::builtins::*;
-pub(crate) use self::builtins::{is_copy, is_linear, sig_of, Overload, Sig};
+pub(crate) use self::builtins::{is_copy, is_linear, sig_of, Overload, Sig, COMPARISON_PRIMITIVES};
 use self::captures::*;
+pub use self::combinators::is_combinator;
 use self::combinators::*;
 pub(crate) use self::combinators::{
-    check_combinator_cycles, combinator_of, is_combinator, word_declares_quotation_parameter,
-    CombinatorEnv,
+    check_combinator_cycles, combinator_index, combinator_of, word_declares_quotation_parameter,
+    CombinatorEnv, CombinatorIndex,
 };
 pub use self::declarations::check_structs;
 use self::declarations::*;
@@ -50,7 +52,9 @@ pub(crate) use self::declarations::{
     selective_not_exported_error, struct_generated_sigs, SelectiveName,
 };
 use self::drop_graph::*;
-pub(crate) use self::drop_graph::{check_drop_overload_reachability, has_self_tail_call};
+pub(crate) use self::drop_graph::{
+    check_drop_overload_reachability, has_self_tail_call, terms_tail_call_self,
+};
 use self::engine::*;
 use self::operators::*;
 use self::poly::*;
@@ -564,7 +568,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     check_combinator_cycles(&combinators)?;
     // Reject mutual tail-recursion cycles (D3, X1) on the whole-module
     // tail-call graph, after signature registration and before body checking.
-    check_tail_call_cycles(words, &drop_overload_indices)?;
+    check_tail_call_cycles(words, &drop_overload_indices, combinators.tail())?;
     // R14: the per-call-site instantiation table, filled as each monomorphic
     // body's calls to polymorphic words are unified, then stored on the module
     // for lowering.
@@ -1350,12 +1354,27 @@ fn back_edge_declared_shape(
 /// capture restriction here (R12): a read that consumes a non-`Copy` enclosing
 /// local, or a borrow of an enclosing place left on the row, is rejected; a
 /// `Copy` local read by value is allowed.
+///
+/// Slice 10c: `is_arm` marks a literal filling a parameter slot the callee
+/// `call`s in *tail* position -- a branch arm of `if`/`unless`, as opposed to
+/// `times`' body. Such a literal runs at most once per entry and inherits the
+/// call site's own tail position; `caller_tail` supplies that. See the
+/// `check_terms_relaxed` call below.
+///
+/// Slice 10c (R-P2-3/R-P2-4): `shape_changing` is true for a declared
+/// quotation whose input and output rows differ (`..i -- ..o`, `..i != ..o`).
+/// There the exit row has no fixed point to check against -- the whole point
+/// of the shape change -- so this returns the literal's actual exit types
+/// without judging them, and the *caller* (`check_poly_combinator_args`)
+/// compares one sibling literal's actual exit types against another's,
+/// erroring at whichever literal disagrees (R-P2-4: no row unification,
+/// `..o` is discovered by forward checking, never solved for).
 #[allow(clippy::too_many_arguments)]
 fn check_literal_against_declared_effect(
     id: QuotId,
     eff: &QuotEffect,
     is_inline: bool,
-    row: &[Type],
+    row: &[Slot],
     word: &str,
     span: Span,
     ctx: &Ctx,
@@ -1367,7 +1386,10 @@ fn check_literal_against_declared_effect(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
-) -> Result<(), String> {
+    shape_changing: bool,
+    is_arm: bool,
+    caller_tail: bool,
+) -> Result<Vec<Type>, String> {
     let body = prov.quotations[id.0].body.clone();
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let moves_before = scope.moves.states.clone();
@@ -1379,15 +1401,64 @@ fn check_literal_against_declared_effect(
     // `quotation borrows place`, a false positive on correct code. A caller
     // whose effect carries no row (every one but the poly literal path) passes
     // an empty region, leaving `fresh` as before.
-    let mut fresh: Vec<Slot> = row.iter().map(|t| Slot::computed(*t)).collect();
+    // Slice 10c: a `~` branch arm keeps the caller's real row slots. The
+    // erasure below exists so a caller borrow riding untouched in the row is
+    // not flagged by the exit-row guard -- a guard this arm already skips
+    // (`is_inline`), because the arm runs in place against exactly these
+    // slots. Erasing them here instead drops each one's `quot` marker, so a
+    // self-tail combinator forwarding its own quotation parameter through an
+    // arm sees a bare `Cstr` placeholder where a quotation is declared.
+    let mut fresh: Vec<Slot> = match is_inline && is_arm {
+        true => row.to_vec(),
+        false => row.iter().map(|s| Slot::computed(s.ty)).collect(),
+    };
     fresh.extend(eff.inputs.iter().map(|t| Slot::computed(*t)));
     let depth = scope.depth();
+    // Slice 10c: an arm occupies the caller's tail position when the call
+    // site does. Pinning that `false` made this probe walk a self-recursive
+    // branch arm as an ordinary call and splice the enclosing combinator
+    // forever, where in tail position the self-call is the back-edge.
+    //
+    // The `back_edge` flag is the mirror image: a `~` arm runs *at most once*
+    // per entry, exactly as the deleted `if`/`else`/`end` arms did (which is
+    // why the retired arm walk passed `false` here), so a granted outer name
+    // may die at its last use inside it. Every other quotation keeps the
+    // conservative `true` -- `times`' body really does wrap around, and a
+    // reference inherited into it stays live across the whole body.
     let result = check_terms_relaxed(
-        &body, fresh, ctx, env, arrays, cells, refs, prov, scope, false, poly, granted, true,
+        &body,
+        fresh,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        scope,
+        is_arm && caller_tail,
+        poly,
+        granted,
+        !(is_inline && is_arm),
     )?;
     // R12: a linear enclosing local the literal consumed (move-state changed
     // from `Live`).
-    if let Some(local) =
+    //
+    // Slice 10c: not applied to a `~` *branch arm*. This is a conservative
+    // argument-site pre-check whose premise is that the callee may call the
+    // quotation any number of times, so one consumption here could be many at
+    // run time -- which is exactly right for `times`' body, the shape it
+    // exists for, and plainly wrong for a branch arm: an arm consuming an
+    // enclosing linear local is what the deleted `if`/`else`/`end` arms did,
+    // reconciled at the join into `MaybeMoved`. `is_arm` is the discriminator
+    // (the callee `call`s this slot in *tail* position, so it runs at most
+    // once per entry), not `is_inline` alone.
+    if is_inline && is_arm {
+        // The probe must also leave no trace: two sibling arms are
+        // alternatives, each starting from the same move-state, and the splice
+        // re-checks whichever one runs. Without the restore the second arm
+        // sees the first arm's consumption and reports use-after-move.
+        scope.moves.states = moves_before.clone();
+    } else if let Some(local) =
         moves_before
             .iter()
             .find_map(|(n, before)| match (before, scope.moves.states.get(n)) {
@@ -1400,11 +1471,17 @@ fn check_literal_against_declared_effect(
         return Err(quotation_captures_local_error(ctx, span, word, &local));
     }
     // R12: a borrow of an enclosing place left live on the literal's exit row.
-    for slot in &result {
-        if let Some(did) = slot.deriv {
-            if let Some(place) = &prov.deriv(did).owned_root {
-                if outer_locals.contains(place) {
-                    return Err(quotation_borrows_place_error(ctx, span, word, place));
+    // Skipped for a `~` branch arm for the same reason as the linear-capture
+    // rule above: the arm runs once, in place, so a borrow left on its exit
+    // row is the caller's own, live in the caller's own frame, exactly as it
+    // was when a branch arm was an inline block rather than a quotation.
+    if !(is_inline && is_arm) {
+        for slot in &result {
+            if let Some(did) = slot.deriv {
+                if let Some(place) = &prov.deriv(did).owned_root {
+                    if outer_locals.contains(place) {
+                        return Err(quotation_borrows_place_error(ctx, span, word, place));
+                    }
                 }
             }
         }
@@ -1418,6 +1495,54 @@ fn check_literal_against_declared_effect(
             span,
         },
     )?;
+    let actual: Vec<Type> = result.iter().map(|s| s.ty).collect();
+    if shape_changing {
+        // R-P2-4: a shape-changing declared quotation has no fixed exit row
+        // to check against as a whole; the caller reconciles sibling
+        // literals' full actual shapes against each other (R-P2-3).
+        //
+        // Review fix: that sibling comparison alone never runs at all when a
+        // shape-changing parameter has no sibling sharing its row id (or every
+        // sibling happens to agree with each other while still disagreeing
+        // with the declaration), so the declared *fixed* trailing outputs
+        // (`eff.outputs`, e.g. the `i64` in `~[ ..i -- ..o i64 ]`) were never
+        // checked at all -- a mismatch there surfaced later as a generic
+        // boundary error, not at this argument site. The row prefix length is
+        // genuinely undetermined (that is the point of R-P2-4), but the
+        // declared suffix is still a fixed point and is checked here.
+        let suffix_len = eff.outputs.len();
+        let suffix_matches = result.len() >= suffix_len
+            && result[result.len() - suffix_len..]
+                .iter()
+                .zip(&eff.outputs)
+                .all(|(f, w)| {
+                    matches!(
+                        match_slot(*f, *w),
+                        SlotMatch::Exact | SlotMatch::LiteralSizeType
+                    )
+                });
+        if !suffix_matches {
+            let actual_outs: Vec<Type> = result
+                .iter()
+                .skip(result.len().saturating_sub(suffix_len))
+                .map(|s| s.ty)
+                .collect();
+            let declared = if is_inline {
+                crate::ast::inline_quotation_type(eff.inputs.clone(), eff.outputs.clone())
+            } else {
+                crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone())
+            };
+            let actual_effect = crate::ast::quotation_type(eff.inputs.clone(), actual_outs);
+            return Err(literal_effect_mismatch_error(
+                ctx,
+                span,
+                word,
+                declared,
+                actual_effect,
+            ));
+        }
+        return Ok(actual);
+    }
     // R11: the literal's exit row must equal the grounded declared output row:
     // the same carried region `row` followed by the declared outputs. N=0
     // leaves the region untouched and N≥2 feeds one iteration's output into the
@@ -1425,7 +1550,7 @@ fn check_literal_against_declared_effect(
     // both sides").
     let expected_out: Vec<Type> = row
         .iter()
-        .copied()
+        .map(|s| s.ty)
         .chain(eff.outputs.iter().copied())
         .collect();
     let matches_out = result.len() == expected_out.len()
@@ -1450,7 +1575,7 @@ fn check_literal_against_declared_effect(
             ctx, span, word, declared, actual,
         ));
     }
-    Ok(())
+    Ok(actual)
 }
 
 /// R10/R21: a quotation parameter position whose argument is not a quotation
@@ -1487,6 +1612,40 @@ fn literal_effect_mismatch_error(
     let word = crate::resolve::demangle_word(word);
     format!(
         "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// Slice 10c (R-P2-3): two sibling literals passed to the same
+/// shape-changing declared quotation parameter (sharing one declared output
+/// row `..o`) leave different actual output shapes. Located at the *second*
+/// literal's own span -- the argument site -- rather than wherever the
+/// spliced callee body would eventually notice the disagreement (recon 8: the
+/// diagnostic this restores).
+fn combinator_branch_output_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    expected: &[Type],
+    found: &[Type],
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    let render = |types: &[Type]| match types.is_empty() {
+        true => "nothing".to_string(),
+        false => format!(
+            "`{}`",
+            types
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+    };
+    format!(
+        "error: the quotations passed to `{word}` leave different stack shapes: an earlier one leaves {}, this one leaves {}{} (line {})",
+        render(expected),
+        render(found),
         in_word(ctx),
         span.line,
     )
@@ -1565,14 +1724,20 @@ fn size_conversion_needed_error(ctx: &Ctx, span: Span, op: &str, target: Type) -
     }
 }
 
+/// Slice 10c: the two arms of a `branch` disagree. Named for the *arms*, not
+/// for `if`: `branch` is the primitive and `if`/`unless` are ordinary
+/// `lib/core.sth` words over it, so by the time this fires the surface word
+/// the user wrote has been spliced away and could equally have been `branch`
+/// itself. (The span still points at the first arm, which is the user's own
+/// literal either way -- see `check_branch_join`.)
 fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: stack effect mismatch in `{}` (line {})\n  `if` branches leave different stack depths (then: {}, else: {})\n  note: declared {}",
+            "error: stack effect mismatch in `{}` (line {})\n  the two branch arms leave different stack depths (then: {}, else: {})\n  note: declared {}",
             name, span.line, d_then, d_else, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: `if` branches leave different stack depths (then: {d_then}, else: {d_else})"
+            "error: the two branch arms leave different stack depths (then: {d_then}, else: {d_else})"
         ),
     }
 }
@@ -1580,11 +1745,11 @@ fn branch_mismatch_error(ctx: &Ctx, span: Span, d_then: usize, d_else: usize) ->
 fn branch_type_mismatch_error(ctx: &Ctx, span: Span, t_then: Type, t_else: Type) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
-            "error: type mismatch in `{}` (line {})\n  `if` branches leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
+            "error: type mismatch in `{}` (line {})\n  the two branch arms leave different types (then: `{}`, else: `{}`)\n  note: declared {}",
             name, span.line, t_then, t_else, effect_str(effect),
         ),
         Ctx::Line { .. } => format!(
-            "error: `if` branches leave different types (then: `{t_then}`, else: `{t_else}`)"
+            "error: the two branch arms leave different types (then: `{t_then}`, else: `{t_else}`)"
         ),
     }
 }
@@ -1913,6 +2078,33 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+
+    /// Review fix (R-P2-3, declaration half): a shape-changing declared
+    /// quotation parameter (`~[ ..i -- ..o i64 ]`, `..i != ..o`) with no
+    /// sibling sharing its row id never goes through the sibling comparison
+    /// `check_poly_combinator_args` runs (there is nothing to compare
+    /// against), so the declared *fixed* trailing output (`i64`) must still be
+    /// checked against the literal's own actual trailing output right here.
+    /// `g`'s single branch leaves a `bool` where `i64` was declared; this must
+    /// be rejected at `g`'s own argument site, not surface later as a generic
+    /// mismatch at `demo`'s declaration boundary (the recon-8 loss R-P2-3
+    /// exists to prevent).
+    #[test]
+    fn shape_changing_quotation_with_no_sibling_checks_its_declared_trailing_output() {
+        let src = ": g ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
+             : demo ( i64 -- i64 i64 ) true [ dup 1 = ] g ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("declared") && err.contains("effect"),
+            "expected a literal-effect-mismatch message, got: {err}"
+        );
+        assert!(
+            !err.contains("different stack shapes"),
+            "must not be the sibling-comparison message (there is no sibling here): {err}"
+        );
+        assert!(err.contains("line 2"), "unexpected message: {err}");
+    }
+
     /// D3's leaf resource: one field, a `drop` override implemented exactly
     /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
     /// inside `drop`'s own body -- exempted, since a word literally named
@@ -1940,18 +2132,36 @@ mod tests {
         // `bool` is `Type::Enum(BOOL_ENUM_ID, ..)` (Slice 9): a real REPL
         // session seeds this at index 0 (`Session::new`); this bare-line
         // helper mirrors that so a `bool`-producing comparison resolves.
+        // Slice 10c (R-P3-4): a session also seeds `lib/core.sth`'s words, so
+        // a line's `<`/`if` resolves to the library definition; without them a
+        // bare comparison is an unknown word.
         let bool_enums = [crate::ast::bool_enum_decl()];
+        let prelude = crate::parser::prelude_words();
+        let mut combinators = CombinatorEnv::default();
+        for word in &prelude {
+            let entry = combinator_of(word).expect("a prelude word has a term body");
+            combinators.insert(word.name.clone(), vec![entry]);
+        }
+        // `True`/`False`, which a comparison word's branch-and-construct body
+        // calls; a session registers them from the injected `bool` enum.
+        let env: HashMap<String, Vec<Overload>> = enum_generated_sigs(&bool_enums)
+            .into_iter()
+            .map(|(name, sig)| {
+                let symbol = name.clone();
+                (name, vec![Overload { sig, symbol }])
+            })
+            .collect();
         infer_line(
             &terms,
             entry,
-            &HashMap::new(),
+            &env,
             &mut Vec::new(),
             &mut Vec::new(),
             &mut Vec::new(),
             &[],
             &bool_enums,
             &HashMap::new(),
-            &HashMap::new(),
+            &combinators,
         )
         .map(|(stack, _insts, _overloads)| stack)
     }
@@ -2094,21 +2304,56 @@ mod tests {
     }
     #[test]
     fn check_branch_depth_mismatch_is_error() {
-        let src = ": w ( bool -- i64 ) if 1 1 else 1 end ;";
+        // Slice 10c: the arms are quotation literals now, so the disagreement
+        // is caught at the *argument* site (R-P2-3), comparing one arm's
+        // actual exit shape against its sibling's, rather than at the join.
+        let src = ": w ( bool -- i64 ) [ 1 1 ] [ 1 ] if ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("different stack depths"));
+        assert!(
+            err.contains("leave different stack shapes"),
+            "unexpected message: {err}"
+        );
+    }
+    #[test]
+    fn check_branch_arms_disagreeing_at_the_join_name_the_arms_not_if() {
+        // The join's two diagnostics are reachable only through a direct
+        // `branch`: written as `if`, R-P2-3's argument-site check compares the
+        // two arm literals first and reports its own message instead. So a
+        // wording that blames `if` is wrong at every site that can actually
+        // produce it. Nothing else exercises this path -- the two
+        // `check_branch_*_is_error` tests both stop at the argument site -- so
+        // the messages are pinned here.
+        let depth = check_src(": w ( u32 -- i64 ) | c | c [ 1 1 ] [ 1 ] branch ;").unwrap_err();
+        assert!(
+            depth.contains("the two branch arms leave different stack depths (then: 2, else: 1)"),
+            "unexpected message: {depth}"
+        );
+        let ty = check_src(": w ( u32 -- i64 ) | c | c [ 1 ] [ true ] branch ;").unwrap_err();
+        assert!(
+            ty.contains("the two branch arms leave different types (then: `i64`, else: `bool`)"),
+            "unexpected message: {ty}"
+        );
+        for err in [&depth, &ty] {
+            assert!(
+                !err.contains("`if`"),
+                "blames a word the user never wrote: {err}"
+            );
+        }
     }
     #[test]
     fn check_branch_join_types_agree_ok() {
         // Both arms leave a single `i64`: the join unifies cleanly.
-        check_src(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap();
+        check_src(": w ( bool -- i64 ) [ 1 ] [ 2 ] if ;").unwrap();
     }
     #[test]
     fn check_branch_join_type_mismatch_is_error() {
         // `then` leaves an `i64`, `else` leaves a `bool`: same depth, different type.
-        let src = ": w ( bool -- i64 ) if 1 else true end ;";
+        let src = ": w ( bool -- i64 ) [ 1 ] [ true ] if ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("different types"), "unexpected message: {err}");
+        assert!(
+            err.contains("leave different stack shapes"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`i64`"), "unexpected message: {err}");
         assert!(err.contains("`bool`"), "unexpected message: {err}");
     }
@@ -2179,11 +2424,11 @@ mod tests {
     #[test]
     fn check_type_propagates_through_body_expected() {
         // `0 >` yields a bool that `if` consumes; both arms leave an i64.
-        check_src(": sign ( i64 -- i64 ) 0 > if 1 else 0 end ;").unwrap();
+        check_src(": sign ( i64 -- i64 ) 0 > [ 1 ] [ 0 ] if ;").unwrap();
     }
     #[test]
     fn check_if_condition_not_bool_is_error() {
-        let src = ": w ( -- i64 ) 5 if 1 else 2 end ;";
+        let src = ": w ( -- i64 ) 5 [ 1 ] [ 2 ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("expected `bool`"), "unexpected message: {err}");
         assert!(err.contains("found `i64`"), "unexpected message: {err}");
@@ -2359,15 +2604,18 @@ mod tests {
     #[test]
     fn check_branch_join_float_widths_mismatch_is_error() {
         // `if` branches leaving `f32` vs `f64` disagree at the join (R12).
-        let src = ": w ( bool -- f64 ) if 1.0 >f32 else 2.0 end ;";
+        let src = ": w ( bool -- f64 ) [ 1.0 >f32 ] [ 2.0 ] if ;";
         let err = check_src(src).unwrap_err();
-        assert!(err.contains("different types"), "unexpected message: {err}");
+        assert!(
+            err.contains("leave different stack shapes"),
+            "unexpected message: {err}"
+        );
         assert!(err.contains("`f32`"), "unexpected message: {err}");
         assert!(err.contains("`f64`"), "unexpected message: {err}");
     }
     #[test]
     fn check_branch_join_float_types_agree_ok() {
-        check_src(": w ( bool -- f64 ) if 1.0 else 2.0 end ;").unwrap();
+        check_src(": w ( bool -- f64 ) [ 1.0 ] [ 2.0 ] if ;").unwrap();
     }
     #[test]
     fn infer_line_net_effect_expected() {
@@ -2462,14 +2710,14 @@ mod tests {
         // R14: `Moved` in both arms joins to `Moved`, not `MaybeMoved`, even
         // though the two move sites differ.
         check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c if s drop else s drop end ;"
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ s drop ] if ;"
         ))
         .unwrap();
     }
     #[test]
     fn check_linear_local_moved_in_one_arm_then_used_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c if s drop else 1 . end\n  s drop ;"
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 1 . ] if\n  s drop ;"
         ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
@@ -2478,7 +2726,7 @@ mod tests {
     #[test]
     fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c if s drop else 1 . end ;"
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 1 . ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -2493,7 +2741,7 @@ mod tests {
         // across the back-edge, which the loop lowering cannot dispose yet.
         // `SPY_DEF` is two lines, so `spin`'s own line 3 lands on line 5.
         let err = check_src(&format!(
-            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else 9 Spy n 1 - spin end ;"
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = [ s drop 0 ] [ 9 Spy n 1 - spin ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -2508,7 +2756,7 @@ mod tests {
         // Moved *into* the recursive call's arguments, the Spy is forwarded,
         // not stranded, so the R15 guard must not fire.
         check_src(&format!(
-            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = if s drop 0 else s n 1 - spin end ;"
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = [ s drop 0 ] [ s n 1 - spin ] if ;"
         ))
         .unwrap();
     }
@@ -2540,11 +2788,11 @@ mod tests {
     fn back_edge_rejects_mismatched_self_call_argument() {
         let src = ": loopy ( ..s 'a i64 ~[ ..s 'a -- ..s ] -- ..s )\n\
                    | f | | n | | acc |\n\
-                   n 0 > if\n\
+                   n 0 > [\n\
                    acc f call\n\
                    5 n 1 - f loopy\n\
-                   else\n\
-                   end ;\n\
+                   ] [\n\
+                   ] if ;\n\
                    : main ( -- ) \"x\" 3 [ drop ] loopy ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -2561,7 +2809,7 @@ mod tests {
     /// post-rewrite (they agree at 1<->1) -- must still type-check identically.
     #[test]
     fn while_self_tail_still_checks_after_back_edge_rewrite() {
-        check_src(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n")
+        check_src(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n")
             .expect("`while` still type-checks after the back-edge rewrite");
     }
 }

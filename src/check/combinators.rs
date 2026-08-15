@@ -6,7 +6,103 @@ use super::*;
 /// operand types, the same shape as `Overload`/poly-candidate resolution --
 /// a single-value map here would silently shadow a second combinator
 /// overload exactly as env's `Sig` did before B1.
-pub(crate) type CombinatorEnv<'a> = HashMap<String, Vec<Combinator<'a>>>;
+///
+/// Slice 10c (R-P1-5): it also carries the `CombinatorIndex` the shared
+/// tail-splice predicate reads, so every checker site that already threads a
+/// `CombinatorEnv` gets the predicate's view of the same words with no second
+/// channel to keep in step.
+#[derive(Default)]
+pub(crate) struct CombinatorEnv<'a> {
+    candidates: HashMap<String, Vec<Combinator<'a>>>,
+    tail: CombinatorIndex,
+}
+
+impl<'a> CombinatorEnv<'a> {
+    pub(super) fn get(&self, name: &str) -> Option<&Vec<Combinator<'a>>> {
+        self.candidates.get(name)
+    }
+
+    pub(super) fn contains_key(&self, name: &str) -> bool {
+        self.candidates.contains_key(name)
+    }
+
+    /// The shared tail-splice view (`has_self_tail_call`, `terms_tail_call_self`).
+    pub(crate) fn tail(&self) -> &CombinatorIndex {
+        &self.tail
+    }
+
+    /// Register (or replace) one name's candidates, as the REPL does when it
+    /// adds the word being defined to the view it checks the body against.
+    pub(crate) fn insert(&mut self, name: String, candidates: Vec<Combinator<'a>>) {
+        self.candidates.insert(name, candidates);
+        self.tail = combinator_index(self.candidates.values().flatten().map(|c| c.word));
+    }
+
+    fn members(&self) -> impl Iterator<Item = &Combinator<'a>> {
+        self.candidates.values().flatten()
+    }
+}
+
+impl<'a> FromIterator<(String, Vec<Combinator<'a>>)> for CombinatorEnv<'a> {
+    fn from_iter<T: IntoIterator<Item = (String, Vec<Combinator<'a>>)>>(iter: T) -> Self {
+        let candidates: HashMap<String, Vec<Combinator<'a>>> = iter.into_iter().collect();
+        let tail = combinator_index(candidates.values().flatten().map(|c| c.word));
+        Self { candidates, tail }
+    }
+}
+
+/// Slice 10c (R-P1-1): one always-spliced word as the shared tail-splice
+/// predicate and both splice sites need it. Owned rather than borrowed so the
+/// checker, the native lowering driver and the REPL can each build one from
+/// whatever they hold (`&[WordDef]`, a `CombinatorEnv`, a session store)
+/// without a lifetime running through the whole lowering stack.
+#[derive(Clone)]
+pub struct CombinatorEntry {
+    /// The body spliced at every call site.
+    pub terms: Vec<Term>,
+    /// How many declared input slots the body's leading `| ... |` binds pop
+    /// from. A row (`..s`) is not a slot, so this is the `sig.inputs.len()` /
+    /// `effect.inputs.len()` `inline_combinator` itself counts.
+    pub inputs: usize,
+    /// A second always-spliced word shares this name. Which one a bare name
+    /// reaches cannot be decided syntactically, so the tail walk declines
+    /// (R-P1-4) rather than guessing -- the same conservatism
+    /// `has_self_tail_call` already applies to a builtin name.
+    pub ambiguous: bool,
+}
+
+/// Slice 10c: the always-spliced words, by name, as the tail walk reads them.
+pub type CombinatorIndex = HashMap<String, CombinatorEntry>;
+
+/// Build a `CombinatorIndex` over whichever words the caller holds. The
+/// `is_combinator` filter is the same one `collect_combinators` and
+/// `ir::lower`'s splice env apply, so the three views name the same words.
+pub fn combinator_index<'w>(words: impl IntoIterator<Item = &'w WordDef>) -> CombinatorIndex {
+    let mut index = CombinatorIndex::new();
+    for word in words {
+        if !is_combinator(word) {
+            continue;
+        }
+        let WordBody::Terms { terms } = &word.body else {
+            continue;
+        };
+        let inputs = match word.poly.as_ref() {
+            Some(sig) => sig.inputs.len(),
+            None => word.effect.inputs.len(),
+        };
+        match index.entry(word.name.clone()) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().ambiguous = true,
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(CombinatorEntry {
+                    terms: terms.clone(),
+                    inputs,
+                    ambiguous: false,
+                });
+            }
+        }
+    }
+    index
+}
 
 /// Slice 6a (R18): one monomorphic quotation-taking word available to inline.
 /// Both fields are shared references into the module, so a `Combinator` is a
@@ -24,7 +120,7 @@ pub(crate) struct Combinator<'a> {
 /// lowered to a call to a word that mints no `IrFunc` (R20). `inline_combinator`
 /// branches on `word.poly` internally to pick the mono or poly splice path.
 pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
-    let mut map: CombinatorEnv<'_> = HashMap::new();
+    let mut map: HashMap<String, Vec<Combinator<'_>>> = HashMap::new();
     for word in words {
         if !is_combinator(word) {
             continue;
@@ -35,7 +131,7 @@ pub(super) fn collect_combinators(words: &[WordDef]) -> CombinatorEnv<'_> {
                 .push(Combinator { word, terms });
         }
     }
-    map
+    map.into_iter().collect()
 }
 
 /// R2 (Slice 6c): the checker's inline view for one retained combinator, the
@@ -71,7 +167,7 @@ pub(crate) fn combinator_of(word: &WordDef) -> Option<Combinator<'_>> {
 /// word is rejected at its definition (`check_inline_declaration`) rather than
 /// silently lowered as an ordinary clause word, so the two never disagree in a
 /// way that reaches codegen.
-pub(crate) fn is_combinator(word: &WordDef) -> bool {
+pub fn is_combinator(word: &WordDef) -> bool {
     matches!(word.body, WordBody::Terms { .. })
         && (word_declares_quotation_parameter(word) || word.declares_inline)
 }
@@ -124,7 +220,7 @@ pub(super) fn poly_input_is_quotation(p: &PolyType) -> bool {
 /// cycle error, and every cycle of length >= 2 (a mutual cycle) is untouched.
 /// Reuses `check_tail_call_cycles`'s 3-colour DFS shape (recon 8).
 pub(crate) fn check_combinator_cycles(combinators: &CombinatorEnv) -> Result<(), String> {
-    let members: Vec<&Combinator> = combinators.values().flatten().collect();
+    let members: Vec<&Combinator> = combinators.members().collect();
     // Slice 8a: two combinators may now share a name (an overload set, R1),
     // so a bare callee name can name more than one node. Unlike
     // `check_tail_call_cycles`'s diagnostic -- where treating an ambiguous
@@ -146,7 +242,7 @@ pub(crate) fn check_combinator_cycles(combinators: &CombinatorEnv) -> Result<(),
             .iter()
             .filter(|&&n| n == self_name)
             .count();
-        let self_tail = tail_position_calls(&c.word.body)
+        let self_tail = tail_position_calls(c.word, combinators.tail())
             .iter()
             .filter(|&&n| n == self_name)
             .count();
@@ -225,13 +321,47 @@ fn combinator_cycle_error(members: &[&Combinator], cycle: &[usize]) -> String {
     )
 }
 
+/// Slice 10c (R-P3-1a): what a quotation operand on the live stack actually
+/// is. There are exactly two forms and both are load-bearing, so the
+/// classification lives here once rather than being hand-rolled per consumer.
+pub(super) enum QuotOperand {
+    /// A quotation literal written at the call site; its body is interned in
+    /// `prov.quotations` and can be spliced.
+    Literal(QuotId),
+    /// R21: an abstract quotation *parameter* of the enclosing always-spliced
+    /// word, forwarded onward. It carries a declared effect and no body: this
+    /// is what the standalone def-site check of a combinator sees, and at a
+    /// real call site the substitution has already replaced it with the
+    /// caller's literal.
+    Forwarded(&'static crate::ast::QuotEffect),
+}
+
+/// Classify one quotation operand. `None` means the slot is not a quotation at
+/// all, which every caller reports with its own diagnostic.
+///
+/// Shared by `inline_combinator`'s declared-parameter loops and the `branch`
+/// primitive's checker arm (R-P3-1a): `branch` is the single builtin that
+/// takes quotation operands, and its operands arrive in both forms -- literals
+/// at a real splice, abstract parameters while checking `if`'s own body
+/// (`| e | | t | | c | c tag t e branch`) standalone. A second hand-rolled
+/// copy of this would silently handle only the literal form, which every
+/// caller of `if` still exercises, so nothing but `if`'s own definition would
+/// ever notice the omission.
+pub(super) fn resolve_quotation_operand(found: Slot) -> Option<QuotOperand> {
+    if let Some(QuotRef::Known(id)) = found.quot {
+        return Some(QuotOperand::Literal(id));
+    }
+    crate::ast::is_quotation_type(found.ty).map(QuotOperand::Forwarded)
+}
+
 /// R18: inline a call to a monomorphic quotation-taking word. Validate each
 /// declared input against the caller's live slot (a quotation parameter takes
 /// a `Known` literal, checked directionally with the D3 capture check, R11/R12;
 /// every other parameter is matched as usual), then splice the callee body
-/// against the live stack (bracketed like a `call`, `tail = false`), so the
-/// callee's own `call`/`times` fuse against the caller's literals. R22
-/// guarantees termination.
+/// against the live stack (bracketed like a `call`), so the callee's own
+/// `call`/`times` fuse against the caller's literals. R22 guarantees
+/// termination. `tail` is the call site's own tail position, threaded into the
+/// splice (R-P1-6).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn inline_combinator(
     comb: &Combinator,
@@ -246,6 +376,7 @@ pub(super) fn inline_combinator(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
+    tail: bool,
 ) -> Result<Vec<Slot>, String> {
     let name = comb.word.name.as_str();
     // A polymorphic combinator (`each`/`map`/`fold`, or any `'T`-carrying
@@ -258,8 +389,10 @@ pub(super) fn inline_combinator(
     let poly_subst = if let Some(sig) = comb.word.poly.as_ref() {
         Some(check_poly_combinator_args(
             sig, span, &stack, name, ctx, env, arrays, cells, refs, prov, scope, poly, granted,
+            tail,
         )?)
     } else {
+        let tail_slots = tail_called_param_slots(name, poly.combinators.tail());
         let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
         let n = inputs.len();
         if stack.len() < n {
@@ -269,51 +402,57 @@ pub(super) fn inline_combinator(
         for (i, want) in inputs.iter().enumerate() {
             let found = stack[base + i];
             if let Some(eff) = crate::ast::is_quotation_type(*want) {
-                if let Some(QuotRef::Known(id)) = found.quot {
+                match resolve_quotation_operand(found) {
                     // Slice 10a (R9, context 4): a monomorphic word's declared
                     // quotation parameter is a `Type::Quotation`/`InlineQuotation`
                     // whose `QuotEffect` carries no row, so the row grounds to
                     // the empty region. (Unreachable for a `~`: `inline_combinator`
                     // routes any poly word here to `check_poly_combinator_args`.)
-                    check_literal_against_declared_effect(
-                        id,
-                        eff,
-                        false,
-                        &[],
-                        name,
-                        span,
-                        ctx,
-                        env,
-                        arrays,
-                        cells,
-                        refs,
-                        prov,
-                        scope,
-                        poly,
-                        granted,
-                    )?;
-                } else if crate::ast::is_quotation_type(found.ty).is_some() {
+                    Some(QuotOperand::Literal(id)) => {
+                        check_literal_against_declared_effect(
+                            id,
+                            eff,
+                            false,
+                            &[],
+                            name,
+                            span,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                            granted,
+                            false,
+                            tail_slots.contains(&i),
+                            tail,
+                        )?;
+                    }
                     // R21: forwarding an abstract quotation parameter. `found`
                     // is itself a declared quotation parameter of the enclosing
-                    // combinator (a `Type::Quotation` slot with no `Known`
-                    // literal -- the only way such a slot arises), reached only
-                    // while checking that enclosing combinator standalone. At a
-                    // real call site the substitution has already bound it to
-                    // the caller's literal, so it carries a `Known` marker and
-                    // splices there; here, at the def site, accept it when its
-                    // declared effect matches the callee parameter, so `outer`
-                    // may pass its own `f` to `inner`. The spliced callee
-                    // body's own `f call`/`f times` then check the forwarded
-                    // parameter against its declared effect (R8/R9).
-                    if found.ty != *want {
+                    // combinator, reached only while checking that enclosing
+                    // combinator standalone. At a real call site the
+                    // substitution has already bound it to the caller's
+                    // literal, so it carries a `Known` marker and splices
+                    // there; here, at the def site, accept it when its declared
+                    // effect matches the callee parameter, so `outer` may pass
+                    // its own `f` to `inner`. The spliced callee body's own
+                    // `f call`/`f times` then check the forwarded parameter
+                    // against its declared effect (R8/R9).
+                    Some(QuotOperand::Forwarded(_)) => {
+                        if found.ty != *want {
+                            return Err(quotation_argument_required_error(
+                                ctx, span, name, *want, found.ty,
+                            ));
+                        }
+                    }
+                    None => {
                         return Err(quotation_argument_required_error(
                             ctx, span, name, *want, found.ty,
                         ));
                     }
-                } else {
-                    return Err(quotation_argument_required_error(
-                        ctx, span, name, *want, found.ty,
-                    ));
                 }
             } else if found.quot.is_some() {
                 return Err(reject_quotation_argument(ctx, span, name));
@@ -340,8 +479,16 @@ pub(super) fn inline_combinator(
     // lowering's hoist-target split keeps a nested loop constant-stack -- so
     // opening this loop inside another is now legal and `splice_tail` is just
     // whether this is a self-tail combinator.
-    let self_tail = crate::check::is_combinator(comb.word) && has_self_tail_call(comb.word);
-    let splice_tail = self_tail;
+    let self_tail = crate::check::is_combinator(comb.word)
+        && has_self_tail_call(comb.word, poly.combinators.tail());
+    // Slice 10c (R-P1-6): the splice is *in place of* the call, so the callee
+    // body's tail terms are the caller's. Threading `tail` here is what carries
+    // tail position into a quotation literal the callee `call`s at its own tail
+    // (`sum-to`'s recursive branch through a hand-written `if`), and is the
+    // checker's half of the same threading `lower_call` does at the lowering
+    // splice: the two must stay identical or the linear-spine guards run over a
+    // back-edge lowering did not build.
+    let splice_tail = self_tail || tail;
     let input_count = match comb.word.poly.as_ref() {
         Some(sig) => sig.inputs.len(),
         None => comb.word.effect.inputs.len(),
@@ -438,7 +585,9 @@ fn check_poly_combinator_args(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
+    tail: bool,
 ) -> Result<Subst, String> {
+    let tail_slots = tail_called_param_slots(name, poly.combinators.tail());
     let n = sig.inputs.len();
     if stack.len() < n {
         return Err(underflow_error(ctx, span, name, n, stack.len()));
@@ -448,7 +597,16 @@ fn check_poly_combinator_args(
     // variable a quotation effect mentions (`'T` in `[ 'T -- &i64 ]`) is
     // already bound when the effect is grounded in pass 2, whatever the
     // parameter order.
+    //
+    // Slice 10c: a *fresh integer literal* filling a bare type variable is
+    // held back and unified last, against whatever the variable resolved to.
+    // This is D8's literal coercion, which the comparison operators had for
+    // free as builtin rows (`5 3 >usize <` typed through `unify_pair`'s
+    // `LiteralSizeType`) and would otherwise lose on becoming `'T: Copy Ord`
+    // library words: a bare `5` carries `i64`, so unifying it first pins `'T`
+    // to `i64` and the `usize` operand then reads as a conflict.
     let mut subst = Subst::default();
+    let mut deferred_literals: Vec<(usize, &PolyType)> = Vec::new();
     for (i, pin) in sig.inputs.iter().enumerate() {
         if poly_input_is_quotation(pin) {
             continue;
@@ -457,10 +615,38 @@ fn check_poly_combinator_args(
         if found.quot.is_some() {
             return Err(reject_quotation_argument(ctx, span, name));
         }
+        if found.literal && found.ty == Type::I64 && matches!(pin, PolyType::Var(_)) {
+            deferred_literals.push((i, pin));
+            continue;
+        }
         unify_poly_input(sig, pin, found.ty, name, span, ctx, arrays, &mut subst)?;
+    }
+    for (i, pin) in deferred_literals {
+        let PolyType::Var(v) = pin else {
+            unreachable!("only a `Var` parameter is deferred")
+        };
+        let ty = match subst.ty_of(*v) {
+            // Exactly D8's domain, no wider: a fresh literal fills a `usize`
+            // or `isize` position without an explicit conversion, and nothing
+            // else. Widening this to every numeric type would accept
+            // `1 >i32 2 <>`, which the builtin rows always rejected.
+            Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
+            _ => stack[base + i].ty,
+        };
+        unify_poly_input(sig, pin, ty, name, span, ctx, arrays, &mut subst)?;
     }
     // Pass 2: ground each quotation parameter and run the directional + D3
     // check on its caller literal.
+    //
+    // Slice 10c (R-P2-3): sibling parameters sharing one declared *output*
+    // row (`..o` in `~[ ..i -- ..o ]` on more than one parameter, e.g. `if`'s
+    // two branch quotations) have no fixed `..o` to check a literal against
+    // (R-P2-4). The first such literal checked for a given row id sets the
+    // baseline; every later one sharing that row id is compared against it
+    // and, on a contradiction, rejected here -- at the argument site -- with
+    // both literals' actual shapes named, rather than left to surface later
+    // at the splice site under a generic message (recon 8).
+    let mut shape_baseline: HashMap<u32, Vec<Type>> = HashMap::new();
     for (i, pin) in sig.inputs.iter().enumerate() {
         if !poly_input_is_quotation(pin) {
             continue;
@@ -483,19 +669,64 @@ fn check_poly_combinator_args(
         // interned `eff` (splicing it would mint an effect no literal equals),
         // so it is reconstructed here, at the callee, and only type-only
         // (`Slot::computed`, dropping provenance, R16).
-        let row: Vec<Type> = match pin {
-            PolyType::Quotation(_, _, _, Some(_), _) => {
-                stack[..base].iter().map(|s| s.ty).collect()
-            }
+        let row: Vec<Slot> = match pin {
+            PolyType::Quotation(_, _, _, Some(_), _) => stack[..base].to_vec(),
             _ => Vec::new(),
         };
-        if let Some(QuotRef::Known(id)) = found.quot {
+        // Slice 10c (R-P2-2/R-P2-3): a declared quotation whose input and
+        // output rows differ has no fixed exit-row check (R-P2-4).
+        let row_out_id = match pin {
+            PolyType::Quotation(_, _, _, a, Some(b)) if *a != Some(*b) => Some(*b),
+            _ => None,
+        };
+        let shape_changing = row_out_id.is_some();
+        let operand = resolve_quotation_operand(found);
+        if let Some(QuotOperand::Literal(id)) = operand {
             let is_inline = matches!(concrete, Type::InlineQuotation(_));
-            check_literal_against_declared_effect(
-                id, eff, is_inline, &row, name, span, ctx, env, arrays, cells, refs, prov, scope,
-                poly, granted,
+            let literal_span = prov.quotations[id.0].span;
+            let actual = check_literal_against_declared_effect(
+                id,
+                eff,
+                is_inline,
+                &row,
+                name,
+                span,
+                ctx,
+                env,
+                arrays,
+                cells,
+                refs,
+                prov,
+                scope,
+                poly,
+                granted,
+                shape_changing,
+                tail_slots.contains(&i),
+                tail,
             )?;
-        } else if crate::ast::is_quotation_type(found.ty).is_some() {
+            if let Some(rid) = row_out_id {
+                if let Some(expected) = shape_baseline.get(&rid) {
+                    let matches = actual.len() == expected.len()
+                        && actual.iter().zip(expected).all(|(f, w)| {
+                            matches!(
+                                match_slot(Slot::computed(*f), *w),
+                                SlotMatch::Exact | SlotMatch::LiteralSizeType
+                            )
+                        });
+                    if !matches {
+                        return Err(combinator_branch_output_mismatch_error(
+                            ctx,
+                            literal_span,
+                            name,
+                            expected,
+                            &actual,
+                        ));
+                    }
+                } else {
+                    shape_baseline.insert(rid, actual);
+                }
+            }
+        } else if operand.is_some() {
             // R21 (poly): a forwarded abstract quotation parameter, accepted
             // when its declared effect matches (the spliced body's own
             // `call`/`times` re-checks it, R8/R9).
@@ -610,7 +841,7 @@ mod tests {
             "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
         );
 
-        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > if 1 - down else end ;";
+        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > [ 1 - down ] [ ] if ;";
         let tokens = lex(tail_src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)

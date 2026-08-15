@@ -310,4 +310,4 @@ pub(super) fn back_edge_pred(f: &IrFunc, header: BlockId) -> &Block {
 /// (aggregate), so the aggregate slot stages rather than forwards.
 pub(super) const STAGED_LOOP: &str = "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
-         : loop ( i64 Box -- Box ) | n b | n 0 = if b else n 1 - n mk loop end ;";
+         : loop ( i64 Box -- Box ) | n b | n 0 = [ b ] [ n 1 - n mk loop ] if ;";

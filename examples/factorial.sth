@@ -1,9 +1,9 @@
 : factorial ( i64 -- i64 )
-  dup 0 = if
+  dup 0 = [
     drop 1
-  else
+  ] [
     dup 1 - factorial *
-  end ;
+  ] if ;
 
 : main ( -- )
   5 factorial . ;    \ prints 120

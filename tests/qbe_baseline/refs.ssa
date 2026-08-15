@@ -174,20 +174,30 @@ export function :List $build__m0(l %v0, :List %v1) {
 	blit %v1, %v3, 24
 	jmp @blk1
 @blk1
-	%v2 =l phi @start %v0, @blk3 %v8
+	%v2 =l phi @start %v0, @blk6 %v16
 	%v5 =l copy 0
 	%v6 =w ceql %v2, %v5
 	jnz %v6, @blk2, @blk3
 @blk2
+	%v9 =w copy 1
 	jmp @blk4
 @blk3
-	%v7 =l copy 1
-	%v8 =l sub %v2, %v7
-	%v9 =:List call $push.2d.front__m0(:List %v3, l %v2)
-	blit %v9, %v4, 24
+	%v10 =w copy 0
+	jmp @blk4
+@blk4
+	%v11 =w phi @blk2 %v9, @blk3 %v10
+	%v14 =w copy %v11
+	jnz %v14, @blk5, @blk6
+@blk5
+	jmp @blk7
+@blk6
+	%v15 =l copy 1
+	%v16 =l sub %v2, %v15
+	%v17 =:List call $push.2d.front__m0(:List %v3, l %v2)
+	blit %v17, %v4, 24
 	blit %v4, %v3, 24
 	jmp @blk1
-@blk4
+@blk7
 	ret %v3
 }
 

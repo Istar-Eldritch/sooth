@@ -576,14 +576,6 @@ pub(super) fn capture_names_into(
                     out.insert(local.to_string());
                 }
             }
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                capture_names_into(then_branch, &mut shadowed.clone(), out);
-                capture_names_into(else_branch, &mut shadowed.clone(), out);
-            }
             TermKind::Quotation(inner) => {
                 capture_names_into(inner, &mut shadowed.clone(), out);
             }
@@ -663,35 +655,12 @@ impl Liveness {
                         Self::record_granted_use(&mut last_use, local, i, back_edge);
                     }
                 }
-                // A nested `if` arm is its own `check_terms` invocation with
-                // its own binds; here we only look for uses of names *this*
-                // list bound (or was granted), attributed to the containing
+                // A nested block is its own `check_terms` invocation with its
+                // own binds; here we only look for uses of names *this* list
+                // bound (or was granted), attributed to the containing
                 // top-level index (Q3's conservative max). Nested binds are
                 // not collected: they belong to the nested invocation's own
-                // scan.
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    Self::nested_uses(
-                        then_branch,
-                        &bound,
-                        outer_releasable,
-                        back_edge,
-                        i,
-                        &mut last_use,
-                    );
-                    Self::nested_uses(
-                        else_branch,
-                        &bound,
-                        outer_releasable,
-                        back_edge,
-                        i,
-                        &mut last_use,
-                    );
-                }
-                // Same treatment as an `if` arm: this is only a floor
+                // scan. This is only a floor
                 // (`capture_alive_names` extends it for a quotation the
                 // checker later finds is still reachable, bound or not).
                 TermKind::Quotation(inner) => {
@@ -739,28 +708,6 @@ impl Liveness {
                         Self::record_granted_use(last_use, local, at, back_edge);
                     }
                 }
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    Self::nested_uses(
-                        then_branch,
-                        bound,
-                        outer_releasable,
-                        back_edge,
-                        at,
-                        last_use,
-                    );
-                    Self::nested_uses(
-                        else_branch,
-                        bound,
-                        outer_releasable,
-                        back_edge,
-                        at,
-                        last_use,
-                    );
-                }
                 TermKind::Quotation(inner) => {
                     Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
                 }
@@ -790,11 +737,6 @@ impl Liveness {
 pub(super) fn references(terms: &[Term], name: &str) -> bool {
     terms.iter().any(|term| match &term.kind {
         TermKind::Call(n) => call_local(n) == name,
-        TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => references(then_branch, name) || references(else_branch, name),
         TermKind::Quotation(inner) => references(inner, name),
         _ => false,
     })
@@ -1151,6 +1093,17 @@ pub(super) enum Ctx<'a> {
         /// `Ctx::Line`, and a retained poly word passes `None`): the gate reads
         /// it and never fires when it is absent.
         modules: Option<&'a [ModuleInfo]>,
+        /// Slice 10c (review fix, Phase 1): whether lowering actually builds a
+        /// splice-time back-edge for this word's own self-tail call
+        /// (`has_self_tail_call`, the same predicate `inline_combinator` and
+        /// every lowering site consult). The back-edge-only linear/reference
+        /// guards (R15) must gate on this, not on the syntactic `tail` flag
+        /// alone: `TailWalk` declines (a forwarded quotation reached through a
+        /// mid-body local, an ambiguous name, a forwarding cycle) in cases
+        /// where the positional `tail` flag still reaches the recursive call,
+        /// and there lowering emits an ordinary `Instr::Call` with no back
+        /// edge to guard.
+        self_tail_call: bool,
     },
     Line {
         structs: &'a [StructDecl],
@@ -1160,11 +1113,16 @@ pub(super) enum Ctx<'a> {
 
 /// The `Ctx` for checking `word`'s body: shared by the body walkers and the
 /// binding-name rejections so all of them cite the same declared effect.
+/// `combs` is the tail-splice view `has_self_tail_call` reads to decide
+/// `self_tail_call`; pass an empty index at a call site whose checking path
+/// never reaches the back-edge guard (it stays `false`, matching lowering,
+/// which never back-edges there either).
 pub(super) fn word_ctx<'a>(
     word: &'a WordDef,
     structs: &'a [StructDecl],
     enums: &'a [EnumDecl],
     modules: Option<&'a [ModuleInfo]>,
+    combs: &CombinatorIndex,
 ) -> Ctx<'a> {
     Ctx::Word {
         name: crate::resolve::demangle_word(&word.name),
@@ -1174,6 +1132,7 @@ pub(super) fn word_ctx<'a>(
         enums,
         module: word.module,
         modules,
+        self_tail_call: has_self_tail_call(word, combs),
     }
 }
 
@@ -1244,6 +1203,18 @@ impl Ctx<'_> {
             Ctx::Line { .. } => None,
         }
     }
+
+    /// Slice 10c (review fix, Phase 1): whether the enclosing word's own
+    /// self-tail call actually lowers to a splice-time back-edge. Gates the
+    /// back-edge-only guards (R15) so they fire exactly where lowering
+    /// back-edges; see the field doc on `Ctx::Word::self_tail_call`. A bare
+    /// REPL line has no word to recurse into, so it is never a back-edge.
+    pub(super) fn is_self_tail_call(&self) -> bool {
+        match self {
+            Ctx::Word { self_tail_call, .. } => *self_tail_call,
+            Ctx::Line { .. } => false,
+        }
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -1266,6 +1237,7 @@ impl<'a> Ctx<'a> {
                 structs,
                 enums,
                 modules,
+                self_tail_call,
                 ..
             } => Ctx::Word {
                 name,
@@ -1275,6 +1247,7 @@ impl<'a> Ctx<'a> {
                 enums,
                 module,
                 modules,
+                self_tail_call,
             },
             Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
         }
@@ -1326,7 +1299,7 @@ mod tests {
     ) -> Result<Option<Vec<Slot>>, String> {
         let word = bare_word("main", caller);
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, structs, &enums, modules);
+        let ctx = word_ctx(&word, structs, &enums, modules, &CombinatorIndex::new());
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
         // The term is written in the caller's own module, so its span says so:
@@ -1388,7 +1361,7 @@ mod tests {
             &[],
             &bool_enums,
             &HashMap::new(),
-            &HashMap::new(),
+            &CombinatorEnv::default(),
         )
         .map(|(stack, _insts, _overloads)| stack)
     }
@@ -1490,7 +1463,7 @@ mod tests {
         let word = bare_word("main", 3);
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, &structs, &enums, None);
+        let ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
         assert_eq!(ctx.module(), 3);
         assert!(ctx.modules().is_none());
     }
@@ -1576,13 +1549,13 @@ mod tests {
         // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
         // both arms (one literal bound before the `if`, read in each) is safe:
         // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
-        let different = check_src(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n")
+        let different = check_src(": main ( -- ) true [ [ 1 + ] ] [ [ 1 - ] ] if drop ;\n")
             .expect_err("two different quotations at a join should be rejected");
         assert!(
             different.contains("these two branches leave different quotations"),
             "the join guard should fire, got: {different}"
         );
-        check_src(": main ( -- ) [ + ] | q | true if q else q end drop ;\n")
+        check_src(": main ( -- ) [ + ] | q | true [ q ] [ q ] if drop ;\n")
             .expect("the same `Known` id in both arms is safe and must not error");
     }
     #[test]
@@ -1658,7 +1631,7 @@ mod tests {
             &module.structs,
             &module.enums,
             &HashMap::new(),
-            &HashMap::new(),
+            &CombinatorEnv::default(),
         )
         .unwrap_err();
         assert!(
@@ -1720,7 +1693,8 @@ mod tests {
     #[test]
     fn operator_dispatch_resolves_the_exact_row_type() {
         // Guards that resolution yields the right stack-effect type: a
-        // homogeneous op over `u8` yields `u8`, a comparison yields `bool`,
+        // homogeneous op over `u8` yields `u8`, a comparison yields the
+        // 32-bit flag,
         // `.` yields nothing. Note these all resolve identically through the
         // numeric fallback too, so this does *not* prove the table pass is
         // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
@@ -1729,7 +1703,10 @@ mod tests {
             infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
             vec![Type::from_name("u8").unwrap()]
         );
-        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::BOOL]);
+        // Slice 10c: the comparison *primitive*, which is what carries the
+        // per-numeric-type rows now; `<` is a `lib/` word over it and resolves
+        // through the word environment this bare-line helper does not build.
+        assert_eq!(infer_src("5 >u8 3 >u8 u<", &[]).unwrap(), vec![Type::U32]);
         assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
     }
     #[test]
@@ -1952,11 +1929,11 @@ mod tests {
     fn back_edge_produces_ground_declared_outputs() {
         let src = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
                    | f | | to | | from |\n\
-                   from to < if\n\
+                   from to < [\n\
                    from f call\n\
                    from 1 + to f my-times\n\
-                   else\n\
-                   end ;\n\
+                   ] [\n\
+                   ] if ;\n\
                    : main ( -- ) 0 0 5 [ + ] my-times . ;\n";
         check_src(src)
             .expect("my-times checks: the back-edge produces the ground declared outputs");
@@ -1985,15 +1962,15 @@ mod tests {
     /// not to withhold from every ancestor indiscriminately.
     #[test]
     fn releasable_into_withholds_a_name_used_in_a_back_edge_body() {
-        let tokens = lex("a drop true if 1 . else end").expect("lexing should succeed");
+        let tokens = lex("a drop true [ 1 . ] [ ] if").expect("lexing should succeed");
         let terms = match crate::parser::parse_line(&tokens).expect("parsing should succeed") {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
         let at = terms
             .iter()
-            .position(|t| matches!(t.kind, TermKind::If { .. }))
-            .expect("the line ends in an `if`");
+            .position(|t| matches!(&t.kind, TermKind::Quotation(_)))
+            .expect("the line's block is a branch-arm quotation literal");
         let rest = &terms[at + 1..];
         let outer: HashSet<String> = ["a", "unused"].iter().map(|n| n.to_string()).collect();
         let live = Liveness::scan(&terms, &outer, true);

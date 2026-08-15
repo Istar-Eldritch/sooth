@@ -2,7 +2,7 @@
   0 > ;
 
 : classify ( i64 -- i64 )
-  pos if 1 else 0 end ;
+  pos [ 1 ] [ 0 ] if ;
 
 : main ( -- )
   7 classify . ;    \ prints 1

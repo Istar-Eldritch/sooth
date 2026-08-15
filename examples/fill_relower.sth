@@ -24,7 +24,7 @@ type: Pair a i64 b i64 ;
 : countdown ( i64 -- )
   | n | 0 4 fill | a | &a 0 >usize &> @ | z | a drop
   n z + .
-  n 0 > if n 1 - countdown else end ;
+  n 0 > [ n 1 - countdown ] [ ] if ;
 
 : main ( -- )
   scalar_last .          \ 42

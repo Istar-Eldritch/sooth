@@ -12,11 +12,11 @@ is a compile error).
 
 ```forth
 : gcd ( i64 i64 -- i64 )
-  dup 0 = if
+  dup 0 = [
     drop
-  else
+  ] [
     swap over mod gcd
-  end ;
+  ] if ;
 ```
 
 ## Status
@@ -58,10 +58,10 @@ term-splicing compiler pass rather than minting a function per call site; multi-
 modules with word/type imports, natively and at the REPL; and quotations as real runtime
 values (non-capturing closures, storable and passable to non-inlined higher-order code).
 No combinator is compiler-known: `times` is ordinary Sooth source over a
-self-tail-recursive helper, like the rest.
+self-tail-recursive helper, like the rest. Nor is `if`: it is a `lib/core.sth` word
+taking a `bool` and two quotations, over the machine primitives `branch` and `tag`.
 In progress: capturing closures and static ad-hoc overloading (`docs/phase4-slice7b-brief.md`,
-`docs/phase4-slice8a-brief.md`); briefed but not started: `if` becoming an ordinary
-combinator (`docs/phase4-slice10c-brief.md`).
+`docs/phase4-slice8a-brief.md`).
 
 The compiler is a Rust bootstrap; the language will later self-host.
 

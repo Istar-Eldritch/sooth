@@ -29,11 +29,10 @@ export: each map fold filter while times times-helper ;
 \ exported words, and every caller of `times` splices its body.
 : times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
-  from to < if
+  from to < [
     from f call
     from 1 + to f times-helper
-  else
-  end ;
+  ] [ ] if ;
 
 : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | n | 0 n f times-helper ;
@@ -63,9 +62,9 @@ export: each map fold filter while times times-helper ;
 \ inert but honest.
 : filter ( ['T: Copy 'N] ~[ 'T -- bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
-  0 n [ | i | &arr i >usize &> @ dup p call if
+  0 n [ | i | &arr i >usize &> @ dup p call [
           | v | &!arr over >usize &!> v ! 1 +
-        else drop end ] times
+        ] [ drop ] if ] times
   | wf | arr wf >usize ;
 
 \ `while` threads a state `'a` through its predicate until the predicate
@@ -75,4 +74,4 @@ export: each map fold filter while times times-helper ;
 \ recursion 6b's relaxed cycle check (D5) admits; the quotation `p` is `Copy`
 \ and re-resolved statically each iteration, carried in no loop phi.
 : while ( 'a ~[ 'a -- 'a bool ] -- 'a )
-  | p | p call if p while else end ;
+  | p | p call [ p while ] [ ] if ;

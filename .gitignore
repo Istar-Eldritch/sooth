@@ -9,3 +9,7 @@
 !/examples/*.sth
 # `resources.sth` reads this fixture at run time: source, not an artifact.
 !/examples/resource_fixture.txt
+
+# Scratch sources a panicking test leaked into the repo root before it could
+# clean up (should live under `temp_dir()`, but guard against the pattern too).
+/sooth-*-witness-*.sth

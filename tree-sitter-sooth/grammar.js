@@ -2,8 +2,8 @@
 //
 // Sooth's own lexer (src/lexer.rs) emits almost everything as a generic
 // `Word` token and leaves sigil/case conventions (`^Type`, `&!x`, `Foo>bar`,
-// `mod::word`, capitalised type/variant names, `'T` poly vars, `if`/`else`/
-// `end`, `dup`/`drop`/...) to the parser and checker, which both carry a
+// `mod::word`, capitalised type/variant names, `'T` poly vars, `if`/`branch`,
+// `dup`/`drop`/...) to the parser and checker, which both carry a
 // symbol table this grammar doesn't have. Some of those conventions (clause
 // heads like `| Cons` with no matching close-pipe) are genuinely undecidable
 // from tokens alone. So this grammar mirrors the same split: only the truly

@@ -33,20 +33,6 @@ pub(super) fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>
                         return true;
                     }
                 }
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    let mut tb = bound.clone();
-                    let mut eb = bound.clone();
-                    if walk(then_branch, enclosing, &mut tb) {
-                        return true;
-                    }
-                    if walk(else_branch, enclosing, &mut eb) {
-                        return true;
-                    }
-                }
                 _ => {}
             }
         }
@@ -333,6 +319,9 @@ pub(super) fn materialize_quotation_at_boundary(
         scope,
         poly,
         &HashSet::new(),
+        false,
+        false,
+        false,
     )?;
     // R19: the erased slot carries the surviving capture set in place of the
     // dropped `Known` marker, the signal `capture_alive_names` (R20) and the
@@ -585,7 +574,7 @@ mod tests {
         // `Ctx::Line`, which can't discriminate a discarded `Ctx` parameter
         // from a used one.
         let word = bare_word("outer", 0);
-        let word_ctx = word_ctx(&word, &structs, &enums, None);
+        let word_ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
         let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
             .expect_err("a captured `~` local must be rejected");
         assert!(

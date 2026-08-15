@@ -351,6 +351,13 @@ pub enum Instr {
     /// `dst: Cstr = src`'s bytes pointer, discarding the length (R7). Mirrors
     /// `StrLen`: no offset spelled here, for the same reason.
     StrPtr(Value, Value),
+    /// Slice 10c (R-P3-2): `dst: Int{32, unsigned} = src`'s enum discriminant,
+    /// for a scalar (all-variants-payload-free) enum only. Such a value *is*
+    /// its discriminant in a 32-bit register, so this reads no memory and
+    /// converts no width: it exists solely to give the discriminant an integer
+    /// `IrType`, which the source value (an `IrType::Enum`) cannot carry. The
+    /// backend relabels the register; the machine code is unchanged.
+    Tag(Value, Value),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

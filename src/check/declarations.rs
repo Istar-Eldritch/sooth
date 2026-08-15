@@ -78,6 +78,19 @@ pub(super) const BUILTIN_WORDS: &[&str] = &[
     "not",
     "shl",
     "shr",
+    // Slice 10c (R-P3-3): the comparison primitives, each yielding the 32-bit
+    // flag `branch` consumes.
+    "u=",
+    "u<",
+    "u>",
+    "u<=",
+    "u>=",
+    "u<>",
+    // The six surface comparison names are `lib/` words now, not name-
+    // dispatched builtins, but they stay listed: this set is also what stops
+    // a bare tail call being read as a call to the enclosing word
+    // (`has_self_tail_call`), and a trailing `<` inside a user's own `Vec2 <`
+    // is still far more often the library `<` on two scalars than a self-call.
     "=",
     "<",
     ">",
@@ -85,6 +98,9 @@ pub(super) const BUILTIN_WORDS: &[&str] = &[
     ">=",
     "<>",
     ".",
+    // Slice 10c (R-P3-1/R-P3-2): the two control/discriminant primitives.
+    "branch",
+    "tag",
     "max",
     "max-total", // check_str_word
     "len",
@@ -808,19 +824,21 @@ pub(super) fn check_generic_concrete_overlap(words: &[WordDef]) -> Result<(), St
     for (name, rows) in builtins.iter() {
         builtin_arity.insert(name.as_str(), rows[0].inputs.len());
     }
-    let mut concrete_arity: HashMap<(u32, &str), usize> = HashMap::new();
+    let mut concrete_inputs: HashMap<(u32, &str), Vec<Type>> = HashMap::new();
     for word in words {
         if word.name != "drop" && word.poly.is_none() {
-            concrete_arity
+            concrete_inputs
                 .entry((word.module, word.name.as_str()))
-                .or_insert_with(|| word.effect.inputs.len());
+                .or_insert_with(|| word.effect.inputs.iter().map(|s| s.ty).collect());
         }
     }
     for word in words {
         let Some(sig) = &word.poly else { continue };
         let arity = sig.inputs.len();
-        let overlaps = builtin_arity.get(word.name.as_str()) == Some(&arity)
-            || concrete_arity.get(&(word.module, word.name.as_str())) == Some(&arity);
+        let concrete_overlaps = concrete_inputs
+            .get(&(word.module, word.name.as_str()))
+            .is_some_and(|inputs| inputs.len() == arity && poly_admits(sig, inputs));
+        let overlaps = builtin_arity.get(word.name.as_str()) == Some(&arity) || concrete_overlaps;
         if overlaps {
             return Err(generic_concrete_overlap_error(
                 &word.name,
@@ -897,6 +915,25 @@ fn duplicate_poly_signature_error(name: &str, sig: &PolySig, span: Span, first: 
         first.line,
         first.col,
     )
+}
+
+/// Whether a call matching a concrete candidate's declared `inputs` could
+/// *also* match `sig` — the question the overlap rule is really asking. A
+/// bound the concrete type fails means no call site can reach both, so there
+/// is nothing to disambiguate.
+///
+/// Slice 10c: this is what lets `lib/core.sth`'s `: < ( 'T: Copy Ord 'T --
+/// bool )` coexist with a user's `: < ( Vec2 Vec2 -- bool )`, which slice 8a
+/// shipped and an arity-only test would now reject outright. Only the `Ord`
+/// bound is consulted (`is_ord` is `is_numeric` and nothing else): `Copy` needs
+/// the struct/enum registries this pass does not carry, and leaving it out only
+/// ever keeps the rule *stricter*.
+fn poly_admits(sig: &PolySig, inputs: &[Type]) -> bool {
+    inputs.iter().zip(&sig.inputs).all(|(ty, pin)| match pin {
+        PolyType::Concrete(want) => want == ty,
+        PolyType::Var(v) => !sig.has_bound(*v, Bound::Ord) || ty.is_numeric(),
+        _ => true,
+    })
 }
 
 /// R5: render the poly candidate's whole declared signature (`: + ( 'T 'T --
@@ -2335,7 +2372,7 @@ mod tests {
         // R10: a struct type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Vec2 x i64 y i64 ;
-             : pick ( bool -- Vec2 ) if 1 2 Vec2 else 3 4 Vec2 end ;",
+             : pick ( bool -- Vec2 ) [ 1 2 Vec2 ] [ 3 4 Vec2 ] if ;",
         )
         .unwrap();
     }
@@ -2405,7 +2442,7 @@ mod tests {
         // R10: an enum type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Shape | Circle r f64 | Square s f64 ;
-             : pick ( bool -- Shape ) if 1.0 Circle else 2.0 Square end ;",
+             : pick ( bool -- Shape ) [ 1.0 Circle ] [ 2.0 Square ] if ;",
         )
         .unwrap();
     }

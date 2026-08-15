@@ -350,6 +350,74 @@ pub(super) fn check_access_word(
 ///
 /// Element access is a reference word (`&>`/`&!>` then `@`/`!`), not an
 /// array word: it goes through `check_access_word` instead.
+/// Slice 10c (R-P3-2): `tag ( E -- u32 )`, one of the three machine-level
+/// primitives, reads a scalar enum's discriminant as a condition flag. Its
+/// domain is deliberately the `is_scalar` enums only — every variant
+/// payload-free — where the value already *is* its discriminant, so the
+/// lowering is a relabel rather than a field read. A payload-carrying enum is
+/// a located error here, at check time, rather than at lowering: reading a
+/// real tag field out of tagged storage is a larger feature this slice does
+/// not need. The predicate is computed from the enum *declaration* (all
+/// variants field-free), not from `ir::layout`, which is why the error is
+/// reachable before any lowering runs.
+pub(super) fn check_tag_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+) -> Result<Option<Vec<Slot>>, String> {
+    if name != "tag" {
+        return Ok(None);
+    }
+    if stack.last().is_some_and(|s| s.quot.is_some()) {
+        return Err(reject_quotation_operand(ctx, span, name));
+    }
+    let Some(top) = stack.last().copied() else {
+        return Err(underflow_error(ctx, span, "tag", 1, 0));
+    };
+    let Type::Enum(id, _) = top.ty else {
+        return Err(tag_operand_error(ctx, span, top.ty));
+    };
+    if !ctx.enums()[id.index()]
+        .variants
+        .iter()
+        .all(|v| v.fields.is_empty())
+    {
+        return Err(tag_payload_enum_error(ctx, span, top.ty));
+    }
+    stack.pop();
+    stack.push(Slot::computed(Type::U32));
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// `tag` applied to something that is not an enum at all.
+fn tag_operand_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `tag` requires an enum operand, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `tag` requires an enum operand, found `{found}`")
+        }
+    }
+}
+
+/// R-P3-2/OQ4: `tag` outside its domain — an enum at least one of whose
+/// variants carries a payload, where the discriminant is a field in tagged
+/// storage rather than the value itself.
+fn tag_payload_enum_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `tag` requires an enum whose variants all carry no payload, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => format!(
+            "error: type mismatch: `tag` requires an enum whose variants all carry no payload, found `{found}`"
+        ),
+    }
+}
+
 /// The two `str`-only words: `len ( str -- usize )` (R8) and `cstr
 /// ( str -- cstr )` (R7, the one explicit `str` -> `cstr` conversion — there
 /// is no reverse). Tried before `check_array_word`, whose own `len` claims
@@ -1135,7 +1203,7 @@ mod tests {
             &[],
             &bool_enums,
             &HashMap::new(),
-            &HashMap::new(),
+            &CombinatorEnv::default(),
         )
         .map(|(stack, _insts, _overloads)| stack)
     }
@@ -1224,8 +1292,12 @@ mod tests {
             op(": main ( -- ) 1 [ + ] + ;\n", "`+`"),
             op(": main ( -- ) [ + ] 1 - . ;\n", "`-`"),
             op(": main ( -- ) [ + ] . ;\n", "`.`"),
-            // the `if` condition, before the `bool` mismatch.
-            op(": main ( -- ) [ + ] if 1 . else 2 . end ;\n", "`if`"),
+            // Slice 10c: the branch condition, before the flag mismatch.
+            // `if` is a `lib/` word now, so the audited site is the primitive
+            // it wraps -- the one builtin exempt from the quotation-operand
+            // default-deny for its *branch* operands, but not for its
+            // condition.
+            op(": main ( -- ) [ + ] [ 1 . ] [ 2 . ] branch ;\n", "`branch`"),
             // check_str_word (`len`/`cstr`).
             op(": main ( -- ) [ + ] len ;\n", "`len`"),
             op(": main ( -- ) [ + ] cstr ;\n", "`cstr`"),
@@ -1307,6 +1379,42 @@ mod tests {
             );
         }
     }
+    /// Slice 10c (R-P3-2/OQ4): `tag`'s domain is the `is_scalar` enums only,
+    /// and the predicate is computed from the *declaration* (every variant
+    /// payload-free), not from `ir::layout` -- which is what makes the
+    /// out-of-domain rejection a located **check-time** error rather than a
+    /// lowering panic. Happy path, both error shapes.
+    #[test]
+    fn check_tag_word_accepts_a_scalar_enum_and_locates_both_rejections() {
+        check_src(": w ( bool -- u32 ) tag ;\n: main ( -- ) true w drop ;\n")
+            .expect("`bool` is payload-free, so its value is its discriminant");
+        check_src(
+            "type: Dir | N | S | E | W ;\n: w ( Dir -- u32 ) tag ;\n\
+             : main ( -- ) N w drop ;\n",
+        )
+        .expect("`bool` is not a carve-out: any all-unit-variant enum works");
+
+        let payload = check_src(
+            "type: E | None | Some v i64 ;\n: w ( E -- u32 ) tag ;\n\
+             : main ( -- ) None w drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            payload.contains("`tag` requires an enum whose variants all carry no payload"),
+            "unexpected message: {payload}"
+        );
+        assert!(payload.contains("`E`"), "names the enum: {payload}");
+        assert!(payload.contains("line 2"), "is located: {payload}");
+
+        let not_enum =
+            check_src(": w ( i64 -- u32 ) tag ;\n: main ( -- ) 1 w drop ;\n").unwrap_err();
+        assert!(
+            not_enum.contains("`tag` requires an enum operand"),
+            "unexpected message: {not_enum}"
+        );
+        assert!(not_enum.contains("line 1"), "is located: {not_enum}");
+    }
+
     #[test]
     fn check_len_on_str_types_as_usize() {
         // R8: `check_str_word` claims `len` on a `str` operand before the

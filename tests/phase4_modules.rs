@@ -171,6 +171,27 @@ fn diamond_import_dedupes_by_canonical_path() {
 }
 
 #[test]
+fn prelude_word_called_from_an_imported_module_resolves() {
+    // Slice 10c (R-P3-4): `lib/core.sth`'s words are injected once and reached
+    // by bare name from every module, so `resolve::mangle` must leave their
+    // names alone. Only an imported module can witness that: the entry module
+    // resolves them either way, while a mangled prelude name is unresolvable
+    // from anywhere but the injected copy's own module.
+    let c = Closure::new("prelude-import");
+    c.write(
+        "parity.sth",
+        ": parity ( i64 -- i64 ) 2 mod 0 = [ 10 ] [ 20 ] if ;\nexport: parity ;\n",
+    );
+    let entry = c.write(
+        "main.sth",
+        "import: p \"parity.sth\" ;\n: main ( -- ) 7 p::parity . ;\n",
+    );
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "20\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn import_path_is_relative_to_importing_file() {
     // Criterion 8: `sub/mid.sth` imports `leaf.sth` resolved relative to its own
     // directory (`sub/`), not the entry's. If resolution were entry-relative the

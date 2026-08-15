@@ -15,7 +15,7 @@ pub(super) fn check_word(
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     for slot in &word.effect.inputs {
         if let Some(name) = &slot.name {
             reject_variant_local(&ctx, name, "parameter")?;
@@ -57,12 +57,15 @@ pub(super) fn check_word(
 /// `check_operator` before the splice is reached, and the two then disagree;
 /// and a variable-bearing signature is excluded by Decision 3.
 ///
-/// The monomorphism rule is phrased over *declared variables*, not
-/// `poly.is_some()`: a `~`-bearing but otherwise concrete effect is
-/// poly-forced by the parser (`effect_has_variable`) while carrying no
-/// variable, and is accepted. It is a policy rule, not a soundness one: the
-/// splice itself handles a variable-bearing body, so `inline` on a poly
-/// signature is not unsound, merely excluded.
+/// Slice 10c (R-P3-3b): a polymorphic signature is **no longer** excluded. The
+/// rule that excluded it was a policy one, not a soundness one -- the splice
+/// already handles a variable-bearing body, so lifting it needed no lowering
+/// work -- and slice 10c ships its first consumers: the six comparison words
+/// (`: = inline ( 'T: Copy Ord 'T -- bool ) u= [ true ] [ false ] branch ;`),
+/// which must be both `'T: Copy Ord`-polymorphic, to keep covering the whole
+/// numeric tower, and `inline`, or every comparison in the language becomes a
+/// real call with a frame. The builtin-name rule below is a *soundness* rule
+/// and stays; the six escape it because their rows left `BUILTIN_TABLE`.
 pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
     if !word.declares_inline {
         return Ok(());
@@ -83,17 +86,6 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
             "error: `inline` on `{name}`, which has a clause body; `inline` requires a term body (line {}, col {})",
             span.line, span.col
         ));
-    }
-    if let Some(sig) = &word.poly {
-        if !sig.ty_var_names.is_empty()
-            || !sig.len_var_names.is_empty()
-            || !sig.row_var_names.is_empty()
-        {
-            return Err(format!(
-                "error: `inline` on `{name}`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line {}, col {})",
-                span.line, span.col
-            ));
-        }
     }
     // A builtin-operator name reaches `check_operator` first, which resolves
     // the overload and records `poly.builtin_overloads[span]` so lowering emits
@@ -190,7 +182,7 @@ fn check_terms_word(
         .map(|s| Slot::computed(s.ty))
         .collect();
 
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
     let mut final_stack = check_terms(
@@ -391,7 +383,7 @@ fn check_clause_body(
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     let mut seen_locals = HashSet::new();
     for name in &clause.locals {
         reject_variant_local(&ctx, name, "local")?;
@@ -515,18 +507,41 @@ mod tests {
         .expect("an ordinary clause word is unaffected");
     }
 
-    /// Slice 11 (R3): the monomorphism rule is phrased over *declared
-    /// variables*, not `poly.is_some()`. The `~`-bearing half of the pair is
-    /// what discriminates the two phrasings: the parser poly-forces a `~` effect
-    /// (`effect_has_variable`), so `poly` is `Some` while carrying no variable,
-    /// and it must still be accepted.
+    /// Slice 10c (E-P3-7): **retargeted, not deleted.** Slice 11's rejection
+    /// of an `inline` polymorphic signature was a *policy* rule by its own
+    /// admission -- the splice already handles a variable-bearing body -- and
+    /// R-P3-3b deliberately reverses it, because the six comparison words must
+    /// be both `'T: Copy Ord`-polymorphic (to keep covering the numeric tower)
+    /// and `inline` (or every comparison becomes a real call with a frame).
+    /// The other half of the original pair, a `~`-bearing but variable-free
+    /// effect, is unaffected and stays.
+    ///
+    /// The witness is a word named `=`, not a neutral name: a neutral name is
+    /// claimed by no builtin, so it slips past the *second* (soundness)
+    /// `inline` gate, `BUILTIN_TABLE.contains_key`, and would pass whether or
+    /// not the real comparison words can ever be `inline`. Restoring the
+    /// polymorphic gate rejects with `requires a monomorphic effect`; leaving
+    /// the six rows in `BUILTIN_TABLE` under their old names rejects with
+    /// `overlaps a concrete overload of `=``.
     #[test]
-    fn check_inline_polymorphic_signature_is_error() {
-        let err = check_src(": id inline ( 'T -- 'T ) ;").unwrap_err();
-        assert_eq!(
-            err,
-            "error: `inline` on `id`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line 1, col 3)"
-        );
+    fn check_inline_polymorphic_signature_is_accepted() {
+        check_src(": id inline ( 'T -- 'T ) ;\n: main ( -- ) ;")
+            .expect("`inline` on a polymorphic signature is a splice, not a rejection");
+        // The witness is `lib/core.sth`'s own `=`, driven straight through
+        // both gates: it cannot be *redeclared* in a test source (that is a
+        // duplicate overload of the injected one), and a neutral stand-in
+        // would not exercise the builtin-name gate at all.
+        let eq = crate::parser::prelude_words()
+            .into_iter()
+            .find(|w| w.name == "=")
+            .expect("`lib/core.sth` defines `=`");
+        assert!(eq.declares_inline, "`=` is declared `inline`");
+        let sig = eq.poly.as_ref().expect("`=` is polymorphic");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        check_inline_declaration(&eq)
+            .expect("the real witness: a builtin-operator-named polymorphic `inline` word");
+        check_src(": main ( -- ) 1 2 = drop 1 >u32 2 >u32 = drop ;")
+            .expect("and it resolves across two distinct numeric types");
         check_src(": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;")
             .expect("a `~`-bearing but variable-free `inline` effect is monomorphic");
     }

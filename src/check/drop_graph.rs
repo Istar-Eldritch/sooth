@@ -59,47 +59,271 @@ pub(super) fn check_main_effect(
 /// R1 (D2, D7): the callee names of every tail-position call in a word body.
 ///
 /// Tail position is a purely *syntactic* property: a call is in tail position
-/// iff it is the final term of a terms body, the final term of a clause body,
-/// or the final term of an arm of a *terminal* `if` (an `if` that is itself
-/// the final term hands tail position to the last term of both arms,
-/// recursively). Any term after a call, arithmetic, a shuffle, a consumer, or
-/// another call, breaks tail position, and a call inside a non-terminal `if`
-/// is not tail. Output-equality with the declared outputs is a *consequence*
-/// of this rule for a well-typed final call, not a second check.
+/// iff it is the final term of a terms body or the final term of a clause
+/// body. Any term after a call, arithmetic, a shuffle, a consumer, or another
+/// call, breaks tail position. Output-equality with the declared outputs is a
+/// *consequence* of this rule for a well-typed final call, not a second check.
+///
+/// Slice 10c (R-P1-1) adds the second way a term inherits tail position: a
+/// splice. An always-spliced callee's body runs *in place of* the call, so its
+/// own tail terms are the caller's, and a quotation literal the callee
+/// `call`s in tail position is spliced there too. `[ ... ] call` at a tail is
+/// the same thing one step shorter. A trailing `[ t ] [ e ] if` hands tail
+/// position to both arms through that rule rather than as a form of its own:
+/// `if` splices, and `branch` tail-calls both quotation parameters. See
+/// `TailWalk`.
 ///
 /// Shared by the checker (R2 predicate, R3 tail-call graph); the lowerer
 /// re-encodes the same syntactic rule via positional `tail` threading in
 /// `lower_terms` (src/ir.rs), which a name list can't express. The two must
 /// stay in lockstep if the tail rule changes.
-pub(super) fn tail_position_calls(body: &WordBody) -> Vec<&str> {
+pub(super) fn tail_position_calls<'a>(word: &'a WordDef, combs: &CombinatorIndex) -> Vec<&'a str> {
     let mut out = Vec::new();
-    match body {
-        WordBody::Terms { terms, .. } => collect_tail_calls(terms, &mut out),
+    let mut walk = TailWalk::new(combs);
+    match &word.body {
+        WordBody::Terms { terms, .. } => {
+            let binds = param_binds(terms, declared_input_count(word));
+            walk.collect(terms, &binds, &mut out);
+        }
         WordBody::Clauses(clauses) => {
+            // A clause body's leading binds pop the dispatched variant's
+            // payload, not the declared inputs, and a clause-bodied word is
+            // never a combinator, so it has no parameter slots to forward.
             for clause in clauses {
-                collect_tail_calls(&clause.body, &mut out);
+                walk.collect(&clause.body, &HashMap::new(), &mut out);
             }
         }
     }
     out
 }
 
-fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
-    let Some(last) = terms.last() else {
-        return;
-    };
-    match &last.kind {
-        TermKind::Call(name) => out.push(name.as_str()),
-        TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            collect_tail_calls(then_branch, out);
-            collect_tail_calls(else_branch, out);
-        }
-        _ => {}
+/// Slice 10c (R-P1-5): the lowering-side entry point onto the same walk, for
+/// the combinator splice, which holds a body and a name rather than a
+/// `WordDef`.
+///
+/// R-P3-1b: it carries `has_self_tail_call`'s builtin-name refusal too. That
+/// used to be omitted on the grounds that a builtin-named combinator could not
+/// exist, since `check_operator`'s R11 guard rejects a quotation operand to any
+/// builtin name before the env combinator lookup runs -- with a standing note
+/// that nothing pinned it, so a narrowing of that guard would make the two
+/// passes disagree about whether a splice is a loop. `branch` is exactly that
+/// narrowing: it is the one builtin sanctioned to take quotation operands. So
+/// the refusal is applied here as well, and neither pass may now read a
+/// builtin name in tail position as a call to the enclosing word while the
+/// other refuses to.
+pub(crate) fn terms_tail_call_self(terms: &[Term], name: &str, combs: &CombinatorIndex) -> bool {
+    if is_builtin_word_name(name) {
+        return false;
     }
+    let binds = match combs.get(name) {
+        Some(entry) => param_binds(terms, entry.inputs),
+        None => HashMap::new(),
+    };
+    let mut out = Vec::new();
+    TailWalk::new(combs).collect(terms, &binds, &mut out);
+    out.contains(&name)
+}
+
+/// Slice 10c (R-P1-1): which of always-spliced `name`'s declared parameter
+/// slots hold a quotation it `call`s in tail position — the same set the tail
+/// walk computes, for a consumer that wants the set itself rather than the
+/// callee names a walk reaches. Empty for a name that is not an always-spliced
+/// word, and for one whose provenance the walk declines to follow.
+///
+/// The argument-site literal check reads it to decide, per parameter, whether
+/// the literal it is about to walk really occupies the caller's tail position:
+/// `if`'s two arms do when the `if` does, `times`' body never does.
+pub(crate) fn tail_called_param_slots(name: &str, combs: &CombinatorIndex) -> Vec<usize> {
+    TailWalk::new(combs)
+        .tail_called_params(name)
+        .map(|(_, slots)| slots)
+        .unwrap_or_default()
+}
+
+fn declared_input_count(word: &WordDef) -> usize {
+    match word.poly.as_ref() {
+        Some(sig) => sig.inputs.len(),
+        None => word.effect.inputs.len(),
+    }
+}
+
+/// What a tail position reaches: a callee name, or a declared parameter slot
+/// of the word being walked (that slot's quotation runs in tail position, so a
+/// caller's literal passed into it does too).
+enum TailHit<'t> {
+    Name(&'t str),
+    Param(usize),
+}
+
+/// What a call site statically hands to one declared input slot.
+enum Arg<'t> {
+    /// A quotation literal written at the call site: its body is visible here.
+    Literal(&'t [Term]),
+    /// The walked word's own declared input slot, reached through the local
+    /// its leading `| ... |` bound it to.
+    Param(usize),
+}
+
+/// **INV-INLINE-COMBINATOR.** A quotation-taking word is always inlined
+/// (spliced) at each call site and mints no `IrFunc`; it has no opaque call
+/// form. Its declared output row is discovered by forward checking of the
+/// spliced terms, never solved for by row unification.
+///
+/// This walk rests on that invariant twice over: it reads a callee's body
+/// because there is only ever one, spliced, form of it, and it treats that
+/// body's tail terms as the caller's because the splice really is in place.
+/// Slice 7b (first-class runtime quotations) is where the invariant breaks;
+/// the walk must be revisited there, together with the combinator splice in
+/// `ir::func_builder::calls`.
+///
+/// The walk is conservative in one direction only: it declines (reports no
+/// tail call) wherever provenance is not syntactically visible -- an ambiguous
+/// name, a forwarding cycle, a quotation reached through anything but a
+/// literal or a declared parameter. Declining costs a loop transform, never
+/// correctness.
+struct TailWalk<'a> {
+    combs: &'a CombinatorIndex,
+    /// The combinators whose tail-called-parameter sets are being computed.
+    /// The inline-always invariant proves *lowering* terminates; it does not
+    /// prove this *static* closure does, because the closure follows edges
+    /// between distinct combinators and two of them mutually forwarding a
+    /// tail-called parameter would loop `C -> D -> C`.
+    visiting: Vec<&'a str>,
+}
+
+impl<'a> TailWalk<'a> {
+    fn new(combs: &'a CombinatorIndex) -> Self {
+        Self {
+            combs,
+            visiting: Vec::new(),
+        }
+    }
+
+    fn collect<'t>(
+        &mut self,
+        terms: &'t [Term],
+        binds: &HashMap<&'t str, usize>,
+        out: &mut Vec<&'t str>,
+    ) {
+        let mut hits = Vec::new();
+        self.walk(terms, binds, &mut hits);
+        out.extend(hits.into_iter().filter_map(|hit| match hit {
+            TailHit::Name(name) => Some(name),
+            TailHit::Param(_) => None,
+        }));
+    }
+
+    fn walk<'t>(
+        &mut self,
+        terms: &'t [Term],
+        binds: &HashMap<&'t str, usize>,
+        out: &mut Vec<TailHit<'t>>,
+    ) {
+        let Some(last) = terms.last() else {
+            return;
+        };
+        let before = &terms[..terms.len() - 1];
+        if let TermKind::Call(name) = &last.kind {
+            out.push(TailHit::Name(name.as_str()));
+            // Which of the callee's argument slots inherit this tail
+            // position: `call`'s single quotation operand, `branch`'s two,
+            // or an always-spliced callee's tail-`call`ed parameter slots.
+            //
+            // Slice 10c (R-P3-5a): `branch` is *seeded*, taking over the
+            // role the deleted `TermKind::If` descent played. It is a
+            // primitive with no walkable body, so the closure below cannot
+            // compute its tail-called-parameter set by inspection; without
+            // the seed `if`'s own set computes empty and every caller that
+            // recurses through a branch arm silently loses its loop.
+            let inherits = match name.as_str() {
+                "call" => Some((1, vec![0])),
+                "branch" => Some((3, vec![1, 2])),
+                _ => self.tail_called_params(name),
+            };
+            let Some((inputs, slots)) = inherits else {
+                return;
+            };
+            let args = visible_args(before, binds);
+            for slot in slots {
+                match args.get(inputs - 1 - slot) {
+                    Some(Arg::Literal(body)) => self.walk(body, binds, out),
+                    Some(Arg::Param(param)) => out.push(TailHit::Param(*param)),
+                    None => {}
+                }
+            }
+        }
+    }
+
+    /// R-P1-1: `name`'s declared input count, and which of its quotation
+    /// parameter slots it `call`s in tail position (directly, or transitively
+    /// by forwarding into another combinator's tail-called slot). `None`
+    /// declines: not an always-spliced word, an ambiguous name (R-P1-4), or a
+    /// forwarding cycle.
+    fn tail_called_params(&mut self, name: &str) -> Option<(usize, Vec<usize>)> {
+        let combs = self.combs;
+        let (key, entry) = combs.get_key_value(name)?;
+        if entry.ambiguous || self.visiting.contains(&key.as_str()) {
+            return None;
+        }
+        self.visiting.push(key.as_str());
+        let binds = param_binds(&entry.terms, entry.inputs);
+        let mut hits = Vec::new();
+        self.walk(&entry.terms, &binds, &mut hits);
+        self.visiting.pop();
+        let slots = hits
+            .into_iter()
+            .filter_map(|hit| match hit {
+                TailHit::Param(slot) => Some(slot),
+                TailHit::Name(_) => None,
+            })
+            .collect();
+        Some((entry.inputs, slots))
+    }
+}
+
+/// The arguments a call receives, top of stack first, as far as they are
+/// statically visible. The scan stops at the first term that does not push
+/// exactly one value of known provenance, so a slot deeper than the returned
+/// run is undecidable and its caller declines (R-P1-3): a quotation reached
+/// through a computed value has no body to walk, and lowering sends it to
+/// `lower_indirect_call` rather than the splice branch.
+fn visible_args<'t>(before: &'t [Term], binds: &HashMap<&'t str, usize>) -> Vec<Arg<'t>> {
+    let mut out = Vec::new();
+    for term in before.iter().rev() {
+        match &term.kind {
+            TermKind::Quotation(body) => out.push(Arg::Literal(body)),
+            TermKind::Call(name) => match binds.get(name.as_str()) {
+                Some(&slot) => out.push(Arg::Param(slot)),
+                None => break,
+            },
+            _ => break,
+        }
+    }
+    out
+}
+
+/// The leading `| ... |` binds of a body, mapping each bound name back to the
+/// declared input slot it took. Only the leading run is read: a combinator
+/// names its quotation parameters before doing anything else (every one in
+/// `lib/` does), and a bind after any other term pops a computed value whose
+/// provenance this syntactic pass cannot follow.
+fn param_binds(terms: &[Term], inputs: usize) -> HashMap<&str, usize> {
+    let mut map = HashMap::new();
+    let mut remaining = inputs;
+    for term in terms {
+        let TermKind::Bind(names) = &term.kind else {
+            break;
+        };
+        if names.len() > remaining {
+            break;
+        }
+        // Leftmost name takes the deepest of the popped values.
+        remaining -= names.len();
+        for (i, name) in names.iter().enumerate() {
+            map.insert(name.as_str(), remaining + i);
+        }
+    }
+    map
 }
 
 /// R2 (M1): whether a word contains at least one tail-position call to itself.
@@ -127,9 +351,14 @@ fn collect_tail_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
 /// `check_term`, so a diagnostic (or a resolution-aware self-call test) is
 /// reachable future work; this syntactic pass, which runs over a `WordDef`
 /// alone, is simply the wrong place for it.
-pub(crate) fn has_self_tail_call(word: &WordDef) -> bool {
+///
+/// Slice 10c (R-P1-5): the one predicate every consumer shares -- the two
+/// syntactic passes, the per-word build gate, the REPL and destructor lowering
+/// paths, and the checker's `splice_tail` -- so check and lowering agree on
+/// whether a splice is a loop by construction rather than by luck.
+pub(crate) fn has_self_tail_call(word: &WordDef, combs: &CombinatorIndex) -> bool {
     !is_builtin_word_name(&word.name)
-        && tail_position_calls(&word.body)
+        && tail_position_calls(word, combs)
             .iter()
             .any(|&callee| callee == word.name)
 }
@@ -149,6 +378,7 @@ pub(crate) fn has_self_tail_call(word: &WordDef) -> bool {
 pub(super) fn check_tail_call_cycles(
     words: &[WordDef],
     drop_overload_indices: &HashSet<usize>,
+    combs: &CombinatorIndex,
 ) -> Result<(), String> {
     // A recognized `drop` overload is not callable by name (`check_shuffle`'s
     // `"drop"` arm intercepts every call site first), so it contributes no
@@ -207,7 +437,7 @@ pub(super) fn check_tail_call_cycles(
 
     let mut adj: Vec<Vec<usize>> = vec![Vec::new(); words.len()];
     for (i, word) in words.iter().enumerate() {
-        for callee in tail_position_calls(&word.body) {
+        for callee in tail_position_calls(word, combs) {
             if let Some(&j) = name_to_idx.get(callee) {
                 if !adj[i].contains(&j) {
                     adj[i].push(j);
@@ -486,14 +716,13 @@ fn collect_all_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
     for term in terms {
         match &term.kind {
             TermKind::Call(name) => out.push(name.as_str()),
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                collect_all_calls(then_branch, out);
-                collect_all_calls(else_branch, out);
-            }
+            // Slice 10c: a branch arm is a quotation literal now, so a call
+            // written inside one is an ordinary call of the enclosing body.
+            // Without this descent `check_combinator_cycles` stops seeing a
+            // combinator's own name inside its arms, and a *non-tail* self-call
+            // there -- which the inliner would splice forever -- goes from a
+            // located rejection to a compiler stack overflow.
+            TermKind::Quotation(inner) => collect_all_calls(inner, out),
             _ => {}
         }
     }
@@ -640,7 +869,7 @@ mod tests {
         // neither of these.
         let src = "type: File fd i64 ; \
                    : shut ( File -- ) drop ; \
-                   : drop ( File -- ) | f | true if f shut else f shut end 1 . ; \
+                   : drop ( File -- ) | f | true [ f shut ] [ f shut ] if 1 . ; \
                    : main ( -- ) 1 File drop ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -808,28 +1037,37 @@ mod tests {
     #[test]
     fn tail_position_final_self_call_is_tail() {
         let w = first_word(": rec ( i64 -- i64 ) rec ;");
-        assert_eq!(tail_position_calls(&w.body), vec!["rec"]);
-        assert!(has_self_tail_call(&w));
+        assert_eq!(
+            tail_position_calls(&w, &CombinatorIndex::new()),
+            vec!["rec"]
+        );
+        assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
     fn tail_position_trailing_arithmetic_is_not_tail() {
         // `rec *`: the final term is `*`, so the self-call is not in tail
         // position (classic non-tail recursion).
         let w = first_word(": rec ( i64 -- i64 ) rec * ;");
-        assert_eq!(tail_position_calls(&w.body), vec!["*"]);
-        assert!(!has_self_tail_call(&w));
+        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["*"]);
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
     fn tail_position_trailing_swap_is_not_tail() {
         let w = first_word(": rec ( i64 -- i64 ) rec swap ;");
-        assert_eq!(tail_position_calls(&w.body), vec!["swap"]);
-        assert!(!has_self_tail_call(&w));
+        assert_eq!(
+            tail_position_calls(&w, &CombinatorIndex::new()),
+            vec!["swap"]
+        );
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
     fn tail_position_trailing_drop_is_not_tail() {
         let w = first_word(": rec ( i64 -- i64 ) rec drop ;");
-        assert_eq!(tail_position_calls(&w.body), vec!["drop"]);
-        assert!(!has_self_tail_call(&w));
+        assert_eq!(
+            tail_position_calls(&w, &CombinatorIndex::new()),
+            vec!["drop"]
+        );
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
     fn tail_position_builtin_named_word_trailing_its_own_name_is_not_self_tail() {
@@ -841,29 +1079,276 @@ mod tests {
         let w = first_word(
             "type: Vec2 x i64 y i64 ; : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;",
         );
-        assert_eq!(tail_position_calls(&w.body), vec!["<"]);
-        assert!(!has_self_tail_call(&w));
+        assert_eq!(tail_position_calls(&w, &CombinatorIndex::new()), vec!["<"]);
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
     }
     #[test]
     fn tail_position_both_terminal_if_arms_are_tail() {
         // A terminal `if` hands tail position to the last term of both arms.
-        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else rec end ;");
-        assert_eq!(tail_position_calls(&w.body), vec!["rec", "rec"]);
-        assert!(has_self_tail_call(&w));
+        // Slice 10c (R-P3-5a): that is no longer a grammar rule but the
+        // combinator walk -- `if` is a `lib/` word whose tail-called-parameter
+        // set is both branch quotations, seeded from `branch` -- so the index
+        // has to carry the real `if`, not be empty.
+        let src = ": rec ( i64 -- i64 ) dup 0 > [ rec ] [ rec ] if ;";
+        let module = parse(&lex(src).unwrap()).unwrap();
+        let combs = combinator_index(module.words.iter());
+        let w = module.words.iter().find(|w| w.name == "rec").unwrap();
+        // The tail callees are `if` itself and, through both of its
+        // tail-called parameter slots, the self-call in each arm.
+        assert_eq!(tail_position_calls(w, &combs), vec!["if", "rec", "rec"]);
+        assert!(has_self_tail_call(w, &combs));
     }
     #[test]
     fn tail_position_non_terminal_if_self_call_is_not_tail() {
         // The `if` is followed by more terms, so it is non-terminal and its
         // arms are not in tail position.
-        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else 0 end drop 5 ;");
-        assert!(!has_self_tail_call(&w));
-        assert!(!tail_position_calls(&w.body).contains(&"rec"));
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > [ rec ] [ 0 ] if drop 5 ;");
+        assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
+        assert!(!tail_position_calls(&w, &CombinatorIndex::new()).contains(&"rec"));
     }
     #[test]
     fn tail_position_clause_body_final_self_call_is_tail() {
         let w = first_word("type: E | A | B ; : w ( E -- E ) | A w | B w ;");
-        assert_eq!(tail_position_calls(&w.body), vec!["w", "w"]);
-        assert!(has_self_tail_call(&w));
+        assert_eq!(
+            tail_position_calls(&w, &CombinatorIndex::new()),
+            vec!["w", "w"]
+        );
+        assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
+    }
+
+    // -- Slice 10c (R-P1): tail-splice recognition ---------------------------
+
+    /// A hand-written two-way branch over the primitive `if`, whose two
+    /// quotation parameters are each `call`ed in tail position: the shape
+    /// whose tail-called-parameter set is `{1, 2}`.
+    const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+         | e | | t | | c | c [ t call ] [ e call ] if ;\n";
+    /// Recon 4's negative: each arm `call`s one parameter and *then* drops the
+    /// other, so the tail term is `drop` and neither parameter is tail-called.
+    const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+         | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
+
+    fn words_of(src: &str) -> Vec<WordDef> {
+        let tokens = lex(src).unwrap();
+        parse(&tokens).unwrap().words
+    }
+    fn named<'w>(words: &'w [WordDef], name: &str) -> &'w WordDef {
+        words.iter().find(|w| w.name == name).unwrap()
+    }
+
+    #[test]
+    fn tail_splice_through_a_tail_called_parameter_is_self_tail() {
+        // Recon 2: `sum-to`'s recursive call sits inside a quotation literal
+        // handed to `Bool?`, which `call`s that parameter in tail position, so
+        // the literal inherits `sum-to`'s tail position.
+        let words = words_of(&format!(
+            "{BOOL_Q}: sum-to ( i64 i64 -- i64 )\n\
+             | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;\n"
+        ));
+        let combs = combinator_index(&words);
+        assert!(has_self_tail_call(named(&words, "sum-to"), &combs));
+        // Without the callee's body there is nothing to prove the splice hands
+        // on tail position, so the walk declines rather than guessing.
+        assert!(!has_self_tail_call(
+            named(&words, "sum-to"),
+            &CombinatorIndex::new()
+        ));
+    }
+
+    #[test]
+    fn tail_splice_through_a_discarded_parameter_is_not_self_tail() {
+        // R-P1-2: `t call e drop` puts `drop` in tail position, so neither
+        // parameter is tail-called and the identical caller stays ordinary
+        // recursion.
+        let words = words_of(&format!(
+            "{BOOL_D}: sum-to ( i64 i64 -- i64 )\n\
+             | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool!? ;\n"
+        ));
+        assert!(!has_self_tail_call(
+            named(&words, "sum-to"),
+            &combinator_index(&words)
+        ));
+    }
+
+    #[test]
+    fn tail_splice_through_a_forwarded_quotation_declines() {
+        // R-P1-3: the recursive literal is bound to a local before the call,
+        // so the argument slot is not a syntactically visible literal and the
+        // walk declines. Conservative by design: it costs the loop transform,
+        // never correctness.
+        let words = words_of(&format!(
+            "{BOOL_Q}: sum-to ( i64 i64 -- i64 )\n\
+             | n | | acc | [ acc n + n 1 - sum-to ] | rec | n 0 = [ acc ] rec Bool? ;\n"
+        ));
+        assert!(!has_self_tail_call(
+            named(&words, "sum-to"),
+            &combinator_index(&words)
+        ));
+    }
+
+    #[test]
+    fn tail_splice_through_an_ambiguous_combinator_name_declines() {
+        // R-P1-4: two always-spliced words share the name, so which body the
+        // call reaches cannot be decided syntactically.
+        let words = words_of(&format!(
+            "{BOOL_Q}: Bool? ( str ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c drop t call e drop ;\n\
+             : sum-to ( i64 i64 -- i64 )\n\
+             | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;\n"
+        ));
+        let combs = combinator_index(&words);
+        assert!(combs["Bool?"].ambiguous);
+        assert!(!has_self_tail_call(named(&words, "sum-to"), &combs));
+    }
+
+    #[test]
+    fn tail_splice_both_predicate_wrappers_agree_for_a_combinator() {
+        // E-P1-4, for the one shape its end-to-end twin
+        // (`ir::driver::tests::tail_splice_check_and_lowering_agree_on_the_loop`)
+        // cannot reach: here the self-tailing word is itself a *combinator*,
+        // whose argument-site literal check splices forever (a pre-existing
+        // hole, unrelated to this walk), so nothing can be compiled to compare
+        // against. The two wrappers the two splice sites call are asked
+        // directly instead: `has_self_tail_call` (the checker's `splice_tail`)
+        // and `terms_tail_call_self` (the lowering splice gate).
+        //
+        // Because nothing routes through those two production call sites, nor
+        // through `check_combinator_cycles`, all three keep passing the suite
+        // with an empty `CombinatorIndex` substituted in. That is expected, not
+        // a missing guard: see the witness map under E-P1-4 in
+        // `docs/phase4-slice10c-spec.md` before "fixing" a survivor there.
+        let recon2 = words_of(&format!(
+            "{BOOL_Q}: walk ( i64 ~[ -- i64 ] -- i64 )\n\
+             | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool? ;\n"
+        ));
+        let recon4 = words_of(&format!(
+            "{BOOL_D}: walk ( i64 ~[ -- i64 ] -- i64 )\n\
+             | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool!? ;\n"
+        ));
+        for (words, expected) in [(recon2, true), (recon4, false)] {
+            let combs = combinator_index(&words);
+            let word = named(&words, "walk");
+            let WordBody::Terms { terms } = &word.body else {
+                unreachable!("`walk` is a terms body")
+            };
+            let checker = is_combinator(word) && has_self_tail_call(word, &combs);
+            let lowering = terms_tail_call_self(terms, &word.name, &combs);
+            assert_eq!(checker, expected, "the checker's `splice_tail`");
+            assert_eq!(
+                checker, lowering,
+                "check and lowering must decide a splice-is-a-loop identically"
+            );
+        }
+    }
+
+    #[test]
+    fn tail_splice_a_builtin_named_word_is_self_tail_to_neither_pass() {
+        // R-P3-1b, asked of the two predicates directly. Nothing routes a
+        // builtin-named word through the production splice sites -- which is
+        // exactly the problem: the refusal `terms_tail_call_self` carries is
+        // the counterpart of `has_self_tail_call`'s, and with no source shape
+        // reaching it the suite stays green if it is deleted, so it is pinned
+        // here or not at all (the `collect_drop_targets` precedent).
+        //
+        // Both words end in their own builtin name, so a walk with no refusal
+        // reports a self-tail. `<` resolves against the builtin table, and
+        // `branch` is the narrowing that made this live: it is the one builtin
+        // sanctioned to take quotation operands (R-P3-1a), so it is also the
+        // one that can reach the env combinator lookup a builtin name used to
+        // be kept away from.
+        for src in [
+            "type: Vec2 x i64 y i64 ;\n\
+             : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n",
+            ": branch ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c t e branch ;\n",
+        ] {
+            let words = words_of(src);
+            // The word under test is the source's own, at index 0: `words_of`
+            // appends the `lib/core.sth` prelude, which now defines `<` too,
+            // so both `last()` and a name lookup can find the wrong one.
+            let word = words.first().expect("the builtin-named word");
+            let WordBody::Terms { terms } = &word.body else {
+                unreachable!("a terms body")
+            };
+            let combs = combinator_index(&words);
+            assert!(
+                !has_self_tail_call(word, &combs),
+                "`{}`: the checker must not read a builtin name as a self-call",
+                word.name
+            );
+            assert!(
+                !terms_tail_call_self(terms, &word.name, &combs),
+                "`{}`: lowering must refuse it too, or the two passes disagree \
+                 about whether a splice is a loop",
+                word.name
+            );
+        }
+    }
+
+    #[test]
+    fn tail_splice_forwarding_cycle_declines() {
+        // Two combinators each forwarding a tail-called parameter into the
+        // other would loop the static closure `C -> D -> C`; the visited set
+        // declines instead. (`check_combinator_cycles` rejects this program
+        // separately -- the point here is that the walk terminates on it.)
+        let words = words_of(
+            ": ping ( ~[ -- i64 ] -- i64 ) | f | f pong ;\n\
+             : pong ( ~[ -- i64 ] -- i64 ) | f | f ping ;\n\
+             : go ( -- i64 ) [ 7 ] ping ;\n",
+        );
+        let combs = combinator_index(&words);
+        assert!(!has_self_tail_call(named(&words, "ping"), &combs));
+        assert!(!has_self_tail_call(named(&words, "go"), &combs));
+    }
+
+    #[test]
+    fn tail_call_of_a_literal_is_tail() {
+        // `[ ... ] call` is the one-step-shorter splice: the literal runs in
+        // place of the `call`, so a self-call at its tail is the back-edge.
+        // Lowering threads `tail` through the same splice, so the walk must
+        // see it too or the two disagree.
+        let words = words_of(": rec ( i64 -- i64 ) [ 1 - rec ] call ;\n");
+        assert!(has_self_tail_call(
+            named(&words, "rec"),
+            &CombinatorIndex::new()
+        ));
+    }
+
+    #[test]
+    fn tail_splice_leading_binds_map_to_declared_slots() {
+        // The mechanism the whole slice rests on: `| e | | t | | c |` binds the
+        // *last* declared input first, so `t`/`e` resolve back to slots 1 and
+        // 2 and their tail `call`s land there. Getting the direction wrong
+        // silently empties the set (and costs every loop), so it is pinned
+        // directly rather than only through a caller.
+        //
+        // Both spellings are checked. One-name binds cannot tell the two
+        // directions apart (each pops the current top either way); only a
+        // multi-name `| c t e |`, whose *leftmost* name takes the deepest
+        // value, does.
+        for (src, name) in [
+            (BOOL_Q, "Bool?"),
+            (
+                ": Pick ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+                 | c t e | c [ t call ] [ e call ] if ;\n",
+                "Pick",
+            ),
+        ] {
+            let words = words_of(src);
+            let combs = combinator_index(&words);
+            let mut walk = TailWalk::new(&combs);
+            let (inputs, mut slots) = walk.tail_called_params(name).unwrap();
+            slots.sort_unstable();
+            assert_eq!((inputs, slots), (3, vec![1, 2]), "{name}");
+        }
+    }
+
+    #[test]
+    fn tail_splice_discarded_parameter_set_is_empty() {
+        let words = words_of(BOOL_D);
+        let combs = combinator_index(&words);
+        let mut walk = TailWalk::new(&combs);
+        assert_eq!(walk.tail_called_params("Bool!?"), Some((3, Vec::new())));
     }
     #[test]
     fn check_mutual_tail_recursion_is_error() {
@@ -881,8 +1366,8 @@ mod tests {
         // Both words call each other only in non-tail position (`x 1 +`), so no
         // tail-call edge exists and X1 must not fire (R4 no-false-positive).
         check_src(
-            ": a ( i64 -- i64 ) dup 0 > if b 1 + else drop 0 end ; \
-             : b ( i64 -- i64 ) dup 0 > if a 1 + else drop 0 end ;",
+            ": a ( i64 -- i64 ) dup 0 > [ b 1 + ] [ drop 0 ] if ; \
+             : b ( i64 -- i64 ) dup 0 > [ a 1 + ] [ drop 0 ] if ;",
         )
         .unwrap();
     }

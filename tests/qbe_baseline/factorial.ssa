@@ -18,17 +18,27 @@ export function l $factorial__m0(l %v0) {
 	%v2 =w ceql %v0, %v1
 	jnz %v2, @blk1, @blk2
 @blk1
-	%v3 =l copy 1
+	%v5 =w copy 1
 	jmp @blk3
 @blk2
-	%v4 =l copy 1
-	%v5 =l sub %v0, %v4
-	%v6 =l call $factorial__m0(l %v5)
-	%v7 =l mul %v0, %v6
+	%v6 =w copy 0
 	jmp @blk3
 @blk3
-	%v8 =l phi @blk1 %v3, @blk2 %v7
-	ret %v8
+	%v7 =w phi @blk1 %v5, @blk2 %v6
+	%v10 =w copy %v7
+	jnz %v10, @blk4, @blk5
+@blk4
+	%v11 =l copy 1
+	jmp @blk6
+@blk5
+	%v12 =l copy 1
+	%v13 =l sub %v0, %v12
+	%v14 =l call $factorial__m0(l %v13)
+	%v15 =l mul %v0, %v14
+	jmp @blk6
+@blk6
+	%v16 =l phi @blk4 %v11, @blk5 %v15
+	ret %v16
 }
 
 export function $sooth_main() {

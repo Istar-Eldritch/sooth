@@ -60,17 +60,17 @@ lacks: statically-checked stack effects and named locals.
 order as the effect comment, and a word calls itself directly (no `recurse`). A
 binding is a term, not just an entry declaration: `| names |` is legal at any point
 in a body, popping that many values off the stack where it appears, with its extent
-running to the end of the enclosing block (a word body, a clause body, or an
-`if`/`else` arm) rather than the whole word:
+running to the end of the enclosing block (a word body, a clause body, or a
+quotation body) rather than the whole word:
 
 ```forth
 : gcd ( int int -- int )
   | a b |
-  b 0 = if
+  b 0 = [
     a
-  else
+  ] [
     b  a b mod  gcd
-  end ;
+  ] if ;
 ```
 
 Locals are opt-in, not the default. Prefer the stack: with `dup`/`swap`/`drop` most
@@ -299,10 +299,11 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 
 ## Control flow and iteration
 
-Boolean branching is `if ... else ... end` (which later becomes a combinator, see
-below); structural dispatch is `match`. There are deliberately **no loop keywords** (no `begin/until`, `do/loop`);
-dropping them keeps the surface small and matches the Factor/Kitten lineage, where
-iteration is expressed with combinators rather than syntax.
+Boolean branching is the library word `if` (`[ then ] [ else ] if`, see below);
+structural dispatch is clause-bodied definition. There are deliberately **no loop
+keywords** (no `begin/until`, `do/loop`); dropping them keeps the surface small and
+matches the Factor/Kitten lineage, where iteration is expressed with combinators
+rather than syntax.
 
 The iteration story, top to bottom:
 
@@ -450,7 +451,8 @@ its body's calls — including a self-tail call — rewritten to internal spelli
 imported `while`'s self-call still resolves to itself and the self-tail recognizer still
 fires rather than recursing forever through an unrecognized name.
 
-**Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
+**Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
+`bool` and two quotations (`[ then ] [ else ] if`). Structural
 dispatch on ADTs is **clause-bodied definition**, the sole enum eliminator: a word
 whose top input is an enum is defined per variant (`| Variant ... ;`),
 exhaustiveness-checked, with no inline `match`. The rejected Haskell-style machine —
@@ -462,14 +464,37 @@ and pattern apparatus stayed out while the per-variant body won. Multi-way branc
 a **`cond` combinator** (a library word taking `[ pred ] [ body ]` pairs), not syntax,
 so nested `if`s aren't the only option.
 
-**`if` stops being syntax once clause dispatch and quotation rows exist.** Phases 0
-through Slice 3 keep `if/else/then` as syntax (renamed `if/else/end` from Slice 4
-onward) because they predate quotations and library enums. With `Bool` a library enum
-(slice 9) and row variables inside quotation effects parsing (slice 10a), `if` is
-written as an ordinary clause-bodied word dispatching on its `Bool` input
-(`: if ( ..i Bool [ ..i -- ..o ] [ ..i -- ..o ] -- ..o )`, slice 10c), and `cond`
-alongside it. This shrinks the core the honest way, by making `if` a word rather than
+**The machine layer and the library layer.** The compiler knows three machine-level
+primitives and nothing else about conditionals: `branch`, a two-way jump on a 32-bit
+flag taking two inline quotations (`( ..a u32 ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`,
+nonzero is true, and the single builtin exempt from the quotation-operand default-deny);
+`tag`, which reads a payload-free enum's discriminant as that flag and is a register
+relabel because such a value already *is* its discriminant; and the six comparison
+primitives `u=`/`u<`/`u>`/`u<=`/`u>=`/`u<>`, one per comparison shape, each deriving
+signed / unsigned / float behaviour from its operand type.
+
+Everything typed is a library word over them, in `lib/core.sth`, injected into every
+program as `bool` itself is. `if` and `unless` are term-body combinators
+(`: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`, whose body reads the
+condition's discriminant with `tag` and `branch`es on the flag); `=`/`<`/`>`/`<=`/`>=`/`<>`
+are `'T: Copy Ord`-polymorphic `inline` words that wrap a comparison primitive and build
+their `bool` by branching and naming a variant. That last detail is the point rather than
+an implementation accident: there is deliberately no operation turning a machine word
+back into an enum, since not every machine word is a valid discriminant, so an invalid
+`bool` is unconstructible rather than merely discouraged. `bool` has no special status
+in any of it; `branch` never sees one. `cond` is a documented future word, not shipped:
+a variadic `[ pred ] [ body ]` word is not fixed-arity.
+
+This shrinks the core the honest way, by making `if` a word rather than
 by replacing it with a bigger feature.
+
+**INV-INLINE-COMBINATOR.** A quotation-taking word is always inlined (spliced) at each
+call site and mints no `IrFunc`; it has no opaque call form. Its declared output row is
+discovered by forward checking of the spliced terms, never solved for by row unification.
+Both splice sites rest on this — the checker's tail walk reads a callee's body because
+there is only ever one, spliced, form of it, and lowering threads the caller's tail
+position into the splice because the body really does run in place of the call. Slice 7b
+(first-class runtime quotations) is where the invariant breaks and both must be revisited.
 
 ## The irreducible core
 
@@ -491,7 +516,8 @@ spliced, so a library word cannot defer code the way `call` does; no word below 
 can express either.
 
 The operator words: arithmetic (`+ - * / mod`), bitwise (`and or xor not shl shr`),
-comparison (`= < > <= >= <> max max-total`), printing (`.`), and the `>T` conversions.
+the comparison primitives (`u= u< u> u<= u>= u<>`, plus `max`/`max-total`), the two
+control primitives (`branch`, `tag`), printing (`.`), and the `>T` conversions.
 Each bottoms out in a machine operation or a type-directed conversion; there is nothing
 in the language to compose them from.
 
@@ -646,9 +672,9 @@ Codegen model (unchanged from first principles, it's the good part): don't model
 the data stack at runtime. Simulate it at compile time as an array of typed slots;
 push/pop manipulate the array, and when IR is emitted the slots become ordinary
 SSA/register values. Each word compiles to a function taking N stack args and
-returning M results. `if`/`end` become basic blocks and branches; there are no loop
-keywords (see Control flow and iteration), and iteration lowers to an internal loop
-primitive with a back-edge. Branch and loop join points unify the virtual-stack state
+returning M results. The `branch` primitive becomes basic blocks and a conditional
+jump; there are no loop keywords (see Control flow and iteration), and iteration
+lowers to an internal loop primitive with a back-edge. Branch and loop join points unify the virtual-stack state
 (depth and type) across predecessors; mismatched depth or type across arms is a
 compile error.
 
@@ -995,9 +1021,9 @@ rows, no borrow analysis needed to write the compiler in it.
 - Signature idea: linear (use exactly once) by default, `dup` is the explicit copy,
   `drop` is the explicit destructor point the checker enforces.
 - Surface: concatenative, Forth-lineage, checked stack effects, `| named locals |`.
-- Control flow: `if/else/end` for boolean branching (demotes to an ordinary
-  clause-bodied word over the library `Bool` enum once slice 10a's quotation rows
-  land; see The irreducible core); clause-bodied definitions as the sole, exhaustive
+- Control flow: `if`/`unless`, ordinary `lib/core.sth` words taking a `bool` and two
+  quotations over the `branch` and `tag` primitives (see The machine layer and the
+  library layer); clause-bodied definitions as the sole, exhaustive
   eliminator for enums (no inline `match`, no guards or literal patterns); a `cond`
   combinator (library word) for multi-way branching. No loop keywords.
 - Iteration: quotations (`[ ]` + `call`) are the sole primitive; lowers to an internal
@@ -1317,7 +1343,7 @@ be written without it, never on principle.
 
 - **Immediate-word / defining-word / macro facility** (would have replaced Forth's
   `CREATE`/`DOES>`). Declined. Sooth already sent the non-metaprogramming uses of
-  Forth immediate words elsewhere (`if/else/end` is a keyword, then a combinator;
+  Forth immediate words elsewhere (`if` is a library combinator over `branch`;
   iteration is quotations + combinators; comments/strings are lexer-level), leaving
   only metaprogramming, which splits into two capabilities both covered without a
   comptime facility: defining new words is a plain nullary word (`: answer 42 ;` is

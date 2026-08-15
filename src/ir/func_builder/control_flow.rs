@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn lower_if_emits_phi_at_join() {
-        let ir = lower_src(": w ( bool -- i64 ) if 1 else 2 end ;");
+        let ir = lower_src(": w ( bool -- i64 ) [ 1 ] [ 2 ] if ;");
         let w = &ir.funcs[0];
         let has_phi = instrs(w).iter().any(|i| matches!(i, Instr::Phi(..)));
         assert!(has_phi);
@@ -329,6 +329,55 @@ mod tests {
             .blocks
             .iter()
             .any(|b| matches!(b.term, Terminator::Jnz(..))));
+    }
+
+    /// Slice 10c (R-P3-1): `branch` reaches this same lowering directly, over
+    /// a raw 32-bit flag rather than a `bool`, with its arms arriving as
+    /// quotation operands instead of embedded term lists. Driving it without
+    /// the library `if` in between is what shows the primitive itself is
+    /// whole.
+    #[test]
+    fn lower_branch_on_a_raw_flag_emits_jnz_and_join() {
+        let ir = lower_src(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;");
+        let w = &ir.funcs[0];
+        assert!(
+            instrs(w).iter().any(|i| matches!(i, Instr::Phi(..))),
+            "the two arms join"
+        );
+        let jnz = w
+            .blocks
+            .iter()
+            .find_map(|b| match b.term {
+                Terminator::Jnz(cond, ..) => Some(cond),
+                _ => None,
+            })
+            .expect("a conditional jump on the flag");
+        assert_eq!(
+            w.value_types[jnz.0 as usize],
+            IrType::Int {
+                bits: 32,
+                signed: false
+            },
+            "`branch` knows a 32-bit flag, never `bool`"
+        );
+    }
+
+    /// The edge case: both arms back-edge, so the join is unreachable and is
+    /// elided entirely (R8, both-arms-tail). Reached through `branch` rather
+    /// than the retired grammar.
+    #[test]
+    fn lower_branch_with_both_arms_back_edging_elides_the_join() {
+        let ir = lower_src(
+            ": spin ( i64 -- i64 )\n  \
+             dup 0 u= [ 1 - spin ] [ 1 - spin ] branch ;",
+        );
+        let w = &ir.funcs[0];
+        assert!(
+            !instrs(w)
+                .iter()
+                .any(|i| matches!(i, Instr::Phi(_, arms) if arms.len() == 2)),
+            "neither arm reaches a join, so no two-predecessor phi is built"
+        );
     }
 
     #[test]

@@ -328,7 +328,36 @@ pub fn prepass_and_register(
     Ok(())
 }
 
+/// Slice 10c (R-P3-4): `lib/core.sth`, the words every program sees without an
+/// `import:` — `if`, `unless` and the six comparison words, each an ordinary
+/// `WordDef` over the `branch`/`tag`/comparison primitives. Compiled into the
+/// binary and parsed once, so the source of record is a real `lib/` file
+/// rather than a hand-built AST nobody can read.
+///
+/// Injected ahead of a file's own words exactly as `bool_enum_decl` injects
+/// the enum, and for the same reason: they are library definitions with no
+/// import path to reach them by. `resolve::mangle` leaves their names alone,
+/// so every module in a closure reaches the one definition by bare name.
+pub fn prelude_words() -> Vec<WordDef> {
+    let src = include_str!("../lib/core.sth");
+    let tokens = crate::lexer::lex(src).expect("lib/core.sth lexes");
+    parse_without_prelude(&tokens)
+        .expect("lib/core.sth parses")
+        .words
+}
+
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
+    let mut module = parse_without_prelude(tokens)?;
+    // Appended, not prepended: a file's own words keep their source order and
+    // their positions in `words`, which the parser's own tests index by.
+    module.words.extend(prelude_words());
+    Ok(module)
+}
+
+/// `parse` minus the prelude injection: the prelude itself is parsed through
+/// here, and the driver's multi-file path builds its own `Module` around
+/// `parse_bodies` and injects the prelude at that level instead.
+fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut structs = Vec::new();
     // Slice 9 (R2): the builtin `bool` enum occupies the reserved head of the
     // registry (`BOOL_ENUM_ID`) ahead of any user enum this file declares.
@@ -678,6 +707,14 @@ struct PolyBuilder {
     /// quotation effect (R4), so both live in the same id space.
     row_names: Vec<String>,
     row_index: HashMap<String, u32>,
+    /// Slice 10c (R-P2-1): a row named on a quotation effect's *output* side
+    /// may denote the signature's own top-level output row named only later
+    /// in the signature (e.g. `..o` in `~[ ..i -- ..o ]`, on a word whose
+    /// top-level output is `-- ..o`). Such a mention is interned optimistically
+    /// and its (id, name, span) recorded here; `validate_pending_quotation_rows`
+    /// checks each one once the whole signature is known, since only then can
+    /// "is this the signature's own top-level row" be answered.
+    pending_quotation_rows: Vec<(u32, String, Span)>,
 }
 
 impl PolyBuilder {
@@ -708,15 +745,57 @@ impl PolyBuilder {
     }
 
     /// Slice 10a (R4): a `..`-prefixed name mentioned inside a quotation
-    /// effect must already denote the signature's own top-level row -- a
-    /// fresh name, or any row when the signature declared none at top level,
-    /// is a located error (the id table is empty in the latter case, so a
-    /// lookup miss covers both).
+    /// effect's *input* side must already denote the signature's own
+    /// top-level row -- a fresh name, or any row when the signature declared
+    /// none at top level, is a located error. This stays strict/immediate
+    /// (unlike the output-side sibling below): the stack region present when
+    /// a quotation *begins* executing can only ever be a row already declared
+    /// by this point in the signature (10c R-P2-1's forward reference is
+    /// specifically for a row named only later, which describes what a
+    /// quotation *leaves*, never what it starts with).
+    ///
+    /// Review fix: this checks `self.row_in`/`self.row_out` directly, not
+    /// mere presence in `row_index`. `row_index` also holds names optimistically
+    /// interned by `quotation_row_id_deferred` for a *sibling* quotation's
+    /// output side, not yet confirmed by `validate_pending_quotation_rows`; a
+    /// bare `row_index` lookup let one quotation's still-unconfirmed output
+    /// mention leak into a later quotation's strict input-side check, accepting
+    /// or rejecting the same signature depending on clause order.
     fn quotation_row_id(&mut self, name: &str, span: Span) -> Result<u32, String> {
         self.row_index
             .get(name)
             .copied()
+            .filter(|id| Some(*id) == self.row_in || Some(*id) == self.row_out)
             .ok_or_else(|| quotation_row_not_top_level_error(name, span))
+    }
+
+    /// Slice 10c (R-P2-1): a `..`-prefixed name mentioned on a quotation
+    /// effect's *output* side may denote the signature's own top-level output
+    /// row, named only later in the signature (`~[ ..i -- ..o ]` parsed while
+    /// still inside the word's input side, `..o` not yet bound by `set_row`).
+    /// Intern it optimistically and defer the "is this actually one of the
+    /// signature's own top-level rows" check to `validate_pending_quotation_rows`,
+    /// once the whole signature -- including a top-level row declared after
+    /// this point -- is known.
+    fn quotation_row_id_deferred(&mut self, name: &str, span: Span) -> u32 {
+        let id = self.row_id(name);
+        self.pending_quotation_rows
+            .push((id, name.to_string(), span));
+        id
+    }
+
+    /// Slice 10c (R-P2-1): resolve every deferred output-side row mention
+    /// against the now-complete signature. A mention that is neither the
+    /// top-level input nor output row is a fresh name (or a row belonging to
+    /// no top-level side at all) and is rejected exactly as the strict,
+    /// immediate check rejects one on the input side.
+    fn validate_pending_quotation_rows(&self) -> Result<(), String> {
+        for (id, name, span) in &self.pending_quotation_rows {
+            if Some(*id) != self.row_in && Some(*id) != self.row_out {
+                return Err(quotation_row_not_top_level_error(name, *span));
+            }
+        }
+        Ok(())
     }
 
     /// Intern a type variable, returning its id and whether this is its
@@ -1253,6 +1332,11 @@ impl<'t> Parser<'t> {
         self.expect_word("--")?;
         let raw_out =
             self.parse_poly_slots(&mut builder, true, |tok| matches!(tok, Token::RParen))?;
+        // Slice 10c (R-P2-1): the whole signature is known now -- resolve
+        // every quotation effect's deferred output-side row mention against
+        // it (a mention that turned out to name neither top-level row is a
+        // located error here, not at the point it was first seen).
+        builder.validate_pending_quotation_rows()?;
         let inputs = raw_in
             .into_iter()
             .map(|r| self.raw_to_poly_type(r))
@@ -1288,7 +1372,7 @@ impl<'t> Parser<'t> {
                 Some((Token::Word(w), span)) if w.starts_with("..") => {
                     return Err(row_var_misplaced_error(w, *span));
                 }
-                _ => slots.push(self.parse_poly_slot(builder)?),
+                _ => slots.push(self.parse_poly_slot(builder, is_output)?),
             }
         }
         Ok(slots)
@@ -1296,21 +1380,29 @@ impl<'t> Parser<'t> {
 
     /// One polymorphic type slot: an array (whose element and/or count may be a
     /// variable), a type variable (with an optional bound at its binding
-    /// occurrence), or a plain concrete type expression.
-    fn parse_poly_slot(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+    /// occurrence), or a plain concrete type expression. `word_is_output` is
+    /// which top-level side of the *enclosing word's* signature this slot sits
+    /// on -- threaded down to a nested quotation effect, since Slice 10c
+    /// (R-P2-2) only lifts the same-row rule for a quotation on the word's
+    /// input side (a parameter), never its output side (R-P2-5).
+    fn parse_poly_slot(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
         // Slice 10a (R1): `~[` has already consumed the opening bracket as
         // one token, so its entry point skips straight to the inner parse
         // rather than going through `parse_poly_quotation`'s own
         // `expect(LBracket)`.
         if matches!(self.peek(), Some((Token::TildeLBracket, _))) {
             self.pos += 1;
-            return self.parse_poly_quotation_inner(builder, true);
+            return self.parse_poly_quotation_inner(builder, true, word_is_output);
         }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             if self.quotation_type_ahead() {
-                return self.parse_poly_quotation(builder);
+                return self.parse_poly_quotation(builder, word_is_output);
             }
-            return self.parse_poly_array(builder);
+            return self.parse_poly_array(builder, word_is_output);
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
@@ -1348,9 +1440,13 @@ impl<'t> Parser<'t> {
     /// Slice 6a (R2/R5): a polymorphic quotation effect `[ <in> -- <out> ]`
     /// whose rows recurse through `parse_poly_slot`, so a `'T` element variable
     /// is interned into `builder` exactly as it is in an ordinary slot.
-    fn parse_poly_quotation(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+    fn parse_poly_quotation(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
         self.expect(Token::LBracket)?;
-        self.parse_poly_quotation_inner(builder, false)
+        self.parse_poly_quotation_inner(builder, false, word_is_output)
     }
 
     /// The body of a polymorphic quotation effect, positioned just past its
@@ -1363,14 +1459,25 @@ impl<'t> Parser<'t> {
         &mut self,
         builder: &mut PolyBuilder,
         is_inline: bool,
+        word_is_output: bool,
     ) -> Result<RawTy, String> {
-        let (inputs, row_in, row_in_span) = self.parse_poly_quot_list(builder, true)?;
+        let (inputs, row_in, row_in_span) =
+            self.parse_poly_quot_list(builder, true, word_is_output)?;
         self.expect_word("--")?;
-        let (outputs, row_out, row_out_span) = self.parse_poly_quot_list(builder, false)?;
+        let (outputs, row_out, row_out_span) =
+            self.parse_poly_quot_list(builder, false, word_is_output)?;
         self.expect(Token::RBracket)?;
-        // R5: both sides or neither, and (for 10a) the same row.
+        // R5: both sides or neither. For 10a's loop-body shape (a back-edge
+        // fixed point) the row must be the same on both sides; Slice 10c
+        // (R-P2-2) lifts that for an *input-side* quotation parameter of a
+        // quotation-taking (always-inlined) word, whose shape change is
+        // splice-local (INV-INLINE-COMBINATOR) and never rides a back-edge.
+        // An output-side quotation (R-P2-5, a word *returning* an inline
+        // quotation) keeps the same-row rule: it is not a parameter, so the
+        // splice-local justification does not apply.
+        let shape_change_lifted = is_inline && !word_is_output;
         match (row_in, row_out) {
-            (Some(a), Some(b)) if a != b => {
+            (Some(a), Some(b)) if a != b && !shape_change_lifted => {
                 return Err(quotation_row_shape_change_error(
                     &builder.row_names[a as usize],
                     &builder.row_names[b as usize],
@@ -1405,6 +1512,7 @@ impl<'t> Parser<'t> {
         &mut self,
         builder: &mut PolyBuilder,
         stop_on_arrow: bool,
+        word_is_output: bool,
     ) -> Result<(Vec<RawTy>, Option<u32>, Option<(String, Span)>), String> {
         let mut row = None;
         let mut row_span = None;
@@ -1412,7 +1520,16 @@ impl<'t> Parser<'t> {
             if w.starts_with("..") {
                 let (w, span) = (w.clone(), *span);
                 self.pos += 1;
-                row = Some(builder.quotation_row_id(&w, span)?);
+                // Slice 10c (R-P2-1): the quotation's own *input* side must
+                // already denote a known row (strict, immediate); its *output*
+                // side may forward-reference the signature's own top-level
+                // output row, named only later (deferred, validated once the
+                // whole signature is parsed).
+                row = Some(if stop_on_arrow {
+                    builder.quotation_row_id(&w, span)?
+                } else {
+                    builder.quotation_row_id_deferred(&w, span)
+                });
                 row_span = Some((w, span));
             }
         }
@@ -1425,7 +1542,7 @@ impl<'t> Parser<'t> {
                 Some((Token::Word(w), span)) if w.starts_with("..") => {
                     return Err(row_var_misplaced_error(w, *span));
                 }
-                _ => out.push(self.parse_poly_slot(builder)?),
+                _ => out.push(self.parse_poly_slot(builder, word_is_output)?),
             }
         }
         Ok((out, row, row_span))
@@ -1434,9 +1551,13 @@ impl<'t> Parser<'t> {
     /// A polymorphic array `[ elem count ]`: `elem` recurses (so `['T 'N]`
     /// nests a variable element), `count` is a decimal literal or a length
     /// variable `'N`.
-    fn parse_poly_array(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+    fn parse_poly_array(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
         self.expect(Token::LBracket)?;
-        let elem = self.parse_poly_slot(builder)?;
+        let elem = self.parse_poly_slot(builder, word_is_output)?;
         let count = match self.peek().cloned() {
             Some((Token::Word(w), span)) if w.starts_with('\'') => {
                 self.pos += 1;
@@ -2217,35 +2338,15 @@ impl<'t> Parser<'t> {
                 kind: TermKind::Call("False".to_string()),
                 span,
             }),
-            Token::Word(w) if w == "if" => {
-                let then_branch = self
-                    .parse_terms("`else` or `end` (unterminated `if`)", |tok| {
-                        is_word(tok, "else") || is_word(tok, "end")
-                    })?;
-                let mut else_span = None;
-                let else_branch = match self.peek() {
-                    Some((tok, at)) if is_word(tok, "else") => {
-                        else_span = Some(*at);
-                        self.pos += 1;
-                        self.parse_terms("`end` (unterminated `if`/`else`)", |tok| {
-                            is_word(tok, "end")
-                        })?
-                    }
-                    _ => Vec::new(),
-                };
-                let end_span = self.expect_word("end")?;
-                Ok(Term {
-                    kind: TermKind::If {
-                        then_branch,
-                        else_branch,
-                        else_span,
-                        end_span,
-                    },
-                    span,
-                })
-            }
+            // Slice 10c (R-P3-5): `if`/`else`/`end` was the last construct the
+            // grammar knew. `if` is an ordinary `lib/` word now, spelled
+            // postfix over two quotations (`[ T ] [ E ] if`), so `if` here is
+            // just a `Call` like any other and `else`/`end` mean nothing at
+            // all -- named explicitly rather than left to the generic
+            // unknown-word error, since that is the diagnostic a source
+            // written against the old grammar needs.
             Token::Word(w) if w == "end" || w == "else" => Err(format!(
-                "parse error: `{w}` without a matching `if` at line {}, col {}",
+                "parse error: `{w}` is not a word; `if` is an ordinary word taking two quotations (`[ then ] [ else ] if`) at line {}, col {}",
                 span.line, span.col
             )),
             Token::Word(w) => Ok(Term {
@@ -2385,7 +2486,7 @@ mod tests {
     fn parse_gcd_shape_matches_ast() {
         let src = std::fs::read_to_string("examples/gcd.sth").unwrap();
         let module = parse_src(&src).unwrap();
-        assert_eq!(module.words.len(), 2);
+        assert_eq!(module.words.len(), 2 + crate::parser::prelude_words().len());
 
         let gcd = &module.words[0];
         assert_eq!(gcd.name, "gcd");
@@ -2394,24 +2495,24 @@ mod tests {
         assert_eq!(gcd.effect.inputs.len(), 2);
         assert_eq!(gcd.effect.outputs.len(), 1);
 
-        // | a b | b 0 = if a else b a b mod gcd end
-        assert_eq!(gcd_body.len(), 5);
+        // | a b | b 0 = [ a ] [ b a b mod gcd ] if
+        assert_eq!(gcd_body.len(), 7);
         assert!(matches!(&gcd_body[0].kind, TermKind::Bind(_)));
         assert!(matches!(&gcd_body[1].kind, TermKind::Call(w) if w == "b"));
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
         assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "="));
         match &gcd_body[4].kind {
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
+            TermKind::Quotation(then_branch) => {
                 assert_eq!(then_branch.len(), 1);
                 assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "a"));
-                assert_eq!(else_branch.len(), 5);
             }
-            other => panic!("expected If, got {other:?}"),
+            other => panic!("expected the `then` quotation, got {other:?}"),
         }
+        match &gcd_body[5].kind {
+            TermKind::Quotation(else_branch) => assert_eq!(else_branch.len(), 5),
+            other => panic!("expected the `else` quotation, got {other:?}"),
+        }
+        assert!(matches!(&gcd_body[6].kind, TermKind::Call(w) if w == "if"));
 
         let main = &module.words[1];
         assert_eq!(main.name, "main");
@@ -2482,14 +2583,17 @@ mod tests {
         assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
     }
 
+    /// Slice 10c (E-P3-2): the `if`/`else`/`end` grammar is gone. `else`/`end`
+    /// are not words, and a source written against the old grammar gets a
+    /// diagnostic naming the replacement rather than a bare unknown word.
     #[test]
-    fn parse_if_without_else_has_empty_else_branch() {
-        let module = parse_src(": w ( i64 -- i64 ) if 1 end ;").unwrap();
-        let body = terms_body(&module.words[0]);
-        match &body[0].kind {
-            TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
-            other => panic!("expected If, got {other:?}"),
-        }
+    fn parse_if_else_end_grammar_is_error() {
+        let err = parse_src(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap_err();
+        assert!(err.contains("`else`"), "unexpected message: {err}");
+        assert!(
+            err.contains("[ then ] [ else ] if"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
@@ -2565,20 +2669,33 @@ mod tests {
         assert!(result.unwrap_err().contains("end"));
     }
 
+    /// Slice 10c: `>=` is spelled with a leading `>` but is a comparison, and
+    /// since R-P3-3 moved it out of `BUILTIN_TABLE` nothing claims it before
+    /// `check_operator`'s `>T` conversion prefix test. Without the carve-out
+    /// there it reads as a conversion to a type named `=`.
     #[test]
-    fn parse_then_no_longer_closes_if() {
-        let result = parse_src(": w ( i64 -- i64 ) if 1 then ;");
-        assert!(
-            result.is_err(),
-            "`then` must no longer close `if`; got {result:?}"
-        );
+    fn ge_is_not_read_as_a_type_conversion() {
+        let module = parse_src(": w ( i64 i64 -- bool ) >= ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == ">="));
+        crate::check::check(
+            &mut parse_src(": w ( i64 i64 -- bool ) >= ;\n: main ( -- ) 1 2 w drop ;").unwrap(),
+        )
+        .expect("`>=` resolves to the library comparison word");
     }
 
+    /// Slice 10c (E-P3-2): `if` is an ordinary word now, so it opens nothing
+    /// and there is no unterminated form to report. What used to be
+    /// `parse_then_no_longer_closes_if` / `..._unterminated_if_...` — both
+    /// guards on the deleted grammar's terminator handling — becomes this: the
+    /// bare word parses, and the arity failure is the checker's, at the call
+    /// site, not the parser's.
     #[test]
-    fn parse_unterminated_if_reports_if_not_semicolon() {
-        let result = parse_src(": w ( -- ) if 1");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unterminated `if`"));
+    fn parse_bare_if_is_an_ordinary_call() {
+        let module = parse_src(": w ( i64 -- i64 ) if ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "if"));
     }
 
     fn parse_line_src(src: &str) -> Result<Line, String> {
@@ -3557,6 +3674,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_row_in_quotation_effect_shape_change_for_input_side_combinator_parses() {
+        // Slice 10c (R-P2-2/R-P2-5): a quotation *parameter* (input side of
+        // the word) of a quotation-taking (always-inlined) word may declare
+        // differing rows -- `..i` (already a known top-level row by the time
+        // this parameter is reached) and `..o` (a forward reference to the
+        // signature's own top-level output row, named only later, admitted by
+        // R-P2-1's deferred check). The shape change is splice-local
+        // (INV-INLINE-COMBINATOR), never a carried region on a back-edge, so
+        // it is not the 10a same-row restriction's concern.
+        let module = parse_src(
+            ": myif ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o ) \
+             | e | | t | | c | c [ t call ] [ e call ] if ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.row_in.is_some());
+        assert!(sig.row_out.is_some());
+        assert_ne!(
+            sig.row_in, sig.row_out,
+            "the word's own top-level rows genuinely differ"
+        );
+        for input in &sig.inputs {
+            if let PolyType::Quotation(_, _, is_inline, row_in, row_out) = input {
+                assert!(*is_inline);
+                assert_eq!(*row_in, sig.row_in);
+                assert_eq!(*row_out, sig.row_out);
+            }
+        }
+    }
+
+    #[test]
     fn parse_row_in_quotation_effect_naming_an_output_only_row_from_the_input_side_is_error() {
         // Review fix (cycle 3): a row named only on the signature's *output*
         // side, referenced from a nested quotation effect on the *input*
@@ -3574,6 +3722,44 @@ mod tests {
             !err.contains("none of that name is declared"),
             "message must not claim the name isn't declared anywhere: {err}"
         );
+    }
+
+    #[test]
+    fn parse_row_in_quotation_effect_second_quotation_input_side_order_dependent_is_error() {
+        // Review fix: a prior quotation's *deferred* output-side mention of
+        // `..o` (not yet confirmed against the top-level row_out, which is
+        // still unset here -- this is entirely on the word's input side)
+        // used to leak into `row_index`, letting a *later* sibling
+        // quotation's strict input-side check accept `..o` even though no
+        // top-level row is bound to it yet at this point in the signature.
+        // Removing the first quotation (the only thing that had interned
+        // `..o`) must not change whether the second one is accepted.
+        let err = parse_src(": f ( ..i bool ~[ ..o -- ..o ] -- ..o ) | c | c call ;").unwrap_err();
+        assert!(err.contains("..o"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
+
+        let err = parse_src(
+            ": f ( ..i bool ~[ ..i -- ..o ] ~[ ..o -- ..o ] -- ..o ) \
+             | d | | c | c call d call ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("..o"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_row_in_quotation_effect_output_side_row_fresh_name_is_error() {
+        // Review fix: `validate_pending_quotation_rows` (the deferred
+        // check for a row named on a quotation effect's *output* side) had
+        // no coverage of its own -- neutering its rejection failed no test
+        // in the suite. `..t` is optimistically interned (so it parses past
+        // R4's immediate check) but is neither of the signature's own
+        // top-level rows (both are `..s`), so it must still be rejected once
+        // the whole signature is known.
+        let err =
+            parse_src(": f ( ..s i64 ~[ ..s i64 -- ..t ] -- ..s ) drop drop drop ;").unwrap_err();
+        assert!(err.contains("..t"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
     }
 
     #[test]

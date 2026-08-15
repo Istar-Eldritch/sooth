@@ -1,0 +1,50 @@
+\ The words the compiler used to know. Every program sees these without an
+\ `import:`, exactly as it sees `bool`; nothing else about them is special.
+\
+\ The compiler is left with three machine-level primitives: `branch`, which
+\ jumps on a 32-bit flag and takes two quotations; `tag`, which reads a
+\ payload-free enum's discriminant as that flag; and the six comparison
+\ primitives `u=`/`u</`u>`/`u<=`/`u>=`/`u<>`, which produce it. Everything
+\ typed -- `bool`, `if`, `unless`, `=` -- is written here, in Sooth.
+
+\ The comparisons. Each is `'T: Copy Ord`-polymorphic, so one definition
+\ covers the whole numeric tower rather than narrowing the language to `i64`,
+\ and each is `inline`, so it is spliced at its call site: without that every
+\ comparison in every program would become a real call with a frame. The
+\ branch-and-construct body is also what makes an invalid `bool` impossible to
+\ build -- there is deliberately no operation turning a machine word back into
+\ an enum, only these two named variants.
+: =  inline ( 'T: Copy Ord 'T -- bool ) u=  [ true ] [ false ] branch ;
+: <  inline ( 'T: Copy Ord 'T -- bool ) u<  [ true ] [ false ] branch ;
+: >  inline ( 'T: Copy Ord 'T -- bool ) u>  [ true ] [ false ] branch ;
+: <= inline ( 'T: Copy Ord 'T -- bool ) u<= [ true ] [ false ] branch ;
+: >= inline ( 'T: Copy Ord 'T -- bool ) u>= [ true ] [ false ] branch ;
+: <> inline ( 'T: Copy Ord 'T -- bool ) u<> [ true ] [ false ] branch ;
+
+\ `if` reads its `bool`'s discriminant and branches on it. Both quotations are
+\ `~` (inline-only) and share the input row `..a` and the output row `..b`, so
+\ a branch may change the stack shape as long as both agree; the shape change
+\ is splice-local and reconciled by the branch's own join.
+\
+\ The locals are spelled out rather than abbreviated because this body is
+\ checked against the whole program's word environment: a local may not shadow
+\ a callable name, so a one-letter local here would collide with any program
+\ that happens to define a word `t`. They are also prefixed `if--`/`unless--`
+\ rather than left as plain `cond`/`then-arm`/`else-arm`: `cond` is DESIGN.md's
+\ documented future multi-way branch word, so a bare `cond` local here would
+\ collide with the very word this file is meant to grow. (The underlying gap
+\ -- prelude-word locals have no hygiene against user or future stdlib names
+\ at all -- is not fixed by this; it is a separate slice.)
+\
+\ Its tail term is `branch`, whose tail-called parameters are both quotations,
+\ so a caller's `... [ base ] [ ... rec ] if` self-tails through it and lowers
+\ to a loop back-edge rather than recursion.
+: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+  | if--else-arm | | if--then-arm | | if--cond |
+  if--cond tag if--then-arm if--else-arm branch ;
+
+\ `unless` is `if` with the arms swapped: the first quotation runs when the
+\ condition is false.
+: unless ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+  | unless--else-arm | | unless--then-arm | | unless--cond |
+  unless--cond tag unless--else-arm unless--then-arm branch ;

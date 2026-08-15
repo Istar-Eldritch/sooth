@@ -51,7 +51,7 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n: drop ( Spy -- )  | s | \"drop \" .
 /// process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < if from f call from 1 + to f times-helper else end ;\n\
+     from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
      : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -322,10 +322,10 @@ fn two_aggregates_swapped_across_back_edge_stay_correct() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box Box -- Box )\n\
            | n a b |\n\
-           n 0 = if b else\n\
+           n 0 = [ b ] [\n\
              a Box>n .\n\
              n 1 - b a loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 4 1 mk 2 mk loop Box>n . ;\n",
         false,
     );
@@ -341,7 +341,7 @@ fn aggregate_carried_loop_runs_in_constant_stack() {
     // no per-iteration stack bump.
     let src = "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
-         : loop ( i64 Box -- Box ) | n b | n 0 = if b else n 1 - n mk loop end ;\n\
+         : loop ( i64 Box -- Box ) | n b | n 0 = [ b ] [ n 1 - n mk loop ] if ;\n\
          : main ( -- ) 1000000 0 mk loop Box>n . ;\n";
     assert_eq!(
         run_stack_bounded_src("aggloop", src),
@@ -361,7 +361,7 @@ fn forwarded_aggregate_reads_its_seeded_value() {
         "seeded",
         "type: Box n i64 ;\n\
          : mk ( i64 -- Box ) | n | n Box ;\n\
-         : loop ( i64 Box -- Box ) | n prev | n 0 = if prev else n 1 - prev loop end ;\n\
+         : loop ( i64 Box -- Box ) | n prev | n 0 = [ prev ] [ n 1 - prev loop ] if ;\n\
          : main ( -- ) 3 42 mk loop Box>n . ;\n",
         false,
     );
@@ -386,7 +386,7 @@ fn recursive_type_destructor_disposes_right_contents() {
          : push-front ( List Res -- List ) | rest v | v rest ^ Cons ;\n\
          : build ( i64 List -- List )\n\
            | n acc |\n\
-           n 0 = if acc else n 1 - acc n mkres push-front build end ;\n\
+           n 0 = [ acc ] [ n 1 - acc n mkres push-front build ] if ;\n\
          : main ( -- ) 3 Nil build drop ;\n",
         false,
     );
@@ -408,11 +408,11 @@ fn join_phi_over_carried_aggregate_survives() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box )\n\
            | n b |\n\
-           n 0 = if b else\n\
-             n 3 = if n mk else b end\n\
+           n 0 = [ b ] [\n\
+             n 3 = [ n mk ] [ b ] if\n\
              | c |\n\
              n 1 - c loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 5 0 mk loop Box>n . ;\n",
         false,
     );
@@ -434,11 +434,11 @@ fn struct_carried_across_back_edge_is_not_aliased() {
          : mk ( i64 -- Box ) | n | n n Box ;\n\
          : loop ( i64 Box -- Box )\n\
            | n prev |\n\
-           n 0 = if prev else\n\
+           n 0 = [ prev ] [\n\
              n mk | cur |\n\
              prev Box>a .\n\
              n 1 - cur loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 0 mk loop Box>a . ;\n",
         false,
     );
@@ -456,11 +456,11 @@ fn array_carried_across_back_edge_is_not_aliased() {
         ": mkarr ( i64 -- [i64 4] ) 4 fill ;\n\
          : loop ( i64 [i64 4] -- [i64 4] )\n\
            | n prev |\n\
-           n 0 = if prev else\n\
+           n 0 = [ prev ] [\n\
              n mkarr | cur |\n\
              &prev 0 &> @ .\n\
              n 1 - cur loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 0 mkarr loop drop ;\n",
         false,
     );
@@ -481,11 +481,11 @@ fn enum_carried_across_back_edge_is_not_aliased() {
          : get ( E -- i64 ) | Wrap ;\n\
          : loop ( i64 E -- E )\n\
            | n prev |\n\
-           n 0 = if prev else\n\
+           n 0 = [ prev ] [\n\
              n mk | cur |\n\
              prev get .\n\
              n 1 - cur loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 0 mk loop get . ;\n",
         false,
     );
@@ -506,11 +506,11 @@ fn destructor_carried_across_back_edge_disposes_right_contents() {
          : mk ( i64 -- Res ) | n | n Res ;\n\
          : loop ( i64 Res -- Res )\n\
            | n prev |\n\
-           n 0 = if prev else\n\
+           n 0 = [ prev ] [\n\
              n mk | cur |\n\
              prev drop\n\
              n 1 - cur loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 0 mk loop drop ;\n",
         false,
     );
@@ -531,10 +531,10 @@ fn nested_projection_carried_across_back_edge_is_not_aliased() {
          : mkseg ( i64 -- Segment ) | n | n n Vec2 n 100 * n Vec2 Segment ;\n\
          : loop ( i64 Segment Vec2 -- Vec2 )\n\
            | n s v |\n\
-           n 0 = if v else\n\
+           n 0 = [ v ] [\n\
              v Vec2>x .\n\
              n 1 - n mkseg s Segment>from loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 0 mkseg 99 99 Vec2 loop Vec2>x . ;\n",
         false,
     );
@@ -553,11 +553,11 @@ fn inline_constructed_aggregate_carried_across_back_edge_is_not_aliased() {
         "type: Vec2 x i64 y i64 ;\n\
          : loop ( i64 Vec2 -- Vec2 )\n\
            | n prev |\n\
-           n 0 = if prev else\n\
+           n 0 = [ prev ] [\n\
              n n Vec2 | cur |\n\
              prev Vec2>x .\n\
              n 1 - cur loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 0 0 Vec2 loop Vec2>x . ;\n",
         false,
     );
@@ -584,16 +584,16 @@ fn back_edges_disagreeing_on_a_carried_slot_stage_independently() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box -- Box )\n\
            | n prev |\n\
-           n 0 = if prev else\n\
-             n 2 mod 0 = if\n\
+           n 0 = [ prev ] [\n\
+             n 2 mod 0 = [\n\
                n mk | cur |\n\
                prev Box>n .\n\
                n 1 - cur loop\n\
-             else\n\
+             ] [\n\
                prev Box>n .\n\
                n 1 - prev loop\n\
-             end\n\
-           end ;\n\
+             ] if\n\
+           ] if ;\n\
          : main ( -- ) 4 0 mk loop Box>n . ;\n",
         false,
     );
@@ -618,11 +618,11 @@ fn zero_size_aggregate_carried_across_back_edge_runs_correctly() {
          : mku ( -- Unit ) Unit ;\n\
          : loop ( i64 Unit -- Unit )\n\
            | n u |\n\
-           n 0 = if u else\n\
+           n 0 = [ u ] [\n\
              u drop\n\
              n .\n\
              n 1 - mku loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 3 Unit loop drop ;\n",
         false,
     );
@@ -647,10 +647,10 @@ fn three_aggregates_rotated_across_back_edge_stay_correct() {
          : mk ( i64 -- Box ) | n | n Box ;\n\
          : loop ( i64 Box Box Box -- Box )\n\
            | n a b c |\n\
-           n 0 = if a else\n\
+           n 0 = [ a ] [\n\
              a Box>n . b Box>n . c Box>n .\n\
              n 1 - c a b loop\n\
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 2 1 mk 2 mk 3 mk loop Box>n . ;\n",
         false,
     );
@@ -707,9 +707,12 @@ fn quotation_body_reads_enclosing_local() {
 #[test]
 fn different_quotations_at_a_join_are_error() {
     // R7: two `if` arms each leaving a *different* quotation merge at the join;
-    // reject there (not at consumption), since `lower_if` would build a `Phi`
-    // over two phantoms even when the merge is only `drop`ped.
-    let err = check_error(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n");
+    // reject there (not at consumption), since the branch lowering would build
+    // a `Phi` over two phantoms even when the merge is only `drop`ped. Slice
+    // 10c: the arms are quotation literals passed to a `lib/` word, so the
+    // join is located at the first arm rather than at `branch` itself, which
+    // sits in library source the user did not write.
+    let err = check_error(": main ( -- ) true [ [ 1 + ] ] [ [ 1 - ] ] if drop ;\n");
     assert!(
         err.contains("these two branches leave different quotations") && err.contains("line 1"),
         "R7 should fire at the join, got: {err}"
@@ -721,7 +724,7 @@ fn quotation_versus_value_at_a_join_is_error() {
     // R7n: one arm leaves a quotation, the other a *real* `cstr`. Their `ty`s
     // are equal (the placeholder is `Cstr`), so the ordinary branch mismatch
     // never fires; the join guard's second phrasing catches it.
-    let err = check_error(": main ( -- ) true if [ 1 + ] else \"x\" cstr end drop ;\n");
+    let err = check_error(": main ( -- ) true [ [ 1 + ] ] [ \"x\" cstr ] if drop ;\n");
     assert!(
         err.contains("one branch of the `if`")
             && err.contains("leaves a quotation and the other does not"),
@@ -818,11 +821,13 @@ fn quotation_as_operator_operand_is_error() {
 
 #[test]
 fn quotation_as_if_condition_is_error() {
-    // R11if: the `if` condition pop is guarded *before* the `cond.ty != Bool`
-    // return, so the message names `if`, not a `Bool` mismatch.
-    let err = check_error(": main ( -- ) [ + ] if 1 . else 2 . end ;\n");
+    // R11if: a quotation in the condition position is rejected naming the
+    // word, never leaking a `bool` mismatch. Slice 10c: `if` is a `lib/` word,
+    // so the rejection is the combinator argument guard's rather than the
+    // retired `if` arm's own -- same site, same guarantee, different wording.
+    let err = check_error(": main ( -- ) [ + ] [ 1 . ] [ 2 . ] if ;\n");
     assert!(
-        err.contains("`if`") && err.contains("cannot take a quotation as an operand"),
+        err.contains("`if`") && err.contains("a quotation cannot be passed to"),
         "R11if should name `if`, not a bool mismatch, got: {err}"
     );
     assert!(
@@ -1100,10 +1105,13 @@ fn times_example_matches_hand_threaded_countdown() {
 #[test]
 fn poly_mymax_runs_at_i64_and_f64() {
     // T9: `mymax`'s `'T: Copy Ord` body branches on `>`, instantiated at `i64`
-    // and `f64` in one program.
+    // and `f64` in one program. Slice 10c: `inline`, because `if` is an
+    // ordinary word taking two quotation literals and a non-spliced
+    // polymorphic body rejects a quotation outright; the branch runs through
+    // the ordinary splice now.
     let (stdout, code) = run_src(
         "poly-mymax",
-        ": mymax ( 'T: Copy Ord 'T -- 'T ) over over > if drop else swap drop end ;\n\
+        ": mymax inline ( 'T: Copy Ord 'T -- 'T ) over over > [ drop ] [ swap drop ] if ;\n\
          : main ( -- ) 3 7 mymax . 3.0 7.0 mymax . ;\n",
         false,
     );
@@ -1118,7 +1126,7 @@ fn poly_choose_runs_at_i64_and_f64() {
     // operand.
     let (stdout, code) = run_src(
         "poly-choose",
-        ": choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;\n\
+        ": choose inline ( 'T 'T bool -- 'T ) | a b flag | flag [ a b drop ] [ b a drop ] if ;\n\
          : main ( -- ) 1 2 true choose . 1.0 2.0 false choose . ;\n",
         false,
     );

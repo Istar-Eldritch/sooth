@@ -116,11 +116,11 @@ type: VmPop vm Vm val i64 ;
 | Jz    | vm target |
     vm vm-pop VmPop>           \ vm' x
     0 =
-    if
+    [
       target Vm<pc
-    else
+    ] [
       bump-pc
-    end
+    ] if
     fetch Fetched> run
 | Jmp   | vm target |
     vm target Vm<pc
