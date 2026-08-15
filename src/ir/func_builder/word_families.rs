@@ -797,7 +797,7 @@ mod tests {
         // about what it points at, so the join has to carry the referent shape
         // across or the projection past it has no field offset to use.
         let ir = lower_src(
-            "type: V x i64 y i64 ;\n             : w ( bool -- i64 ) | c | 1 2 V | v | c if &v else &v end &V>x @ ;",
+            "type: V x i64 y i64 ;\n             : w ( bool -- i64 ) | c | 1 2 V | v | c [ &v ] [ &v ] if &V>x @ ;",
         );
         let w = &ir.funcs[0];
         let phi = instrs(w)

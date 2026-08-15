@@ -876,6 +876,100 @@ only place a register class is spelled. Requirement text says '32-bit unsigned'.
 
 ---
 
+### P3 as built: what the requirements did not anticipate
+
+Everything below was found by building P3, and each is load-bearing rather than
+incidental.
+
+**Where the library words live.** `lib/core.sth` is compiled into the binary
+(`include_str!`) and parsed once by `parser::prelude_words`, which both
+`parser::parse` and `driver::assemble_module` **append** to a module's words, and
+which `Session::new` seeds through the ordinary `eval_def` path. Appended, not
+prepended, so a file's own words keep their indices (the parser's tests read
+`words[0]`). `resolve::mangle` never mangles a prelude name, for the reason it
+never mangles `main`: they are declared once but reached by bare name from every
+module in a closure. The REPL's import path excludes them from `body_rename` on
+the same grounds `.` was already excluded.
+
+**`tag` needed an IR instruction, `Instr::Tag`.** The obvious alternatives both
+fail: reusing the operand's `Value` leaves it carrying `IrType::Enum`, so a later
+`.` on the result prints `true`/`false` instead of `1`/`0`, and `Instr::Conv` *is*
+the width conversion E-P3-3 forbids. `Instr::Tag` exists solely to give the
+discriminant an integer `IrType`; the backend emits a same-register `copy`, which
+QBE coalesces. Measured on `examples/gcd.sth` and on `: cmp ( i64 i64 -- i64 ) =
+[ 11 ] [ 22 ] if ;`: the latter's whole diamond folds to `cmpq; movl; movl;
+cmovnz`, no call and no frame, which is E-P3-4 part 3.
+
+**The `>=` collision is real and was caused by this slice.** With `>=` out of
+`BUILTIN_TABLE`, `check_operator`'s `>T` conversion prefix test claims it and
+rejects with `` unknown type `=` ``. It is not a lexer bug: `>=` lexes as one
+word. `conversion_target_name` carves it out by name, with the reasoning written
+at the carve-out; `parser::tests::ge_is_not_read_as_a_type_conversion` pins it.
+
+**A `~` branch arm is exempt from three argument-site rules, keyed on being a
+*tail-called* parameter slot, not on being a `~`.** `check_literal_against_
+declared_effect` is a conservative probe whose premise is that the callee may run
+the quotation any number of times — right for `times`' body, wrong for a branch
+arm, which runs at most once, in place, exactly as the deleted `if`/`else`/`end`
+arms did. So for a slot in the callee's tail-called-parameter set (R-P1-1's own
+machinery, exposed as `tail_called_param_slots`) the probe: walks the body with
+`back_edge = false`; keeps the caller's real row slots rather than type-only
+copies; and skips the D3 linear-capture and borrow-place rejections, all of which
+the splice itself then enforces properly through `check_branch_join`'s cloned
+scopes and `MaybeMoved` join. Discriminating on `is_inline` alone was tried and is
+wrong: it disarms the D3 rules for `times` (`poly_combinator_consuming_local_is_
+error` catches it). The probe also restores `scope.moves` afterwards, since two
+sibling arms are alternatives starting from the same move-state.
+
+**This closes P1's recorded combinator-argument splice hole.** Threading the real
+tail position into that probe is what stops it re-splicing a self-recursive branch
+arm forever; `collect_all_calls` now descends into quotation literals, so
+`check_combinator_cycles` still rejects a *non-tail* self-call that has moved into
+an arm rather than letting the inliner hang.
+
+**A polymorphic non-`inline` word can no longer branch.** `if` takes quotation
+literals and `poly_walk` rejects a quotation in a polymorphic body outright, so the
+capability moves to `inline` (which R-P3-3b just enabled). `examples/poly_if.sth`
+and the poly-branch tests are migrated by adding `inline`; their output is
+unchanged. Lifting `poly_walk`'s quotation rejection is a separate slice.
+
+**Keeping a user overload of a comparison name working took three changes**, since
+`lib/core.sth`'s `<` and a user's `: < ( Vec2 Vec2 -- bool )` now share a name:
+`check_generic_concrete_overlap` asks whether the concrete candidate's inputs could
+actually instantiate the generic signature (an `Ord`-bounded variable admits only
+the numeric tower) instead of comparing arity alone; `poly_sig_could_match` honours
+that same bound, so the library word does not claim `Vec2 Vec2 <`; and `check_term`
+falls through to the concrete lookup when no polymorphic candidate admits the
+operands, recording the resolved symbol in `builtin_overloads` so lowering emits a
+call rather than finding the name in its combinator env and splicing the library
+body.
+
+**D8's literal coercion had to be re-taught to the poly argument path.** `5 3
+>usize <` typed through `unify_pair`'s `LiteralSizeType` while `<` was a builtin
+row; as a `'T: Copy Ord` word the bare `5` pins `'T` to `i64` first and the `usize`
+operand reads as a conflict. `check_poly_combinator_args` now defers a fresh
+integer literal filling a bare type variable and unifies it last, against whatever
+the variable resolved to — restricted to `usize`/`isize`, exactly D8's domain, so
+`1 >i32 2 <>` stays the rejection it always was.
+
+**Diagnostics are located at the caller, not in `lib/core.sth`.** The branch join
+reports at the first arm literal (always the caller's own code) rather than at
+`branch`, whose span is library source the user did not write. `if`'s locals are
+spelled `else-arm`/`then-arm`/`cond` because a prelude body is checked against the
+whole program's environment and a local may not shadow a callable name — a
+one-letter local collides with any program defining a word `t`.
+
+**Reported, not done: ROADMAP item 12.** Its text says it lifts the
+polymorphic-`inline` policy gate and migrates "10c's *injected* `if`/`cond`". 10c
+lifts that gate (R-P3-3b), `if` is an ordinary `lib/` word rather than injected
+syntax, and `cond` is not shipped at all. ROADMAP.md is deliberately untouched by
+this slice.
+
+**`tests/qbe_baseline/` regenerated deliberately.** A library `=` is `Cmp` plus a
+diamond in IL, which the spec predicted; the machine code is what stays the same,
+and `tests/corpus_stdout/` (captured before the swap, per E-P3-6) is what pins
+behaviour across the migration.
+
 ## The whole-slice witness
 
 A program using `if`, `unless` and `while` entirely from `lib/`, self-tailing

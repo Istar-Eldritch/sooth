@@ -157,7 +157,7 @@ fn failed_redefinition_keeps_old_generation_resident() {
 #[test]
 fn sign_definable_and_callable_in_repl() {
     let out = run_session(&[
-        ": sign ( i64 -- i64 ) 0 > if 1 else 0 end ;",
+        ": sign ( i64 -- i64 ) 0 > [ 1 ] [ 0 ] if ;",
         "-7 sign",
         "7 sign",
     ]);
@@ -571,7 +571,7 @@ fn enum_declaration_errors_report_and_session_survives() {
 #[test]
 fn self_tail_recursive_word_completes_in_constant_stack_in_repl() {
     let out = run_session(&[
-        ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = if acc else acc n + n 1 - sum-to end ;",
+        ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = [ acc ] [ acc n + n 1 - sum-to ] if ;",
         "0 1000000 sum-to .",
     ]);
     let lines: Vec<&str> = out.lines().collect();
@@ -599,7 +599,7 @@ fn vm_dogfood_runs_in_repl() {
         ": vm-pop ( Vm -- VmPop ) | vm | vm Vm>sp 1 - | i | &vm &Vm>stack i &> @ | x | vm i Vm<sp x VmPop ;",
         ": bump-pc ( Vm -- Vm ) dup Vm>pc 1 + Vm<pc ;",
         ": fetch ( Vm -- Fetched ) | vm | vm Vm>pc | i | &vm &Vm>prog i &> @ | op | vm op Fetched ;",
-        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | &vm &Vm>mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> | v x | &!v &!Vm>mem addr &!> x ! v bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = if target Vm<pc else bump-pc end fetch Fetched> run | Jmp | vm target | vm target Vm<pc fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
+        ": run ( Vm Op -- i64 ) | Push | vm v | vm v vm-push bump-pc fetch Fetched> run | Add | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot + vm-push bump-pc fetch Fetched> run | Sub | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot - vm-push bump-pc fetch Fetched> run | Mul | vm | vm vm-pop VmPop> swap vm-pop VmPop> rot * vm-push bump-pc fetch Fetched> run | Load | vm addr | &vm &Vm>mem addr &> @ | x | vm x vm-push bump-pc fetch Fetched> run | Store | vm addr | vm vm-pop VmPop> | v x | &!v &!Vm>mem addr &!> x ! v bump-pc fetch Fetched> run | Jz | vm target | vm vm-pop VmPop> 0 = [ target Vm<pc ] [ bump-pc ] if fetch Fetched> run | Jmp | vm target | vm target Vm<pc fetch Fetched> run | Halt | vm | vm vm-pop VmPop> swap drop ;",
         ": build ( -- [Op 13] ) Halt 13 fill | prog | &!prog 0 >usize &!> 0 >usize Load ! &!prog 1 >usize &!> 11 >usize Jz ! &!prog 2 >usize &!> 1 >usize Load ! &!prog 3 >usize &!> 0 >usize Load ! &!prog 4 >usize &!> Add ! &!prog 5 >usize &!> 1 >usize Store ! &!prog 6 >usize &!> 0 >usize Load ! &!prog 7 >usize &!> 1 Push ! &!prog 8 >usize &!> Sub ! &!prog 9 >usize &!> 0 >usize Store ! &!prog 10 >usize &!> 0 >usize Jmp ! &!prog 11 >usize &!> 1 >usize Load ! prog ;",
         "build 0 >usize 0 8 fill 0 >usize 0 4 fill | mem | &!mem 0 >usize &!> 100000 ! mem Vm fetch Fetched> run .",
     ]);

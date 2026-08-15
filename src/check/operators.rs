@@ -44,6 +44,25 @@ pub(super) enum OpDispatch {
     NotOperator,
 }
 
+/// The target type name of a `>T` numeric conversion word (`>i8` -> `i8`), or
+/// `None` if `name` is not one.
+///
+/// `>=` is excluded by hand. It is spelled with a leading `>` but is a
+/// comparison, not a conversion; while it was a `BUILTIN_TABLE` row the table
+/// lookup claimed it before the prefix test ever ran, so the collision was
+/// latent. Slice 10c (R-P3-3) moves `>=` out of the table and into `lib/`,
+/// which exposes it: without this filter a bare `>=` is read as a conversion
+/// to a type named `=` and rejected with `` unknown type `=` `` instead of
+/// reaching the library word.
+fn conversion_target_name(name: &str) -> Option<&str> {
+    name.strip_prefix('>')
+        .filter(|rest| !rest.is_empty() && *rest != "=")
+}
+
+fn is_conversion_name(name: &str) -> bool {
+    conversion_target_name(name).is_some()
+}
+
 pub(super) fn check_operator(
     name: &str,
     span: Span,
@@ -74,24 +93,23 @@ pub(super) fn check_operator(
             | "not"
             | "shl"
             | "shr"
-            | "="
-            | "<"
-            | ">"
-            | "<="
-            | ">="
-            | "<>"
+            | "u="
+            | "u<"
+            | "u>"
+            | "u<="
+            | "u>="
+            | "u<>"
             | "max"
             | "max-total"
             | "."
-    ) || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
+    ) || is_conversion_name(name);
     // The unary members (`not`, print, the `>T` conversions) read only the
     // top; every other operator reads a pair, so its deeper operand at
     // `stack[n - 2]` is an operand of it too. Guarding the top alone lets a
     // quotation there fall through to `operand_pair_mismatch_error`, which
     // spells the `Cstr` placeholder into the message the audit exists to keep
     // hidden.
-    let is_unary =
-        matches!(name, "not" | ".") || name.strip_prefix('>').is_some_and(|r| !r.is_empty());
+    let is_unary = matches!(name, "not" | ".") || is_conversion_name(name);
     if is_operator && stack.last().is_some_and(|s| s.quot.is_some()) {
         return Err(reject_quotation_operand(ctx, span, name));
     }
@@ -125,7 +143,7 @@ pub(super) fn check_operator(
         // Not a table operator: the `>T` numeric conversions stay hand-written
         // (R0), dispatched by parsing the target type out of the name rather
         // than keyed on operand type, so no row can hold them.
-        let Some(rest) = name.strip_prefix('>').filter(|r| !r.is_empty()) else {
+        let Some(rest) = conversion_target_name(name) else {
             return Ok(OpDispatch::NotOperator);
         };
         let target = match Type::from_name(rest) {
@@ -254,7 +272,7 @@ pub(super) fn check_operator(
             stack.truncate(n - 2);
             stack.push(Slot::computed(a.ty));
         }
-        "=" | "<" | ">" | "<=" | ">=" | "<>" => {
+        "u=" | "u<" | "u>" | "u<=" | "u>=" | "u<>" => {
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
@@ -268,7 +286,7 @@ pub(super) fn check_operator(
                 None => operand_pair_mismatch_error(ctx, span, name, a.ty, b.ty),
             })?;
             stack.truncate(n - 2);
-            stack.push(Slot::computed(Type::BOOL));
+            stack.push(Slot::computed(Type::U32));
         }
         // R12 (S6): `max ( 'T 'T -- 'T )`, an internal `Ord` bound resolved
         // against the integer tower (`is_int`, which already includes
@@ -552,12 +570,14 @@ mod tests {
     }
     #[test]
     fn check_cmp_mixed_sign_is_error() {
-        // `u8` and `i8` fed to `<` names both differing operand types, via
-        // the same operand-pair-mismatch diagnostic.
+        // `u8` and `i8` fed to `<` names both differing operand types. Slice
+        // 10c: `<` is a `'T: Copy Ord` library word now, so the rejection is
+        // the variable-conflict one rather than the builtin operand-pair one;
+        // both operand types are still named.
         let src = ": w ( -- bool ) 200 >u8 5 >i8 < ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same numeric type"),
+            err.contains("resolved `'T` to both"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`u8`"), "unexpected message: {err}");
@@ -577,11 +597,13 @@ mod tests {
     }
     #[test]
     fn check_cmp_mixed_float_width_is_error() {
-        // X2: mixed float-width comparison names both operand types.
+        // X2: mixed float-width comparison names both operand types (slice
+        // 10c: through the library `<`'s variable conflict, see
+        // `check_cmp_mixed_sign_is_error`).
         let src = ": w ( -- bool ) 1.0 >f32 2.0 < ;";
         let err = check_src(src).unwrap_err();
         assert!(
-            err.contains("same numeric type"),
+            err.contains("resolved `'T` to both"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`f32`"), "unexpected message: {err}");
@@ -713,10 +735,12 @@ mod tests {
     }
     #[test]
     fn check_cmp_ne_mixed_type_is_error() {
-        let src = ": w ( -- bool ) 1 >i32 2 <> ;";
-        let err = check_src(src).unwrap_err();
+        // Slice 10c: D8's literal coercion covers the two size types only, so
+        // a fresh `2` beside an `i32` is still a mismatch; the rejection is
+        // now the library `<>`'s variable conflict.
+        let err = check_src(": w ( -- bool ) 1 >i32 2 <> ;").unwrap_err();
         assert!(
-            err.contains("same numeric type"),
+            err.contains("resolved `'T` to both"),
             "unexpected message: {err}"
         );
         assert!(err.contains("`i32`"), "unexpected message: {err}");
@@ -835,8 +859,8 @@ mod tests {
         // merge to a coercible literal: on the computed arm's runtime path a
         // computed `i64` would fill the `usize` output without `>usize` (X10).
         for src in [
-            ": w ( bool -- usize ) if 5 else 1 1 + end ;",
-            ": w ( bool -- usize ) if 1 1 + else 5 end ;",
+            ": w ( bool -- usize ) [ 5 ] [ 1 1 + ] if ;",
+            ": w ( bool -- usize ) [ 1 1 + ] [ 5 ] if ;",
         ] {
             let err = check_src(src).unwrap_err();
             assert!(err.contains("usize"), "unexpected message: {err}");
@@ -847,7 +871,7 @@ mod tests {
     fn check_usize_branch_merge_both_literals_coerces_ok() {
         // Both arms leave a literal, so the merged slot stays a coercible
         // literal and fills the `usize` output.
-        check_src(": w ( bool -- usize ) if 5 else 6 end ;").unwrap();
+        check_src(": w ( bool -- usize ) [ 5 ] [ 6 ] if ;").unwrap();
     }
     #[test]
     fn check_usize_call_argument_literal_coerces_ok() {

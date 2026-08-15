@@ -13,11 +13,11 @@ type: Summed rest List total i64 ;
 
 : build ( i64 List -- List )
   | n acc |
-  n 0 = if
+  n 0 = [
     acc
-  else
+  ] [
     n 1 - acc n push-front build
-  end ;
+  ] if ;
 
 : pop ( List -- Popped )
 | Nil   Nil 0 Popped
@@ -26,15 +26,15 @@ type: Summed rest List total i64 ;
 
 : sum-first ( List i64 i64 -- Summed )
   | l k acc |
-  k 0 = if
+  k 0 = [
     l acc Summed
-  else
+  ] [
     l pop Popped>
     acc +
     k 1 -
     swap
     sum-first
-  end ;
+  ] if ;
 
 : main ( -- )
   10 Nil build

@@ -64,7 +64,7 @@ fn check_error(src: &str) -> String {
 /// process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < if from f call from 1 + to f times-helper else end ;\n\
+     from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
      : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -108,7 +108,7 @@ fn if_inside_a_loop_reading_an_alias_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | a | arr | &a 0 >usize &> @ . true if &!arr 0 >usize &!> 9 ! else end arr drop ] times ;\n"
+         2 [ | i | a | arr | &a 0 >usize &> @ . true [ &!arr 0 >usize &!> 9 ! ] [ ] if arr drop ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -122,7 +122,7 @@ fn read_and_mutate_inside_a_looped_grant_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | true if a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop else end ] times ;\n"
+         2 [ | i | true [ a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop ] [ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -138,7 +138,7 @@ fn single_call_body_naming_the_alias_is_an_error() {
     let err = check_error(
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         [ true if a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop else end ] call ;\n",
+         [ true [ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop ] [ ] if ] call ;\n",
     );
     assert_aliased_by(&err, "arr", "a");
 }
@@ -153,7 +153,7 @@ fn write_only_across_a_back_edge_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | true if a | arr | &!arr 0 >usize &!> 9 ! arr drop else end ] times ;\n"
+         2 [ | i | true [ a | arr | &!arr 0 >usize &!> 9 ! arr drop ] [ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -172,11 +172,11 @@ fn two_level_execute_once_grant_still_accepted() {
         "6g-nest2",
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         true if\n\
-         true if\n\
+         true [\n\
+         true [\n\
          a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop\n\
-         else end\n\
-         else end ;\n",
+         ] [ ] if\n\
+         ] [ ] if ;\n",
     );
     assert_eq!(out, "9\n");
     assert_eq!(code, 0);

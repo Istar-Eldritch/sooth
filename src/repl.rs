@@ -280,17 +280,6 @@ fn rewrite_combinator_body_calls(terms: &[Term], rename: &HashMap<String, String
                 TermKind::Call(name) => {
                     TermKind::Call(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
                 }
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    else_span,
-                    end_span,
-                } => TermKind::If {
-                    then_branch: rewrite_combinator_body_calls(then_branch, rename),
-                    else_branch: rewrite_combinator_body_calls(else_branch, rename),
-                    else_span: *else_span,
-                    end_span: *end_span,
-                },
                 TermKind::Quotation(inner) => {
                     TermKind::Quotation(rewrite_combinator_body_calls(inner, rename))
                 }
@@ -996,6 +985,15 @@ impl Session {
         session
             .eval_def(crate::ast::bool_print_word_def(), &mut std::io::sink())
             .expect("the injected `bool` print word always checks and compiles");
+        // Slice 10c (R-P3-4): `lib/core.sth`'s words, seeded the same way, so
+        // a session sees `if`/`unless` and the six comparison words exactly as
+        // a compiled program does. All eight are always-spliced, so `eval_def`
+        // routes each to the combinator-retention path.
+        for word in crate::parser::prelude_words() {
+            session
+                .eval_def(word, &mut std::io::sink())
+                .expect("an injected `lib/core.sth` word always checks and compiles");
+        }
         session
     }
 
@@ -1989,8 +1987,18 @@ impl Session {
             // env-splice loop above skips it -- a spliced combinator's call
             // to bare `.` resolves against the session's own identical
             // injected copy with no rename needed, and no `q::.__importN`
-            // env row exists to rename it to.
-            .filter(|w| w.module == 0 && w.name != "main" && w.name != "drop" && w.name != ".")
+            // env row exists to rename it to. Slice 10c (R-P3-4): the
+            // `lib/core.sth` words are excluded on the same grounds; they are
+            // injected into the imported closure *and* seeded into the
+            // session, so renaming an imported `while`'s `if` would point it
+            // at a `q::if__importN` nothing defines.
+            .filter(|w| {
+                w.module == 0
+                    && w.name != "main"
+                    && w.name != "drop"
+                    && w.name != "."
+                    && !crate::resolve::is_prelude_word_name(&w.name)
+            })
             .map(|w| {
                 let raw = if multi {
                     w.name.strip_suffix("__m0").unwrap_or(&w.name)
@@ -2104,14 +2112,6 @@ impl Session {
                     if let Some(new) = self.rewrite_import_call(name, term.span)? {
                         *name = new;
                     }
-                }
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    self.rewrite_terms_imports(then_branch)?;
-                    self.rewrite_terms_imports(else_branch)?;
                 }
                 TermKind::Quotation(inner) => self.rewrite_terms_imports(inner)?,
                 _ => {}

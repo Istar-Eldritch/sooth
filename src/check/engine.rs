@@ -576,14 +576,6 @@ pub(super) fn capture_names_into(
                     out.insert(local.to_string());
                 }
             }
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                capture_names_into(then_branch, &mut shadowed.clone(), out);
-                capture_names_into(else_branch, &mut shadowed.clone(), out);
-            }
             TermKind::Quotation(inner) => {
                 capture_names_into(inner, &mut shadowed.clone(), out);
             }
@@ -663,35 +655,12 @@ impl Liveness {
                         Self::record_granted_use(&mut last_use, local, i, back_edge);
                     }
                 }
-                // A nested `if` arm is its own `check_terms` invocation with
-                // its own binds; here we only look for uses of names *this*
-                // list bound (or was granted), attributed to the containing
+                // A nested block is its own `check_terms` invocation with its
+                // own binds; here we only look for uses of names *this* list
+                // bound (or was granted), attributed to the containing
                 // top-level index (Q3's conservative max). Nested binds are
                 // not collected: they belong to the nested invocation's own
-                // scan.
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    Self::nested_uses(
-                        then_branch,
-                        &bound,
-                        outer_releasable,
-                        back_edge,
-                        i,
-                        &mut last_use,
-                    );
-                    Self::nested_uses(
-                        else_branch,
-                        &bound,
-                        outer_releasable,
-                        back_edge,
-                        i,
-                        &mut last_use,
-                    );
-                }
-                // Same treatment as an `if` arm: this is only a floor
+                // scan. This is only a floor
                 // (`capture_alive_names` extends it for a quotation the
                 // checker later finds is still reachable, bound or not).
                 TermKind::Quotation(inner) => {
@@ -739,28 +708,6 @@ impl Liveness {
                         Self::record_granted_use(last_use, local, at, back_edge);
                     }
                 }
-                TermKind::If {
-                    then_branch,
-                    else_branch,
-                    ..
-                } => {
-                    Self::nested_uses(
-                        then_branch,
-                        bound,
-                        outer_releasable,
-                        back_edge,
-                        at,
-                        last_use,
-                    );
-                    Self::nested_uses(
-                        else_branch,
-                        bound,
-                        outer_releasable,
-                        back_edge,
-                        at,
-                        last_use,
-                    );
-                }
                 TermKind::Quotation(inner) => {
                     Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
                 }
@@ -790,11 +737,6 @@ impl Liveness {
 pub(super) fn references(terms: &[Term], name: &str) -> bool {
     terms.iter().any(|term| match &term.kind {
         TermKind::Call(n) => call_local(n) == name,
-        TermKind::If {
-            then_branch,
-            else_branch,
-            ..
-        } => references(then_branch, name) || references(else_branch, name),
         TermKind::Quotation(inner) => references(inner, name),
         _ => false,
     })
@@ -1607,13 +1549,13 @@ mod tests {
         // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
         // both arms (one literal bound before the `if`, read in each) is safe:
         // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
-        let different = check_src(": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n")
+        let different = check_src(": main ( -- ) true [ [ 1 + ] ] [ [ 1 - ] ] if drop ;\n")
             .expect_err("two different quotations at a join should be rejected");
         assert!(
             different.contains("these two branches leave different quotations"),
             "the join guard should fire, got: {different}"
         );
-        check_src(": main ( -- ) [ + ] | q | true if q else q end drop ;\n")
+        check_src(": main ( -- ) [ + ] | q | true [ q ] [ q ] if drop ;\n")
             .expect("the same `Known` id in both arms is safe and must not error");
     }
     #[test]
@@ -1751,7 +1693,8 @@ mod tests {
     #[test]
     fn operator_dispatch_resolves_the_exact_row_type() {
         // Guards that resolution yields the right stack-effect type: a
-        // homogeneous op over `u8` yields `u8`, a comparison yields `bool`,
+        // homogeneous op over `u8` yields `u8`, a comparison yields the
+        // 32-bit flag,
         // `.` yields nothing. Note these all resolve identically through the
         // numeric fallback too, so this does *not* prove the table pass is
         // used; `check_not_on_literal_count_is_not_a_literal_for_fill` is the
@@ -1760,7 +1703,10 @@ mod tests {
             infer_src("5 >u8 3 >u8 +", &[]).unwrap(),
             vec![Type::from_name("u8").unwrap()]
         );
-        assert_eq!(infer_src("5 >u8 3 >u8 <", &[]).unwrap(), vec![Type::BOOL]);
+        // Slice 10c: the comparison *primitive*, which is what carries the
+        // per-numeric-type rows now; `<` is a `lib/` word over it and resolves
+        // through the word environment this bare-line helper does not build.
+        assert_eq!(infer_src("5 >u8 3 >u8 u<", &[]).unwrap(), vec![Type::U32]);
         assert_eq!(infer_src("5 .", &[]).unwrap(), Vec::<Type>::new());
     }
     #[test]
@@ -1983,11 +1929,11 @@ mod tests {
     fn back_edge_produces_ground_declared_outputs() {
         let src = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
                    | f | | to | | from |\n\
-                   from to < if\n\
+                   from to < [\n\
                    from f call\n\
                    from 1 + to f my-times\n\
-                   else\n\
-                   end ;\n\
+                   ] [\n\
+                   ] if ;\n\
                    : main ( -- ) 0 0 5 [ + ] my-times . ;\n";
         check_src(src)
             .expect("my-times checks: the back-edge produces the ground declared outputs");
@@ -2016,15 +1962,15 @@ mod tests {
     /// not to withhold from every ancestor indiscriminately.
     #[test]
     fn releasable_into_withholds_a_name_used_in_a_back_edge_body() {
-        let tokens = lex("a drop true if 1 . else end").expect("lexing should succeed");
+        let tokens = lex("a drop true [ 1 . ] [ ] if").expect("lexing should succeed");
         let terms = match crate::parser::parse_line(&tokens).expect("parsing should succeed") {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
         let at = terms
             .iter()
-            .position(|t| matches!(t.kind, TermKind::If { .. }))
-            .expect("the line ends in an `if`");
+            .position(|t| matches!(&t.kind, TermKind::Quotation(_)))
+            .expect("the line's block is a branch-arm quotation literal");
         let rest = &terms[at + 1..];
         let outer: HashSet<String> = ["a", "unused"].iter().map(|n| n.to_string()).collect();
         let live = Liveness::scan(&terms, &outer, true);

@@ -17,72 +17,120 @@ export function $sooth_main() {
 	%v0 =l copy 2
 	%v1 =l copy 5
 	%v2 =l copy 9
-	%v3 =l call $sooth_mono_mymax3__m0__t0_i64(l %v0, l %v1, l %v2)
-	call $printf(l $fmt, l %v3, ...)
-	%v4 =d copy d_2
-	%v5 =d copy d_5
-	%v6 =d copy d_9
-	%v7 =d call $sooth_mono_mymax3__m0__t0_f64(d %v4, d %v5, d %v6)
-	call $printf(l $ffmt, d %v7, ...)
-	ret
-}
-
-export function d $sooth_mono_mymax3__m0__t0_f64(d %v0, d %v1, d %v2) {
-@start
-	%v3 =w cgtd %v0, %v1
-	jnz %v3, @blk1, @blk2
-@blk1
-	%v4 =w cgtd %v0, %v2
-	jnz %v4, @blk4, @blk5
-@blk4
-	jmp @blk6
-@blk5
-	jmp @blk6
-@blk6
-	%v5 =d phi @blk4 %v0, @blk5 %v2
-	jmp @blk3
-@blk2
-	%v6 =w cgtd %v1, %v2
-	jnz %v6, @blk7, @blk8
-@blk7
-	jmp @blk9
-@blk8
-	jmp @blk9
-@blk9
-	%v7 =d phi @blk7 %v1, @blk8 %v2
-	jmp @blk3
-@blk3
-	%v8 =d phi @blk6 %v5, @blk9 %v7
-	ret %v8
-}
-
-export function l $sooth_mono_mymax3__m0__t0_i64(l %v0, l %v1, l %v2) {
-@start
 	%v3 =w csgtl %v0, %v1
 	jnz %v3, @blk1, @blk2
 @blk1
-	%v4 =w csgtl %v0, %v2
-	jnz %v4, @blk4, @blk5
-@blk4
-	jmp @blk6
-@blk5
-	jmp @blk6
-@blk6
-	%v5 =l phi @blk4 %v0, @blk5 %v2
+	%v6 =w copy 1
 	jmp @blk3
 @blk2
-	%v6 =w csgtl %v1, %v2
-	jnz %v6, @blk7, @blk8
-@blk7
-	jmp @blk9
-@blk8
-	jmp @blk9
-@blk9
-	%v7 =l phi @blk7 %v1, @blk8 %v2
+	%v7 =w copy 0
 	jmp @blk3
 @blk3
-	%v8 =l phi @blk6 %v5, @blk9 %v7
-	ret %v8
+	%v8 =w phi @blk1 %v6, @blk2 %v7
+	%v11 =w copy %v8
+	jnz %v11, @blk4, @blk5
+@blk4
+	%v12 =w csgtl %v0, %v2
+	jnz %v12, @blk7, @blk8
+@blk7
+	%v15 =w copy 1
+	jmp @blk9
+@blk8
+	%v16 =w copy 0
+	jmp @blk9
+@blk9
+	%v17 =w phi @blk7 %v15, @blk8 %v16
+	%v20 =w copy %v17
+	jnz %v20, @blk10, @blk11
+@blk10
+	jmp @blk12
+@blk11
+	jmp @blk12
+@blk12
+	%v21 =l phi @blk10 %v0, @blk11 %v2
+	jmp @blk6
+@blk5
+	%v22 =w csgtl %v1, %v2
+	jnz %v22, @blk13, @blk14
+@blk13
+	%v25 =w copy 1
+	jmp @blk15
+@blk14
+	%v26 =w copy 0
+	jmp @blk15
+@blk15
+	%v27 =w phi @blk13 %v25, @blk14 %v26
+	%v30 =w copy %v27
+	jnz %v30, @blk16, @blk17
+@blk16
+	jmp @blk18
+@blk17
+	jmp @blk18
+@blk18
+	%v31 =l phi @blk16 %v1, @blk17 %v2
+	jmp @blk6
+@blk6
+	%v32 =l phi @blk12 %v21, @blk18 %v31
+	call $printf(l $fmt, l %v32, ...)
+	%v33 =d copy d_2
+	%v34 =d copy d_5
+	%v35 =d copy d_9
+	%v36 =w cgtd %v33, %v34
+	jnz %v36, @blk19, @blk20
+@blk19
+	%v39 =w copy 1
+	jmp @blk21
+@blk20
+	%v40 =w copy 0
+	jmp @blk21
+@blk21
+	%v41 =w phi @blk19 %v39, @blk20 %v40
+	%v44 =w copy %v41
+	jnz %v44, @blk22, @blk23
+@blk22
+	%v45 =w cgtd %v33, %v35
+	jnz %v45, @blk25, @blk26
+@blk25
+	%v48 =w copy 1
+	jmp @blk27
+@blk26
+	%v49 =w copy 0
+	jmp @blk27
+@blk27
+	%v50 =w phi @blk25 %v48, @blk26 %v49
+	%v53 =w copy %v50
+	jnz %v53, @blk28, @blk29
+@blk28
+	jmp @blk30
+@blk29
+	jmp @blk30
+@blk30
+	%v54 =d phi @blk28 %v33, @blk29 %v35
+	jmp @blk24
+@blk23
+	%v55 =w cgtd %v34, %v35
+	jnz %v55, @blk31, @blk32
+@blk31
+	%v58 =w copy 1
+	jmp @blk33
+@blk32
+	%v59 =w copy 0
+	jmp @blk33
+@blk33
+	%v60 =w phi @blk31 %v58, @blk32 %v59
+	%v63 =w copy %v60
+	jnz %v63, @blk34, @blk35
+@blk34
+	jmp @blk36
+@blk35
+	jmp @blk36
+@blk36
+	%v64 =d phi @blk34 %v34, @blk35 %v35
+	jmp @blk24
+@blk24
+	%v65 =d phi @blk30 %v54, @blk36 %v64
+	call $printf(l $ffmt, d %v65, ...)
+	ret
 }
 
 function $sooth_oob_trap(l %line, l %idx, l %len) {

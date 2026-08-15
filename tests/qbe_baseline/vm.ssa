@@ -130,8 +130,8 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v4 =l alloc8 16
 	%v5 =l alloc8 16
 	blit %v1, %v4, 16
-	%v113 =l alloc8 320
-	%v122 =l alloc8 320
+	%v121 =l alloc8 320
+	%v130 =l alloc8 320
 	jmp @blk1
 @blk1
 	%v7 =l add %v4, 0
@@ -308,46 +308,56 @@ export function l $run__m0(:Vm %v0, :Op %v1) {
 	%v112 =w ceql %v110, %v111
 	jnz %v112, @blk23, @blk24
 @blk23
-	blit %v108, %v113, 320
-	%v114 =l add %v113, 208
-	storel %v106, %v114
+	%v115 =w copy 1
 	jmp @blk25
 @blk24
-	%v115 =:Vm call $bump.2d.pc__m0(:Vm %v108)
+	%v116 =w copy 0
 	jmp @blk25
 @blk25
-	%v116 =l phi @blk23 %v113, @blk24 %v115
-	%v117 =:Fetched call $fetch__m0(:Vm %v116)
-	%v118 =l add %v117, 0
-	%v119 =l add %v117, 320
-	blit %v118, %v3, 320
-	blit %v119, %v5, 16
+	%v117 =w phi @blk23 %v115, @blk24 %v116
+	%v120 =w copy %v117
+	jnz %v120, @blk26, @blk27
+@blk26
+	blit %v108, %v121, 320
+	%v122 =l add %v121, 208
+	storel %v106, %v122
+	jmp @blk28
+@blk27
+	%v123 =:Vm call $bump.2d.pc__m0(:Vm %v108)
+	jmp @blk28
+@blk28
+	%v124 =l phi @blk26 %v121, @blk27 %v123
+	%v125 =:Fetched call $fetch__m0(:Vm %v124)
+	%v126 =l add %v125, 0
+	%v127 =l add %v125, 320
+	blit %v126, %v3, 320
+	blit %v127, %v5, 16
 	blit %v3, %v2, 320
 	blit %v5, %v4, 16
 	jmp @blk1
 @blk9
-	%v120 =l add %v4, 8
-	%v121 =l loadl %v120
-	blit %v2, %v122, 320
-	%v123 =l add %v122, 208
-	storel %v121, %v123
-	%v124 =:Fetched call $fetch__m0(:Vm %v122)
-	%v125 =l add %v124, 0
-	%v126 =l add %v124, 320
-	blit %v125, %v3, 320
-	blit %v126, %v5, 16
+	%v128 =l add %v4, 8
+	%v129 =l loadl %v128
+	blit %v2, %v130, 320
+	%v131 =l add %v130, 208
+	storel %v129, %v131
+	%v132 =:Fetched call $fetch__m0(:Vm %v130)
+	%v133 =l add %v132, 0
+	%v134 =l add %v132, 320
+	blit %v133, %v3, 320
+	blit %v134, %v5, 16
 	blit %v3, %v2, 320
 	blit %v5, %v4, 16
 	jmp @blk1
 @blk10
-	%v127 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
-	%v128 =l add %v127, 0
-	%v129 =l add %v127, 320
-	%v130 =l loadl %v129
+	%v135 =:VmPop call $vm.2d.pop__m0(:Vm %v2)
+	%v136 =l add %v135, 0
+	%v137 =l add %v135, 320
+	%v138 =l loadl %v137
 	jmp @blk18
 @blk18
-	%v131 =l phi @blk10 %v130
-	ret %v131
+	%v139 =l phi @blk10 %v138
+	ret %v139
 }
 
 export function :arr_0 $build__m0() {

@@ -18,14 +18,24 @@ export function l $sign__m0(l %v0) {
 	%v2 =w csgtl %v0, %v1
 	jnz %v2, @blk1, @blk2
 @blk1
-	%v3 =l copy 1
+	%v5 =w copy 1
 	jmp @blk3
 @blk2
-	%v4 =l copy 0
+	%v6 =w copy 0
 	jmp @blk3
 @blk3
-	%v5 =l phi @blk1 %v3, @blk2 %v4
-	ret %v5
+	%v7 =w phi @blk1 %v5, @blk2 %v6
+	%v10 =w copy %v7
+	jnz %v10, @blk4, @blk5
+@blk4
+	%v11 =l copy 1
+	jmp @blk6
+@blk5
+	%v12 =l copy 0
+	jmp @blk6
+@blk6
+	%v13 =l phi @blk4 %v11, @blk5 %v12
+	ret %v13
 }
 
 export function $sooth_main() {

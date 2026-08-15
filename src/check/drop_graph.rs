@@ -99,12 +99,22 @@ pub(super) fn tail_position_calls<'a>(word: &'a WordDef, combs: &CombinatorIndex
 
 /// Slice 10c (R-P1-5): the lowering-side entry point onto the same walk, for
 /// the combinator splice, which holds a body and a name rather than a
-/// `WordDef`. `has_self_tail_call`'s builtin-name refusal is deliberately not
-/// applied here: a builtin-named combinator cannot exist (`check_operator`'s
-/// R11 guard rejects a quotation operand to a builtin name before the env
-/// combinator lookup runs), and the splice site's caller is the one deciding
-/// whether a *combinator* self-tails.
+/// `WordDef`.
+///
+/// R-P3-1b: it carries `has_self_tail_call`'s builtin-name refusal too. That
+/// used to be omitted on the grounds that a builtin-named combinator could not
+/// exist, since `check_operator`'s R11 guard rejects a quotation operand to any
+/// builtin name before the env combinator lookup runs -- with a standing note
+/// that nothing pinned it, so a narrowing of that guard would make the two
+/// passes disagree about whether a splice is a loop. `branch` is exactly that
+/// narrowing: it is the one builtin sanctioned to take quotation operands. So
+/// the refusal is applied here as well, and neither pass may now read a
+/// builtin name in tail position as a call to the enclosing word while the
+/// other refuses to.
 pub(crate) fn terms_tail_call_self(terms: &[Term], name: &str, combs: &CombinatorIndex) -> bool {
+    if is_builtin_word_name(name) {
+        return false;
+    }
     let binds = match combs.get(name) {
         Some(entry) => param_binds(terms, entry.inputs),
         None => HashMap::new(),
@@ -112,6 +122,22 @@ pub(crate) fn terms_tail_call_self(terms: &[Term], name: &str, combs: &Combinato
     let mut out = Vec::new();
     TailWalk::new(combs).collect(terms, &binds, &mut out);
     out.contains(&name)
+}
+
+/// Slice 10c (R-P1-1): which of always-spliced `name`'s declared parameter
+/// slots hold a quotation it `call`s in tail position — the same set the tail
+/// walk computes, for a consumer that wants the set itself rather than the
+/// callee names a walk reaches. Empty for a name that is not an always-spliced
+/// word, and for one whose provenance the walk declines to follow.
+///
+/// The argument-site literal check reads it to decide, per parameter, whether
+/// the literal it is about to walk really occupies the caller's tail position:
+/// `if`'s two arms do when the `if` does, `times`' body never does.
+pub(crate) fn tail_called_param_slots(name: &str, combs: &CombinatorIndex) -> Vec<usize> {
+    TailWalk::new(combs)
+        .tail_called_params(name)
+        .map(|(_, slots)| slots)
+        .unwrap_or_default()
 }
 
 fn declared_input_count(word: &WordDef) -> usize {
@@ -197,38 +223,34 @@ impl<'a> TailWalk<'a> {
             return;
         };
         let before = &terms[..terms.len() - 1];
-        match &last.kind {
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                self.walk(then_branch, binds, out);
-                self.walk(else_branch, binds, out);
-            }
-            TermKind::Call(name) => {
-                out.push(TailHit::Name(name.as_str()));
-                // Which of the callee's argument slots inherit this tail
-                // position: `call`'s single quotation operand, or an
-                // always-spliced callee's tail-`call`ed parameter slots.
-                let inherits = if name == "call" {
-                    Some((1, vec![0]))
-                } else {
-                    self.tail_called_params(name)
-                };
-                let Some((inputs, slots)) = inherits else {
-                    return;
-                };
-                let args = visible_args(before, binds);
-                for slot in slots {
-                    match args.get(inputs - 1 - slot) {
-                        Some(Arg::Literal(body)) => self.walk(body, binds, out),
-                        Some(Arg::Param(param)) => out.push(TailHit::Param(*param)),
-                        None => {}
-                    }
+        if let TermKind::Call(name) = &last.kind {
+            out.push(TailHit::Name(name.as_str()));
+            // Which of the callee's argument slots inherit this tail
+            // position: `call`'s single quotation operand, `branch`'s two,
+            // or an always-spliced callee's tail-`call`ed parameter slots.
+            //
+            // Slice 10c (R-P3-5a): `branch` is *seeded*, taking over the
+            // role the deleted `TermKind::If` descent played. It is a
+            // primitive with no walkable body, so the closure below cannot
+            // compute its tail-called-parameter set by inspection; without
+            // the seed `if`'s own set computes empty and every caller that
+            // recurses through a branch arm silently loses its loop.
+            let inherits = match name.as_str() {
+                "call" => Some((1, vec![0])),
+                "branch" => Some((3, vec![1, 2])),
+                _ => self.tail_called_params(name),
+            };
+            let Some((inputs, slots)) = inherits else {
+                return;
+            };
+            let args = visible_args(before, binds);
+            for slot in slots {
+                match args.get(inputs - 1 - slot) {
+                    Some(Arg::Literal(body)) => self.walk(body, binds, out),
+                    Some(Arg::Param(param)) => out.push(TailHit::Param(*param)),
+                    None => {}
                 }
             }
-            _ => {}
         }
     }
 
@@ -694,14 +716,13 @@ fn collect_all_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
     for term in terms {
         match &term.kind {
             TermKind::Call(name) => out.push(name.as_str()),
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
-                collect_all_calls(then_branch, out);
-                collect_all_calls(else_branch, out);
-            }
+            // Slice 10c: a branch arm is a quotation literal now, so a call
+            // written inside one is an ordinary call of the enclosing body.
+            // Without this descent `check_combinator_cycles` stops seeing a
+            // combinator's own name inside its arms, and a *non-tail* self-call
+            // there -- which the inliner would splice forever -- goes from a
+            // located rejection to a compiler stack overflow.
+            TermKind::Quotation(inner) => collect_all_calls(inner, out),
             _ => {}
         }
     }
@@ -848,7 +869,7 @@ mod tests {
         // neither of these.
         let src = "type: File fd i64 ; \
                    : shut ( File -- ) drop ; \
-                   : drop ( File -- ) | f | true if f shut else f shut end 1 . ; \
+                   : drop ( File -- ) | f | true [ f shut ] [ f shut ] if 1 . ; \
                    : main ( -- ) 1 File drop ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -1064,18 +1085,24 @@ mod tests {
     #[test]
     fn tail_position_both_terminal_if_arms_are_tail() {
         // A terminal `if` hands tail position to the last term of both arms.
-        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else rec end ;");
-        assert_eq!(
-            tail_position_calls(&w, &CombinatorIndex::new()),
-            vec!["rec", "rec"]
-        );
-        assert!(has_self_tail_call(&w, &CombinatorIndex::new()));
+        // Slice 10c (R-P3-5a): that is no longer a grammar rule but the
+        // combinator walk -- `if` is a `lib/` word whose tail-called-parameter
+        // set is both branch quotations, seeded from `branch` -- so the index
+        // has to carry the real `if`, not be empty.
+        let src = ": rec ( i64 -- i64 ) dup 0 > [ rec ] [ rec ] if ;";
+        let module = parse(&lex(src).unwrap()).unwrap();
+        let combs = combinator_index(module.words.iter());
+        let w = module.words.iter().find(|w| w.name == "rec").unwrap();
+        // The tail callees are `if` itself and, through both of its
+        // tail-called parameter slots, the self-call in each arm.
+        assert_eq!(tail_position_calls(w, &combs), vec!["if", "rec", "rec"]);
+        assert!(has_self_tail_call(w, &combs));
     }
     #[test]
     fn tail_position_non_terminal_if_self_call_is_not_tail() {
         // The `if` is followed by more terms, so it is non-terminal and its
         // arms are not in tail position.
-        let w = first_word(": rec ( i64 -- i64 ) dup 0 > if rec else 0 end drop 5 ;");
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > [ rec ] [ 0 ] if drop 5 ;");
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
         assert!(!tail_position_calls(&w, &CombinatorIndex::new()).contains(&"rec"));
     }
@@ -1095,11 +1122,11 @@ mod tests {
     /// quotation parameters are each `call`ed in tail position: the shape
     /// whose tail-called-parameter set is `{1, 2}`.
     const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-         | e | | t | | c | c if t call else e call end ;\n";
+         | e | | t | | c | c [ t call ] [ e call ] if ;\n";
     /// Recon 4's negative: each arm `call`s one parameter and *then* drops the
     /// other, so the tail term is `drop` and neither parameter is tail-called.
     const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-         | e | | t | | c | c if t call e drop else e call t drop end ;\n";
+         | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
 
     fn words_of(src: &str) -> Vec<WordDef> {
         let tokens = lex(src).unwrap();
@@ -1259,7 +1286,7 @@ mod tests {
             (BOOL_Q, "Bool?"),
             (
                 ": Pick ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-                 | c t e | c if t call else e call end ;\n",
+                 | c t e | c [ t call ] [ e call ] if ;\n",
                 "Pick",
             ),
         ] {
@@ -1295,8 +1322,8 @@ mod tests {
         // Both words call each other only in non-tail position (`x 1 +`), so no
         // tail-call edge exists and X1 must not fire (R4 no-false-positive).
         check_src(
-            ": a ( i64 -- i64 ) dup 0 > if b 1 + else drop 0 end ; \
-             : b ( i64 -- i64 ) dup 0 > if a 1 + else drop 0 end ;",
+            ": a ( i64 -- i64 ) dup 0 > [ b 1 + ] [ drop 0 ] if ; \
+             : b ( i64 -- i64 ) dup 0 > [ a 1 + ] [ drop 0 ] if ;",
         )
         .unwrap();
     }

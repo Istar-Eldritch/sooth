@@ -66,11 +66,11 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, 
 /// single count.
 const MY_TIMES: &str = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < if\n\
+     from to < [\n\
        from f call\n\
        from 1 + to f my-times\n\
-     else\n\
-     end ;\n";
+     ] [\n\
+     ] if ;\n";
 
 // -- R15: a user-space `my-times` runs in constant stack --------------------
 
@@ -209,8 +209,8 @@ fn while_is_unaffected_by_the_row_and_back_edge_rewrite() {
     // `while_self_tail_still_checks_after_back_edge_rewrite`
     // (`src/check.rs`), run end to end.
     let src = ": while ( 'a [ 'a -- 'a bool ] -- 'a )\n\
-               | p | p call if p while else end ;\n\
-               : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n";
+               | p | p call [ p while ] [ ] if ;\n\
+               : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n";
     let (stdout, code) = run_src("while-unaffected", src);
     assert_eq!(stdout, "5\n");
     assert_eq!(code, 0);

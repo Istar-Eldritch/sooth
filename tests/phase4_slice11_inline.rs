@@ -231,16 +231,17 @@ fn inline_word_clause_body_is_located_error() {
 }
 
 #[test]
-fn inline_word_polymorphic_signature_is_located_error() {
-    // R3: a variable-bearing signature is rejected before the poly checker runs
-    // (which would otherwise take it for a legitimate poly combinator). Phrased
-    // over declared variables, so the `~` case in
-    // `inline_tilde_parameter_word_is_accepted` stays accepted.
-    let err = check_error(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id . ;\n");
-    assert_eq!(
-        err,
-        "error: `inline` on `id`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line 1, col 3)"
-    );
+fn inline_word_polymorphic_signature_is_accepted() {
+    // Slice 10c (R-P3-3b) **reverses R3's polymorphic half**, which its own
+    // doc admitted was a policy rule and not a soundness one: the splice
+    // already handles a variable-bearing body. The reversal is what lets the
+    // six `lib/core.sth` comparison words be both `'T: Copy Ord`-polymorphic
+    // and `inline`. R3's other rejections (clause body, `main`, a builtin
+    // operator name) are untouched, and the tests above still pin them.
+    let tokens = lexer::lex(": id inline ( 'T -- 'T ) ;\n: main ( -- ) 3 id . ;\n")
+        .expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("a polymorphic `inline` word is spliced, not rejected");
 }
 
 #[test]
@@ -339,7 +340,7 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     // R4's relaxation, inherited: every self-occurrence in tail position is not
     // a splice-forever cycle, because the loop transform lowers it to a
     // back-edge. `5 down` counts to 0.
-    let src = ": down inline ( i64 -- i64 ) dup 0 > if 1 - down else end ;\n\
+    let src = ": down inline ( i64 -- i64 ) dup 0 > [ 1 - down ] [ ] if ;\n\
                : main ( -- ) 5 down . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-self-tail", src);
     std::fs::remove_file(&binary).ok();
@@ -514,16 +515,12 @@ fn repl_inline_word_is_retained_not_lowered() {
 }
 
 #[test]
-fn repl_inline_polymorphic_signature_is_rejected() {
-    // R3 at the REPL: the retention route (R7) would otherwise carry a
-    // variable-bearing `inline` word into the poly-combinator check as a
-    // legitimate poly combinator, so the session runs the same per-word
-    // rejection native `check` runs, with the same message.
-    let transcript = repl_transcript(": id inline ( 'T -- 'T ) ;\n:quit\n");
-    assert_eq!(
-        transcript,
-        "error: `inline` on `id`, which declares a polymorphic signature; `inline` requires a monomorphic effect (line 1, col 3)\n"
-    );
+fn repl_inline_polymorphic_signature_is_accepted() {
+    // The REPL twin of the reversal above: the retention route (R7) carries a
+    // variable-bearing `inline` word into the poly-combinator check, which is
+    // now where it belongs.
+    let transcript = repl_transcript(": id inline ( 'T -- 'T ) ;\n3 id\n:quit\n");
+    assert_eq!(transcript, "defined id\nstack: 3\n");
 }
 
 // -- Phase 3 (Feature B): `lib/combinators.sth` retyped to `~[ ... ]` --------
@@ -537,11 +534,11 @@ fn combinators_source(quotation_kind: &str) -> String {
 
 : times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
-  from to < if
+  from to < [
     from f call
     from 1 + to f times-helper
-  else
-  end ;
+  ] [
+  ] if ;
 
 : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | n | 0 n f times-helper ;
@@ -563,13 +560,13 @@ fn combinators_source(quotation_kind: &str) -> String {
 
 : filter ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
-  0 n [ | i | &arr i >usize &> @ dup p call if
+  0 n [ | i | &arr i >usize &> @ dup p call [
           | v | &!arr over >usize &!> v ! 1 +
-        else drop end ] times
+        ] [ drop ] if ] times
   | wf | arr wf >usize ;
 
 : while ( 'a {quotation_kind}[ 'a -- 'a bool ] -- 'a )
-  | p | p call if p while else end ;
+  | p | p call [ p while ] [ ] if ;
 "#
     )
 }
@@ -584,7 +581,7 @@ const COMBINATORS_MAIN: &str = "\
   mkarr [ 2 * ] map [ 1 + drop ] each
   mkarr 0 [ + ] fold .
   mkarr [ 2 > ] filter drop drop
-  0 [ | n | n 3 < if n 1 + true else n false end ] while . ;
+  0 [ | n | n 3 < [ n 1 + true ] [ n false ] if ] while . ;
 ";
 
 #[test]

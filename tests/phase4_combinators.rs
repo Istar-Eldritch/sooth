@@ -81,7 +81,7 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n\
 /// `lib/combinators.sth`'s `times`, inlined: `check_error`/`check_ok` run the
 /// checker in process, where an `import:` line never resolves, and a REPL
 /// session takes one definition per line.
-const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | to | | from | from to < if from f call from 1 + to f times-helper else end ;\n\
+const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | to | | from | from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | | n | 0 n f times-helper ;\n";
 
 #[test]
@@ -498,12 +498,12 @@ fn stale_phase6_diagnostics_are_reworded() {
         ),
         // two different quotations at an `if` join.
         (
-            ": main ( -- ) true if [ 1 + ] else [ 1 - ] end drop ;\n",
+            ": main ( -- ) true [ [ 1 + ] ] [ [ 1 - ] ] if drop ;\n",
             "leave different quotations",
         ),
         // a quotation on one `if` arm, a value on the other.
         (
-            ": main ( -- ) true if [ 1 + ] else \"x\" cstr end drop ;\n",
+            ": main ( -- ) true [ [ 1 + ] ] [ \"x\" cstr ] if drop ;\n",
             "leaves a quotation and the other does not",
         ),
     ];
@@ -631,11 +631,11 @@ fn combinator_through_helper_recursion_is_not_a_splice_cycle() {
     // forward must not newly reject this.
     let src = ": helper ( i64 -- )\n\
                  | n |\n\
-                 n 0 > if\n\
+                 n 0 > [\n\
                    n 1 - [ . ] comb\n\
                    0 drop\n\
-                 else\n\
-                 end ;\n\
+                 ] [\n\
+                 ] if ;\n\
                : comb ( i64 [ i64 -- ] -- )\n\
                  | f | | n |\n\
                  n f call\n\
@@ -770,9 +770,9 @@ fn filter_checks_standalone() {
     // rejection never gates this.
     let filter = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize )\n\
                   | p | len >i64 | n | | arr |\n\
-                  0 n [ | i | &arr i >usize &> @ dup p call if\n\
+                  0 n [ | i | &arr i >usize &> @ dup p call [\n\
                           | v | &!arr over >usize &!> v ! 1 +\n\
-                        else drop end ] times\n\
+                        ] [ drop ] if ] times\n\
                   | wf | arr wf >usize ;\n";
     check_ok(&format!("{TIMES_DEF}{filter}"));
 }
@@ -841,7 +841,7 @@ fn self_tail_combinator_edge_is_allowed() {
     // tail-only condition deleted, so the twin below
     // (`non_tail_combinator_self_call_is_still_a_cycle_error`) pins that
     // deleting it flips a *non-tail* program from reject to accept.
-    check_ok(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n");
+    check_ok(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n");
 }
 
 #[test]
@@ -930,7 +930,7 @@ fn while_runs_to_a_fixpoint() {
     // Criterion 7 (R10/R13): the canonical fixpoint. `while` threads the
     // counter through the predicate until it reaches 5, then leaves it.
     let src = format!(
-        "{}: main ( -- ) 0 [ dup 5 < if 1 + true else false end ] c::while . ;\n",
+        "{}: main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_fixpoint", &src);
@@ -946,7 +946,7 @@ fn while_carrying_an_aggregate_state_runs() {
     let src = format!(
         "{}type: Box n i64 ;\n\
          : main ( -- )\n\
-           0 Box [ | b | b Box>n dup 5 < if 1 + Box true else Box false end ] c::while\n\
+           0 Box [ | b | b Box>n dup 5 < [ 1 + Box true ] [ Box false ] if ] c::while\n\
            | r | r Box>n . ;\n",
         combinators_import("c")
     );
@@ -962,7 +962,7 @@ fn while_empty_false_arm_falls_through() {
     // exits immediately with the initial state (7) untouched, exercising the
     // fall-through arm directly.
     let src = format!(
-        "{}: main ( -- ) 7 [ dup 5 < if 1 + true else false end ] c::while . ;\n",
+        "{}: main ( -- ) 7 [ dup 5 < [ 1 + true ] [ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let (stdout, code) = run_src("while_falls_through", &src);
@@ -991,8 +991,8 @@ fn while_body_linear_local_across_back_edge_is_error() {
     let src = format!(
         "{SPY_DEF}\
          : while ( i64 [ i64 -- i64 bool ] -- i64 )\n\
-           | p | p call if 3 Spy | leak | p while else end ;\n\
-         : main ( -- ) 0 [ dup 5 < if 1 + true else false end ] while . ;\n"
+           | p | p call [ 3 Spy | leak | p while ] [ ] if ;\n\
+         : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n"
     );
     let err = check_error(&src);
     assert!(
@@ -1038,7 +1038,7 @@ fn while_inside_a_times_body_runs_to_fixpoint() {
     // counts `0` up to `5` with the inner `while` and prints it.
     let src = format!(
         "{}: main ( -- )\n\
-           3 [ | i | 0 [ dup 5 < if 1 + true else false end ] c::while . ] c::times ;\n",
+           3 [ | i | 0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while . ] c::times ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_times", &src);
@@ -1060,7 +1060,7 @@ fn times_inside_a_self_tail_combinator_body_runs() {
     // counts `0` up to `5`.
     let src = format!(
         "{}: main ( -- )\n\
-           0 [ 2 [ | i | ] c::times dup 5 < if 1 + true else false end ] c::while . ;\n",
+           0 [ 2 [ | i | ] c::times dup 5 < [ 1 + true ] [ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("times_in_while", &src);
@@ -1083,8 +1083,8 @@ fn while_inside_a_while_body_runs() {
     // `while` runs to its own fixpoint each step but drops its result.
     let src = format!(
         "{}: main ( -- )\n\
-           0 [ dup 3 < if 0 [ dup 2 < if 1 + true else false end ] c::while drop\n\
-                        1 + true else false end ] c::while . ;\n",
+           0 [ dup 3 < [ 0 [ dup 2 < [ 1 + true ] [ false ] if ] c::while drop\n\
+                        1 + true ] [ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let binary = build_binary("while_in_while", &src);
@@ -1217,11 +1217,11 @@ fn destructor_call_inside_a_times_body_holds_constant_stack() {
         "{}type: List | Nil | Cons v i64 next ^List ;\n\
          : build ( i64 List -- List )\n  \
            | n acc |\n  \
-           n 0 = if\n    \
+           n 0 = [\n    \
              acc\n  \
-           else\n    \
+           ] [\n    \
              n 1 - n acc ^ Cons build\n  \
-           end ;\n\
+           ] if ;\n\
          : main ( -- ) 200000 [ drop 5 Nil build drop ] times ;\n",
         combinators_import("c | times |")
     );
@@ -1248,11 +1248,11 @@ fn while_and_hand_threaded_loop_agree_across_stack_limits() {
     // `while_lowers_to_a_back_edge_not_an_infinite_splice` unit.
     const N: usize = 10_000;
     let comb = format!(
-        "{}: main ( -- ) 0 [ dup {N} < if 1 + true else false end ] c::while . ;\n",
+        "{}: main ( -- ) 0 [ dup {N} < [ 1 + true ] [ false ] if ] c::while . ;\n",
         combinators_import("c")
     );
     let hand = format!(
-        ": countup ( i64 -- i64 ) dup {N} < if 1 + countup else end ;\n\
+        ": countup ( i64 -- i64 ) dup {N} < [ 1 + countup ] [ ] if ;\n\
          : main ( -- ) 0 countup . ;\n"
     );
     let comb_bin = build_binary("wq-comb", &comb);
@@ -1532,8 +1532,8 @@ fn repl_error(input: &str) -> String {
 // and (for `filter`, since 10b retired the intrinsic) a session-defined
 // `times`, so a session define exercises the splice, not a library import.
 const WHILE_DEF: &str =
-    ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call if p while else end ;\n";
-const FILTER_DEF: &str = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n [ | i | &arr i >usize &> @ dup p call if | v | &!arr over >usize &!> v ! 1 + else drop end ] times | wf | arr wf >usize ;\n";
+    ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n";
+const FILTER_DEF: &str = ": filter ( ['T: Copy 'N] [ 'T -- bool ] -- ['T 'N] usize ) | p | len >i64 | n | | arr | 0 n [ | i | &arr i >usize &> @ dup p call [ | v | &!arr over >usize &!> v ! 1 + ] [ drop ] if ] times | wf | arr wf >usize ;\n";
 
 // A REPL expr line's residual stack is what the in-process driver writes to the
 // capture buffer; the runtime `.` word prints to the real process stdout, which
@@ -1602,7 +1602,7 @@ fn repl_while_define_runs_to_fixpoint() {
     // while` runs to a fixpoint of 5, lowering to a loop back-edge (constant
     // stack), not an infinite splice or a link failure to a never-minted symbol.
     let transcript = repl_error(&format!(
-        "{WHILE_DEF}0 [ dup 5 < if 1 + true else false end ] while\n:quit\n"
+        "{WHILE_DEF}0 [ dup 5 < [ 1 + true ] [ false ] if ] while\n:quit\n"
     ));
     assert_eq!(transcript, "defined while\nstack: 5\n");
 }
@@ -2046,7 +2046,7 @@ fn repl_imported_while_runs_to_fixpoint() {
     // deleted, the self-call would miss the recognizer and the splice would
     // recurse forever.
     let transcript = repl_error(&format!(
-        "{}0 [ dup 5 < if 1 + true else false end ] c::while\n:quit\n",
+        "{}0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while\n:quit\n",
         combinators_import("c")
     ));
     assert_eq!(transcript, "imported c\nstack: 5\n");
@@ -2110,7 +2110,7 @@ fn repl_combinators_dogfood_matches_native() {
          &!s 0 >usize &!> 3 ! &!s 1 >usize &!> 7 ! &!s 2 >usize &!> 1 ! \
          &!s 3 >usize &!> 9 ! &!s 4 >usize &!> 5 ! s ;",
         "scores [ 4 > ] c::filter | n | | out | out drop n",
-        "0 [ dup 5 < if 1 + true else false end ] c::while"
+        "0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while"
     ));
     assert_eq!(
         transcript,
@@ -2335,8 +2335,8 @@ fn self_tail_back_edge_check_still_fires_under_an_import() {
     let err = build_error_with_import(
         "m0-backedge",
         "type: V x i64 ;\n\
-         : spin ( &!V i64 -- )\n  | r n |\n  n 0 = if\n  else\n    \
-         0 V | x |\n    &!x n 1 - spin\n  end ;\n\
+         : spin ( &!V i64 -- )\n  | r n |\n  n 0 = [\n  ] [\n    \
+         0 V | x |\n    &!x n 1 - spin\n  ] if ;\n\
          : main ( -- )\n  0 V | v |\n  &!v 3 spin\n  v drop ;\n",
     );
     assert!(
@@ -2384,7 +2384,7 @@ fn self_tail_combinator_dups_its_quotation_instead_of_binding_it() {
     let (stdout, code) = run_src(
         "dup-quot-self-tail",
         ": rep ( i64 [ -- ] -- )\n\
-         dup call swap 1 - dup 0 > if swap rep else drop drop end ;\n\
+         dup call swap 1 - dup 0 > [ swap rep ] [ drop drop ] if ;\n\
          : main ( -- ) 3 [ 7 . ] rep ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");
@@ -2401,7 +2401,7 @@ fn self_tail_combinator_dups_an_inline_quotation_parameter() {
     let (stdout, code) = run_src(
         "dup-inline-quot-self-tail",
         ": rep ( i64 ~[ -- ] -- )\n\
-         dup call swap 1 - dup 0 > if swap rep else drop drop end ;\n\
+         dup call swap 1 - dup 0 > [ swap rep ] [ drop drop ] if ;\n\
          : main ( -- ) 3 [ 9 . ] rep ;\n",
     );
     assert_eq!(code, 0, "stdout was: {stdout}");
@@ -2416,7 +2416,7 @@ fn dup_quotation_self_tail_loop_runs_in_constant_stack() {
     let binary = build_binary(
         "dup-quot-constant-stack",
         ": rep ( i64 [ -- ] -- )\n\
-         dup call swap 1 - dup 0 > if swap rep else drop drop end ;\n\
+         dup call swap 1 - dup 0 > [ swap rep ] [ drop drop ] if ;\n\
          : main ( -- ) 1000000 [ ] rep 42 . ;\n",
     );
     let (code, stdout) = run_at_stack_limit(&binary, 1024);

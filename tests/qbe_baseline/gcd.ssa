@@ -16,17 +16,27 @@ export function l $gcd__m0(l %v0, l %v1) {
 @start
 	jmp @blk1
 @blk1
-	%v2 =l phi @start %v0, @blk3 %v3
-	%v3 =l phi @start %v1, @blk3 %v6
+	%v2 =l phi @start %v0, @blk6 %v3
+	%v3 =l phi @start %v1, @blk6 %v14
 	%v4 =l copy 0
 	%v5 =w ceql %v3, %v4
 	jnz %v5, @blk2, @blk3
 @blk2
+	%v8 =w copy 1
 	jmp @blk4
 @blk3
-	%v6 =l rem %v2, %v3
-	jmp @blk1
+	%v9 =w copy 0
+	jmp @blk4
 @blk4
+	%v10 =w phi @blk2 %v8, @blk3 %v9
+	%v13 =w copy %v10
+	jnz %v13, @blk5, @blk6
+@blk5
+	jmp @blk7
+@blk6
+	%v14 =l rem %v2, %v3
+	jmp @blk1
+@blk7
 	ret %v2
 }
 

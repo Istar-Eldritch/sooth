@@ -1040,6 +1040,16 @@ impl Type {
     /// Sugar for the default float-literal type (`f64`, D5).
     pub const F64: Type = Type::Float(FloatType { bits: 64 });
 
+    /// Slice 10c (R-P3-1): the machine-level condition flag `branch` consumes,
+    /// `tag` produces and the comparison primitives yield. A 32-bit unsigned
+    /// integer rather than a target-width one, so no conversion sits between a
+    /// comparison, a discriminant read and a conditional jump, and so the flag
+    /// is the same width on a 32- and a 64-bit target.
+    pub const U32: Type = Type::Int(IntType {
+        bits: 32,
+        signed: false,
+    });
+
     /// Slice 9 (D-A/R2): `bool` is no longer a primitive scalar type but the
     /// two-variant zero-payload enum `type: Bool | False | True ;`, injected
     /// at the reserved head of every module's enum registry (`BOOL_ENUM_ID`).
@@ -1190,16 +1200,6 @@ pub enum TermKind {
     /// appears, leftmost name taking the deepest value. Its extent is the rest
     /// of the enclosing block (R2), so no closing term is needed.
     Bind(Vec<String>),
-    If {
-        then_branch: Vec<Term>,
-        else_branch: Vec<Term>,
-        /// The `else` token, when present: the `then` arm's terminator, and so
-        /// where a name bound in that arm goes out of scope (R2, R6).
-        else_span: Option<Span>,
-        /// The `end` token: the `else` arm's terminator, and the `then` arm's
-        /// too when there is no `else`.
-        end_span: Span,
-    },
     /// A `[ ... ]` quotation literal (R1): an ordered term list, nested by
     /// construction since the element list is parsed with `parse_terms`.
     /// Compile-time-only marker in this slice (D1): never a runtime value.
@@ -1277,21 +1277,6 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
             TermKind::Quotation(inner) => {
                 let mut inner_bound = bound.clone();
                 TermKind::Quotation(rename_terms(inner, uid, &mut inner_bound))
-            }
-            TermKind::If {
-                then_branch,
-                else_branch,
-                else_span,
-                end_span,
-            } => {
-                let mut tb = bound.clone();
-                let mut eb = bound.clone();
-                TermKind::If {
-                    then_branch: rename_terms(then_branch, uid, &mut tb),
-                    else_branch: rename_terms(else_branch, uid, &mut eb),
-                    else_span: *else_span,
-                    end_span: *end_span,
-                }
             }
             other => other.clone(),
         };

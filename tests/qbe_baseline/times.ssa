@@ -20,21 +20,31 @@ export function $sooth_main() {
 	%v3 =l copy 0
 	jmp @blk1
 @blk1
-	%v4 =l phi @start %v0, @blk2 %v10
-	%v5 =l phi @start %v3, @blk2 %v12
-	%v6 =l phi @start %v1, @blk2 %v6
+	%v4 =l phi @start %v0, @blk5 %v18
+	%v5 =l phi @start %v3, @blk5 %v20
+	%v6 =l phi @start %v1, @blk5 %v6
 	%v7 =w csltl %v5, %v6
 	jnz %v7, @blk2, @blk3
 @blk2
-	%v8 =l copy 1
-	%v9 =l add %v5, %v8
-	%v10 =l add %v4, %v9
-	%v11 =l copy 1
-	%v12 =l add %v5, %v11
-	jmp @blk1
+	%v10 =w copy 1
+	jmp @blk4
 @blk3
+	%v11 =w copy 0
 	jmp @blk4
 @blk4
+	%v12 =w phi @blk2 %v10, @blk3 %v11
+	%v15 =w copy %v12
+	jnz %v15, @blk5, @blk6
+@blk5
+	%v16 =l copy 1
+	%v17 =l add %v5, %v16
+	%v18 =l add %v4, %v17
+	%v19 =l copy 1
+	%v20 =l add %v5, %v19
+	jmp @blk1
+@blk6
+	jmp @blk7
+@blk7
 	call $printf(l $fmt, l %v4, ...)
 	ret
 }

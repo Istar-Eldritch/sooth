@@ -196,7 +196,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     let mut refs = Vec::new();
     // Slice 9 phase 2 (R6): the library `.` overload for `bool`, injected
     // ahead of every file's own words exactly as `bool_enum_decl` injects
-    // the enum it dispatches over.
+    // the enum it dispatches over. Slice 10c (R-P3-4) puts `if`/`unless` and
+    // the six comparison words beside it, from `lib/core.sth`.
     let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
     let mut modules = Vec::with_capacity(closure.nodes.len());
@@ -256,6 +257,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             selective: selective_map,
         });
     }
+
+    // Slice 10c (R-P3-4): `lib/core.sth`'s words — `if`, `unless` and the six
+    // comparison words — appended once for the whole closure, the multi-file
+    // twin of `parser::parse`'s own injection.
+    words.extend(parser::prelude_words());
 
     let mut module = Module {
         words,

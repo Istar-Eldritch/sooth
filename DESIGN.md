@@ -450,7 +450,8 @@ its body's calls — including a self-tail call — rewritten to internal spelli
 imported `while`'s self-call still resolves to itself and the self-tail recognizer still
 fires rather than recursing forever through an unrecognized name.
 
-**Conditionals and dispatch.** Boolean branching is `if ... else ... end`. Structural
+**Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
+`bool` and two quotations (`[ then ] [ else ] if`). Structural
 dispatch on ADTs is **clause-bodied definition**, the sole enum eliminator: a word
 whose top input is an enum is defined per variant (`| Variant ... ;`),
 exhaustiveness-checked, with no inline `match`. The rejected Haskell-style machine —
@@ -462,14 +463,37 @@ and pattern apparatus stayed out while the per-variant body won. Multi-way branc
 a **`cond` combinator** (a library word taking `[ pred ] [ body ]` pairs), not syntax,
 so nested `if`s aren't the only option.
 
-**`if` stops being syntax once clause dispatch and quotation rows exist.** Phases 0
-through Slice 3 keep `if/else/then` as syntax (renamed `if/else/end` from Slice 4
-onward) because they predate quotations and library enums. With `Bool` a library enum
-(slice 9) and row variables inside quotation effects parsing (slice 10a), `if` is
-written as an ordinary clause-bodied word dispatching on its `Bool` input
-(`: if ( ..i Bool [ ..i -- ..o ] [ ..i -- ..o ] -- ..o )`, slice 10c), and `cond`
-alongside it. This shrinks the core the honest way, by making `if` a word rather than
+**The machine layer and the library layer.** The compiler knows three machine-level
+primitives and nothing else about conditionals: `branch`, a two-way jump on a 32-bit
+flag taking two inline quotations (`( ..a u32 ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`,
+nonzero is true, and the single builtin exempt from the quotation-operand default-deny);
+`tag`, which reads a payload-free enum's discriminant as that flag and is a register
+relabel because such a value already *is* its discriminant; and the six comparison
+primitives `u=`/`u<`/`u>`/`u<=`/`u>=`/`u<>`, one per comparison shape, each deriving
+signed / unsigned / float behaviour from its operand type.
+
+Everything typed is a library word over them, in `lib/core.sth`, injected into every
+program as `bool` itself is. `if` and `unless` are term-body combinators
+(`: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`, whose body reads the
+condition's discriminant with `tag` and `branch`es on the flag); `=`/`<`/`>`/`<=`/`>=`/`<>`
+are `'T: Copy Ord`-polymorphic `inline` words that wrap a comparison primitive and build
+their `bool` by branching and naming a variant. That last detail is the point rather than
+an implementation accident: there is deliberately no operation turning a machine word
+back into an enum, since not every machine word is a valid discriminant, so an invalid
+`bool` is unconstructible rather than merely discouraged. `bool` has no special status
+in any of it; `branch` never sees one. `cond` is a documented future word, not shipped:
+a variadic `[ pred ] [ body ]` word is not fixed-arity.
+
+This shrinks the core the honest way, by making `if` a word rather than
 by replacing it with a bigger feature.
+
+**INV-INLINE-COMBINATOR.** A quotation-taking word is always inlined (spliced) at each
+call site and mints no `IrFunc`; it has no opaque call form. Its declared output row is
+discovered by forward checking of the spliced terms, never solved for by row unification.
+Both splice sites rest on this — the checker's tail walk reads a callee's body because
+there is only ever one, spliced, form of it, and lowering threads the caller's tail
+position into the splice because the body really does run in place of the call. Slice 7b
+(first-class runtime quotations) is where the invariant breaks and both must be revisited.
 
 ## The irreducible core
 
@@ -491,7 +515,8 @@ spliced, so a library word cannot defer code the way `call` does; no word below 
 can express either.
 
 The operator words: arithmetic (`+ - * / mod`), bitwise (`and or xor not shl shr`),
-comparison (`= < > <= >= <> max max-total`), printing (`.`), and the `>T` conversions.
+the comparison primitives (`u= u< u> u<= u>= u<>`, plus `max`/`max-total`), the two
+control primitives (`branch`, `tag`), printing (`.`), and the `>T` conversions.
 Each bottoms out in a machine operation or a type-directed conversion; there is nothing
 in the language to compose them from.
 

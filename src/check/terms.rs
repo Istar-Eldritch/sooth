@@ -255,6 +255,32 @@ fn check_term(
                 }
                 return Ok(stack);
             }
+            // Slice 10c (R-P3-1a): `branch` is intercepted here, beside
+            // `call`, for the same reason: it is a compiler-known word whose
+            // operands are quotations, so every builtin family below it would
+            // reject them under R11's default-deny. It is the *single*
+            // sanctioned exemption from that deny; nothing else in the
+            // language takes a quotation operand to a builtin name.
+            if name == "branch" {
+                return check_branch(
+                    stack,
+                    span,
+                    ctx,
+                    env,
+                    arrays,
+                    cells,
+                    refs,
+                    prov,
+                    scope,
+                    tail,
+                    poly,
+                    live,
+                    at,
+                    siblings,
+                    base_depth,
+                    outer_releasable,
+                );
+            }
             // R6: `call` is a compiler-known word intercepted before every
             // builtin family and user-word lookup (a local named `call`
             // already won above). It requires a statically-known
@@ -425,6 +451,9 @@ fn check_term(
                 }
                 OpDispatch::NotOperator => {}
             }
+            if let Some(stack) = check_tag_word(name, span, &mut stack, ctx)? {
+                return Ok(stack);
+            }
             if let Some(stack) = check_str_word(name, span, &mut stack, ctx)? {
                 return Ok(stack);
             }
@@ -551,31 +580,54 @@ fn check_term(
             // stack. Copy the chosen `Combinator` out of the borrowed map
             // first (it is two pointers) so `poly` can be reborrowed mutably
             // for the splice.
+            // Slice 10c: a name can now be *both* a polymorphic library word
+            // and a concrete user overload -- `lib/core.sth`'s `'T: Copy Ord`
+            // comparisons against a user's `: < ( Vec2 Vec2 -- bool )` for
+            // their own type, which slice 8a shipped. The library candidate's
+            // `Ord` bound excludes `Vec2`, so when no polymorphic candidate
+            // admits these operands the call falls through to the concrete
+            // lookup, exactly as a builtin row's exact miss fell through to a
+            // user overload (8a R2). Computed once and consulted by both the
+            // combinator interception and the poly-call one below, since a
+            // poly combinator sits in both tables.
+            let fall_through_to_env = env.contains_key(name)
+                && poly.env.get(name).is_some_and(|cands| {
+                    !cands
+                        .iter()
+                        .any(|(sig, _)| poly_sig_could_match(sig, &stack, name, span, ctx, arrays))
+                });
             if let Some(candidates) = poly.combinators.get(name) {
                 let chosen = match candidates.as_slice() {
-                    [only] => *only,
-                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays)
-                        .ok_or_else(|| {
-                            no_combinator_overload_matches_error(ctx, span, name, candidates)
-                        })?,
+                    [only] if !fall_through_to_env => Some(*only),
+                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays),
                 };
-                let granted = releasable_into(
-                    scope,
-                    base_depth,
-                    outer_releasable,
-                    &siblings[at + 1..],
-                    live,
-                    at,
-                );
-                return inline_combinator(
-                    &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
-                    &granted, tail,
-                );
+                match chosen {
+                    Some(chosen) => {
+                        let granted = releasable_into(
+                            scope,
+                            base_depth,
+                            outer_releasable,
+                            &siblings[at + 1..],
+                            live,
+                            at,
+                        );
+                        return inline_combinator(
+                            &chosen, span, stack, ctx, env, arrays, cells, refs, prov, scope, poly,
+                            &granted, tail,
+                        );
+                    }
+                    None if fall_through_to_env => {}
+                    None => {
+                        return Err(no_combinator_overload_matches_error(
+                            ctx, span, name, candidates,
+                        ))
+                    }
+                }
             }
             // R5/R14: a call to a polymorphic word is intercepted before the
             // concrete `env` lookup and unified against the concrete stack;
             // its `Sig` is per-instantiation, not name-keyed.
-            if poly.env.contains_key(name) {
+            if poly.env.contains_key(name) && !fall_through_to_env {
                 return check_poly_call(name, span, &mut stack, ctx, arrays, poly);
             }
             // R1/R2: one name can carry several candidates. A single one is
@@ -598,7 +650,20 @@ fn check_term(
                     .ok_or_else(|| unknown_word_error(ctx, span, name))?,
             };
             let chosen = match candidates {
-                [only] => only,
+                [only] => {
+                    // Slice 10c: reaching here on a name that is *also* an
+                    // always-spliced word means the fall-through above fired
+                    // (no polymorphic candidate admits these operands). Record
+                    // the site so lowering emits a real call to this word;
+                    // without the record `lower_call` still finds the name in
+                    // its combinator env and splices the library definition,
+                    // so the checker and the backend would disagree about
+                    // which `<` a `Vec2 Vec2 <` site means.
+                    if poly.combinators.contains_key(name) {
+                        poly.builtin_overloads.insert(span, only.symbol.clone());
+                    }
+                    only
+                }
                 _ => {
                     let operands: Vec<Type> = stack.iter().map(|s| s.ty).collect();
                     let hit = candidates.iter().find(|o| {
@@ -711,291 +776,6 @@ fn check_term(
                 });
             }
             Ok(stack)
-        }
-        TermKind::If {
-            then_branch,
-            else_branch,
-            else_span,
-            end_span,
-        } => {
-            let cond = stack
-                .pop()
-                .ok_or_else(|| underflow_error(ctx, span, "if", 1, 0))?;
-            // R11: guard before the `Bool` mismatch, or the generic message
-            // names the `Cstr` placeholder instead of the `if` condition.
-            if cond.quot.is_some() {
-                return Err(reject_quotation_operand(ctx, span, "if"));
-            }
-            if cond.ty != Type::BOOL {
-                return Err(type_mismatch_error(ctx, span, "if", Type::BOOL, cond.ty));
-            }
-            // R14: each arm advances its own copy of the move-state; the join
-            // reconciles them into `MaybeMoved` wherever they disagree. R2:
-            // each arm is also a block, so a name it binds is gone by the join
-            // and the two arms' name sets agree there again.
-            let depth = scope.depth();
-            // D6: `releasable_into` (see its doc) decides what's safe to grant
-            // into either arm; an arm executes exactly once, so it may die at
-            // its own last use inside (`back_edge = false`).
-            let granted = releasable_into(
-                scope,
-                base_depth,
-                outer_releasable,
-                &siblings[at + 1..],
-                live,
-                at,
-            );
-            let mut then_scope = scope.clone();
-            let mut else_scope = scope.clone();
-            let then_stack = check_terms_relaxed(
-                then_branch,
-                stack.clone(),
-                ctx,
-                env,
-                arrays,
-                cells,
-                refs,
-                prov,
-                &mut then_scope,
-                tail,
-                poly,
-                &granted,
-                false,
-            )?;
-            let (then_token, then_at) = match else_span {
-                Some(at) => ("else", *at),
-                None => ("end", *end_span),
-            };
-            leave_block(
-                ctx,
-                &mut then_scope,
-                depth,
-                BlockEnd::Arm {
-                    token: then_token,
-                    span: then_at,
-                },
-            )?;
-            let else_stack = check_terms_relaxed(
-                else_branch,
-                stack,
-                ctx,
-                env,
-                arrays,
-                cells,
-                refs,
-                prov,
-                &mut else_scope,
-                tail,
-                poly,
-                &granted,
-                false,
-            )?;
-            leave_block(
-                ctx,
-                &mut else_scope,
-                depth,
-                BlockEnd::Arm {
-                    token: "end",
-                    span: *end_span,
-                },
-            )?;
-            scope.moves = Moves::join(then_scope.moves, else_scope.moves);
-            if then_stack.len() != else_stack.len() {
-                return Err(branch_mismatch_error(
-                    ctx,
-                    span,
-                    then_stack.len(),
-                    else_stack.len(),
-                ));
-            }
-            let mut merged = Vec::with_capacity(then_stack.len());
-            for (i, (t_then, t_else)) in then_stack.iter().zip(&else_stack).enumerate() {
-                // R7/R11: a branch merge cannot carry a quotation whose
-                // identity is ambiguous *unless* the enclosing context declares
-                // its type, in which case the join materializes each arm into a
-                // runtime `(code, env)` value (D4). Two arms carrying the
-                // *same* literal stay a forwarded marker (`lower_if`'s `t == e`
-                // fast path emits no `Phi`, splice preserved). The `Cstr`
-                // placeholder makes an arm's real `Cstr` compare equal to a
-                // quotation, so the ordinary `ty` mismatch below never catches
-                // the one-quotation shape; this guard has both phrasings.
-                let (quot, erased_ty, surviving) = match (t_then.quot, t_else.quot) {
-                    (None, None) => (
-                        None,
-                        None,
-                        prov.union_surviving(t_then.surviving, t_else.surviving),
-                    ),
-                    (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
-                        (Some(QuotRef::Known(a)), None, None)
-                    }
-                    (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) => {
-                        // R11 ordering pin: the capture admission runs before
-                        // the id/expected-type resolution, so a rejected
-                        // capturing arm raises R15 rather than falling through
-                        // to `different_quotations_at_join_error`. `escaping`
-                        // is true only at a word-body tail (the join feeds the
-                        // declared output); an in-frame join whose expected
-                        // type comes from a consumer is not escaping.
-                        let escaping = tail;
-                        let enclosing: HashSet<String> =
-                            scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
-                        let mut arm_sets: Vec<SurvivingCaptureSetId> = Vec::new();
-                        for id in [a, b] {
-                            let body = prov.quotations[id.0].body.clone();
-                            if body_captures_enclosing(&body, &enclosing) {
-                                let span = prov.quotations[id.0].span;
-                                if let Some(set) =
-                                    check_capture_admission(id, escaping, span, ctx, prov, scope)?
-                                {
-                                    arm_sets.push(set);
-                                }
-                            }
-                        }
-                        // The expected quotation type threaded from the
-                        // enclosing declared context. At a word-body tail the
-                        // merged slot maps to the declared output at index `i`.
-                        // Otherwise the join may feed an in-frame store
-                        // `&!ref if..end !`, whose `&!Quotation` referent sits
-                        // directly below the merged slot and gives the erased
-                        // value its type (the "or field" the diagnostic
-                        // promises); an in-frame boundary is not escaping, so
-                        // the R21 admission above already ran with `escaping =
-                        // tail = false`. Without either the join cannot type the
-                        // erased value, so it stays a located error.
-                        let expected = if tail {
-                            ctx.declared_outputs()
-                                .and_then(|outs| outs.get(i))
-                                .map(|slot| slot.ty)
-                        } else {
-                            i.checked_sub(1)
-                                .and_then(|below| ref_parts(then_stack[below].ty, refs))
-                                .map(|(referent, _)| referent)
-                                .filter(|t| matches!(t, Type::Quotation(_)))
-                        };
-                        match expected {
-                            Some(Type::Quotation(eff)) => {
-                                let word = ctx.word_name().unwrap_or("the branch");
-                                let a_span = prov.quotations[a.0].span;
-                                let b_span = prov.quotations[b.0].span;
-                                // Slice 10a (R9): the `if`-join's expected
-                                // effect is a `QuotEffect` (no row), so both
-                                // arms ground to the empty region.
-                                check_literal_against_declared_effect(
-                                    a,
-                                    eff,
-                                    false,
-                                    &[],
-                                    word,
-                                    a_span,
-                                    ctx,
-                                    env,
-                                    arrays,
-                                    cells,
-                                    refs,
-                                    prov,
-                                    scope,
-                                    poly,
-                                    &HashSet::new(),
-                                    false,
-                                )?;
-                                check_literal_against_declared_effect(
-                                    b,
-                                    eff,
-                                    false,
-                                    &[],
-                                    word,
-                                    b_span,
-                                    ctx,
-                                    env,
-                                    arrays,
-                                    cells,
-                                    refs,
-                                    prov,
-                                    scope,
-                                    poly,
-                                    &HashSet::new(),
-                                    false,
-                                )?;
-                                // R23: the merged erased slot's surviving set is
-                                // the union of both arms' -- a fresh interned
-                                // set, never a mutation of either arm's (keeps
-                                // the field `Copy`-compatible).
-                                let merged_set = arm_sets
-                                    .into_iter()
-                                    .fold(None, |acc, s| prov.union_surviving(acc, Some(s)));
-                                // Erased: a runtime `(code, env)` value with a
-                                // real `Type::Quotation`, no `Known` marker.
-                                (None, Some(Type::Quotation(eff)), merged_set)
-                            }
-                            _ => return Err(different_quotations_at_join_error(ctx, span)),
-                        }
-                    }
-                    _ => return Err(quotation_versus_value_at_join_error(ctx, span)),
-                };
-                if erased_ty.is_none() && t_then.ty != t_else.ty {
-                    return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
-                }
-                // The type-only join above already rejects two arms whose
-                // stacks disagree in shape; it says nothing about *which place*
-                // a live reference's suspension is attributed to. Two arms of
-                // identical shape can each suspend a different place (one
-                // derives from local `x`, the other from `y`), which the merge
-                // must reject rather than silently pick one arm's answer — a
-                // later hazard check would then reason about the wrong arm's
-                // runtime path. A place is either arm's owned root or the
-                // reference local a mutable reborrow suspends: two arms
-                // reborrowing *different* reference parameters have no owned
-                // root at all and still disagree.
-                let deriv = match (t_then.deriv, t_else.deriv) {
-                    (None, None) => None,
-                    (Some(a), Some(b))
-                        if prov.deriv(a).suspension() == prov.deriv(b).suspension() =>
-                    {
-                        Some(a)
-                    }
-                    _ => {
-                        return Err(borrow_join_disagreement_error(
-                            ctx,
-                            span,
-                            t_then.deriv.map(|id| prov.deriv(id)),
-                            t_else.deriv.map(|id| prov.deriv(id)),
-                        ));
-                    }
-                };
-                // A merged slot is a coercible literal only if *both* arms
-                // leave a literal there: a value computed on either runtime
-                // path is computed after the merge, so it can't silently fill
-                // a `usize`/`isize` position without an explicit conversion
-                // (D8/X10).
-                // Keep every region either arm could have left, since the merge
-                // cannot know which one ran: dropping one would let a later
-                // borrow of a name bound to the merge mutate storage a live name
-                // still denotes on the path that was dropped.
-                let alias = match (t_then.alias, t_else.alias) {
-                    (None, None) => None,
-                    (Some(a), None) | (None, Some(a)) => Some(a),
-                    (Some(a), Some(b)) => Some(Alias {
-                        set: prov.alias_union(a.set, b.set),
-                        span: a.span,
-                    }),
-                };
-                merged.push(Slot {
-                    // R11: a materialized join slot carries the declared
-                    // quotation type in place of the arms' `Cstr` placeholder.
-                    ty: erased_ty.unwrap_or(t_then.ty),
-                    literal: t_then.literal && t_else.literal,
-                    // A value merged from two branches is never a single
-                    // known literal, so it can't feed a compile-time count.
-                    int_val: None,
-                    alias,
-                    deriv,
-                    // R7: only a marker both arms agree on survives the join.
-                    quot,
-                    // R23: the union of both arms' surviving capture sets.
-                    surviving,
-                });
-            }
-            Ok(merged)
         }
         // R5: a quotation literal interns its body into the side table and
         // pushes a compile-time-only marker (D1/D2). The body is *not* checked
@@ -1164,6 +944,410 @@ fn check_abstract_quotation_call(
     Ok(stack)
 }
 
+/// Slice 10c (R-P3-1a): the two-way branch-and-join every conditional in the
+/// language now goes through. Each arm advances its own clone of the
+/// move-state and its own copy of the live stack; the join reconciles the two
+/// (`MaybeMoved` where they disagree about a move, a merged alias/derivation
+/// set, one `Slot` per position) or rejects them for disagreeing in depth,
+/// type, quotation identity or suspended place.
+///
+/// Each `*_end` is the token that closes that arm and where it sits, for
+/// `leave_block`'s unconsumed-linear diagnostic.
+#[allow(clippy::too_many_arguments)]
+fn check_branch_join(
+    then_body: &[Term],
+    then_end: (&'static str, Span),
+    else_body: &[Term],
+    else_end: (&'static str, Span),
+    stack: Vec<Slot>,
+    span: Span,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    tail: bool,
+    poly: &mut PolyCtx,
+    live: &Liveness,
+    at: usize,
+    siblings: &[Term],
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
+) -> Result<Vec<Slot>, String> {
+    // R14: each arm advances its own copy of the move-state; the join
+    // reconciles them into `MaybeMoved` wherever they disagree. R2:
+    // each arm is also a block, so a name it binds is gone by the join
+    // and the two arms' name sets agree there again.
+    let depth = scope.depth();
+    // D6: `releasable_into` (see its doc) decides what's safe to grant
+    // into either arm; an arm executes exactly once, so it may die at
+    // its own last use inside (`back_edge = false`).
+    let granted = releasable_into(
+        scope,
+        base_depth,
+        outer_releasable,
+        &siblings[at + 1..],
+        live,
+        at,
+    );
+    let mut then_scope = scope.clone();
+    let mut else_scope = scope.clone();
+    let then_stack = check_terms_relaxed(
+        then_body,
+        stack.clone(),
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        &mut then_scope,
+        tail,
+        poly,
+        &granted,
+        false,
+    )?;
+    leave_block(
+        ctx,
+        &mut then_scope,
+        depth,
+        BlockEnd::Arm {
+            token: then_end.0,
+            span: then_end.1,
+        },
+    )?;
+    let else_stack = check_terms_relaxed(
+        else_body,
+        stack,
+        ctx,
+        env,
+        arrays,
+        cells,
+        refs,
+        prov,
+        &mut else_scope,
+        tail,
+        poly,
+        &granted,
+        false,
+    )?;
+    leave_block(
+        ctx,
+        &mut else_scope,
+        depth,
+        BlockEnd::Arm {
+            token: else_end.0,
+            span: else_end.1,
+        },
+    )?;
+    scope.moves = Moves::join(then_scope.moves, else_scope.moves);
+    if then_stack.len() != else_stack.len() {
+        return Err(branch_mismatch_error(
+            ctx,
+            span,
+            then_stack.len(),
+            else_stack.len(),
+        ));
+    }
+    let mut merged = Vec::with_capacity(then_stack.len());
+    for (i, (t_then, t_else)) in then_stack.iter().zip(&else_stack).enumerate() {
+        // R7/R11: a branch merge cannot carry a quotation whose
+        // identity is ambiguous *unless* the enclosing context declares
+        // its type, in which case the join materializes each arm into a
+        // runtime `(code, env)` value (D4). Two arms carrying the
+        // *same* literal stay a forwarded marker (`lower_if`'s `t == e`
+        // fast path emits no `Phi`, splice preserved). The `Cstr`
+        // placeholder makes an arm's real `Cstr` compare equal to a
+        // quotation, so the ordinary `ty` mismatch below never catches
+        // the one-quotation shape; this guard has both phrasings.
+        let (quot, erased_ty, surviving) = match (t_then.quot, t_else.quot) {
+            (None, None) => (
+                None,
+                None,
+                prov.union_surviving(t_then.surviving, t_else.surviving),
+            ),
+            (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) if a == b => {
+                (Some(QuotRef::Known(a)), None, None)
+            }
+            (Some(QuotRef::Known(a)), Some(QuotRef::Known(b))) => {
+                // R11 ordering pin: the capture admission runs before
+                // the id/expected-type resolution, so a rejected
+                // capturing arm raises R15 rather than falling through
+                // to `different_quotations_at_join_error`. `escaping`
+                // is true only at a word-body tail (the join feeds the
+                // declared output); an in-frame join whose expected
+                // type comes from a consumer is not escaping.
+                let escaping = tail;
+                let enclosing: HashSet<String> =
+                    scope.bound.iter().map(|bnd| bnd.name.clone()).collect();
+                let mut arm_sets: Vec<SurvivingCaptureSetId> = Vec::new();
+                for id in [a, b] {
+                    let body = prov.quotations[id.0].body.clone();
+                    if body_captures_enclosing(&body, &enclosing) {
+                        let span = prov.quotations[id.0].span;
+                        if let Some(set) =
+                            check_capture_admission(id, escaping, span, ctx, prov, scope)?
+                        {
+                            arm_sets.push(set);
+                        }
+                    }
+                }
+                // The expected quotation type threaded from the
+                // enclosing declared context. At a word-body tail the
+                // merged slot maps to the declared output at index `i`.
+                // Otherwise the join may feed an in-frame store
+                // `&!ref if..end !`, whose `&!Quotation` referent sits
+                // directly below the merged slot and gives the erased
+                // value its type (the "or field" the diagnostic
+                // promises); an in-frame boundary is not escaping, so
+                // the R21 admission above already ran with `escaping =
+                // tail = false`. Without either the join cannot type the
+                // erased value, so it stays a located error.
+                let expected = if tail {
+                    ctx.declared_outputs()
+                        .and_then(|outs| outs.get(i))
+                        .map(|slot| slot.ty)
+                } else {
+                    i.checked_sub(1)
+                        .and_then(|below| ref_parts(then_stack[below].ty, refs))
+                        .map(|(referent, _)| referent)
+                        .filter(|t| matches!(t, Type::Quotation(_)))
+                };
+                match expected {
+                    Some(Type::Quotation(eff)) => {
+                        let word = ctx.word_name().unwrap_or("the branch");
+                        let a_span = prov.quotations[a.0].span;
+                        let b_span = prov.quotations[b.0].span;
+                        // Slice 10a (R9): the `if`-join's expected
+                        // effect is a `QuotEffect` (no row), so both
+                        // arms ground to the empty region.
+                        check_literal_against_declared_effect(
+                            a,
+                            eff,
+                            false,
+                            &[],
+                            word,
+                            a_span,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                            &HashSet::new(),
+                            false,
+                            false,
+                            false,
+                        )?;
+                        check_literal_against_declared_effect(
+                            b,
+                            eff,
+                            false,
+                            &[],
+                            word,
+                            b_span,
+                            ctx,
+                            env,
+                            arrays,
+                            cells,
+                            refs,
+                            prov,
+                            scope,
+                            poly,
+                            &HashSet::new(),
+                            false,
+                            false,
+                            false,
+                        )?;
+                        // R23: the merged erased slot's surviving set is
+                        // the union of both arms' -- a fresh interned
+                        // set, never a mutation of either arm's (keeps
+                        // the field `Copy`-compatible).
+                        let merged_set = arm_sets
+                            .into_iter()
+                            .fold(None, |acc, s| prov.union_surviving(acc, Some(s)));
+                        // Erased: a runtime `(code, env)` value with a
+                        // real `Type::Quotation`, no `Known` marker.
+                        (None, Some(Type::Quotation(eff)), merged_set)
+                    }
+                    _ => return Err(different_quotations_at_join_error(ctx, span)),
+                }
+            }
+            _ => return Err(quotation_versus_value_at_join_error(ctx, span)),
+        };
+        if erased_ty.is_none() && t_then.ty != t_else.ty {
+            return Err(branch_type_mismatch_error(ctx, span, t_then.ty, t_else.ty));
+        }
+        // The type-only join above already rejects two arms whose
+        // stacks disagree in shape; it says nothing about *which place*
+        // a live reference's suspension is attributed to. Two arms of
+        // identical shape can each suspend a different place (one
+        // derives from local `x`, the other from `y`), which the merge
+        // must reject rather than silently pick one arm's answer — a
+        // later hazard check would then reason about the wrong arm's
+        // runtime path. A place is either arm's owned root or the
+        // reference local a mutable reborrow suspends: two arms
+        // reborrowing *different* reference parameters have no owned
+        // root at all and still disagree.
+        let deriv = match (t_then.deriv, t_else.deriv) {
+            (None, None) => None,
+            (Some(a), Some(b)) if prov.deriv(a).suspension() == prov.deriv(b).suspension() => {
+                Some(a)
+            }
+            _ => {
+                return Err(borrow_join_disagreement_error(
+                    ctx,
+                    span,
+                    t_then.deriv.map(|id| prov.deriv(id)),
+                    t_else.deriv.map(|id| prov.deriv(id)),
+                ));
+            }
+        };
+        // A merged slot is a coercible literal only if *both* arms
+        // leave a literal there: a value computed on either runtime
+        // path is computed after the merge, so it can't silently fill
+        // a `usize`/`isize` position without an explicit conversion
+        // (D8/X10).
+        // Keep every region either arm could have left, since the merge
+        // cannot know which one ran: dropping one would let a later
+        // borrow of a name bound to the merge mutate storage a live name
+        // still denotes on the path that was dropped.
+        let alias = match (t_then.alias, t_else.alias) {
+            (None, None) => None,
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (Some(a), Some(b)) => Some(Alias {
+                set: prov.alias_union(a.set, b.set),
+                span: a.span,
+            }),
+        };
+        merged.push(Slot {
+            // R11: a materialized join slot carries the declared
+            // quotation type in place of the arms' `Cstr` placeholder.
+            ty: erased_ty.unwrap_or(t_then.ty),
+            literal: t_then.literal && t_else.literal,
+            // A value merged from two branches is never a single
+            // known literal, so it can't feed a compile-time count.
+            int_val: None,
+            alias,
+            deriv,
+            // R7: only a marker both arms agree on survives the join.
+            quot,
+            // R23: the union of both arms' surviving capture sets.
+            surviving,
+        });
+    }
+    Ok(merged)
+}
+
+/// Slice 10c (R-P3-1/R-P3-1a): `branch`, the machine-level two-way conditional
+/// and the single builtin exempt from R11's quotation-operand default-deny.
+/// `( ..a u32 ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )`: it knows a 32-bit
+/// flag, never `bool`, which is what removes the last typed construct from the
+/// compiler -- `bool` is an ordinary library enum and `if` an ordinary library
+/// word that reads its discriminant with `tag` and branches on the result.
+/// Nonzero is true.
+///
+/// The two branch operands arrive on the stack in both of the forms
+/// `resolve_quotation_operand` classifies, and both are load-bearing: literals
+/// at every real call site, and abstract `~` parameters while `if`'s own body
+/// is checked standalone at its definition.
+#[allow(clippy::too_many_arguments)]
+fn check_branch(
+    mut stack: Vec<Slot>,
+    span: Span,
+    ctx: &Ctx,
+    env: &HashMap<String, Vec<Overload>>,
+    arrays: &mut Vec<ArrayDecl>,
+    cells: &mut Vec<OwnedCellDecl>,
+    refs: &mut Vec<RefDecl>,
+    prov: &mut Provenance,
+    scope: &mut Scope,
+    tail: bool,
+    poly: &mut PolyCtx,
+    live: &Liveness,
+    at: usize,
+    siblings: &[Term],
+    base_depth: usize,
+    outer_releasable: &HashSet<String>,
+) -> Result<Vec<Slot>, String> {
+    if stack.len() < 3 {
+        return Err(underflow_error(ctx, span, "branch", 3, stack.len()));
+    }
+    let else_slot = stack.pop().expect("branch: else operand");
+    let then_slot = stack.pop().expect("branch: then operand");
+    let cond = stack.pop().expect("branch: condition");
+    if cond.quot.is_some() {
+        return Err(reject_quotation_operand(ctx, span, "branch"));
+    }
+    if cond.ty != Type::U32 {
+        return Err(type_mismatch_error(ctx, span, "branch", Type::U32, cond.ty));
+    }
+    let then_op = resolve_quotation_operand(then_slot)
+        .ok_or_else(|| branch_needs_quotation_error(ctx, span, then_slot.ty))?;
+    let else_op = resolve_quotation_operand(else_slot)
+        .ok_or_else(|| branch_needs_quotation_error(ctx, span, else_slot.ty))?;
+    match (then_op, else_op) {
+        (QuotOperand::Literal(t), QuotOperand::Literal(e)) => {
+            let then_body = prov.quotations[t.0].body.clone();
+            let then_end = prov.quotations[t.0].span;
+            let else_body = prov.quotations[e.0].body.clone();
+            let else_end = prov.quotations[e.0].span;
+            // The join's diagnostics are located at the first arm, not at
+            // `branch` itself: the arms are the *caller's* literals, while
+            // `branch` is reached through `lib/core.sth`'s `if`, whose span
+            // would point a user at library source they did not write.
+            check_branch_join(
+                &then_body,
+                ("branch arm", then_end),
+                &else_body,
+                ("branch arm", else_end),
+                stack,
+                then_end,
+                ctx,
+                env,
+                arrays,
+                cells,
+                refs,
+                prov,
+                scope,
+                tail,
+                poly,
+                live,
+                at,
+                siblings,
+                base_depth,
+                outer_releasable,
+            )
+        }
+        // R21: at least one arm is an abstract quotation parameter, with a
+        // declared effect and no body to splice. This is the standalone
+        // def-site check of a word like `if` forwarding its own `~`
+        // parameters, so the arm is checked against that declared effect
+        // exactly as `f call` is -- both arms declare the same effect, so
+        // applying either one's is the same answer.
+        (QuotOperand::Forwarded(eff), _) | (_, QuotOperand::Forwarded(eff)) => {
+            check_abstract_quotation_call(eff, span, stack, ctx, "branch")
+        }
+    }
+}
+
+/// `branch` handed something that is not a quotation in either branch slot.
+fn branch_needs_quotation_error(ctx: &Ctx, span: Span, found: Type) -> String {
+    match ctx {
+        Ctx::Word { name, effect, .. } => format!(
+            "error: type mismatch in `{}` (line {})\n  `branch` requires two quotation operands, found `{}`\n  note: declared {}",
+            name, span.line, found, effect_str(effect),
+        ),
+        Ctx::Line { .. } => {
+            format!("error: type mismatch: `branch` requires two quotation operands, found `{found}`")
+        }
+    }
+}
+
 /// Slice 10a (R11): the back-edge arm's result -- one `Slot` per ground
 /// declared output. Extracted as a named, callable function (R14a) so phase 6
 /// can drive it from a white-box test: `#[ignore]` skips execution, not
@@ -1299,6 +1483,57 @@ fn naming_aliases_borrowed_place_error(ctx: &Ctx, span: Span, name: &str, live: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn check_src(src: &str) -> Result<(), String> {
+        let tokens = crate::lexer::lex(src).unwrap();
+        let mut module = crate::parser::parse(&tokens).unwrap();
+        crate::check::check(&mut module)
+    }
+
+    /// Slice 10c (R-P3-1a): `branch`'s two branch operands arrive in *both*
+    /// forms `resolve_quotation_operand` classifies, and both are load-bearing.
+    ///
+    /// The first is the ordinary one: literals at a real call site. The second
+    /// is the R21 abstract-forward case, which only a word's own definition
+    /// exercises -- `myif`'s body forwards its declared `~` parameters into
+    /// `branch`, and at *its* definition site those are abstract quotation
+    /// slots with no interned body. Measured mutation: route `branch`'s arm
+    /// through the `QuotRef::Known` case alone and `lib/core.sth`'s own `if`
+    /// stops checking, so *nothing* builds -- the abstract-forward case is not
+    /// an edge case, it is the case the whole slice rests on.
+    #[test]
+    fn check_branch_accepts_a_literal_and_a_forwarded_quotation_operand() {
+        check_src(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
+            .expect("two quotation literals splice at the call site");
+        check_src(
+            ": myif ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
+             | e | | t | | c | c tag t e branch ;\n\
+             : main ( -- ) 1 2 = [ 7 ] [ 8 ] myif . ;\n",
+        )
+        .expect("`myif`'s own definition forwards its abstract `~` parameters into `branch`");
+    }
+
+    /// `branch` is the *single* builtin exempt from R11's quotation-operand
+    /// default-deny, and only for its two branch slots: a quotation in the
+    /// condition position is still rejected, naming `branch`.
+    #[test]
+    fn check_branch_rejects_a_quotation_condition_and_a_non_quotation_arm() {
+        let cond = check_src(": main ( -- ) [ + ] [ 1 ] [ 2 ] branch drop ;\n").unwrap_err();
+        assert!(
+            cond.contains("`branch`") && cond.contains("cannot take a quotation as an operand"),
+            "unexpected message: {cond}"
+        );
+        let arm = check_src(": main ( -- ) 1 2 u= 3 [ 2 ] branch drop ;\n").unwrap_err();
+        assert!(
+            arm.contains("`branch` requires two quotation operands"),
+            "unexpected message: {arm}"
+        );
+        let flag = check_src(": main ( -- ) true [ 1 ] [ 2 ] branch drop ;\n").unwrap_err();
+        assert!(
+            flag.contains("`branch`") && flag.contains("`u32`"),
+            "`branch` knows a 32-bit flag, not `bool`: {flag}"
+        );
+    }
 
     /// Slice 10a (R14): white-box proof that `back_edge_outs` forwards the
     /// surviving capture set along the index map. The witness is an aggregate

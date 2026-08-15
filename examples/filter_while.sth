@@ -21,4 +21,4 @@ import: c "../lib/combinators.sth" ;
   scores [ 4 > ] c::filter | n | | out | \ kept: 7 9 5, n = 3
   n .
   out drop
-  0 [ dup 5 < if 1 + true else false end ] c::while . ; \ fixpoint: 5
+  0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while . ; \ fixpoint: 5

@@ -48,7 +48,7 @@ fn check_error(src: &str) -> String {
 /// run in process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < if from f call from 1 + to f times-helper else end ;\n\
+     from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
      : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -472,7 +472,7 @@ fn two_differing_quotation_arms_materialize_and_call() {
     // splice, so it materializes each against the word's declared
     // `[ i64 -- i64 ]` output (R11) and `call` at the site dispatches
     // indirectly through whichever aggregate the branch left.
-    let src = ": pick ( bool -- [ i64 -- i64 ] ) if [ 1 + ] else [ 2 + ] end ;\n\
+    let src = ": pick ( bool -- [ i64 -- i64 ] ) [ [ 1 + ] ] [ [ 2 + ] ] if ;\n\
                : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
     let (stdout, code) = run_src("qjoin", src);
     assert_eq!(stdout, "5\n6\n");
@@ -490,7 +490,7 @@ fn same_quotation_both_arms_still_splices() {
     // One literal bound before the `if`, named in both arms: the equal `Known`
     // ids forward the marker (no `Phi`, no materialization), so `call` after
     // the join splices exactly as today and emits no indirect call.
-    let src = ": main ( -- ) [ 1 + ] | q | true if q else q end 5 swap call . ;\n";
+    let src = ": main ( -- ) [ 1 + ] | q | true [ q ] [ q ] if 5 swap call . ;\n";
     let (stdout, code) = run_src("qjoinsame", src);
     assert_eq!(stdout, "6\n");
     assert_eq!(code, 0);
@@ -508,7 +508,7 @@ fn capturing_scalar_at_join_snapshots() {
     // `true` arm captures the scalar `x`. 7b re-points 7a's rejection: the arm
     // snapshots `x = 10` and both arms materialize (the `false` arm captures
     // nothing, a null env). `true`: 4 + 10 = 14; `false`: 4 + 2 = 6.
-    let src = ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | if [ x + ] else [ 2 + ] end ;\n\
+    let src = ": pick ( bool -- [ i64 -- i64 ] ) 10 | x | [ [ x + ] ] [ [ 2 + ] ] if ;\n\
                : main ( -- ) true pick 4 swap call . false pick 4 swap call . ;\n";
     let (stdout, code) = run_src("qcapjoin", src);
     assert_eq!(stdout, "14\n6\n");
@@ -535,7 +535,7 @@ fn loop_over_erased_quotation_emits_one_indirect_call() {
     // intrinsic effectively had.
     let src = ": spin ( i64 i64 i64 [ i64 i64 -- i64 ] -- i64 )\n\
                | f | | to | | from |\n\
-               from to < if from f call from 1 + to f spin else end ;\n\
+               from to < [ from f call from 1 + to f spin ] [ ] if ;\n\
                : acc ( -- [ i64 i64 -- i64 ] ) [ + ] ;\n\
                : main ( -- ) 0 0 5 acc spin . ;\n";
     let (stdout, code) = run_src("qtimes", src);
@@ -945,7 +945,7 @@ fn join_of_two_capturing_arms_unions_capture_sets() {
                10 2 fill | a |\n\
                &a | r |\n\
                [ 0 ] Holder | h |\n\
-               &!h &!Holder>q true if [ r 0 >usize &> @ ] else [ r 1 >usize &> @ ] end !\n\
+               &!h &!Holder>q true [ [ r 0 >usize &> @ ] ] [ [ r 1 >usize &> @ ] ] if !\n\
                h Holder>q call .\n\
                a drop ;\n";
     let (stdout, code) = run_src("qjoinunion", src);
@@ -974,7 +974,7 @@ fn join_capture_union_kills_either_arm_referent_is_past_last_use() {
              &a | ra |\n\
              &b | rb |\n\
              [ 0 ] Holder | h |\n\
-             &!h &!Holder>q true if [ ra 0 >usize &> @ ] else [ rb 0 >usize &> @ ] end !\n\
+             &!h &!Holder>q true [ [ ra 0 >usize &> @ ] ] [ [ rb 0 >usize &> @ ] ] if !\n\
              &!{kill} 0 >usize &!> 9 !\n\
              h Holder>q call .\n\
              a drop b drop ;\n"

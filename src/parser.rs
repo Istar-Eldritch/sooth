@@ -328,7 +328,36 @@ pub fn prepass_and_register(
     Ok(())
 }
 
+/// Slice 10c (R-P3-4): `lib/core.sth`, the words every program sees without an
+/// `import:` — `if`, `unless` and the six comparison words, each an ordinary
+/// `WordDef` over the `branch`/`tag`/comparison primitives. Compiled into the
+/// binary and parsed once, so the source of record is a real `lib/` file
+/// rather than a hand-built AST nobody can read.
+///
+/// Injected ahead of a file's own words exactly as `bool_enum_decl` injects
+/// the enum, and for the same reason: they are library definitions with no
+/// import path to reach them by. `resolve::mangle` leaves their names alone,
+/// so every module in a closure reaches the one definition by bare name.
+pub fn prelude_words() -> Vec<WordDef> {
+    let src = include_str!("../lib/core.sth");
+    let tokens = crate::lexer::lex(src).expect("lib/core.sth lexes");
+    parse_without_prelude(&tokens)
+        .expect("lib/core.sth parses")
+        .words
+}
+
 pub fn parse(tokens: &[(Token, Span)]) -> Result<Module, String> {
+    let mut module = parse_without_prelude(tokens)?;
+    // Appended, not prepended: a file's own words keep their source order and
+    // their positions in `words`, which the parser's own tests index by.
+    module.words.extend(prelude_words());
+    Ok(module)
+}
+
+/// `parse` minus the prelude injection: the prelude itself is parsed through
+/// here, and the driver's multi-file path builds its own `Module` around
+/// `parse_bodies` and injects the prelude at that level instead.
+fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut structs = Vec::new();
     // Slice 9 (R2): the builtin `bool` enum occupies the reserved head of the
     // registry (`BOOL_ENUM_ID`) ahead of any user enum this file declares.
@@ -2309,35 +2338,15 @@ impl<'t> Parser<'t> {
                 kind: TermKind::Call("False".to_string()),
                 span,
             }),
-            Token::Word(w) if w == "if" => {
-                let then_branch = self
-                    .parse_terms("`else` or `end` (unterminated `if`)", |tok| {
-                        is_word(tok, "else") || is_word(tok, "end")
-                    })?;
-                let mut else_span = None;
-                let else_branch = match self.peek() {
-                    Some((tok, at)) if is_word(tok, "else") => {
-                        else_span = Some(*at);
-                        self.pos += 1;
-                        self.parse_terms("`end` (unterminated `if`/`else`)", |tok| {
-                            is_word(tok, "end")
-                        })?
-                    }
-                    _ => Vec::new(),
-                };
-                let end_span = self.expect_word("end")?;
-                Ok(Term {
-                    kind: TermKind::If {
-                        then_branch,
-                        else_branch,
-                        else_span,
-                        end_span,
-                    },
-                    span,
-                })
-            }
+            // Slice 10c (R-P3-5): `if`/`else`/`end` was the last construct the
+            // grammar knew. `if` is an ordinary `lib/` word now, spelled
+            // postfix over two quotations (`[ T ] [ E ] if`), so `if` here is
+            // just a `Call` like any other and `else`/`end` mean nothing at
+            // all -- named explicitly rather than left to the generic
+            // unknown-word error, since that is the diagnostic a source
+            // written against the old grammar needs.
             Token::Word(w) if w == "end" || w == "else" => Err(format!(
-                "parse error: `{w}` without a matching `if` at line {}, col {}",
+                "parse error: `{w}` is not a word; `if` is an ordinary word taking two quotations (`[ then ] [ else ] if`) at line {}, col {}",
                 span.line, span.col
             )),
             Token::Word(w) => Ok(Term {
@@ -2477,7 +2486,7 @@ mod tests {
     fn parse_gcd_shape_matches_ast() {
         let src = std::fs::read_to_string("examples/gcd.sth").unwrap();
         let module = parse_src(&src).unwrap();
-        assert_eq!(module.words.len(), 2);
+        assert_eq!(module.words.len(), 2 + crate::parser::prelude_words().len());
 
         let gcd = &module.words[0];
         assert_eq!(gcd.name, "gcd");
@@ -2486,24 +2495,24 @@ mod tests {
         assert_eq!(gcd.effect.inputs.len(), 2);
         assert_eq!(gcd.effect.outputs.len(), 1);
 
-        // | a b | b 0 = if a else b a b mod gcd end
-        assert_eq!(gcd_body.len(), 5);
+        // | a b | b 0 = [ a ] [ b a b mod gcd ] if
+        assert_eq!(gcd_body.len(), 7);
         assert!(matches!(&gcd_body[0].kind, TermKind::Bind(_)));
         assert!(matches!(&gcd_body[1].kind, TermKind::Call(w) if w == "b"));
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
         assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "="));
         match &gcd_body[4].kind {
-            TermKind::If {
-                then_branch,
-                else_branch,
-                ..
-            } => {
+            TermKind::Quotation(then_branch) => {
                 assert_eq!(then_branch.len(), 1);
                 assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "a"));
-                assert_eq!(else_branch.len(), 5);
             }
-            other => panic!("expected If, got {other:?}"),
+            other => panic!("expected the `then` quotation, got {other:?}"),
         }
+        match &gcd_body[5].kind {
+            TermKind::Quotation(else_branch) => assert_eq!(else_branch.len(), 5),
+            other => panic!("expected the `else` quotation, got {other:?}"),
+        }
+        assert!(matches!(&gcd_body[6].kind, TermKind::Call(w) if w == "if"));
 
         let main = &module.words[1];
         assert_eq!(main.name, "main");
@@ -2574,14 +2583,17 @@ mod tests {
         assert!(matches!(&body[1].kind, TermKind::Call(w) if w == "False"));
     }
 
+    /// Slice 10c (E-P3-2): the `if`/`else`/`end` grammar is gone. `else`/`end`
+    /// are not words, and a source written against the old grammar gets a
+    /// diagnostic naming the replacement rather than a bare unknown word.
     #[test]
-    fn parse_if_without_else_has_empty_else_branch() {
-        let module = parse_src(": w ( i64 -- i64 ) if 1 end ;").unwrap();
-        let body = terms_body(&module.words[0]);
-        match &body[0].kind {
-            TermKind::If { else_branch, .. } => assert!(else_branch.is_empty()),
-            other => panic!("expected If, got {other:?}"),
-        }
+    fn parse_if_else_end_grammar_is_error() {
+        let err = parse_src(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap_err();
+        assert!(err.contains("`else`"), "unexpected message: {err}");
+        assert!(
+            err.contains("[ then ] [ else ] if"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
@@ -2657,20 +2669,33 @@ mod tests {
         assert!(result.unwrap_err().contains("end"));
     }
 
+    /// Slice 10c: `>=` is spelled with a leading `>` but is a comparison, and
+    /// since R-P3-3 moved it out of `BUILTIN_TABLE` nothing claims it before
+    /// `check_operator`'s `>T` conversion prefix test. Without the carve-out
+    /// there it reads as a conversion to a type named `=`.
     #[test]
-    fn parse_then_no_longer_closes_if() {
-        let result = parse_src(": w ( i64 -- i64 ) if 1 then ;");
-        assert!(
-            result.is_err(),
-            "`then` must no longer close `if`; got {result:?}"
-        );
+    fn ge_is_not_read_as_a_type_conversion() {
+        let module = parse_src(": w ( i64 i64 -- bool ) >= ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == ">="));
+        crate::check::check(
+            &mut parse_src(": w ( i64 i64 -- bool ) >= ;\n: main ( -- ) 1 2 w drop ;").unwrap(),
+        )
+        .expect("`>=` resolves to the library comparison word");
     }
 
+    /// Slice 10c (E-P3-2): `if` is an ordinary word now, so it opens nothing
+    /// and there is no unterminated form to report. What used to be
+    /// `parse_then_no_longer_closes_if` / `..._unterminated_if_...` — both
+    /// guards on the deleted grammar's terminator handling — becomes this: the
+    /// bare word parses, and the arity failure is the checker's, at the call
+    /// site, not the parser's.
     #[test]
-    fn parse_unterminated_if_reports_if_not_semicolon() {
-        let result = parse_src(": w ( -- ) if 1");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("unterminated `if`"));
+    fn parse_bare_if_is_an_ordinary_call() {
+        let module = parse_src(": w ( i64 -- i64 ) if ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 1);
+        assert!(matches!(&body[0].kind, TermKind::Call(w) if w == "if"));
     }
 
     fn parse_line_src(src: &str) -> Result<Line, String> {
@@ -3660,7 +3685,7 @@ mod tests {
         // it is not the 10a same-row restriction's concern.
         let module = parse_src(
             ": myif ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o ) \
-             | e | | t | | c | c if t call else e call end ;",
+             | e | | t | | c | c [ t call ] [ e call ] if ;",
         )
         .unwrap();
         let sig = module.words[0].poly.as_ref().expect("poly sig present");

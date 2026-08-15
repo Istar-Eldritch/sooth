@@ -125,6 +125,18 @@ pub(super) fn printable_types() -> Vec<Type> {
     v
 }
 
+/// Slice 10c (R-P3-3): the six comparison primitives and the `CmpOp` each
+/// lowers, named once so the checker table, the operator-name lists and the
+/// lowering dispatch cannot drift apart.
+pub(crate) const COMPARISON_PRIMITIVES: [(&str, crate::ir::CmpOp); 6] = [
+    ("u=", crate::ir::CmpOp::Eq),
+    ("u<", crate::ir::CmpOp::Lt),
+    ("u>", crate::ir::CmpOp::Gt),
+    ("u<=", crate::ir::CmpOp::Le),
+    ("u>=", crate::ir::CmpOp::Ge),
+    ("u<>", crate::ir::CmpOp::Ne),
+];
+
 /// The builtin overload table (slice 8a, Q-A): every concrete row a builtin
 /// operator resolves to, keyed by operator name, each name carrying one row
 /// per operand-type shape it accepts. `check_operator` does an exact-type
@@ -134,7 +146,6 @@ pub(super) fn printable_types() -> Vec<Type> {
 /// (Q-B). The generic builtins (`len`/`fill`/`cstr`, the `>T` conversions,
 /// the shuffles) are carved out and stay in their own dispatchers (Q-A, R0).
 pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
-    use crate::ir::CmpOp;
     let mut table: HashMap<String, Vec<BuiltinRow>> = HashMap::new();
     let mut row = |name: &str, inputs: Vec<Type>, outputs: Vec<Type>, lower: BuiltinLower| {
         table.entry(name.to_string()).or_default().push(BuiltinRow {
@@ -147,15 +158,17 @@ pub fn builtin_table() -> HashMap<String, Vec<BuiltinRow>> {
         row("+", vec![ty, ty], vec![ty], BuiltinLower::Add);
         row("-", vec![ty, ty], vec![ty], BuiltinLower::Sub);
         row("*", vec![ty, ty], vec![ty], BuiltinLower::Mul);
-        for (op, cmp) in [
-            ("=", CmpOp::Eq),
-            ("<", CmpOp::Lt),
-            (">", CmpOp::Gt),
-            ("<=", CmpOp::Le),
-            (">=", CmpOp::Ge),
-            ("<>", CmpOp::Ne),
-        ] {
-            row(op, vec![ty, ty], vec![Type::BOOL], BuiltinLower::Cmp(cmp));
+        // Slice 10c (R-P3-3): the comparison *primitives*, each yielding the
+        // 32-bit flag `branch` consumes. The `u` prefix marks the raw-flag
+        // layer, not an unsigned-operand variant: there is exactly one
+        // primitive per comparison shape and it derives signed / unsigned /
+        // float behaviour from its operand type at lowering, exactly as the
+        // rows it replaces did. `=`/`<`/... are now ordinary `lib/` words over
+        // these, so the six surface names have *left* this table -- which is
+        // also what lets them be `inline` (`check_inline_declaration`'s
+        // builtin-name gate keys on membership here).
+        for (op, cmp) in COMPARISON_PRIMITIVES {
+            row(op, vec![ty, ty], vec![Type::U32], BuiltinLower::Cmp(cmp));
         }
     }
     for ty in float_types() {
@@ -458,16 +471,15 @@ mod tests {
     }
     #[test]
     fn builtin_table_comparisons_have_a_row_per_numeric_type() {
-        use crate::ir::CmpOp;
+        // Slice 10c (R-P3-3): **retargeted, not deleted**. This is the only
+        // thing pinning comparison coverage of the whole numeric tower, and
+        // the tower rows moved wholesale from `=`/`<`/... to the `u`-prefixed
+        // primitives. Deleting it to go green would drop the guard at exactly
+        // the moment the slice puts it under strain; the surface names are now
+        // `'T: Copy Ord`-polymorphic library words over these rows, whose own
+        // tower coverage E-P3-4 part 4 exercises end to end.
         let table = builtin_table();
-        for (op, cmp) in [
-            ("=", CmpOp::Eq),
-            ("<", CmpOp::Lt),
-            (">", CmpOp::Gt),
-            ("<=", CmpOp::Le),
-            (">=", CmpOp::Ge),
-            ("<>", CmpOp::Ne),
-        ] {
+        for (op, cmp) in COMPARISON_PRIMITIVES {
             let rows = table
                 .get(op)
                 .unwrap_or_else(|| panic!("`{op}` is a builtin operator"));
@@ -476,7 +488,7 @@ mod tests {
             let mut got: Vec<Type> = rows
                 .iter()
                 .map(|r| {
-                    assert_eq!(r.outputs, vec![Type::BOOL], "`{op}` produces `bool`");
+                    assert_eq!(r.outputs, vec![Type::U32], "`{op}` produces a `u32` flag");
                     assert_eq!(r.inputs.len(), 2, "`{op}` is binary");
                     assert_eq!(r.inputs[0], r.inputs[1], "a `{op}` row is homogeneous");
                     assert_eq!(
@@ -491,6 +503,14 @@ mod tests {
             got.sort_by_key(|t| t.name());
             want.sort_by_key(|t| t.name());
             assert_eq!(got, want, "one `{op}` row per numeric type, no more");
+        }
+        for op in ["=", "<", ">", "<=", ">=", "<>"] {
+            assert!(
+                !table.contains_key(op),
+                "`{op}` left `BUILTIN_TABLE` for `lib/`; leaving a row behind \
+                 both restores the builtin and re-arms the `inline` \
+                 builtin-name gate against the library word"
+            );
         }
     }
     #[test]

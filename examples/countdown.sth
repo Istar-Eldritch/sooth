@@ -1,10 +1,10 @@
 : sum-to ( i64 i64 -- i64 )
   | acc n |
-  n 0 = if
+  n 0 = [
     acc
-  else
+  ] [
     acc n + n 1 - sum-to
-  end ;
+  ] if ;
 
 : main ( -- )
   0 1000000 sum-to . ;    \ prints 500000500000; overflows the host stack

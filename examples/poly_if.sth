@@ -3,17 +3,17 @@
 \ that nested `if` falls out of the recursive poly-walk rather than needing a
 \ dedicated mechanism.
 
-: mymax ( 'T: Copy Ord 'T -- 'T ) over over > if drop else swap drop end ;
+: mymax inline ( 'T: Copy Ord 'T -- 'T ) over over > [ drop ] [ swap drop ] if ;
 
-: choose ( 'T 'T bool -- 'T ) | a b flag | flag if a b drop else b a drop end ;
+: choose inline ( 'T 'T bool -- 'T ) | a b flag | flag [ a b drop ] [ b a drop ] if ;
 
-: mymax3 ( 'T: Copy Ord 'T 'T -- 'T )
+: mymax3 inline ( 'T: Copy Ord 'T 'T -- 'T )
   | a b c |
-  a b > if
-    a c > if a else c end
-  else
-    b c > if b else c end
-  end ;
+  a b > [
+    a c > [ a ] [ c ] if
+  ] [
+    b c > [ b ] [ c ] if
+  ] if ;
 
 : main ( -- )
   2 5 9 mymax3 .

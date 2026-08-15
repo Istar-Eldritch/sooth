@@ -392,16 +392,26 @@ export function :Vm $h.2d.jz__m0(:Vm %v0) {
 	%v11 =w ceql %v9, %v10
 	jnz %v11, @blk1, @blk2
 @blk1
-	%v12 =l alloc8 320
-	blit %v7, %v12, 320
-	%v13 =l add %v12, 208
-	storel %v5, %v13
+	%v14 =w copy 1
 	jmp @blk3
 @blk2
+	%v15 =w copy 0
 	jmp @blk3
 @blk3
-	%v14 =l phi @blk1 %v12, @blk2 %v7
-	ret %v14
+	%v16 =w phi @blk1 %v14, @blk2 %v15
+	%v19 =w copy %v16
+	jnz %v19, @blk4, @blk5
+@blk4
+	%v20 =l alloc8 320
+	blit %v7, %v20, 320
+	%v21 =l add %v20, 208
+	storel %v5, %v21
+	jmp @blk6
+@blk5
+	jmp @blk6
+@blk6
+	%v22 =l phi @blk4 %v20, @blk5 %v7
+	ret %v22
 }
 
 export function :Vm $h.2d.jmp__m0(:Vm %v0) {
@@ -696,7 +706,7 @@ export function l $dispatch__m0(:Vm %v0, :arr_3 %v1) {
 	%v4 =l alloc8 144
 	%v5 =l alloc8 144
 	blit %v1, %v4, 144
-	%v26 =l alloc8 16
+	%v34 =l alloc8 16
 	jmp @blk1
 @blk1
 	%v6 =:Fetched call $fetch__m0(:Vm %v2)
@@ -711,35 +721,45 @@ export function l $dispatch__m0(:Vm %v0, :arr_3 %v1) {
 	%v15 =w ceql %v12, %v14
 	jnz %v15, @blk2, @blk3
 @blk2
-	%v16 =:VmPop call $vm.2d.pop__m0(:Vm %v10)
-	%v17 =l add %v16, 0
-	%v18 =l add %v16, 320
-	%v19 =l loadl %v18
+	%v18 =w copy 1
 	jmp @blk4
 @blk3
-	%v20 =l add %v4, 0
-	%v21 =l copy 9
-	%v22 =w cultl %v12, %v21
-	jnz %v22, @blk5, @blk6
-@blk6
-	%v23 =l copy 203
-	%v24 =l copy 9
-	call $sooth_oob_trap(l %v23, l %v12, l %v24)
-	jmp @blk5
+	%v19 =w copy 0
+	jmp @blk4
+@blk4
+	%v20 =w phi @blk2 %v18, @blk3 %v19
+	%v23 =w copy %v20
+	jnz %v23, @blk5, @blk6
 @blk5
+	%v24 =:VmPop call $vm.2d.pop__m0(:Vm %v10)
+	%v25 =l add %v24, 0
+	%v26 =l add %v24, 320
+	%v27 =l loadl %v26
+	jmp @blk7
+@blk6
+	%v28 =l add %v4, 0
+	%v29 =l copy 9
+	%v30 =w cultl %v12, %v29
+	jnz %v30, @blk8, @blk9
+@blk9
+	%v31 =l copy 203
+	%v32 =l copy 9
+	call $sooth_oob_trap(l %v31, l %v12, l %v32)
+	jmp @blk8
+@blk8
 	%eoff0 =l mul %v12, 16
-	%v25 =l add %v20, %eoff0
-	blit %v25, %v26, 16
-	%v27 =l add %v26, 0
-	%v28 =l loadl %v27
-	%v29 =l add %v26, 8
-	%v30 =l loadl %v29
-	%v31 =:Vm call %v28(:Vm %v10, l %v30)
-	blit %v31, %v3, 320
+	%v33 =l add %v28, %eoff0
+	blit %v33, %v34, 16
+	%v35 =l add %v34, 0
+	%v36 =l loadl %v35
+	%v37 =l add %v34, 8
+	%v38 =l loadl %v37
+	%v39 =:Vm call %v36(:Vm %v10, l %v38)
+	blit %v39, %v3, 320
 	blit %v3, %v2, 320
 	jmp @blk1
-@blk4
-	ret %v19
+@blk7
+	ret %v27
 }
 
 export function :arr_0 $build__m0() {

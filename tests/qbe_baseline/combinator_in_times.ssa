@@ -92,49 +92,69 @@ export function $sooth_main() {
 	%v2 =l copy 0
 	jmp @blk1
 @blk1
-	%v3 =l phi @start %v2, @blk8 %v26
-	%v4 =l phi @start %v0, @blk8 %v4
+	%v3 =l phi @start %v2, @blk14 %v42
+	%v4 =l phi @start %v0, @blk14 %v4
 	%v5 =w csltl %v3, %v4
 	jnz %v5, @blk2, @blk3
 @blk2
-	%v6 =:arr_0 call $mk__m0(l %v3)
-	%v8 =l copy 3
-	%v9 =l copy %v8
-	%v11 =l copy 0
-	jmp @blk5
-@blk5
-	%v12 =l phi @blk2 %v11, @blk9 %v24
-	%v13 =l phi @blk2 %v9, @blk9 %v13
-	%v14 =w csltl %v12, %v13
-	jnz %v14, @blk6, @blk7
-@blk6
-	%v15 =l add %v6, 0
-	%v16 =l copy %v12
-	%v17 =l copy 3
-	%v18 =w cultl %v16, %v17
-	jnz %v18, @blk9, @blk10
-@blk10
-	%v19 =l copy 43
-	%v20 =l copy 3
-	call $sooth_oob_trap(l %v19, l %v16, l %v20)
-	jmp @blk9
-@blk9
-	%eoff0 =l mul %v16, 8
-	%v21 =l add %v15, %eoff0
-	%v22 =l loadl %v21
-	call $printf(l $fmt, l %v22, ...)
-	%v23 =l copy 1
-	%v24 =l add %v12, %v23
-	jmp @blk5
-@blk7
-	jmp @blk8
-@blk8
-	%v25 =l copy 1
-	%v26 =l add %v3, %v25
-	jmp @blk1
+	%v8 =w copy 1
+	jmp @blk4
 @blk3
+	%v9 =w copy 0
 	jmp @blk4
 @blk4
+	%v10 =w phi @blk2 %v8, @blk3 %v9
+	%v13 =w copy %v10
+	jnz %v13, @blk5, @blk6
+@blk5
+	%v14 =:arr_0 call $mk__m0(l %v3)
+	%v16 =l copy 3
+	%v17 =l copy %v16
+	%v19 =l copy 0
+	jmp @blk8
+@blk8
+	%v20 =l phi @blk5 %v19, @blk15 %v40
+	%v21 =l phi @blk5 %v17, @blk15 %v21
+	%v22 =w csltl %v20, %v21
+	jnz %v22, @blk9, @blk10
+@blk9
+	%v25 =w copy 1
+	jmp @blk11
+@blk10
+	%v26 =w copy 0
+	jmp @blk11
+@blk11
+	%v27 =w phi @blk9 %v25, @blk10 %v26
+	%v30 =w copy %v27
+	jnz %v30, @blk12, @blk13
+@blk12
+	%v31 =l add %v14, 0
+	%v32 =l copy %v20
+	%v33 =l copy 3
+	%v34 =w cultl %v32, %v33
+	jnz %v34, @blk15, @blk16
+@blk16
+	%v35 =l copy 42
+	%v36 =l copy 3
+	call $sooth_oob_trap(l %v35, l %v32, l %v36)
+	jmp @blk15
+@blk15
+	%eoff0 =l mul %v32, 8
+	%v37 =l add %v31, %eoff0
+	%v38 =l loadl %v37
+	call $printf(l $fmt, l %v38, ...)
+	%v39 =l copy 1
+	%v40 =l add %v20, %v39
+	jmp @blk8
+@blk13
+	jmp @blk14
+@blk14
+	%v41 =l copy 1
+	%v42 =l add %v3, %v41
+	jmp @blk1
+@blk6
+	jmp @blk7
+@blk7
 	ret
 }
 

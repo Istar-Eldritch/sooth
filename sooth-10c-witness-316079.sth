@@ -1,0 +1,10 @@
+import: c "lib/combinators.sth" ;
+: classify ( i64 -- i64 ) dup 10 < [ 1 ] [ 2 ] if swap drop ;
+: countdown ( i64 i64 -- i64 )
+  | n | | acc | n 0 = [ acc ] [ acc n + n 1 - countdown ] if ;
+: main ( -- )
+  3 classify .
+  30 classify .
+  7 true [ 0 ] [ 1 ] unless .
+  0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while .
+  0 100 countdown . ;
