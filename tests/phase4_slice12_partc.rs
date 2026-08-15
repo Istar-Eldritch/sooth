@@ -22,7 +22,7 @@ fn check_error(src: &str) -> String {
 fn ordinary_literal_at_an_inline_parameter_is_located_error() {
     let err = check_error(
         ": takes-tilde inline ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : main ( -- ) 5 [ 1 + ] takes-tilde . ;\n",
+         : main ( -- ) [ 1 + ] takes-tilde . ;\n",
     );
     assert_eq!(
         err,
@@ -38,7 +38,7 @@ fn ordinary_literal_at_an_inline_parameter_is_located_error() {
 fn inline_literal_at_an_ordinary_parameter_is_located_error() {
     let err = check_error(
         ": takes-ordinary ( [ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : main ( -- ) 5 ~[ 1 + ] takes-ordinary . ;\n",
+         : main ( -- ) ~[ 1 + ] takes-ordinary . ;\n",
     );
     assert_eq!(
         err,

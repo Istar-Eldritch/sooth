@@ -299,7 +299,7 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 
 ## Control flow and iteration
 
-Boolean branching is the library word `if` (`[ then ] [ else ] if`, see below);
+Boolean branching is the library word `if` (`~[ then ] ~[ else ] if`, see below);
 structural dispatch is clause-bodied definition. There are deliberately **no loop
 keywords** (no `begin/until`, `do/loop`); dropping them keeps the surface small and
 matches the Factor/Kitten lineage, where iteration is expressed with combinators
@@ -452,7 +452,7 @@ imported `while`'s self-call still resolves to itself and the self-tail recogniz
 fires rather than recursing forever through an unrecognized name.
 
 **Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
-`bool` and two quotations (`[ then ] [ else ] if`). Structural
+`bool` and two quotations (`~[ then ] ~[ else ] if`). Structural
 dispatch on ADTs is **clause-bodied definition**, the sole enum eliminator: a word
 whose top input is an enum is defined per variant (`| Variant ... ;`),
 exhaustiveness-checked, with no inline `match`. The rejected Haskell-style machine —

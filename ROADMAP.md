@@ -308,7 +308,7 @@ self-tail-recursive `times-helper`: its recursive call in tail position lowers t
 constant-stack loop (a header `Phi`/`Jnz` reached by a back-edge `Jmp`, no per-iteration
 `Instr::Call`, every loop-body `Alloc` entry-hoisted, verified at 1M+ iterations under a 1MB
 stack), and loops nest at any depth. `examples/times.sth`
-(`0 1000000 [ 1 + + ] times .`) dogfoods it, printing the same total as
+(`0 1000000 ~[ 1 + + ] times .`) dogfoods it, printing the same total as
 `examples/countdown.sth`'s hand-threaded self-recursion.
 **Phase 4 Slice 5a (native multi-file compilation, word and type imports, and
 encapsulation) is complete**: a file is a compilation unit, and `import: q "path.sth" ;`

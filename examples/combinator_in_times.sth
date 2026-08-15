@@ -3,7 +3,7 @@
 \ round and print its elements, one round per outer `times` iteration, one
 \ over `each` from `lib/combinators.sth` and one hand-threaded, so the golden
 \ can pin them to the same output. This is ROADMAP's own motivating shape for
-\ 6d, `2 [ | i | mk [ . ] c::each ] times`: a combinator driving its own
+\ 6d, `2 ~[ | i | mk ~[ . ] c::each ] times`: a combinator driving its own
 \ internal `times` loop while already inside an outer `times` body, which R18
 \ rejected before this slice lifted the limit.
 

@@ -37,7 +37,7 @@
 \ at all -- is not fixed by this; it is a separate slice.)
 \
 \ Its tail term is `branch`, whose tail-called parameters are both quotations,
-\ so a caller's `... [ base ] [ ... rec ] if` self-tails through it and lowers
+\ so a caller's `... ~[ base ] ~[ ... rec ] if` self-tails through it and lowers
 \ to a loop back-edge rather than recursion.
 : if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
   | if--else-arm | | if--then-arm | | if--cond |

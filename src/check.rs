@@ -191,7 +191,6 @@ struct SurvivingSet {
 #[derive(Debug, Clone)]
 struct QuotBody {
     body: Vec<Term>,
-    #[allow(dead_code)]
     span: Span,
     is_inline: bool,
 }

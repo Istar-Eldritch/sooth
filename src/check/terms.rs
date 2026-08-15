@@ -321,7 +321,13 @@ fn check_term(
                 // immediately preceding this `call` being itself a
                 // `TermKind::Quotation` literal is a *direct* call, since a
                 // forwarded parameter's use here is a `Call(name)` term, never
-                // a literal.
+                // a literal. This check is adjacency-only, by design: it
+                // catches the direct `~[ ... ] call` spelling R-C2 names, not
+                // every path by which a `~[ ... ]` literal might reach `call`
+                // through intervening terms that don't touch it (e.g.
+                // `~[ ... ] 5 . call`) -- that spelling still splices
+                // correctly, since `~` never changes runtime behaviour, only
+                // which diagnostics fire.
                 if at > 0 {
                     if let TermKind::Quotation(_, true) = &siblings[at - 1].kind {
                         return Err(inline_literal_at_call_error(ctx, siblings[at - 1].span));
