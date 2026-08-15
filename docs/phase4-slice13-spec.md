@@ -439,14 +439,20 @@ warnings && cargo test`) and, from P2 on, runnable. Sized for a less-capable
 implementer: P1 is wide but mechanical; P2 introduces production with the simplest
 (shared, no-`Provenance`) checking; P3 isolates the aliasing machinery.
 
-- **Phase 1 — Part A (representation + threading), no new capability.** R-A1..R-A10,
+- **Phase 1 — Part A (representation + threading).** R-A1..R-A10,
   R-A6a. Add the variant and raw form, the parser interception and fold (both the
   bare-sigil and glued-`&'T` cases, R-A3), every exhaustive-match arm, all three
   `refs`-taking signature changes (`apply_subst`, `subst_polytype`, and
   `unify_poly_input` per R-A6a — the last one threads through ~11 call sites, not
   just its own arm), and the diagnostic renderers. A signature can declare
   `&'T`/`&['T 4]`/`&!...`; a body `&a` is still an unknown-word error. Standalone
-  value: the type is nameable and round-trips. The placebo hazard is that an arm
+  value: the type is nameable and round-trips — and, **corrected during Phase 1
+  review**, it is also already *runnable*. This phase was scoped as "no new
+  capability", which is false: a monomorphic caller can borrow a local into a
+  generic word's ref slot (`: firstref ( &['T 4] -- ) drop ;` called as `&a
+  firstref`), so `unify_poly_input` and `subst_polytype` ground a poly ref on the
+  live path and the program compiles, links, and runs. Phase 2 must not assume no
+  borrow reaches lowering yet. The placebo hazard is that an arm
   added but never reached is untestable — pin the reachable ones (fold,
   `poly_type_str`, `unify_poly_input` against a concrete `&`-arg) with unit tests,
   and mutation-check them. **Difficulty: standard-to-hard, revised up after
@@ -502,7 +508,14 @@ form.
   is a follow-up, not a soundness gap.
 - **REPL borrows in a poly line**: a REPL line has no polymorphic words (slice 6a D2), so
   `remap_poly_type`'s `Ref` arm (R-A9) is threaded for imported-word generation only, not
-  for a poly borrow typed at the REPL.
+  for a poly borrow typed at the REPL. The arm is consequently unreachable from any
+  test, exactly like its pre-existing `Array` sibling.
+- **A `&`/`&!` sigil followed by a non-`--` delimiter** (`( 'T -- 'T & )`): the
+  R-A3 guard and `parse_ref_type_expr` both check only `--`/end-of-tokens, so a
+  closing `)`, `|`, `;` or `]` yields a located but generic `expected a word, found
+  RParen` instead of `ref_no_referent_error`. The poly path inherits this from the
+  concrete path rather than adding a gap; fixing it means enumerating the delimiter
+  set in both places, so it is a standalone cleanup, not Phase 1 or Part B work.
 
 ## Phases (JSON)
 
