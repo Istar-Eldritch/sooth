@@ -14,6 +14,20 @@ fn check_error(src: &str) -> String {
     sooth::check::check(&mut module).expect_err("check should fail")
 }
 
+/// Build and run `src`, returning its stdout.
+fn run(name: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let binary = sooth::driver::build(&path).expect("build should succeed");
+    let output = std::process::Command::new(&binary)
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&binary).ok();
+    String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
 /// X7 / M-C, direction 1 (E3a): an ordinary `[ ... ]` literal at a `~[ ... ]`
 /// parameter. Exact text, not merely "rejected" -- mutation: delete the
 /// flavour comparison in `check_literal_against_declared_effect` and the
@@ -42,23 +56,59 @@ fn inline_literal_at_an_ordinary_parameter_is_located_error() {
     );
     assert_eq!(
         err,
-        "error: this argument is an inline `~[ ... ]` quotation but `takes-ordinary` declares \
-         parameter `[ i64 -- i64 ]` as an ordinary `[ ... ]`; write it `[ ... ]` in `main` (line 2)"
+        "error: this quotation is inline `~[ ... ]` but `takes-ordinary` expects \
+         `[ i64 -- i64 ]`, an ordinary `[ ... ]`; write it `[ ... ]` in `main` (line 2)"
     );
 }
 
-/// E3b at the direct-`call` boundary (R-C2's fourth listed boundary): a
-/// `~[ ... ]` literal spelled directly before `call` (not forwarded through a
-/// combinator's own `~`-declared parameter local, which must keep working --
-/// see `check::terms::tests` for that positive case) is rejected, naming
-/// `call` since there is no declared parameter to name.
+/// X7 (R-C2): E3b at the word-output boundary. Same funnel as the parameter
+/// golden above, but reached through `materialize_quotation_at_boundary`
+/// rather than the argument loop, so only a test says the funnel covers it.
+/// The wording claims no parameter, because there is none.
 #[test]
-fn inline_literal_at_a_direct_call_is_located_error() {
-    let err = check_error(": main ( -- ) ~[ 1 + ] call ;\n");
+fn inline_literal_at_a_word_output_is_located_error() {
+    let err = check_error(
+        ": mk ( -- [ i64 -- i64 ] ) ~[ 1 + ] ;\n\
+         : main ( -- ) 5 mk call . ;\n",
+    );
     assert_eq!(
         err,
-        "error: this argument is an inline `~[ ... ]` quotation but `call` splices an ordinary \
-         `[ ... ]`; write it `[ ... ]` in `main` (line 1)"
+        "error: this quotation is inline `~[ ... ]` but `mk` expects `[ i64 -- i64 ]`, \
+         an ordinary `[ ... ]`; write it `[ ... ]` in `mk` (line 1)"
+    );
+}
+
+/// X7 (R-C2): E3b at the array-store boundary, the third of the three. Here
+/// the expectation belongs to the store operator, not to any word.
+#[test]
+fn inline_literal_at_an_array_store_is_located_error() {
+    let err = check_error(
+        ": seed ( -- [ -- i64 ] ) [ 0 ] ;\n\
+         : main ( -- )\n\
+         seed 2 fill | tbl |\n\
+         &!tbl 0 >usize &!> ~[ 1 ] !\n\
+         &tbl 0 &> @ call .\n\
+         tbl drop ;\n",
+    );
+    assert_eq!(
+        err,
+        "error: this quotation is inline `~[ ... ]` but `!` expects `[ -- i64 ]`, \
+         an ordinary `[ ... ]`; write it `[ ... ]` in `main` (line 4)"
+    );
+}
+
+/// R-C2: a direct `call` is *not* a flavour boundary. Nothing is materialized
+/// there -- `call` splices a literal under either spelling -- so both are
+/// accepted and both print `6`.
+#[test]
+fn both_quotation_flavours_are_accepted_at_a_direct_call() {
+    assert_eq!(
+        run("call-ordinary", ": main ( -- ) 5 [ 1 + ] call . ;\n"),
+        "6\n"
+    );
+    assert_eq!(
+        run("call-inline", ": main ( -- ) 5 ~[ 1 + ] call . ;\n"),
+        "6\n"
     );
 }
 

@@ -171,7 +171,16 @@ Numbered and traceable. Each maps to a named test or golden in the exit criteria
   is compared against the parameter's flavour:
   - an ordinary `[ ... ]` literal at a `~[ ... ]` parameter is a located error (E3a);
   - a `~[ ... ]` literal at an ordinary `Type::Quotation` boundary (parameter,
-    field/array store, word output, direct `[ ... ] call`) is a located error (E3b).
+    field/array store, word output) is a located error (E3b).
+
+  A direct `[ ... ] call` is **not** one of those boundaries. Nothing is
+  materialized there: `call` on a literal splices it under either spelling, so
+  the flavour decides nothing and there is no resolved parameter type to compare
+  against. The rule could only be enforced syntactically, by inspecting the term
+  adjacent to the `call` — the same mechanism OQ5 declines for the positional
+  case, and holed the same way (`~[ ... ] 5 swap call` reaches the identical
+  splice through an intervening term). Both spellings are accepted at a direct
+  `call`.
 - **R-C3.** Corpus call-site migration: every combinator call site in `lib/` and
   `examples/` gains the tilde — `[ ... ] if` → `~[ ... ] if`, `[ ... ] times` →
   `~[ ... ] times`, and the `c::fold`/`c::map`/`c::each`/`c::filter`/`c::while`,
@@ -240,10 +249,14 @@ a diagnostic golden.
   > `{param}` as inline `~[ ... ]`; write it `~[ ... ]`
 
 - **E3b (part C, R-C2).** A `~[ ... ]` literal at an ordinary `[ ... ]` boundary.
-  Located at the argument literal. Text:
+  Located at the literal. `{name}` is the parameter's word, the returning word, or
+  the store operator, so the text names the *expectation* rather than a parameter
+  declaration (unlike E3a, which can only ever fire at a declared parameter: a
+  `Type::InlineQuotation` is unrepresentable, so it is never an output or a store
+  target). Text:
 
-  > this argument is an inline `~[ ... ]` quotation but `{name}` declares parameter
-  > `{param}` as an ordinary `[ ... ]`; write it `[ ... ]`
+  > this quotation is inline `~[ ... ]` but `{name}` expects `{param}`, an ordinary
+  > `[ ... ]`; write it `[ ... ]`
 
 - **E4 (part C / OQ4, R-D5).** An ordinary-`[ ... ]`-parameter word (a real-call
   quotation-taking word) defined in the REPL. Located at the definition. Text:
@@ -315,7 +328,9 @@ tests sit beside their stage per house convention).
 - **X6.** `~[ ... ]` parses as a term-level literal (positive golden;
   `parser.rs` unit test for the new `parse_term` arm).
 - **X7.** An ordinary `[ ... ]` at a `~` parameter (E3a) and a `~[ ... ]` at an
-  ordinary parameter (E3b) are each located-error goldens (= M-C).
+  ordinary parameter (E3b) are each located-error goldens (= M-C). E3b gets a
+  golden at each of R-C2's other two boundaries as well — a word output and an
+  array store — since all three ride one funnel and only a test says so.
 - **X8.** The migrated corpus (R-C3, including the `slice6g:386` `sort` call site
   now `~[ ... ]`) stays byte-identical.
 - **X9.** `examples/capturing_dispatch.sth`'s stored/returned ordinary quotations

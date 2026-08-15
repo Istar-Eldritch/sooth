@@ -309,30 +309,10 @@ fn check_term(
                 let Some(QuotRef::Known(id)) = top.quot else {
                     return Err(call_needs_quotation_error(ctx, span));
                 };
-                // Slice 12 (R-C2, E3b): a `~[ ... ]` literal spelled directly
-                // before `call` (not forwarded through a local bound from a
-                // declared `~` parameter -- that shape is a combinator's own
-                // body doing `f call` on its forwarded parameter, and must
-                // keep working: it is how every library combinator's body
-                // calls its own quotation parameter). The distinguishing fact
-                // is syntactic, not the resolved `Slot`'s `quot` marker (a
-                // forwarded parameter's slot carries the exact same `Known`
-                // marker once its combinator is spliced): only the term
-                // immediately preceding this `call` being itself a
-                // `TermKind::Quotation` literal is a *direct* call, since a
-                // forwarded parameter's use here is a `Call(name)` term, never
-                // a literal. This check is adjacency-only, by design: it
-                // catches the direct `~[ ... ] call` spelling R-C2 names, not
-                // every path by which a `~[ ... ]` literal might reach `call`
-                // through intervening terms that don't touch it (e.g.
-                // `~[ ... ] 5 . call`) -- that spelling still splices
-                // correctly, since `~` never changes runtime behaviour, only
-                // which diagnostics fire.
-                if at > 0 {
-                    if let TermKind::Quotation(_, true) = &siblings[at - 1].kind {
-                        return Err(inline_literal_at_call_error(ctx, siblings[at - 1].span));
-                    }
-                }
+                // Slice 12 (R-C2): `call` is not a flavour boundary. Nothing
+                // is materialized here -- a literal is spliced under either
+                // spelling -- so `~` decides nothing and both are accepted.
+                //
                 // Splice the body against the current locals/scope in lexical
                 // extent (capture is free, recon 9), bracketed like an `if`
                 // arm so a body that binds does not leak past the `call` and a

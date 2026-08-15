@@ -1663,8 +1663,10 @@ fn ordinary_literal_at_inline_param_error(
 }
 
 /// Slice 12 (R-C2, E3b): a `~[ ... ]` literal at an ordinary `Type::Quotation`
-/// boundary (parameter, field/array store, word output). The mirror of the
-/// error above.
+/// boundary. The mirror of the error above, but phrased over the expectation
+/// rather than a parameter declaration: unlike E3a, this fires at all three
+/// boundaries, so `word` is as often the returning word or the store operator
+/// (`!`) as it is the parameter's word.
 fn inline_literal_at_ordinary_param_error(
     ctx: &Ctx,
     span: Span,
@@ -1673,20 +1675,7 @@ fn inline_literal_at_ordinary_param_error(
 ) -> String {
     let word = crate::resolve::demangle_word(word);
     format!(
-        "error: this argument is an inline `~[ ... ]` quotation but `{word}` declares parameter `{param}` as an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
-        in_word(ctx),
-        span.line,
-    )
-}
-
-/// Slice 12 (R-C2, E3b): the direct-`call` boundary. `call` has no declared
-/// parameter to name (it splices whatever literal sits on top), so a `~[ ... ]`
-/// there is rejected against `call` itself rather than a named parameter --
-/// `~` marks a literal spliced only through a declared inline parameter, not
-/// general splice-by-`call` spelling.
-fn inline_literal_at_call_error(ctx: &Ctx, span: Span) -> String {
-    format!(
-        "error: this argument is an inline `~[ ... ]` quotation but `call` splices an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
+        "error: this quotation is inline `~[ ... ]` but `{word}` expects `{param}`, an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
         in_word(ctx),
         span.line,
     )
