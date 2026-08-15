@@ -1352,6 +1352,15 @@ fn back_edge_declared_shape(
 /// capture restriction here (R12): a read that consumes a non-`Copy` enclosing
 /// local, or a borrow of an enclosing place left on the row, is rejected; a
 /// `Copy` local read by value is allowed.
+///
+/// Slice 10c (R-P2-3/R-P2-4): `shape_changing` is true for a declared
+/// quotation whose input and output rows differ (`..i -- ..o`, `..i != ..o`).
+/// There the exit row has no fixed point to check against -- the whole point
+/// of the shape change -- so this returns the literal's actual exit types
+/// without judging them, and the *caller* (`check_poly_combinator_args`)
+/// compares one sibling literal's actual exit types against another's,
+/// erroring at whichever literal disagrees (R-P2-4: no row unification,
+/// `..o` is discovered by forward checking, never solved for).
 #[allow(clippy::too_many_arguments)]
 fn check_literal_against_declared_effect(
     id: QuotId,
@@ -1369,7 +1378,8 @@ fn check_literal_against_declared_effect(
     scope: &mut Scope,
     poly: &mut PolyCtx,
     granted: &HashSet<String>,
-) -> Result<(), String> {
+    shape_changing: bool,
+) -> Result<Vec<Type>, String> {
     let body = prov.quotations[id.0].body.clone();
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let moves_before = scope.moves.states.clone();
@@ -1420,6 +1430,12 @@ fn check_literal_against_declared_effect(
             span,
         },
     )?;
+    let actual: Vec<Type> = result.iter().map(|s| s.ty).collect();
+    if shape_changing {
+        // R-P2-4: a shape-changing declared quotation has no fixed exit row
+        // to check against; the caller reconciles sibling literals instead.
+        return Ok(actual);
+    }
     // R11: the literal's exit row must equal the grounded declared output row:
     // the same carried region `row` followed by the declared outputs. N=0
     // leaves the region untouched and N≥2 feeds one iteration's output into the
@@ -1452,7 +1468,7 @@ fn check_literal_against_declared_effect(
             ctx, span, word, declared, actual,
         ));
     }
-    Ok(())
+    Ok(actual)
 }
 
 /// R10/R21: a quotation parameter position whose argument is not a quotation
@@ -1489,6 +1505,36 @@ fn literal_effect_mismatch_error(
     let word = crate::resolve::demangle_word(word);
     format!(
         "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// Slice 10c (R-P2-3): two sibling literals passed to the same
+/// shape-changing declared quotation parameter (sharing one declared output
+/// row `..o`) leave different actual output shapes. Located at the *second*
+/// literal's own span -- the argument site -- rather than wherever the
+/// spliced callee body would eventually notice the disagreement (recon 8: the
+/// diagnostic this restores).
+fn combinator_branch_output_mismatch_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    expected: &[Type],
+    found: &[Type],
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    let render = |types: &[Type]| {
+        types
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    format!(
+        "error: the quotations passed to `{word}` leave different stack shapes: `{}` vs `{}`{} (line {})",
+        render(expected),
+        render(found),
         in_word(ctx),
         span.line,
     )

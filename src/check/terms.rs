@@ -896,6 +896,7 @@ fn check_term(
                                     scope,
                                     poly,
                                     &HashSet::new(),
+                                    false,
                                 )?;
                                 check_literal_against_declared_effect(
                                     b,
@@ -913,6 +914,7 @@ fn check_term(
                                     scope,
                                     poly,
                                     &HashSet::new(),
+                                    false,
                                 )?;
                                 // R23: the merged erased slot's surviving set is
                                 // the union of both arms' -- a fresh interned

@@ -678,6 +678,14 @@ struct PolyBuilder {
     /// quotation effect (R4), so both live in the same id space.
     row_names: Vec<String>,
     row_index: HashMap<String, u32>,
+    /// Slice 10c (R-P2-1): a row named on a quotation effect's *output* side
+    /// may denote the signature's own top-level output row named only later
+    /// in the signature (e.g. `..o` in `~[ ..i -- ..o ]`, on a word whose
+    /// top-level output is `-- ..o`). Such a mention is interned optimistically
+    /// and its (id, name, span) recorded here; `validate_pending_quotation_rows`
+    /// checks each one once the whole signature is known, since only then can
+    /// "is this the signature's own top-level row" be answered.
+    pending_quotation_rows: Vec<(u32, String, Span)>,
 }
 
 impl PolyBuilder {
@@ -708,15 +716,49 @@ impl PolyBuilder {
     }
 
     /// Slice 10a (R4): a `..`-prefixed name mentioned inside a quotation
-    /// effect must already denote the signature's own top-level row -- a
-    /// fresh name, or any row when the signature declared none at top level,
-    /// is a located error (the id table is empty in the latter case, so a
-    /// lookup miss covers both).
+    /// effect's *input* side must already denote the signature's own
+    /// top-level row -- a fresh name, or any row when the signature declared
+    /// none at top level, is a located error (the id table is empty in the
+    /// latter case, so a lookup miss covers both). This stays strict/immediate
+    /// (unlike the output-side sibling below): the stack region present when
+    /// a quotation *begins* executing can only ever be a row already declared
+    /// by this point in the signature (10c R-P2-1's forward reference is
+    /// specifically for a row named only later, which describes what a
+    /// quotation *leaves*, never what it starts with).
     fn quotation_row_id(&mut self, name: &str, span: Span) -> Result<u32, String> {
         self.row_index
             .get(name)
             .copied()
             .ok_or_else(|| quotation_row_not_top_level_error(name, span))
+    }
+
+    /// Slice 10c (R-P2-1): a `..`-prefixed name mentioned on a quotation
+    /// effect's *output* side may denote the signature's own top-level output
+    /// row, named only later in the signature (`~[ ..i -- ..o ]` parsed while
+    /// still inside the word's input side, `..o` not yet bound by `set_row`).
+    /// Intern it optimistically and defer the "is this actually one of the
+    /// signature's own top-level rows" check to `validate_pending_quotation_rows`,
+    /// once the whole signature -- including a top-level row declared after
+    /// this point -- is known.
+    fn quotation_row_id_deferred(&mut self, name: &str, span: Span) -> u32 {
+        let id = self.row_id(name);
+        self.pending_quotation_rows
+            .push((id, name.to_string(), span));
+        id
+    }
+
+    /// Slice 10c (R-P2-1): resolve every deferred output-side row mention
+    /// against the now-complete signature. A mention that is neither the
+    /// top-level input nor output row is a fresh name (or a row belonging to
+    /// no top-level side at all) and is rejected exactly as the strict,
+    /// immediate check rejects one on the input side.
+    fn validate_pending_quotation_rows(&self) -> Result<(), String> {
+        for (id, name, span) in &self.pending_quotation_rows {
+            if Some(*id) != self.row_in && Some(*id) != self.row_out {
+                return Err(quotation_row_not_top_level_error(name, *span));
+            }
+        }
+        Ok(())
     }
 
     /// Intern a type variable, returning its id and whether this is its
@@ -1253,6 +1295,11 @@ impl<'t> Parser<'t> {
         self.expect_word("--")?;
         let raw_out =
             self.parse_poly_slots(&mut builder, true, |tok| matches!(tok, Token::RParen))?;
+        // Slice 10c (R-P2-1): the whole signature is known now -- resolve
+        // every quotation effect's deferred output-side row mention against
+        // it (a mention that turned out to name neither top-level row is a
+        // located error here, not at the point it was first seen).
+        builder.validate_pending_quotation_rows()?;
         let inputs = raw_in
             .into_iter()
             .map(|r| self.raw_to_poly_type(r))
@@ -1288,7 +1335,7 @@ impl<'t> Parser<'t> {
                 Some((Token::Word(w), span)) if w.starts_with("..") => {
                     return Err(row_var_misplaced_error(w, *span));
                 }
-                _ => slots.push(self.parse_poly_slot(builder)?),
+                _ => slots.push(self.parse_poly_slot(builder, is_output)?),
             }
         }
         Ok(slots)
@@ -1296,21 +1343,29 @@ impl<'t> Parser<'t> {
 
     /// One polymorphic type slot: an array (whose element and/or count may be a
     /// variable), a type variable (with an optional bound at its binding
-    /// occurrence), or a plain concrete type expression.
-    fn parse_poly_slot(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+    /// occurrence), or a plain concrete type expression. `word_is_output` is
+    /// which top-level side of the *enclosing word's* signature this slot sits
+    /// on -- threaded down to a nested quotation effect, since Slice 10c
+    /// (R-P2-2) only lifts the same-row rule for a quotation on the word's
+    /// input side (a parameter), never its output side (R-P2-5).
+    fn parse_poly_slot(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
         // Slice 10a (R1): `~[` has already consumed the opening bracket as
         // one token, so its entry point skips straight to the inner parse
         // rather than going through `parse_poly_quotation`'s own
         // `expect(LBracket)`.
         if matches!(self.peek(), Some((Token::TildeLBracket, _))) {
             self.pos += 1;
-            return self.parse_poly_quotation_inner(builder, true);
+            return self.parse_poly_quotation_inner(builder, true, word_is_output);
         }
         if matches!(self.peek(), Some((Token::LBracket, _))) {
             if self.quotation_type_ahead() {
-                return self.parse_poly_quotation(builder);
+                return self.parse_poly_quotation(builder, word_is_output);
             }
-            return self.parse_poly_array(builder);
+            return self.parse_poly_array(builder, word_is_output);
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
@@ -1348,9 +1403,13 @@ impl<'t> Parser<'t> {
     /// Slice 6a (R2/R5): a polymorphic quotation effect `[ <in> -- <out> ]`
     /// whose rows recurse through `parse_poly_slot`, so a `'T` element variable
     /// is interned into `builder` exactly as it is in an ordinary slot.
-    fn parse_poly_quotation(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+    fn parse_poly_quotation(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
         self.expect(Token::LBracket)?;
-        self.parse_poly_quotation_inner(builder, false)
+        self.parse_poly_quotation_inner(builder, false, word_is_output)
     }
 
     /// The body of a polymorphic quotation effect, positioned just past its
@@ -1363,14 +1422,25 @@ impl<'t> Parser<'t> {
         &mut self,
         builder: &mut PolyBuilder,
         is_inline: bool,
+        word_is_output: bool,
     ) -> Result<RawTy, String> {
-        let (inputs, row_in, row_in_span) = self.parse_poly_quot_list(builder, true)?;
+        let (inputs, row_in, row_in_span) =
+            self.parse_poly_quot_list(builder, true, word_is_output)?;
         self.expect_word("--")?;
-        let (outputs, row_out, row_out_span) = self.parse_poly_quot_list(builder, false)?;
+        let (outputs, row_out, row_out_span) =
+            self.parse_poly_quot_list(builder, false, word_is_output)?;
         self.expect(Token::RBracket)?;
-        // R5: both sides or neither, and (for 10a) the same row.
+        // R5: both sides or neither. For 10a's loop-body shape (a back-edge
+        // fixed point) the row must be the same on both sides; Slice 10c
+        // (R-P2-2) lifts that for an *input-side* quotation parameter of a
+        // quotation-taking (always-inlined) word, whose shape change is
+        // splice-local (INV-INLINE-COMBINATOR) and never rides a back-edge.
+        // An output-side quotation (R-P2-5, a word *returning* an inline
+        // quotation) keeps the same-row rule: it is not a parameter, so the
+        // splice-local justification does not apply.
+        let shape_change_lifted = is_inline && !word_is_output;
         match (row_in, row_out) {
-            (Some(a), Some(b)) if a != b => {
+            (Some(a), Some(b)) if a != b && !shape_change_lifted => {
                 return Err(quotation_row_shape_change_error(
                     &builder.row_names[a as usize],
                     &builder.row_names[b as usize],
@@ -1405,6 +1475,7 @@ impl<'t> Parser<'t> {
         &mut self,
         builder: &mut PolyBuilder,
         stop_on_arrow: bool,
+        word_is_output: bool,
     ) -> Result<(Vec<RawTy>, Option<u32>, Option<(String, Span)>), String> {
         let mut row = None;
         let mut row_span = None;
@@ -1412,7 +1483,16 @@ impl<'t> Parser<'t> {
             if w.starts_with("..") {
                 let (w, span) = (w.clone(), *span);
                 self.pos += 1;
-                row = Some(builder.quotation_row_id(&w, span)?);
+                // Slice 10c (R-P2-1): the quotation's own *input* side must
+                // already denote a known row (strict, immediate); its *output*
+                // side may forward-reference the signature's own top-level
+                // output row, named only later (deferred, validated once the
+                // whole signature is parsed).
+                row = Some(if stop_on_arrow {
+                    builder.quotation_row_id(&w, span)?
+                } else {
+                    builder.quotation_row_id_deferred(&w, span)
+                });
                 row_span = Some((w, span));
             }
         }
@@ -1425,7 +1505,7 @@ impl<'t> Parser<'t> {
                 Some((Token::Word(w), span)) if w.starts_with("..") => {
                     return Err(row_var_misplaced_error(w, *span));
                 }
-                _ => out.push(self.parse_poly_slot(builder)?),
+                _ => out.push(self.parse_poly_slot(builder, word_is_output)?),
             }
         }
         Ok((out, row, row_span))
@@ -1434,9 +1514,13 @@ impl<'t> Parser<'t> {
     /// A polymorphic array `[ elem count ]`: `elem` recurses (so `['T 'N]`
     /// nests a variable element), `count` is a decimal literal or a length
     /// variable `'N`.
-    fn parse_poly_array(&mut self, builder: &mut PolyBuilder) -> Result<RawTy, String> {
+    fn parse_poly_array(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word_is_output: bool,
+    ) -> Result<RawTy, String> {
         self.expect(Token::LBracket)?;
-        let elem = self.parse_poly_slot(builder)?;
+        let elem = self.parse_poly_slot(builder, word_is_output)?;
         let count = match self.peek().cloned() {
             Some((Token::Word(w), span)) if w.starts_with('\'') => {
                 self.pos += 1;
@@ -3554,6 +3638,37 @@ mod tests {
             err,
             "error: a loop body cannot change the shape of the carried region: `..s` in, `..t` out\nnote: 10c lifts this for a word without a back-edge"
         );
+    }
+
+    #[test]
+    fn parse_row_in_quotation_effect_shape_change_for_input_side_combinator_parses() {
+        // Slice 10c (R-P2-2/R-P2-5): a quotation *parameter* (input side of
+        // the word) of a quotation-taking (always-inlined) word may declare
+        // differing rows -- `..i` (already a known top-level row by the time
+        // this parameter is reached) and `..o` (a forward reference to the
+        // signature's own top-level output row, named only later, admitted by
+        // R-P2-1's deferred check). The shape change is splice-local
+        // (INV-INLINE-COMBINATOR), never a carried region on a back-edge, so
+        // it is not the 10a same-row restriction's concern.
+        let module = parse_src(
+            ": myif ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o ) \
+             | e | | t | | c | c if t call else e call end ;",
+        )
+        .unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(sig.row_in.is_some());
+        assert!(sig.row_out.is_some());
+        assert_ne!(
+            sig.row_in, sig.row_out,
+            "the word's own top-level rows genuinely differ"
+        );
+        for input in &sig.inputs {
+            if let PolyType::Quotation(_, _, is_inline, row_in, row_out) = input {
+                assert!(*is_inline);
+                assert_eq!(*row_in, sig.row_in);
+                assert_eq!(*row_out, sig.row_out);
+            }
+        }
     }
 
     #[test]

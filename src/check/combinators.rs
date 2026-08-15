@@ -389,6 +389,7 @@ pub(super) fn inline_combinator(
                         scope,
                         poly,
                         granted,
+                        false,
                     )?;
                 } else if crate::ast::is_quotation_type(found.ty).is_some() {
                     // R21: forwarding an abstract quotation parameter. `found`
@@ -567,6 +568,16 @@ fn check_poly_combinator_args(
     }
     // Pass 2: ground each quotation parameter and run the directional + D3
     // check on its caller literal.
+    //
+    // Slice 10c (R-P2-3): sibling parameters sharing one declared *output*
+    // row (`..o` in `~[ ..i -- ..o ]` on more than one parameter, e.g. `if`'s
+    // two branch quotations) have no fixed `..o` to check a literal against
+    // (R-P2-4). The first such literal checked for a given row id sets the
+    // baseline; every later one sharing that row id is compared against it
+    // and, on a contradiction, rejected here -- at the argument site -- with
+    // both literals' actual shapes named, rather than left to surface later
+    // at the splice site under a generic message (recon 8).
+    let mut shape_baseline: HashMap<u32, Vec<Type>> = HashMap::new();
     for (i, pin) in sig.inputs.iter().enumerate() {
         if !poly_input_is_quotation(pin) {
             continue;
@@ -595,12 +606,56 @@ fn check_poly_combinator_args(
             }
             _ => Vec::new(),
         };
+        // Slice 10c (R-P2-2/R-P2-3): a declared quotation whose input and
+        // output rows differ has no fixed exit-row check (R-P2-4).
+        let row_out_id = match pin {
+            PolyType::Quotation(_, _, _, a, Some(b)) if *a != Some(*b) => Some(*b),
+            _ => None,
+        };
+        let shape_changing = row_out_id.is_some();
         if let Some(QuotRef::Known(id)) = found.quot {
             let is_inline = matches!(concrete, Type::InlineQuotation(_));
-            check_literal_against_declared_effect(
-                id, eff, is_inline, &row, name, span, ctx, env, arrays, cells, refs, prov, scope,
-                poly, granted,
+            let literal_span = prov.quotations[id.0].span;
+            let actual = check_literal_against_declared_effect(
+                id,
+                eff,
+                is_inline,
+                &row,
+                name,
+                span,
+                ctx,
+                env,
+                arrays,
+                cells,
+                refs,
+                prov,
+                scope,
+                poly,
+                granted,
+                shape_changing,
             )?;
+            if let Some(rid) = row_out_id {
+                if let Some(expected) = shape_baseline.get(&rid) {
+                    let matches = actual.len() == expected.len()
+                        && actual.iter().zip(expected).all(|(f, w)| {
+                            matches!(
+                                match_slot(Slot::computed(*f), *w),
+                                SlotMatch::Exact | SlotMatch::LiteralSizeType
+                            )
+                        });
+                    if !matches {
+                        return Err(combinator_branch_output_mismatch_error(
+                            ctx,
+                            literal_span,
+                            name,
+                            expected,
+                            &actual,
+                        ));
+                    }
+                } else {
+                    shape_baseline.insert(rid, actual);
+                }
+            }
         } else if crate::ast::is_quotation_type(found.ty).is_some() {
             // R21 (poly): a forwarded abstract quotation parameter, accepted
             // when its declared effect matches (the spliced body's own
