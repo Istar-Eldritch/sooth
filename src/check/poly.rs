@@ -132,7 +132,7 @@ pub(super) fn check_poly_combinator_standalone(
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     let span = word_span(word);
     let mut subst = Subst::default();
     for v in 0..sig.ty_var_names.len() as u32 {
@@ -245,7 +245,13 @@ pub fn check_poly_body(
     // `ctx`, so a bare operator in a poly body resolves against the same
     // scoped candidate set a concrete body does. `Some` from `check::check`,
     // `None` from `repl.rs` (the REPL path is unscoped, R8).
-    let ctx = word_ctx(word, structs, enums, modules);
+    //
+    // Slice 10c (review fix, Phase 1): `poly_walk` never reaches the
+    // concrete back-edge guard (R15) `ctx.is_self_tail_call()` gates, so an
+    // empty index is correct here, not just convenient -- lowering never
+    // back-edges a polymorphic instantiation either (`lower_instantiation`
+    // hardcodes `self_tail = false`).
+    let ctx = word_ctx(word, structs, enums, modules, &CombinatorIndex::new());
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
         WordBody::Clauses(_) => {

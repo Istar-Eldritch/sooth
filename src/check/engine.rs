@@ -1151,6 +1151,17 @@ pub(super) enum Ctx<'a> {
         /// `Ctx::Line`, and a retained poly word passes `None`): the gate reads
         /// it and never fires when it is absent.
         modules: Option<&'a [ModuleInfo]>,
+        /// Slice 10c (review fix, Phase 1): whether lowering actually builds a
+        /// splice-time back-edge for this word's own self-tail call
+        /// (`has_self_tail_call`, the same predicate `inline_combinator` and
+        /// every lowering site consult). The back-edge-only linear/reference
+        /// guards (R15) must gate on this, not on the syntactic `tail` flag
+        /// alone: `TailWalk` declines (a forwarded quotation reached through a
+        /// mid-body local, an ambiguous name, a forwarding cycle) in cases
+        /// where the positional `tail` flag still reaches the recursive call,
+        /// and there lowering emits an ordinary `Instr::Call` with no back
+        /// edge to guard.
+        self_tail_call: bool,
     },
     Line {
         structs: &'a [StructDecl],
@@ -1160,11 +1171,16 @@ pub(super) enum Ctx<'a> {
 
 /// The `Ctx` for checking `word`'s body: shared by the body walkers and the
 /// binding-name rejections so all of them cite the same declared effect.
+/// `combs` is the tail-splice view `has_self_tail_call` reads to decide
+/// `self_tail_call`; pass an empty index at a call site whose checking path
+/// never reaches the back-edge guard (it stays `false`, matching lowering,
+/// which never back-edges there either).
 pub(super) fn word_ctx<'a>(
     word: &'a WordDef,
     structs: &'a [StructDecl],
     enums: &'a [EnumDecl],
     modules: Option<&'a [ModuleInfo]>,
+    combs: &CombinatorIndex,
 ) -> Ctx<'a> {
     Ctx::Word {
         name: crate::resolve::demangle_word(&word.name),
@@ -1174,6 +1190,7 @@ pub(super) fn word_ctx<'a>(
         enums,
         module: word.module,
         modules,
+        self_tail_call: has_self_tail_call(word, combs),
     }
 }
 
@@ -1244,6 +1261,18 @@ impl Ctx<'_> {
             Ctx::Line { .. } => None,
         }
     }
+
+    /// Slice 10c (review fix, Phase 1): whether the enclosing word's own
+    /// self-tail call actually lowers to a splice-time back-edge. Gates the
+    /// back-edge-only guards (R15) so they fire exactly where lowering
+    /// back-edges; see the field doc on `Ctx::Word::self_tail_call`. A bare
+    /// REPL line has no word to recurse into, so it is never a back-edge.
+    pub(super) fn is_self_tail_call(&self) -> bool {
+        match self {
+            Ctx::Word { self_tail_call, .. } => *self_tail_call,
+            Ctx::Line { .. } => false,
+        }
+    }
 }
 
 impl<'a> Ctx<'a> {
@@ -1266,6 +1295,7 @@ impl<'a> Ctx<'a> {
                 structs,
                 enums,
                 modules,
+                self_tail_call,
                 ..
             } => Ctx::Word {
                 name,
@@ -1275,6 +1305,7 @@ impl<'a> Ctx<'a> {
                 enums,
                 module,
                 modules,
+                self_tail_call,
             },
             Ctx::Line { structs, enums } => Ctx::Line { structs, enums },
         }
@@ -1326,7 +1357,7 @@ mod tests {
     ) -> Result<Option<Vec<Slot>>, String> {
         let word = bare_word("main", caller);
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, structs, &enums, modules);
+        let ctx = word_ctx(&word, structs, &enums, modules, &CombinatorIndex::new());
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
         // The term is written in the caller's own module, so its span says so:
@@ -1490,7 +1521,7 @@ mod tests {
         let word = bare_word("main", 3);
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, &structs, &enums, None);
+        let ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
         assert_eq!(ctx.module(), 3);
         assert!(ctx.modules().is_none());
     }

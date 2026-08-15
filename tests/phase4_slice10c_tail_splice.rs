@@ -165,6 +165,45 @@ fn discard_after_the_parameter_call_stays_ordinary_recursion() {
     );
 }
 
+// -- Review fix (Phase 1): a decline still checks as ordinary recursion -----
+
+#[test]
+fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_checks() {
+    // R-P1-3: `rec`'s bind follows the quotation literal itself, a non-leading
+    // term, so `param_binds` never tracks it and `TailWalk` cannot see through
+    // the local to walk the literal it holds -- the walk declines,
+    // `has_self_tail_call` is `false`, and lowering keeps ordinary recursion
+    // for `spin`, never a loop.
+    //
+    // Before the review fix, the checker's back-edge-only reference guard
+    // fired anyway: the positional `tail` flag threads through a resolved
+    // value (not a name), so it sees through the bind and reaches `spin`'s
+    // recursive call still marked tail, and the guard rejected `&!x` (a
+    // reference into a fresh local `x` created inside `rec`'s own literal) as
+    // crossing a loop back-edge that lowering was never going to build. Each
+    // recursive call is a fresh call frame, not a shared loop iteration, so
+    // the reference is safe; the two sides just disagreed about whether this
+    // was a loop.
+    let src = "type: V x i64 ;\n\
+        : Bool? ( bool ~[ -- ] ~[ -- ] -- )\n\
+        | e | | t | | c | c if t call else e call end ;\n\
+        : spin ( &!V i64 -- )\n\
+        | r n |\n\
+        [ 0 V | x | &!x n 1 - spin ] | rec |\n\
+        n 0 = [ ] rec Bool? ;\n\
+        : main ( -- )\n\
+        0 V | v | &!v 3 spin ;\n";
+    let funcs = lowered(src);
+    let spin = func(&funcs, "spin");
+    assert_eq!(
+        self_calls(spin),
+        1,
+        "the decline keeps ordinary recursion, not a loop"
+    );
+    assert_eq!(back_edges(spin), 0, "no loop is built for this shape");
+    assert!(!opens_a_loop_header(spin));
+}
+
 // -- E-P1-5: the linear spine across the spliced back-edge -------------------
 
 #[test]

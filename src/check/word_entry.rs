@@ -15,7 +15,7 @@ pub(super) fn check_word(
 ) -> Result<(), String> {
     // A parameter name equal to a registered variant name is rejected (X12)
     // regardless of body form.
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     for slot in &word.effect.inputs {
         if let Some(name) = &slot.name {
             reject_variant_local(&ctx, name, "parameter")?;
@@ -190,7 +190,7 @@ fn check_terms_word(
         .map(|s| Slot::computed(s.ty))
         .collect();
 
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     let mut scope = Scope::default();
     let mut prov = Provenance::default();
     let mut final_stack = check_terms(
@@ -391,7 +391,7 @@ fn check_clause_body(
     dropped: &mut Vec<Type>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
-    let ctx = word_ctx(word, structs, enums, modules);
+    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
     let mut seen_locals = HashSet::new();
     for name in &clause.locals {
         reject_variant_local(&ctx, name, "local")?;

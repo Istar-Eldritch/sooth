@@ -661,7 +661,15 @@ fn check_term(
                     }
                 }
             }
-            if tail && ctx.mangled_name() == Some(name.as_str()) {
+            // Slice 10c (review fix, Phase 1): `tail` alone is the syntactic
+            // position, which `TailWalk` can see further into than lowering's
+            // own splice ever will (a mid-body local forwarding a literal
+            // through a combinator, R-P1-3). `ctx.is_self_tail_call()` is the
+            // same `has_self_tail_call` predicate lowering consults to decide
+            // whether *this word* actually gets the loop shape, so gating on
+            // both together means this guard fires exactly where lowering
+            // back-edges, never on a call that lowers as ordinary recursion.
+            if tail && ctx.mangled_name() == Some(name.as_str()) && ctx.is_self_tail_call() {
                 check_linear_across_back_edge(
                     ctx,
                     span,

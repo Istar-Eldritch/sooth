@@ -40,10 +40,9 @@ pub(crate) use self::builtins::{is_copy, is_linear, sig_of, Overload, Sig};
 use self::captures::*;
 use self::combinators::*;
 pub(crate) use self::combinators::{
-    check_combinator_cycles, combinator_of, is_combinator, word_declares_quotation_parameter,
-    CombinatorEnv,
+    check_combinator_cycles, combinator_index, combinator_of, is_combinator,
+    word_declares_quotation_parameter, CombinatorEnv, CombinatorIndex,
 };
-pub(crate) use self::combinators::{combinator_index, CombinatorIndex};
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
