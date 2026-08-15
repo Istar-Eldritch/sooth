@@ -293,8 +293,15 @@ tests sit beside their stage per house convention).
 
 - **X1.** `is_combinator` is `WordBody::Terms && declares_inline`, asserted both
   ways on directly-constructed `WordDef`s (`combinators.rs` unit test; = M-A).
-- **X2.** The nine R-B3 library words declare `inline`; `nm` shows no symbol for
-  any of them (`tests/phase4_slice12_partab.rs`).
+- **X2.** The nine R-B3 library words declare `inline`, asserted on
+  `is_combinator` over the words as `lib/` spells them, and a program calling all
+  nine still builds and runs (`tests/phase4_slice12_partab.rs`). Not asserted via
+  `nm`: all nine are polymorphic, so `ir/driver.rs`'s `poly_indices` already
+  excludes them from the symbol-minting env whether or not they are combinators,
+  which makes a symbol-table witness a placebo *for these nine*. The end-to-end
+  no-symbol witness belongs to the one shape where minting tracks
+  combinator-ness, a monomorphic `inline` word
+  (`phase4_slice11_inline.rs::inline_word_mints_no_symbol`).
 - **X3.** A `~[ ... ]` parameter without `inline` is the E2 located-error golden
   (= M-B).
 - **X4.** R-B4: `arrays.sth`'s `bin_search`/`sort` retype to `~[ ... ]` + `inline`;
@@ -327,6 +334,13 @@ tests sit beside their stage per house convention).
   divergence (the retention gate is at `is_combinator`, R-D5).
 - **X13.** `Arity`'s new field is populated by `ir_arity_env` (R-D2), exercised so
   the REPL half of part D is not silently unlowered.
+
+P1 note for this phase: to stay green under R-B1, P1 added `inline` to
+`examples/array_ctor.sth`'s `withbuf` and to ~20 test-source words with ordinary
+`[ ... ]` parameters, including `src/ir/func_builder/calls.rs`'s `apply` doc
+fixture, the exact source X10 names as its witness. So on entry to P3 the
+codebase has **no** coverage of the ordinary-`[ ... ]`-parameter real call: part D
+must reintroduce the non-inline shape at those sites, not assume one survives.
 
 ## Out of scope
 

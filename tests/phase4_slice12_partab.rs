@@ -3,13 +3,27 @@
 //! `is_combinator` is declared, not inferred (R-A1, unit-tested in
 //! `src/check/combinators.rs`); a `~[ ... ]` parameter without `inline` is a
 //! located error (R-B1, unit-tested in `src/check/word_entry.rs`). This file
-//! covers the two goldens that need a real build: X2 (the nine library words
-//! mint no symbol) and X4 (`arrays.sth`'s retyped `bin_search`/`sort` still
-//! run, an ordinary `[ ... ]` literal still satisfying their new `~[ ... ]`
-//! parameter until part C requires the tilde).
+//! covers X2 (the nine library words are declared combinators, and still run)
+//! and X4 (`arrays.sth`'s retyped `bin_search`/`sort` still run, an ordinary
+//! `[ ... ]` literal still satisfying their new `~[ ... ]` parameter until part
+//! C requires the tilde).
 
-/// Build and run `src`, returning the built binary's path (left in place so a
-/// caller can inspect its symbol table), stdout, and exit code.
+/// The nine `lib/combinators.sth`/`lib/core.sth` words that gained `inline`
+/// this slice, paired with the file that defines each.
+const MIGRATED: [(&str, &str); 9] = [
+    ("combinators.sth", "times-helper"),
+    ("combinators.sth", "times"),
+    ("combinators.sth", "each"),
+    ("combinators.sth", "map"),
+    ("combinators.sth", "fold"),
+    ("combinators.sth", "filter"),
+    ("combinators.sth", "while"),
+    ("core.sth", "if"),
+    ("core.sth", "unless"),
+];
+
+/// Build and run `src`, returning the built binary's path (left in place for
+/// the caller to remove), stdout, and exit code.
 fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
@@ -29,20 +43,42 @@ fn build_and_run(name: &str, src: &str) -> (std::path::PathBuf, String, i32) {
     )
 }
 
-fn nm_symbols(binary: &std::path::Path) -> String {
-    let nm = std::process::Command::new("nm")
-        .arg(binary)
-        .output()
-        .expect("nm should run");
-    String::from_utf8_lossy(&nm.stdout).into_owned()
+/// X2, the discriminating half: each of the nine is still a combinator once
+/// part A retires the inference leg, asserted on `is_combinator` itself over
+/// the words as `lib/` actually spells them. A missed `inline` in the library
+/// reddens this directly.
+///
+/// Asserted at the predicate rather than through `nm`, because a symbol-table
+/// witness cannot discriminate *these nine*: all nine are polymorphic, and
+/// `ir::driver`'s `poly_indices` already excludes a polymorphic word from the
+/// symbol-minting env whether or not it is a combinator. The end-to-end
+/// no-symbol witness lives on the one shape where minting does track
+/// combinator-ness, a monomorphic `inline` word
+/// (`phase4_slice11_inline.rs::inline_word_mints_no_symbol`).
+#[test]
+fn migrated_library_words_are_declared_combinators() {
+    for (file, name) in MIGRATED {
+        let path = format!("{}/lib/{file}", env!("CARGO_MANIFEST_DIR"));
+        let src = std::fs::read_to_string(&path).expect("a library file should be readable");
+        let tokens = sooth::lexer::lex(&src).expect("a library file should lex");
+        let module = sooth::parser::parse(&tokens).expect("a library file should parse");
+        let word = module
+            .words
+            .iter()
+            .find(|w| w.name == name)
+            .unwrap_or_else(|| panic!("`{name}` should be defined in lib/{file}"));
+        assert!(
+            sooth::check::is_combinator(word),
+            "`{name}` must declare `inline` to stay a combinator once recognition is declared, \
+             not inferred"
+        );
+    }
 }
 
-/// X2: the nine `lib/combinators.sth`/`lib/core.sth` words that gained
-/// `inline` this slice (`times-helper`, `times`, `each`, `map`, `fold`,
-/// `filter`, `while`, `if`, `unless`) are still combinators after part A
-/// retires the inference leg -- each mints no symbol.
+/// X2, the end-to-end half: every one of the nine is called, and the program
+/// still builds and runs once recognition is declared rather than inferred.
 #[test]
-fn migrated_library_words_mint_no_symbol() {
+fn migrated_library_words_still_run() {
     let src = format!(
         "{}: main ( -- )\n\
          3 [ 1 + drop ] c::times\n\
@@ -55,31 +91,9 @@ fn migrated_library_words_mint_no_symbol() {
          false [ 1 ] [ 2 ] unless drop ;\n",
         combinators_import("c"),
     );
-    let (binary, _stdout, code) = build_and_run("slice12-partab-nosym", &src);
-    let symbols = nm_symbols(&binary);
+    let (binary, _stdout, code) = build_and_run("slice12-partab-run", &src);
     std::fs::remove_file(&binary).ok();
     assert_eq!(code, 0);
-    for name in [
-        "times-helper",
-        "times",
-        "each",
-        "map",
-        "fold",
-        "filter",
-        "while",
-        "if",
-        "unless",
-    ] {
-        let mangled = format!("{name}__m");
-        assert!(
-            !symbols.contains(&mangled),
-            "`{name}` gained `inline` this slice and must mint no symbol; nm found:\n{symbols}"
-        );
-    }
-    assert!(
-        symbols.contains("main"),
-        "sanity: nm reads this binary's symbols at all:\n{symbols}"
-    );
 }
 
 /// X4: `arrays.sth`'s `bin_search`/`sort` retype their comparator to
