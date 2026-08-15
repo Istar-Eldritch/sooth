@@ -64,7 +64,7 @@ fn check_error(src: &str) -> String {
 /// process, where an `import:` line never resolves.
 const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
-     from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
+     from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
      : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
@@ -108,7 +108,7 @@ fn if_inside_a_loop_reading_an_alias_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | a | arr | &a 0 >usize &> @ . true [ &!arr 0 >usize &!> 9 ! ] [ ] if arr drop ] times ;\n"
+         2 ~[ | i | a | arr | &a 0 >usize &> @ . true ~[ &!arr 0 >usize &!> 9 ! ] ~[ ] if arr drop ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -122,7 +122,7 @@ fn read_and_mutate_inside_a_looped_grant_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | true [ a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop ] [ ] if ] times ;\n"
+         2 ~[ | i | true ~[ a | arr | &a 0 >usize &> @ . &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -138,7 +138,7 @@ fn single_call_body_naming_the_alias_is_an_error() {
     let err = check_error(
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         [ true [ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop ] [ ] if ] call ;\n",
+         [ true ~[ a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop ] ~[ ] if ] call ;\n",
     );
     assert_aliased_by(&err, "arr", "a");
 }
@@ -153,7 +153,7 @@ fn write_only_across_a_back_edge_is_an_error() {
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
-         2 [ | i | true [ a | arr | &!arr 0 >usize &!> 9 ! arr drop ] [ ] if ] times ;\n"
+         2 ~[ | i | true ~[ a | arr | &!arr 0 >usize &!> 9 ! arr drop ] ~[ ] if ] times ;\n"
     ));
     assert_aliased_by(&err, "arr", "a");
 }
@@ -172,11 +172,11 @@ fn two_level_execute_once_grant_still_accepted() {
         "6g-nest2",
         ": main ( -- )\n\
          0 4 fill | a |\n\
-         true [\n\
-         true [\n\
+         true ~[\n\
+         true ~[\n\
          a | arr | &!arr 0 >usize &!> 9 ! &arr 0 >usize &> @ . arr drop\n\
-         ] [ ] if\n\
-         ] [ ] if ;\n",
+         ] ~[ ] if\n\
+         ] ~[ ] if ;\n",
     );
     assert_eq!(out, "9\n");
     assert_eq!(code, 0);
@@ -195,7 +195,7 @@ fn times_doorway_grants_the_bound_alias() {
             "{}: main ( -- )\n\
              0 4 fill | a |\n\
              a | arr |\n\
-             4 [ | i | &!arr i >usize &!> i ! ] times\n\
+             4 ~[ | i | &!arr i >usize &!> i ! ] times\n\
              &arr 2 >usize &> @ .\n\
              arr drop ;\n",
             lib_import("c | times |", "lib/combinators.sth")
@@ -215,7 +215,7 @@ fn later_use_withholds_the_times_grant() {
         "{TIMES_DEF}: main ( -- )\n\
          0 4 fill | a |\n\
          a | arr |\n\
-         4 [ | i | &!arr i >usize &!> i ! ] times\n\
+         4 ~[ | i | &!arr i >usize &!> i ! ] times\n\
          arr drop\n\
          &a 0 >usize &> @ .\n\
          a drop ;\n"
@@ -279,7 +279,7 @@ fn bound_array_passed_to_filter_is_accepted() {
             "{}\n\
              : main ( -- )\n\
              0 4 fill | a |\n\
-             a [ 4 > ] c::filter drop drop ;\n",
+             a ~[ 4 > ] c::filter drop drop ;\n",
             lib_import("c", "lib/combinators.sth")
         ),
     );
@@ -307,7 +307,7 @@ fn while_over_an_aliased_array_local_is_accepted() {
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
-             0 [ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             0 ~[ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
              &arr 0 >usize &> @ . ;\n",
             lib_import("c", "lib/combinators.sth")
         ),
@@ -333,7 +333,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_read_in_the
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
-             0 [ | i | &a 0 >usize &> @ drop &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             0 ~[ | i | &a 0 >usize &> @ drop &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
              &arr 0 >usize &> @ . ;\n",
             lib_import("c", "lib/combinators.sth")
         ),
@@ -355,7 +355,7 @@ fn while_over_an_aliased_array_local_rejects_if_the_original_name_is_used_after_
              : main ( -- )\n\
              input | a |\n\
              a | arr |\n\
-             0 [ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
+             0 ~[ | i | &!arr i >usize &!> 9 ! i 1 + dup 4 < ] c::while drop\n\
              &arr 0 >usize &> @ .\n\
              &a 0 >usize &> @ drop ;\n",
             lib_import("c", "lib/combinators.sth")
@@ -383,7 +383,7 @@ fn sort_called_with_bound_array_locals_runs() {
              &!d 2 >usize &!> 1 !\n\
              &!d 3 >usize &!> 3 !\n\
              0 4 fill | s |\n\
-             d s [ | x y | x y - ] a::sort\n\
+             d s ~[ | x y | x y - ] a::sort\n\
              | ra rs | rs drop\n\
              &ra 0 >usize &> @ .\n\
              &ra 1 >usize &> @ .\n\

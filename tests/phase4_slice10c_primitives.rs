@@ -109,7 +109,7 @@ fn if_locals_do_not_collide_with_user_words_named_cond_or_arm() {
 /// it mints no symbol for it and emits the jump-and-join directly.
 #[test]
 fn a_call_to_if_splices_the_library_definition() {
-    let funcs = lowered(": w ( bool -- i64 ) [ 1 ] [ 2 ] if ;\n: main ( -- ) true w . ;\n");
+    let funcs = lowered(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) true w . ;\n");
     assert!(
         !funcs.iter().any(|f| f.name.starts_with("if")),
         "no `IrFunc` is minted for `if`"
@@ -167,7 +167,7 @@ fn the_if_else_end_grammar_no_longer_parses() {
     let err = parser::parse(&tokens).expect_err("the old grammar is gone");
     assert!(err.contains("`else`"), "unexpected message: {err}");
     assert!(
-        err.contains("[ then ] [ else ] if"),
+        err.contains("~[ then ] ~[ else ] if"),
         "the diagnostic points at the replacement: {err}"
     );
 }
@@ -317,7 +317,7 @@ fn a_comparison_primitive_emits_one_cmp_over_its_operands() {
 /// polymorphic comparison word exist.
 #[test]
 fn the_canonical_comparison_and_branch_costs_no_call() {
-    let funcs = lowered(": w ( i64 i64 -- i64 ) = [ 1 ] [ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
+    let funcs = lowered(": w ( i64 i64 -- i64 ) = ~[ 1 ] ~[ 2 ] if ;\n: main ( -- ) 1 2 w . ;\n");
     assert!(
         !funcs.iter().any(|f| f.name.starts_with('=')),
         "no `IrFunc` is minted for the library `=`"
@@ -396,7 +396,7 @@ fn word_w_assembly(src: &str) -> String {
 /// diverge or the build breaks.
 #[test]
 fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
-    let library = word_w_assembly(": w ( i64 i64 -- i64 ) = [ 1 ] [ 2 ] if ;");
+    let library = word_w_assembly(": w ( i64 i64 -- i64 ) = ~[ 1 ] ~[ 2 ] if ;");
     let primitive = word_w_assembly(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;");
     assert_eq!(
         library, primitive,
@@ -464,7 +464,7 @@ fn corpus_loops_still_lower_to_a_back_edge_through_the_library_if() {
 fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
     let funcs = lowered(
         ": sum-to ( i64 i64 -- i64 )\n  \
-         | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] if ;\n\
+         | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] if ;\n\
          : main ( -- ) 0 10 sum-to . ;\n",
     );
     let w = func(&funcs, "sum-to");
@@ -483,14 +483,14 @@ fn a_self_tail_through_the_library_if_lowers_to_a_back_edge() {
 fn the_whole_slice_witness_runs_and_keeps_its_loop_shape() {
     let src = format!(
         "import: c \"{}/lib/combinators.sth\" ;\n\
-               : classify ( i64 -- i64 ) dup 10 < [ 1 ] [ 2 ] if swap drop ;\n\
+               : classify ( i64 -- i64 ) dup 10 < ~[ 1 ] ~[ 2 ] if swap drop ;\n\
                : countdown ( i64 i64 -- i64 )\n  \
-               | n | | acc | n 0 = [ acc ] [ acc n + n 1 - countdown ] if ;\n\
+               | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - countdown ] if ;\n\
                : main ( -- )\n  \
                3 classify .\n  \
                30 classify .\n  \
-               true [ 0 ] [ 1 ] unless .\n  \
-               0 [ dup 5 < [ 1 + true ] [ false ] if ] c::while .\n  \
+               true ~[ 0 ] ~[ 1 ] unless .\n  \
+               0 ~[ dup 5 < ~[ 1 + true ] ~[ false ] if ] c::while .\n  \
                0 100 countdown . ;\n",
         env!("CARGO_MANIFEST_DIR")
     );

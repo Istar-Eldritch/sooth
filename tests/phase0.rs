@@ -96,8 +96,8 @@ fn rgb_pack_compiles_and_runs() {
 fn signed_vs_unsigned_compare_differ_on_same_bit_pattern() {
     // Same bit pattern (200), compared as `i8` (negative) vs `u8` (positive)
     // against `5`, must give differing results (proves R10 codegen, S4).
-    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < [ 1 ] [ 0 ] if ;\n\n\
-: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < [ 1 ] [ 0 ] if ;\n\n\
+    let src = ": signed_lt ( -- i64 )\n  200 >i8 5 >i8 < ~[ 1 ] ~[ 0 ] if ;\n\n\
+: unsigned_lt ( -- i64 )\n  200 >u8 5 >u8 < ~[ 1 ] ~[ 0 ] if ;\n\n\
 : main ( -- )\n  signed_lt .\n  unsigned_lt . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-vs-unsigned-cmp-{}.sth",
@@ -170,7 +170,7 @@ fn signed_widen_to_unsigned_subword_compares_correctly() {
     // `200 >u8 >i8` is `-56` as `i8`; widened to `u16` it must read as the
     // logical unsigned value `65480`, not the sign-extended bit pattern, so
     // comparing it against a clean `u16` `65535` must be `true`.
-    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < [ 1 ] [ 0 ] if . ;\n";
+    let src = ": main ( -- )\n  200 >u8 >i8 >u16 65535 >u16 < ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-widen-subword-cmp-golden-{}.sth",
         std::process::id()
@@ -257,7 +257,7 @@ fn conversion_unknown_target_reports_diagnostic() {
 
 #[test]
 fn if_condition_not_bool_reports_diagnostic() {
-    let src = ": oops ( -- i64 )\n  5 [ 1 ] [ 2 ] if ;\n";
+    let src = ": oops ( -- i64 )\n  5 ~[ 1 ] ~[ 2 ] if ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -281,7 +281,7 @@ fn operand_type_mismatch_reports_diagnostic() {
 fn branch_join_type_mismatch_reports_diagnostic() {
     // Slice 10c: the arms are quotation literals, so their disagreement is
     // caught at the argument site (R-P2-3) rather than at the join.
-    let src = ": oops ( bool -- i64 )\n  [ 1 ] [ true ] if ;\n";
+    let src = ": oops ( bool -- i64 )\n  ~[ 1 ] ~[ true ] if ;\n";
     let tokens = lexer::lex(src).expect("lexing should succeed");
     let mut module = parser::parse(&tokens).expect("parsing should succeed");
     let err = check::check(&mut module).expect_err("check should fail");
@@ -391,7 +391,7 @@ fn float_division_produces_inf_and_nan_with_nan_detectable_via_self_compare() {
     // literal `0.0 0.0 /` away (an unrelated compile-time-only restriction).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
 : main ( -- )\n  1.0 0.0 fdiv .\n  0.0 0.0 fdiv .\n  \
-0.0 0.0 fdiv dup = [ 1 ] [ 0 ] if . ;\n";
+0.0 0.0 fdiv dup = ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-div-inf-nan-{}.sth",
         std::process::id()
@@ -418,8 +418,8 @@ fn float_comparison_is_ieee_ordered_and_false_for_nan() {
     // comparison involving a NaN produced by `0.0 0.0 /` is false, including
     // `<` and `>` against a NaN (not just `=`, RISK 1).
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
-: main ( -- )\n  1.0 2.0 < [ 1 ] [ 0 ] if .\n  2.0 1.0 < [ 1 ] [ 0 ] if .\n  \
-0.0 0.0 fdiv dup < [ 1 ] [ 0 ] if .\n  0.0 0.0 fdiv dup > [ 1 ] [ 0 ] if . ;\n";
+: main ( -- )\n  1.0 2.0 < ~[ 1 ] ~[ 0 ] if .\n  2.0 1.0 < ~[ 1 ] ~[ 0 ] if .\n  \
+0.0 0.0 fdiv dup < ~[ 1 ] ~[ 0 ] if .\n  0.0 0.0 fdiv dup > ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-float-cmp-ordered-nan-{}.sth",
         std::process::id()
@@ -724,7 +724,7 @@ fn signed_subword_shift_high_bits_are_canonical_for_comparison() {
     // `1 << 7` in an `i8` is -128 (0x80), which must compare as `< 0`. If the
     // high bits weren't kept canonical within the `i8` width, the comparison
     // could see stale bits instead of the correct sign.
-    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < [ 1 . ] [ 0 . ] if ;\n";
+    let src = ": main ( -- )\n  1 >i8 7 shl 0 >i8 < ~[ 1 . ] ~[ 0 . ] if ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-signed-subword-shift-compare-{}.sth",
         std::process::id()
@@ -779,12 +779,12 @@ fn logical_and_or_xor_truth_table_on_bools() {
     // logical coincide): T and T = T, T and F = F, T or F = T, F or F = F,
     // T xor F = T, T xor T = F.
     let src = ": main ( -- )\n  \
-  true true and [ 1 ] [ 0 ] if .\n  \
-  true false and [ 1 ] [ 0 ] if .\n  \
-  true false or [ 1 ] [ 0 ] if .\n  \
-  false false or [ 1 ] [ 0 ] if .\n  \
-  true false xor [ 1 ] [ 0 ] if .\n  \
-  true true xor [ 1 ] [ 0 ] if . ;\n";
+  true true and ~[ 1 ] ~[ 0 ] if .\n  \
+  true false and ~[ 1 ] ~[ 0 ] if .\n  \
+  true false or ~[ 1 ] ~[ 0 ] if .\n  \
+  false false or ~[ 1 ] ~[ 0 ] if .\n  \
+  true false xor ~[ 1 ] ~[ 0 ] if .\n  \
+  true true xor ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-logical-and-or-xor-truth-table-{}.sth",
         std::process::id()
@@ -804,7 +804,7 @@ fn not_is_type_directed_bool_logical_vs_integer_bitwise() {
     // bitwise complement on the same underlying bit pattern (`0 >u8 not` ->
     // 255, not 1).
     let src = ": main ( -- )\n  \
-  true not [ 1 ] [ 0 ] if .\n  \
+  true not ~[ 1 ] ~[ 0 ] if .\n  \
   0 >u8 not >i64 . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-not-type-directed-bool-vs-int-{}.sth",
@@ -824,12 +824,12 @@ fn le_ge_ne_on_integers_with_signed_unsigned_edge() {
     // vs `u8` (200, positive) against 5: `<=`/`>=` flip with the sign, while
     // `<>` stays true either way (not-equal is sign-agnostic like `=`).
     let src = ": main ( -- )\n  \
-  200 >i8 5 >i8 <= [ 1 ] [ 0 ] if .\n  \
-  200 >u8 5 >u8 <= [ 1 ] [ 0 ] if .\n  \
-  200 >i8 5 >i8 >= [ 1 ] [ 0 ] if .\n  \
-  200 >u8 5 >u8 >= [ 1 ] [ 0 ] if .\n  \
-  200 >i8 5 >i8 <> [ 1 ] [ 0 ] if .\n  \
-  200 >u8 5 >u8 <> [ 1 ] [ 0 ] if . ;\n";
+  200 >i8 5 >i8 <= ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >u8 5 >u8 <= ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >i8 5 >i8 >= ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >u8 5 >u8 >= ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >i8 5 >i8 <> ~[ 1 ] ~[ 0 ] if .\n  \
+  200 >u8 5 >u8 <> ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-le-ge-ne-signed-unsigned-edge-{}.sth",
         std::process::id()
@@ -850,10 +850,10 @@ fn le_ge_ne_are_ieee_ordered_and_correct_for_nan_floats() {
     // where "NaN involved" flips the answer relative to `=`.
     let src = ": fdiv ( f64 f64 -- f64 )\n  | a b | a b / ;\n\n\
 : main ( -- )\n  \
-  0.0 0.0 fdiv dup <= [ 1 ] [ 0 ] if .\n  \
-  0.0 0.0 fdiv dup >= [ 1 ] [ 0 ] if .\n  \
-  0.0 0.0 fdiv dup <> [ 1 ] [ 0 ] if .\n  \
-  0.0 0.0 fdiv dup = [ 1 ] [ 0 ] if . ;\n";
+  0.0 0.0 fdiv dup <= ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup >= ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup <> ~[ 1 ] ~[ 0 ] if .\n  \
+  0.0 0.0 fdiv dup = ~[ 1 ] ~[ 0 ] if . ;\n";
     let path = std::env::temp_dir().join(format!("sooth-le-ge-ne-nan-{}.sth", std::process::id()));
     std::fs::write(&path, src).expect("writing temp source should succeed");
     let (stdout, code) = run_and_capture_stdout(path.to_str().unwrap());
@@ -1182,7 +1182,7 @@ fn clause_body_containing_if_else_end_joins_correctly() {
     let src = "type: Item | Zero | NonZero v i64 ;\n\
 : classify ( Item -- i64 )\n\
 | Zero       0\n\
-| NonZero    0 > [ 1 ] [ -1 ] if\n\
+| NonZero    0 > ~[ 1 ] ~[ -1 ] if\n\
 ;\n\
 : main ( -- )\n  Zero classify .\n  5 NonZero classify .\n  -5 NonZero classify . ;\n";
     let path =
@@ -1491,9 +1491,9 @@ fn locals_rebind_correctly_across_tail_iterations_native() {
     // deliberately kept separate from the constant-stack goldens above.
     let src = ": digits ( i64 i64 -- i64 )\n\
   | acc n |\n\
-  n 0 = [\n\
+  n 0 = ~[\n\
     acc\n\
-  ] [\n\
+  ] ~[\n\
     acc 10 * n + n 1 - digits\n\
   ] if ;\n\
 : main ( -- ) 0 5 digits . ;\n";
@@ -1516,12 +1516,12 @@ fn terminal_if_both_arms_tail_produce_two_back_edges_native() {
     // both eliminate, at N large enough to overflow if either didn't.
     let src = ": both-tail ( i64 i64 -- i64 )\n\
   | acc n |\n\
-  n 0 = [\n\
+  n 0 = ~[\n\
     acc\n\
-  ] [\n\
-    n 500000 > [\n\
+  ] ~[\n\
+    n 500000 > ~[\n\
       acc n + n 1 - both-tail\n\
-    ] [\n\
+    ] ~[\n\
       acc n + n 1 - both-tail\n\
     ] if\n\
   ] if ;\n\
@@ -1543,8 +1543,8 @@ fn clause_multi_tail_runs_in_constant_stack_native() {
     // iteration (each clause contributes its own back-edge).
     let src = "type: Parity | Even | Odd ;\n\
 : sum-parity ( i64 i64 Parity -- i64 )\n\
-  | Even | acc n | n 0 = [ acc ] [ acc n + n 1 - Odd sum-parity ] if\n\
-  | Odd  | acc n | n 0 = [ acc ] [ acc n + n 1 - Even sum-parity ] if\n\
+  | Even | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Odd sum-parity ] if\n\
+  | Odd  | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - Even sum-parity ] if\n\
 ;\n\
 : main ( -- ) 0 1000000 Even sum-parity . ;\n";
     let path = std::env::temp_dir().join(format!(
@@ -1571,7 +1571,7 @@ fn mixed_clause_back_edge_and_base_case_runs_in_constant_stack_native() {
     // run correctly.
     let src = "type: Step | Go | Halt ;\n\
 : run-mix ( i64 i64 Step -- i64 )\n\
-  | Go   | acc n | n 0 = [ acc n Halt run-mix ] [ acc n + n 1 - Go run-mix ] if\n\
+  | Go   | acc n | n 0 = ~[ acc n Halt run-mix ] ~[ acc n + n 1 - Go run-mix ] if\n\
   | Halt | acc n | acc\n\
 ;\n\
 : main ( -- ) 0 1000000 Go run-mix . ;\n";
@@ -1601,7 +1601,7 @@ fn enum_get_from_carried_array_clause_dispatch_constant_stack() {
     // (a conversion word on a `bool` is a checker error), and `fetch` reads
     // the enum through a reference (`&>` then `@`) rather than `get`.
     let src = "type: Op | Step | Stop ;\n\
-: idx ( i64 -- usize ) | count | count 0 = [ 1 ] [ 0 ] if >usize ;\n\
+: idx ( i64 -- usize ) | count | count 0 = ~[ 1 ] ~[ 0 ] if >usize ;\n\
 : fetch ( [Op 2] usize -- Op ) | a i | &a i &> @ ;\n\
 : run ( [Op 2] i64 i64 Op -- i64 )\n\
   | Step | prog count acc |\n\
@@ -1721,9 +1721,9 @@ type: VmPop vm Vm val i64 ;\n\
 | Jz    | vm target |\n\
     vm vm-pop VmPop>\n\
     0 =\n\
-    [\n\
+    ~[\n\
       target Vm<pc\n\
-    ] [\n\
+    ] ~[\n\
       bump-pc\n\
     ] if\n\
     fetch Fetched> run\n\
@@ -1932,7 +1932,7 @@ fn both_arms_consume_linear_ok() {
     let stdout = run_linear_golden(
         "both-arms",
         &format!(
-            "{SPY_DEF}: dispose ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 99 . s drop ] if ;\n\
+            "{SPY_DEF}: dispose ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 99 . s drop ] if ;\n\
 : main ( -- )\n  7 Spy true dispose\n  8 Spy false dispose ;\n"
         ),
     );
@@ -1944,7 +1944,7 @@ fn divergent_arm_use_is_error() {
     // Criterion 10b: consumed in one arm only, then referenced past the join.
     // The join yields `MaybeMoved`, so the later use is a use-after-move.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 1 . ] if\n  s drop ;\n"
+        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;\n"
     ));
     assert!(err.contains("use after move"), "unexpected message: {err}");
     assert!(err.contains("`Spy`"), "unexpected message: {err}");
@@ -1957,7 +1957,7 @@ fn divergent_arm_unconsumed_is_error() {
     // `s` WAS consumed on the `then` arm, so the diagnostic must not claim it
     // was never touched: the bug is the `else` arm forgetting it.
     let err = linear_check_error(&format!(
-        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 1 . ] if ;\n"
+        "{SPY_DEF}: oops ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;\n"
     ));
     assert!(
         err.contains("not consumed on every path"),
@@ -1973,7 +1973,7 @@ fn linear_across_loop_back_edge_is_located_error() {
     // is two lines, so `spin`'s own line 3 lands on line 5.
     let err = linear_check_error(&format!(
         "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n\
-  n 0 = [ s drop 0 ] [ 9 Spy n 1 - spin ] if ;\n"
+  n 0 = ~[ s drop 0 ] ~[ 9 Spy n 1 - spin ] if ;\n"
     ));
     assert!(
         err.contains("not supported yet"),
@@ -1989,7 +1989,7 @@ fn copy_loop_still_compiles() {
     // by the back-edge guard.
     let stdout = run_linear_golden(
         "copy-loop",
-        ": countdown ( i64 -- i64 )\n  | n |\n  n 0 = [ 0 ] [ n 1 - countdown ] if ;\n\
+        ": countdown ( i64 -- i64 )\n  | n |\n  n 0 = ~[ 0 ] ~[ n 1 - countdown ] if ;\n\
 : main ( -- )\n  100 countdown . ;\n",
     );
     assert_eq!(stdout, "0\n");
@@ -2195,8 +2195,8 @@ fn drop_of_linear_enum_dispatches_on_tag() {
         "enum-tag-dispatch",
         &format!(
             "{SPY_DEF}type: Item | Empty | Full v Spy ;\n\
-: main ( -- )\n  1 .\n  true [ 5 Spy Full ] [ Empty ] if drop\n  2 .\n\
-  false [ 9 Spy Full ] [ Empty ] if drop\n  3 . ;\n"
+: main ( -- )\n  1 .\n  true ~[ 5 Spy Full ] ~[ Empty ] if drop\n  2 .\n\
+  false ~[ 9 Spy Full ] ~[ Empty ] if drop\n  3 . ;\n"
         ),
     );
     assert_eq!(stdout, "1\ndrop 5\n2\n3\n");
@@ -2566,7 +2566,7 @@ fn owned_alloc_dispose_loop_stays_within_memory_bound() {
     // tail-call -> loop shape (constant stack), so the outer loop itself
     // never grows memory; only a broken `free` (a real leak, or a fake one)
     // would.
-    let src = ": loop-owned ( i64 -- )\n  dup 0 = [\n    drop\n  ] [\n    0 >u8 1024 fill ^ drop\n    1 - loop-owned\n  ] if ;\n\
+    let src = ": loop-owned ( i64 -- )\n  dup 0 = ~[\n    drop\n  ] ~[\n    0 >u8 1024 fill ^ drop\n    1 - loop-owned\n  ] if ;\n\
 : main ( -- )\n  100000 loop-owned ;\n";
     let code = run_owned_memory_bounded_golden("mem-bound", src, 65536);
     assert_eq!(
@@ -2635,8 +2635,8 @@ fn enum_variant_with_owned_frees_on_drop() {
     let stdout = run_owned_traced_golden(
         "enum-variant",
         "type: Item | Empty | Full v ^i64 ;\n\
-: main ( -- )\n  true [ 5 ^ Full ] [ Empty ] if drop\n  \
-false [ 9 ^ Full ] [ Empty ] if drop ;\n",
+: main ( -- )\n  true ~[ 5 ^ Full ] ~[ Empty ] if drop\n  \
+false ~[ 9 ^ Full ] ~[ Empty ] if drop ;\n",
     );
     assert_eq!(stdout, "alloc 8\nfree 8\n");
 }
@@ -2741,9 +2741,9 @@ fn run_stack_bounded_golden(tag: &str, src: &str) -> Option<i32> {
 const DEEP_LIST_SRC: &str = "type: List | Nil | Cons v i64 next ^List ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - n acc ^ Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
@@ -3024,9 +3024,9 @@ fn deep_right_leaning_tree_disposes_in_constant_stack() {
     let src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
 : build ( i64 Tree -- Tree )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - Leaf ^ acc ^ Node build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Leaf build drop ;\n";
@@ -3054,9 +3054,9 @@ fn mutually_recursive_types_dispose_in_constant_stack() {
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 -\n    \
     n Spy acc ^ BCons ^\n    \
     n Spy swap ACons\n    \
@@ -3077,9 +3077,9 @@ drop 3\nfree 24\ndrop 3\nfree 24\n"
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 -\n    \
     n Spy acc ^ BCons ^\n    \
     n Spy swap ACons\n    \
@@ -3107,9 +3107,9 @@ fn wrapper_indirection_disposes_in_constant_stack_left_leaning_tree_stays_depth_
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - n acc ^ Wrap Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
@@ -3123,9 +3123,9 @@ type: List | Nil | Cons w Wrap ;\n\
     let left_leaning_src = "type: Tree | Leaf | Node left ^Tree right ^Tree ;\n\
 : build ( i64 Tree -- Tree )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - acc ^ Leaf ^ Node build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Leaf build drop ;\n";
@@ -3209,9 +3209,9 @@ type: A | ANil | ACons next ^B tag Spy ;\n\
 type: B | BNil | BCons tag Spy next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 -\n    \
     n Spy acc ^ BCons ^\n    \
     n 10 * Spy ACons\n    \
@@ -3297,12 +3297,12 @@ fn deep_multi_variant_enum_disposes_in_constant_stack() {
     let src = "type: T | Nil | X next ^T v i64 | Y v i64 next ^T ;\n\
 : build ( i64 T -- T )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
-    n 2 mod 0 = [\n      \
+  ] ~[\n    \
+    n 2 mod 0 = ~[\n      \
       n 1 - acc ^ n X build\n    \
-    ] [\n      \
+    ] ~[\n      \
       n 1 - n acc ^ Y build\n    \
     ] if\n  \
   ] if ;\n\
@@ -3392,9 +3392,9 @@ fn deep_wrapper_struct_list_disposes_in_constant_stack() {
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - n acc ^ Wrap Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
@@ -3415,9 +3415,9 @@ fn deep_double_cell_list_disposes_in_constant_stack() {
     let src = "type: L | Nil | Cons next ^^L v i64 ;\n\
 : build ( i64 L -- L )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - acc ^ ^ n Cons build\n  \
   ] if ;\n\
 : main ( -- )\n  1000000 Nil build drop ;\n";
@@ -3435,9 +3435,9 @@ const DEEP_MUTUAL_CHAIN_TYPES: &str = "type: A | ANil | ACons next ^B tag i64 ;\
 type: B | BNil | BCons tag i64 next ^A ;\n\
 : build ( i64 A -- A )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 -\n    \
     n acc ^ BCons ^\n    \
     n 10 * ACons\n    \
@@ -3490,15 +3490,15 @@ fn deep_recursive_chain_disposes_within_bounded_memory() {
 type: List | Nil | Cons w Wrap ;\n\
 : build ( i64 List -- List )\n  \
   | n acc |\n  \
-  n 0 = [\n    \
+  n 0 = ~[\n    \
     acc\n  \
-  ] [\n    \
+  ] ~[\n    \
     n 1 - n acc ^ Wrap Cons build\n  \
   ] if ;\n\
 : churn ( i64 -- )\n  \
-  dup 0 = [\n    \
+  dup 0 = ~[\n    \
     drop\n  \
-  ] [\n    \
+  ] ~[\n    \
     10000 Nil build drop\n    \
     1 - churn\n  \
   ] if ;\n\

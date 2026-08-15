@@ -1634,7 +1634,7 @@ mod tests {
 
     #[test]
     fn emit_if_has_jnz_and_phi() {
-        let il = emit_src(": w ( bool -- i64 ) [ 1 ] [ 2 ] if ;");
+        let il = emit_src(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;");
         assert!(il.contains("jnz "));
         assert!(il.contains("phi "));
     }
@@ -2390,7 +2390,7 @@ mod tests {
         // This structural test verifies the loop IL (a header `phi` with a
         // back-edge predecessor, plus the back-edge `jmp`) is valid QBE text.
         let il = emit_src(
-            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = [ acc ] [ acc n + n 1 - sum-to ] if ;",
+            ": sum-to ( i64 i64 -- i64 ) | acc n | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] if ;",
         );
         assert!(
             il.contains("phi"),

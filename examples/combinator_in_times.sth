@@ -17,4 +17,4 @@ import: c "../lib/combinators.sth" ;
   s ;
 
 : main ( -- )
-  3 [ | i | i mk [ . ] c::each ] c::times ;
+  3 ~[ | i | i mk ~[ . ] c::each ] c::times ;

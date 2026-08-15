@@ -1,7 +1,7 @@
 : factorial ( i64 -- i64 )
-  dup 0 = [
+  dup 0 = ~[
     drop 1
-  ] [
+  ] ~[
     dup 1 - factorial *
   ] if ;
 

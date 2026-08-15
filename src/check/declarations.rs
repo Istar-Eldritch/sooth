@@ -2372,7 +2372,7 @@ mod tests {
         // R10: a struct type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Vec2 x i64 y i64 ;
-             : pick ( bool -- Vec2 ) [ 1 2 Vec2 ] [ 3 4 Vec2 ] if ;",
+             : pick ( bool -- Vec2 ) ~[ 1 2 Vec2 ] ~[ 3 4 Vec2 ] if ;",
         )
         .unwrap();
     }
@@ -2442,7 +2442,7 @@ mod tests {
         // R10: an enum type flows through an `if`/`else` join like any Type.
         check_src(
             "type: Shape | Circle r f64 | Square s f64 ;
-             : pick ( bool -- Shape ) [ 1.0 Circle ] [ 2.0 Square ] if ;",
+             : pick ( bool -- Shape ) ~[ 1.0 Circle ] ~[ 2.0 Square ] if ;",
         )
         .unwrap();
     }

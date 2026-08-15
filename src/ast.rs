@@ -1200,10 +1200,16 @@ pub enum TermKind {
     /// appears, leftmost name taking the deepest value. Its extent is the rest
     /// of the enclosing block (R2), so no closing term is needed.
     Bind(Vec<String>),
-    /// A `[ ... ]` quotation literal (R1): an ordered term list, nested by
-    /// construction since the element list is parsed with `parse_terms`.
-    /// Compile-time-only marker in this slice (D1): never a runtime value.
-    Quotation(Vec<Term>),
+    /// A `[ ... ]` or `~[ ... ]` quotation literal (R1): an ordered term
+    /// list, nested by construction since the element list is parsed with
+    /// `parse_terms`. Compile-time-only marker in this slice (D1): never a
+    /// runtime value. The `bool` is the literal's own spelling (Slice 12,
+    /// R-C1): `true` for a `~[ ... ]` inline-only literal, `false` for an
+    /// ordinary `[ ... ]`. Checked against the consuming parameter's declared
+    /// flavour at each argument-matching site (R-C2), independent of
+    /// `Type::InlineQuotation`/`Type::Quotation`, which describe the
+    /// *parameter*.
+    Quotation(Vec<Term>, bool),
     /// Slice 6h (D1): a body-level `[ Type ; Count ]` raw array constructor,
     /// carrying the parse-time-interned `Type::Array(id)` for the shape.
     /// Concrete-path only: `poly_term` rejects it eagerly (there is nowhere
@@ -1274,9 +1280,9 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
                 TermKind::Bind(renamed)
             }
             TermKind::Call(name) => TermKind::Call(rename_call(name, uid, bound)),
-            TermKind::Quotation(inner) => {
+            TermKind::Quotation(inner, is_inline) => {
                 let mut inner_bound = bound.clone();
-                TermKind::Quotation(rename_terms(inner, uid, &mut inner_bound))
+                TermKind::Quotation(rename_terms(inner, uid, &mut inner_bound), *is_inline)
             }
             other => other.clone(),
         };

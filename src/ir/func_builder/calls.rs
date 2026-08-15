@@ -52,7 +52,7 @@ impl<'a> FuncBuilder<'a> {
             // is the plainest non-aggregate placeholder (the IR side has no
             // `if`-condition concern, so the checker's `Cstr` choice does not
             // bind here).
-            TermKind::Quotation(body) => {
+            TermKind::Quotation(body, _) => {
                 let id = QuotId(self.quot_defs.len());
                 self.quot_defs.push(body.clone());
                 let v = self.fresh_value(IrType::I64);
@@ -708,7 +708,7 @@ mod tests {
             },
         );
         let term = &line_terms("[ + ]")[0];
-        assert!(matches!(term.kind, TermKind::Quotation(_)));
+        assert!(matches!(term.kind, TermKind::Quotation(_, _)));
         b.lower_term(term, false);
         assert!(
             b.cur_instrs.is_empty(),
@@ -1255,7 +1255,7 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ 1 - go ] [ drop ] if ;");
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ drop ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1282,8 +1282,9 @@ mod tests {
         // shape would diverge from the one below instead of both trivially
         // satisfying the same hard-coded numbers.
         let with_binding =
-            lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ | x | 1 - x go ] [ drop ] if ;");
-        let without_binding = lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ 1 - go ] [ drop ] if ;");
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ | x | 1 - x go ] ~[ drop ] if ;");
+        let without_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ drop ] if ;");
         let f1 = &with_binding.funcs[0];
         let f2 = &without_binding.funcs[0];
         let header1 = loop_header(f1);
@@ -1301,7 +1302,7 @@ mod tests {
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact *`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = [ drop 1 ] [ dup 1 - fact * ] if ;");
+        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = ~[ drop 1 ] ~[ dup 1 - fact * ] if ;");
         let f = &ir.funcs[0];
         assert_eq!(
             count(f, is_call_instr),
@@ -1319,7 +1320,7 @@ mod tests {
         // R10 over-eager boundary: the `if` is followed by more terms
         // (`drop 5`), so it is non-terminal and its arms are not in tail
         // position; the self-call stays a real `Instr::Call`.
-        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > [ w ] [ drop 0 ] if drop 5 ;");
+        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > ~[ w ] ~[ drop 0 ] if drop 5 ;");
         let f = &ir.funcs[0];
         assert_eq!(count(f, is_call_instr), 1);
         assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
@@ -1330,7 +1331,7 @@ mod tests {
         // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
         // arm of a terminal `if` back-edges, so the single header phi gains two
         // back-edge arms on top of the entry arm (three total).
-        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > [ 1 - go ] [ 1 + go ] if ;");
+        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ 1 + go ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1518,7 +1519,7 @@ mod tests {
     // other pins it against `lib/combinators.sth`.
     const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | to | | from |\n\
-         from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
+         from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
          : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | n | 0 n f times-helper ;\n";
 
@@ -1538,7 +1539,7 @@ mod tests {
             "{TIMES_DEF}\
              : each inline ( ['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
-             count [ | i | &arr i >usize &> @ f call ] times\n\
+             count ~[ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
              : main ( -- ) 0 4 fill [ . ] each ;\n"
         ));
@@ -1617,8 +1618,8 @@ mod tests {
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
         let ir = lower_src(
-            ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n\
-             : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n",
+            ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
+             : main ( -- ) 0 [ dup 5 < ~[ 1 + true ] ~[ false ] if ] while . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),

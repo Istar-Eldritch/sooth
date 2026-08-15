@@ -180,7 +180,7 @@ fn prelude_word_called_from_an_imported_module_resolves() {
     let c = Closure::new("prelude-import");
     c.write(
         "parity.sth",
-        ": parity ( i64 -- i64 ) 2 mod 0 = [ 10 ] [ 20 ] if ;\nexport: parity ;\n",
+        ": parity ( i64 -- i64 ) 2 mod 0 = ~[ 10 ] ~[ 20 ] if ;\nexport: parity ;\n",
     );
     let entry = c.write(
         "main.sth",

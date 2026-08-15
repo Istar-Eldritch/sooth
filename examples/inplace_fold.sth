@@ -32,21 +32,21 @@ type: AccL arr [i64 4] ;
 : prefix-copy ( [i64 4] AccC -- AccC )
   | arr acc |
   &!acc &!AccC>arr | out |
-  0 4 [ | i | &arr i >usize &> @ + | run | out i >usize &!> run ! run ] times
+  0 4 ~[ | i | &arr i >usize &> @ + | run | out i >usize &!> run ! run ] times
   drop
   acc ;
 
 : prefix-linear ( [i64 4] AccL -- AccL )
   | arr acc |
   &!acc &!AccL>arr | out |
-  0 4 [ | i | &arr i >usize &> @ + | run | out i >usize &!> run ! run ] times
+  0 4 ~[ | i | &arr i >usize &> @ + | run | out i >usize &!> run ! run ] times
   drop
   acc ;
 
 : main ( -- )
   input 0 4 fill AccC prefix-copy | c |
-  4 [ | i | &c &AccC>arr i >usize &> @ . ] times
+  4 ~[ | i | &c &AccC>arr i >usize &> @ . ] times
   c AccC> drop
   input 0 4 fill AccL prefix-linear | l |
-  4 [ | i | &l &AccL>arr i >usize &> @ . ] times
+  4 ~[ | i | &l &AccL>arr i >usize &> @ . ] times
   l drop ;

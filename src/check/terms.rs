@@ -309,6 +309,24 @@ fn check_term(
                 let Some(QuotRef::Known(id)) = top.quot else {
                     return Err(call_needs_quotation_error(ctx, span));
                 };
+                // Slice 12 (R-C2, E3b): a `~[ ... ]` literal spelled directly
+                // before `call` (not forwarded through a local bound from a
+                // declared `~` parameter -- that shape is a combinator's own
+                // body doing `f call` on its forwarded parameter, and must
+                // keep working: it is how every library combinator's body
+                // calls its own quotation parameter). The distinguishing fact
+                // is syntactic, not the resolved `Slot`'s `quot` marker (a
+                // forwarded parameter's slot carries the exact same `Known`
+                // marker once its combinator is spliced): only the term
+                // immediately preceding this `call` being itself a
+                // `TermKind::Quotation` literal is a *direct* call, since a
+                // forwarded parameter's use here is a `Call(name)` term, never
+                // a literal.
+                if at > 0 {
+                    if let TermKind::Quotation(_, true) = &siblings[at - 1].kind {
+                        return Err(inline_literal_at_call_error(ctx, siblings[at - 1].span));
+                    }
+                }
                 // Splice the body against the current locals/scope in lexical
                 // extent (capture is free, recon 9), bracketed like an `if`
                 // arm so a body that binds does not leak past the `call` and a
@@ -782,11 +800,12 @@ fn check_term(
         // here (D3): a bare body's input row is unknown until its consumption
         // site (`call`). The placeholder `ty` is `Cstr`, a registry-free
         // scalar no user op accepts once R11's default-deny is in place (R4).
-        TermKind::Quotation(body) => {
+        TermKind::Quotation(body, is_inline) => {
             let id = QuotId(prov.quotations.len());
             prov.quotations.push(QuotBody {
                 body: body.clone(),
                 span,
+                is_inline: *is_inline,
             });
             prov.quotation_captures.push(capture_names(body));
             stack.push(Slot {
@@ -1508,7 +1527,7 @@ mod tests {
         check_src(
             ": myif inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
              | e | | t | | c | c tag t e branch ;\n\
-             : main ( -- ) 1 2 = [ 7 ] [ 8 ] myif . ;\n",
+             : main ( -- ) 1 2 = ~[ 7 ] ~[ 8 ] myif . ;\n",
         )
         .expect("`myif`'s own definition forwards its abstract `~` parameters into `branch`");
     }
@@ -1536,7 +1555,7 @@ mod tests {
         .expect("the mismatched literal arm goes unchecked at `w`'s own definition");
         let err = check_src(
             ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
-             : main ( -- ) 1 2 u= [ 5 ] w . ;\n",
+             : main ( -- ) 1 2 u= ~[ 5 ] w . ;\n",
         )
         .unwrap_err();
         assert!(

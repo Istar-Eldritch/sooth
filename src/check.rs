@@ -183,13 +183,17 @@ struct SurvivingSet {
     bundle: bool,
 }
 
-/// One interned quotation literal: its body terms (spliced at `call`/`times`)
-/// and the literal's span, for a located diagnostic.
+/// One interned quotation literal: its body terms (spliced at `call`/`times`),
+/// the literal's span (for a located diagnostic), and its own source flavour
+/// (Slice 12, R-C1/R-C2): `true` for a `~[ ... ]` literal, `false` for an
+/// ordinary `[ ... ]`. Checked against the consuming parameter's declared
+/// flavour at each argument-matching site.
 #[derive(Debug, Clone)]
 struct QuotBody {
     body: Vec<Term>,
     #[allow(dead_code)]
     span: Span,
+    is_inline: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1394,6 +1398,27 @@ fn check_literal_against_declared_effect(
     caller_tail: bool,
 ) -> Result<Vec<Type>, String> {
     let body = prov.quotations[id.0].body.clone();
+    // Slice 12 (R-C2): the literal's own spelling (`~[ ... ]` vs `[ ... ]`)
+    // must match the boundary's declared flavour, independent of whatever
+    // this literal actually type-checks against. Every argument-matching site
+    // (a combinator parameter -- mono or poly -- and every ordinary
+    // `Type::Quotation` materialization boundary) funnels through this one
+    // function, so this is the single place both directions (E3a/E3b) are
+    // enforced.
+    let literal_is_inline = prov.quotations[id.0].is_inline;
+    if literal_is_inline != is_inline {
+        let param = if is_inline {
+            crate::ast::inline_quotation_type(eff.inputs.clone(), eff.outputs.clone())
+        } else {
+            crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone())
+        };
+        let literal_span = prov.quotations[id.0].span;
+        return Err(if literal_is_inline {
+            inline_literal_at_ordinary_param_error(ctx, literal_span, word, param)
+        } else {
+            ordinary_literal_at_inline_param_error(ctx, literal_span, word, param)
+        });
+    }
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let moves_before = scope.moves.states.clone();
     // Slice 10a (R9): ground the declared quotation's row against the concrete
@@ -1615,6 +1640,54 @@ fn literal_effect_mismatch_error(
     let word = crate::resolve::demangle_word(word);
     format!(
         "error: the quotation passed to `{word}` was declared `{declared}` but its body has effect `{actual}`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// Slice 12 (R-C2, E3a): an ordinary `[ ... ]` literal at a `~[ ... ]`
+/// (`Type::InlineQuotation`) parameter. Located at the argument literal, not
+/// the word definition -- the declared flavour is fine, the caller spelled
+/// the wrong bracket.
+fn ordinary_literal_at_inline_param_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    param: Type,
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: this argument is an ordinary `[ ... ]` quotation but `{word}` declares parameter `{param}` as inline `~[ ... ]`; write it `~[ ... ]`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// Slice 12 (R-C2, E3b): a `~[ ... ]` literal at an ordinary `Type::Quotation`
+/// boundary (parameter, field/array store, word output). The mirror of the
+/// error above.
+fn inline_literal_at_ordinary_param_error(
+    ctx: &Ctx,
+    span: Span,
+    word: &str,
+    param: Type,
+) -> String {
+    let word = crate::resolve::demangle_word(word);
+    format!(
+        "error: this argument is an inline `~[ ... ]` quotation but `{word}` declares parameter `{param}` as an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
+        in_word(ctx),
+        span.line,
+    )
+}
+
+/// Slice 12 (R-C2, E3b): the direct-`call` boundary. `call` has no declared
+/// parameter to name (it splices whatever literal sits on top), so a `~[ ... ]`
+/// there is rejected against `call` itself rather than a named parameter --
+/// `~` marks a literal spliced only through a declared inline parameter, not
+/// general splice-by-`call` spelling.
+fn inline_literal_at_call_error(ctx: &Ctx, span: Span) -> String {
+    format!(
+        "error: this argument is an inline `~[ ... ]` quotation but `call` splices an ordinary `[ ... ]`; write it `[ ... ]`{} (line {})",
         in_word(ctx),
         span.line,
     )
@@ -2095,7 +2168,7 @@ mod tests {
     #[test]
     fn shape_changing_quotation_with_no_sibling_checks_its_declared_trailing_output() {
         let src = ": g inline ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
-             : demo ( i64 -- i64 i64 ) true [ dup 1 = ] g ;\n";
+             : demo ( i64 -- i64 i64 ) true ~[ dup 1 = ] g ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("declared") && err.contains("effect"),
@@ -2310,7 +2383,7 @@ mod tests {
         // Slice 10c: the arms are quotation literals now, so the disagreement
         // is caught at the *argument* site (R-P2-3), comparing one arm's
         // actual exit shape against its sibling's, rather than at the join.
-        let src = ": w ( bool -- i64 ) [ 1 1 ] [ 1 ] if ;";
+        let src = ": w ( bool -- i64 ) ~[ 1 1 ] ~[ 1 ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("leave different stack shapes"),
@@ -2346,12 +2419,12 @@ mod tests {
     #[test]
     fn check_branch_join_types_agree_ok() {
         // Both arms leave a single `i64`: the join unifies cleanly.
-        check_src(": w ( bool -- i64 ) [ 1 ] [ 2 ] if ;").unwrap();
+        check_src(": w ( bool -- i64 ) ~[ 1 ] ~[ 2 ] if ;").unwrap();
     }
     #[test]
     fn check_branch_join_type_mismatch_is_error() {
         // `then` leaves an `i64`, `else` leaves a `bool`: same depth, different type.
-        let src = ": w ( bool -- i64 ) [ 1 ] [ true ] if ;";
+        let src = ": w ( bool -- i64 ) ~[ 1 ] ~[ true ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("leave different stack shapes"),
@@ -2427,11 +2500,11 @@ mod tests {
     #[test]
     fn check_type_propagates_through_body_expected() {
         // `0 >` yields a bool that `if` consumes; both arms leave an i64.
-        check_src(": sign ( i64 -- i64 ) 0 > [ 1 ] [ 0 ] if ;").unwrap();
+        check_src(": sign ( i64 -- i64 ) 0 > ~[ 1 ] ~[ 0 ] if ;").unwrap();
     }
     #[test]
     fn check_if_condition_not_bool_is_error() {
-        let src = ": w ( -- i64 ) 5 [ 1 ] [ 2 ] if ;";
+        let src = ": w ( -- i64 ) 5 ~[ 1 ] ~[ 2 ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(err.contains("expected `bool`"), "unexpected message: {err}");
         assert!(err.contains("found `i64`"), "unexpected message: {err}");
@@ -2607,7 +2680,7 @@ mod tests {
     #[test]
     fn check_branch_join_float_widths_mismatch_is_error() {
         // `if` branches leaving `f32` vs `f64` disagree at the join (R12).
-        let src = ": w ( bool -- f64 ) [ 1.0 >f32 ] [ 2.0 ] if ;";
+        let src = ": w ( bool -- f64 ) ~[ 1.0 >f32 ] ~[ 2.0 ] if ;";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("leave different stack shapes"),
@@ -2618,7 +2691,7 @@ mod tests {
     }
     #[test]
     fn check_branch_join_float_types_agree_ok() {
-        check_src(": w ( bool -- f64 ) [ 1.0 ] [ 2.0 ] if ;").unwrap();
+        check_src(": w ( bool -- f64 ) ~[ 1.0 ] ~[ 2.0 ] if ;").unwrap();
     }
     #[test]
     fn infer_line_net_effect_expected() {
@@ -2713,14 +2786,14 @@ mod tests {
         // R14: `Moved` in both arms joins to `Moved`, not `MaybeMoved`, even
         // though the two move sites differ.
         check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ s drop ] if ;"
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ s drop ] if ;"
         ))
         .unwrap();
     }
     #[test]
     fn check_linear_local_moved_in_one_arm_then_used_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 1 . ] if\n  s drop ;"
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if\n  s drop ;"
         ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");
@@ -2729,7 +2802,7 @@ mod tests {
     #[test]
     fn check_linear_local_moved_in_one_arm_and_dropped_nowhere_is_error() {
         let err = check_src(&format!(
-            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c [ s drop ] [ 1 . ] if ;"
+            "{SPY_DEF}: w ( Spy bool -- )\n  | s c |\n  c ~[ s drop ] ~[ 1 . ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -2744,7 +2817,7 @@ mod tests {
         // across the back-edge, which the loop lowering cannot dispose yet.
         // `SPY_DEF` is two lines, so `spin`'s own line 3 lands on line 5.
         let err = check_src(&format!(
-            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = [ s drop 0 ] [ 9 Spy n 1 - spin ] if ;"
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = ~[ s drop 0 ] ~[ 9 Spy n 1 - spin ] if ;"
         ))
         .unwrap_err();
         assert!(
@@ -2759,7 +2832,7 @@ mod tests {
         // Moved *into* the recursive call's arguments, the Spy is forwarded,
         // not stranded, so the R15 guard must not fire.
         check_src(&format!(
-            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = [ s drop 0 ] [ s n 1 - spin ] if ;"
+            "{SPY_DEF}: spin ( Spy i64 -- i64 )\n  | s n |\n  n 0 = ~[ s drop 0 ] ~[ s n 1 - spin ] if ;"
         ))
         .unwrap();
     }
@@ -2791,12 +2864,12 @@ mod tests {
     fn back_edge_rejects_mismatched_self_call_argument() {
         let src = ": loopy inline ( ..s 'a i64 ~[ ..s 'a -- ..s ] -- ..s )\n\
                    | f | | n | | acc |\n\
-                   n 0 > [\n\
+                   n 0 > ~[\n\
                    acc f call\n\
                    5 n 1 - f loopy\n\
-                   ] [\n\
+                   ] ~[\n\
                    ] if ;\n\
-                   : main ( -- ) \"x\" 3 [ drop ] loopy ;\n";
+                   : main ( -- ) \"x\" 3 ~[ drop ] loopy ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
             err.contains("type mismatch in `main`"),
@@ -2813,7 +2886,7 @@ mod tests {
     #[test]
     fn while_self_tail_still_checks_after_back_edge_rewrite() {
         check_src(
-            ": while inline ( 'a ~[ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n",
+            ": while inline ( 'a ~[ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n",
         )
         .expect("`while` still type-checks after the back-edge rewrite");
     }

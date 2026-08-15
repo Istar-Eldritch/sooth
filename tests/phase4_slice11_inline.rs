@@ -303,7 +303,7 @@ fn inline_tilde_parameter_word_is_accepted_and_spliced() {
     // effect is poly-forced by the parser (`effect_has_variable`) but declares
     // no variable, so it is monomorphic for `inline`'s purposes and runs.
     let src = ": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;\n\
-               : main ( -- ) 3 [ 1 + ] twice . ;\n";
+               : main ( -- ) 3 ~[ 1 + ] twice . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-tilde", src);
     std::fs::remove_file(&binary).ok();
     assert_eq!(stdout, "5\n");
@@ -340,7 +340,7 @@ fn inline_word_self_tail_recursion_runs_as_a_loop() {
     // R4's relaxation, inherited: every self-occurrence in tail position is not
     // a splice-forever cycle, because the loop transform lowers it to a
     // back-edge. `5 down` counts to 0.
-    let src = ": down inline ( i64 -- i64 ) dup 0 > [ 1 - down ] [ ] if ;\n\
+    let src = ": down inline ( i64 -- i64 ) dup 0 > ~[ 1 - down ] ~[ ] if ;\n\
                : main ( -- ) 5 down . ;\n";
     let (binary, stdout, code) = build_and_run("slice11-self-tail", src);
     std::fs::remove_file(&binary).ok();
@@ -420,7 +420,7 @@ fn quotation_taking_word_reference_output_is_accepted() {
                : pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n\
                : main ( -- )\n\
                  7 >u32 P | s |\n\
-                 &!s [ 1 . ] pick | r |\n\
+                 &!s ~[ 1 . ] pick | r |\n\
                  r 2 >u32 +!\n\
                  &s &P>n @ >i64 .\n\
                  s drop ;\n";
@@ -535,10 +535,10 @@ fn combinators_source(quotation_kind: &str) -> String {
 
 : times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
-  from to < [
+  from to < ~[
     from f call
     from 1 + to f times-helper
-  ] [
+  ] ~[
   ] if ;
 
 : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
@@ -546,44 +546,52 @@ fn combinators_source(quotation_kind: &str) -> String {
 
 : each inline ( ['T 'N] {quotation_kind}[ 'T -- ] -- )
   | f | len >i64 | count | | arr |
-  count [ | i | &arr i >usize &> @ f call ] times
+  count ~[ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
 : map inline ( ['T 'N] {quotation_kind}[ 'T -- 'T ] -- ['T 'N] )
   | f | len >i64 | count | | arr |
-  count [ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times
+  count ~[ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times
   arr ;
 
 : fold inline ( ['T 'N] 'A {quotation_kind}[ 'A 'T -- 'A ] -- 'A )
   | f | | acc | len >i64 | count | | arr |
-  acc count [ | i | &arr i >usize &> @ f call ] times
+  acc count ~[ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
 : filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
-  0 n [ | i | &arr i >usize &> @ dup p call [
+  0 n ~[ | i | &arr i >usize &> @ dup p call ~[
           | v | &!arr over >usize &!> v ! 1 +
-        ] [ drop ] if ] times
+        ] ~[ drop ] if ] times
   | wf | arr wf >usize ;
 
 : while inline ( 'a {quotation_kind}[ 'a -- 'a bool ] -- 'a )
-  | p | p call [ p while ] [ ] if ;
+  | p | p call ~[ p while ] ~[ ] if ;
 "#
     )
 }
 
 /// A corpus program exercising all five combinators (`each`/`map`/`fold`/
-/// `filter`/`while`) in a single build.
-const COMBINATORS_MAIN: &str = "\
+/// `filter`/`while`) in a single build. Slice 12 (R-C2): the tilde is now
+/// spelling-significant against the callee's declared flavour, so this must
+/// be generated per variant too -- the pre-retype build's `each` etc. declare
+/// an ordinary `[ ... ]` parameter and reject a `~[ ... ]` argument outright
+/// (E3b), so one shared literal `&str` can no longer serve both builds.
+fn combinators_main(quotation_kind: &str) -> String {
+    format!(
+        "\
 : mkarr ( -- [i64 4] ) 0 4 fill ;
 
 : main ( -- )
-  mkarr [ 1 + drop ] each
-  mkarr [ 2 * ] map [ 1 + drop ] each
-  mkarr 0 [ + ] fold .
-  mkarr [ 2 > ] filter drop drop
-  0 [ | n | n 3 < [ n 1 + true ] [ n false ] if ] while . ;
-";
+  mkarr {quotation_kind}[ 1 + drop ] each
+  mkarr {quotation_kind}[ 2 * ] map {quotation_kind}[ 1 + drop ] each
+  mkarr 0 {quotation_kind}[ + ] fold .
+  mkarr {quotation_kind}[ 2 > ] filter drop drop
+  0 {quotation_kind}[ | n | n 3 < ~[ n 1 + true ] ~[ n false ] if ] while . ;
+"
+    )
+}
 
 #[test]
 fn combinators_retype_output_byte_identical() {
@@ -592,8 +600,8 @@ fn combinators_retype_output_byte_identical() {
     // already only ever passed a literal `[ ... ]`, so the emitted QBE for a
     // program exercising all five combinators must be byte-identical before
     // and after the retype.
-    let pre = combinators_source("") + COMBINATORS_MAIN;
-    let post = combinators_source("~") + COMBINATORS_MAIN;
+    let pre = combinators_source("") + &combinators_main("");
+    let post = combinators_source("~") + &combinators_main("~");
 
     let pre_path =
         std::env::temp_dir().join(format!("sooth-slice11-pre-{}.sth", std::process::id()));

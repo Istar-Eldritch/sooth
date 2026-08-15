@@ -16,7 +16,7 @@ import: c | times | "../lib/combinators.sth" ;
   s ;
 
 : main ( -- )
-  3 [ | i | i mk | arr |
-      3 [ | j | &arr j >usize &> @ . ] times
+  3 ~[ | i | i mk | arr |
+      3 ~[ | j | &arr j >usize &> @ . ] times
       arr drop
     ] times ;

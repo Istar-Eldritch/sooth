@@ -576,7 +576,7 @@ pub(super) fn capture_names_into(
                     out.insert(local.to_string());
                 }
             }
-            TermKind::Quotation(inner) => {
+            TermKind::Quotation(inner, _) => {
                 capture_names_into(inner, &mut shadowed.clone(), out);
             }
             _ => {}
@@ -663,7 +663,7 @@ impl Liveness {
                 // scan. This is only a floor
                 // (`capture_alive_names` extends it for a quotation the
                 // checker later finds is still reachable, bound or not).
-                TermKind::Quotation(inner) => {
+                TermKind::Quotation(inner, _) => {
                     Self::nested_uses(inner, &bound, outer_releasable, back_edge, i, &mut last_use);
                 }
                 _ => {}
@@ -708,7 +708,7 @@ impl Liveness {
                         Self::record_granted_use(last_use, local, at, back_edge);
                     }
                 }
-                TermKind::Quotation(inner) => {
+                TermKind::Quotation(inner, _) => {
                     Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
                 }
                 _ => {}
@@ -737,7 +737,7 @@ impl Liveness {
 pub(super) fn references(terms: &[Term], name: &str) -> bool {
     terms.iter().any(|term| match &term.kind {
         TermKind::Call(n) => call_local(n) == name,
-        TermKind::Quotation(inner) => references(inner, name),
+        TermKind::Quotation(inner, _) => references(inner, name),
         _ => false,
     })
 }
@@ -1549,13 +1549,13 @@ mod tests {
         // otherwise build a `Phi` over two phantoms. The *same* `Known` id in
         // both arms (one literal bound before the `if`, read in each) is safe:
         // `lower_if`'s `t == e` fast path emits no `Phi`, so it must not error.
-        let different = check_src(": main ( -- ) true [ [ 1 + ] ] [ [ 1 - ] ] if drop ;\n")
+        let different = check_src(": main ( -- ) true ~[ [ 1 + ] ] ~[ [ 1 - ] ] if drop ;\n")
             .expect_err("two different quotations at a join should be rejected");
         assert!(
             different.contains("these two branches leave different quotations"),
             "the join guard should fire, got: {different}"
         );
-        check_src(": main ( -- ) [ + ] | q | true [ q ] [ q ] if drop ;\n")
+        check_src(": main ( -- ) [ + ] | q | true ~[ q ] ~[ q ] if drop ;\n")
             .expect("the same `Known` id in both arms is safe and must not error");
     }
     #[test]
@@ -1929,12 +1929,12 @@ mod tests {
     fn back_edge_produces_ground_declared_outputs() {
         let src = ": my-times inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
                    | f | | to | | from |\n\
-                   from to < [\n\
+                   from to < ~[\n\
                    from f call\n\
                    from 1 + to f my-times\n\
-                   ] [\n\
+                   ] ~[\n\
                    ] if ;\n\
-                   : main ( -- ) 0 0 5 [ + ] my-times . ;\n";
+                   : main ( -- ) 0 0 5 ~[ + ] my-times . ;\n";
         check_src(src)
             .expect("my-times checks: the back-edge produces the ground declared outputs");
     }
@@ -1962,14 +1962,14 @@ mod tests {
     /// not to withhold from every ancestor indiscriminately.
     #[test]
     fn releasable_into_withholds_a_name_used_in_a_back_edge_body() {
-        let tokens = lex("a drop true [ 1 . ] [ ] if").expect("lexing should succeed");
+        let tokens = lex("a drop true ~[ 1 . ] ~[ ] if").expect("lexing should succeed");
         let terms = match crate::parser::parse_line(&tokens).expect("parsing should succeed") {
             crate::ast::Line::Expr(terms) => terms,
             other => panic!("expected Expr, got {other:?}"),
         };
         let at = terms
             .iter()
-            .position(|t| matches!(&t.kind, TermKind::Quotation(_)))
+            .position(|t| matches!(&t.kind, TermKind::Quotation(..)))
             .expect("the line's block is a branch-arm quotation literal");
         let rest = &terms[at + 1..];
         let outer: HashSet<String> = ["a", "unused"].iter().map(|n| n.to_string()).collect();

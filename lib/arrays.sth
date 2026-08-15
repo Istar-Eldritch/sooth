@@ -28,21 +28,21 @@ export: bin_search sort ;
 \ iteration (`lo == hi`) is a no-op, not wasted merge work.
 : bin_search inline ( ['T: Copy 'N] 'T ~[ 'T 'T -- i64 ] -- ['T 'N] usize bool )
   | cmp | | key | len >i64 | n | | arr |
-  0 n 32 [ | i |
-    over over < [
+  0 n 32 ~[ | i |
+    over over < ~[
       | lo hi |
       lo hi + 1 shr | mid |
-      &arr mid >usize &> @ key cmp call 0 < [
+      &arr mid >usize &> @ key cmp call 0 < ~[
         mid 1 + hi
-      ] [
+      ] ~[
         lo mid
       ] if
-    ] [ ] if
+    ] ~[ ] if
   ] times
   | lo hi |
-  lo n < [
+  lo n < ~[
     &arr lo >usize &> @ key cmp call 0 =
-  ] [
+  ] ~[
     false
   ] if
   | found |
@@ -50,7 +50,7 @@ export: bin_search sort ;
 ;
 
 : min2 ( i64 i64 -- i64 )
-  over over < [ drop ] [ swap drop ] if ;
+  over over < ~[ drop ] ~[ swap drop ] if ;
 
 \ In-place (caller-supplied scratch) bottom-up merge sort. `scratch` must be
 \ the same length as `arr`; its contents on entry are irrelevant, and the
@@ -70,29 +70,29 @@ export: bin_search sort ;
 : sort inline ( ['T: Copy 'N] ['T 'N] ~[ 'T 'T -- i64 ] -- ['T 'N] ['T 'N] )
   | cmp | | scratch |
   len >i64 | n | | arr |
-  arr scratch 1 32 [ | i |
+  arr scratch 1 32 ~[ | i |
     | ca cs cw |
-    cw n < [
-      0 n [ | k |
+    cw n < ~[
+      0 n ~[ | k |
         | j |
-        j n < [
+        j n < ~[
           j cw + n min2 | mid |
           j cw 2 * + n min2 | hi |
-          j mid hi j - [ | step |
+          j mid hi j - ~[ | step |
             | l r |
-            l mid < r hi < and [
-              &ca l >usize &> @ &ca r >usize &> @ cmp call 0 < [
+            l mid < r hi < and ~[
+              &ca l >usize &> @ &ca r >usize &> @ cmp call 0 < ~[
                 &!cs j step + >usize &!> &ca l >usize &> @ !
                 l 1 + r
-              ] [
+              ] ~[
                 &!cs j step + >usize &!> &ca r >usize &> @ !
                 l r 1 +
               ] if
-            ] [
-              l mid < [
+            ] ~[
+              l mid < ~[
                 &!cs j step + >usize &!> &ca l >usize &> @ !
                 l 1 + r
-              ] [
+              ] ~[
                 &!cs j step + >usize &!> &ca r >usize &> @ !
                 l r 1 +
               ] if
@@ -100,13 +100,13 @@ export: bin_search sort ;
           ] times
           drop drop
           j cw 2 * +
-        ] [
+        ] ~[
           j
         ] if
       ] times
       drop
       cs ca cw 2 *
-    ] [
+    ] ~[
       ca cs cw
     ] if
   ] times

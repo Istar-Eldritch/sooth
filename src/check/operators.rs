@@ -859,8 +859,8 @@ mod tests {
         // merge to a coercible literal: on the computed arm's runtime path a
         // computed `i64` would fill the `usize` output without `>usize` (X10).
         for src in [
-            ": w ( bool -- usize ) [ 5 ] [ 1 1 + ] if ;",
-            ": w ( bool -- usize ) [ 1 1 + ] [ 5 ] if ;",
+            ": w ( bool -- usize ) ~[ 5 ] ~[ 1 1 + ] if ;",
+            ": w ( bool -- usize ) ~[ 1 1 + ] ~[ 5 ] if ;",
         ] {
             let err = check_src(src).unwrap_err();
             assert!(err.contains("usize"), "unexpected message: {err}");
@@ -871,7 +871,7 @@ mod tests {
     fn check_usize_branch_merge_both_literals_coerces_ok() {
         // Both arms leave a literal, so the merged slot stays a coercible
         // literal and fills the `usize` output.
-        check_src(": w ( bool -- usize ) [ 5 ] [ 6 ] if ;").unwrap();
+        check_src(": w ( bool -- usize ) ~[ 5 ] ~[ 6 ] if ;").unwrap();
     }
     #[test]
     fn check_usize_call_argument_literal_coerces_ok() {

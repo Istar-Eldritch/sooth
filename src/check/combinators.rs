@@ -852,7 +852,7 @@ mod tests {
             "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
         );
 
-        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > [ 1 - down ] [ ] if ;";
+        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > ~[ 1 - down ] ~[ ] if ;";
         let tokens = lex(tail_src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
