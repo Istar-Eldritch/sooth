@@ -1,0 +1,13 @@
+\ Slice 13 phase 3 (R-B8): the mutable write witness. `setat` borrows its
+\ array local mutably, takes a mutable reference to one element, and stores
+\ through it -- all still generic, monomorphized at `i64` by this call. The
+\ borrow is dead once `!` consumes the element reference, so the array can be
+\ named and returned afterwards.
+: setat ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 2 &!> v ! a ;
+: main ( -- )
+  0 4 fill | a |
+  &!a 0 &!> 10 !  &!a 1 &!> 20 !  &!a 2 &!> 30 !  &!a 3 &!> 40 !
+  a 99 setat | b |
+  &b 2 &> @ .
+  &b 1 &> @ .
+  b drop ;

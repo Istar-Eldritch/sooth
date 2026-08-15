@@ -45,6 +45,19 @@ pub(super) fn poly_is_copy(
 pub(super) struct PolyScope {
     locals: HashMap<String, PolyType>,
     moves: Moves,
+    /// Slice 13 (R-B5): the prefix borrows this body has taken and not yet
+    /// proven dead, in the order they were taken.
+    borrows: Vec<PolyBorrow>,
+}
+
+/// Slice 13 (R-B5): one recorded prefix borrow of a local -- the place, its
+/// mutability, and the site, so a later conflict can name the borrow it
+/// conflicts with the way the monomorphic `Deriv` does.
+#[derive(Debug, Clone)]
+pub(super) struct PolyBorrow {
+    place: String,
+    mutable: bool,
+    span: Span,
 }
 
 impl PolyScope {
@@ -54,6 +67,54 @@ impl PolyScope {
     /// which is the whole point of tracking three move states (D2).
     fn unconsumed(&self) -> Vec<&str> {
         self.moves.unconsumed()
+    }
+
+    /// Slice 13 (R-B5), the conservative borrow liveness OQ1 permits in place
+    /// of threading `Provenance`/`Liveness` through the poly walk: a borrow
+    /// can only be observed through a *reference value*, and Sooth forbids
+    /// storing one anywhere it could outlive the stack (a declared field, a
+    /// `fill` element, a `^` payload are all rejected outright), so once no
+    /// stack slot and no local holds a reference, every borrow this body has
+    /// taken is provably dead and is forgotten here.
+    ///
+    /// Coarser than the monomorphic per-place `live_deriv`: one unrelated
+    /// live reference keeps *every* recorded borrow alive, so a rejection can
+    /// be a conservative false positive (pinned by
+    /// `poly_borrow_liveness_is_coarse_across_places`). It never misses a
+    /// hazard, which is the locked minimum -- a live borrow is never pruned.
+    fn prune_dead_borrows(&mut self, stack: &[PolyType]) {
+        if self.borrows.is_empty() {
+            return;
+        }
+        let reachable = stack
+            .iter()
+            .chain(self.locals.values())
+            .any(is_reference_slot);
+        if !reachable {
+            self.borrows.clear();
+        }
+    }
+
+    /// The most recent live borrow of `place` a new borrow (or naming) would
+    /// conflict with: any borrow when `mutable_only` is false (the direction a
+    /// new `&!` takes), a mutable one otherwise (what a new `&` conflicts
+    /// with). Call `prune_dead_borrows` first; a record still here is live.
+    fn live_borrow_of(&self, place: &str, mutable_only: bool) -> Option<&PolyBorrow> {
+        self.borrows
+            .iter()
+            .rev()
+            .find(|b| b.place == place && (b.mutable || !mutable_only))
+    }
+}
+
+/// Whether a `PolyType` slot holds a reference: a poly one (`&['T 4]`, from a
+/// body borrow) or a fully concrete one (`&[i64 4]`, from a declared input).
+/// Both keep a borrow observable, so both count for `prune_dead_borrows`.
+fn is_reference_slot(pt: &PolyType) -> bool {
+    match pt {
+        PolyType::Ref(..) => true,
+        PolyType::Concrete(t) => t.is_ref(),
+        _ => false,
     }
 }
 
@@ -422,6 +483,24 @@ pub(super) fn poly_call_term(
     // the monomorphic checker treats a linear local; a `Copy` local carries no
     // such obligation and is absent from `moves`.
     if let Some(pt) = scope.locals.get(name).cloned() {
+        // Slice 13 (R-B5), the direction symmetric with the check at the
+        // borrow: reading a local a live borrow already reaches. Consuming it
+        // (a non-`Copy` local, moved by this read) would leave that borrow
+        // aimed at storage its owner gave away; merely naming it while a
+        // mutable borrow is live makes that borrow's mutation silently
+        // observable through a second name. Checking only at the borrow
+        // catches `a ... &!a` and misses `&!a ... a`, the same hazard with
+        // the two terms swapped.
+        scope.prune_dead_borrows(&stack);
+        let consumes = !poly_is_copy(&pt, sig, structs, enums, arrays);
+        if let Some(live) = scope.live_borrow_of(name, !consumes) {
+            let ty = poly_type_str(&pt, sig);
+            return Err(if consumes {
+                poly_consume_of_borrowed_place_error(ctx, span, name, &ty, live)
+            } else {
+                poly_naming_aliases_borrowed_place_error(ctx, span, name, live)
+            });
+        }
         scope
             .moves
             .take(name, span)
@@ -457,9 +536,48 @@ pub(super) fn poly_call_term(
         lits.push(None);
         return Ok(stack);
     }
-    // Slice 13 (R-B4/R-B6): the store family. `!`'s mutable path is Phase 3;
-    // `+!` never lands in a generic body (R-B6), so it is a located error
-    // now rather than an eventual unknown-word one once `!` is added.
+    // Slice 13 (R-B4): `!` stores a `Copy` value through a *mutable*
+    // reference, `( &!T T -- )`. A shared receiver is a mutability mismatch
+    // rendered off the receiver's own referent, exactly as `&>`'s is.
+    if name == "!" {
+        let n = stack.len();
+        if n < 2 {
+            return Err(need(2, n));
+        }
+        let receiver = stack[n - 2].clone();
+        let value = stack[n - 1].clone();
+        let PolyType::Ref(referent, mutable) = &receiver else {
+            return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
+        };
+        if !*mutable {
+            return Err(poly_rendered_type_mismatch_error(
+                ctx,
+                span,
+                name,
+                &poly_type_str(&PolyType::Ref(referent.clone(), true), sig),
+                &poly_type_str(&receiver, sig),
+            ));
+        }
+        // The referent is overwritten, so whatever was there is forgotten:
+        // only a `Copy` referent may be stored into, or the old value's drop
+        // obligation would vanish with it (the monomorphic `!` gates the
+        // same way).
+        poly_copy_gate(referent, name, sig, ctx, span, structs, enums, arrays)?;
+        if **referent != value {
+            return Err(poly_rendered_type_mismatch_error(
+                ctx,
+                span,
+                name,
+                &poly_type_str(referent, sig),
+                &poly_type_str(&value, sig),
+            ));
+        }
+        stack.truncate(n - 2);
+        lits.truncate(n - 2);
+        return Ok(stack);
+    }
+    // Slice 13 (R-B6): `+!` never lands in a generic body, so it is a located
+    // error rather than an unknown-word one now that `!` is recognised.
     if name == "+!" {
         return Err(poly_unsupported_accessor_error(ctx, span, name));
     }
@@ -643,14 +761,12 @@ pub(super) fn poly_call_term(
 }
 
 /// Slice 13 (R-B1): every `&`-led word reaching a polymorphic body -- the
-/// prefix borrow (`&x`) and the shared array-element accessor (`&>`) this
-/// phase produces, plus the permanently out-of-scope owning-cell/struct-field
-/// family (`&^`, `&Struct>field`, R-B6) rejected regardless of mutability.
-/// Mirrors `check_reference_word` fronting the monomorphic family: `Ok(None)`
-/// if `name` is not `&`-led, or is a mutable (`&!`) spelling of a form Phase 3
-/// has not yet added (the mutable path and its exclusivity check land there,
-/// per OQ1) -- the caller then falls through exactly as it did before this
-/// phase, ending in the ordinary unknown-word error.
+/// prefix borrow (`&x`/`&!x`) and the array-element accessor (`&>`/`&!>`),
+/// plus the permanently out-of-scope owning-cell/struct-field family (`&^`,
+/// `&Struct>field`, R-B6) rejected regardless of mutability. Mirrors
+/// `check_reference_word` fronting the monomorphic family: `Ok(None)` if
+/// `name` is not `&`-led, and the caller then falls through to the ordinary
+/// lookup chain.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn poly_reference_word(
     name: &str,
@@ -681,11 +797,6 @@ pub(super) fn poly_reference_word(
 
     match rest {
         ">" => {
-            // Phase 3 (R-B3, mutable half): `&!>` lands with the exclusivity
-            // check. Until then, declining leaves it an ordinary unknown word.
-            if mutable {
-                return Ok(None);
-            }
             let n = stack.len();
             if n < 2 {
                 return Err(need(name, 2, n));
@@ -731,11 +842,6 @@ pub(super) fn poly_reference_word(
             lits.push(None);
         }
         _ => {
-            // Phase 3 adds the mutable prefix borrow (`&!x`) and its
-            // exclusivity check; until then, declining leaves it unknown.
-            if mutable {
-                return Ok(None);
-            }
             if rest.is_empty() {
                 return Err(poly_borrow_of_non_place_error(ctx, span, name));
             }
@@ -768,6 +874,24 @@ pub(super) fn poly_reference_word(
             if let Some(site) = scope.moves.moved_site(rest) {
                 return Err(poly_use_after_move_error(ctx, span, rest, site));
             }
+            // Exclusivity (R-B5/OQ1), symmetric and per place: a new mutable
+            // borrow conflicts with any live borrow of this local, a new
+            // shared one with a live mutable borrow. Two live `&!` rooted at
+            // different locals do not conflict. Enforced here, in the poly
+            // body, because a plain generic word is checked once and never
+            // re-checked concretely at its instantiations -- a hazard missed
+            // here is missed everywhere.
+            scope.prune_dead_borrows(stack);
+            if let Some(live) = scope.live_borrow_of(rest, !mutable) {
+                return Err(poly_conflicting_borrow_error(
+                    ctx, span, rest, mutable, live,
+                ));
+            }
+            scope.borrows.push(PolyBorrow {
+                place: rest.to_string(),
+                mutable,
+                span,
+            });
             stack.push(PolyType::Ref(Box::new(local_pt), mutable));
             lits.push(None);
         }
@@ -1755,6 +1879,71 @@ fn poly_borrow_of_non_aggregate_local_error(
     format!(
         "error: cannot borrow the local `{local}` of type `{ty}` in `{where_}` (line {}, col {})\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `{ty}` is not",
         span.line, span.col
+    )
+}
+
+/// Slice 13 (R-B5): every borrow-liveness diagnostic below carries this,
+/// because none of them are answered by the monomorphic `Provenance`/
+/// `Liveness` pair: `PolyScope` approximates a borrow's lifetime instead
+/// (`prune_dead_borrows`), so a rejection here can be conservative. Saying so
+/// keeps a false positive legible as a deliberate bound rather than a checker
+/// bug.
+const POLY_BORROW_LIVENESS_NOTE: &str = "\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local";
+
+/// Slice 13 (E6/R-B5): exclusivity in a generic body, in whichever of its two
+/// symmetric directions was violated -- a new mutable borrow against any live
+/// borrow of the place, a new shared one against a live mutable borrow. Same
+/// shape as the monomorphic `conflicting_borrow_error`, plus the conservative
+/// note.
+fn poly_conflicting_borrow_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    new_mutable: bool,
+    live: &PolyBorrow,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    let sigil = if new_mutable { "&!" } else { "&" };
+    let held = if live.mutable { "mutable" } else { "shared" };
+    format!(
+        "error: `{sigil}{place}` conflicts with a live borrow of `{place}` in `{where_}` (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first{POLY_BORROW_LIVENESS_NOTE}",
+        span.line, span.col, live.span.line, live.span.col,
+    )
+}
+
+/// Slice 13 (R-B5): consuming a local -- reading a linear one moves it out --
+/// while a reference derived from it is still live would leave that reference
+/// aimed at storage its owner has given away. The monomorphic
+/// `consume_of_borrowed_place_error`'s twin.
+fn poly_consume_of_borrowed_place_error(
+    ctx: &Ctx,
+    span: Span,
+    place: &str,
+    ty: &str,
+    live: &PolyBorrow,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    let held = if live.mutable { "mutable" } else { "shared" };
+    format!(
+        "error: cannot consume the borrowed local `{place}` of type `{ty}` in `{where_}` (line {}, col {})\n  the {held} borrow taken at line {}, col {} is still live\n  a place stays borrowed until every reference derived from it is consumed{POLY_BORROW_LIVENESS_NOTE}",
+        span.line, span.col, live.span.line, live.span.col,
+    )
+}
+
+/// Slice 13 (R-B5): the other naming direction -- reading a `Copy` aggregate
+/// local while a mutable borrow of it is live. The read does not consume it,
+/// but it is a second name for storage that borrow mutates. The monomorphic
+/// `naming_aliases_borrowed_place_error`'s twin.
+fn poly_naming_aliases_borrowed_place_error(
+    ctx: &Ctx,
+    span: Span,
+    name: &str,
+    live: &PolyBorrow,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot name `{name}` in `{where_}` (line {}, col {}): a mutable borrow of it is still live (line {}, col {})\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy{POLY_BORROW_LIVENESS_NOTE}",
+        span.line, span.col, live.span.line, live.span.col,
     )
 }
 
@@ -2822,16 +3011,180 @@ mod tests {
         assert!(err.contains("length 4"), "{err}");
     }
 
+    // -- Phase 3 (R-B3..R-B5): the mutable path and exclusivity -----------
+
     #[test]
-    fn poly_reference_word_declines_a_mutable_borrow_this_phase() {
-        // Phase 3 adds `&!x`/`&!>`; until then, a mutable-sigil name is not
-        // recognized here and falls through to the ordinary unknown-word
-        // error, exactly as it did before this phase.
+    fn setat_writes_an_element_through_a_poly_mutable_borrow() {
+        // R-B8's write witness, at the checker: `&!a` borrows mutably, `&!>`
+        // takes a mutable element reference, `!` stores the `Copy` value
+        // through it, and the array is returned afterwards -- the borrow is
+        // dead by then, so naming `a` again is not a second name for
+        // borrowed storage.
+        check_src(
+            ": setat ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 2 &!> v ! a ;\n\
+             : main ( -- ) 0 4 fill 99 setat drop ;\n",
+        )
+        .expect("a mutable prefix borrow, element ref, and store should check");
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_two_live_mutable_borrows() {
+        // E6/R-B5/OQ1: the hazard the poly body must catch itself, since a
+        // plain generic word is checked once and never re-checked at its
+        // instantiations. Rejected *at the second borrow site* (line 3, col
+        // 7), naming the first (line 3, col 3).
         let err =
-            check_src(": badmut ( ['T: Copy 4] -- 'T )\n  | a |\n  &!a 0 &!> @\n;\n").unwrap_err();
+            check_src(": twomut ( ['T: Copy 4] -- ['T 4] )\n  | a |\n  &!a &!a drop drop a\n;\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `&!a` conflicts with a live borrow of `a` in `twomut` (line 3, col 7)\n  the mutable borrow taken at line 3, col 3 is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_a_shared_borrow_beside_a_live_mutable_one() {
+        // E6, the other symmetric direction: a new *shared* borrow conflicts
+        // with a live mutable one (never with another shared one).
+        let err =
+            check_src(": mixed ( ['T: Copy 4] -- ['T 4] )\n  | a |\n  &!a &a drop drop a\n;\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `&a` conflicts with a live borrow of `a` in `mixed` (line 3, col 7)\n  the mutable borrow taken at line 3, col 3 is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_accepts_two_live_shared_borrows() {
+        // The positive control for the two rejections above: with no mutable
+        // borrow in play there is nothing for exclusivity to protect, so two
+        // live `&a` are fine. Without this, a rule that rejected *every*
+        // second borrow would pass both negatives.
+        check_src(": twoshared ( ['T: Copy 4] -- ['T 4] ) | a | &a &a drop drop a ;\n")
+            .expect("two shared borrows of one place do not conflict");
+    }
+
+    #[test]
+    fn poly_borrow_liveness_releases_a_borrow_once_its_reference_is_consumed() {
+        // R-B5: the liveness approximation is not "live until the word ends"
+        // -- `!` consumes the element reference, leaving no reference value
+        // anywhere, so the first borrow is provably dead and the second
+        // write is accepted. A word that can write only one element would be
+        // a much weaker capability than the slice claims.
+        check_src(
+            ": settwo ( ['T: Copy 4] 'T -- ['T 4] )\n  | a v |\n  &!a 0 &!> v !\n  &!a 1 &!> v !\n  a\n;\n",
+        )
+        .expect("a borrow whose reference is consumed is dead");
+    }
+
+    #[test]
+    fn poly_borrow_liveness_is_coarse_across_places() {
+        // R-B5's permitted conservatism, pinned as intentional rather than
+        // left as an accidental divergence: `prune_dead_borrows` releases
+        // *all* recorded borrows or none, so an unrelated live `&b` keeps
+        // `a`'s already-consumed borrow recorded and the second `&!a` is
+        // refused. The monomorphic checker accepts the same shape (its
+        // `live_deriv` is per place), so this is an over-rejection, never a
+        // missed hazard -- and it is legible as such from the note.
+        let err = check_src(
+            ": coarse ( ['T: Copy 4] ['T 4] 'T -- ['T 4] ['T 4] )\n  | a b v |\n  &b\n  &!a 0 &!> v !\n  &!a 1 &!> v !\n  drop a b\n;\n",
+        )
+        .unwrap_err();
         assert!(
-            err.contains("unknown word") || err.contains("no overload"),
+            err.starts_with(
+                "error: `&!a` conflicts with a live borrow of `a` in `coarse` (line 5, col 3)"
+            ),
             "{err}"
+        );
+        assert!(err.contains("conservatively treated as live"), "{err}");
+    }
+
+    #[test]
+    fn poly_call_term_rejects_consuming_a_borrowed_local() {
+        // R-B5, the naming side: reading a linear local moves it out, and a
+        // reference derived from it would be left aimed at storage its owner
+        // gave away. Checking only at the borrow catches `a ... &!a` and
+        // misses this, the same hazard with the terms swapped.
+        let err = check_src(": consume ( ['T 4] -- ['T 4] )\n  | a |\n  &a a swap drop\n;\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot consume the borrowed local `a` of type `['T 4]` in `consume` (line 3, col 6)\n  the shared borrow taken at line 3, col 3 is still live\n  a place stays borrowed until every reference derived from it is consumed\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+
+    #[test]
+    fn poly_call_term_rejects_naming_a_mutably_borrowed_local() {
+        // R-B5, the naming side for a `Copy` aggregate: the read does not
+        // consume it, but the name still denotes the storage the live `&!`
+        // mutates.
+        let err =
+            check_src(": alias ( ['T: Copy 4] -- ['T 4] 'T )\n  | a |\n  &!a a swap 0 &!> @\n;\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot name `a` in `alias` (line 3, col 7): a mutable borrow of it is still live (line 3, col 3)\n  naming an aggregate does not copy it, so this name would denote the storage that borrow mutates\n  finish with the borrow first, or `dup` for an independent copy\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+
+    #[test]
+    fn poly_body_rejects_dup_of_a_mutable_borrow_and_accepts_dup_of_a_shared_one() {
+        // E1/D3/R-A5, now reachable end to end (Phase 1 could only reach the
+        // gate directly, since no body could produce a `&!`): duplicating an
+        // exclusive borrow would let two names mutate through it. The shared
+        // half is the positive control -- a `&x` *is* `Copy`, so a rule that
+        // rejected every `dup` of a reference would pass the negative alone.
+        let err = check_src(
+            ": dupmut ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a dup 0 &!> v ! drop a ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `dup` a mutable reference in `dupmut` (line 1)\n  `&!['T 4]` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow"
+        );
+        check_src(
+            ": dupshared ( ['T: Copy 4] -- ['T 4] 'T ) | a | &a dup drop 0 &> @ | e | a e ;\n",
+        )
+        .expect("a shared reference is `Copy` and may be duplicated");
+    }
+
+    #[test]
+    fn poly_body_store_rejects_a_shared_receiver() {
+        // R-B4: `!` is `( &!T T -- )`. A shared receiver is a mutability
+        // mismatch rendered off the receiver's own referent, the same shape
+        // `&>` uses for the mirror-image mismatch.
+        let err = check_src(": rdstore ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &a 0 &> v ! a ;\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: type mismatch in `rdstore` (line 1)\n  `!` expected `&!'T`, found `&'T`\n  note: declared ( -- )"
+        );
+    }
+
+    #[test]
+    fn poly_body_store_rejects_a_value_of_another_type() {
+        // R-B4: the stored value must unify with the referent -- an `i64`
+        // literal is not a `'T`, at any instantiation but one.
+        let err = check_src(
+            ": wrongval ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 0 &!> 5 ! v drop a ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: type mismatch in `wrongval` (line 1)\n  `!` expected `'T`, found `i64`\n  note: declared ( -- )"
+        );
+    }
+
+    #[test]
+    fn poly_body_store_rejects_a_non_copy_referent() {
+        // R-B4: storing overwrites the old value, so a linear referent would
+        // lose its drop obligation silently. Same X7 gate `@` already uses.
+        let err = check_src(": linstore ( ['T 4] 'T -- ['T 4] ) | a v | &!a 0 &!> v ! a ;\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `!` the type variable `'T` in `linstore` (line 1)\n  `'T` has no `Copy` bound, and a linear value cannot be duplicated; declare `'T: Copy` if every instantiation is `Copy`"
         );
     }
 
