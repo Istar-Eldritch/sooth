@@ -3080,6 +3080,38 @@ mod tests {
     }
 
     #[test]
+    fn poly_borrow_liveness_sees_a_reference_parked_in_a_local() {
+        // R-B5: `prune_dead_borrows` scans the locals as well as the stack.
+        // Binding the first `&!a` to `r` empties the stack while the
+        // reference is still perfectly usable, so a stack-only scan would
+        // call the borrow dead and admit a genuine second mutable borrow of
+        // `a` -- two live `&!` to one place, the exact hazard R-B5 exists to
+        // stop. Every other liveness case parks its reference on the stack.
+        let err = check_src(
+            ": hidden ( ['T: Copy 4] 'T -- ['T 4] )\n  | a v |\n  &!a | r |\n  &!a 0 &!> v !\n  r 1 &!> v !\n  a\n;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: `&!a` conflicts with a live borrow of `a` in `hidden` (line 4, col 3)\n  the mutable borrow taken at line 3, col 3 is still live\n  at most one `&!` to a place, and never a `&` alongside a `&!`; consume the earlier borrow first\n  note: this borrow's exact lifetime is not tracked in a generic body; it is conservatively treated as live while any reference value remains on the stack or in a local"
+        );
+    }
+
+    #[test]
+    fn poly_call_term_accepts_naming_a_local_beside_a_live_shared_borrow() {
+        // The positive control for the two naming-side rejections above, and
+        // the mirror of `poly_reference_word_accepts_two_live_shared_borrows`
+        // at the other site: naming a `Copy` aggregate neither moves it nor
+        // aliases anything a *shared* borrow could mutate, so only a live
+        // *mutable* borrow conflicts here. Without this, a naming check that
+        // ignored the direction bit would pass both negatives.
+        check_src(
+            ": sharedname ( ['T: Copy 4] -- ['T 4] 'T )\n  | a |\n  &a 0 &> @ | e |\n  &a a swap drop\n  e\n;\n",
+        )
+        .expect("a shared borrow does not stop a non-consuming name of its place");
+    }
+
+    #[test]
     fn poly_borrow_liveness_is_coarse_across_places() {
         // R-B5's permitted conservatism, pinned as intentional rather than
         // left as an accidental divergence: `prune_dead_borrows` releases

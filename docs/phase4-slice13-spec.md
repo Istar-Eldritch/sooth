@@ -544,6 +544,17 @@ form.
 - **Full `Provenance`/`Liveness` acceptance parity**, if phase P3 ships the conservative
   fallback: any over-rejection is pinned and documented; closing it to exact mono parity
   is a follow-up, not a soundness gap.
+- **A shared renderer for the borrow-liveness diagnostics**: the three poly error
+  functions restate the monomorphic wording from `src/check/check.rs` and
+  `src/check/terms.rs` almost verbatim, so the two copies can drift. Not unified
+  now because they are not literal twins: mono renders the location through
+  `in_word(ctx)` (empty at top level), the poly ones always name a word and append
+  `POLY_BORROW_LIVENESS_NOTE`, and they carry `Deriv` vs `PolyBorrow`. A common
+  helper therefore means changing monomorphic diagnostics too, which is wider than
+  this slice. Note the drift is one-sided: the poly copies are pinned whole by
+  `assert_eq`, while mono's tests only `contains` a leading fragment and assert its
+  trailing explanation lines nowhere — so editing mono's wording silently diverges
+  the two, and whoever does it should re-check the poly twins by hand.
 - **REPL borrows in a poly line**: a REPL line has no polymorphic words (slice 6a D2), so
   `remap_poly_type`'s `Ref` arm (R-A9) is threaded for imported-word generation only, not
   for a poly borrow typed at the REPL. The arm is consequently unreachable from any
