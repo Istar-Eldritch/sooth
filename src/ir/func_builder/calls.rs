@@ -52,7 +52,7 @@ impl<'a> FuncBuilder<'a> {
             // is the plainest non-aggregate placeholder (the IR side has no
             // `if`-condition concern, so the checker's `Cstr` choice does not
             // bind here).
-            TermKind::Quotation(body) => {
+            TermKind::Quotation(body, _) => {
                 let id = QuotId(self.quot_defs.len());
                 self.quot_defs.push(body.clone());
                 let v = self.fresh_value(IrType::I64);
@@ -232,10 +232,13 @@ impl<'a> FuncBuilder<'a> {
         // resolve + bundle-unpack shape as the ordinary user-word path in the
         // `_` arm below, since this *is* that path, reached early.
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
-            let (in_arity, out_arity, ret_ty) = *self
-                .env
-                .get(&sym_name)
-                .expect("checked user overload exists");
+            let (in_arity, out_arity, ret_ty) = {
+                let a = self
+                    .env
+                    .get(&sym_name)
+                    .expect("checked user overload exists");
+                (a.in_arity, a.out_arity, a.ret_ty)
+            };
             let split = self.stack.len() - in_arity;
             let args = self.stack.split_off(split);
             let bundle = match ret_ty {
@@ -638,18 +641,32 @@ impl<'a> FuncBuilder<'a> {
                 // every type is `Copy`, so the drop set is empty and no drop
                 // glue is emitted here.
                 if tail && self.header.is_some() && name == self.cur_word_name {
-                    let (in_arity, ..) = *self.env.get(name).expect("checked user word exists");
+                    let (in_arity, quot_inputs) = {
+                        let a = self.env.get(name).expect("checked user word exists");
+                        (a.in_arity, a.quot_inputs.clone())
+                    };
                     let split = self.stack.len() - in_arity;
-                    let args = self.stack.split_off(split);
+                    let mut args = self.stack.split_off(split);
+                    // R-D3 applies to the back-edge the same as the ordinary
+                    // dispatch below: a phantom quotation carried around the
+                    // loop must be materialized before it reaches the header
+                    // phi, or the blit at the loop header sees a phantom type.
+                    self.materialize_quot_args(&mut args, &quot_inputs);
                     self.back_edges.push((self.cur_id, args));
                     self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
                     self.terminated = true;
                     return;
                 }
-                let (in_arity, out_arity, ret_ty) =
-                    *self.env.get(name).expect("checked user word exists");
+                let (in_arity, out_arity, ret_ty, quot_inputs) = {
+                    let a = self.env.get(name).expect("checked user word exists");
+                    (a.in_arity, a.out_arity, a.ret_ty, a.quot_inputs.clone())
+                };
                 let split = self.stack.len() - in_arity;
-                let args = self.stack.split_off(split);
+                let mut args = self.stack.split_off(split);
+                // R-D3: an ordinary `[ ... ]` parameter is a real call, so a
+                // phantom quotation argument becomes its `(code, env)`
+                // aggregate here, before it can reach `Instr::Call`.
+                self.materialize_quot_args(&mut args, &quot_inputs);
                 // R11: a multi-output callee returns one bundle, unpacked back
                 // onto the stack below, so the lowering stack matches the
                 // stack the checker verified. The discriminator is the
@@ -708,7 +725,7 @@ mod tests {
             },
         );
         let term = &line_terms("[ + ]")[0];
-        assert!(matches!(term.kind, TermKind::Quotation(_)));
+        assert!(matches!(term.kind, TermKind::Quotation(_, _)));
         b.lower_term(term, false);
         assert!(
             b.cur_instrs.is_empty(),
@@ -1255,7 +1272,7 @@ mod tests {
         // carrying one phi per loop-carried (input-arity) slot, and the tail
         // self-call is a `Jmp` back to that header with no `Instr::Call` to
         // self. `go` has input arity 2, so the header has two phis.
-        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ 1 - go ] [ drop ] if ;");
+        let ir = lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ drop ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1282,8 +1299,9 @@ mod tests {
         // shape would diverge from the one below instead of both trivially
         // satisfying the same hard-coded numbers.
         let with_binding =
-            lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ | x | 1 - x go ] [ drop ] if ;");
-        let without_binding = lower_src(": go ( i64 i64 -- i64 ) dup 0 > [ 1 - go ] [ drop ] if ;");
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ | x | 1 - x go ] ~[ drop ] if ;");
+        let without_binding =
+            lower_src(": go ( i64 i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ drop ] if ;");
         let f1 = &with_binding.funcs[0];
         let f2 = &without_binding.funcs[0];
         let header1 = loop_header(f1);
@@ -1301,7 +1319,7 @@ mod tests {
     fn non_tail_self_call_stays_a_call() {
         // R10: a self-call followed by more work (`fact *`) is not in tail
         // position, so it stays a real `Instr::Call` and no loop is built.
-        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = [ drop 1 ] [ dup 1 - fact * ] if ;");
+        let ir = lower_src(": fact ( i64 -- i64 ) dup 0 = ~[ drop 1 ] ~[ dup 1 - fact * ] if ;");
         let f = &ir.funcs[0];
         assert_eq!(
             count(f, is_call_instr),
@@ -1319,7 +1337,7 @@ mod tests {
         // R10 over-eager boundary: the `if` is followed by more terms
         // (`drop 5`), so it is non-terminal and its arms are not in tail
         // position; the self-call stays a real `Instr::Call`.
-        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > [ w ] [ drop 0 ] if drop 5 ;");
+        let ir = lower_src(": w ( i64 -- i64 ) dup 0 > ~[ w ] ~[ drop 0 ] if drop 5 ;");
         let f = &ir.funcs[0];
         assert_eq!(count(f, is_call_instr), 1);
         assert!(!matches!(f.blocks[0].term, Terminator::Jmp(_)));
@@ -1330,7 +1348,7 @@ mod tests {
         // R8 multi-arm back-patch through `lower_if`: a self-tail-call in each
         // arm of a terminal `if` back-edges, so the single header phi gains two
         // back-edge arms on top of the entry arm (three total).
-        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > [ 1 - go ] [ 1 + go ] if ;");
+        let ir = lower_src(": go ( i64 -- i64 ) dup 0 > ~[ 1 - go ] ~[ 1 + go ] if ;");
         let f = &ir.funcs[0];
         let header = loop_header(f);
         let phis = header_phis(header_block(f, header));
@@ -1455,7 +1473,7 @@ mod tests {
         // an `apply` func back, and deleting the `lower_call` inline branch
         // would leave an `Instr::Call apply` in `main`.
         let ir = lower_src(
-            ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+            ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
              : main ( -- ) 3 [ 1 + ] apply . ;\n",
         );
         assert!(
@@ -1490,8 +1508,8 @@ mod tests {
         // or the checker's abstract-forward accept) leaves an `Instr::Call`
         // for `inner` behind.
         let ir = lower_src(
-            ": inner ( i64 [ i64 -- ] -- ) call ;\n\
-             : outer ( i64 [ i64 -- ] -- ) inner ;\n\
+            ": inner inline ( i64 [ i64 -- ] -- ) call ;\n\
+             : outer inline ( i64 [ i64 -- ] -- ) inner ;\n\
              : main ( -- ) 7 [ 1 + . ] outer ;\n",
         );
         assert!(
@@ -1516,10 +1534,10 @@ mod tests {
     // Shared with `each_lowering_test_times_def_is_pinned_to_the_library` so
     // the two tests cannot drift apart: one exercises this exact source, the
     // other pins it against `lib/combinators.sth`.
-    const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+    const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | to | | from |\n\
-         from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
-         : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+         from to < ~[ from f call from 1 + to f times-helper ] ~[ ] if ;\n\
+         : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | n | 0 n f times-helper ;\n";
 
     #[test]
@@ -1536,9 +1554,9 @@ mod tests {
         // `lib/combinators.sth`, so the unit needs no import closure.
         let ir = lower_src(&format!(
             "{TIMES_DEF}\
-             : each ( ['T 'N] [ 'T -- ] -- )\n\
+             : each inline ( ['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
-             count [ | i | &arr i >usize &> @ f call ] times\n\
+             count ~[ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
              : main ( -- ) 0 4 fill [ . ] each ;\n"
         ));
@@ -1617,8 +1635,8 @@ mod tests {
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
         let ir = lower_src(
-            ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n\
-             : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n",
+            ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call ~[ p while ] ~[ ] if ;\n\
+             : main ( -- ) 0 [ dup 5 < ~[ 1 + true ] ~[ false ] if ] while . ;\n",
         );
         assert!(
             ir.funcs.iter().all(|f| f.name != "while"),

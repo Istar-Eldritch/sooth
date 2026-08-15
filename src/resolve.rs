@@ -471,7 +471,7 @@ fn rewrite_terms(
                     }
                 }
             }
-            TermKind::Quotation(inner) => {
+            TermKind::Quotation(inner, _) => {
                 rewrite_terms(inner, module, imports, selective, tables, scope, exports)?;
             }
             // Slice 6h: an array constructor carries an already-resolved
@@ -763,7 +763,7 @@ mod tests {
         for t in terms {
             match &t.kind {
                 TermKind::Call(n) => out.push(n.clone()),
-                TermKind::Quotation(inner) => collect_calls(inner, out),
+                TermKind::Quotation(inner, _) => collect_calls(inner, out),
                 _ => {}
             }
         }

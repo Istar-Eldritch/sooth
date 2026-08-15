@@ -1,8 +1,8 @@
 : sum-to ( i64 i64 -- i64 )
   | acc n |
-  n 0 = [
+  n 0 = ~[
     acc
-  ] [
+  ] ~[
     acc n + n 1 - sum-to
   ] if ;
 

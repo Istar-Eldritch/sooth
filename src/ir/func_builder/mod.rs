@@ -66,7 +66,7 @@ fn free_locals_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut Ha
                     out.insert(local.to_string());
                 }
             }
-            TermKind::Quotation(inner) => free_locals_into(inner, &mut shadowed.clone(), out),
+            TermKind::Quotation(inner, _) => free_locals_into(inner, &mut shadowed.clone(), out),
             _ => {}
         }
     }
@@ -989,7 +989,7 @@ mod tests {
         let ir = lower_src(
             "type: Box n i64 ;\n\
              : mk ( i64 -- Box ) | n | n Box ;\n\
-             : loop ( i64 Box -- Box ) | n prev | n 0 = [ prev ] [ n 1 - prev loop ] if ;",
+             : loop ( i64 Box -- Box ) | n prev | n 0 = ~[ prev ] ~[ n 1 - prev loop ] if ;",
         );
         let f = ir.funcs.iter().find(|f| f.name == "loop").unwrap();
         let header = loop_header(f);

@@ -342,7 +342,7 @@ pub(super) fn poly_term(
         // `PolyType` variant; pushing a placeholder would erase the identity
         // into output unification/`Subst`/mangling. Mirrors the
         // `if`-in-a-polymorphic-body rejection above.
-        TermKind::Quotation(_) => {
+        TermKind::Quotation(_, _) => {
             return Err(format!(
                 "error: a quotation in the polymorphic body of `{}` (line {}) is not yet supported",
                 ctx.word_name().unwrap_or("<line>"),
@@ -1763,7 +1763,7 @@ mod tests {
         // wrongly rejected at the word end (M1).
         assert!(
             check_src(
-                ": choose inline ( 'T 'T bool -- 'T ) | a b flag | flag [ a b drop ] [ b a drop ] if ;\n: main ( -- ) 1 2 true choose drop ;",
+                ": choose inline ( 'T 'T bool -- 'T ) | a b flag | flag ~[ a b drop ] ~[ b a drop ] if ;\n: main ( -- ) 1 2 true choose drop ;",
             )
             .is_ok(),
             "choose should type-check"
@@ -1782,7 +1782,7 @@ mod tests {
     fn check_arm_local_unconsumed_is_error() {
         // T2: `y` is bound inside the `then` arm and never consumed in it.
         let err = check_src(&format!(
-            "{SPY}: arm_leak ( Spy Spy bool -- Spy ) | a b flag | flag [ a b | y | ] [ a drop b ] if ;\n: main ( -- ) ;",
+            "{SPY}: arm_leak ( Spy Spy bool -- Spy ) | a b flag | flag ~[ a b | y | ] ~[ a drop b ] if ;\n: main ( -- ) ;",
         ))
         .unwrap_err();
         assert!(err.contains('y'), "names the arm-local: {err}");
@@ -1794,7 +1794,7 @@ mod tests {
         // nothing leaks at the word end.
         assert!(
             check_src(
-                ": both inline ( 'T 'T bool -- ) | a b flag | flag [ a drop b drop ] [ b drop a drop ] if ;\n: main ( -- ) ;",
+                ": both inline ( 'T 'T bool -- ) | a b flag | flag ~[ a drop b drop ] ~[ b drop a drop ] if ;\n: main ( -- ) ;",
             )
             .is_ok(),
             "both should type-check"
@@ -1806,7 +1806,7 @@ mod tests {
         // `MaybeMoved`), which the leak check must count as still-unconsumed
         // (M3).
         let err = check_src(&format!(
-            "{SPY}: one ( Spy bool -- ) | x flag | flag [ x drop ] [ ] if ;\n: main ( -- ) ;"
+            "{SPY}: one ( Spy bool -- ) | x flag | flag ~[ x drop ] ~[ ] if ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains('x'), "names the leaked local: {err}");
@@ -1820,7 +1820,7 @@ mod tests {
         // T5: `x` untouched on both arms (`Live`+`Live` => `Live`); a value
         // parked in a local across a branch still leaks at the word end (M4).
         let err = check_src(&format!(
-            "{SPY}: none ( Spy bool -- ) | x flag | flag [ ] [ ] if ;\n: main ( -- ) ;"
+            "{SPY}: none ( Spy bool -- ) | x flag | flag ~[ ] ~[ ] if ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains('x'), "names the leaked local: {err}");
@@ -1832,8 +1832,9 @@ mod tests {
         // `if`'s own declared parameter type rather than a hand-written arm,
         // and a spliced poly body reports the operand at its instantiated
         // stand-in type.
-        let err = check_src(": bad inline ( 'T 'T -- 'T ) [ drop ] [ drop ] if ;\n: main ( -- ) ;")
-            .unwrap_err();
+        let err =
+            check_src(": bad inline ( 'T 'T -- 'T ) ~[ drop ] ~[ drop ] if ;\n: main ( -- ) ;")
+                .unwrap_err();
         assert!(err.contains("if"), "names the `if`: {err}");
         assert!(err.contains("`bool`"), "names the expected type: {err}");
     }
@@ -1846,7 +1847,7 @@ mod tests {
         // carries a `Copy` bound so the repeated reads are not use-after-move,
         // leaving the depth mismatch as the sole failure this test proves.
         let err = check_src(
-            ": bad inline ( 'T: Copy bool -- 'T ) | x flag | flag [ x ] [ x x ] if ;\n: main ( -- ) ;",
+            ": bad inline ( 'T: Copy bool -- 'T ) | x flag | flag ~[ x ] ~[ x x ] if ;\n: main ( -- ) ;",
         )
         .unwrap_err();
         assert!(
@@ -1859,7 +1860,7 @@ mod tests {
         // T8: both arms consume `x` (the join is `Moved`), so the `x drop`
         // after the branch is a second read: use-after-move, not a leak.
         let err = check_src(&format!(
-            "{SPY}: bad ( Spy bool -- ) | x flag | flag [ x drop ] [ x drop ] if x drop ;\n: main ( -- ) ;"
+            "{SPY}: bad ( Spy bool -- ) | x flag | flag ~[ x drop ] ~[ x drop ] if x drop ;\n: main ( -- ) ;"
         ))
         .unwrap_err();
         assert!(err.contains("use after move"), "unexpected message: {err}");

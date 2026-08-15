@@ -18,7 +18,7 @@ import: c | times | "../lib/combinators.sth" ;
 
 : main ( -- )
   scores | arr |
-  0 5 [ | i | &arr i >usize &> @ + ] times .
-  5 [ | i | &arr i >usize &> @ 2 * | v | &!arr i >usize &!> v ! ] times
-  5 [ | i | &arr i >usize &> @ . ] times
+  0 5 ~[ | i | &arr i >usize &> @ + ] times .
+  5 ~[ | i | &arr i >usize &> @ 2 * | v | &!arr i >usize &!> v ! ] times
+  5 ~[ | i | &arr i >usize &> @ . ] times
   arr drop ;

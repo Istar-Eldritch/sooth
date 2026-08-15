@@ -116,9 +116,9 @@ type: VmPop vm Vm val i64 ;
 | Jz    | vm target |
     vm vm-pop VmPop>           \ vm' x
     0 =
-    [
+    ~[
       target Vm<pc
-    ] [
+    ] ~[
       bump-pc
     ] if
     fetch Fetched> run

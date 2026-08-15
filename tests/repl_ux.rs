@@ -186,6 +186,29 @@ fn repl_clear_disposes_then_resets() {
     );
 }
 
+/// Slice 12 (R-B2): the REPL runs the same missing-`inline`-on-a-`~`-
+/// parameter gate (`check_inline_quotation_requires_inline`) native `check`
+/// runs in its pre-pass. Without it a `~[ ... ]` parameter without `inline`
+/// is accepted at definition and only panics later, at the call site
+/// (`checked user word exists`), instead of failing at `:` with the exact E2
+/// text -- so this asserts the exact line, not just that the session errors.
+#[test]
+fn repl_missing_inline_on_tilde_parameter_is_error() {
+    let out = run_session(&[
+        ": twice ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;",
+        "5 [ 1 + ] twice",
+    ]);
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec![
+            "error: word `twice` declares an inline-quotation parameter `~[ i64 -- i64 ]` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line 1, col 3)",
+            "error: unknown word `twice`",
+        ],
+        "expected the definition to be rejected with the exact E2 text (and the later call site to see no `twice`, not panic on a retained-but-invalid word): {out}"
+    );
+}
+
 /// Regression (slice 6c): once a session can retain a combinator
 /// (`self.combinators`), a struct's `drop` override calling one reopens the
 /// same gap the native build fixed separately -- `synthesize_aggregate_
@@ -202,7 +225,7 @@ fn repl_clear_disposes_then_resets() {
 #[test]
 fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
     let out = run_session(&[
-        ": twice ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
+        ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
         "type: Bx v i64 ;",
         ": drop ( Bx -- ) Bx>v [ 1 + ] twice . ;",
         ": helper ( i64 -- i64 ) 1 + ;",

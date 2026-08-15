@@ -120,7 +120,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
                 symbols[idx].clone(),
-                (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
+                Arity {
+                    in_arity: w.effect.inputs.len(),
+                    out_arity: w.effect.outputs.len(),
+                    ret_ty,
+                    quot_inputs: quot_input_slots(w.effect.inputs.iter().map(|s| s.ty)),
+                },
             )
         })
         .collect();
@@ -133,7 +138,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         let ret_ty = decl.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
         env.insert(
             decl.name.clone(),
-            (decl.effect.inputs.len(), decl.effect.outputs.len(), ret_ty),
+            Arity {
+                in_arity: decl.effect.inputs.len(),
+                out_arity: decl.effect.outputs.len(),
+                ret_ty,
+                quot_inputs: quot_input_slots(decl.effect.inputs.iter().map(|s| s.ty)),
+            },
         );
         extern_symbols.insert(decl.name.clone(), decl.symbol.clone());
     }
@@ -703,14 +713,14 @@ mod tests {
     /// `tail` threading at one splice) shows up as a mismatch.
     #[test]
     fn tail_splice_check_and_lowering_agree_on_the_loop() {
-        const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-             | e | | t | | c | c [ t call ] [ e call ] if ;\n";
-        const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-             | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
+        const BOOL_Q: &str = ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n";
+        const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+             | e | | t | | c | c ~[ t call e drop ] ~[ e call t drop ] if ;\n";
         for (branch, callee, expected) in [(BOOL_Q, "Bool?", true), (BOOL_D, "Bool!?", false)] {
             let src = format!(
                 "{branch}: sum-to ( i64 i64 -- i64 )\n\
-                 | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] {callee} ;\n\
+                 | n | | acc | n 0 = ~[ acc ] ~[ acc n + n 1 - sum-to ] {callee} ;\n\
                  : main ( -- ) 0 10 sum-to . ;\n"
             );
             let tokens = lex(&src).unwrap();
@@ -1006,7 +1016,15 @@ mod tests {
     #[test]
     fn lower_call_uses_resolved_generation_symbol() {
         let mut env = HashMap::new();
-        env.insert("sq".to_string(), (1usize, 1usize, None));
+        env.insert(
+            "sq".to_string(),
+            Arity {
+                in_arity: 1,
+                out_arity: 1,
+                ret_ty: None,
+                quot_inputs: Vec::new(),
+            },
+        );
         let resolve = |name: &str| format!("{name}__gen2");
         let (func, _q, _m, _) = lower_line(
             0,

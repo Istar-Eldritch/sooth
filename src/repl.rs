@@ -134,17 +134,25 @@ struct PolyWordEntry {
     builtin_overloads: HashMap<Span, String>,
 }
 
-/// Derive ir's arity map (RK2) from the typed checker env: ir needs only the
-/// input/output counts and the output `IrType`, not the full typed effect.
-/// The REPL's env never carries more than one candidate per name (its
-/// redefinition model keeps exactly one live binding), so the sole candidate
-/// answers.
+/// Derive ir's arity map (RK2) from the typed checker env: ir needs the
+/// input/output counts, the output `IrType`, and which inputs are ordinary
+/// `[ ... ]` quotations (R-D2), not the full typed effect. The REPL's env
+/// never carries more than one candidate per name (its redefinition model
+/// keeps exactly one live binding), so the sole candidate answers.
 fn ir_arity_env(env: &HashMap<String, Vec<check::Overload>>) -> HashMap<String, ir::Arity> {
     env.iter()
         .map(|(name, overloads)| {
             let sig = &overloads[0].sig;
             let ret = sig.outputs.first().map(|&ty| ir::ir_type_of(ty));
-            (name.clone(), (sig.inputs.len(), sig.outputs.len(), ret))
+            (
+                name.clone(),
+                ir::Arity {
+                    in_arity: sig.inputs.len(),
+                    out_arity: sig.outputs.len(),
+                    ret_ty: ret,
+                    quot_inputs: ir::quot_input_slots(sig.inputs.iter().copied()),
+                },
+            )
         })
         .collect()
 }
@@ -280,8 +288,8 @@ fn rewrite_combinator_body_calls(terms: &[Term], rename: &HashMap<String, String
                 TermKind::Call(name) => {
                     TermKind::Call(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
                 }
-                TermKind::Quotation(inner) => {
-                    TermKind::Quotation(rewrite_combinator_body_calls(inner, rename))
+                TermKind::Quotation(inner, is_inline) => {
+                    TermKind::Quotation(rewrite_combinator_body_calls(inner, rename), *is_inline)
                 }
                 other => other.clone(),
             };
@@ -1666,6 +1674,31 @@ impl Session {
         // closure may declare `main`, unlike `driver::build`'s native path,
         // where module 0 is the program's own entry point.
         driver::check_no_main_in_closure(&module, &closure, None)?;
+        // Slice 12 (R-D5/E4): `eval_def` declines an ordinary `[ ... ]`-parameter
+        // word, and the import path has to decline the same shape or the
+        // boundary is only half a boundary. `splice_import`'s two binding loops
+        // would otherwise bind it as an ordinary word, and the later call site
+        // builds its quotation argument in the *session's* translation unit,
+        // where the `__quot0` code pointer is a non-PIC relocation: the line
+        // dies in `ld` instead of at the boundary. Rejected here, above the
+        // commit point, so a refused import leaves the session untouched (R16),
+        // and for both exported and private module-0 words, since a retained
+        // combinator's body can call a private one.
+        if let Some(w) = module.words.iter().find(|w| {
+            w.module == 0
+                && w.poly.is_none()
+                && !check::is_combinator(w)
+                && check::word_declares_quotation_parameter(w)
+        }) {
+            let span = check::word_span(w);
+            return Err(format!(
+                "error: word `{}` takes a `[ ... ]` quotation parameter and lowers to a real call, which is not supported in the REPL ({}, line {}, col {})",
+                crate::resolve::demangle_word(&w.name),
+                closure.path_of(w.module).display(),
+                span.line,
+                span.col
+            ));
+        }
         // R12 (slice 6c): a closure exporting a quotation-taking word is no
         // longer rejected -- `splice_import` retains the combinator (D5).
         // R11: each selectively-imported name must be exported by module 0,
@@ -1880,10 +1913,7 @@ impl Session {
             // import symbol would point at nothing. It is retained instead in
             // the combinator loop below.
             let Some(w) = module.words.iter().find(|w| {
-                w.module == 0
-                    && w.poly.is_none()
-                    && w.name == mangled
-                    && !check::word_declares_quotation_parameter(w)
+                w.module == 0 && w.poly.is_none() && w.name == mangled && !check::is_combinator(w)
             }) else {
                 continue; // an exported type name or combinator, handled elsewhere
             };
@@ -1934,7 +1964,7 @@ impl Session {
                 // body already resolves through the session's own identical
                 // copy with no rename needed.
                 || w.name == "."
-                || check::word_declares_quotation_parameter(w)
+                || check::is_combinator(w)
             {
                 continue;
             }
@@ -2010,9 +2040,11 @@ impl Session {
             .collect();
         for (raw, _span) in &module.modules[0].exports {
             let mangled = mangled_of(raw);
-            let Some(w) = module.words.iter().find(|w| {
-                w.module == 0 && w.name == mangled && check::word_declares_quotation_parameter(w)
-            }) else {
+            let Some(w) = module
+                .words
+                .iter()
+                .find(|w| w.module == 0 && w.name == mangled && check::is_combinator(w))
+            else {
                 continue;
             };
             let internal = format!("{q}::{raw}__import{epoch}");
@@ -2113,7 +2145,7 @@ impl Session {
                         *name = new;
                     }
                 }
-                TermKind::Quotation(inner) => self.rewrite_terms_imports(inner)?,
+                TermKind::Quotation(inner, _) => self.rewrite_terms_imports(inner)?,
                 _ => {}
             }
         }
@@ -2552,18 +2584,35 @@ impl Session {
         // in particular, which the retention route below would otherwise carry
         // into `check_poly_combinator_repl` as a legitimate poly combinator.
         check::check_inline_declaration(&word)?;
-        // R6 (Slice 6c): a quotation-taking word is now *retained* rather than
-        // R23-rejected. It routes here (both mono and poly, D2), skipping
-        // lowering entirely (D3): the session keeps its body as raw terms and
-        // re-splices it, fresh, at every later call site under that site's own
-        // live env, which is what the inliner needs (R20).
-        // Slice 11 (R7): a declared `inline` word takes the same route even
-        // when it declares no quotation parameter. Without this it would fall
-        // through to the ordinary lowering path below and mint a `.so` and a
-        // symbol, which is exactly the silent fall-back to a real call that
-        // D2's unconditional guarantee forbids.
-        if word.declares_inline || check::word_declares_quotation_parameter(&word) {
+        // Slice 12 (R-B2): the same missing-`inline`-on-a-`~`-parameter gate
+        // native `check` runs in its pre-pass, run here too so the REPL never
+        // accepts a `~[ ... ]` parameter without `inline`.
+        check::check_inline_quotation_requires_inline(&word)?;
+        // R6 (Slice 6c): a combinator is *retained* rather than R23-rejected.
+        // It routes here (both mono and poly, D2), skipping lowering entirely
+        // (D3): the session keeps its body as raw terms and re-splices it,
+        // fresh, at every later call site under that site's own live env,
+        // which is what the inliner needs (R20). Gated on `is_combinator`
+        // (R-D5), the one predicate the batch compiler recognizes a splice by,
+        // so REPL retention cannot diverge from it -- in particular a declared
+        // `inline` word that takes no quotation at all must not fall through to
+        // the ordinary lowering path below and mint a `.so` and a symbol, which
+        // is exactly the silent fall-back to a real call D2 forbids.
+        if check::is_combinator(&word) {
             return self.eval_combinator_def(word, writer);
+        }
+        // Slice 12 (R-D5/E4): the remaining quotation-taking shape is a word
+        // with an ordinary `[ ... ]` parameter, which lowers to a real call
+        // (part D). The REPL declines it: the `(code, env)` ABI across a
+        // `dlopen` boundary -- the quotation built on a later line, its code
+        // pointer resolved through `RTLD_GLOBAL` -- is untested surface, so
+        // this is a scope boundary, not a mis-lowering waiting to happen.
+        if check::word_declares_quotation_parameter(&word) {
+            let display = crate::resolve::demangle_word(&word.name);
+            return Err(format!(
+                "error: word `{display}` takes a `[ ... ]` quotation parameter and lowers to a real call, which is not supported in the REPL (line {}, col {})",
+                word.span.line, word.span.col
+            ));
         }
         // R3 (Slice 2): a polymorphic word's signature lives entirely in
         // `word.poly` (`word.effect` is empty), so it takes a wholly separate
@@ -3650,6 +3699,38 @@ mod tests {
         assert_eq!(session.render_stack(), "stack: ^99i64");
         session.eval_line("drop", &mut out).unwrap();
         assert_eq!(session.render_stack(), "stack: (empty)");
+    }
+
+    /// R-D2/X13: the REPL's env builder marks an ordinary `[ ... ]` parameter
+    /// slot with the quotation `IrType` its `(code, env)` aggregate carries, so
+    /// a call site lowered in a session materializes its phantom argument
+    /// exactly as the batch compiler's does. Built from a really parsed
+    /// signature, since a `Type::Quotation` carries an interned effect no test
+    /// should hand-fabricate. Left unpopulated, the REPL half of the real-call
+    /// path lowers a bare phantom into `Instr::Call` and this reads `I64`.
+    #[test]
+    fn ir_arity_env_marks_an_ordinary_quotation_parameter_slot() {
+        let src = ": apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;";
+        let tokens = lexer::lex(src).unwrap();
+        let module = parser::parse(&tokens).unwrap();
+        let sig = check::sig_of(&module.words[0].effect);
+        let env = HashMap::from([(
+            "apply".to_string(),
+            vec![check::Overload {
+                sig,
+                symbol: "apply".to_string(),
+            }],
+        )]);
+
+        let arity = ir_arity_env(&env).remove("apply").expect("the sole entry");
+        assert_eq!(arity.in_arity, 2);
+        assert_eq!(arity.quot_inputs.len(), 1, "only slot 0 is a quotation");
+        let (slot, ty) = arity.quot_inputs[0];
+        assert_eq!(slot, 0);
+        assert!(
+            matches!(ty, ir::IrType::Quotation(_)),
+            "the slot carries the parameter's quotation type, got {ty:?}"
+        );
     }
 
     fn entry(generation: u64) -> WordEntry {

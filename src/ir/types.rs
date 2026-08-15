@@ -398,12 +398,36 @@ pub enum Terminator {
     Jmp(BlockId),
 }
 
-/// Declared signature of a user word or `extern:` declaration: (input count,
-/// output count, output `IrType` if any). The build path derives this from
-/// declared slot types; the REPL derives it from the checker's typed env. A
-/// `None` output type (e.g. a word with no output) is treated as
-/// `IrType::Int` by callers.
-pub type Arity = (usize, usize, Option<IrType>);
+/// Declared signature of a user word or `extern:` declaration. The build path
+/// derives this from declared slot types; the REPL derives it from the
+/// checker's typed env. A `None` `ret_ty` (e.g. a word with no output) is
+/// treated as `IrType::Int` by callers.
+#[derive(Debug, Clone)]
+pub struct Arity {
+    pub in_arity: usize,
+    pub out_arity: usize,
+    pub ret_ty: Option<IrType>,
+    /// The callee's ordinary `[ ... ]` quotation parameters (R-D1). A call
+    /// site materializes the phantom argument at each of these slots before it
+    /// enters `Instr::Call`; the name-keyed env is the only thing a call site
+    /// holds about its callee, so the shape has to travel here rather than be
+    /// re-read from the callee's `WordDef` (which lowering never has, and the
+    /// REPL has no module to read one from).
+    pub quot_inputs: Vec<(usize, IrType)>,
+}
+
+/// The ordinary `[ ... ]` quotation slots of a declared input row, as
+/// `(index, IrType::Quotation)` pairs. A `~[ ... ]` slot never appears: a word
+/// declaring one is a combinator, spliced at every call site and absent from
+/// every lowering env.
+pub fn quot_input_slots(inputs: impl IntoIterator<Item = Type>) -> Vec<(usize, IrType)> {
+    inputs
+        .into_iter()
+        .enumerate()
+        .filter(|(_, ty)| matches!(ty, Type::Quotation(_)))
+        .map(|(i, ty)| (i, ir_type_of(ty)))
+        .collect()
+}
 
 /// Maps a called user-word name to the symbol it is emitted/linked as. The build
 /// path uses identity; the REPL supplies generation-mangled symbols so a unit

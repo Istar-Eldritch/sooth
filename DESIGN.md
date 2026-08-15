@@ -299,7 +299,7 @@ FFI is the explicit unsafe hole, wrapped in safe words that establish invariants
 
 ## Control flow and iteration
 
-Boolean branching is the library word `if` (`[ then ] [ else ] if`, see below);
+Boolean branching is the library word `if` (`~[ then ] ~[ else ] if`, see below);
 structural dispatch is clause-bodied definition. There are deliberately **no loop
 keywords** (no `begin/until`, `do/loop`); dropping them keeps the surface small and
 matches the Factor/Kitten lineage, where iteration is expressed with combinators
@@ -320,7 +320,7 @@ The iteration story, top to bottom:
   compiler lowers to the loop primitive. Reserving them as keywords would bloat the
   core for no reason.
 - **Combinators are inlined.** The compiler inlines the common combinators and their
-  quotation arguments at the call site, so `[ ... ] each` lowers to a tight loop with
+  quotation arguments at the call site, so `~[ ... ] each` lowers to a tight loop with
   the body inlined, not a higher-order `call` per element. This is what makes "loops
   are a library" perform as well as loop syntax would have.
 - **Raw recursion is legal but not the idiom.** A word may call itself; it is just a
@@ -452,7 +452,7 @@ imported `while`'s self-call still resolves to itself and the self-tail recogniz
 fires rather than recursing forever through an unrecognized name.
 
 **Conditionals and dispatch.** Boolean branching is the ordinary word `if`, taking a
-`bool` and two quotations (`[ then ] [ else ] if`). Structural
+`bool` and two quotations (`~[ then ] ~[ else ] if`). Structural
 dispatch on ADTs is **clause-bodied definition**, the sole enum eliminator: a word
 whose top input is an enum is defined per variant (`| Variant ... ;`),
 exhaustiveness-checked, with no inline `match`. The rejected Haskell-style machine —
@@ -488,13 +488,15 @@ a variadic `[ pred ] [ body ]` word is not fixed-arity.
 This shrinks the core the honest way, by making `if` a word rather than
 by replacing it with a bigger feature.
 
-**INV-INLINE-COMBINATOR.** A quotation-taking word is always inlined (spliced) at each
-call site and mints no `IrFunc`; it has no opaque call form. Its declared output row is
-discovered by forward checking of the spliced terms, never solved for by row unification.
-Both splice sites rest on this — the checker's tail walk reads a callee's body because
-there is only ever one, spliced, form of it, and lowering threads the caller's tail
-position into the splice because the body really does run in place of the call. Slice 7b
-(first-class runtime quotations) is where the invariant breaks and both must be revisited.
+**INV-INLINE-COMBINATOR.** A word declaring an `inline` `~[ ... ]` parameter is always
+inlined (spliced) at each call site and mints no `IrFunc`; it has no opaque call form. Its
+declared output row is discovered by forward checking of the spliced terms, never solved
+for by row unification. Both splice sites rest on this — the checker's tail walk reads a
+callee's body because there is only ever one, spliced, form of it, and lowering threads the
+caller's tail position into the splice because the body really does run in place of the
+call. A word declaring an ordinary `[ ... ]` parameter is the other form and none of the
+above holds of it: it is a genuine call that mints an `IrFunc` and receives the quotation
+as a `(code, env)` value.
 
 ## The irreducible core
 

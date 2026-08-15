@@ -102,7 +102,7 @@ fn mid_body_binding_leftmost_name_takes_deepest_value() {
 fn local_bound_in_if_arm_is_not_visible_after_end() {
     // Criterion 3: the arm is the extent (R2), so `x` past `end` is not a name
     // at all: it resolves as a word, and there is no such word.
-    let err = check_error(": w ( bool -- i64 )\n  [ 7 | x | x ] [ 0 ] if\n  x ;\n");
+    let err = check_error(": w ( bool -- i64 )\n  ~[ 7 | x | x ] ~[ 0 ] if\n  x ;\n");
     assert!(err.contains("unknown word"), "unexpected message: {err}");
     assert!(err.contains("`x`"), "unexpected message: {err}");
 }
@@ -114,7 +114,7 @@ fn name_bound_in_one_arm_can_be_rebound_in_sibling_arm() {
     // happens (each arm's locals truncate at its exit).
     let (stdout, code) = run_src(
         "sibling-arm-rebind",
-        ": pick ( bool -- i64 )\n  [ 1 | v | v 10 * ] [ 2 | v | v 100 * ] if ;\n\n\
+        ": pick ( bool -- i64 )\n  ~[ 1 | v | v 10 * ] ~[ 2 | v | v 100 * ] if ;\n\n\
 : main ( -- )\n  true pick .\n  false pick . ;\n",
     );
     assert_eq!(stdout, "10\n200\n");
@@ -175,7 +175,7 @@ fn unconsumed_linear_local_errors_at_block_end() {
     // that literal's own `]`, not the deleted `else`/`end` keywords.
     // `SPY_DEF` is two lines, so `w`'s own line 3 lands on line 5.
     let at_then = check_error(&format!(
-        "{SPY_DEF}: w ( bool -- )\n  [ 7 Spy | s | 0 .\n  ] [ 0 . ] if ;\n\
+        "{SPY_DEF}: w ( bool -- )\n  ~[ 7 Spy | s | 0 .\n  ] ~[ 0 . ] if ;\n\
 : main ( -- ) true w ;\n"
     ));
     assert!(
@@ -188,11 +188,11 @@ fn unconsumed_linear_local_errors_at_block_end() {
     );
 
     let at_else = check_error(&format!(
-        "{SPY_DEF}: w ( bool -- )\n  [ 0 . ] [\n  7 Spy | s | 0 .\n  ] if ;\n\
+        "{SPY_DEF}: w ( bool -- )\n  ~[ 0 . ] ~[\n  7 Spy | s | 0 .\n  ] if ;\n\
 : main ( -- ) true w ;\n"
     ));
     assert!(
-        at_else.contains("scope ends at the `branch arm` on line 4, col 11"),
+        at_else.contains("scope ends at the `branch arm` on line 4, col 12"),
         "unexpected message: {at_else}"
     );
 }
@@ -207,7 +207,7 @@ fn linear_local_bound_in_arm_and_moved_on_one_nested_path_is_error() {
     // `SPY_DEF` is two lines, so the outer arm opening on `w`'s own line 2
     // lands on line 4.
     let err = check_error(&format!(
-        "{SPY_DEF}: w ( bool bool -- )\n  [\n    7 Spy | s |\n    [ s drop ] [ 1 . ] if\n  ] [ drop 0 . ] if ;\n: main ( -- ) true true w ;\n"
+        "{SPY_DEF}: w ( bool bool -- )\n  ~[\n    7 Spy | s |\n    ~[ s drop ] ~[ 1 . ] if\n  ] ~[ drop 0 . ] if ;\n: main ( -- ) true true w ;\n"
     ));
     assert!(
         err.contains("is not consumed on every path"),
@@ -227,7 +227,7 @@ fn linear_local_bound_and_consumed_in_arm_is_accepted() {
     let (stdout, code) = run_src(
         "linear-local-consumed-in-arm",
         &format!(
-            "{SPY_DEF}: w ( bool -- )\n  [ 7 Spy | s | s drop\n  ] [ 0 . ] if ;\n\n\
+            "{SPY_DEF}: w ( bool -- )\n  ~[ 7 Spy | s | s drop\n  ] ~[ 0 . ] if ;\n\n\
 : main ( -- )\n  true w\n  false w ;\n"
         ),
     );
@@ -437,12 +437,12 @@ fn mid_body_binding_in_self_tail_recursive_word_loops_correctly() {
     let (stdout, code) = run_src(
         "mid-body-binding-self-tail",
         ": sum-to ( i64 i64 -- i64 )\n\
-  dup 0 > [\n\
+  dup 0 > ~[\n\
     | acc n |\n\
     acc n +\n\
     n 1 -\n\
     sum-to\n\
-  ] [\n\
+  ] ~[\n\
     drop\n\
   ] if ;\n\
 : main ( -- )\n\

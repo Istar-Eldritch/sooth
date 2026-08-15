@@ -21,6 +21,22 @@ impl<'a> FuncBuilder<'a> {
         }
     }
 
+    /// R-D3: at an ordinary (non-spliced) call, turn each phantom quotation
+    /// argument into the `(code, env)` aggregate the callee's declared
+    /// parameter names. `quot_inputs` comes from the callee's `Arity`, so the
+    /// slots line up with `args` positionally. This is the argument-position
+    /// materialization boundary, the peer of a store, a word output, and a
+    /// branch join.
+    pub(in crate::ir) fn materialize_quot_args(
+        &mut self,
+        args: &mut [Value],
+        quot_inputs: &[(usize, IrType)],
+    ) {
+        for &(slot, ty) in quot_inputs {
+            args[slot] = self.materialize_if_phantom(args[slot], ty);
+        }
+    }
+
     /// Slice 7a/7b (R9/R16): build the runtime `(code, env)` aggregate for
     /// phantom quotation `phantom`, recording the callee `IrFunc` to mint
     /// (deduped by symbol). `code` gets the callee's address (`FuncAddr`). The

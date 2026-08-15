@@ -13,9 +13,9 @@ type: Summed rest List total i64 ;
 
 : build ( i64 List -- List )
   | n acc |
-  n 0 = [
+  n 0 = ~[
     acc
-  ] [
+  ] ~[
     n 1 - acc n push-front build
   ] if ;
 
@@ -26,9 +26,9 @@ type: Summed rest List total i64 ;
 
 : sum-first ( List i64 i64 -- Summed )
   | l k acc |
-  k 0 = [
+  k 0 = ~[
     l acc Summed
-  ] [
+  ] ~[
     l pop Popped>
     acc +
     k 1 -

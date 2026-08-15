@@ -28,9 +28,9 @@ use self::func_builder::{lower_materialized, lower_word_parts, word_ret_ty, EnvP
 
 use self::types::QuotId;
 pub use self::types::{
-    ir_type_of, quotation_layout, Arity, BinOp, Block, BlockId, CmpOp, Instr, IrFunc, IrModule,
-    IrType, QuotSigId, QuotSigLayout, Resolver, Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL,
-    OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
+    ir_type_of, quot_input_slots, quotation_layout, Arity, BinOp, Block, BlockId, CmpOp, Instr,
+    IrFunc, IrModule, IrType, QuotSigId, QuotSigLayout, Resolver, Terminator, Value, ALLOC_SYMBOL,
+    FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 pub(crate) use self::layout::{

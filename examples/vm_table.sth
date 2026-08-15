@@ -155,9 +155,9 @@ type: Decoded vm Vm idx usize ;
   target64 >usize | target |
   vm vm-pop VmPop> | vm2 x |
   x 0 =
-  [
+  ~[
     vm2 target Vm<pc
-  ] [
+  ] ~[
     vm2
   ] if ;
 
@@ -196,10 +196,10 @@ type: Decoded vm Vm idx usize ;
   | vm0 table |
   vm0 fetch Fetched> decode Decoded> | vm idx |
   idx 8 >usize =
-  [
+  ~[
     vm vm-pop VmPop>
     swap drop
-  ] [
+  ] ~[
     &table idx &> @ | h |
     vm h call
     table

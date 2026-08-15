@@ -147,37 +147,35 @@ pub(crate) fn combinator_of(word: &WordDef) -> Option<Combinator<'_>> {
     }
 }
 
-/// R18/R20: a combinator is a **monomorphic** `WordBody::Terms` word with a
-/// `Type::Quotation` input. The checker inlines a call to one (splicing its
-/// body) and lowering mints no `IrFunc` for it, so `check` and `ir::lower`
-/// must agree on the predicate exactly; it lives here as the single source.
-/// Slice 6a phase 2: a **polymorphic** quotation-taking word (`each`/`map`/
-/// `fold`) is a combinator too. It never monomorphizes to a standalone
-/// `IrFunc` (R20); its body is spliced concretely at each call site, where the
-/// element/length variables become the caller's concrete types, so the same
-/// splice mechanism serves both the mono and poly cases (the poly signature
-/// only drives the standalone def-site check, R17). The quotation parameter
-/// sits in `sig.inputs` as either a variable-bearing `PolyType::Quotation` or,
-/// when its effect is fully concrete, a `Concrete(Type::Quotation)`.
+/// R18/R20: a combinator is a `WordBody::Terms` word declaring `inline`
+/// (recognition is **declared, not inferred**, R-A1). The checker inlines a
+/// call to one (splicing its body) and lowering mints no `IrFunc` for it, so
+/// `check` and `ir::lower` must agree on the predicate exactly; it lives here
+/// as the single source.
 ///
-/// Slice 11 (R2): a word that declares `inline` is always spliced too, whatever
-/// its parameters, so the property is no longer inferred from the signature's
-/// shape alone. The `WordBody::Terms` conjunct is retained, so a clause-bodied
-/// word is never a combinator regardless of the flag; a clause-bodied `inline`
-/// word is rejected at its definition (`check_inline_declaration`) rather than
+/// A word that takes a `~[ ... ]` (`Type::InlineQuotation`) parameter cannot
+/// be anything *but* a combinator (a `~` quotation has no runtime
+/// representation), so it must declare `inline` too
+/// (`check_inline_declaration`'s R-B1 neighbour rejects it otherwise); a word
+/// taking only an ordinary `[ ... ]` (`Type::Quotation`) parameter and no
+/// `inline` is an ordinary real call (part D lowers that shape). The
+/// `WordBody::Terms` conjunct means a clause-bodied word is never a
+/// combinator regardless of the flag; a clause-bodied `inline` word is
+/// rejected at its definition (`check_inline_declaration`) rather than
 /// silently lowered as an ordinary clause word, so the two never disagree in a
 /// way that reaches codegen.
 pub fn is_combinator(word: &WordDef) -> bool {
-    matches!(word.body, WordBody::Terms { .. })
-        && (word_declares_quotation_parameter(word) || word.declares_inline)
+    matches!(word.body, WordBody::Terms { .. }) && word.declares_inline
 }
 
 /// R23 (D7): whether a word's declared effect names a quotation parameter,
-/// regardless of body kind (a clause body is rejected separately by
-/// `clause_bodied_quotation_word_error`, and a session never reaches a clause
-/// body via `eval_def`/`eval_poly_def` at all -- this is the coarser gate the
-/// REPL uses, since it cannot retain *any* quotation-taking word's body past
-/// the defining line, term-body or not).
+/// regardless of body kind and of flavour (a clause body is rejected
+/// separately by `clause_bodied_quotation_word_error`). This is *not* the
+/// "does this word splice?" question -- `is_combinator` answers that, from the
+/// declaration alone -- but the coarser "is this slot a quotation?" one its
+/// callers across `check/{poly,terms,audits,captures}.rs` ask, and the one the
+/// REPL's own boundary asks to decline the ordinary `[ ... ]` parameter shape
+/// it does not support.
 pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
     match &word.poly {
         None => word
@@ -778,19 +776,34 @@ mod tests {
     }
     #[test]
     fn quotation_taking_word_mints_no_symbol() {
-        // U20: a monomorphic quotation-taking word is a combinator, so it is
-        // inlined and mints no `IrFunc`; `is_combinator` (the single predicate
-        // `check` and `ir::lower` share) recognizes it and excludes an
-        // ordinary word. Deleting the `Type::Quotation` clause makes `apply`
-        // stop being a combinator and mint a symbol (a link error, since its
-        // body is a bare `call` over a phantom).
+        // Slice 12 (R-A1, M-A): recognition is declared, not inferred. An
+        // ordinary `[ ... ]` parameter no longer makes a word a combinator by
+        // itself -- `apply` here declares no `inline`, so it is an ordinary
+        // word (a real call, part D's territory), same as `plain`.
+        // Constructed directly (not via an end-to-end build) so the test
+        // discriminates the retired inference leg from an end-to-end "it
+        // still builds" placebo: re-adding the `word_declares_quotation_parameter`
+        // disjunct to `is_combinator` flips `apply` to `true` and this must fail.
         let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+                   : apply-inline inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
                    : plain ( i64 -- i64 ) 1 + ;\n";
         let tokens = lex(src).unwrap();
         let module = parse(&tokens).unwrap();
         let apply = module.words.iter().find(|w| w.name == "apply").unwrap();
+        let apply_inline = module
+            .words
+            .iter()
+            .find(|w| w.name == "apply-inline")
+            .unwrap();
         let plain = module.words.iter().find(|w| w.name == "plain").unwrap();
-        assert!(is_combinator(apply), "`apply` is a combinator (no symbol)");
+        assert!(
+            !is_combinator(apply),
+            "`apply` declares no `inline`, so an ordinary `[ ... ]` parameter alone is not a combinator"
+        );
+        assert!(
+            is_combinator(apply_inline),
+            "the identical shape with `inline` declared is a combinator"
+        );
         assert!(!is_combinator(plain), "`plain` is an ordinary word");
     }
 
@@ -841,7 +854,7 @@ mod tests {
             "error: an always-spliced word cannot be recursive (the inliner would splice it forever): `loopy` -> `loopy` (line 1, col 3)"
         );
 
-        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > [ 1 - down ] [ ] if ;";
+        let tail_src = ": down inline ( i64 -- i64 ) dup 0 > ~[ 1 - down ] ~[ ] if ;";
         let tokens = lex(tail_src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)

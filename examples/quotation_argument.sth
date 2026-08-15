@@ -1,0 +1,17 @@
+\ Dogfood: Phase 4 slice 12 (declared combinator recognition). A word taking an
+\ ordinary `[ ... ]` parameter is a *real call*, not a splice: `apply` mints its
+\ own symbol and receives its argument as a runtime `(code, env)` quotation
+\ value. `apply2` forwards that value down a second call level, and `run` calls
+\ one and returns its result. A word that must be spliced instead declares
+\ `inline` over a `~[ ... ]` parameter (see `lib/combinators.sth`).
+
+: apply ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;
+
+: apply2 ( [ i64 -- i64 ] i64 -- i64 ) apply ;
+
+: run ( [ -- i64 ] -- i64 ) call ;
+
+: main ( -- )
+  [ 1 + ] 5 apply .
+  [ 2 * ] 20 apply2 .
+  [ 42 ] run . ;

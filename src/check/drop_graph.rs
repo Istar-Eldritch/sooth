@@ -68,7 +68,7 @@ pub(super) fn check_main_effect(
 /// splice. An always-spliced callee's body runs *in place of* the call, so its
 /// own tail terms are the caller's, and a quotation literal the callee
 /// `call`s in tail position is spliced there too. `[ ... ] call` at a tail is
-/// the same thing one step shorter. A trailing `[ t ] [ e ] if` hands tail
+/// the same thing one step shorter. A trailing `~[ t ] ~[ e ] if` hands tail
 /// position to both arms through that rule rather than as a form of its own:
 /// `if` splices, and `branch` tail-calls both quotation parameters. See
 /// `TailWalk`.
@@ -291,7 +291,7 @@ fn visible_args<'t>(before: &'t [Term], binds: &HashMap<&'t str, usize>) -> Vec<
     let mut out = Vec::new();
     for term in before.iter().rev() {
         match &term.kind {
-            TermKind::Quotation(body) => out.push(Arg::Literal(body)),
+            TermKind::Quotation(body, _) => out.push(Arg::Literal(body)),
             TermKind::Call(name) => match binds.get(name.as_str()) {
                 Some(&slot) => out.push(Arg::Param(slot)),
                 None => break,
@@ -722,7 +722,7 @@ fn collect_all_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
             // combinator's own name inside its arms, and a *non-tail* self-call
             // there -- which the inliner would splice forever -- goes from a
             // located rejection to a compiler stack overflow.
-            TermKind::Quotation(inner) => collect_all_calls(inner, out),
+            TermKind::Quotation(inner, _) => collect_all_calls(inner, out),
             _ => {}
         }
     }
@@ -869,7 +869,7 @@ mod tests {
         // neither of these.
         let src = "type: File fd i64 ; \
                    : shut ( File -- ) drop ; \
-                   : drop ( File -- ) | f | true [ f shut ] [ f shut ] if 1 . ; \
+                   : drop ( File -- ) | f | true ~[ f shut ] ~[ f shut ] if 1 . ; \
                    : main ( -- ) 1 File drop ;";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -1089,7 +1089,7 @@ mod tests {
         // combinator walk -- `if` is a `lib/` word whose tail-called-parameter
         // set is both branch quotations, seeded from `branch` -- so the index
         // has to carry the real `if`, not be empty.
-        let src = ": rec ( i64 -- i64 ) dup 0 > [ rec ] [ rec ] if ;";
+        let src = ": rec ( i64 -- i64 ) dup 0 > ~[ rec ] ~[ rec ] if ;";
         let module = parse(&lex(src).unwrap()).unwrap();
         let combs = combinator_index(module.words.iter());
         let w = module.words.iter().find(|w| w.name == "rec").unwrap();
@@ -1102,7 +1102,7 @@ mod tests {
     fn tail_position_non_terminal_if_self_call_is_not_tail() {
         // The `if` is followed by more terms, so it is non-terminal and its
         // arms are not in tail position.
-        let w = first_word(": rec ( i64 -- i64 ) dup 0 > [ rec ] [ 0 ] if drop 5 ;");
+        let w = first_word(": rec ( i64 -- i64 ) dup 0 > ~[ rec ] ~[ 0 ] if drop 5 ;");
         assert!(!has_self_tail_call(&w, &CombinatorIndex::new()));
         assert!(!tail_position_calls(&w, &CombinatorIndex::new()).contains(&"rec"));
     }
@@ -1121,12 +1121,12 @@ mod tests {
     /// A hand-written two-way branch over the primitive `if`, whose two
     /// quotation parameters are each `call`ed in tail position: the shape
     /// whose tail-called-parameter set is `{1, 2}`.
-    const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-         | e | | t | | c | c [ t call ] [ e call ] if ;\n";
+    const BOOL_Q: &str = ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+         | e | | t | | c | c ~[ t call ] ~[ e call ] if ;\n";
     /// Recon 4's negative: each arm `call`s one parameter and *then* drops the
     /// other, so the tail term is `drop` and neither parameter is tail-called.
-    const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-         | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
+    const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+         | e | | t | | c | c ~[ t call e drop ] ~[ e call t drop ] if ;\n";
 
     fn words_of(src: &str) -> Vec<WordDef> {
         let tokens = lex(src).unwrap();
@@ -1191,7 +1191,7 @@ mod tests {
         // R-P1-4: two always-spliced words share the name, so which body the
         // call reaches cannot be decided syntactically.
         let words = words_of(&format!(
-            "{BOOL_Q}: Bool? ( str ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+            "{BOOL_Q}: Bool? inline ( str ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c drop t call e drop ;\n\
              : sum-to ( i64 i64 -- i64 )\n\
              | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;\n"
@@ -1218,11 +1218,11 @@ mod tests {
         // a missing guard: see the witness map under E-P1-4 in
         // `docs/phase4-slice10c-spec.md` before "fixing" a survivor there.
         let recon2 = words_of(&format!(
-            "{BOOL_Q}: walk ( i64 ~[ -- i64 ] -- i64 )\n\
+            "{BOOL_Q}: walk inline ( i64 ~[ -- i64 ] -- i64 )\n\
              | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool? ;\n"
         ));
         let recon4 = words_of(&format!(
-            "{BOOL_D}: walk ( i64 ~[ -- i64 ] -- i64 )\n\
+            "{BOOL_D}: walk inline ( i64 ~[ -- i64 ] -- i64 )\n\
              | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool!? ;\n"
         ));
         for (words, expected) in [(recon2, true), (recon4, false)] {
@@ -1259,7 +1259,7 @@ mod tests {
         for src in [
             "type: Vec2 x i64 y i64 ;\n\
              : < ( Vec2 Vec2 -- bool ) | a b | a Vec2>x b Vec2>x < ;\n",
-            ": branch ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+            ": branch inline ( u32 ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c t e branch ;\n",
         ] {
             let words = words_of(src);
@@ -1292,8 +1292,8 @@ mod tests {
         // declines instead. (`check_combinator_cycles` rejects this program
         // separately -- the point here is that the walk terminates on it.)
         let words = words_of(
-            ": ping ( ~[ -- i64 ] -- i64 ) | f | f pong ;\n\
-             : pong ( ~[ -- i64 ] -- i64 ) | f | f ping ;\n\
+            ": ping inline ( ~[ -- i64 ] -- i64 ) | f | f pong ;\n\
+             : pong inline ( ~[ -- i64 ] -- i64 ) | f | f ping ;\n\
              : go ( -- i64 ) [ 7 ] ping ;\n",
         );
         let combs = combinator_index(&words);
@@ -1329,8 +1329,8 @@ mod tests {
         for (src, name) in [
             (BOOL_Q, "Bool?"),
             (
-                ": Pick ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
-                 | c t e | c [ t call ] [ e call ] if ;\n",
+                ": Pick inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+                 | c t e | c ~[ t call ] ~[ e call ] if ;\n",
                 "Pick",
             ),
         ] {
@@ -1366,8 +1366,8 @@ mod tests {
         // Both words call each other only in non-tail position (`x 1 +`), so no
         // tail-call edge exists and X1 must not fire (R4 no-false-positive).
         check_src(
-            ": a ( i64 -- i64 ) dup 0 > [ b 1 + ] [ drop 0 ] if ; \
-             : b ( i64 -- i64 ) dup 0 > [ a 1 + ] [ drop 0 ] if ;",
+            ": a ( i64 -- i64 ) dup 0 > ~[ b 1 + ] ~[ drop 0 ] if ; \
+             : b ( i64 -- i64 ) dup 0 > ~[ a 1 + ] ~[ drop 0 ] if ;",
         )
         .unwrap();
     }

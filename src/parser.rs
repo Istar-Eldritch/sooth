@@ -2346,7 +2346,7 @@ impl<'t> Parser<'t> {
             // unknown-word error, since that is the diagnostic a source
             // written against the old grammar needs.
             Token::Word(w) if w == "end" || w == "else" => Err(format!(
-                "parse error: `{w}` is not a word; `if` is an ordinary word taking two quotations (`[ then ] [ else ] if`) at line {}, col {}",
+                "parse error: `{w}` is not a word; `if` is an ordinary word taking two quotations (`~[ then ] ~[ else ] if`) at line {}, col {}",
                 span.line, span.col
             )),
             Token::Word(w) => Ok(Term {
@@ -2370,7 +2370,23 @@ impl<'t> Parser<'t> {
                 })?;
                 self.expect(Token::RBracket)?;
                 Ok(Term {
-                    kind: TermKind::Quotation(body),
+                    kind: TermKind::Quotation(body, false),
+                    span,
+                })
+            }
+            // Slice 12 (R-C1): a `~[ ... ]` body literal, the inline-only
+            // flavour. Mints the same `TermKind::Quotation` shape as the
+            // ordinary `[ ... ]` arm above, with the flavour flag set; R-C2
+            // requires this flavour to match the consuming parameter's
+            // declared `Type::InlineQuotation`/`Type::Quotation` at each
+            // argument-matching site.
+            Token::TildeLBracket => {
+                let body = self.parse_terms("`]` (unterminated quotation)", |tok| {
+                    matches!(tok, Token::RBracket)
+                })?;
+                self.expect(Token::RBracket)?;
+                Ok(Term {
+                    kind: TermKind::Quotation(body, true),
                     span,
                 })
             }
@@ -2502,14 +2518,18 @@ mod tests {
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
         assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "="));
         match &gcd_body[4].kind {
-            TermKind::Quotation(then_branch) => {
+            TermKind::Quotation(then_branch, is_inline) => {
                 assert_eq!(then_branch.len(), 1);
+                assert!(is_inline, "gcd.sth writes `if`'s arms `~[ ... ]` (R-C3)");
                 assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "a"));
             }
             other => panic!("expected the `then` quotation, got {other:?}"),
         }
         match &gcd_body[5].kind {
-            TermKind::Quotation(else_branch) => assert_eq!(else_branch.len(), 5),
+            TermKind::Quotation(else_branch, is_inline) => {
+                assert_eq!(else_branch.len(), 5);
+                assert!(is_inline, "gcd.sth writes `if`'s arms `~[ ... ]` (R-C3)");
+            }
             other => panic!("expected the `else` quotation, got {other:?}"),
         }
         assert!(matches!(&gcd_body[6].kind, TermKind::Call(w) if w == "if"));
@@ -2591,7 +2611,7 @@ mod tests {
         let err = parse_src(": w ( bool -- i64 ) if 1 else 2 end ;").unwrap_err();
         assert!(err.contains("`else`"), "unexpected message: {err}");
         assert!(
-            err.contains("[ then ] [ else ] if"),
+            err.contains("~[ then ] ~[ else ] if"),
             "unexpected message: {err}"
         );
     }
@@ -2604,18 +2624,57 @@ mod tests {
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 4);
         match &body[0].kind {
-            TermKind::Quotation(terms) => {
+            TermKind::Quotation(terms, is_inline) => {
                 assert_eq!(terms.len(), 2);
+                assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
                 assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "+"));
             }
             other => panic!("expected Quotation, got {other:?}"),
         }
         match &body[2].kind {
-            TermKind::Quotation(outer) => {
+            TermKind::Quotation(outer, is_inline) => {
                 assert_eq!(outer.len(), 1);
+                assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 match &outer[0].kind {
-                    TermKind::Quotation(inner) => assert!(inner.is_empty()),
+                    TermKind::Quotation(inner, is_inline) => {
+                        assert!(inner.is_empty());
+                        assert!(!is_inline, "an ordinary `[ ... ]` literal");
+                    }
+                    other => panic!("expected nested Quotation, got {other:?}"),
+                }
+            }
+            other => panic!("expected Quotation, got {other:?}"),
+        }
+    }
+
+    /// Slice 12 (R-C1, X6): the new `Token::TildeLBracket` arm mints the same
+    /// `TermKind::Quotation` shape as the ordinary `[ ... ]` arm, flagged
+    /// `is_inline`, and a `~[ ... ]` in a body position no longer falls to the
+    /// generic `other =>` "unexpected token" arm.
+    #[test]
+    fn tilde_quotation_literal_parses_into_an_inline_quotation_term() {
+        let module = parse_src(": w ( -- ) ~[ 1 + ] drop ~[ ~[ ] ] drop ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        assert_eq!(body.len(), 4);
+        match &body[0].kind {
+            TermKind::Quotation(terms, is_inline) => {
+                assert_eq!(terms.len(), 2);
+                assert!(is_inline, "a `~[ ... ]` literal");
+                assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
+                assert!(matches!(&terms[1].kind, TermKind::Call(ref w) if w == "+"));
+            }
+            other => panic!("expected Quotation, got {other:?}"),
+        }
+        match &body[2].kind {
+            TermKind::Quotation(outer, is_inline) => {
+                assert_eq!(outer.len(), 1);
+                assert!(is_inline, "a `~[ ... ]` literal");
+                match &outer[0].kind {
+                    TermKind::Quotation(inner, is_inline) => {
+                        assert!(inner.is_empty());
+                        assert!(is_inline, "a `~[ ... ]` literal");
+                    }
                     other => panic!("expected nested Quotation, got {other:?}"),
                 }
             }
@@ -3936,7 +3995,7 @@ mod tests {
     fn quotation_without_a_semicolon_still_parses_as_a_quotation() {
         let module = parse_src(": w ( -- ) [ 1 2 drop ] drop ;").unwrap();
         let body = terms_body(&module.words[0]);
-        assert!(matches!(&body[0].kind, TermKind::Quotation(_)));
+        assert!(matches!(&body[0].kind, TermKind::Quotation(..)));
     }
 
     #[test]

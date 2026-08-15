@@ -309,6 +309,10 @@ fn check_term(
                 let Some(QuotRef::Known(id)) = top.quot else {
                     return Err(call_needs_quotation_error(ctx, span));
                 };
+                // Slice 12 (R-C2): `call` is not a flavour boundary. Nothing
+                // is materialized here -- a literal is spliced under either
+                // spelling -- so `~` decides nothing and both are accepted.
+                //
                 // Splice the body against the current locals/scope in lexical
                 // extent (capture is free, recon 9), bracketed like an `if`
                 // arm so a body that binds does not leak past the `call` and a
@@ -782,11 +786,12 @@ fn check_term(
         // here (D3): a bare body's input row is unknown until its consumption
         // site (`call`). The placeholder `ty` is `Cstr`, a registry-free
         // scalar no user op accepts once R11's default-deny is in place (R4).
-        TermKind::Quotation(body) => {
+        TermKind::Quotation(body, is_inline) => {
             let id = QuotId(prov.quotations.len());
             prov.quotations.push(QuotBody {
                 body: body.clone(),
                 span,
+                is_inline: *is_inline,
             });
             prov.quotation_captures.push(capture_names(body));
             stack.push(Slot {
@@ -1506,9 +1511,9 @@ mod tests {
         check_src(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
             .expect("two quotation literals splice at the call site");
         check_src(
-            ": myif ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
+            ": myif inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
              | e | | t | | c | c tag t e branch ;\n\
-             : main ( -- ) 1 2 = [ 7 ] [ 8 ] myif . ;\n",
+             : main ( -- ) 1 2 = ~[ 7 ] ~[ 8 ] myif . ;\n",
         )
         .expect("`myif`'s own definition forwards its abstract `~` parameters into `branch`");
     }
@@ -1530,13 +1535,13 @@ mod tests {
     #[test]
     fn check_branch_leaves_a_literal_arm_unchecked_beside_a_forwarded_one() {
         check_src(
-            ": w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
+            ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
              : main ( -- ) ;\n",
         )
         .expect("the mismatched literal arm goes unchecked at `w`'s own definition");
         let err = check_src(
-            ": w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
-             : main ( -- ) 1 2 u= [ 5 ] w . ;\n",
+            ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
+             : main ( -- ) 1 2 u= ~[ 5 ] w . ;\n",
         )
         .unwrap_err();
         assert!(
