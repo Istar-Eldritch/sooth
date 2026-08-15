@@ -25,6 +25,13 @@ pub(super) fn poly_is_copy(
         // Slice 6a (D3): a quotation parameter is always `Copy`, so it may be
         // called repeatedly and carries no move obligation.
         PolyType::Quotation(..) => true,
+        // Slice 13 (D3/R-A5): mirrors the monomorphic `is_copy` on
+        // `Type::Ref` exactly -- a shared reference is freely duplicated (the
+        // exclusivity rule has nothing to protect), a mutable one is not
+        // (duplicating it would let two names observe or mutate through one
+        // exclusive borrow). The referent's own `Copy`-ness is irrelevant: a
+        // `&['T 4]` is `Copy` even where `['T 4]` is linear.
+        PolyType::Ref(_, mutable) => !*mutable,
     }
 }
 
@@ -89,12 +96,12 @@ pub(super) fn check_poly_combinator_standalone(
     }
     let mut inputs = Vec::with_capacity(sig.inputs.len());
     for pty in &sig.inputs {
-        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays, refs)?;
         inputs.push(TypedSlot { name: None, ty });
     }
     let mut outputs = Vec::with_capacity(sig.outputs.len());
     for pty in &sig.outputs {
-        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays)?;
+        let ty = apply_subst(sig, pty, &subst, &word.name, span, &ctx, arrays, refs)?;
         outputs.push(TypedSlot { name: None, ty });
     }
     let terms = match &word.body {
@@ -604,6 +611,14 @@ pub(super) fn poly_copy_gate(
         PolyType::Quotation(..) => {
             unreachable!("a quotation effect is always Copy (D3); the gate returns above")
         }
+        // Slice 13 (E1): only the *mutable* arm reaches here -- a shared
+        // reference is `Copy` and returned above.
+        PolyType::Ref(..) => Err(poly_copy_mutable_ref_error(
+            ctx,
+            span,
+            op,
+            &poly_type_str(pt, sig),
+        )),
     }
 }
 
@@ -715,6 +730,7 @@ pub(super) fn resolve_poly_overload(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    refs: &[RefDecl],
 ) -> Result<(PolySig, Option<u64>), PolyOverloadMiss> {
     let mut saw_quotation = false;
     for (sig, generation) in candidates {
@@ -727,7 +743,7 @@ pub(super) fn resolve_poly_overload(
             saw_quotation = true;
             continue;
         }
-        if poly_sig_unifies(sig, stack, name, span, ctx, arrays) {
+        if poly_sig_unifies(sig, stack, name, span, ctx, arrays, refs) {
             return Ok((sig.clone(), *generation));
         }
     }
@@ -783,6 +799,7 @@ pub(super) fn poly_sig_unifies(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    refs: &[RefDecl],
 ) -> bool {
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
@@ -799,6 +816,7 @@ pub(super) fn poly_sig_unifies(
             span,
             ctx,
             arrays,
+            refs,
             &mut subst,
         )
         .is_ok()
@@ -825,6 +843,7 @@ pub(super) fn poly_sig_could_match(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    refs: &[RefDecl],
 ) -> bool {
     let n_in = sig.inputs.len();
     if stack.len() < n_in {
@@ -855,6 +874,7 @@ pub(super) fn poly_sig_could_match(
             span,
             ctx,
             arrays,
+            refs,
             &mut subst,
         )
         .is_ok()
@@ -882,11 +902,12 @@ pub(super) fn resolve_combinator_overload<'a>(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    refs: &[RefDecl],
 ) -> Option<Combinator<'a>> {
     for comb in candidates {
         let matched = match comb.word.poly.as_ref() {
             Some(sig) => {
-                poly_sig_could_match(sig, stack, comb.word.name.as_str(), span, ctx, arrays)
+                poly_sig_could_match(sig, stack, comb.word.name.as_str(), span, ctx, arrays, refs)
             }
             None => {
                 let inputs: Vec<Type> = comb.word.effect.inputs.iter().map(|s| s.ty).collect();
@@ -959,12 +980,13 @@ pub(super) fn check_poly_call(
     stack: &mut Vec<Slot>,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
     poly: &mut PolyCtx,
 ) -> Result<Vec<Slot>, String> {
     let candidates = poly.env.get(name).expect("caller checked membership");
     let (sig, generation) = match candidates.as_slice() {
         [(sig, generation)] => (sig.clone(), *generation),
-        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays) {
+        _ => match resolve_poly_overload(candidates, stack, name, span, ctx, arrays, refs) {
             Ok(chosen) => chosen,
             Err(PolyOverloadMiss::Quotation) => {
                 return Err(reject_quotation_argument(ctx, span, name))
@@ -996,6 +1018,7 @@ pub(super) fn check_poly_call(
             span,
             ctx,
             arrays,
+            refs,
             &mut subst,
         )?;
     }
@@ -1017,7 +1040,9 @@ pub(super) fn check_poly_call(
     }
     let mut outputs: Vec<Type> = Vec::with_capacity(sig.outputs.len());
     for pty in &sig.outputs {
-        outputs.push(apply_subst(&sig, pty, &subst, name, span, ctx, arrays)?);
+        outputs.push(apply_subst(
+            &sig, pty, &subst, name, span, ctx, arrays, refs,
+        )?);
     }
     // R14: record the instantiation for lowering, keyed by the call-site span.
     // The bundle is filled later (a resolved output count >= 2 interns one).
@@ -1054,6 +1079,7 @@ pub(super) fn unify_poly_input(
     span: Span,
     ctx: &Ctx,
     arrays: &[ArrayDecl],
+    refs: &[RefDecl],
     subst: &mut Subst,
 ) -> Result<(), String> {
     match pty {
@@ -1083,7 +1109,7 @@ pub(super) fn unify_poly_input(
                 return Err(poly_array_expected_error(ctx, span, name, slot_ty));
             };
             let (elem_ty, count) = (arrays[id.index()].element, arrays[id.index()].count);
-            unify_poly_input(sig, elem, elem_ty, name, span, ctx, arrays, subst)?;
+            unify_poly_input(sig, elem, elem_ty, name, span, ctx, arrays, refs, subst)?;
             match len {
                 Len::Concrete(k) => {
                     if *k != count {
@@ -1124,7 +1150,7 @@ pub(super) fn unify_poly_input(
             // rendering that silently drops the row are both avoided by
             // never building one.
             let Some(eff) = crate::ast::is_quotation_type(slot_ty) else {
-                return Err(poly_quotation_type_mismatch_error(
+                return Err(poly_rendered_type_mismatch_error(
                     ctx,
                     span,
                     name,
@@ -1135,7 +1161,7 @@ pub(super) fn unify_poly_input(
             // Slice 10a (R8): the row is a separate field, never a slot in
             // `ins`/`outs`, so this arity check already excludes it.
             if ins.len() != eff.inputs.len() || outs.len() != eff.outputs.len() {
-                return Err(poly_quotation_type_mismatch_error(
+                return Err(poly_rendered_type_mismatch_error(
                     ctx,
                     span,
                     name,
@@ -1144,21 +1170,57 @@ pub(super) fn unify_poly_input(
                 ));
             }
             for (p, c) in ins.iter().zip(&eff.inputs) {
-                unify_poly_input(sig, p, *c, name, span, ctx, arrays, subst)?;
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, refs, subst)?;
             }
             for (p, c) in outs.iter().zip(&eff.outputs) {
-                unify_poly_input(sig, p, *c, name, span, ctx, arrays, subst)?;
+                unify_poly_input(sig, p, *c, name, span, ctx, arrays, refs, subst)?;
             }
+        }
+        // Slice 13 (R-A6): a declared `&`-slot unifies only against a
+        // reference slot of the *same* mutability -- a shared argument cannot
+        // fill a `&!` parameter, nor the reverse -- then recurses on the
+        // referent the registry names.
+        PolyType::Ref(referent, mutable) => {
+            let Some((slot_referent, slot_mutable)) = ref_parts(slot_ty, refs) else {
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    slot_ty,
+                ));
+            };
+            if slot_mutable != *mutable {
+                return Err(poly_rendered_type_mismatch_error(
+                    ctx,
+                    span,
+                    name,
+                    &poly_type_str(pty, sig),
+                    slot_ty,
+                ));
+            }
+            unify_poly_input(
+                sig,
+                referent,
+                slot_referent,
+                name,
+                span,
+                ctx,
+                arrays,
+                refs,
+                subst,
+            )?;
         }
     }
     Ok(())
 }
 
-/// Slice 10a (R10): `type_mismatch_error`'s twin for a declared quotation
-/// mismatch, taking the expected side as an already-rendered `PolyType`
-/// string (`poly_type_str`, which knows the `~` sigil and the row) rather
-/// than a `Type` -- a row cannot live in a `Type::Quotation`'s `QuotEffect`.
-pub(super) fn poly_quotation_type_mismatch_error(
+/// Slice 10a (R10): `type_mismatch_error`'s twin for a declared mismatch
+/// whose expected side has no `Type` to name, taking it as an already-rendered
+/// `PolyType` string (`poly_type_str`) instead. A row cannot live in a
+/// `Type::Quotation`'s `QuotEffect`, and Slice 13's `PolyType::Ref` has no
+/// `RefId` until its referent grounds, so neither can be rendered as a `Type`.
+pub(super) fn poly_rendered_type_mismatch_error(
     ctx: &Ctx,
     span: Span,
     op: &str,
@@ -1181,6 +1243,7 @@ pub(super) fn poly_quotation_type_mismatch_error(
 /// concrete `Type`. A variable-bearing array folds to a concrete interned
 /// array shape. A variable the inputs never bound is an under-determined
 /// signature (a located error rather than a panic).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_subst(
     sig: &PolySig,
     pty: &PolyType,
@@ -1189,6 +1252,7 @@ pub(super) fn apply_subst(
     span: Span,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
 ) -> Result<Type, String> {
     match pty {
         PolyType::Concrete(t) => Ok(*t),
@@ -1196,7 +1260,7 @@ pub(super) fn apply_subst(
             poly_unbound_output_error(ctx, span, name, &sig.ty_var_names[*v as usize])
         }),
         PolyType::Array(elem, len) => {
-            let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays)?;
+            let elem_ty = apply_subst(sig, elem, subst, name, span, ctx, arrays, refs)?;
             let count = match len {
                 Len::Concrete(k) => *k,
                 Len::Var(ln) => subst.len_of(*ln).ok_or_else(|| {
@@ -1214,11 +1278,11 @@ pub(super) fn apply_subst(
         PolyType::Quotation(ins, outs, is_inline, _, _) => {
             let mut cins = Vec::with_capacity(ins.len());
             for p in ins {
-                cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+                cins.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
             }
             let mut couts = Vec::with_capacity(outs.len());
             for p in outs {
-                couts.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+                couts.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
             }
             // Slice 10a (R1): ground a `~` effect to `Type::InlineQuotation`
             // rather than `Type::Quotation`, so the materialization
@@ -1228,6 +1292,14 @@ pub(super) fn apply_subst(
             } else {
                 crate::ast::quotation_type(cins, couts)
             })
+        }
+        // Slice 13 (R-A7/D4): grounding the referent is what finally mints a
+        // `RefId` -- the shape may be one no call site has interned yet, so
+        // this is the interning side of the pair (`subst_polytype`, at
+        // lowering, only looks a shape up).
+        PolyType::Ref(referent, mutable) => {
+            let referent = apply_subst(sig, referent, subst, name, span, ctx, arrays, refs)?;
+            Ok(crate::ast::intern_ref_type(refs, referent, *mutable))
         }
     }
 }
@@ -1271,6 +1343,19 @@ pub(super) fn poly_copy_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -
     )
 }
 
+/// Slice 13 (E1): `dup`/`over` on a mutable reference in a generic body. The
+/// same class of fact as `poly_copy_body_error`'s missing `Copy` bound, but
+/// the reason is exclusivity rather than an absent bound, so the note names
+/// that instead.
+pub(super) fn poly_copy_mutable_ref_error(ctx: &Ctx, span: Span, op: &str, ty: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot `{op}` a mutable reference in `{where_}` (line {})\n  `{ty}` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow",
+        span.line
+    )
+}
+
 pub(super) fn poly_ord_body_error(ctx: &Ctx, span: Span, op: &str, var: &str) -> String {
     let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
@@ -1294,6 +1379,7 @@ pub(super) fn poly_op_on_variable_error(
         PolyType::Array(..) => "an array with a variable".to_string(),
         PolyType::Concrete(t) => format!("`{t}`"),
         PolyType::Quotation(..) => "a quotation".to_string(),
+        PolyType::Ref(..) => "a reference".to_string(),
     };
     format!(
         "error: `{op}` is not permitted on {what} in `{where_}` (line {})",
@@ -1492,6 +1578,13 @@ pub(crate) fn poly_type_str(pt: &PolyType, sig: &PolySig) -> String {
                 (false, false) => format!("{sigil}[ {i} -- {o} ]"),
             }
         }
+        // Slice 13 (R-A9): the surface spelling, `&`/`&!` glued to the
+        // referent, exactly as `intern_ref_type` names a concrete one.
+        PolyType::Ref(referent, mutable) => format!(
+            "&{}{}",
+            if *mutable { "!" } else { "" },
+            poly_type_str(referent, sig)
+        ),
     }
 }
 
@@ -1914,6 +2007,7 @@ mod tests {
         let structs: [StructDecl; 0] = [];
         let enums: [EnumDecl; 0] = [];
         let arrays: [ArrayDecl; 0] = [];
+        let refs: [RefDecl; 0] = [];
         let ctx = Ctx::Line {
             structs: &structs,
             enums: &enums,
@@ -1927,6 +2021,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &refs,
             &mut subst,
         )
         .expect("`[ 'T -- ]` should unify against `[ i64 -- ]`");
@@ -1941,6 +2036,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &refs,
             &mut subst2,
         )
         .expect_err("an arity mismatch must be a located type mismatch");
@@ -1970,6 +2066,7 @@ mod tests {
             Span::default(),
             &ctx,
             &arrays,
+            &refs,
             &mut subst3,
         )
         .expect_err("a non-quotation slot must be a located type mismatch");
@@ -2006,5 +2103,239 @@ mod tests {
             Some(0),
         );
         assert_eq!(poly_type_str(&quot, &sig), "~[ ..s i64 -- ..s ]");
+    }
+
+    /// A signature over one type variable `'T` and one length variable `'N`,
+    /// the shape every Slice 13 reference test names its referent from.
+    fn ref_sig() -> PolySig {
+        PolySig {
+            row_in: None,
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            row_out: None,
+            bounds: Vec::new(),
+            ty_var_names: vec!["'T".to_string()],
+            len_var_names: vec!["'N".to_string()],
+            row_var_names: Vec::new(),
+        }
+    }
+
+    fn poly_ref(referent: PolyType, mutable: bool) -> PolyType {
+        PolyType::Ref(Box::new(referent), mutable)
+    }
+
+    #[test]
+    fn poly_type_str_renders_a_reference() {
+        // Slice 13 (R-A9): the sigil is glued to the referent's own rendering,
+        // so a poly reference reads back exactly as it was written.
+        let sig = ref_sig();
+        assert_eq!(
+            poly_type_str(&poly_ref(PolyType::Var(0), false), &sig),
+            "&'T"
+        );
+        assert_eq!(
+            poly_type_str(&poly_ref(PolyType::Var(0), true), &sig),
+            "&!'T"
+        );
+        let arr = PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4));
+        assert_eq!(poly_type_str(&poly_ref(arr, false), &sig), "&['T 4]");
+    }
+
+    #[test]
+    fn declared_poly_reference_signature_round_trips() {
+        // Slice 13 (R-A10, the Part A exit criterion): a poly word may
+        // *declare* a borrow, and the declaration survives parse + fold +
+        // rendering unchanged. Producing one is Part B.
+        let tokens = lex(": peek ( ['T 4] -- &['T 4] ) ;").unwrap();
+        let module = parse(&tokens).unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(poly_type_str(&sig.outputs[0], sig), "&['T 4]");
+    }
+
+    #[test]
+    fn poly_is_copy_tracks_a_reference_mutability_not_its_referent() {
+        // Slice 13 (D3/R-A5): mirrors the monomorphic `is_copy` on
+        // `Type::Ref` -- shared is `Copy`, mutable is not, and the referent's
+        // own linearity is irrelevant either way. Answering `true`
+        // unconditionally would let a generic body freely `dup` an exclusive
+        // borrow, an acceptance every concrete instantiation rejects.
+        let sig = ref_sig();
+        let linear_referent = PolyType::Var(0); // no `Copy` bound
+        assert!(poly_is_copy(
+            &poly_ref(linear_referent.clone(), false),
+            &sig,
+            &[],
+            &[],
+            &[]
+        ));
+        assert!(!poly_is_copy(
+            &poly_ref(linear_referent, true),
+            &sig,
+            &[],
+            &[],
+            &[]
+        ));
+    }
+
+    #[test]
+    fn poly_copy_gate_rejects_a_mutable_reference() {
+        // Slice 13 (E1): the gate's reference arm is a real located
+        // diagnostic, not an `unreachable!` -- `dup` on a `&!` must reject,
+        // and on a `&` must still pass (the positive control).
+        let sig = ref_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let span = Span {
+            line: 7,
+            col: 3,
+            ..Span::default()
+        };
+        let err = poly_copy_gate(
+            &poly_ref(PolyType::Var(0), true),
+            "dup",
+            &sig,
+            &ctx,
+            span,
+            &[],
+            &[],
+            &[],
+        )
+        .expect_err("`dup` of a mutable reference must be rejected");
+        assert_eq!(
+            err,
+            "error: cannot `dup` a mutable reference in `<line>` (line 7)\n  `&!'T` is not `Copy`: duplicating it would let two names observe or mutate through one exclusive borrow",
+        );
+        poly_copy_gate(
+            &poly_ref(PolyType::Var(0), false),
+            "dup",
+            &sig,
+            &ctx,
+            span,
+            &[],
+            &[],
+            &[],
+        )
+        .expect("`dup` of a shared reference is permitted");
+    }
+
+    #[test]
+    fn poly_var_id_on_a_reference_is_none() {
+        // Slice 13 (R-A9): a reference is not a bare variable, so the
+        // existing `_ => None` already answers correctly and the function
+        // needs no new arm. Pinned rather than edited.
+        assert_eq!(poly_var_id(&poly_ref(PolyType::Var(0), false)), None);
+    }
+
+    #[test]
+    fn unify_poly_input_matches_a_declared_reference_slot() {
+        // Slice 13 (R-A6): a declared `&['T 4]` binds `'T` through the
+        // registry's referent; a mutability mismatch and a non-reference slot
+        // are located mismatches, never a silent bind.
+        let sig = ref_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let arr_ty = intern_array_type(&mut arrays, Type::I64, 4);
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let shared = crate::ast::intern_ref_type(&mut refs, arr_ty, false);
+        let mutable = crate::ast::intern_ref_type(&mut refs, arr_ty, true);
+        let declared = poly_ref(
+            PolyType::Array(Box::new(PolyType::Var(0)), Len::Concrete(4)),
+            false,
+        );
+
+        let mut subst = Subst::default();
+        unify_poly_input(
+            &sig,
+            &declared,
+            shared,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &refs,
+            &mut subst,
+        )
+        .expect("`&['T 4]` should unify against `&[i64 4]`");
+        assert_eq!(subst.ty_of(0), Some(Type::I64), "`'T` should bind to `i64`");
+
+        let mut subst2 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &declared,
+            mutable,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &refs,
+            &mut subst2,
+        )
+        .expect_err("a mutability mismatch must be a located type mismatch");
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `&['T 4]`, found `&![i64 4]`",
+        );
+        assert!(
+            subst2.ty_of(0).is_none(),
+            "a mutability mismatch must not silently bind `'T`"
+        );
+
+        let mut subst3 = Subst::default();
+        let err = unify_poly_input(
+            &sig,
+            &declared,
+            arr_ty,
+            "f",
+            Span::default(),
+            &ctx,
+            &arrays,
+            &refs,
+            &mut subst3,
+        )
+        .expect_err("a non-reference slot must be a located type mismatch");
+        assert_eq!(
+            err,
+            "error: type mismatch: `f` expected `&['T 4]`, found `[i64 4]`",
+        );
+        assert!(
+            subst3.ty_of(0).is_none(),
+            "a non-reference slot must not silently bind `'T`"
+        );
+    }
+
+    #[test]
+    fn apply_subst_grounds_a_reference_by_interning() {
+        // Slice 13 (R-A7/D4): grounding is what mints the `RefId` -- the
+        // shape may be one no call site has interned yet, so the check side
+        // interns it (and the lowering side then only looks it up).
+        let sig = ref_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let mut subst = Subst::default();
+        subst.ty.push((0, Type::I64));
+        let mut arrays: Vec<ArrayDecl> = Vec::new();
+        let mut refs: Vec<RefDecl> = Vec::new();
+        let ty = apply_subst(
+            &sig,
+            &poly_ref(PolyType::Var(0), true),
+            &subst,
+            "f",
+            Span::default(),
+            &ctx,
+            &mut arrays,
+            &mut refs,
+        )
+        .expect("a bound referent grounds");
+        assert_eq!(ty.name(), "&!i64");
+        assert_eq!(refs.len(), 1, "the shape must be interned exactly once");
+        assert_eq!(refs[0].referent, Type::I64);
+        assert!(refs[0].mutable);
     }
 }

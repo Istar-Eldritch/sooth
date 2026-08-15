@@ -282,6 +282,9 @@ fn collect_poly_concrete(t: &PolyType, out: &mut Vec<Type>) {
         PolyType::Concrete(ty) => out.push(*ty),
         PolyType::Var(_) => {}
         PolyType::Array(elem, _) => collect_poly_concrete(elem, out),
+        // Slice 13 (R-A9): a private type named behind a `&` is still named,
+        // so export-privacy must see it.
+        PolyType::Ref(referent, _) => collect_poly_concrete(referent, out),
         // Slice 6a (R5): a declared quotation effect's rows may name concrete
         // types (`[ i64 -- ]`); collect them so export-privacy still sees a
         // private type mentioned inside an effect.
@@ -1240,6 +1243,20 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::parse;
+
+    #[test]
+    fn collect_poly_concrete_sees_through_a_reference() {
+        // Slice 13 (R-A9): a concrete type named behind a `&` is still named,
+        // so export-privacy (which reads this collection) must see it. Only a
+        // *variable-bearing* referent reaches this arm -- a fully concrete one
+        // folds to `Concrete(Type::Ref)` at parse time -- so the test builds
+        // that shape directly rather than through a source signature.
+        let inner = PolyType::Array(Box::new(PolyType::Concrete(Type::I64)), Len::Var(0));
+        let pt = PolyType::Ref(Box::new(inner), false);
+        let mut out = Vec::new();
+        collect_poly_concrete(&pt, &mut out);
+        assert_eq!(out, vec![Type::I64]);
+    }
 
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();

@@ -304,6 +304,12 @@ fn audit_poly_input_quotation(pt: &PolyType, sig: &PolySig) -> Result<(), String
             Ok(())
         }
         PolyType::Var(_) => Ok(()),
+        // Slice 13 (R-A9): a quotation buried behind a `&` is still a nested
+        // effect position, so recurse rather than accepting the referent
+        // unseen.
+        PolyType::Ref(referent, _) => {
+            reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
+        }
     }
 }
 
@@ -324,6 +330,9 @@ fn reject_poly_quotation_anywhere(
         PolyType::Concrete(ty) => reject_quotation_type_position(*ty, position),
         PolyType::Var(_) => Ok(()),
         PolyType::Array(elem, _) => reject_poly_quotation_anywhere(elem, sig, "an array element"),
+        PolyType::Ref(referent, _) => {
+            reject_poly_quotation_anywhere(referent, sig, "a reference's referent")
+        }
         PolyType::Quotation(..) => Err(format!(
             "error: a quotation type `{}` cannot appear as {position}: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
             poly_type_str(pt, sig),
@@ -368,6 +377,18 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+    #[test]
+    fn poly_quotation_behind_a_reference_is_rejected() {
+        // Slice 13 (R-A9): the default-deny recurses through a reference's
+        // referent, so a quotation buried behind a `&` cannot slip past the
+        // audit and reach `ir_type_of`.
+        let err = check_src(": f ( &[ 'T -- ] -- ) drop ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a quotation type `[ 'T -- ]` cannot appear as a reference's referent: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+        );
+    }
+
     /// Slice 10a (R2): the declaration-position rejection is no longer fail-open
     /// for a `~` -- it used to return `Ok` (`if let Type::Quotation`), letting a
     /// `~` slip past silently. Constructed directly.

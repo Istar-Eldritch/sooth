@@ -239,7 +239,7 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             .poly
             .as_ref()
             .expect("a recorded callee is polymorphic");
-        let effect = concrete_effect(sig, &inst.subst, &module.arrays);
+        let effect = concrete_effect(sig, &inst.subst, &module.arrays, &module.refs);
         // R7/R14: a self-recursive polymorphic word is a nested polymorphic
         // call (the body calling the very word being instantiated), out of
         // scope this slice; `self_tail` stays `false` here rather than
@@ -583,10 +583,15 @@ pub fn lower_line(
 /// and outputs. The row variable (`..s`) is not materialized: it is a
 /// pass-through that stays on the caller's stack (S2), so it never enters the
 /// monomorphized function's frame.
-fn concrete_effect(sig: &PolySig, subst: &Subst, arrays: &[ArrayDecl]) -> StackEffect {
+fn concrete_effect(
+    sig: &PolySig,
+    subst: &Subst,
+    arrays: &[ArrayDecl],
+    refs: &[RefDecl],
+) -> StackEffect {
     let slot = |pt: &PolyType| TypedSlot {
         name: None,
-        ty: subst_polytype(pt, subst, arrays),
+        ty: subst_polytype(pt, subst, arrays, refs),
     };
     StackEffect {
         inputs: sig.inputs.iter().map(&slot).collect(),
@@ -598,14 +603,19 @@ fn concrete_effect(sig: &PolySig, subst: &Subst, arrays: &[ArrayDecl]) -> StackE
 /// variable resolves through `θ`; a variable-bearing array folds to its already
 /// interned concrete shape (the caller pushed that shape, so it exists in the
 /// module's array registry — lowering only reads it, it never interns).
-pub(super) fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl]) -> Type {
+pub(super) fn subst_polytype(
+    pt: &PolyType,
+    subst: &Subst,
+    arrays: &[ArrayDecl],
+    refs: &[RefDecl],
+) -> Type {
     match pt {
         PolyType::Concrete(t) => *t,
         PolyType::Var(v) => subst
             .ty_of(*v)
             .expect("checked: unification bound every input type variable"),
         PolyType::Array(elem, len) => {
-            let element = subst_polytype(elem, subst, arrays);
+            let element = subst_polytype(elem, subst, arrays, refs);
             let count = match len {
                 Len::Concrete(k) => *k,
                 Len::Var(ln) => subst
@@ -624,6 +634,19 @@ pub(super) fn subst_polytype(pt: &PolyType, subst: &Subst, arrays: &[ArrayDecl])
         // and R20u.
         PolyType::Quotation(..) => {
             unreachable!("a quotation effect never reaches monomorphized lowering (R7/R20)")
+        }
+        // Slice 13 (R-A8/D4): lowering only *looks up* an already-interned
+        // shape, exactly as the array arm does -- check-side `apply_subst`
+        // has interned every `Type::Ref` this word's instantiations can
+        // produce by the time lowering runs, so a miss here is a gap in that
+        // coverage, not a reason to intern from the lowering side.
+        PolyType::Ref(referent, mutable) => {
+            let referent = subst_polytype(referent, subst, arrays, refs);
+            let idx = refs
+                .iter()
+                .position(|d| d.referent == referent && d.mutable == *mutable)
+                .expect("checked: the concrete reference shape was interned at the call site");
+            Type::Ref(RefId::from_index(idx), *mutable, refs[idx].name_static)
         }
     }
 }
@@ -678,9 +701,10 @@ pub(crate) fn lower_instantiation(
     resolve: Resolver,
     regs: Registries,
     arrays: &[ArrayDecl],
+    refs: &[RefDecl],
     combinators: &crate::check::CombinatorIndex,
 ) -> Vec<IrFunc> {
-    let effect = concrete_effect(sig, subst, arrays);
+    let effect = concrete_effect(sig, subst, arrays, refs);
     lower_word_parts(
         symbol,
         &effect,
@@ -1168,7 +1192,7 @@ mod tests {
         );
         let subst = Subst::default();
         assert!(
-            std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[])).is_err(),
+            std::panic::catch_unwind(|| subst_polytype(&poly_quot, &subst, &[], &[])).is_err(),
             "`subst_polytype` on a quotation must hit the R7 `unreachable!` arm"
         );
     }

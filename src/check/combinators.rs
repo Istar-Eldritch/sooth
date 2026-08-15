@@ -496,7 +496,15 @@ pub(super) fn inline_combinator(
     // bottom-aligned index map for the arm's result), which only this set
     // site can compute -- the arm deep in the splice has no `sig`/`Subst`.
     let (ground_inputs, ground_outputs, index_map) = if self_tail {
-        back_edge_declared_shape(comb.word, poly_subst.as_ref(), name, span, ctx, arrays)?
+        back_edge_declared_shape(
+            comb.word,
+            poly_subst.as_ref(),
+            name,
+            span,
+            ctx,
+            arrays,
+            refs,
+        )?
     } else {
         (Vec::new(), Vec::new(), Vec::new())
     };
@@ -617,7 +625,9 @@ fn check_poly_combinator_args(
             deferred_literals.push((i, pin));
             continue;
         }
-        unify_poly_input(sig, pin, found.ty, name, span, ctx, arrays, &mut subst)?;
+        unify_poly_input(
+            sig, pin, found.ty, name, span, ctx, arrays, refs, &mut subst,
+        )?;
     }
     for (i, pin) in deferred_literals {
         let PolyType::Var(v) = pin else {
@@ -631,7 +641,7 @@ fn check_poly_combinator_args(
             Some(resolved @ (Type::Usize | Type::Isize)) => resolved,
             _ => stack[base + i].ty,
         };
-        unify_poly_input(sig, pin, ty, name, span, ctx, arrays, &mut subst)?;
+        unify_poly_input(sig, pin, ty, name, span, ctx, arrays, refs, &mut subst)?;
     }
     // Pass 2: ground each quotation parameter and run the directional + D3
     // check on its caller literal.
@@ -650,7 +660,7 @@ fn check_poly_combinator_args(
             continue;
         }
         let found = stack[base + i];
-        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays)?;
+        let concrete = apply_subst(sig, pin, &subst, name, span, ctx, arrays, refs)?;
         // Slice 10a (R1): `apply_subst` grounds an ordinary quotation parameter
         // to `Type::Quotation` and (phase 2) a `~` parameter to
         // `Type::InlineQuotation`; the accessor accepts both, so this let-else

@@ -254,6 +254,20 @@ fn remap_poly_type(
             )),
             len.clone(),
         ),
+        // Slice 13 (R-A9): the poly reference carries no `RefId` of its own
+        // (that is minted only at grounding), so only the referent shifts;
+        // the mutability passes through verbatim.
+        PolyType::Ref(referent, mutable) => PolyType::Ref(
+            Box::new(remap_poly_type(
+                referent,
+                struct_base,
+                enum_base,
+                array_base,
+                cell_base,
+                ref_base,
+            )),
+            *mutable,
+        ),
         PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
             ins.iter()
                 .map(|q| {
@@ -1321,6 +1335,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.arrays,
+                &self.refs,
                 &bodies,
             ));
             newly.push(inst.symbol.clone());
