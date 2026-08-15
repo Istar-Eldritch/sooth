@@ -9,7 +9,7 @@
 //! grammar are gone.
 
 use sooth::ir::{lower, CmpOp, Instr, IrFunc, IrType, Terminator};
-use sooth::{check, lexer, parser};
+use sooth::{backend, check, lexer, parser};
 
 fn lowered(src: &str) -> Vec<IrFunc> {
     let tokens = lexer::lex(src).expect("lexing should succeed");
@@ -332,6 +332,75 @@ fn the_canonical_comparison_and_branch_costs_no_call() {
             .iter()
             .any(|i| matches!(i, Instr::Cmp(_, CmpOp::Eq, _, _))),
         "the comparison is still one `Cmp`"
+    );
+}
+
+/// The emitted assembly of word `w` in `src`, isolated from the surrounding
+/// runtime shims. The word is emitted unmangled (`w:`), so the block runs from
+/// its label to the `.type` directive QBE closes every function with.
+fn word_w_assembly(src: &str) -> String {
+    let tokens = lexer::lex(src).expect("lexing should succeed");
+    let mut module = parser::parse(&tokens).expect("parsing should succeed");
+    check::check(&mut module).expect("check should succeed");
+    let ir = lower(&module).expect("lowering should succeed");
+    let il = backend::qbe::emit(&ir).expect("QBE IL emission should succeed");
+
+    let dir = std::env::temp_dir().join(format!(
+        "slice10c_mc_{}_{:p}",
+        std::process::id(),
+        src.as_ptr()
+    ));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let ssa = dir.join("w.ssa");
+    let asm = dir.join("w.s");
+    std::fs::write(&ssa, &il).expect("writing QBE IL");
+    let status = std::process::Command::new("qbe")
+        .arg(&ssa)
+        .arg("-o")
+        .arg(&asm)
+        .status()
+        .expect("qbe runs (the corpus_stdout suite already requires it)");
+    assert!(status.success(), "qbe exited {status}");
+    let s = std::fs::read_to_string(&asm).expect("reading assembly");
+    std::fs::remove_dir_all(&dir).ok();
+
+    let start = s
+        .find("\nw:")
+        .expect("`w` is emitted as an unmangled label")
+        + 1;
+    let end = start
+        + s[start..]
+            .find(".type w,")
+            .expect("QBE closes `w` with a `.type` directive");
+    s[start..end].trim_end().to_string()
+}
+
+/// Part 3, at the machine-code level. The IR-level test above pins that the
+/// library `=`/`if` mint no call and add one `Cmp`; this pins the stronger
+/// claim the spec's R-P3-3a actually makes: the library form costs *nothing*
+/// over the raw primitives. `= [ 1 ] [ 2 ] if` lowers to two branch-and-
+/// construct diamonds in QBE IL (one for `=`'s `bool`, one for `if`); the raw
+/// primitive `u= [ 1 ] [ 2 ] branch` lowers to one. QBE folds both to the same
+/// branchless machine code, so the abstraction is free.
+///
+/// This is a *relative* equivalence through one QBE on one host, not a pinned
+/// absolute assembly string: the rest of the suite pins portable QBE IL for a
+/// reason, and an x86 golden would rot on a different target or QBE version.
+/// The primitive `u= ... branch` form is exactly the post-migration lowering of
+/// the pre-migration `= if 1 else 2 end`; that the two agree was cross-checked
+/// out of band against the compiler rebuilt at the pre-P3 checkpoint (builtin
+/// `=` + `TermKind::If`), whose `w` was the same `cmov`.
+///
+/// Mutation: if the library `if`/`=` stop splicing (a real `call`, an
+/// unfoldable extra `bool` materialisation, a lost `inline`) the two blocks
+/// diverge or the build breaks.
+#[test]
+fn the_library_if_folds_to_the_same_machine_code_as_the_branch_primitive() {
+    let library = word_w_assembly(": w ( i64 i64 -- i64 ) = [ 1 ] [ 2 ] if ;");
+    let primitive = word_w_assembly(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;");
+    assert_eq!(
+        library, primitive,
+        "library `=`/`if` must fold to the same machine code as raw `u=`/`branch`"
     );
 }
 

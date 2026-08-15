@@ -1,9 +1,11 @@
 //! E-P3-6: every committed `examples/*.sth` that declares its own `main`
 //! produces byte-identical stdout across slice 10c's `if`/`else`/`end` ->
 //! postfix `[ T ] [ E ] if` migration. The fixtures in `tests/corpus_stdout/`
-//! were captured *before* `TermKind::If` was deleted, which is the only moment
-//! the pre-migration source still parses; without them the comparison is
-//! impossible after the swap.
+//! pin each program's pre-migration output: the value that compiler emitted
+//! before the swap, verified by rebuilding the compiler at the pre-P3
+//! checkpoint and confirming its output for every example is byte-identical to
+//! the committed fixture here. A regression in the migrated lowering shows up
+//! as a program whose stdout no longer matches its pinned pre-migration value.
 //!
 //! Regenerate deliberately (never blindly to make a red test pass) when a
 //! corpus program's output is *intended* to change:
