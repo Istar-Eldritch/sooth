@@ -718,17 +718,25 @@ impl PolyBuilder {
     /// Slice 10a (R4): a `..`-prefixed name mentioned inside a quotation
     /// effect's *input* side must already denote the signature's own
     /// top-level row -- a fresh name, or any row when the signature declared
-    /// none at top level, is a located error (the id table is empty in the
-    /// latter case, so a lookup miss covers both). This stays strict/immediate
+    /// none at top level, is a located error. This stays strict/immediate
     /// (unlike the output-side sibling below): the stack region present when
     /// a quotation *begins* executing can only ever be a row already declared
     /// by this point in the signature (10c R-P2-1's forward reference is
     /// specifically for a row named only later, which describes what a
     /// quotation *leaves*, never what it starts with).
+    ///
+    /// Review fix: this checks `self.row_in`/`self.row_out` directly, not
+    /// mere presence in `row_index`. `row_index` also holds names optimistically
+    /// interned by `quotation_row_id_deferred` for a *sibling* quotation's
+    /// output side, not yet confirmed by `validate_pending_quotation_rows`; a
+    /// bare `row_index` lookup let one quotation's still-unconfirmed output
+    /// mention leak into a later quotation's strict input-side check, accepting
+    /// or rejecting the same signature depending on clause order.
     fn quotation_row_id(&mut self, name: &str, span: Span) -> Result<u32, String> {
         self.row_index
             .get(name)
             .copied()
+            .filter(|id| Some(*id) == self.row_in || Some(*id) == self.row_out)
             .ok_or_else(|| quotation_row_not_top_level_error(name, span))
     }
 
@@ -3689,6 +3697,44 @@ mod tests {
             !err.contains("none of that name is declared"),
             "message must not claim the name isn't declared anywhere: {err}"
         );
+    }
+
+    #[test]
+    fn parse_row_in_quotation_effect_second_quotation_input_side_order_dependent_is_error() {
+        // Review fix: a prior quotation's *deferred* output-side mention of
+        // `..o` (not yet confirmed against the top-level row_out, which is
+        // still unset here -- this is entirely on the word's input side)
+        // used to leak into `row_index`, letting a *later* sibling
+        // quotation's strict input-side check accept `..o` even though no
+        // top-level row is bound to it yet at this point in the signature.
+        // Removing the first quotation (the only thing that had interned
+        // `..o`) must not change whether the second one is accepted.
+        let err = parse_src(": f ( ..i bool ~[ ..o -- ..o ] -- ..o ) | c | c call ;").unwrap_err();
+        assert!(err.contains("..o"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
+
+        let err = parse_src(
+            ": f ( ..i bool ~[ ..i -- ..o ] ~[ ..o -- ..o ] -- ..o ) \
+             | d | | c | c call d call ;",
+        )
+        .unwrap_err();
+        assert!(err.contains("..o"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_row_in_quotation_effect_output_side_row_fresh_name_is_error() {
+        // Review fix: `validate_pending_quotation_rows` (the deferred
+        // check for a row named on a quotation effect's *output* side) had
+        // no coverage of its own -- neutering its rejection failed no test
+        // in the suite. `..t` is optimistically interned (so it parses past
+        // R4's immediate check) but is neither of the signature's own
+        // top-level rows (both are `..s`), so it must still be rejected once
+        // the whole signature is known.
+        let err =
+            parse_src(": f ( ..s i64 ~[ ..s i64 -- ..t ] -- ..s ) drop drop drop ;").unwrap_err();
+        assert!(err.contains("..t"), "unexpected message: {err}");
+        assert!(err.contains("top-level row"), "unexpected message: {err}");
     }
 
     #[test]

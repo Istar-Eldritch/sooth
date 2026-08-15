@@ -1433,7 +1433,49 @@ fn check_literal_against_declared_effect(
     let actual: Vec<Type> = result.iter().map(|s| s.ty).collect();
     if shape_changing {
         // R-P2-4: a shape-changing declared quotation has no fixed exit row
-        // to check against; the caller reconciles sibling literals instead.
+        // to check against as a whole; the caller reconciles sibling
+        // literals' full actual shapes against each other (R-P2-3).
+        //
+        // Review fix: that sibling comparison alone never runs at all when a
+        // shape-changing parameter has no sibling sharing its row id (or every
+        // sibling happens to agree with each other while still disagreeing
+        // with the declaration), so the declared *fixed* trailing outputs
+        // (`eff.outputs`, e.g. the `i64` in `~[ ..i -- ..o i64 ]`) were never
+        // checked at all -- a mismatch there surfaced later as a generic
+        // boundary error, not at this argument site. The row prefix length is
+        // genuinely undetermined (that is the point of R-P2-4), but the
+        // declared suffix is still a fixed point and is checked here.
+        let suffix_len = eff.outputs.len();
+        let suffix_matches = result.len() >= suffix_len
+            && result[result.len() - suffix_len..]
+                .iter()
+                .zip(&eff.outputs)
+                .all(|(f, w)| {
+                    matches!(
+                        match_slot(*f, *w),
+                        SlotMatch::Exact | SlotMatch::LiteralSizeType
+                    )
+                });
+        if !suffix_matches {
+            let actual_outs: Vec<Type> = result
+                .iter()
+                .skip(result.len().saturating_sub(suffix_len))
+                .map(|s| s.ty)
+                .collect();
+            let declared = if is_inline {
+                crate::ast::inline_quotation_type(eff.inputs.clone(), eff.outputs.clone())
+            } else {
+                crate::ast::quotation_type(eff.inputs.clone(), eff.outputs.clone())
+            };
+            let actual_effect = crate::ast::quotation_type(eff.inputs.clone(), actual_outs);
+            return Err(literal_effect_mismatch_error(
+                ctx,
+                span,
+                word,
+                declared,
+                actual_effect,
+            ));
+        }
         return Ok(actual);
     }
     // R11: the literal's exit row must equal the grounded declared output row:
@@ -1961,6 +2003,33 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+
+    /// Review fix (R-P2-3, declaration half): a shape-changing declared
+    /// quotation parameter (`~[ ..i -- ..o i64 ]`, `..i != ..o`) with no
+    /// sibling sharing its row id never goes through the sibling comparison
+    /// `check_poly_combinator_args` runs (there is nothing to compare
+    /// against), so the declared *fixed* trailing output (`i64`) must still be
+    /// checked against the literal's own actual trailing output right here.
+    /// `g`'s single branch leaves a `bool` where `i64` was declared; this must
+    /// be rejected at `g`'s own argument site, not surface later as a generic
+    /// mismatch at `demo`'s declaration boundary (the recon-8 loss R-P2-3
+    /// exists to prevent).
+    #[test]
+    fn shape_changing_quotation_with_no_sibling_checks_its_declared_trailing_output() {
+        let src = ": g ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
+             : demo ( i64 -- i64 i64 ) true [ dup 1 = ] g ;\n";
+        let err = check_src(src).unwrap_err();
+        assert!(
+            err.contains("declared") && err.contains("effect"),
+            "expected a literal-effect-mismatch message, got: {err}"
+        );
+        assert!(
+            !err.contains("different stack shapes"),
+            "must not be the sibling-comparison message (there is no sibling here): {err}"
+        );
+        assert!(err.contains("line 2"), "unexpected message: {err}");
+    }
+
     /// D3's leaf resource: one field, a `drop` override implemented exactly
     /// as `examples/resources.sth`'s `Fd` (extracting the field via `Fd>n`
     /// inside `drop`'s own body -- exempted, since a word literally named
