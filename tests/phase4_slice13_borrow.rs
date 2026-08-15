@@ -33,10 +33,13 @@ fn setat_writes_an_array_element_through_a_poly_mutable_borrow_and_leaves_the_re
     // back: the one `setat` wrote (99) and an untouched neighbour (20). The
     // neighbour is what discriminates a store through the *element* borrow
     // from one that overwrote the array wholesale or wrote the wrong slot.
+    // `setat` is then called again at `Vec2` (two i64 fields), which
+    // discriminates a stride bug: a wrong element size would clobber the
+    // neighbour's fields rather than merely writing the wrong scalar.
     let binary = common::build_example("examples/poly_borrow_setat.sth");
     let output = Command::new(&binary).output().expect("binary should run");
     std::fs::remove_file(&binary).ok();
     let stdout = String::from_utf8(output.stdout).expect("stdout should be utf8");
-    assert_eq!(stdout, "99\n20\n");
+    assert_eq!(stdout, "99\n20\n91\n92\n21\n22\n");
     assert_eq!(output.status.code(), Some(0));
 }

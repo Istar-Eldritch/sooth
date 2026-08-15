@@ -533,6 +533,14 @@ form.
   the aliasing machinery. Deferred to keep Part B's scope on the array case.
 - **`+!`** (R-B4/R-B6): the add-in-place store, alongside `!` in shape; deferred to
   avoid widening the mutable path beyond one store operator.
+- **A fully concrete `&[...]` parameter is unusable inside a generic body**
+  (`raw_to_poly_type` folds it to `Concrete(Type::Ref)`, and every accessor arm
+  (`&!>`, `&>`, `@`, `!`) matches only `PolyType::Ref`): e.g.
+  `: setz ( &![i64 4] 'T -- 'T ) | r v | r 0 &!> v ! ;` rejects with `` `&!>` is not
+  permitted on `&![i64 4]` ``. Pre-existing since Phase 2 (`&>`/`@` have the same
+  hole), not introduced by Part B; fixing it means folding a concrete `Ref` back to
+  a `PolyType::Ref` at signature-binding time, which is wider than either P2's or
+  P3's scope.
 - **Full `Provenance`/`Liveness` acceptance parity**, if phase P3 ships the conservative
   fallback: any over-rejection is pinned and documented; closing it to exact mono parity
   is a follow-up, not a soundness gap.

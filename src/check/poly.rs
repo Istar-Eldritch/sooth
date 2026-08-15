@@ -513,8 +513,7 @@ pub(super) fn poly_call_term(
     // R-B1 (slice 13): every `&`-led word (the prefix borrow and the
     // reference accessor family) fronts the rest of dispatch, mirroring
     // `check_reference_word`'s own position ahead of the monomorphic
-    // family. `Ok(None)` (not `&`-led, or a mutable spelling Phase 3 has not
-    // yet added) falls through unchanged.
+    // family. `Ok(None)` (not `&`-led) falls through unchanged.
     if let Some(next) = poly_reference_word(
         name, span, &mut stack, lits, scope, sig, ctx, structs, enums, arrays,
     )? {
@@ -1815,8 +1814,10 @@ pub(super) fn poly_var_to_concrete_error(
 }
 
 /// Slice 13 (E4/R-B6): an accessor with no poly-body support -- ever
-/// (`&^`, `&Struct>field`), or not yet (`+!` alongside `!`, still Phase 3) --
-/// located, never a silent fallthrough to an unknown-word error.
+/// (`&^`, `&Struct>field`), or not yet (e.g. a fully concrete `&![T N]`
+/// parameter's accessors, folded to `PolyType::Concrete` and unmatched by
+/// any `PolyType::Ref` arm) -- located, never a silent fallthrough to an
+/// unknown-word error.
 pub(super) fn poly_unsupported_accessor_error(ctx: &Ctx, span: Span, op: &str) -> String {
     let op = crate::resolve::demangle_call(op);
     let where_ = ctx.word_name().unwrap_or("<line>");
