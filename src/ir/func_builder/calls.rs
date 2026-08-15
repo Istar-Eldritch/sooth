@@ -1455,7 +1455,7 @@ mod tests {
         // an `apply` func back, and deleting the `lower_call` inline branch
         // would leave an `Instr::Call apply` in `main`.
         let ir = lower_src(
-            ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+            ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
              : main ( -- ) 3 [ 1 + ] apply . ;\n",
         );
         assert!(
@@ -1490,8 +1490,8 @@ mod tests {
         // or the checker's abstract-forward accept) leaves an `Instr::Call`
         // for `inner` behind.
         let ir = lower_src(
-            ": inner ( i64 [ i64 -- ] -- ) call ;\n\
-             : outer ( i64 [ i64 -- ] -- ) inner ;\n\
+            ": inner inline ( i64 [ i64 -- ] -- ) call ;\n\
+             : outer inline ( i64 [ i64 -- ] -- ) inner ;\n\
              : main ( -- ) 7 [ 1 + . ] outer ;\n",
         );
         assert!(
@@ -1516,10 +1516,10 @@ mod tests {
     // Shared with `each_lowering_test_times_def_is_pinned_to_the_library` so
     // the two tests cannot drift apart: one exercises this exact source, the
     // other pins it against `lib/combinators.sth`.
-    const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+    const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | to | | from |\n\
          from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
-         : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+         : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
          | f | | n | 0 n f times-helper ;\n";
 
     #[test]
@@ -1536,7 +1536,7 @@ mod tests {
         // `lib/combinators.sth`, so the unit needs no import closure.
         let ir = lower_src(&format!(
             "{TIMES_DEF}\
-             : each ( ['T 'N] [ 'T -- ] -- )\n\
+             : each inline ( ['T 'N] [ 'T -- ] -- )\n\
              | f | len >i64 | count | | arr |\n\
              count [ | i | &arr i >usize &> @ f call ] times\n\
              arr drop ;\n\
@@ -1617,7 +1617,7 @@ mod tests {
         // body forever), not silently pass. `while` is defined inline so the
         // unit needs no import closure.
         let ir = lower_src(
-            ": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n\
+            ": while inline ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n\
              : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n",
         );
         assert!(

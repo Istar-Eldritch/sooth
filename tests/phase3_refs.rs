@@ -69,10 +69,10 @@ fn combinators_import(qualifier: &str) -> String {
 /// process, where an `import:` line never resolves. Its quotation local is
 /// named `body` rather than the library's `f`, since a local may not shadow a
 /// word name and this file's goldens routinely declare a word `f`.
-const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | body | | to | | from |\n\
      from to < [ from body call from 1 + to body times-helper ] [ ] if ;\n\
-     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | body | | n | 0 n body times-helper ;\n";
 
 #[test]
@@ -1697,7 +1697,7 @@ fn mutable_borrow_captured_by_a_quotation_passed_to_another_word_is_error() {
     // top-level use of `q` (here, passed as an operand to `apply`, which
     // calls it) must extend the capture through to the borrow it holds.
     let err = check_error(&format!(
-        "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+        "{CAPTURE_PRELUDE}\n: apply inline ( [ -- ] -- ) | f | f call ;\n\
          : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
          [ out 0 >usize &!> 9 ! ] | q |\n  &!arr | out2 |\n  \
          out2 1 >usize &!> 7 !\n  q apply\n  drop ;\n"
@@ -1788,7 +1788,7 @@ fn unbound_quotation_capture_still_dies_at_its_own_literal() {
     let (stdout, code) = run_src(
         "unbound-quotation-capture-dies-at-its-own-position",
         &format!(
-            "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+            "{CAPTURE_PRELUDE}\n: apply inline ( [ -- ] -- ) | f | f call ;\n\
              : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
              [ out 0 >usize &!> 9 ! ] apply\n  &!arr | out2 |\n  \
              out2 1 >usize &!> 7 !\n  &arr 0 >usize &> @ .\n ;\n"
@@ -1832,7 +1832,7 @@ fn mutable_borrow_captured_through_a_nested_quotation_literal_is_error() {
     // itself recurse into the nested `TermKind::Quotation` to see `out` at
     // all.
     let err = check_error(&format!(
-        "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+        "{CAPTURE_PRELUDE}\n: apply inline ( [ -- ] -- ) | f | f call ;\n\
          : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
          [ [ out 0 >usize &!> 9 ! ] apply ] | q |\n  &!arr | out2 |\n  \
          out2 1 >usize &!> 7 !\n  q call arr drop ;\n"
@@ -1880,7 +1880,7 @@ fn mutable_borrow_captured_by_a_quotation_defined_after_the_second_borrow_is_err
     // per-term checking starts -- sees this in advance and keeps `out`
     // alive back at `out2`'s bind.
     let err = check_error(&format!(
-        "{CAPTURE_PRELUDE}\n: apply ( [ -- ] -- ) | f | f call ;\n\
+        "{CAPTURE_PRELUDE}\n: apply inline ( [ -- ] -- ) | f | f call ;\n\
          : main ( -- )\n  input | arr |\n  &!arr | out |\n  \
          &!arr | out2 |\n  out2 1 >usize &!> 7 !\n  \
          [ out 0 >usize &!> 9 ! ] apply\n  arr drop ;\n"

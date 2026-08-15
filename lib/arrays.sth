@@ -26,7 +26,7 @@ export: bin_search sort ;
 \ every Sooth array's length is a `u32` (`fill`'s own range check), so 32
 \ halvings always converge regardless of `n`, and an already-converged
 \ iteration (`lo == hi`) is a no-op, not wasted merge work.
-: bin_search ( ['T: Copy 'N] 'T [ 'T 'T -- i64 ] -- ['T 'N] usize bool )
+: bin_search inline ( ['T: Copy 'N] 'T ~[ 'T 'T -- i64 ] -- ['T 'N] usize bool )
   | cmp | | key | len >i64 | n | | arr |
   0 n 32 [ | i |
     over over < [
@@ -67,7 +67,7 @@ export: bin_search sort ;
 \ passes always suffice, and `n` block-start attempts always suffice to walk
 \ every block, with the excess iterations idling as a no-op once `cw >= n`
 \ (outer) or `j >= n` (inner).
-: sort ( ['T: Copy 'N] ['T 'N] [ 'T 'T -- i64 ] -- ['T 'N] ['T 'N] )
+: sort inline ( ['T: Copy 'N] ['T 'N] ~[ 'T 'T -- i64 ] -- ['T 'N] ['T 'N] )
   | cmp | | scratch |
   len >i64 | n | | arr |
   arr scratch 1 32 [ | i |

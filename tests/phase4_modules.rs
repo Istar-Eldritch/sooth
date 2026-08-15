@@ -497,7 +497,7 @@ fn library_combinator_disposing_its_own_resource_compiles_under_qualified_only_i
             "type: Res n i64 ;\n",
             ": mk ( -- Res ) 1 Res ;\n",
             ": drop ( Res -- ) | r | r Res>n . ;\n",
-            ": with ( [ i64 -- i64 ] -- i64 ) | q | mk | r | &r &Res>n @ q call r drop ;\n",
+            ": with inline ( [ i64 -- i64 ] -- i64 ) | q | mk | r | &r &Res>n @ q call r drop ;\n",
             "export: with ;\n",
         ),
     );

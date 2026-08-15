@@ -14,7 +14,7 @@ use sooth::{check, lexer, parser};
 
 /// A row-polymorphic `if`, hand-written over the primitive `if` (the library
 /// `if` arrives in P3): `..i`/`..o` may differ, per P2's parser lift.
-const MYIF: &str = ": myif ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o )\n\
+const MYIF: &str = ": myif inline ( ..i bool ~[ ..i -- ..o ] ~[ ..i -- ..o ] -- ..o )\n\
      | e | | t | | c | c [ t call ] [ e call ] if ;\n";
 
 fn lowered(src: &str) -> Vec<IrFunc> {

@@ -3625,8 +3625,8 @@ fn overloads_of_a_combinator_name_are_both_reachable() {
     // types differ, but collect_combinators stayed a bare-name-keyed
     // single-value map, so the second candidate silently displaced the first
     // exactly as env's Sig did before B1 (and poly_env did for a poly word).
-    let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-: apply ( bool [ bool -- bool ] -- bool ) call ;\n\
+    let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+: apply inline ( bool [ bool -- bool ] -- bool ) call ;\n\
 : main ( -- ) 5 [ 2 * ] apply . true [ not ] apply . ;\n";
     let (stdout, code) = run_overload_src("combinator-overload", src);
     assert_eq!(stdout, "10\nfalse\n");
@@ -3635,8 +3635,8 @@ fn overloads_of_a_combinator_name_are_both_reachable() {
 
 #[test]
 fn a_combinator_call_matching_no_overload_names_the_candidates() {
-    let src = ": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
-: apply ( bool [ bool -- bool ] -- bool ) call ;\n\
+    let src = ": apply inline ( i64 [ i64 -- i64 ] -- i64 ) call ;\n\
+: apply inline ( bool [ bool -- bool ] -- bool ) call ;\n\
 : main ( -- ) \"x\" [ drop \"y\" ] apply drop ;\n";
     let path = std::env::temp_dir().join(format!(
         "sooth-combinator-overload-nomatch-{}.sth",

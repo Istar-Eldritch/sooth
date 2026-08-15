@@ -411,12 +411,13 @@ fn inline_reference_output_pair() {
 fn quotation_taking_word_reference_output_is_accepted() {
     // The exemption is phrased over the shared `is_combinator` predicate (D5),
     // not over the new flag, so it covers every always-spliced word uniformly.
-    // This word declares no `inline` at all: had R5's guard been written
-    // `if !word.declares_inline`, this would still be rejected. It is also the
-    // recon-5 shape, whose reference is derived from an *input* reference and so
-    // is rooted in the caller either way.
+    // Slice 12 (R-B1): a `~[ ... ]` parameter now requires `inline` at the
+    // definition, so this word declares it too, but the assertion this test
+    // guards is unchanged -- the exemption reads `is_combinator`, not the flag
+    // directly. It is also the recon-5 shape, whose reference is derived from
+    // an *input* reference and so is rooted in the caller either way.
     let src = "type: P n u32 ;\n\
-               : pick ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n\
+               : pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n\
                : main ( -- )\n\
                  7 >u32 P | s |\n\
                  &!s [ 1 . ] pick | r |\n\
@@ -532,7 +533,7 @@ fn combinators_source(quotation_kind: &str) -> String {
     format!(
         r#"export: each map fold filter while ;
 
-: times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
+: times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | to | | from |
   from to < [
     from f call
@@ -540,32 +541,32 @@ fn combinators_source(quotation_kind: &str) -> String {
   ] [
   ] if ;
 
-: times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
+: times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )
   | f | | n | 0 n f times-helper ;
 
-: each ( ['T 'N] {quotation_kind}[ 'T -- ] -- )
+: each inline ( ['T 'N] {quotation_kind}[ 'T -- ] -- )
   | f | len >i64 | count | | arr |
   count [ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
-: map ( ['T 'N] {quotation_kind}[ 'T -- 'T ] -- ['T 'N] )
+: map inline ( ['T 'N] {quotation_kind}[ 'T -- 'T ] -- ['T 'N] )
   | f | len >i64 | count | | arr |
   count [ | i | &arr i >usize &> @ f call | v | &!arr i >usize &!> v ! ] times
   arr ;
 
-: fold ( ['T 'N] 'A {quotation_kind}[ 'A 'T -- 'A ] -- 'A )
+: fold inline ( ['T 'N] 'A {quotation_kind}[ 'A 'T -- 'A ] -- 'A )
   | f | | acc | len >i64 | count | | arr |
   acc count [ | i | &arr i >usize &> @ f call ] times
   arr drop ;
 
-: filter ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
+: filter inline ( ['T: Copy 'N] {quotation_kind}[ 'T -- bool ] -- ['T 'N] usize )
   | p | len >i64 | n | | arr |
   0 n [ | i | &arr i >usize &> @ dup p call [
           | v | &!arr over >usize &!> v ! 1 +
         ] [ drop ] if ] times
   | wf | arr wf >usize ;
 
-: while ( 'a {quotation_kind}[ 'a -- 'a bool ] -- 'a )
+: while inline ( 'a {quotation_kind}[ 'a -- 'a bool ] -- 'a )
   | p | p call [ p while ] [ ] if ;
 "#
     )

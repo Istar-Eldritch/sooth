@@ -46,10 +46,10 @@ fn check_error(src: &str) -> String {
 
 /// `lib/combinators.sth`'s `times`, inlined: the lowering-shape helpers below
 /// run in process, where an `import:` line never resolves.
-const TIMES_DEF: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+const TIMES_DEF: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
      from to < [ from f call from 1 + to f times-helper ] [ ] if ;\n\
-     : times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+     : times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | n | 0 n f times-helper ;\n";
 
 #[test]

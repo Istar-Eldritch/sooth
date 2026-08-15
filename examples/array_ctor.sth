@@ -46,7 +46,7 @@ import: c | times | "../lib/combinators.sth" ;
   200 . ;
 
 \ D5: a concrete `[ i64 ; 4 ]` inside a combinator body works for free.
-: withbuf ( [ -- i64 ] -- i64 )
+: withbuf inline ( [ -- i64 ] -- i64 )
   | f | [ i64 ; 4 ] | a | &a 0 >usize &> @ | z | a drop f call z + ;
 
 \ A self-tail-recursive word that constructs an array each iteration: the

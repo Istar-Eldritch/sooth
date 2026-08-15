@@ -1506,7 +1506,7 @@ mod tests {
         check_src(": w ( i64 i64 -- i64 ) u= [ 1 ] [ 2 ] branch ;\n: main ( -- ) 1 2 w . ;\n")
             .expect("two quotation literals splice at the call site");
         check_src(
-            ": myif ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
+            ": myif inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )\n  \
              | e | | t | | c | c tag t e branch ;\n\
              : main ( -- ) 1 2 = [ 7 ] [ 8 ] myif . ;\n",
         )
@@ -1530,12 +1530,12 @@ mod tests {
     #[test]
     fn check_branch_leaves_a_literal_arm_unchecked_beside_a_forwarded_one() {
         check_src(
-            ": w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
+            ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
              : main ( -- ) ;\n",
         )
         .expect("the mismatched literal arm goes unchecked at `w`'s own definition");
         let err = check_src(
-            ": w ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
+            ": w inline ( u32 ~[ -- i64 ] -- i64 ) | t | t [ 999 888 ] branch ;\n\
              : main ( -- ) 1 2 u= [ 5 ] w . ;\n",
         )
         .unwrap_err();

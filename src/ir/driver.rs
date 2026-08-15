@@ -703,9 +703,9 @@ mod tests {
     /// `tail` threading at one splice) shows up as a mismatch.
     #[test]
     fn tail_splice_check_and_lowering_agree_on_the_loop() {
-        const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+        const BOOL_Q: &str = ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c [ t call ] [ e call ] if ;\n";
-        const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+        const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
              | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
         for (branch, callee, expected) in [(BOOL_Q, "Bool?", true), (BOOL_D, "Bool!?", false)] {
             let src = format!(

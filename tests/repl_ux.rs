@@ -202,7 +202,7 @@ fn repl_clear_disposes_then_resets() {
 #[test]
 fn repl_combinator_called_from_drop_override_body_runs_without_panicking() {
     let out = run_session(&[
-        ": twice ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
+        ": twice inline ( i64 [ i64 -- i64 ] -- i64 ) | q | q call q call ;",
         "type: Bx v i64 ;",
         ": drop ( Bx -- ) Bx>v [ 1 + ] twice . ;",
         ": helper ( i64 -- i64 ) 1 + ;",

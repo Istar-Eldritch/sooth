@@ -57,7 +57,7 @@ fn spaced_tilde_bracket_is_a_parse_error() {
 
 #[test]
 fn glued_tilde_bracket_parses_as_a_combinator_parameter() {
-    let src = ": apply ( i64 ~[ i64 -- i64 ] -- i64 ) call ;\n\
+    let src = ": apply inline ( i64 ~[ i64 -- i64 ] -- i64 ) call ;\n\
                : main ( -- ) 3 [ 1 + ] apply . ;\n";
     let (stdout, code) = run_src("tilde-parses", src);
     assert_eq!(stdout, "4\n");
@@ -70,7 +70,7 @@ fn glued_tilde_bracket_parses_as_a_combinator_parameter() {
 fn call_on_inline_quotation_is_accepted() {
     // The sixth behavioural test: without it, an over-eager materialization
     // check could silently break invocation and nothing would notice.
-    let src = ": twice ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;\n\
+    let src = ": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;\n\
                : main ( -- ) 3 [ 2 * ] twice . ;\n";
     let (stdout, code) = run_src("tilde-call", src);
     assert_eq!(stdout, "12\n");
@@ -196,8 +196,8 @@ fn forwarding_inline_quotation_into_an_ordinary_declared_parameter_is_error() {
     // `InlineQuotation(eff) != Quotation(eff)` even though `eff` is
     // identical, and the mismatch is located naming both spellings.
     let err = check_error(
-        ": takes_ordinary ( [ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : outer ( ~[ i64 -- i64 ] -- i64 ) | g | g takes_ordinary ;\n\
+        ": takes_ordinary inline ( [ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
+         : outer inline ( ~[ i64 -- i64 ] -- i64 ) | g | g takes_ordinary ;\n\
          : main ( -- ) [ 1 + ] outer . ;\n",
     );
     assert!(
@@ -213,8 +213,8 @@ fn forwarding_ordinary_quotation_into_an_inline_declared_parameter_is_error() {
     // Direction 2, the mirror image: an ordinary-declared parameter forwarded
     // into a nested combinator that declares `~`.
     let err = check_error(
-        ": takes_tilde ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-         : outer ( [ i64 -- i64 ] -- i64 ) | g | g takes_tilde ;\n\
+        ": takes_tilde inline ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
+         : outer inline ( [ i64 -- i64 ] -- i64 ) | g | g takes_tilde ;\n\
          : main ( -- ) [ 1 + ] outer . ;\n",
     );
     assert!(
@@ -232,7 +232,7 @@ fn variable_bearing_inline_quotation_grounds_through_apply_subst() {
     // `variable_bearing_inline_quotation_still_mismatches_ordinary` is the one
     // that actually discriminates `apply_subst`'s `is_inline` branch -- it
     // fails if that branch is mutated away, this one does not.)
-    let src = ": apply ( 'T ~[ 'T -- 'T ] -- 'T ) call ;\n\
+    let src = ": apply inline ( 'T ~[ 'T -- 'T ] -- 'T ) call ;\n\
                : main ( -- ) 3 [ 2 * ] apply . ;\n";
     let (stdout, code) = run_src("tilde-var-ground", src);
     assert_eq!(stdout, "6\n");
@@ -253,8 +253,8 @@ fn variable_bearing_inline_quotation_still_mismatches_ordinary() {
     // is a positive control -- it exercises the same branch but does not
     // discriminate it.)
     let err = check_error(
-        ": takes_ordinary ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
-         : outer ( 'T ~[ 'T -- 'T ] -- 'T ) | g | g takes_ordinary ;\n\
+        ": takes_ordinary inline ( 'T [ 'T -- 'T ] -- 'T ) call ;\n\
+         : outer inline ( 'T ~[ 'T -- 'T ] -- 'T ) | g | g takes_ordinary ;\n\
          : main ( -- ) 3 [ 2 * ] outer . ;\n",
     );
     assert!(
@@ -269,8 +269,8 @@ fn forwarding_inline_quotation_into_a_matching_inline_declared_parameter_runs() 
     // type and the declared type agree (both `~`), the forward is accepted
     // and runs -- so the two negative goldens are catching a real type
     // mismatch, not merely rejecting every forward.
-    let src = ": takes_tilde ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
-               : outer ( ~[ i64 -- i64 ] -- i64 ) | g | g takes_tilde ;\n\
+    let src = ": takes_tilde inline ( ~[ i64 -- i64 ] -- i64 ) | f | 5 f call ;\n\
+               : outer inline ( ~[ i64 -- i64 ] -- i64 ) | g | g takes_tilde ;\n\
                : main ( -- ) [ 1 + ] outer . ;\n";
     let (stdout, code) = run_src("tilde-forward-match", src);
     assert_eq!(stdout, "6\n");
@@ -286,7 +286,8 @@ fn forwarding_inline_quotation_into_a_matching_inline_declared_parameter_runs() 
 // are `times`'s signature shape minus the back-edge (phase 5), so they exercise
 // R9 without depending on the self-tail rewrite.
 
-const APPLY_WITH: &str = ": apply-with ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | f call ;\n";
+const APPLY_WITH: &str =
+    ": apply-with inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | f | f call ;\n";
 
 #[test]
 fn row_bearing_inline_quotation_grounds_and_runs() {
@@ -332,7 +333,7 @@ fn abstract_row_bearing_quotation_passes_down() {
     // agree), and the spliced `apply-with` body grounds the row itself.
     let src = format!(
         "{APPLY_WITH}\
-         : outer ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | g | g apply-with ;\n\
+         : outer inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s ) | g | g apply-with ;\n\
          : main ( -- ) 10 5 [ + ] outer . ;\n"
     );
     let (stdout, code) = run_src("row-passdown", &src);

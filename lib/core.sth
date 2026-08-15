@@ -39,12 +39,12 @@
 \ Its tail term is `branch`, whose tail-called parameters are both quotations,
 \ so a caller's `... [ base ] [ ... rec ] if` self-tails through it and lowers
 \ to a loop back-edge rather than recursion.
-: if ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+: if inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
   | if--else-arm | | if--then-arm | | if--cond |
   if--cond tag if--then-arm if--else-arm branch ;
 
 \ `unless` is `if` with the arms swapped: the first quotation runs when the
 \ condition is false.
-: unless ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
+: unless inline ( ..a bool ~[ ..a -- ..b ] ~[ ..a -- ..b ] -- ..b )
   | unless--else-arm | | unless--then-arm | | unless--cond |
   unless--cond tag unless--else-arm unless--then-arm branch ;

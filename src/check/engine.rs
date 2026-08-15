@@ -1927,7 +1927,7 @@ mod tests {
     /// row-only) ground declared outputs. It now checks.
     #[test]
     fn back_edge_produces_ground_declared_outputs() {
-        let src = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+        let src = ": my-times inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
                    | f | | to | | from |\n\
                    from to < [\n\
                    from f call\n\

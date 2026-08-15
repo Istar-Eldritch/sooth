@@ -72,7 +72,7 @@ const SPY_DEF: &str = "type: Spy tag i64 ;\n\
 
 /// The `times-helper` shape 10b's library `times` will be built on: an ordinary
 /// self-tail combinator carrying a from/to pair over a row.
-const TIMES_HELPER: &str = ": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+const TIMES_HELPER: &str = ": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
     \x20 | f | | to | | from |\n\
     \x20 from to < [\n\
     \x20   from f call\n\
@@ -164,7 +164,7 @@ fn own_frame_linear_bound_before_the_tail_if_is_error() {
     // or removed, the shape starts compiling and this goes red.
     let src = format!(
         "{SPY_DEF}\
-         : while ( i64 [ i64 -- i64 bool ] -- i64 )\n\
+         : while inline ( i64 [ i64 -- i64 bool ] -- i64 )\n\
          \x20 | p | 9 Spy | own | p call [ p while ] [ ] if ;\n\
          : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n"
     );
@@ -345,7 +345,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
     c.write(
         "c.sth",
         "export: inner ;\n\
-         : inner ( ..s ~[ ..s -- ..s ] -- ..s )  | f | f call ;\n",
+         : inner inline ( ..s ~[ ..s -- ..s ] -- ..s )  | f | f call ;\n",
     );
     c.write(
         "b.sth",
@@ -353,7 +353,7 @@ fn drop_visibility_error_is_worded_from_the_authoring_module_under_nested_splici
          export: outer Res ;\n\
          type: Res n i64 ;\n\
          : drop ( Res -- )  | r | r Res>n . ;\n\
-         : outer ( ..s ~[ ..s -- ..s ] -- ..s )  | f | 9 Res f c::inner ;\n",
+         : outer inline ( ..s ~[ ..s -- ..s ] -- ..s )  | f | 9 Res f c::inner ;\n",
     );
     let entry = c.write(
         "main.sth",

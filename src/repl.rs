@@ -2552,6 +2552,10 @@ impl Session {
         // in particular, which the retention route below would otherwise carry
         // into `check_poly_combinator_repl` as a legitimate poly combinator.
         check::check_inline_declaration(&word)?;
+        // Slice 12 (R-B2): the same missing-`inline`-on-a-`~`-parameter gate
+        // native `check` runs in its pre-pass, run here too so the REPL never
+        // accepts a `~[ ... ]` parameter without `inline`.
+        check::check_inline_quotation_requires_inline(&word)?;
         // R6 (Slice 6c): a quotation-taking word is now *retained* rather than
         // R23-rejected. It routes here (both mono and poly, D2), skipping
         // lowering entirely (D3): the session keeps its body as raw terms and

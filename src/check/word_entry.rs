@@ -105,6 +105,42 @@ pub(crate) fn check_inline_declaration(word: &WordDef) -> Result<(), String> {
     Ok(())
 }
 
+/// Slice 12 (R-B1): a `~[ ... ]` (`Type::InlineQuotation`) parameter is
+/// unrepresentable at runtime -- it can only ever be spliced -- so a word
+/// declaring one must also declare `inline`. This is the mirror rule of
+/// `check_inline_declaration` above: that function rejects an `inline` the
+/// splice cannot deliver on; this one rejects a `~` parameter the splice is
+/// the *only* way to deliver on, absent `inline`. Phrased over
+/// `Type::InlineQuotation` specifically, not `word_declares_quotation_parameter`
+/// (which also matches an ordinary `Type::Quotation`): an ordinary `[ ... ]`
+/// parameter is representable, so it is a real call by default (part D) and
+/// needs no `inline`.
+pub(crate) fn check_inline_quotation_requires_inline(word: &WordDef) -> Result<(), String> {
+    if word.declares_inline {
+        return Ok(());
+    }
+    let param = match &word.poly {
+        None => word.effect.inputs.iter().find_map(|s| match s.ty {
+            Type::InlineQuotation(_) => Some(s.ty.name().to_string()),
+            _ => None,
+        }),
+        Some(sig) => sig.inputs.iter().find_map(|p| match p {
+            PolyType::Quotation(_, _, true, ..) => Some(poly_type_str(p, sig)),
+            PolyType::Concrete(t @ Type::InlineQuotation(_)) => Some(t.name().to_string()),
+            _ => None,
+        }),
+    };
+    let Some(param) = param else {
+        return Ok(());
+    };
+    let name = crate::resolve::demangle_word(&word.name);
+    let span = word.span;
+    Err(format!(
+        "error: word `{name}` declares an inline-quotation parameter `{param}` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line {}, col {})",
+        span.line, span.col
+    ))
+}
+
 /// The effect-signature half of the no-stored-reference rule: no declared
 /// **output** may transitively
 /// contain a reference (returning one would outlive the frame that owns the
@@ -477,6 +513,46 @@ mod tests {
         check_src(": sq ( i64 -- i64 ) | n | n n * ;").unwrap();
     }
 
+    /// Slice 12 (R-B1, M-B): a `~[ ... ]` parameter without `inline` is a
+    /// located error naming the word and the parameter's rendered spelling.
+    /// The mono and poly (variable-bearing) shapes both fire it; the same
+    /// shape with `inline` added is accepted, so the rejection is keyed on
+    /// the missing keyword, not the `~` parameter itself.
+    #[test]
+    fn check_missing_inline_on_tilde_parameter_is_error() {
+        let err = check_src(
+            ": twice ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;\n: main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: word `twice` declares an inline-quotation parameter `~[ i64 -- i64 ]` but is not `inline`; a `~[ ... ]` quotation can only be spliced, so the word must declare `inline` (line 1, col 3)"
+        );
+        check_src(
+            ": twice inline ( i64 ~[ i64 -- i64 ] -- i64 ) | f | f call f call ;\n: main ( -- ) ;\n",
+        )
+        .expect("the identical shape with `inline` declared is accepted");
+
+        let poly_err = check_src(
+            ": each ( ['T 'N] ~[ 'T -- ] -- )\n\
+             | f | len >i64 | count | | arr | count [ | i | drop f call ] times\n\
+             arr drop ;\n\
+             : main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            poly_err.contains("declares an inline-quotation parameter")
+                && poly_err.contains("`each`")
+                && poly_err.contains("must declare `inline`"),
+            "a variable-bearing `~` parameter is rejected too, got: {poly_err}"
+        );
+
+        // An ordinary `[ ... ]` parameter needs no `inline` at all: it is a
+        // real call (part D's territory), so this gate must not fire on it.
+        check_src(": apply ( i64 [ i64 -- i64 ] -- i64 ) call ;\n: main ( -- ) ;\n")
+            .expect("an ordinary `[ ... ]` parameter is exempt from this gate");
+    }
+
     /// Slice 11 (R3): a clause-bodied `inline` word is `is_combinator == false`
     /// (the predicate requires `WordBody::Terms`), so accepting it would lower
     /// it as an ordinary clause word -- the silent fall-back to a real call D2
@@ -556,14 +632,16 @@ mod tests {
     fn check_reference_free_signature_skipped_for_combinator() {
         check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n")
             .expect("an `inline` word may declare a reference output");
-        check_src("type: P n u32 ;\n: pick ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n")
-            .expect("a quotation-taking word is exempt too (the skip reads `is_combinator`)");
+        check_src(
+            "type: P n u32 ;\n: pick inline ( &!P ~[ -- ] -- &!u32 ) | p f | f call p &!P>n ;\n",
+        )
+        .expect("a quotation-taking word is exempt too (the skip reads `is_combinator`)");
         // A *poly* combinator takes the same exemption by the same guard: it
         // reaches `check_word` through the concrete stand-in
         // `check_poly_combinator_standalone` builds, which carries the quotation
         // parameter (and the flag) across and so is itself `is_combinator`.
         check_src(
-            "type: P n u32 ;\n: pick ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!P>n ;\n",
+            "type: P n u32 ;\n: pick inline ( 'T &!P ~[ 'T -- ] -- &!u32 ) | v p f | v f call p &!P>n ;\n",
         )
         .expect("a poly combinator is exempt through its concrete stand-in");
         let err =

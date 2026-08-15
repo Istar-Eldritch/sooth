@@ -64,7 +64,7 @@ fn run_at_stack_limit(binary: &std::path::Path, limit_kb: u32) -> (Option<i32>, 
 /// The recon-4 `my-times`, spelled with `..s i64 i64 ~[ ..s i64 -- ..s ]`:
 /// `from`/`to` are two separate `i64` counters, not a typo for `times`'s own
 /// single count.
-const MY_TIMES: &str = ": my-times ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
+const MY_TIMES: &str = ": my-times inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )\n\
      | f | | to | | from |\n\
      from to < [\n\
        from f call\n\
@@ -105,7 +105,7 @@ fn row_grounding_accepts_a_borrow_of_an_unrelated_place_of_the_same_type() {
     // proves the substitution actually took effect at runtime, not merely
     // that the check let it through.
     let src = "type: V x i64 ;\n\
-               : apply-with-v ( ..s &!V ~[ ..s &!V -- ..s ] -- ..s )\n\
+               : apply-with-v inline ( ..s &!V ~[ ..s &!V -- ..s ] -- ..s )\n\
                | f | f call ;\n\
                : main ( -- )\n\
                0 V | a |\n\
@@ -186,11 +186,11 @@ fn combinators_library_declares_exactly_seven_tildes() {
     )
     .expect("reading lib/combinators.sth should succeed");
     assert!(
-        current_src.contains(": times-helper ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )"),
+        current_src.contains(": times-helper inline ( ..s i64 i64 ~[ ..s i64 -- ..s ] -- ..s )"),
         "lib/combinators.sth must declare `times-helper` over an inline quotation"
     );
     assert!(
-        current_src.contains(": times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )"),
+        current_src.contains(": times inline ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )"),
         "lib/combinators.sth must declare `times` over an inline quotation"
     );
     assert_eq!(
@@ -208,7 +208,7 @@ fn while_is_unaffected_by_the_row_and_back_edge_rewrite() {
     // rewrite had to keep agreeing with; this is the value-level twin of
     // `while_self_tail_still_checks_after_back_edge_rewrite`
     // (`src/check.rs`), run end to end.
-    let src = ": while ( 'a [ 'a -- 'a bool ] -- 'a )\n\
+    let src = ": while inline ( 'a [ 'a -- 'a bool ] -- 'a )\n\
                | p | p call [ p while ] [ ] if ;\n\
                : main ( -- ) 0 [ dup 5 < [ 1 + true ] [ false ] if ] while . ;\n";
     let (stdout, code) = run_src("while-unaffected", src);

@@ -15,13 +15,13 @@ use sooth::{check, lexer, parser};
 
 /// A two-way branch whose two quotation parameters are each `call`ed in tail
 /// position, so both inherit their caller's tail position.
-const BOOL_Q: &str = ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+const BOOL_Q: &str = ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
      | e | | t | | c | c [ t call ] [ e call ] if ;\n";
 
 /// Recon 4's negative twin: each arm `call`s one parameter and *then* drops the
 /// other, so `drop` holds the tail position and neither parameter is
 /// tail-called. Identical callers must stay ordinary recursion.
-const BOOL_D: &str = ": Bool!? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
+const BOOL_D: &str = ": Bool!? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 )\n\
      | e | | t | | c | c [ t call e drop ] [ e call t drop ] if ;\n";
 
 fn sum_to(branch: &str, iterations: u32) -> String {
@@ -209,7 +209,7 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
     // the reference is safe; the two sides just disagreed about whether this
     // was a loop.
     let src = "type: V x i64 ;\n\
-        : Bool? ( bool ~[ -- ] ~[ -- ] -- )\n\
+        : Bool? inline ( bool ~[ -- ] ~[ -- ] -- )\n\
         | e | | t | | c | c [ t call ] [ e call ] if ;\n\
         : spin ( &!V i64 -- )\n\
         | r n |\n\
@@ -244,7 +244,7 @@ fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
     // separates the loop from the recursion; the REPL echoes the whole
     // residual stack each line, so the assertion pins the exact line.
     let out = run_session(&[
-        ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
+        ": Bool? inline ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
          | e | | t | | c | c [ t call ] [ e call ] if ;",
         ": sum-to ( i64 i64 -- i64 ) \
          | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;",
@@ -289,7 +289,7 @@ fn linear_value_forwarded_into_the_spliced_back_edge_is_ok() {
     // (the `Spy` rides the carried row) and disposes exactly once.
     let src = "type: Spy tag i64 ;\n\
         : drop ( Spy -- ) | s | \"drop \" . s Spy>tag . ;\n\
-        : Bool? ( Spy bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
+        : Bool? inline ( Spy bool ~[ Spy -- i64 ] ~[ Spy -- i64 ] -- i64 )\n\
         | e | | t | | c | c [ t call ] [ e call ] if ;\n\
         : spin ( Spy i64 -- i64 )\n\
         | n | n 0 = [ | s | s drop 0 ] [ | s | s n 1 - spin ] Bool? ;\n\

@@ -61,7 +61,9 @@ use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
 use self::terms::check_terms;
 use self::terms::check_terms_relaxed;
-pub(crate) use self::word_entry::check_inline_declaration;
+pub(crate) use self::word_entry::{
+    check_inline_declaration, check_inline_quotation_requires_inline,
+};
 use self::word_entry::{check_reference_free_signature, check_word};
 use self::word_families::*;
 
@@ -551,6 +553,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     // combinator).
     for word in words.iter() {
         check_inline_declaration(word)?;
+        check_inline_quotation_requires_inline(word)?;
     }
     // R18: the monomorphic quotation-taking words, gathered once so a call to
     // one is intercepted and inlined (term-splice) rather than lowered to a
@@ -2091,7 +2094,7 @@ mod tests {
     /// exists to prevent).
     #[test]
     fn shape_changing_quotation_with_no_sibling_checks_its_declared_trailing_output() {
-        let src = ": g ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
+        let src = ": g inline ( ..i bool ~[ ..i -- ..o i64 ] -- ..o i64 ) | c | drop c call ;\n\
              : demo ( i64 -- i64 i64 ) true [ dup 1 = ] g ;\n";
         let err = check_src(src).unwrap_err();
         assert!(
@@ -2786,7 +2789,7 @@ mod tests {
     /// silent soundness hole -- so the test is not a placebo.)
     #[test]
     fn back_edge_rejects_mismatched_self_call_argument() {
-        let src = ": loopy ( ..s 'a i64 ~[ ..s 'a -- ..s ] -- ..s )\n\
+        let src = ": loopy inline ( ..s 'a i64 ~[ ..s 'a -- ..s ] -- ..s )\n\
                    | f | | n | | acc |\n\
                    n 0 > [\n\
                    acc f call\n\
@@ -2809,7 +2812,9 @@ mod tests {
     /// post-rewrite (they agree at 1<->1) -- must still type-check identically.
     #[test]
     fn while_self_tail_still_checks_after_back_edge_rewrite() {
-        check_src(": while ( 'a [ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n")
-            .expect("`while` still type-checks after the back-edge rewrite");
+        check_src(
+            ": while inline ( 'a ~[ 'a -- 'a bool ] -- 'a ) | p | p call [ p while ] [ ] if ;\n",
+        )
+        .expect("`while` still type-checks after the back-edge rewrite");
     }
 }
