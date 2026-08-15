@@ -147,22 +147,21 @@ pub(crate) fn combinator_of(word: &WordDef) -> Option<Combinator<'_>> {
     }
 }
 
-/// R18/R20: a combinator is a **monomorphic** `WordBody::Terms` word declaring
-/// `inline`. The checker inlines a call to one (splicing its body) and
-/// lowering mints no `IrFunc` for it, so `check` and `ir::lower` must agree on
-/// the predicate exactly; it lives here as the single source.
+/// R18/R20: a combinator is a `WordBody::Terms` word declaring `inline`
+/// (recognition is **declared, not inferred**, R-A1). The checker inlines a
+/// call to one (splicing its body) and lowering mints no `IrFunc` for it, so
+/// `check` and `ir::lower` must agree on the predicate exactly; it lives here
+/// as the single source.
 ///
-/// Slice 12 (R-A1): recognition is **declared, not inferred**. Earlier slices
-/// also recognized a combinator by its signature shape alone (any word naming
-/// a quotation parameter); that inference leg is retired. A word that takes a
-/// `~[ ... ]` (`Type::InlineQuotation`) parameter cannot be anything *but* a
-/// combinator (a `~` quotation has no runtime representation), so it must
-/// declare `inline` too (`check_inline_declaration`'s R-B1 neighbour rejects it
-/// otherwise); a word taking only an ordinary `[ ... ]` (`Type::Quotation`)
-/// parameter and no `inline` is now an ordinary real call (part D lowers that
-/// shape). The `WordBody::Terms` conjunct is retained, so a clause-bodied word
-/// is never a combinator regardless of the flag; a clause-bodied `inline` word
-/// is rejected at its definition (`check_inline_declaration`) rather than
+/// A word that takes a `~[ ... ]` (`Type::InlineQuotation`) parameter cannot
+/// be anything *but* a combinator (a `~` quotation has no runtime
+/// representation), so it must declare `inline` too
+/// (`check_inline_declaration`'s R-B1 neighbour rejects it otherwise); a word
+/// taking only an ordinary `[ ... ]` (`Type::Quotation`) parameter and no
+/// `inline` is an ordinary real call (part D lowers that shape). The
+/// `WordBody::Terms` conjunct means a clause-bodied word is never a
+/// combinator regardless of the flag; a clause-bodied `inline` word is
+/// rejected at its definition (`check_inline_declaration`) rather than
 /// silently lowered as an ordinary clause word, so the two never disagree in a
 /// way that reaches codegen.
 pub fn is_combinator(word: &WordDef) -> bool {

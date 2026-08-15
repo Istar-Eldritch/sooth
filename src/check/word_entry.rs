@@ -623,11 +623,14 @@ mod tests {
     }
 
     /// Slice 11 (R5/D5): the no-reference-output rule is skipped for an
-    /// always-spliced word. The skip is keyed on `is_combinator`, not on
-    /// `declares_inline`, and the middle case is what discriminates the two
-    /// phrasings: a quotation-taking word declares no `inline` and is exempt all
-    /// the same. The third is the outermost boundary -- a real word, which does
-    /// have a frame of its own to lose, is still rejected.
+    /// always-spliced word. Post-R-A1 the skip's `is_combinator` and
+    /// `declares_inline` are extensionally identical for anything `check_src`
+    /// can reach here (a `~[ ... ]` parameter without `inline` is rejected
+    /// first, by `check_inline_declaration`'s R-B1 neighbour), so the middle
+    /// case below no longer discriminates the two phrasings; it still stands
+    /// as a poly-combinator regression. The third case is the outermost
+    /// boundary -- a real word, which does have a frame of its own to lose, is
+    /// still rejected.
     #[test]
     fn check_reference_free_signature_skipped_for_combinator() {
         check_src("type: P n u32 ;\n: pick inline ( &!P -- &!u32 ) | p | p &!P>n ;\n")

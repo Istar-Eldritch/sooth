@@ -70,8 +70,9 @@ fn migrated_library_words_mint_no_symbol() {
         "if",
         "unless",
     ] {
+        let mangled = format!("{name}__m");
         assert!(
-            !symbols.contains(name),
+            !symbols.contains(&mangled),
             "`{name}` gained `inline` this slice and must mint no symbol; nm found:\n{symbols}"
         );
     }
