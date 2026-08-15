@@ -2927,20 +2927,22 @@ mod tests {
     }
 
     #[test]
-    fn borrowing_a_quotation_local_is_rejected_by_the_splice_path() {
-        // Phase 2 review, R-B8's `&q` witness: `poly_reference_word` never
-        // sees a quotation local. A quotation input makes the word a
-        // combinator, and a combinator is checked by splicing it at the call
-        // site -- so the rejection is the *monomorphic* one, naming the
-        // instantiated `[ i64 -- i64 ]` rather than a poly type. Pinned as
-        // the actual behaviour: the borrow is rejected, just not here.
+    fn borrowing_a_quotation_local_is_rejected() {
+        // R-B8's `&q` witness. UPDATED after the slice 12 rebase: slice 12
+        // retired `is_combinator`'s quotation-parameter inference leg (a word
+        // now splices only when it *declares* `inline`), so `ap`'s ordinary,
+        // non-`inline` `[ 'T -- 'T ]` parameter no longer makes it a
+        // combinator -- it is checked as a genuine poly body, and
+        // `poly_reference_word` itself rejects the quotation-typed local `f`
+        // (D5: only an aggregate is borrowable) directly, rather than the
+        // splice path naming a monomorphic instantiation.
         let err = check_src(
             ": ap ( 'T [ 'T -- 'T ] -- 'T ) | x f | f &f drop x swap call ;\n: main ( -- ) 3 [ 1 + ] ap . ;\n",
         )
         .unwrap_err();
         assert_eq!(
             err,
-            "error: cannot borrow the scalar local `f` of type `[ i64 -- i64 ]` in `ap` (line 1, col 42)\n  a scalar has no address; borrow a field or an aggregate instead"
+            "error: cannot borrow the local `f` of type `[ 'T -- 'T ]` in `ap` (line 1, col 42)\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `[ 'T -- 'T ]` is not"
         );
     }
 
