@@ -912,7 +912,12 @@ fn drop_import_visibility_error(
 
 /// A constant (literal) index out of range for a `[T N]` (X4, R11): a compile
 /// error naming the length `N` and the offending index.
-fn array_index_out_of_range_error(ctx: &Ctx, span: Span, count: u32, index: i64) -> String {
+pub(super) fn array_index_out_of_range_error(
+    ctx: &Ctx,
+    span: Span,
+    count: u32,
+    index: i64,
+) -> String {
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: array index out of range in `{}` (line {})\n  index {} is out of bounds for length {}\n  note: declared {}",

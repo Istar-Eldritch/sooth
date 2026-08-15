@@ -215,10 +215,18 @@ pub fn check_poly_body(
         }
     };
     let stack = sig.inputs.clone();
+    // Slice 13 (R-B3): a parallel int-literal shadow of the stack, `None` for
+    // every non-`IntLit` value (mirrors `Slot::int_val`, which the `PolyType`
+    // stack has no room for). Load-bearing only for `&>`'s static bounds
+    // check against a literal index; every other consumer clears it, exactly
+    // as any operator but a bare shuffle clears `Slot::int_val` in the
+    // monomorphic checker.
+    let mut lits: Vec<Option<i64>> = vec![None; stack.len()];
     let mut scope = PolyScope::default();
     let residual = poly_walk(
         terms,
         stack,
+        &mut lits,
         &mut scope,
         sig,
         &ctx,
@@ -246,6 +254,7 @@ pub fn check_poly_body(
 pub(super) fn poly_walk(
     terms: &[Term],
     mut stack: Vec<PolyType>,
+    lits: &mut Vec<Option<i64>>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
@@ -259,6 +268,7 @@ pub(super) fn poly_walk(
         stack = poly_term(
             term,
             stack,
+            lits,
             scope,
             sig,
             ctx,
@@ -276,6 +286,7 @@ pub(super) fn poly_walk(
 pub(super) fn poly_term(
     term: &Term,
     mut stack: Vec<PolyType>,
+    lits: &mut Vec<Option<i64>>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
@@ -287,9 +298,18 @@ pub(super) fn poly_term(
 ) -> Result<Vec<PolyType>, String> {
     let span = term.span;
     match &term.kind {
-        TermKind::IntLit(_) => stack.push(PolyType::Concrete(Type::I64)),
-        TermKind::FloatLit(_) => stack.push(PolyType::Concrete(Type::F64)),
-        TermKind::StrLit(_) => stack.push(PolyType::Concrete(Type::Str)),
+        TermKind::IntLit(n) => {
+            stack.push(PolyType::Concrete(Type::I64));
+            lits.push(Some(*n));
+        }
+        TermKind::FloatLit(_) => {
+            stack.push(PolyType::Concrete(Type::F64));
+            lits.push(None);
+        }
+        TermKind::StrLit(_) => {
+            stack.push(PolyType::Concrete(Type::Str));
+            lits.push(None);
+        }
         TermKind::Bind(names) => {
             if stack.len() < names.len() {
                 let op = format!("| {} |", names.join(" "));
@@ -319,6 +339,11 @@ pub(super) fn poly_term(
                 }
             }
             let bound = stack.split_off(stack.len() - names.len());
+            // A bound local's own literal-ness is not tracked (D6/R-B3 only
+            // needs a literal that is still the immediate top of stack); a
+            // local read back later carries no int value, same as any other
+            // computed slot.
+            lits.truncate(lits.len() - names.len());
             for (name, pt) in names.iter().zip(bound) {
                 // A non-`Copy` binding carries a consume-exactly-once
                 // obligation tracked in `moves`; a `Copy` one does not.
@@ -333,6 +358,7 @@ pub(super) fn poly_term(
                 name,
                 span,
                 stack,
+                lits,
                 scope,
                 sig,
                 ctx,
@@ -376,6 +402,7 @@ pub(super) fn poly_call_term(
     name: &str,
     span: Span,
     mut stack: Vec<PolyType>,
+    lits: &mut Vec<Option<i64>>,
     scope: &mut PolyScope,
     sig: &PolySig,
     ctx: &Ctx,
@@ -395,9 +422,42 @@ pub(super) fn poly_call_term(
             .take(name, span)
             .map_err(|site| poly_use_after_move_error(ctx, span, name, site))?;
         stack.push(pt);
+        lits.push(None);
         return Ok(stack);
     }
     let need = |n: usize, holds: usize| underflow_error(ctx, span, name, n, holds);
+    // R-B1 (slice 13): every `&`-led word (the prefix borrow and the
+    // reference accessor family) fronts the rest of dispatch, mirroring
+    // `check_reference_word`'s own position ahead of the monomorphic
+    // family. `Ok(None)` (not `&`-led, or a mutable spelling Phase 3 has not
+    // yet added) falls through unchanged.
+    if let Some(next) = poly_reference_word(
+        name, span, &mut stack, lits, scope, sig, ctx, structs, enums, arrays,
+    )? {
+        return Ok(next);
+    }
+    // Slice 13 (R-B4): `@` fetches a `Copy` referent through any reference,
+    // shared or mutable -- there is no `&!T -> &T` demotion to write, so both
+    // mutabilities are typed identically here.
+    if name == "@" {
+        let top = stack.last().ok_or_else(|| need(1, stack.len()))?.clone();
+        let PolyType::Ref(referent, _) = &top else {
+            return Err(poly_op_on_variable_error(ctx, span, "@", &top, sig));
+        };
+        poly_copy_gate(referent, "@", sig, ctx, span, structs, enums, arrays)?;
+        let out = (**referent).clone();
+        stack.pop();
+        lits.pop();
+        stack.push(out);
+        lits.push(None);
+        return Ok(stack);
+    }
+    // Slice 13 (R-B4/R-B6): the store family. `!`'s mutable path is Phase 3;
+    // `+!` never lands in a generic body (R-B6), so it is a located error
+    // now rather than an eventual unknown-word one once `!` is added.
+    if name == "+!" {
+        return Err(poly_unsupported_accessor_error(ctx, span, name));
+    }
     // The five core shuffles move `PolyType` slots verbatim; `dup`/`over` gate
     // on `Copy` (a bare variable answers from its bound set, X7).
     match name {
@@ -405,6 +465,7 @@ pub(super) fn poly_call_term(
             let top = stack.last().ok_or_else(|| need(1, stack.len()))?.clone();
             poly_copy_gate(&top, "dup", sig, ctx, span, structs, enums, arrays)?;
             stack.push(top);
+            lits.push(*lits.last().expect("stack/lits length invariant"));
             return Ok(stack);
         }
         "over" => {
@@ -415,6 +476,7 @@ pub(super) fn poly_call_term(
             let below = stack[n - 2].clone();
             poly_copy_gate(&below, "over", sig, ctx, span, structs, enums, arrays)?;
             stack.push(below);
+            lits.push(lits[n - 2]);
             return Ok(stack);
         }
         "swap" => {
@@ -423,6 +485,7 @@ pub(super) fn poly_call_term(
                 return Err(need(2, n));
             }
             stack.swap(n - 1, n - 2);
+            lits.swap(n - 1, n - 2);
             return Ok(stack);
         }
         "rot" => {
@@ -432,10 +495,13 @@ pub(super) fn poly_call_term(
             }
             let a = stack.remove(n - 3);
             stack.push(a);
+            let al = lits.remove(n - 3);
+            lits.push(al);
             return Ok(stack);
         }
         "drop" => {
             stack.pop().ok_or_else(|| need(1, 0))?;
+            lits.pop();
             return Ok(stack);
         }
         "len" => {
@@ -444,10 +510,13 @@ pub(super) fn poly_call_term(
                 PolyType::Array(..) | PolyType::Concrete(Type::Array(..)) => {
                     // Non-consuming: the array stays, `len` folds to `usize`.
                     stack.push(PolyType::Concrete(Type::Usize));
+                    lits.push(None);
                 }
                 PolyType::Concrete(Type::Str) => {
                     stack.pop();
+                    lits.pop();
                     stack.push(PolyType::Concrete(Type::Usize));
+                    lits.push(None);
                 }
                 _ => return Err(poly_op_on_variable_error(ctx, span, "len", top, sig)),
             }
@@ -478,7 +547,9 @@ pub(super) fn poly_call_term(
                     _ => return Err(poly_op_operand_mismatch_error(ctx, span, name, &a, &b, sig)),
                 }
                 stack.truncate(n - 2);
+                lits.truncate(n - 2);
                 stack.push(PolyType::Concrete(Type::BOOL));
+                lits.push(None);
                 return Ok(stack);
             }
         }
@@ -545,8 +616,10 @@ pub(super) fn poly_call_term(
                 }
             }
             stack.truncate(base);
+            lits.truncate(base);
             for out in &msig.outputs {
                 stack.push(PolyType::Concrete(*out));
+                lits.push(None);
             }
             if exact && (is_builtin_name || chosen.symbol != name) {
                 builtin_overloads.insert(span, chosen.symbol.clone());
@@ -557,10 +630,185 @@ pub(super) fn poly_call_term(
     // Everything else is an ordinary operator over concrete operands. Extract
     // the maximal concrete suffix, run the concrete check, reflect it back; a
     // variable operand (a too-short suffix) surfaces as the op's own error.
-    if let Some(next) = poly_delegate_op(name, span, &mut stack, ctx, env, builtin_overloads)? {
+    if let Some(next) = poly_delegate_op(name, span, &mut stack, lits, ctx, env, builtin_overloads)?
+    {
         return Ok(next);
     }
     Err(unknown_word_error(ctx, span, name))
+}
+
+/// Slice 13 (R-B1): every `&`-led word reaching a polymorphic body -- the
+/// prefix borrow (`&x`) and the shared array-element accessor (`&>`) this
+/// phase produces, plus the permanently out-of-scope owning-cell/struct-field
+/// family (`&^`, `&Struct>field`, R-B6) rejected regardless of mutability.
+/// Mirrors `check_reference_word` fronting the monomorphic family: `Ok(None)`
+/// if `name` is not `&`-led, or is a mutable (`&!`) spelling of a form Phase 3
+/// has not yet added (the mutable path and its exclusivity check land there,
+/// per OQ1) -- the caller then falls through exactly as it did before this
+/// phase, ending in the ordinary unknown-word error.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn poly_reference_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<PolyType>,
+    lits: &mut Vec<Option<i64>>,
+    scope: &mut PolyScope,
+    sig: &PolySig,
+    ctx: &Ctx,
+    _structs: &[StructDecl],
+    _enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<Option<Vec<PolyType>>, String> {
+    if !name.starts_with('&') {
+        return Ok(None);
+    }
+    let mutable = name.starts_with("&!");
+    let rest = &name[if mutable { 2 } else { 1 }..];
+    let need = |op: &str, n: usize, holds: usize| underflow_error(ctx, span, op, n, holds);
+
+    // R-B6: an owning-cell or a struct-field accessor never produces a
+    // variable-referent ref (no generic structs/enums this slice) and is out
+    // of scope for a generic body regardless of mutability -- a located error
+    // now, never a silent fallthrough to an eventual unknown-word one.
+    if rest == "^" || (rest != ">" && rest.contains('>')) {
+        return Err(poly_unsupported_accessor_error(ctx, span, name));
+    }
+
+    match rest {
+        ">" => {
+            // Phase 3 (R-B3, mutable half): `&!>` lands with the exclusivity
+            // check. Until then, declining leaves it an ordinary unknown word.
+            if mutable {
+                return Ok(None);
+            }
+            let n = stack.len();
+            if n < 2 {
+                return Err(need(name, 2, n));
+            }
+            let index_pt = stack[n - 1].clone();
+            let index_lit = lits[n - 1];
+            let receiver = stack[n - 2].clone();
+            let Some((recv_mut, elem, len)) = poly_ref_array_parts(&receiver, arrays) else {
+                return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
+            };
+            if recv_mut != mutable {
+                return Err(poly_op_on_variable_error(ctx, span, name, &receiver, sig));
+            }
+            let count = match len {
+                Len::Concrete(count) => count,
+                // D6: a fully generic-length array's element cannot be
+                // statically bounds-checked; a dependent-bounds problem this
+                // slice defers (its own slice, `'N`-length element access).
+                Len::Var(v) => {
+                    return Err(poly_generic_length_index_error(
+                        ctx,
+                        span,
+                        &sig.len_var_names[v as usize],
+                    ));
+                }
+            };
+            check_poly_array_index(&index_pt, index_lit, count, ctx, span, name, sig)?;
+            stack.truncate(n - 2);
+            lits.truncate(n - 2);
+            stack.push(PolyType::Ref(Box::new(elem), mutable));
+            lits.push(None);
+        }
+        _ => {
+            // Phase 3 adds the mutable prefix borrow (`&!x`) and its
+            // exclusivity check; until then, declining leaves it unknown.
+            if mutable {
+                return Ok(None);
+            }
+            if rest.is_empty() {
+                return Err(poly_borrow_of_non_place_error(ctx, span, name));
+            }
+            let Some(local_pt) = scope.locals.get(rest).cloned() else {
+                return Err(poly_borrow_of_non_local_error(ctx, span, name, rest));
+            };
+            // D5: only an aggregate local is borrowable -- a bare type
+            // variable might instantiate to a scalar, which has no address,
+            // so the conservative rule refuses every bare-variable local
+            // uniformly rather than deferring the question to instantiation.
+            let is_aggregate = matches!(local_pt, PolyType::Array(..))
+                || matches!(
+                    local_pt,
+                    PolyType::Concrete(
+                        Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..)
+                    )
+                );
+            if !is_aggregate {
+                let ty_str = poly_type_str(&local_pt, sig);
+                return Err(match local_pt {
+                    PolyType::Var(_) => {
+                        poly_borrow_of_variable_local_error(ctx, span, rest, &ty_str)
+                    }
+                    _ => poly_borrow_of_non_aggregate_local_error(ctx, span, rest, &ty_str),
+                });
+            }
+            // Borrowing is not a move, but the referent still has to be
+            // there: a local already consumed holds nothing, exactly the
+            // monomorphic `use_after_move_error` reason for the same op.
+            if let Some(site) = scope.moves.moved_site(rest) {
+                return Err(poly_use_after_move_error(ctx, span, rest, site));
+            }
+            stack.push(PolyType::Ref(Box::new(local_pt), mutable));
+            lits.push(None);
+        }
+    }
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// Slice 13 (R-B3): the array shape a poly-body `&>`/`&!>` receiver borrows,
+/// as `(mutable, element, length)` -- a variable-bearing `PolyType::Array`
+/// directly, or a fully concrete array folded to `Concrete(Type::Array)` and
+/// looked up in the registry, mirroring the two representations
+/// `raw_to_poly_type` leaves for an array shape. `None` if `pt` is not a
+/// reference to an array at all.
+fn poly_ref_array_parts(pt: &PolyType, arrays: &[ArrayDecl]) -> Option<(bool, PolyType, Len)> {
+    let PolyType::Ref(referent, mutable) = pt else {
+        return None;
+    };
+    match referent.as_ref() {
+        PolyType::Array(elem, len) => Some((*mutable, (**elem).clone(), len.clone())),
+        PolyType::Concrete(Type::Array(id, _)) => {
+            let decl = &arrays[id.index()];
+            Some((
+                *mutable,
+                PolyType::Concrete(decl.element),
+                Len::Concrete(decl.count),
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Slice 13 (R-B3): `&>`/`&!>`'s static bounds check against a concrete
+/// count, the poly-body twin of the monomorphic `check_array_index`. Unlike
+/// `Slot`, the `PolyType` stack carries no `int_val` of its own, so the
+/// caller passes the parallel `lits` shadow's entry (`R-B3`'s doc comment on
+/// `check_poly_body`) alongside the index's `PolyType`.
+#[allow(clippy::too_many_arguments)]
+fn check_poly_array_index(
+    index_pt: &PolyType,
+    index_lit: Option<i64>,
+    count: u32,
+    ctx: &Ctx,
+    span: Span,
+    op: &str,
+    sig: &PolySig,
+) -> Result<(), String> {
+    match index_pt {
+        PolyType::Concrete(Type::Usize) => Ok(()),
+        PolyType::Concrete(Type::I64) => match index_lit {
+            Some(idx) if idx >= 0 && idx < i64::from(count) => Ok(()),
+            Some(idx) => Err(array_index_out_of_range_error(ctx, span, count, idx)),
+            // A computed (non-literal) `i64` index needs the explicit
+            // `>usize` conversion the monomorphic checker also requires;
+            // there is no value here to bounds-check at compile time.
+            None => Err(size_conversion_needed_error(ctx, span, op, Type::Usize)),
+        },
+        other => Err(poly_op_on_variable_error(ctx, span, op, other, sig)),
+    }
 }
 
 /// The variable id of a bare `PolyType::Var`, else `None` (a concrete or
@@ -630,6 +878,7 @@ pub(super) fn poly_delegate_op(
     name: &str,
     span: Span,
     stack: &mut Vec<PolyType>,
+    lits: &mut Vec<Option<i64>>,
     ctx: &Ctx,
     env: &HashMap<String, Vec<Overload>>,
     builtin_overloads: &mut HashMap<Span, String>,
@@ -689,8 +938,10 @@ pub(super) fn poly_delegate_op(
         return Ok(None);
     }
     stack.truncate(split);
+    lits.truncate(split);
     for slot in cstack {
         stack.push(PolyType::Concrete(slot.ty));
+        lits.push(None);
     }
     Ok(Some(std::mem::take(stack)))
 }
@@ -1417,6 +1668,84 @@ pub(super) fn poly_var_to_concrete_error(
     format!(
         "error: `{callee}` in `{where_}` (line {}) expects `{expected}`, but the type variable `{var}` is not a concrete type",
         span.line
+    )
+}
+
+/// Slice 13 (E4/R-B6): an accessor with no poly-body support -- ever
+/// (`&^`, `&Struct>field`), or not yet (`+!` alongside `!`, still Phase 3) --
+/// located, never a silent fallthrough to an unknown-word error.
+pub(super) fn poly_unsupported_accessor_error(ctx: &Ctx, span: Span, op: &str) -> String {
+    let op = crate::resolve::demangle_call(op);
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{op}` is not yet supported in a generic body, in `{where_}` (line {})\n  monomorphize this word (or write a concrete wrapper) to use `{op}` today",
+        span.line
+    )
+}
+
+/// A bare `&`/`&!` sigil with no referent: names nothing, so there is no
+/// place to borrow. Mirrors the monomorphic `borrow_of_non_place_error`'s
+/// "a bare sigil cannot borrow whatever happens to be on the stack" case.
+fn poly_borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{spelled}` does not borrow a place in `{where_}` (line {})\n  it names nothing (a bare sigil cannot borrow whatever happens to be on the stack)",
+        span.line
+    )
+}
+
+/// `&x`/`&!x` where `x` is not a local currently in scope.
+fn poly_borrow_of_non_local_error(ctx: &Ctx, span: Span, spelled: &str, local: &str) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: `{spelled}` does not borrow a place in `{where_}` (line {})\n  `{local}` is not a local in scope",
+        span.line
+    )
+}
+
+/// Slice 13 (E2/D5): borrowing a local whose declared type is a bare type
+/// variable -- it might instantiate to a scalar, which has no address, so
+/// the conservative rule refuses every bare-variable local uniformly rather
+/// than deferring "is it an aggregate?" to instantiation. Mirrors the
+/// monomorphic `borrow_of_scalar_local_error`'s shape.
+pub(super) fn poly_borrow_of_variable_local_error(
+    ctx: &Ctx,
+    span: Span,
+    local: &str,
+    var: &str,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot borrow the local `{local}` of type `{var}` in `{where_}` (line {}, col {})\n  `{var}` might instantiate to a scalar, which has no address; borrow an aggregate (a struct, enum, array, or owning cell) instead",
+        span.line, span.col
+    )
+}
+
+/// D5's aggregate gate, the non-variable arm: a concrete scalar, or a local
+/// already itself a reference, is not an aggregate either. Not spec-pinned
+/// (no required golden exercises it), so the wording is free; it still
+/// names the local and its type rather than falling through to a generic
+/// diagnostic.
+fn poly_borrow_of_non_aggregate_local_error(
+    ctx: &Ctx,
+    span: Span,
+    local: &str,
+    ty: &str,
+) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot borrow the local `{local}` of type `{ty}` in `{where_}` (line {}, col {})\n  only an aggregate (a struct, enum, array, or owning cell) is borrowable; `{ty}` is not",
+        span.line, span.col
+    )
+}
+
+/// Slice 13 (E3/D6): `&>`/`&!>` on a generic-length array (`['T 'N]`) -- the
+/// element cannot be statically bounds-checked without a known count.
+pub(super) fn poly_generic_length_index_error(ctx: &Ctx, span: Span, len_var: &str) -> String {
+    let where_ = ctx.word_name().unwrap_or("<line>");
+    format!(
+        "error: cannot index a generic-length array in `{where_}` (line {}, col {})\n  the array's length is the type variable `{len_var}`, so its element cannot be statically bounds-checked; index a concrete-length array (`['T 4]`), or use a fixed length in this word's signature",
+        span.line, span.col
     )
 }
 
@@ -2349,5 +2678,165 @@ mod tests {
         assert_eq!(refs.len(), 1, "the shape must be interned exactly once");
         assert_eq!(refs[0].referent, Type::I64);
         assert!(refs[0].mutable);
+    }
+
+    // -- Phase 2 (R-B1..R-B6): production and checking --------------------
+
+    #[test]
+    fn first_reads_an_array_element_through_a_poly_borrow() {
+        // R-B2/R-B3/R-B4: the P2 read witness type-checks -- `&a` borrows
+        // the aggregate local, `0` is a literal index bounds-checked against
+        // the concrete length 4, and `@` fetches the `Copy` element.
+        check_src(
+            ": first ( ['T: Copy 4] -- 'T ) | a | &a 0 &> @ ;\n\
+             : main ( -- ) 10 4 fill first drop ;\n",
+        )
+        .expect("a shared prefix borrow, array-element ref, and fetch should check");
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_borrowing_a_bare_variable_local() {
+        // E2/D5: a bare `'T` local might instantiate to a scalar, which has
+        // no address, so it is refused uniformly rather than deferred.
+        let err = check_src(": badvar ( 'T: Copy -- 'T )\n  | t |\n  &t\n;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot borrow the local `t` of type `'T` in `badvar` (line 3, col 3)\n  `'T` might instantiate to a scalar, which has no address; borrow an aggregate (a struct, enum, array, or owning cell) instead"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_indexing_a_generic_length_array() {
+        // E3/D6: `['T 'N]` has no known count, so its element cannot be
+        // statically bounds-checked; only a concrete-length array's element
+        // is accessible this slice.
+        let err =
+            check_src(": badidx ( ['T 'N] -- 'T )\n  | a |\n  &a 0\n  &>\n  @\n;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot index a generic-length array in `badidx` (line 4, col 3)\n  the array's length is the type variable `'N`, so its element cannot be statically bounds-checked; index a concrete-length array (`['T 4]`), or use a fixed length in this word's signature"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_borrowing_a_moved_local() {
+        // E5: borrowing is not a move, but the referent still has to be
+        // there -- a local already consumed holds nothing.
+        let err = check_src(": badmove ( ['T 4] -- 'T )\n  | a |\n  a drop\n  &a 0 &> @\n;\n")
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "error: use after move in `badmove` (line 4)\n  local `a` is linear and was moved at line 3, col 3, so it is used exactly once"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_owning_cell_accessor_in_a_generic_body() {
+        // R-B6/E4: `&^` never produces a variable-referent ref (no generic
+        // structs/enums this slice), so it is out of scope regardless of
+        // mutability -- a located error, not a silent unknown-word one.
+        let err = check_src(": badcell ( 'T -- 'T )\n  &^\n;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `&^` is not yet supported in a generic body, in `badcell` (line 2)\n  monomorphize this word (or write a concrete wrapper) to use `&^` today"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_struct_field_accessor_in_a_generic_body() {
+        // R-B6/E4: `&Struct>field` is likewise out of scope -- a concrete
+        // struct field never has a variable referent either.
+        let err = check_src(": badfield ( 'T -- 'T )\n  &Point>x\n;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `&Point>x` is not yet supported in a generic body, in `badfield` (line 2)\n  monomorphize this word (or write a concrete wrapper) to use `&Point>x` today"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_add_in_place_in_a_generic_body() {
+        // R-B4/R-B6: `+!` is permanently out of scope, unlike `!` (Phase 3).
+        let err = check_src(": badaddstore ( 'T -- 'T )\n  +!\n;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `+!` is not yet supported in a generic body, in `badaddstore` (line 2)\n  monomorphize this word (or write a concrete wrapper) to use `+!` today"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_out_of_range_literal_index() {
+        // R-B3: the literal `9` is statically bounds-checked against the
+        // array's known length 4, mirroring the monomorphic `check_array_index`.
+        let err = check_src(": oob ( ['T: Copy 4] -- 'T )\n  | a |\n  &a 9 &> @\n;\n").unwrap_err();
+        assert!(err.contains("array index out of range"), "{err}");
+        assert!(err.contains("index 9"), "{err}");
+        assert!(err.contains("length 4"), "{err}");
+    }
+
+    #[test]
+    fn poly_reference_word_declines_a_mutable_borrow_this_phase() {
+        // Phase 3 adds `&!x`/`&!>`; until then, a mutable-sigil name is not
+        // recognized here and falls through to the ordinary unknown-word
+        // error, exactly as it did before this phase.
+        let err =
+            check_src(": badmut ( ['T: Copy 4] -- 'T )\n  | a |\n  &!a 0 &!> @\n;\n").unwrap_err();
+        assert!(
+            err.contains("unknown word") || err.contains("no overload"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn check_poly_array_index_bounds_checks_a_literal_and_requires_conversion_otherwise() {
+        // R-B3, direct unit coverage of the helper mutation testing would
+        // otherwise miss: a literal within range passes, one out of range
+        // rejects, and a computed (non-literal) `i64` needs the explicit
+        // `>usize` conversion the monomorphic checker also requires.
+        let sig = ref_sig();
+        let ctx = Ctx::Line {
+            structs: &[],
+            enums: &[],
+        };
+        let span = Span::default();
+        check_poly_array_index(
+            &PolyType::Concrete(Type::I64),
+            Some(2),
+            4,
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect("an in-range literal should pass");
+        check_poly_array_index(
+            &PolyType::Concrete(Type::I64),
+            Some(9),
+            4,
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect_err("an out-of-range literal should reject");
+        check_poly_array_index(
+            &PolyType::Concrete(Type::I64),
+            None,
+            4,
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect_err("a computed i64 needs the explicit >usize conversion");
+        check_poly_array_index(
+            &PolyType::Concrete(Type::Usize),
+            None,
+            4,
+            &ctx,
+            span,
+            "&>",
+            &sig,
+        )
+        .expect("an already-usize index needs no literal at all");
     }
 }
