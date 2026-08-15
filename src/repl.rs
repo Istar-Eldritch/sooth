@@ -254,6 +254,20 @@ fn remap_poly_type(
             )),
             len.clone(),
         ),
+        // Slice 13 (R-A9): the poly reference carries no `RefId` of its own
+        // (that is minted only at grounding), so only the referent shifts;
+        // the mutability passes through verbatim.
+        PolyType::Ref(referent, mutable) => PolyType::Ref(
+            Box::new(remap_poly_type(
+                referent,
+                struct_base,
+                enum_base,
+                array_base,
+                cell_base,
+                ref_base,
+            )),
+            *mutable,
+        ),
         PolyType::Quotation(ins, outs, is_inline, row_in, row_out) => PolyType::Quotation(
             ins.iter()
                 .map(|q| {
@@ -1321,6 +1335,7 @@ impl Session {
                 &resolve,
                 regs,
                 &self.arrays,
+                &self.refs,
                 &bodies,
             ));
             newly.push(inst.symbol.clone());
@@ -2578,7 +2593,7 @@ impl Session {
         // per-word audit, before the R6 combinator route below (so a quotation
         // in a non-input position is still rejected). A poly word's effect is
         // empty, so its output-position check runs on the poly path.
-        check::audit_word_quotation_positions(&word)?;
+        check::audit_word_quotation_positions(&word, &self.structs, &self.enums, &self.arrays)?;
         // Slice 11 (R3): the same per-word `inline` rejections native `check`
         // runs as a pre-pass, at the REPL's own per-word gate -- the poly half
         // in particular, which the retention route below would otherwise carry

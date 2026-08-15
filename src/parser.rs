@@ -673,6 +673,11 @@ enum RawTy {
     /// effect declared, if any (R4: it can only be the signature's own
     /// top-level row, so it is already an id in that row id space).
     Quotation(Vec<RawTy>, Vec<RawTy>, bool, Option<u32>, Option<u32>),
+    /// Slice 13 (R-A2): a `&`-led slot whose referent may itself be variable
+    /// (`&'T`, `&!['T 'N]`), folded to `PolyType::Ref` -- or to
+    /// `Concrete(Type::Ref)` when the referent folds fully concrete -- by
+    /// `raw_to_poly_type`.
+    Ref(Box<RawTy>, bool),
 }
 
 enum RawLen {
@@ -903,6 +908,16 @@ fn quotation_row_shape_change_error(row_in: &str, row_out: &str) -> String {
 fn quotation_row_requires_inline_error(name: &str, span: Span) -> String {
     format!(
         "error: a quotation effect with a row (`{name}`) must be inline (`~[ ... ]`) at line {}, col {}: a row's size is unknown at runtime, so only a splice-only quotation may carry one",
+        span.line, span.col
+    )
+}
+
+/// A `&`/`&!` sigil with nothing after it to borrow. Shared by the concrete
+/// type-expression path and Slice 13's poly-slot interception so both spell
+/// the same fact the same way.
+fn ref_no_referent_error(word: &str, span: Span) -> String {
+    format!(
+        "error: reference type `{word}` has no referent type at line {}, col {} (write `{word}T` for some type T)",
         span.line, span.col
     )
 }
@@ -1305,6 +1320,13 @@ impl<'t> Parser<'t> {
     /// is poly-forced even when its effect is otherwise fully concrete, since
     /// `WordDef.poly = Some(..)` is what R9 context 4's unreachability
     /// depends on.
+    /// Slice 13 (R-A3, review fix): a glued `&'T`/`&!'T` is one `Word` token
+    /// starting with `&`, not `'`, so it was missed by this pre-scan and the
+    /// whole effect took the concrete path -- where `parse_ref_type_expr`
+    /// then resolves `'T` as an (unknown) concrete type name. A glued
+    /// referent must be recognized here too, or `parse_poly_slot`'s glued
+    /// branch (R-A3) is only ever reached when some other slot in the same
+    /// effect is independently variable-bearing.
     fn effect_has_variable(&self) -> bool {
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
@@ -1312,6 +1334,13 @@ impl<'t> Parser<'t> {
                 Token::RParen => return false,
                 Token::TildeLBracket => return true,
                 Token::Word(w) if w.starts_with('\'') || w.starts_with("..") => return true,
+                Token::Word(w)
+                    if w.strip_prefix('&')
+                        .map(|r| r.strip_prefix('!').unwrap_or(r))
+                        .is_some_and(|r| r.starts_with('\'')) =>
+                {
+                    return true;
+                }
                 _ => {}
             }
             i += 1;
@@ -1406,35 +1435,87 @@ impl<'t> Parser<'t> {
         }
         if matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
-            let glued_colon = w.ends_with(':') && w.len() > 1;
-            let name = if glued_colon {
-                w[..w.len() - 1].to_string()
-            } else {
-                w.clone()
-            };
-            let bound_follows =
-                glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":");
-            if bound_follows && !glued_colon {
-                self.pos += 1; // the standalone `:`
-            }
-            let bounds = if bound_follows {
-                Some(self.parse_capabilities(span)?)
-            } else {
-                None
-            };
-            let (id, is_binding) = builder.intern_ty_var(&name, span)?;
-            if let Some(bounds) = bounds {
-                if !is_binding {
-                    return Err(bound_on_use_error(&name, span));
+            return self.parse_poly_ty_var(builder, &w, span);
+        }
+        // Slice 13 (R-A3): a `&`-led slot, intercepted *before* the
+        // `parse_type_expr` fallthrough -- which resolves a reference's
+        // referent concretely, so `&'T` would die on `'T` as an unknown type.
+        // Only the two poly-relevant shapes are taken here; a glued concrete
+        // referent (`&Foo`, `&!^List`) still falls through to
+        // `parse_ref_type_expr` and folds to `Concrete`.
+        if let Some((Token::Word(w), span)) = self.peek() {
+            let (w, span) = (w.clone(), *span);
+            if w.starts_with('&') {
+                let sigil_len = if w.starts_with("&!") { 2 } else { 1 };
+                let mutable = sigil_len == 2;
+                let remainder = &w[sigil_len..];
+                // Bare sigil (`& 'T`, `&['T 4]`): the referent is a genuine
+                // following token, so recurse into it as a poly slot.
+                if remainder.is_empty() {
+                    self.pos += 1;
+                    if matches!(self.peek(), Some((Token::Word(n), _)) if n == "--")
+                        || self.peek().is_none()
+                    {
+                        return Err(ref_no_referent_error(&w, span));
+                    }
+                    let inner = self.parse_poly_slot(builder, word_is_output)?;
+                    return Ok(RawTy::Ref(Box::new(inner), mutable));
                 }
-                for b in bounds {
-                    builder.bounds.push((id, b));
+                // Glued sigil+variable (`&'T`, `&!'T: Copy`): the referent is
+                // a substring, not a token, so the variable is interned from
+                // the remainder rather than recursed on.
+                if remainder.starts_with('\'') {
+                    let remainder = remainder.to_string();
+                    let remainder_span = Span {
+                        col: span.col + sigil_len as u32,
+                        ..span
+                    };
+                    self.pos += 1;
+                    let inner = self.parse_poly_ty_var(builder, &remainder, remainder_span)?;
+                    return Ok(RawTy::Ref(Box::new(inner), mutable));
                 }
             }
-            return Ok(RawTy::Var(id));
         }
         let ty = self.parse_type_expr()?;
         Ok(RawTy::Concrete(ty))
+    }
+
+    /// One type-variable slot, already lexed: `'T`, with an optional bound at
+    /// its binding occurrence (`'T: Copy`, glued or spaced). Shared by the
+    /// bare slot arm and Slice 13's glued `&'T`, so a bound behind a sigil
+    /// binds exactly as it does without one.
+    fn parse_poly_ty_var(
+        &mut self,
+        builder: &mut PolyBuilder,
+        word: &str,
+        span: Span,
+    ) -> Result<RawTy, String> {
+        let glued_colon = word.ends_with(':') && word.len() > 1;
+        let name = if glued_colon {
+            word[..word.len() - 1].to_string()
+        } else {
+            word.to_string()
+        };
+        let bound_follows =
+            glued_colon || matches!(self.peek(), Some((Token::Word(c), _)) if c == ":");
+        if bound_follows && !glued_colon {
+            self.pos += 1; // the standalone `:`
+        }
+        let bounds = if bound_follows {
+            Some(self.parse_capabilities(span)?)
+        } else {
+            None
+        };
+        let (id, is_binding) = builder.intern_ty_var(&name, span)?;
+        if let Some(bounds) = bounds {
+            if !is_binding {
+                return Err(bound_on_use_error(&name, span));
+            }
+            for b in bounds {
+                builder.bounds.push((id, b));
+            }
+        }
+        Ok(RawTy::Var(id))
     }
 
     /// Slice 6a (R2/R5): a polymorphic quotation effect `[ <in> -- <out> ]`
@@ -1667,6 +1748,17 @@ impl<'t> Parser<'t> {
                     _ => PolyType::Quotation(ins, outs, is_inline, row_in, row_out),
                 }
             }
+            // Slice 13 (R-A4): a `&`-led slot folds like an array -- a fully
+            // concrete referent interns to a real `Type::Ref`, so only a
+            // variable-bearing referent stays `PolyType::Ref`.
+            RawTy::Ref(inner, mutable) => {
+                let inner = self.raw_to_poly_type(*inner);
+                if let PolyType::Concrete(t) = inner {
+                    PolyType::Concrete(crate::ast::intern_ref_type(self.refs, t, mutable))
+                } else {
+                    PolyType::Ref(Box::new(inner), mutable)
+                }
+            }
         }
     }
 
@@ -1819,10 +1911,7 @@ impl<'t> Parser<'t> {
         };
         let referent = if remainder.is_empty() {
             if matches!(self.peek(), Some((Token::Word(w), _)) if w == "--") {
-                return Err(format!(
-                    "error: reference type `{word}` has no referent type at line {}, col {} (write `{word}T` for some type T)",
-                    span.line, span.col
-                ));
+                return Err(ref_no_referent_error(&word, span));
             }
             self.parse_type_expr()?
         } else if remainder.starts_with('^') {
@@ -3621,6 +3710,92 @@ mod tests {
         assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
         assert!(sig.ty_var_names.is_empty());
         assert!(matches!(sig.inputs[0], PolyType::Array(_, Len::Var(0))));
+    }
+
+    #[test]
+    fn effect_has_variable_recognizes_a_glued_only_referent() {
+        // Slice 13 (R-A3, review fix): `parse_poly_ref_slot_with_glued_variable_referent`
+        // below has a bare `'T` input that trips the pre-scan on its own,
+        // masking a gap where `&'T` is the *only* variable mention in the
+        // effect. Without the fix this signature took the concrete path and
+        // `'T` failed to resolve as an unknown type.
+        let module = parse_src(": f ( &'T -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Ref(r, false) if **r == PolyType::Var(0)),
+            "`&'T` should fold to a shared `PolyType::Ref` over `'T`"
+        );
+    }
+
+    #[test]
+    fn parse_poly_ref_slot_with_glued_variable_referent() {
+        // Slice 13 (R-A3, glued case): `&'T` lexes as one word (`&`/`'` are
+        // not delimiters), so the referent is a substring, not a token to
+        // recurse on. Both mutabilities ride the variant.
+        let module = parse_src(": f ( 'T -- &'T &!'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.outputs[0], PolyType::Ref(r, false) if **r == PolyType::Var(0)),
+            "`&'T` should fold to a shared `PolyType::Ref` over `'T`"
+        );
+        assert!(
+            matches!(&sig.outputs[1], PolyType::Ref(r, true) if **r == PolyType::Var(0)),
+            "`&!'T` should fold to a mutable `PolyType::Ref` over `'T`"
+        );
+    }
+
+    #[test]
+    fn parse_poly_ref_slot_binds_a_bound_on_a_glued_variable() {
+        // Slice 13 (R-A3): the glued case interns its variable through the
+        // same path a bare slot does, so a bound at a `&'T` *binding*
+        // occurrence attaches to `'T` itself. Splitting the sigil without
+        // that shared path would intern a variable spelled `'T:`, silently
+        // distinct from every later `'T`.
+        let module = parse_src(": f ( &'T: Copy -- 'T ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert_eq!(sig.ty_var_names, vec!["'T".to_string()]);
+        assert!(sig.has_bound(0, Bound::Copy));
+        assert!(matches!(sig.outputs[0], PolyType::Var(0)));
+    }
+
+    #[test]
+    fn parse_poly_ref_slot_with_bare_sigil_recurses_on_the_next_token() {
+        // Slice 13 (R-A3, bare-sigil case): `[` *is* a delimiter, so `&['T 4]`
+        // arrives as a lone `&` followed by a genuine array token, which
+        // recurses as a poly slot rather than resolving concretely.
+        let module = parse_src(": peek ( ['T 4] -- &['T 4] ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        let PolyType::Ref(referent, false) = &sig.outputs[0] else {
+            panic!(
+                "expected a shared `PolyType::Ref`, got {:?}",
+                sig.outputs[0]
+            );
+        };
+        assert!(matches!(**referent, PolyType::Array(_, Len::Concrete(4))));
+    }
+
+    #[test]
+    fn parse_poly_ref_slot_with_concrete_referent_folds_to_a_type() {
+        // Slice 13 (R-A4): a `&`-slot whose referent folds fully concrete
+        // interns a real `Type::Ref`, exactly as a concrete array shape does;
+        // only a variable-bearing referent stays `PolyType::Ref`.
+        let module = parse_src(": f ( 'T [i64 4] -- 'T &[i64 4] ) ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        let PolyType::Concrete(ty) = sig.outputs[1] else {
+            panic!("expected a folded `Concrete`, got {:?}", sig.outputs[1]);
+        };
+        assert_eq!(ty.name(), "&[i64 4]");
+    }
+
+    #[test]
+    fn parse_poly_ref_slot_without_a_referent_is_error() {
+        // Slice 13 (R-A3): a bare sigil with nothing to borrow is the same
+        // located error the concrete type-expression path already emits.
+        let err = parse_src(": f ( 'T & -- 'T ) ;").unwrap_err();
+        assert!(
+            err.contains("reference type `&` has no referent type"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

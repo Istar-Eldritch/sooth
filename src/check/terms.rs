@@ -596,14 +596,14 @@ fn check_term(
             // poly combinator sits in both tables.
             let fall_through_to_env = env.contains_key(name)
                 && poly.env.get(name).is_some_and(|cands| {
-                    !cands
-                        .iter()
-                        .any(|(sig, _)| poly_sig_could_match(sig, &stack, name, span, ctx, arrays))
+                    !cands.iter().any(|(sig, _)| {
+                        poly_sig_could_match(sig, &stack, name, span, ctx, arrays, refs)
+                    })
                 });
             if let Some(candidates) = poly.combinators.get(name) {
                 let chosen = match candidates.as_slice() {
                     [only] if !fall_through_to_env => Some(*only),
-                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays),
+                    _ => resolve_combinator_overload(candidates, &stack, span, ctx, arrays, refs),
                 };
                 match chosen {
                     Some(chosen) => {
@@ -632,7 +632,7 @@ fn check_term(
             // concrete `env` lookup and unified against the concrete stack;
             // its `Sig` is per-instantiation, not name-keyed.
             if poly.env.contains_key(name) && !fall_through_to_env {
-                return check_poly_call(name, span, &mut stack, ctx, arrays, poly);
+                return check_poly_call(name, span, &mut stack, ctx, arrays, refs, poly);
             }
             // R1/R2: one name can carry several candidates. A single one is
             // the ordinary case and resolves by name at lowering exactly as

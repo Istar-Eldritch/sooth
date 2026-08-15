@@ -1,0 +1,23 @@
+\ Slice 13 phase 3 (R-B8): the mutable write witness. `setat` borrows its
+\ array local mutably, takes a mutable reference to one element, and stores
+\ through it -- generic, and monomorphized here at two distinct types (`i64`
+\ then the two-field `Vec2`) so a stride bug in generic element-ref lowering
+\ shows up as clobbered neighbour fields, not just a wrong scalar. The borrow
+\ is dead once `!` consumes the element reference, so the array can be named
+\ and returned afterwards.
+type: Vec2 x i64 y i64 ;
+
+: setat ( ['T: Copy 4] 'T -- ['T 4] ) | a v | &!a 2 &!> v ! a ;
+: main ( -- )
+  0 4 fill | a |
+  &!a 0 &!> 10 !  &!a 1 &!> 20 !  &!a 2 &!> 30 !  &!a 3 &!> 40 !
+  a 99 setat | b |
+  &b 2 &> @ .
+  &b 1 &> @ .
+  b drop
+  0 0 Vec2 4 fill | c |
+  &!c 0 &!> 11 12 Vec2 !  &!c 1 &!> 21 22 Vec2 !  &!c 2 &!> 31 32 Vec2 !  &!c 3 &!> 41 42 Vec2 !
+  c 91 92 Vec2 setat | d |
+  &d 2 &> @ | e | e Vec2>x . e Vec2>y .
+  &d 1 &> @ | e2 | e2 Vec2>x . e2 Vec2>y .
+  d drop ;

@@ -1318,17 +1318,18 @@ fn back_edge_declared_shape(
     span: Span,
     ctx: &Ctx,
     arrays: &mut Vec<ArrayDecl>,
+    refs: &mut Vec<RefDecl>,
 ) -> Result<BackEdgeShape, String> {
     let (inputs, outputs): (Vec<Type>, Vec<Type>) = match word.poly.as_ref() {
         Some(sig) => {
             let subst = subst.expect("a poly combinator's marker carries its resolved θ");
             let mut inputs = Vec::with_capacity(sig.inputs.len());
             for p in &sig.inputs {
-                inputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+                inputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
             }
             let mut outputs = Vec::with_capacity(sig.outputs.len());
             for p in &sig.outputs {
-                outputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays)?);
+                outputs.push(apply_subst(sig, p, subst, name, span, ctx, arrays, refs)?);
             }
             (inputs, outputs)
         }

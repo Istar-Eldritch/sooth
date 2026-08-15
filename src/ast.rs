@@ -638,6 +638,17 @@ pub enum PolyType {
     /// quotation effect can only ever denote the signature's top-level row
     /// (R4), so it shares that id space rather than minting its own.
     Quotation(Vec<PolyType>, Vec<PolyType>, bool, Option<u32>, Option<u32>),
+    /// Slice 13 (R-A1/D1): a reference whose referent is still polymorphic
+    /// (`&'T`, `&['T 4]`, and their `&!` twins): the referent, then whether
+    /// it is mutable. There is deliberately no `RefId` -- the referent may be
+    /// a variable, which no registry entry can name; the id is minted only
+    /// when the referent grounds to a concrete `Type` (`apply_subst` /
+    /// `subst_polytype`, via `intern_ref_type`), and a fully-concrete
+    /// referent folds to `Concrete(Type::Ref(..))` at parse time. Mutability
+    /// rides the variant for the same reason `Type::Ref` carries it: it is
+    /// the classification bit (`Copy`-ness, store-vs-fetch, exclusivity),
+    /// asked at sites that hold no registry.
+    Ref(Box<PolyType>, bool),
 }
 
 /// R4: a polymorphic stack effect. The variable id spaces are per-signature

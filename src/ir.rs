@@ -12,8 +12,8 @@ use std::mem;
 
 use crate::ast::{
     ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module, OwnedCellDecl,
-    OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Subst, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
+    OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span, StackEffect, StructDecl,
+    StructId, Subst, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
 };
 
 mod destructors;

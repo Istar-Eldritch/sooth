@@ -1897,7 +1897,8 @@ mod tests {
                 enums: &[],
             };
             let mut arrays = Vec::new();
-            back_edge_declared_shape(&w, None, "w", Span::default(), &ctx, &mut arrays)
+            let mut refs = Vec::new();
+            back_edge_declared_shape(&w, None, "w", Span::default(), &ctx, &mut arrays, &mut refs)
                 .unwrap()
                 .2
         }
