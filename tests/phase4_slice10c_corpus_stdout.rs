@@ -40,6 +40,7 @@ const CORPUS: &[&str] = &[
     "mean",
     "modules",
     "poly_if",
+    "quotation_argument",
     "refs",
     "resources",
     "rgb",

@@ -169,11 +169,13 @@ pub fn is_combinator(word: &WordDef) -> bool {
 }
 
 /// R23 (D7): whether a word's declared effect names a quotation parameter,
-/// regardless of body kind (a clause body is rejected separately by
-/// `clause_bodied_quotation_word_error`, and a session never reaches a clause
-/// body via `eval_def`/`eval_poly_def` at all -- this is the coarser gate the
-/// REPL uses, since it cannot retain *any* quotation-taking word's body past
-/// the defining line, term-body or not).
+/// regardless of body kind and of flavour (a clause body is rejected
+/// separately by `clause_bodied_quotation_word_error`). This is *not* the
+/// "does this word splice?" question -- `is_combinator` answers that, from the
+/// declaration alone -- but the coarser "is this slot a quotation?" one its
+/// callers across `check/{poly,terms,audits,captures}.rs` ask, and the one the
+/// REPL's own boundary asks to decline the ordinary `[ ... ]` parameter shape
+/// it does not support.
 pub(crate) fn word_declares_quotation_parameter(word: &WordDef) -> bool {
     match &word.poly {
         None => word

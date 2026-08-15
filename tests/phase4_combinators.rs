@@ -1703,9 +1703,9 @@ fn repl_cross_line_combinator_cycle_is_error() {
     // redefine `a` calling `b`) is the same located `combinator_cycle_error`.
     // Without the check the cycle type-checks and then splices forever.
     let transcript = repl_error(
-        ": a ( [ -- ] -- ) call ;\n\
-         : b ( [ -- ] -- ) call [ ] a ;\n\
-         : a ( [ -- ] -- ) call [ ] b ;\n:quit\n",
+        ": a inline ( ~[ -- ] -- ) call ;\n\
+         : b inline ( ~[ -- ] -- ) call ~[ ] a ;\n\
+         : a inline ( ~[ -- ] -- ) call ~[ ] b ;\n:quit\n",
     );
     // The cycle chain names both words; its starting node depends on hash-map
     // iteration order, so the direction is not pinned.

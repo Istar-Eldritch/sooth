@@ -232,10 +232,13 @@ impl<'a> FuncBuilder<'a> {
         // resolve + bundle-unpack shape as the ordinary user-word path in the
         // `_` arm below, since this *is* that path, reached early.
         if let Some(sym_name) = self.builtin_overloads.get(&span).cloned() {
-            let (in_arity, out_arity, ret_ty) = *self
-                .env
-                .get(&sym_name)
-                .expect("checked user overload exists");
+            let (in_arity, out_arity, ret_ty) = {
+                let a = self
+                    .env
+                    .get(&sym_name)
+                    .expect("checked user overload exists");
+                (a.in_arity, a.out_arity, a.ret_ty)
+            };
             let split = self.stack.len() - in_arity;
             let args = self.stack.split_off(split);
             let bundle = match ret_ty {
@@ -638,7 +641,11 @@ impl<'a> FuncBuilder<'a> {
                 // every type is `Copy`, so the drop set is empty and no drop
                 // glue is emitted here.
                 if tail && self.header.is_some() && name == self.cur_word_name {
-                    let (in_arity, ..) = *self.env.get(name).expect("checked user word exists");
+                    let in_arity = self
+                        .env
+                        .get(name)
+                        .expect("checked user word exists")
+                        .in_arity;
                     let split = self.stack.len() - in_arity;
                     let args = self.stack.split_off(split);
                     self.back_edges.push((self.cur_id, args));
@@ -646,10 +653,16 @@ impl<'a> FuncBuilder<'a> {
                     self.terminated = true;
                     return;
                 }
-                let (in_arity, out_arity, ret_ty) =
-                    *self.env.get(name).expect("checked user word exists");
+                let (in_arity, out_arity, ret_ty, quot_inputs) = {
+                    let a = self.env.get(name).expect("checked user word exists");
+                    (a.in_arity, a.out_arity, a.ret_ty, a.quot_inputs.clone())
+                };
                 let split = self.stack.len() - in_arity;
-                let args = self.stack.split_off(split);
+                let mut args = self.stack.split_off(split);
+                // R-D3: an ordinary `[ ... ]` parameter is a real call, so a
+                // phantom quotation argument becomes its `(code, env)`
+                // aggregate here, before it can reach `Instr::Call`.
+                self.materialize_quot_args(&mut args, &quot_inputs);
                 // R11: a multi-output callee returns one bundle, unpacked back
                 // onto the stack below, so the lowering stack matches the
                 // stack the checker verified. The discriminator is the

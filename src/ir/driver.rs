@@ -120,7 +120,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
             let ret_ty = word_ret_ty(&w.effect.outputs, &structs);
             (
                 symbols[idx].clone(),
-                (w.effect.inputs.len(), w.effect.outputs.len(), ret_ty),
+                Arity {
+                    in_arity: w.effect.inputs.len(),
+                    out_arity: w.effect.outputs.len(),
+                    ret_ty,
+                    quot_inputs: quot_input_slots(w.effect.inputs.iter().map(|s| s.ty)),
+                },
             )
         })
         .collect();
@@ -133,7 +138,12 @@ pub fn lower(module: &Module) -> Result<IrModule, String> {
         let ret_ty = decl.effect.outputs.first().map(|slot| ir_type_of(slot.ty));
         env.insert(
             decl.name.clone(),
-            (decl.effect.inputs.len(), decl.effect.outputs.len(), ret_ty),
+            Arity {
+                in_arity: decl.effect.inputs.len(),
+                out_arity: decl.effect.outputs.len(),
+                ret_ty,
+                quot_inputs: quot_input_slots(decl.effect.inputs.iter().map(|s| s.ty)),
+            },
         );
         extern_symbols.insert(decl.name.clone(), decl.symbol.clone());
     }
@@ -1006,7 +1016,15 @@ mod tests {
     #[test]
     fn lower_call_uses_resolved_generation_symbol() {
         let mut env = HashMap::new();
-        env.insert("sq".to_string(), (1usize, 1usize, None));
+        env.insert(
+            "sq".to_string(),
+            Arity {
+                in_arity: 1,
+                out_arity: 1,
+                ret_ty: None,
+                quot_inputs: Vec::new(),
+            },
+        );
         let resolve = |name: &str| format!("{name}__gen2");
         let (func, _q, _m, _) = lower_line(
             0,
