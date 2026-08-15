@@ -1981,6 +1981,18 @@ mod tests {
         assert!(err.contains("linear"), "unexpected message: {err}");
     }
     #[test]
+    fn poly_op_on_variable_error_names_a_reference() {
+        // Slice 13 (review fix): `poly_op_on_variable_error`'s `Ref` describer
+        // (`"a reference"`) is reachable from source -- `len` rejects a
+        // reference the same way it rejects a bare type variable -- but had
+        // no test asserting the exact wording.
+        let err = check_src(": f ( &['T 4] -- usize ) len ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `len` is not permitted on a reference in `f` (line 1)"
+        );
+    }
+    #[test]
     fn quotation_effect_unifies_and_binds_variable() {
         // Criterion 2 (R6): a declared `[ 'T -- ]` unified against a concrete
         // `[ i64 -- ]` binds `'T = i64`; an arity mismatch is a located type

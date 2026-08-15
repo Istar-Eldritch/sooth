@@ -770,6 +770,22 @@ mod tests {
     }
 
     #[test]
+    fn subst_polytype_grounds_a_poly_ref_slot_from_a_monomorphic_caller() {
+        // Slice 13 (R-A8, review fix): `subst_polytype`'s `Ref` arm was
+        // untested and the spec assumed it unreachable in Phase 1 -- but a
+        // monomorphic caller borrowing a local into a generic word already
+        // instantiates a poly ref slot, so lowering must ground it *now*,
+        // not in a later phase. Stubbing the arm to `panic!` breaks this
+        // build.
+        let src = ": firstref ( &['T 4] -- ) drop ;\n\
+             : main ( -- ) 7 4 fill | a | &a firstref a drop ;\n";
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        lower(&module).expect("a monomorphic caller must ground the poly ref slot");
+    }
+
+    #[test]
     fn lower_line_marshals_all_inputs_and_outputs() {
         // `+` from a carried depth of 2 loads both slots and stores the single
         // result: D=2 loads, M=1 store.

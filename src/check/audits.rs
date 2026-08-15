@@ -389,6 +389,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn poly_quotation_behind_a_reference_inside_an_array_element_is_rejected() {
+        // Slice 13 (review fix): the test above reaches `audit_poly_input_quotation`'s
+        // own `Ref` arm, but never `reject_poly_quotation_anywhere`'s `Ref` arm --
+        // reached only when a `Ref` shows up *inside* a position that arm is
+        // already recursing through (here, an array element). Stubbing that
+        // arm to `Ok(())` lets `[&[ 'T -- ] 4]` sail through the checker.
+        let err = check_src(": f ( [&[ 'T -- ] 4] -- ) drop ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a quotation type `[ 'T -- ]` cannot appear as a reference's referent: a quotation is only legal as a direct parameter of a word this slice, and a runtime quotation value is slice 7",
+        );
+    }
+
     /// Slice 10a (R2): the declaration-position rejection is no longer fail-open
     /// for a `~` -- it used to return `Ok` (`if let Type::Quotation`), letting a
     /// `~` slip past silently. Constructed directly.

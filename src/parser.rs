@@ -1320,6 +1320,13 @@ impl<'t> Parser<'t> {
     /// is poly-forced even when its effect is otherwise fully concrete, since
     /// `WordDef.poly = Some(..)` is what R9 context 4's unreachability
     /// depends on.
+    /// Slice 13 (R-A3, review fix): a glued `&'T`/`&!'T` is one `Word` token
+    /// starting with `&`, not `'`, so it was missed by this pre-scan and the
+    /// whole effect took the concrete path -- where `parse_ref_type_expr`
+    /// then resolves `'T` as an (unknown) concrete type name. A glued
+    /// referent must be recognized here too, or `parse_poly_slot`'s glued
+    /// branch (R-A3) is only ever reached when some other slot in the same
+    /// effect is independently variable-bearing.
     fn effect_has_variable(&self) -> bool {
         let mut i = self.pos;
         while let Some((tok, _)) = self.tokens.get(i) {
@@ -1327,6 +1334,13 @@ impl<'t> Parser<'t> {
                 Token::RParen => return false,
                 Token::TildeLBracket => return true,
                 Token::Word(w) if w.starts_with('\'') || w.starts_with("..") => return true,
+                Token::Word(w)
+                    if w.strip_prefix('&')
+                        .map(|r| r.strip_prefix('!').unwrap_or(r))
+                        .is_some_and(|r| r.starts_with('\'')) =>
+                {
+                    return true;
+                }
                 _ => {}
             }
             i += 1;
@@ -3696,6 +3710,21 @@ mod tests {
         assert_eq!(sig.len_var_names, vec!["'N".to_string()]);
         assert!(sig.ty_var_names.is_empty());
         assert!(matches!(sig.inputs[0], PolyType::Array(_, Len::Var(0))));
+    }
+
+    #[test]
+    fn effect_has_variable_recognizes_a_glued_only_referent() {
+        // Slice 13 (R-A3, review fix): `parse_poly_ref_slot_with_glued_variable_referent`
+        // below has a bare `'T` input that trips the pre-scan on its own,
+        // masking a gap where `&'T` is the *only* variable mention in the
+        // effect. Without the fix this signature took the concrete path and
+        // `'T` failed to resolve as an unknown type.
+        let module = parse_src(": f ( &'T -- ) drop ;").unwrap();
+        let sig = module.words[0].poly.as_ref().expect("poly sig present");
+        assert!(
+            matches!(&sig.inputs[0], PolyType::Ref(r, false) if **r == PolyType::Var(0)),
+            "`&'T` should fold to a shared `PolyType::Ref` over `'T`"
+        );
     }
 
     #[test]
