@@ -152,3 +152,30 @@ fn repl_still_retains_a_declared_inline_combinator() {
     );
     assert_eq!(transcript, "defined apply\nstack: 6\n");
 }
+
+/// R-D5: the three import-site gates moved from `word_declares_quotation_parameter`
+/// to `is_combinator`, which widens what they skip -- an `inline` word with *no*
+/// quotation parameter at all (`bump` below) is `is_combinator` but not
+/// `word_declares_quotation_parameter`. Under the old predicate it would fall
+/// through the ordinary-word-binding loop and be bound into `self.env` expecting
+/// a `bump__import0` symbol that an inline word never mints, so calling it would
+/// die in `dlopen` with an undefined-symbol error instead of splicing. Import a
+/// library exporting exactly this shape and call it: it must run, not link-fail.
+#[test]
+fn repl_import_gate_retains_an_inline_non_quotation_word() {
+    let lib_path = std::env::temp_dir().join(format!(
+        "sooth-slice12-partd-importgate-{}.sth",
+        std::process::id()
+    ));
+    std::fs::write(
+        &lib_path,
+        "export: bump ;\n: bump inline ( i64 -- i64 ) 1 + ;\n",
+    )
+    .expect("writing temp library should succeed");
+    let transcript = repl_transcript(&format!(
+        "import: c \"{}\" ;\n5 c::bump\n:quit\n",
+        lib_path.display()
+    ));
+    std::fs::remove_file(&lib_path).ok();
+    assert_eq!(transcript, "imported c\nstack: 6\n");
+}

@@ -641,13 +641,17 @@ impl<'a> FuncBuilder<'a> {
                 // every type is `Copy`, so the drop set is empty and no drop
                 // glue is emitted here.
                 if tail && self.header.is_some() && name == self.cur_word_name {
-                    let in_arity = self
-                        .env
-                        .get(name)
-                        .expect("checked user word exists")
-                        .in_arity;
+                    let (in_arity, quot_inputs) = {
+                        let a = self.env.get(name).expect("checked user word exists");
+                        (a.in_arity, a.quot_inputs.clone())
+                    };
                     let split = self.stack.len() - in_arity;
-                    let args = self.stack.split_off(split);
+                    let mut args = self.stack.split_off(split);
+                    // R-D3 applies to the back-edge the same as the ordinary
+                    // dispatch below: a phantom quotation carried around the
+                    // loop must be materialized before it reaches the header
+                    // phi, or the blit at the loop header sees a phantom type.
+                    self.materialize_quot_args(&mut args, &quot_inputs);
                     self.back_edges.push((self.cur_id, args));
                     self.seal_block(Terminator::Jmp(self.header.expect("loop header")));
                     self.terminated = true;
