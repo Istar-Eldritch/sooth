@@ -156,6 +156,15 @@ live `&!` reaches is another (E6b/E6c).
 **R-B6.** `&^`, `&Struct>field` and `+!` in a generic body are located errors (E4), never a
 silent fallthrough to unknown-word.
 
+**R-B8 (witness label, restored after review — condensation had dropped it while the
+requirement it names stayed live in code comments).** The runnable exit witnesses are
+the Read golden (`first`, a concrete-`i64` array, asserting the exact printed slot value)
+and the Write golden (`setat`, an in-place element set through `&!a ... &!> ... !`,
+monomorphized at both `i64` and a two-field `Vec2` to catch stride bugs, asserting the
+written slot plus its untouched neighbours) — `tests/phase4_slice13_borrow.rs`,
+`examples/poly_borrow_first.sth`, `examples/poly_borrow_setat.sth`. Both compile and run,
+proving the borrow lowers rather than merely checks.
+
 **R-B7.** No new IR: a borrowing generic word lowers through the existing monomorphization
 path, and the body's `&a`/`&>`/`@`/`!` reuse the monomorphic reference machinery once
 instantiated.
