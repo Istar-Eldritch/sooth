@@ -371,13 +371,16 @@ probe's `Bool?`.
   the analysis declines. See OQ1.
 - **R-P1-4 (resolution).** Resolve the combinator at the call site through the
   checker's existing resolution, not a bare-name lookup; decline on ambiguity.
-- **R-P1-5 (single predicate, six sites).** All consumers share one predicate so
-  check and lowering agree by construction: the two syntactic passes
+- **R-P1-5 (single predicate, every consumer).** All consumers share one predicate
+  so check and lowering agree by construction: the two syntactic passes
   (`collect_tail_calls`→`has_self_tail_call`, `body_tail_calls_self`), the four
-  `has_self_tail_call` sites (`driver.rs:183`, `driver.rs:643`,
-  `destructors.rs:372`, `combinators.rs:343`), and the lowering splice gate
-  (`calls.rs:520`). `combinators.rs:343` (`splice_tail`) is the site that currently
-  diverges from lowering and must be driven by the same predicate.
+  `has_self_tail_call` sites (the whole-program build gate `driver.rs:176`, the
+  REPL's `lower_word` `driver.rs:636`, `destructors.rs:372`, and the checker's
+  `splice_tail` `combinators.rs:442`), the lowering splice gate (`calls.rs:538`),
+  and `check_combinator_cycles` (`combinators.rs:245`), which reads the same walk
+  through `tail_position_calls` to decide whether a self-edge is tail-only.
+  `combinators.rs:442` (`splice_tail`) is the site that currently diverges from
+  lowering and must be driven by the same predicate.
 - **R-P1-6 (lowering).** Thread the real `tail` flag through the call-of-literal
   splice (`calls.rs:316`) and the combinator splice (`calls.rs:520`/`:528`), gated
   on the shared predicate having sanctioned this splice. The whole-word back-edge
@@ -417,12 +420,42 @@ probe's `Bool?`.
   would pass either way.)
 - **E-P1-4 — check and lowering cannot diverge.** A unit test that constructs the
   recon-2 shape and the recon-4 shape and asserts the checker's `splice_tail`
-  (`combinators.rs:343`) and lowering's `body_tail_calls_self` decision
-  (`calls.rs:520`) return the **same** answer for each, via the shared predicate.
-  *Mutation:* give lowering a private rule (revert `combinators.rs:343` to the
+  (`combinators.rs:442`) and lowering's `terms_tail_call_self` decision
+  (`calls.rs:538`) return the **same** answer for each, via the shared predicate.
+  *Mutation:* give lowering a private rule (revert `combinators.rs:442` to the
   old `has_self_tail_call`-only, leaving lowering on the new predicate); the two
   disagree on the recon-2 shape ⇒ test fails. (Satisfies the brief's "a test that
   fails if they are allowed to diverge.")
+
+  **Witness map for R-P1-5, measured.** "Shares the predicate" is checked per
+  *site*, by passing an empty `CombinatorIndex` there (which reverts that site
+  alone to the pre-slice `If`-only walk) and running the suite:
+
+  | Site | Empty-index mutation |
+  | --- | --- |
+  | `driver.rs:176` (whole-program build gate) | killed by E-P1-1, E-P1-2, E-P1-5's positive twin, and the check/lowering agreement test |
+  | `driver.rs:636` (REPL `lower_word`) | killed by `repl_defined_spliced_self_tail_loops_in_constant_stack` |
+  | `destructors.rs:372` (`drop` override) | **dead argument**: a `drop` override is named `drop`, and `has_self_tail_call` short-circuits `false` on any `BUILTIN_WORDS` name, so no index can change this site's answer |
+  | `combinators.rs:245` (`check_combinator_cycles`) | survives |
+  | `combinators.rs:442` (`splice_tail`) | survives |
+  | `calls.rs:538` (lowering splice gate) | survives |
+
+  The last three are gated on the walked word being *itself* a combinator, and no
+  such word can be compiled today: a self-tailing combinator's recursive call
+  necessarily sits in a quotation literal passed to another combinator, and
+  `check_poly_combinator_args` → `check_literal_against_declared_effect` re-enters
+  `inline_combinator` on that literal, so the argument-site check re-splices
+  without bound and the *compiler* overflows its stack (no diagnostic).
+  `check_combinator_cycles` does not catch it because `all_calls` does not descend
+  into quotation literals, so the shape carries no self-edge. This predates P1
+  (the same program aborts identically at P1's base commit) and is out of P1's
+  scope; until it is fixed, those three sites are witnessed only by
+  `tail_splice_both_predicate_wrappers_agree_for_a_combinator`, which asks the two
+  predicate wrappers directly rather than through the production call sites. So
+  R-P1-5's "agree by construction" is *tested* for the `tail` threading and for the
+  two reachable `self_tail` sites, and *inspected* for the three unreachable ones.
+  Closing the argument-site hole is the prerequisite for promoting them, and
+  belongs to whichever later slice takes on combinator-argument splice termination.
 - **E-P1-5 — linear value across the spliced back-edge.** A program carrying a
   **non-`Copy`** value live across a spliced back-edge is rejected, **asserting the
   exact diagnostic, not merely that it fails**: mirror the sibling assertion style at
@@ -864,6 +897,16 @@ golden that ties P1+P2+P3 together.
 - Early return — no `TermKind` for it; the two-way branch plus a join suffices.
 - First-class runtime quotations / closures — slice 7b (where
   INV-INLINE-COMBINATOR must be revisited).
+- **Combinator-argument splice termination.** A word that is *itself* a combinator
+  and self-tails through a splice cannot be compiled: the argument-site check of
+  its recursive quotation literal (`check_poly_combinator_args` →
+  `check_literal_against_declared_effect` → `inline_combinator`) re-splices without
+  bound and the compiler overflows its stack with no diagnostic, and
+  `check_combinator_cycles` misses it because `all_calls` does not descend into
+  quotation literals. Pre-existing (reproduces at P1's base commit), not caused by
+  P1's widened walk. It is why three of R-P1-5's sites have no end-to-end witness
+  (see E-P1-4's witness map); a later slice should either terminate the
+  argument-site splice or reject the shape with a located error.
 - Declared combinator recognition: slice 12, which marks whatever `if`/`unless`/
   `while` become. **This slice narrows slice 12.** ROADMAP item 12 currently claims
   it lifts the polymorphic-`inline` policy gate; 10c lifts that gate here (R-P3-3b),
@@ -899,7 +942,11 @@ placebo-prone findings the brief flags are covered explicitly:
 | P3: `branch`'s checker arm actually handles the abstract-forward case | R-P3-1a | route the arm through `QuotRef::Known` only, bypassing the shared resolver: `myif`'s own definition (`c t e branch` over its own `~` parameters) fails to check, while a literal call site still passes |
 
 Plus the divergence guard E-P1-4 (check vs lowering) and the boundary-from-both-
-sides guard E-P2-1.
+sides guard E-P2-1. E-P1-4 carries its own per-site witness map, measured rather
+than asserted: three of R-P1-5's sites survive the empty-index mutation because the
+shape that would reach them cannot be compiled for a pre-existing reason, and saying
+so is the point, since a green suite would otherwise read as a witness that does not
+exist.
 
 The E-P3-7 row was added after round 2, which caught the `cmpgt` witness as a placebo.
 The measurement that had been used to justify the design used that same neutral name,

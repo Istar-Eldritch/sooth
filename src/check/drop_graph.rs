@@ -1184,6 +1184,12 @@ mod tests {
         // against. The two wrappers the two splice sites call are asked
         // directly instead: `has_self_tail_call` (the checker's `splice_tail`)
         // and `terms_tail_call_self` (the lowering splice gate).
+        //
+        // Because nothing routes through those two production call sites, nor
+        // through `check_combinator_cycles`, all three keep passing the suite
+        // with an empty `CombinatorIndex` substituted in. That is expected, not
+        // a missing guard: see the witness map under E-P1-4 in
+        // `docs/phase4-slice10c-spec.md` before "fixing" a survivor there.
         let recon2 = words_of(&format!(
             "{BOOL_Q}: walk ( i64 ~[ -- i64 ] -- i64 )\n\
              | f | | n | n 0 = [ f call ] [ n 1 - f walk ] Bool? ;\n"

@@ -108,6 +108,30 @@ fn check_error(src: &str) -> String {
     check::check(&mut module).expect_err("check should fail")
 }
 
+/// Run a scripted REPL session (one input line per element) and return the
+/// captured stdout, mirroring `tests/phase1.rs`'s harness.
+fn run_session(lines: &[&str]) -> String {
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_sooth"))
+        .arg("repl")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("repl should spawn");
+    let mut stdin = child.stdin.take().expect("stdin should be piped");
+    let script = lines.join("\n") + "\n";
+    std::io::Write::write_all(&mut stdin, script.as_bytes()).expect("writing stdin should succeed");
+    drop(stdin);
+    let output = child.wait_with_output().expect("repl should exit cleanly");
+    assert!(
+        output.status.success(),
+        "repl exited with {:?}; stderr: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("stdout should be utf8")
+}
+
 // -- E-P1-1: the spliced self-tail lowers to a back-edge ---------------------
 
 #[test]
@@ -202,6 +226,34 @@ fn forwarded_recursion_through_a_mid_body_bind_declines_the_loop_but_still_check
     );
     assert_eq!(back_edges(spin), 0, "no loop is built for this shape");
     assert!(!opens_a_loop_header(spin));
+}
+
+// -- E-P1-4: the REPL lowering path shares the predicate --------------------
+
+#[test]
+fn repl_defined_spliced_self_tail_loops_in_constant_stack() {
+    // R-P1-5 names `ir::lower_word` (the REPL's per-line entry) as one of the
+    // sites that must consult the shared predicate. It takes its own
+    // `CombinatorIndex` argument, so passing an empty one there would silently
+    // revert this path to the pre-slice `If`-only walk while the whole-program
+    // build path stayed correct -- exactly the divergence E-P1-4 exists to
+    // catch, and the only one of the sites that lacked a witness which is
+    // reachable at all (see the spec's E-P1-4 note).
+    //
+    // 1e6 real frames overflow the host stack, so the printed sum is what
+    // separates the loop from the recursion; the REPL echoes the whole
+    // residual stack each line, so the assertion pins the exact line.
+    let out = run_session(&[
+        ": Bool? ( bool ~[ -- i64 ] ~[ -- i64 ] -- i64 ) \
+         | e | | t | | c | c if t call else e call end ;",
+        ": sum-to ( i64 i64 -- i64 ) \
+         | n | | acc | n 0 = [ acc ] [ acc n + n 1 - sum-to ] Bool? ;",
+        "0 1000000 sum-to",
+    ]);
+    assert!(
+        out.lines().any(|l| l == "stack: 500000500000"),
+        "the REPL-defined self-tail must loop and print its sum: {out}"
+    );
 }
 
 // -- E-P1-5: the linear spine across the spliced back-edge -------------------
