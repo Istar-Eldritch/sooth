@@ -2593,7 +2593,7 @@ impl Session {
         // per-word audit, before the R6 combinator route below (so a quotation
         // in a non-input position is still rejected). A poly word's effect is
         // empty, so its output-position check runs on the poly path.
-        check::audit_word_quotation_positions(&word)?;
+        check::audit_word_quotation_positions(&word, &self.structs, &self.enums, &self.arrays)?;
         // Slice 11 (R3): the same per-word `inline` rejections native `check`
         // runs as a pre-pass, at the REPL's own per-word gate -- the poly half
         // in particular, which the retention route below would otherwise carry

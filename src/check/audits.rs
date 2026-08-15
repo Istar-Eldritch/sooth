@@ -134,7 +134,7 @@ pub(super) fn audit_quotation_type_positions(module: &Module) -> Result<(), Stri
         &module.refs,
     )?;
     for w in &module.words {
-        audit_word_quotation_positions(w)?;
+        audit_word_quotation_positions(w, &module.structs, &module.enums, &module.arrays)?;
     }
     for decl in &module.externs {
         for slot in decl.effect.inputs.iter().chain(&decl.effect.outputs) {
@@ -213,7 +213,18 @@ pub(crate) fn audit_quotation_type_registries(
 /// quotation nested inside a declared effect. A direct quotation *parameter*
 /// (the one legal position) is accepted here and rejected separately at the
 /// REPL (R23), which discards word bodies the inliner needs.
-pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> {
+///
+/// Also runs the poly twin of the no-stored-reference signature rule
+/// (`audit_poly_reference_free_signature`): `structs`/`enums`/`arrays` are
+/// needed only for that half (a poly word's output/input may fold to a fully
+/// concrete `Type` nesting a reference inside a struct/enum/array, which
+/// `contains_reference` resolves through the registries).
+pub(crate) fn audit_word_quotation_positions(
+    w: &WordDef,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
     let word = crate::resolve::demangle_word(&w.name);
     for slot in &w.effect.outputs {
         // R8 (D4): a monomorphic word may declare a `Type::Quotation` output (a
@@ -273,7 +284,73 @@ pub(crate) fn audit_word_quotation_positions(w: &WordDef) -> Result<(), String> 
             audit_poly_input_quotation(pt, sig)?;
         }
     }
+    audit_poly_reference_free_signature(w, word, structs, enums, arrays)?;
     Ok(())
+}
+
+/// Phase 2 fix: the poly twin of `check_reference_free_signature`
+/// (`word_entry.rs`). That check runs on `word.effect`, which is empty for a
+/// poly word, so it never sees a poly signature at all -- Phase 2 made `&'T`
+/// a producible output (`peek`'s `&['T 4]`), and nothing rejected the
+/// signature the monomorphic checker forbids outright (`peeki`'s `&[i64 4]`),
+/// so the escaping reference reached lowering and hit
+/// `checked: every reference value records its referent`. Skipped for a
+/// combinator, mirroring `check_word`'s own skip: a spliced word has no frame
+/// of its own for the returned reference to outlive.
+fn audit_poly_reference_free_signature(
+    w: &WordDef,
+    word: &str,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> Result<(), String> {
+    let Some(sig) = &w.poly else {
+        return Ok(());
+    };
+    if is_combinator(w) {
+        return Ok(());
+    }
+    for pt in &sig.outputs {
+        if contains_poly_reference(pt, structs, enums, arrays) {
+            return Err(format!(
+                "error: a reference cannot be stored: `{word}` declares the output `{}`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead",
+                poly_type_str(pt, sig)
+            ));
+        }
+    }
+    for pt in &sig.inputs {
+        if !matches!(pt, PolyType::Ref(..)) && contains_poly_reference(pt, structs, enums, arrays) {
+            return Err(format!(
+                "error: a reference cannot be stored: `{word}` declares the input `{}`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate",
+                poly_type_str(pt, sig)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `pt` **transitively contains** a reference, the poly-signature
+/// twin of `contains_reference` (`builtins.rs`), which the `Concrete` arm
+/// delegates to (a fully-concrete `Type` may still nest a reference inside a
+/// struct field, enum variant or array element -- the same shapes
+/// `contains_reference` already resolves through the registries). A
+/// `PolyType::Quotation` is not descended into: a word carrying one is a
+/// combinator (the direct parameter is the only legal position,
+/// `audit_poly_input_quotation`), and this whole audit is skipped for a
+/// combinator above -- so a non-combinator word can never reach this arm
+/// with a `Quotation` at all, let alone one hiding a reference.
+fn contains_poly_reference(
+    pt: &PolyType,
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+    arrays: &[ArrayDecl],
+) -> bool {
+    match pt {
+        PolyType::Ref(..) => true,
+        PolyType::Concrete(ty) => contains_reference(*ty, structs, enums, arrays),
+        PolyType::Array(elem, _) => contains_poly_reference(elem, structs, enums, arrays),
+        PolyType::Var(_) | PolyType::Quotation(..) => false,
+    }
 }
 
 /// R7a (poly path, item 2): audit a poly word *input*, where a direct
@@ -403,6 +480,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn poly_output_borrow_that_outlives_its_frame_is_rejected() {
+        // Phase 2 review blocker: `word.effect` is empty for a poly word, so
+        // `check_reference_free_signature` (`word_entry.rs`) never saw this
+        // shape and the escaping reference reached lowering, which panicked
+        // ("checked: every reference value records its referent"). The
+        // monomorphic twin of this signature is already rejected at
+        // declaration; the poly path must match.
+        let err = check_src(
+            ": peek ( ['T: Copy 4] -- &['T 4] ) | a | &a ;\n: main ( -- ) 10 4 fill peek drop ;\n",
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `peek` declares the output `&['T 4]`\n  a `&T`/`&!T` borrows a local of the callee's own frame, which is gone by the time the caller reads it; take the reference as an input instead"
+        );
+    }
+
+    #[test]
+    fn poly_input_carrying_a_nested_reference_is_rejected() {
+        // Phase 2 review blocker: an input may *be* a reference at the top
+        // level, but not carry one nested inside an aggregate -- the
+        // monomorphic checker already rejects `[&i64 4]` this way, and the
+        // poly path was missing the same check for `[&'T 4]`.
+        let err = check_src(": g ( 'T: Copy [&'T 4] -- ) drop ;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: a reference cannot be stored: `g` declares the input `[&'T 4]`, which contains a reference\n  an input may *be* a `&T`/`&!T`, but not carry one nested inside an aggregate"
+        );
+    }
+
     /// Slice 10a (R2): the declaration-position rejection is no longer fail-open
     /// for a `~` -- it used to return `Ok` (`if let Type::Quotation`), letting a
     /// `~` slip past silently. Constructed directly.
@@ -435,10 +543,10 @@ mod tests {
             span: Span::default(),
         };
         let inl = crate::ast::inline_quotation_type(vec![Type::I64], Vec::new());
-        let err = audit_word_quotation_positions(&mk(inl)).unwrap_err();
+        let err = audit_word_quotation_positions(&mk(inl), &[], &[], &[]).unwrap_err();
         assert!(err.contains("the output of `w`"), "locates it: {err}");
         let ord = crate::ast::quotation_type(vec![Type::I64], Vec::new());
-        assert!(audit_word_quotation_positions(&mk(ord)).is_ok());
+        assert!(audit_word_quotation_positions(&mk(ord), &[], &[], &[]).is_ok());
     }
     #[test]
     fn check_drop_overload_on_non_struct_input_is_error() {

@@ -2,4 +2,7 @@
 \ local, indexes it through the shared array-element accessor, and fetches
 \ the element -- all still generic, monomorphized at `i64` by this call.
 : first ( ['T: Copy 4] -- 'T ) | a | &a 0 &> @ ;
-: main ( -- ) 10 4 fill first . ;
+: main ( -- )
+  0 4 fill | a |
+  &!a 0 &!> 10 !  &!a 1 &!> 20 !  &!a 2 &!> 30 !  &!a 3 &!> 40 !
+  a first . ;

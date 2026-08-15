@@ -2787,6 +2787,34 @@ mod tests {
     }
 
     #[test]
+    fn poly_body_at_rejects_a_non_copy_referent() {
+        // Phase 2 review: `@`'s `poly_copy_gate` call was reachable but
+        // untested -- deleting it broke no test. A bare `'T` (no `Copy`
+        // bound) fetched through a reference must still be rejected, the
+        // same X7 reason `dup`/`over` already cover for a bare variable.
+        let err =
+            check_src(": g ( ['T 4] -- 'T ) | a | &a 0 &> @ ;\n: main ( -- ) 10 4 fill g drop ;\n")
+                .unwrap_err();
+        assert_eq!(
+            err,
+            "error: cannot `@` the type variable `'T` in `g` (line 1)\n  `'T` has no `Copy` bound, and a linear value cannot be duplicated; declare `'T: Copy` if every instantiation is `Copy`"
+        );
+    }
+
+    #[test]
+    fn poly_reference_word_rejects_shared_accessor_on_a_mutable_receiver() {
+        // Phase 2 review: the `recv_mut != mutable` guard in `&>`'s arm was
+        // reachable (a declared `&![...]` input) but untested -- deleting it
+        // broke no test. `&>` on a mutable reference must still be rejected
+        // rather than silently reading through it.
+        let err = check_src(": rd ( &!['T: Copy 4] -- 'T )\n  0 &> @\n;\n").unwrap_err();
+        assert_eq!(
+            err,
+            "error: `&>` is not permitted on a reference in `rd` (line 2)"
+        );
+    }
+
+    #[test]
     fn check_poly_array_index_bounds_checks_a_literal_and_requires_conversion_otherwise() {
         // R-B3, direct unit coverage of the helper mutation testing would
         // otherwise miss: a literal within range passes, one out of range
