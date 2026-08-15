@@ -604,21 +604,20 @@ has nothing to intern a body-internal shape against, so this is deferred to a fu
 slice. A concrete element inside a combinator body already works today, since a
 combinator is monomorphized and checked by the ordinary concrete `check_word`.
 
-**Next action: Phase 4 Slice 10c** (`if` as an ordinary combinator, the last compiler-known
-control-flow word, now that 6g has closed the splice-granting bug it would otherwise
-multiply). 7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
+**Next action: Phase 4 Slice 12** (combinator recognition becomes declared, not inferred).
+7b (capturing closures), 8a (ad-hoc dispatch: static overloading, the mechanism),
 8b (`drop`'s import visibility and destructure guard, plus 8a's own operator
 module-scoping gap), 6h (the raw array constructor and `fill`'s re-lowering), 10a (row
 variables inside a quotation's declared effect), 6g (combinator splices learning 6f's
-granting rule), 10b (`times` moved into `lib/combinators.sth`), and 11 (`inline` as a
+granting rule), 10b (`times` moved into `lib/combinators.sth`), 10c (`if`/`unless`/`while` as
+ordinary `lib/core.sth`/`lib/combinators.sth` words over the `branch`/`tag`/comparison
+primitives, no `cond`, no compiler-known `bool`), and 11 (`inline` as a
 declared word property, `~` generalised beyond `times` to `lib/combinators.sth`, and a
 reference-output exemption for every always-spliced word) are all done on `main`. Slice 9
-shipped P1–P2 only (`Bool` as a library
-enum, merged at `c5db035`); its `if`/`cond` half (P3–P5) needs a row variable inside a
-quotation's declared effect, which does not parse before slice 10a, and is split out as
-**slice 10c** (`docs/phase4-slice10c-brief.md`), renumbered into slice 10's lineage since it
-extends 10a's row mechanism and gates on 10a phases 1–4, i.e. everything up to and including
-grounding (not on 10b).
+shipped `Bool` as a library enum (P1–P2 only, merged at `c5db035`); its `if`/`cond` half was
+renumbered into slice 10's lineage as slice 10c, since what it depended on was 10a's row
+mechanism, not 9's own scope, and shipped a different mechanism than this entry originally
+assumed — full account in `docs/phase4-slice10c-spec.md`.
 
 **Known gap, not yet scheduled:** a row-typed combinator call over a quotation left in (or
 read back out of) the row crashes the backend instead of being rejected. `[ + ] 3 [ drop ]
@@ -2058,8 +2057,8 @@ then find out what the compiler owes it.
    representation and grounding code. Findings, including why the two-differing-rows shape
    this entry first assumed was wrong, in `docs/phase4-slice10c-brief.md`.
 
-10. **Rows in quotation effects: `times` is a library combinator. 10a ✅ done; 10b
-    implemented.** The
+10. **Rows in quotation effects: `times`, `if`/`unless`/`while` are library combinators.
+    10a ✅ done; 10b ✅ done; 10c ✅ done.** The
     self-tail-call loop transform (slice 6) and quotation-parameter splicing (`while`, slice 6)
     are both already general, keyword-free machinery; the one loop shape user code could not
     write was `times ( ..s i64 ~[ ..s i64 -- ..s ] -- ..s )`, because a row variable `..s` can
@@ -2075,12 +2074,17 @@ then find out what the compiler owes it.
     `check_term`/`ir.rs` `"times"` arms. It carries one checker change of its own, not the
 pure delete-and-import it looks like: `check_linear_across_back_edge` takes a frame floor
     (`src/check/terms.rs:1060`), exempting a linear local the *enclosing* frame owns and
-    disposes from a rejection meant for one the loop actually carries. **10c** is
-    `if`/`cond` as ordinary words (`docs/phase4-slice10c-brief.md`, formerly numbered slice
-    9b), which extends 10a's row representation to a row that legitimately differs between a
-    quotation's input and output side, and gates on 10a phases 1–4 only (the `~` type, its
-    surface syntax, rows, and grounding) — not on 10b, and not on 10a's back-edge fix, since
-    `if` has no back-edge.
+    disposes from a rejection meant for one the loop actually carries. **10c**
+    (`docs/phase4-slice10c-spec.md`, formerly numbered slice 9b) retires `if` as a
+    compiler-known construct: `TermKind::If` and the `if`/`else`/`end` grammar are deleted.
+    The compiler keeps three machine primitives — `branch` (a 32-bit flag plus two quotation
+    operands), `tag` (a scalar enum's discriminant read) and comparisons — and `bool` becomes
+    an ordinary payload-free library enum with `if`/`unless` (`lib/core.sth`) and `while`
+    (`lib/combinators.sth`) as ordinary words built from them. No `cond` ships. Three designs
+    were tried before this one (clause dispatch on `Bool`; hand-written enum eliminators, ruled
+    out because a clause body cannot receive a branch quotation); the shipped shape is the only
+    one that closes the layering violation — a primitive depending on a library-defined type —
+    without reintroducing it.
     **`~[ ... ]`, the inline-only quotation type, lands in 10a rather than 10c.** A row-bearing
     quotation parameter *must* be spliced — `QuotEffect` has no row field and a row's size
     isn't known at runtime — so every combinator today relies on that as an unstated
@@ -2145,8 +2149,10 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
     all. This slice lifts that rejection and makes the declaration the single route: a word
     declaring a `~[ ... ]` parameter must say `inline` (a located error where it does not),
     `word_declares_quotation_parameter`'s leg in `is_combinator` retires, and
-    `lib/combinators.sth` plus 10c's injected `if`/`cond` are migrated. The predicate itself
-    stays: `is_quotation_type` has ~20 parameter-level callers across
+    `lib/combinators.sth` is migrated. (10c already shipped `if`/`unless` as ordinary `lib/core.sth`
+    words, not injected, and shipped no `cond`; this slice's own polymorphic-`inline` gate lift was
+    also absorbed into 10c, since 10c's library comparison words needed it as their first consumer.)
+    The predicate itself stays: `is_quotation_type` has ~20 parameter-level callers across
     `check/{poly,terms,audits,captures}.rs` that ask what a slot is, not whether a word splices.
 
     Splicing a polymorphic word is already the shipped behaviour — `times` is polymorphic and
@@ -2176,12 +2182,26 @@ pure delete-and-import it looks like: `check_linear_across_back_edge` takes a fr
     (`count [ | i | ... ] times` → `count ~[ | i | ... ] times`). 10c's desugar already emits
     `~`-flavoured branch literals, which this makes writable by hand.
 
-    Gates on 10c, which extends `is_combinator`/`collect_combinators`/`inline_combinator` to
-    clause bodies and injects `if`/`cond` as combinators this slice must then mark.
-    Open for the brief: whether the ordinary-`[ ... ]` real-call path lowers at all. The
-    two-slot `IrType::Quotation` aggregate is ABI-handled, but no word receives one through a
-    real call today, since the inference splices them all, and an argument position is not
-    currently a `materialize_quotation_at_boundary` site. Prototype it before the plan locks.
+    Gates on 10c only in that `if`/`unless` (`lib/core.sth`) and `while`
+    (`lib/combinators.sth`) already declare a `~[ ... ]` parameter and so must gain the
+    `inline` declaration this slice requires, exactly like every other library combinator;
+    10c introduced no clause-body or dispatch-based combinator mechanism for this slice to
+    build on.
+    The ordinary-`[ ... ]` real-call path does not lower today, and the gap is measured rather
+    than assumed: with `is_combinator` narrowed to `~` parameters only, `: apply
+    ( [ i64 -- i64 ] i64 -- i64 ) | n | | f | n f call ;` emits a **correct callee** —
+    `export function l $apply__m0(:Q0 %v0, l %v1)` loading both slots and calling through the
+    code pointer — and a **broken caller**: `call $apply__m0(l %v0, l %v1)` where `%v0` is
+    never defined and is passed as `l` rather than `:Q0`, which QBE rejects (`invalid type for
+    first operand %v0 in arg`). A quotation literal lowers to a *phantom* typed `IrType::I64`
+    (`calls.rs`'s `TermKind::Quotation` arm) and only becomes the real `(code, env)` aggregate
+    when a boundary calls `materialize_if_phantom`; the store/return/field boundaries do, and
+    the ordinary-call argument path does not. Two changes, no new machinery: materialize a
+    phantom argument at a real call, and give lowering the callee's parameter types — `env` is
+    a `HashMap<String, Arity>` carrying only `(in_arity, out_arity, ret_ty)`, so a call site
+    cannot currently tell which argument is a quotation. The checker half already works
+    (`check/terms.rs`'s argument-position `materialize_quotation_at_boundary`, which the
+    comment notes covers an ordinary user word declaring a quotation parameter).
 
     The "must declare `inline`" rule needs no carve-out against 11's builtin-operator
     rejection, which would otherwise make a `~`-bearing overload of a builtin name both
