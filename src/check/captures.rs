@@ -27,7 +27,7 @@ pub(super) fn body_captures_enclosing(body: &[Term], enclosing: &HashSet<String>
                         return true;
                     }
                 }
-                TermKind::Quotation(inner, _) => {
+                TermKind::Quotation(inner, _, _) => {
                     let mut inner_bound = bound.clone();
                     if walk(inner, enclosing, &mut inner_bound) {
                         return true;

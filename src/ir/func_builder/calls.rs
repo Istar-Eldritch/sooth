@@ -52,7 +52,7 @@ impl<'a> FuncBuilder<'a> {
             // is the plainest non-aggregate placeholder (the IR side has no
             // `if`-condition concern, so the checker's `Cstr` choice does not
             // bind here).
-            TermKind::Quotation(body, _) => {
+            TermKind::Quotation(body, _, _) => {
                 let id = QuotId(self.quot_defs.len());
                 self.quot_defs.push(body.clone());
                 let v = self.fresh_value(IrType::I64);
@@ -744,7 +744,7 @@ mod tests {
             },
         );
         let term = &line_terms("[ + ]")[0];
-        assert!(matches!(term.kind, TermKind::Quotation(_, _)));
+        assert!(matches!(term.kind, TermKind::Quotation(_, _, _)));
         b.lower_term(term, false);
         assert!(
             b.cur_instrs.is_empty(),

@@ -441,7 +441,7 @@ pub(super) fn poly_term(
         // `PolyType` variant; pushing a placeholder would erase the identity
         // into output unification/`Subst`/mangling. Mirrors the
         // `if`-in-a-polymorphic-body rejection above.
-        TermKind::Quotation(_, _) => {
+        TermKind::Quotation(_, _, _) => {
             return Err(format!(
                 "error: a quotation in the polymorphic body of `{}` (line {}) is not yet supported",
                 ctx.word_name().unwrap_or("<line>"),

@@ -291,7 +291,7 @@ fn visible_args<'t>(before: &'t [Term], binds: &HashMap<&'t str, usize>) -> Vec<
     let mut out = Vec::new();
     for term in before.iter().rev() {
         match &term.kind {
-            TermKind::Quotation(body, _) => out.push(Arg::Literal(body)),
+            TermKind::Quotation(body, _, _) => out.push(Arg::Literal(body)),
             TermKind::Call(name) => match binds.get(name.as_str()) {
                 Some(&slot) => out.push(Arg::Param(slot)),
                 None => break,
@@ -722,7 +722,7 @@ fn collect_all_calls<'a>(terms: &'a [Term], out: &mut Vec<&'a str>) {
             // combinator's own name inside its arms, and a *non-tail* self-call
             // there -- which the inliner would splice forever -- goes from a
             // located rejection to a compiler stack overflow.
-            TermKind::Quotation(inner, _) => collect_all_calls(inner, out),
+            TermKind::Quotation(inner, _, _) => collect_all_calls(inner, out),
             _ => {}
         }
     }

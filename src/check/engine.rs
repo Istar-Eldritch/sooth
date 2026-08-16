@@ -576,7 +576,7 @@ pub(super) fn capture_names_into(
                     out.insert(local.to_string());
                 }
             }
-            TermKind::Quotation(inner, _) => {
+            TermKind::Quotation(inner, _, _) => {
                 capture_names_into(inner, &mut shadowed.clone(), out);
             }
             _ => {}
@@ -663,7 +663,7 @@ impl Liveness {
                 // scan. This is only a floor
                 // (`capture_alive_names` extends it for a quotation the
                 // checker later finds is still reachable, bound or not).
-                TermKind::Quotation(inner, _) => {
+                TermKind::Quotation(inner, _, _) => {
                     Self::nested_uses(inner, &bound, outer_releasable, back_edge, i, &mut last_use);
                 }
                 _ => {}
@@ -708,7 +708,7 @@ impl Liveness {
                         Self::record_granted_use(last_use, local, at, back_edge);
                     }
                 }
-                TermKind::Quotation(inner, _) => {
+                TermKind::Quotation(inner, _, _) => {
                     Self::nested_uses(inner, bound, outer_releasable, back_edge, at, last_use);
                 }
                 _ => {}
@@ -737,7 +737,7 @@ impl Liveness {
 pub(super) fn references(terms: &[Term], name: &str) -> bool {
     terms.iter().any(|term| match &term.kind {
         TermKind::Call(n) => call_local(n) == name,
-        TermKind::Quotation(inner, _) => references(inner, name),
+        TermKind::Quotation(inner, _, _) => references(inner, name),
         _ => false,
     })
 }

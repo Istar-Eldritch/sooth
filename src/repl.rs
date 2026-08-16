@@ -302,9 +302,11 @@ fn rewrite_combinator_body_calls(terms: &[Term], rename: &HashMap<String, String
                 TermKind::Call(name) => {
                     TermKind::Call(rename.get(name).cloned().unwrap_or_else(|| name.clone()))
                 }
-                TermKind::Quotation(inner, is_inline) => {
-                    TermKind::Quotation(rewrite_combinator_body_calls(inner, rename), *is_inline)
-                }
+                TermKind::Quotation(inner, is_inline, annot) => TermKind::Quotation(
+                    rewrite_combinator_body_calls(inner, rename),
+                    *is_inline,
+                    annot.clone(),
+                ),
                 other => other.clone(),
             };
             Term {
@@ -2172,7 +2174,7 @@ impl Session {
                         *name = new;
                     }
                 }
-                TermKind::Quotation(inner, _) => self.rewrite_terms_imports(inner)?,
+                TermKind::Quotation(inner, _, _) => self.rewrite_terms_imports(inner)?,
                 _ => {}
             }
         }

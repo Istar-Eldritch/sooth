@@ -786,7 +786,7 @@ fn check_term(
         // here (D3): a bare body's input row is unknown until its consumption
         // site (`call`). The placeholder `ty` is `Cstr`, a registry-free
         // scalar no user op accepts once R11's default-deny is in place (R4).
-        TermKind::Quotation(body, is_inline) => {
+        TermKind::Quotation(body, is_inline, _) => {
             let id = QuotId(prov.quotations.len());
             prov.quotations.push(QuotBody {
                 body: body.clone(),
