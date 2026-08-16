@@ -453,19 +453,79 @@ mod tests {
 
     #[test]
     fn mode_is_write_if_any_mutable_borrow() {
+        // Both orders: `w` absorbs an `r` that came before it, and a later `r`
+        // never demotes a `w`.
         let statics = vec![statik("COUNT")];
-        let words = vec![word(
-            "both",
-            vec![
-                call("&COUNT"),
-                call("@"),
-                call("&!COUNT"),
-                call("1"),
-                call("+!"),
-            ],
-        )];
+        let words = vec![
+            word(
+                "read-then-write",
+                vec![
+                    call("&COUNT"),
+                    call("@"),
+                    call("&!COUNT"),
+                    call("1"),
+                    call("+!"),
+                ],
+            ),
+            word(
+                "write-then-read",
+                vec![
+                    call("&!COUNT"),
+                    call("1"),
+                    call("+!"),
+                    call("&COUNT"),
+                    call("@"),
+                ],
+            ),
+        ];
         let (sets, _) = infer_sets(&words, &statics);
         assert_eq!(sets[0], set_of(&[("COUNT", GlobalMode::W)]));
+        assert_eq!(sets[1], set_of(&[("COUNT", GlobalMode::W)]));
+    }
+
+    #[test]
+    fn direct_set_reaches_into_a_clause_body() {
+        // A clause-style word's terms live under `WordBody::Clauses`, a body
+        // shape the term walk has to enter on its own.
+        let statics = vec![statik("COUNT")];
+        let mut w = word("elim", Vec::new());
+        w.body = WordBody::Clauses(vec![Clause {
+            variant: "Some".to_string(),
+            locals: vec!["x".to_string()],
+            body: vec![call("&!COUNT"), call("1"), call("+!")],
+            span: span(1),
+        }]);
+        let (sets, _) = infer_sets(&[w], &statics);
+        assert_eq!(sets[0], set_of(&[("COUNT", GlobalMode::W)]));
+    }
+
+    #[test]
+    fn static_lookup_is_scoped_to_the_accessing_module() {
+        // A static is module-private (R2), so a same-named static of another
+        // module is not this word's to accrue -- the borrow-typing lookup is
+        // module-keyed and so is this one.
+        let statics = vec![static_in("COUNT", 1)];
+        let words = vec![word_in(
+            "a",
+            0,
+            vec![call("&!COUNT"), call("1"), call("+!")],
+        )];
+        let (sets, _) = infer_sets(&words, &statics);
+        assert_eq!(sets[0], GlobalSet::new());
+    }
+
+    #[test]
+    fn local_shadowing_a_word_name_is_not_a_call_edge() {
+        // `b` here is a bound local being pushed, not a call to the word `b`,
+        // so `a` inherits nothing from that word's set.
+        let statics = vec![statik("COUNT")];
+        let words = vec![
+            word("a", vec![bind(&["b"]), call("b")]),
+            word("b", vec![call("&!COUNT"), call("1"), call("+!")]),
+        ];
+        let (sets, _) = infer_sets(&words, &statics);
+        assert_eq!(sets[0], GlobalSet::new());
+        assert_eq!(sets[1], set_of(&[("COUNT", GlobalMode::W)]));
     }
 
     #[test]
