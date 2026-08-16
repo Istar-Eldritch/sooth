@@ -229,6 +229,15 @@ words are:
   `strip_ref_sigil`'s fallthrough at `src/resolve.rs:154`, recon 3). A core name
   that is neither a local, a module type/word, nor a module static is left
   untouched, exactly as today.
+- "Exactly as words are" does **not** extend to `resolve::mangle`'s exemption
+  list. Statics get their own `resolve::mangle_static`, unconditional. Every
+  exemption `mangle` makes (`main`, `drop`, every `lib/core.sth` prelude word)
+  exists so a *word* of that name stays reachable by bare name from a module
+  that did not declare it; a static is reachable no such way, so the exemptions
+  never applied to one and only ever collided. Both sites must use it — the
+  decl loop and the `&NAME` rewrite — but *only* those two: the word-rewrite arm
+  three lines below the static arm needs the exemptions, and blanket-replacing
+  the call unresolves every `if`.
 - `ast::rename_call` (`src/ast.rs:1620`, inlining) needs **no change**: a static
   ref is not a bound local, so it already falls through unchanged. Confirm this
   with a note in the diff, do not edit it.
@@ -295,6 +304,22 @@ that the disposal/consume scans treat a static root as nothing to dispose. The
 spec must **not** claim "every borrow rule is type-keyed, applies verbatim": the
 exclusivity rules are `owned_root`-keyed, and statics get a real `owned_root`
 precisely so those rules keep working.
+
+**Recorded gap — exclusivity is per-body, so two cross-body holes stay open**
+(a later slice, not this one). The `owned_root` scans run over one word body,
+which is all a *local* root ever needs: a local cannot be named from another
+body. A static can. So neither of these is caught:
+
+- a caller holding a live `&!COUNT` across a call to a callee that takes its
+  own `&!COUNT`;
+- a `&!COUNT` escaping in a materialized closure's `env` (`OuterRooted`, so
+  `check::captures` admits it) and coexisting with a second live borrow.
+
+Both are cross-body by construction, so no per-body scan can see them. The
+natural home is the R4/R5 global-set fixpoint, which already computes exactly
+which statics each callee writes: an exclusivity check keyed off that set is a
+later slice's work, and until it lands R3's "exclusivity fires for statics
+verbatim" holds *within a body only*.
 
 ## Global-set analysis (recon 4, decision 5/6, OQ3)
 
@@ -483,6 +508,16 @@ stay Phase 9 regardless: this is plain compiler-allocated storage only.
 - Struct-typed (aggregate) statics and their initialisers (OQ1; Phase 9).
 - `Copy`-marker interaction beyond "a static is its own carve-out": DESIGN.md
   settles this, nothing new here.
+- Cross-body static exclusivity (see R3's recorded gap): needs the R4/R5 global
+  set, and is a later slice.
+- Making `check_static_decls`'s name-collision rule symmetric across modules.
+  `colliding_name_kind` compares against words in the static's *own* module,
+  and `parser::prelude_words` gives every `lib/core.sth` word module 0, so
+  `static: if` is a located "already the name of a word in this module" error
+  in the entry file and silently accepted in every imported one. Harmless at
+  codegen now that `mangle_static` is unconditional; it is an ergonomics rule
+  applied unevenly, and squaring it belongs with whatever slice gives prelude
+  words real hygiene (`lib/core.sth` already records that gap for locals).
 
 ## Files touched
 

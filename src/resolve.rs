@@ -35,6 +35,20 @@ pub(crate) fn mangle(name: &str, module: u32) -> String {
     format!("{name}__m{module}")
 }
 
+/// R2: a static's own mangle, with no exemptions. Every exemption `mangle`
+/// makes exists so a *word* stays reachable by bare name from a module that
+/// did not declare it (`main` from the C shim, a `drop` overload from
+/// `find_drop_overloads`, `if` from every module at once). A static is
+/// reachable no such way: only `&NAME` inside its declaring module names one,
+/// and that site mangles identically. Routing statics through `mangle` instead
+/// gave `static: drop` and `static: main` a raw data symbol, so two modules
+/// declaring one leaked a bare "symbol already defined" out of the assembler,
+/// and `Ctx::static_type`, which matches on the mangled name alone, silently
+/// borrowed whichever of the two it found first.
+pub(crate) fn mangle_static(name: &str, module: u32) -> String {
+    format!("{name}__m{module}")
+}
+
 /// Slice 10c (R-P3-4): the `lib/core.sth` words injected into every closure.
 /// They are declared once but reached by bare name from every module, so
 /// mangling them per module would bind each module's `if` to a spelling only
@@ -276,7 +290,7 @@ impl NameTables {
         // resolves, and only under a sigil: a static is reachable no other
         // way, so a bare `COUNT` stays whatever it means today.
         if !sigil.is_empty() && suffix.is_empty() && self.statics[module as usize].contains(core) {
-            return Ok(Some(format!("{sigil}{}", mangle(core, module))));
+            return Ok(Some(format!("{sigil}{}", mangle_static(core, module))));
         }
         // A bare call to one of `check::builtin_table`'s operator names stays
         // unrewritten even when this module declares a same-named overload:
@@ -428,10 +442,12 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
         x.name = mangle(&x.name, x.module);
     }
     // R2: a static's data symbol is module-scoped exactly as a word's is, so
-    // two modules may each declare `COUNT` without colliding at codegen. No
-    // operator-name carve-out applies: a static is never a dispatch name.
+    // two modules may each declare `COUNT` without colliding at codegen --
+    // and, via `mangle_static`, without colliding on `drop`/`main`/a prelude
+    // word either. No operator-name carve-out applies: a static is never a
+    // dispatch name.
     for s in &mut module.statics {
-        s.name = mangle(&s.name, s.module);
+        s.name = mangle_static(&s.name, s.module);
     }
     Ok(())
 }
@@ -542,6 +558,19 @@ mod tests {
         assert_eq!(mangle("main", 0), "main");
         assert_eq!(mangle("push", 1), "push__m1");
         assert_eq!(mangle("Point", 0), "Point__m0");
+    }
+
+    /// R2: a static inherits none of `mangle`'s exemptions. Each name below is
+    /// one `mangle` returns raw, and each used to reach the backend as a raw
+    /// data symbol that a second module's static -- or, for `main`, the entry
+    /// word's own `sooth_main` -- then collided with at the assembler.
+    #[test]
+    fn mangle_static_suffixes_even_the_exempt_word_names() {
+        for name in ["main", "drop", "if"] {
+            assert_eq!(mangle(name, 1), name, "precondition: {name} is exempt");
+            assert_eq!(mangle_static(name, 1), format!("{name}__m1"));
+        }
+        assert_eq!(mangle_static("COUNT", 2), "COUNT__m2");
     }
 
     /// U5 (R16): a name that exists in the target module but is not on its

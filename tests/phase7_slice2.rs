@@ -5,7 +5,7 @@
 //! `check::check`, so every case here goes through a real file build rather
 //! than the in-process single-file checker.
 //!
-//! The escaping-closure golden asserts an *admitted* program, not a
+//! The escaping-closure goldens assert an *admitted* program, not a
 //! diagnostic: a static-rooted `owned_root` classifies as `OuterRooted`, so
 //! `check::captures` never flags it, and unlike a local-rooted reference it
 //! never can dangle -- a static outlives every closure that captures it. Its
@@ -196,20 +196,110 @@ fn two_modules_declaring_the_same_static_get_distinct_storage() {
     assert_eq!(code, 0);
 }
 
-/// The spec's flagged high-risk case: a static-rooted `&!COUNT` named inside a
+/// R2, the exempt names: `resolve::mangle` deliberately leaves `main`, `drop`
+/// and every `lib/core.sth` prelude word unmangled so a *word* of that name
+/// stays reachable by bare name from a module that did not declare it. A
+/// static is reachable no such way, so routing it through those exemptions
+/// only ever collided: two modules each declaring `static: drop` emitted one
+/// raw `drop` data symbol (`symbol `drop' is already defined` straight from
+/// the assembler), and `Ctx::static_type`, which matches on the mangled name
+/// alone, borrowed whichever of the two it found first. Values differ per
+/// module and per name so a collapse that somehow linked would still show up
+/// as wrong numbers. Both exempt classes that can name a static are covered:
+/// the fixed names (`drop`) and the `lib/core.sth` prelude words (`if`).
+#[test]
+fn statics_named_like_mangle_exempt_words_get_distinct_storage() {
+    let dir = scratch("exempt-names");
+    for (file, dropv, ifv, word) in [
+        ("lib1.sth", "100", "300", "peek1"),
+        ("lib2.sth", "11", "13", "peek2"),
+    ] {
+        std::fs::write(
+            dir.join(file),
+            format!(
+                "static: drop i64 = {dropv} ;\n\
+                 static: if i64 = {ifv} ;\n\
+                 : {word} ( -- i64 i64 ) global: drop r, if r &drop @ &if @ ;\n\
+                 export: {word} ;\n"
+            ),
+        )
+        .unwrap();
+    }
+    let entry = dir.join("main.sth");
+    std::fs::write(
+        &entry,
+        "import: p | peek1 | \"lib1.sth\" ;\n\
+         import: q | peek2 | \"lib2.sth\" ;\n\
+         : main ( -- ) peek1 . . peek2 . . ;\n",
+    )
+    .unwrap();
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "300\n100\n13\n11\n");
+    assert_eq!(code, 0);
+}
+
+/// R2, the `main` exemption specifically: a library static named `main` used
+/// to reach the backend as the raw symbol `main`, which `qbe_name` rewrites to
+/// `sooth_main` -- the very symbol the entry word owns and the C shim calls.
+/// The assembler rejected the program outright, so this asserts a build that
+/// links at all, with the static's value proving the two did not merge.
+#[test]
+fn a_library_static_named_main_does_not_collide_with_the_entry_symbol() {
+    let dir = scratch("static-main");
+    std::fs::write(
+        dir.join("lib.sth"),
+        "static: main i64 = 42 ;\n\
+         : peekmain ( -- i64 ) global: main r &main @ ;\n\
+         export: peekmain ;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.sth");
+    std::fs::write(
+        &entry,
+        "import: l | peekmain | \"lib.sth\" ;\n\
+         : main ( -- ) peekmain . ;\n",
+    )
+    .unwrap();
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+/// The spec's flagged high-risk case, half one: `&!COUNT` named *inside* a
 /// quotation literal that materializes into a `(code, env)` value and escapes
-/// its defining word. The job here is to prove **no ICE** -- this codebase has
-/// live materialized-quotation crashes elsewhere, so "a static ref behaves like
-/// any other ref" is exactly where it would break. It is admitted rather than
+/// its defining word. The borrow is taken when the closure runs, so the env is
+/// empty -- the static's address is materialized inside the quotation body.
+/// The job here is to prove **no ICE** -- this codebase has live
+/// materialized-quotation crashes elsewhere, so "a static ref behaves like any
+/// other ref" is exactly where it would break. It is admitted rather than
 /// rejected because a static, unlike a local, outlives every closure that can
 /// capture it; the calls through the escaped closure must reach the one shared
 /// data symbol.
 #[test]
-fn static_ref_captured_into_escaping_closure_no_ice() {
+fn static_ref_named_inside_an_escaping_quotation_no_ice() {
     let (stdout, code) = run_program(
         "escaping-closure",
         "static: COUNT i64 = 0 ;\n\
          : make ( -- [ -- ] ) global: COUNT w [ &!COUNT 1 +! ] ;\n\
+         export: make ;\n\
+         : main ( -- ) make | q | q call q call &COUNT @ . ;\n",
+    );
+    assert_eq!(stdout, "2\n");
+    assert_eq!(code, 0);
+}
+
+/// Half two, the shape the test above does *not* reach: the `&!COUNT` is taken
+/// in `make`'s own body and bound to a local, so the escaping closure carries
+/// the live static-rooted reference in its captured `env` rather than
+/// re-deriving the address per call. This is the case `check::captures`
+/// classifies as `OuterRooted` and admits, and the one where a dangling-ref
+/// analysis written for locals would have had to reject or miscompile.
+#[test]
+fn static_ref_captured_into_an_escaping_closure_env_no_ice() {
+    let (stdout, code) = run_program(
+        "escaping-closure-env",
+        "static: COUNT i64 = 0 ;\n\
+         : make ( -- [ -- ] ) global: COUNT w &!COUNT | c | [ c 1 +! ] ;\n\
          export: make ;\n\
          : main ( -- ) make | q | q call q call &COUNT @ . ;\n",
     );
