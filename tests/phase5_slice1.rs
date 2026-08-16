@@ -25,6 +25,42 @@ fn build_and_run(name: &str, src: &str) -> (String, i32) {
     )
 }
 
+fn build_err(name: &str, src: &str) -> String {
+    let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
+    std::fs::write(&path, src).expect("writing temp source should succeed");
+    let err = sooth::driver::build(&path).expect_err("build should fail");
+    std::fs::remove_file(&path).ok();
+    err
+}
+
+/// The end-to-end half of `check::declarations`'s
+/// `duplicate_type_check_includes_generic_headers`, which hand-builds its
+/// `GenericStructDecl`s and so cannot see whether a *parsed* generic header
+/// ever reaches the checker. Without this, dropping the driver's
+/// `generic_structs.extend` (or passing `&[]` to `check_types`) leaves the
+/// whole suite green while a generic `Box` silently shadows a concrete one.
+#[test]
+fn generic_header_colliding_with_a_concrete_type_is_a_duplicate() {
+    let err = build_err(
+        "phase5-slice1-dup-struct",
+        "type: Box x i64 ;\ntype: Box 'T val 'T ;\n: main ( -- ) 1 . ;\n",
+    );
+    assert!(err.contains("duplicate type `Box`"), "unexpected: {err}");
+    assert!(err.contains("line 2, col 1"), "unlocated: {err}");
+}
+
+/// The enum twin, guarding the driver's `generic_enums.extend` and the
+/// `generic_enums` argument to `check_types` independently of the struct side.
+#[test]
+fn generic_enum_header_colliding_with_a_concrete_type_is_a_duplicate() {
+    let err = build_err(
+        "phase5-slice1-dup-enum",
+        "type: Opt | None | Some v i64 ;\ntype: Opt 'T | Nothing | Just v 'T ;\n: main ( -- ) 1 . ;\n",
+    );
+    assert!(err.contains("duplicate type `Opt`"), "unexpected: {err}");
+    assert!(err.contains("line 2, col 1"), "unlocated: {err}");
+}
+
 #[test]
 fn generic_type_declared_but_never_used_builds_and_runs() {
     let (stdout, code) = build_and_run(

@@ -167,6 +167,21 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
     Ok(())
 }
 
+/// Phase 5 slice 1: a `'`-prefixed word inside a `type:` body is a type
+/// variable, never a field name. Rejected at every field-name position so the
+/// rule holds uniformly -- a generic header consumes its `'`-prefixed words
+/// before any field is read, which would otherwise leave `'x` legal as a field
+/// name everywhere except directly after the type name.
+fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
+    if name.starts_with('\'') {
+        return Err(format!(
+            "error: `{name}` at line {}, col {} cannot be a field name (a `'`-prefixed word is a type variable)",
+            span.line, span.col
+        ));
+    }
+    Ok(())
+}
+
 /// R12: the `extern:` symbol string is emitted verbatim as `call $<symbol>`
 /// once lowered, so it must already be a valid C identifier here at the
 /// declaration — the trust boundary — rather than surfacing as broken QBE
@@ -1045,6 +1060,28 @@ fn phantom_ty_var_error(decl_name: &str, name: &str, span: Span) -> String {
     format!(
         "error: type variable `{name}` at line {}, col {} is bound by `type: {decl_name}`'s header but appears in no field (a phantom parameter cannot be disambiguated at a call site)",
         span.line, span.col
+    )
+}
+
+/// Phase 5 slice 1: the generic path's twin of the concrete odd-field-count
+/// error. It names the header's bound variables because the likeliest way to
+/// reach it is writing a `'`-prefixed *field* name directly after the type
+/// name (`type: Foo 'bar i64 ;`), which the header scan consumes as a type
+/// parameter -- leaving the plain message pointing at a token the author never
+/// got wrong.
+fn generic_odd_field_count_error(
+    decl_name: &str,
+    ty_vars: &[(String, Span)],
+    field_name: &str,
+    before: &str,
+    span: Span,
+) -> String {
+    let header: Vec<&str> = ty_vars.iter().map(|(n, _)| n.as_str()).collect();
+    format!(
+        "parse error: field `{field_name}` has no type before `{before}` at line {}, col {} (odd field-token count in the body of generic `type: {decl_name} {}`; a `'`-prefixed word after the type name binds a type parameter)",
+        span.line,
+        span.col,
+        header.join(" "),
     )
 }
 
@@ -2205,7 +2242,8 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
                 Some(_) => {
-                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    let (field_name, field_span) = self.expect_word_any_spanned()?;
+                    reject_ty_var_field_name(&field_name, field_span)?;
                     if let Some((Token::Semicolon, span)) = self.peek() {
                         return Err(format!(
                             "parse error: field `{field_name}` has no type before `;` at line {}, col {} (odd field-token count in `type:` body)",
@@ -2395,7 +2433,8 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) | Some((Token::Pipe, _)) => break,
                 Some(_) => {
-                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    let (field_name, field_span) = self.expect_word_any_spanned()?;
+                    reject_ty_var_field_name(&field_name, field_span)?;
                     if let Some((tok, span)) = self.peek() {
                         if matches!(tok, Token::Semicolon | Token::Pipe) {
                             return Err(format!(
@@ -2434,11 +2473,15 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) => break,
                 Some(_) => {
-                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    let (field_name, field_span) = self.expect_word_any_spanned()?;
+                    reject_ty_var_field_name(&field_name, field_span)?;
                     if let Some((Token::Semicolon, span)) = self.peek() {
-                        return Err(format!(
-                            "parse error: field `{field_name}` has no type before `;` at line {}, col {} (odd field-token count in `type:` body)",
-                            span.line, span.col
+                        return Err(generic_odd_field_count_error(
+                            &name,
+                            &ty_vars,
+                            &field_name,
+                            ";",
+                            *span,
                         ));
                     }
                     let ty = self.parse_generic_field_type_expr(&name, &ty_vars, &mut used)?;
@@ -2525,12 +2568,20 @@ impl<'t> Parser<'t> {
             match self.peek() {
                 Some((Token::Semicolon, _)) | Some((Token::Pipe, _)) => break,
                 Some(_) => {
-                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    let (field_name, field_span) = self.expect_word_any_spanned()?;
+                    reject_ty_var_field_name(&field_name, field_span)?;
                     if let Some((tok, span)) = self.peek() {
                         if matches!(tok, Token::Semicolon | Token::Pipe) {
-                            return Err(format!(
-                                "parse error: field `{field_name}` has no type before `{tok:?}` at line {}, col {} (odd field-token count in `type:` body)",
-                                span.line, span.col
+                            return Err(generic_odd_field_count_error(
+                                decl_name,
+                                ty_vars,
+                                &field_name,
+                                if matches!(tok, Token::Semicolon) {
+                                    ";"
+                                } else {
+                                    "|"
+                                },
+                                *span,
                             ));
                         }
                     }
@@ -3501,6 +3552,7 @@ mod tests {
         let err = result.unwrap_err();
         assert!(err.contains("'E"), "unexpected message: {err}");
         assert!(err.contains("Box"), "unexpected message: {err}");
+        assert!(err.contains("line 1, col 18"), "unlocated: {err}");
     }
 
     #[test]
@@ -3512,6 +3564,8 @@ mod tests {
         assert!(err.contains("phantom"), "unexpected message: {err}");
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Phantom"), "unexpected message: {err}");
+        // The location points at the binding site, not at the declaration.
+        assert!(err.contains("line 1, col 15"), "unlocated: {err}");
     }
 
     #[test]
@@ -3527,6 +3581,47 @@ mod tests {
         assert!(err.contains("bound twice"), "unexpected message: {err}");
         assert!(err.contains("'T"), "unexpected message: {err}");
         assert!(err.contains("Bad"), "unexpected message: {err}");
+        // Col 14 is the *second* `'T`, the one that is the duplicate.
+        assert!(err.contains("line 1, col 14"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_typedef_tick_prefixed_field_name_is_error() {
+        // Phase 5 slice 1 review fix: `'`-prefixed words are type variables,
+        // so they are rejected at every field-name position. Before this,
+        // `'y` was accepted as an ordinary field name here while the same
+        // spelling directly after the type name was read as a type parameter.
+        let result = parse_src("type: Foo x i64 'y i64 ;");
+        let err = result.unwrap_err();
+        assert!(err.contains("'y"), "unexpected message: {err}");
+        assert!(err.contains("type variable"), "unexpected message: {err}");
+        assert!(err.contains("line 1, col 17"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_variant_tick_prefixed_field_name_is_error() {
+        // The same gate inside a generic enum variant, where the header has
+        // already consumed its own `'`-prefixed words.
+        let result = parse_src("type: E 'T | Ok v 'T 'z ;");
+        let err = result.unwrap_err();
+        assert!(err.contains("'z"), "unexpected message: {err}");
+        assert!(err.contains("type variable"), "unexpected message: {err}");
+        assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_typedef_odd_field_count_names_the_generic_header() {
+        // `'bar` reads as a type parameter, so the trailing `i64` is a field
+        // name with no type. The plain odd-field-count message would name
+        // `i64`, a token the author never got wrong; this one says the header
+        // was read as generic over `'bar`.
+        let result = parse_src("type: Foo 'bar i64 ;");
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("generic `type: Foo 'bar`"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("line 1, col 20"), "unlocated: {err}");
     }
 
     #[test]

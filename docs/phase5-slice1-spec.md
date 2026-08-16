@@ -116,7 +116,12 @@ variable-only, never a nested open application.
   step must set it explicitly, not leave it defaulted.
 - **No regression to existing concrete `type:` declarations.** Every existing golden
   `.sth` file and `parse_typedef_*`/`check_struct_*`/`check_enum_*` test continues to pass
-  unchanged; a concrete (non-generic) `type:` header parses exactly as it does today.
+  unchanged; a concrete (non-generic) `type:` header parses exactly as it does today, with
+  one deliberate narrowing: a `'`-prefixed word is a type variable, so it is rejected at
+  every field-name position in a `type:` body. Without the narrowing the rule would hold
+  only in some positions: the header scan consumes `'`-prefixed words directly after the
+  type name, so `type: Foo 'bar i64 ;` reads as a generic declaration while
+  `type: Foo x i64 'y i64 ;` would still take `'y` as an ordinary field name.
 
 ## Scope and boundaries
 
