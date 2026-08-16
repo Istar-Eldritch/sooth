@@ -66,7 +66,7 @@ fn free_locals_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut Ha
                     out.insert(local.to_string());
                 }
             }
-            TermKind::Quotation(inner, _) => free_locals_into(inner, &mut shadowed.clone(), out),
+            TermKind::Quotation(inner, _, _) => free_locals_into(inner, &mut shadowed.clone(), out),
             _ => {}
         }
     }

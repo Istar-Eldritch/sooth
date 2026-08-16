@@ -1528,6 +1528,26 @@ impl std::fmt::Display for Type {
     }
 }
 
+/// Phase 6 slice 1 (D4): the optional effect a quotation literal declares
+/// inside its own brackets, `[ ( ..a T -- ..b U ) term* ]`. Self-contained:
+/// unlike a `PolyType::Quotation` inside a `PolySig`, an annotation has no
+/// enclosing signature to borrow an id space from, so its type- and
+/// row-variable ids are minted per literal (a `Var(0)` in one literal's
+/// annotation is unrelated to a `Var(0)` in another's). A fully concrete
+/// annotation leaves both rows `None` and both name tables empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotAnnot {
+    pub inputs: Vec<PolyType>,
+    pub outputs: Vec<PolyType>,
+    pub row_in: Option<u32>,
+    pub row_out: Option<u32>,
+    pub ty_var_names: Vec<String>,
+    pub row_var_names: Vec<String>,
+    /// The annotation's opening `(`, where a body/annotation disagreement is
+    /// reported.
+    pub span: Span,
+}
+
 #[derive(Debug, Clone)]
 pub struct Term {
     pub kind: TermKind,
@@ -1555,8 +1575,10 @@ pub enum TermKind {
     /// ordinary `[ ... ]`. Checked against the consuming parameter's declared
     /// flavour at each argument-matching site (R-C2), independent of
     /// `Type::InlineQuotation`/`Type::Quotation`, which describe the
-    /// *parameter*.
-    Quotation(Vec<Term>, bool),
+    /// *parameter*. The `Option<QuotAnnot>` is Phase 6 slice 1 (D4): the
+    /// effect the literal declares inside its own brackets, `None` for every
+    /// unannotated literal.
+    Quotation(Vec<Term>, bool, Option<QuotAnnot>),
     /// Slice 6h (D1): a body-level `[ Type ; Count ]` raw array constructor,
     /// carrying the parse-time-interned `Type::Array(id)` for the shape.
     /// Concrete-path only: `poly_term` rejects it eagerly (there is nowhere
@@ -1627,9 +1649,13 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
                 TermKind::Bind(renamed)
             }
             TermKind::Call(name) => TermKind::Call(rename_call(name, uid, bound)),
-            TermKind::Quotation(inner, is_inline) => {
+            TermKind::Quotation(inner, is_inline, annot) => {
                 let mut inner_bound = bound.clone();
-                TermKind::Quotation(rename_terms(inner, uid, &mut inner_bound), *is_inline)
+                TermKind::Quotation(
+                    rename_terms(inner, uid, &mut inner_bound),
+                    *is_inline,
+                    annot.clone(),
+                )
             }
             other => other.clone(),
         };

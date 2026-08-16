@@ -17,8 +17,8 @@
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, Import, Len,
-    Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig, PolyType, RefDecl, Span,
-    StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig, PolyType, QuotAnnot, RefDecl,
+    Span, StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -1012,6 +1012,36 @@ fn row_var_misplaced_error(name: &str, span: Span) -> String {
         "error: row variable `{name}` at line {}, col {} may appear only once, at the deepest (leftmost) slot of a side",
         span.line, span.col
     )
+}
+
+/// Phase 6 slice 1 (R6): a quotation annotation parses only in its full form,
+/// so a parenthesized list that reaches `)` without a `--` -- including the
+/// empty `( )` -- is rejected rather than read as an elided effect.
+fn annotation_missing_arrow_error(span: Span) -> String {
+    format!(
+        "parse error: a quotation annotation must be written in full as `( inputs -- outputs )`, found `)` with no `--` at line {}, col {}",
+        span.line, span.col
+    )
+}
+
+/// Phase 6 slice 1 (R2): a quotation annotation's own variable tables, minted
+/// per literal and disjoint from any enclosing signature's `PolySig` -- an
+/// annotation has no signature to borrow an id space from.
+#[derive(Default)]
+struct AnnotVars {
+    ty_names: Vec<String>,
+    row_names: Vec<String>,
+    row_in: Option<u32>,
+    row_out: Option<u32>,
+}
+
+/// Intern a variable spelling, assigning a fresh id on first sight.
+fn intern_var_name(table: &mut Vec<String>, name: &str) -> u32 {
+    if let Some(i) = table.iter().position(|n| n == name) {
+        return i as u32;
+    }
+    table.push(name.to_string());
+    (table.len() - 1) as u32
 }
 
 /// Slice 10a (R4): a `..`-prefixed name inside a quotation effect that does
@@ -2309,6 +2339,89 @@ impl<'t> Parser<'t> {
         Ok(out)
     }
 
+    /// Phase 6 slice 1 (D1): the optional effect a quotation literal declares
+    /// inside its own brackets, read once the opening bracket is consumed. A
+    /// leading `(` is the sole disambiguator and is unambiguous: `parse_term`
+    /// has no `Token::LParen` arm, so no body term can begin with one. A
+    /// literal with no leading `(` parses exactly as before.
+    fn parse_optional_quot_annotation(&mut self) -> Result<Option<QuotAnnot>, String> {
+        if !matches!(self.peek(), Some((Token::LParen, _))) {
+            return Ok(None);
+        }
+        self.parse_quot_annotation().map(Some)
+    }
+
+    /// The annotation itself, `( inputs -- outputs )`. Follows the shape of
+    /// `parse_quot_type_list` (a list, `--`, a list) but is deliberately not
+    /// that reader: this one stops on `)` rather than `]`, admits the variable
+    /// spellings `'T`/`..a`, and mints their ids into the literal's own name
+    /// tables rather than any enclosing signature's `PolySig` (R2). R6: only
+    /// the full four-part form parses, so `( )` and a parenthesized list with
+    /// no `--` are both located errors.
+    fn parse_quot_annotation(&mut self) -> Result<QuotAnnot, String> {
+        let span = self.expect(Token::LParen)?;
+        let mut vars = AnnotVars::default();
+        let inputs = self.parse_annot_slots(&mut vars, false, |tok| {
+            matches!(tok, Token::RParen) || is_word(tok, "--")
+        })?;
+        if let Some((Token::RParen, span)) = self.peek() {
+            return Err(annotation_missing_arrow_error(*span));
+        }
+        self.expect_word("--")?;
+        let outputs =
+            self.parse_annot_slots(&mut vars, true, |tok| matches!(tok, Token::RParen))?;
+        self.expect(Token::RParen)?;
+        Ok(QuotAnnot {
+            inputs,
+            outputs,
+            row_in: vars.row_in,
+            row_out: vars.row_out,
+            ty_var_names: vars.ty_names,
+            row_var_names: vars.row_names,
+            span,
+        })
+    }
+
+    /// One side of an annotation. A leading `..s` (the deepest slot) is the
+    /// side's row variable, interned into the annotation's own row table; a
+    /// `..s` anywhere else, or a second one, is the same misplacement error a
+    /// signature's rows raise.
+    fn parse_annot_slots(
+        &mut self,
+        vars: &mut AnnotVars,
+        is_output: bool,
+        stop: impl Fn(&Token) -> bool,
+    ) -> Result<Vec<PolyType>, String> {
+        if let Some((Token::Word(w), _)) = self.peek() {
+            if w.starts_with("..") {
+                let w = w.clone();
+                self.pos += 1;
+                let id = intern_var_name(&mut vars.row_names, &w);
+                if is_output {
+                    vars.row_out = Some(id);
+                } else {
+                    vars.row_in = Some(id);
+                }
+            }
+        }
+        let mut slots = Vec::new();
+        loop {
+            match self.peek() {
+                None => return Err(self.eof_error(if is_output { "`)`" } else { "`)` or `--`" })),
+                Some((tok, _)) if stop(tok) => break,
+                Some((Token::Word(w), span)) if w.starts_with("..") => {
+                    return Err(row_var_misplaced_error(w, *span));
+                }
+                Some((Token::Word(w), _)) if w.starts_with('\'') => {
+                    let (w, _) = self.expect_word_any_spanned()?;
+                    slots.push(PolyType::Var(intern_var_name(&mut vars.ty_names, &w)));
+                }
+                _ => slots.push(PolyType::Concrete(self.parse_type_expr()?)),
+            }
+        }
+        Ok(slots)
+    }
+
     /// The array count token: a decimal literal `>= 1` and `<= u32::MAX`
     /// (M1: no const-expr eval, so a non-literal count is always a located
     /// error naming the offending token). A literal `< 1` or `> u32::MAX` is
@@ -3137,12 +3250,13 @@ impl<'t> Parser<'t> {
             // quotation-body one.
             Token::LBracket if self.array_ctor_ahead() => self.parse_array_ctor_term(span),
             Token::LBracket => {
+                let annotation = self.parse_optional_quot_annotation()?;
                 let body = self.parse_terms("`]` (unterminated quotation)", |tok| {
                     matches!(tok, Token::RBracket)
                 })?;
                 self.expect(Token::RBracket)?;
                 Ok(Term {
-                    kind: TermKind::Quotation(body, false),
+                    kind: TermKind::Quotation(body, false, annotation),
                     span,
                 })
             }
@@ -3153,12 +3267,13 @@ impl<'t> Parser<'t> {
             // declared `Type::InlineQuotation`/`Type::Quotation` at each
             // argument-matching site.
             Token::TildeLBracket => {
+                let annotation = self.parse_optional_quot_annotation()?;
                 let body = self.parse_terms("`]` (unterminated quotation)", |tok| {
                     matches!(tok, Token::RBracket)
                 })?;
                 self.expect(Token::RBracket)?;
                 Ok(Term {
-                    kind: TermKind::Quotation(body, true),
+                    kind: TermKind::Quotation(body, true, annotation),
                     span,
                 })
             }
@@ -3327,7 +3442,7 @@ mod tests {
         assert!(matches!(&gcd_body[2].kind, TermKind::IntLit(0)));
         assert!(matches!(&gcd_body[3].kind, TermKind::Call(w) if w == "="));
         match &gcd_body[4].kind {
-            TermKind::Quotation(then_branch, is_inline) => {
+            TermKind::Quotation(then_branch, is_inline, _) => {
                 assert_eq!(then_branch.len(), 1);
                 assert!(is_inline, "gcd.sth writes `if`'s arms `~[ ... ]` (R-C3)");
                 assert!(matches!(&then_branch[0].kind, TermKind::Call(w) if w == "a"));
@@ -3335,7 +3450,7 @@ mod tests {
             other => panic!("expected the `then` quotation, got {other:?}"),
         }
         match &gcd_body[5].kind {
-            TermKind::Quotation(else_branch, is_inline) => {
+            TermKind::Quotation(else_branch, is_inline, _) => {
                 assert_eq!(else_branch.len(), 5);
                 assert!(is_inline, "gcd.sth writes `if`'s arms `~[ ... ]` (R-C3)");
             }
@@ -3433,7 +3548,7 @@ mod tests {
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 4);
         match &body[0].kind {
-            TermKind::Quotation(terms, is_inline) => {
+            TermKind::Quotation(terms, is_inline, _) => {
                 assert_eq!(terms.len(), 2);
                 assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
@@ -3442,11 +3557,11 @@ mod tests {
             other => panic!("expected Quotation, got {other:?}"),
         }
         match &body[2].kind {
-            TermKind::Quotation(outer, is_inline) => {
+            TermKind::Quotation(outer, is_inline, _) => {
                 assert_eq!(outer.len(), 1);
                 assert!(!is_inline, "an ordinary `[ ... ]` literal");
                 match &outer[0].kind {
-                    TermKind::Quotation(inner, is_inline) => {
+                    TermKind::Quotation(inner, is_inline, _) => {
                         assert!(inner.is_empty());
                         assert!(!is_inline, "an ordinary `[ ... ]` literal");
                     }
@@ -3467,7 +3582,7 @@ mod tests {
         let body = terms_body(&module.words[0]);
         assert_eq!(body.len(), 4);
         match &body[0].kind {
-            TermKind::Quotation(terms, is_inline) => {
+            TermKind::Quotation(terms, is_inline, _) => {
                 assert_eq!(terms.len(), 2);
                 assert!(is_inline, "a `~[ ... ]` literal");
                 assert!(matches!(terms[0].kind, TermKind::IntLit(1)));
@@ -3476,11 +3591,11 @@ mod tests {
             other => panic!("expected Quotation, got {other:?}"),
         }
         match &body[2].kind {
-            TermKind::Quotation(outer, is_inline) => {
+            TermKind::Quotation(outer, is_inline, _) => {
                 assert_eq!(outer.len(), 1);
                 assert!(is_inline, "a `~[ ... ]` literal");
                 match &outer[0].kind {
-                    TermKind::Quotation(inner, is_inline) => {
+                    TermKind::Quotation(inner, is_inline, _) => {
                         assert!(inner.is_empty());
                         assert!(is_inline, "a `~[ ... ]` literal");
                     }
@@ -3488,6 +3603,129 @@ mod tests {
                 }
             }
             other => panic!("expected Quotation, got {other:?}"),
+        }
+    }
+
+    /// Phase 6 slice 1 (D1/D4): the full four-part annotation reads into the
+    /// literal's own `QuotAnnot`, concrete on both sides, leaving both rows
+    /// and both name tables empty.
+    #[test]
+    fn parse_quotation_annotation_full_form_ok() {
+        let module = parse_src(": w ( -- ) [ ( i64 -- bool ) dup 10 < ] drop ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(terms, is_inline, Some(annot)) => {
+                assert_eq!(terms.len(), 3, "the body is read by the untouched reader");
+                assert!(!is_inline, "an ordinary `[ ... ]` literal");
+                assert_eq!(annot.inputs, vec![PolyType::Concrete(Type::I64)]);
+                assert_eq!(annot.outputs, vec![PolyType::Concrete(Type::BOOL)]);
+                assert_eq!((annot.row_in, annot.row_out), (None, None));
+                assert!(annot.ty_var_names.is_empty());
+                assert!(annot.row_var_names.is_empty());
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// The `~[ ... ]` flavour reads the same annotation and keeps its flag.
+    #[test]
+    fn parse_quotation_annotation_inline_flavour_ok() {
+        let module = parse_src(": w ( -- ) ~[ ( i64 -- bool ) dup 10 < ] drop ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(terms, is_inline, Some(annot)) => {
+                assert_eq!(terms.len(), 3);
+                assert!(is_inline, "a `~[ ... ]` literal");
+                assert_eq!(annot.inputs, vec![PolyType::Concrete(Type::I64)]);
+                assert_eq!(annot.outputs, vec![PolyType::Concrete(Type::BOOL)]);
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// D1's additive-parse guard: a literal with no leading `(` parses exactly
+    /// as before, carrying no annotation.
+    #[test]
+    fn parse_quotation_no_annotation_unchanged() {
+        let module = parse_src(": w ( -- ) [ dup 10 < ] drop ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(terms, _, annotation) => {
+                assert_eq!(terms.len(), 3);
+                assert!(annotation.is_none(), "an unannotated literal");
+            }
+            other => panic!("expected Quotation, got {other:?}"),
+        }
+    }
+
+    /// R6: only the full form parses, so a parenthesized list reaching `)`
+    /// with no `--` is a located error rather than an elided effect.
+    #[test]
+    fn parse_quotation_annotation_missing_arrow_is_error() {
+        let err = parse_src(": w ( -- ) [ ( i64 bool ) dup 10 < ] drop ;").unwrap_err();
+        assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
+        assert!(err.contains("line 1, col 25"), "unexpected: {err}");
+    }
+
+    /// R6: the empty `( )` is the same rejection, not a nil effect.
+    #[test]
+    fn parse_quotation_annotation_elided_is_error() {
+        let err = parse_src(": w ( -- ) [ ( ) dup ] drop ;").unwrap_err();
+        assert!(err.contains("( inputs -- outputs )"), "unexpected: {err}");
+        assert!(err.contains("line 1, col 16"), "unexpected: {err}");
+    }
+
+    /// R2: a row spelling is admitted and interned into the literal's own row
+    /// table; the same name on both sides is one id (a passthrough row).
+    #[test]
+    fn parse_quotation_annotation_row_ok() {
+        let module = parse_src(": w ( -- ) [ ( ..a i64 -- ..a ) drop ] drop ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(annot.row_var_names, vec!["..a".to_string()]);
+                assert_eq!((annot.row_in, annot.row_out), (Some(0), Some(0)));
+                assert_eq!(annot.inputs, vec![PolyType::Concrete(Type::I64)]);
+                assert!(annot.outputs.is_empty());
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// R2: a shape-changing row is two distinct per-literal ids (the checker,
+    /// not the parser, decides what a standalone one means).
+    #[test]
+    fn parse_quotation_annotation_distinct_rows_are_distinct_ids() {
+        let module = parse_src(": w ( -- ) [ ( ..a -- ..b ) drop ] drop ;").unwrap();
+        match &terms_body(&module.words[0])[0].kind {
+            TermKind::Quotation(_, _, Some(annot)) => {
+                assert_eq!(
+                    annot.row_var_names,
+                    vec!["..a".to_string(), "..b".to_string()]
+                );
+                assert_eq!((annot.row_in, annot.row_out), (Some(0), Some(1)));
+            }
+            other => panic!("expected an annotated Quotation, got {other:?}"),
+        }
+    }
+
+    /// R2: type variables are minted into a **per-literal** space, so two
+    /// sibling literals each start at `Var(0)` and neither borrows the
+    /// enclosing word's `PolySig`.
+    #[test]
+    fn parse_quotation_annotation_ty_vars_are_per_literal() {
+        let module =
+            parse_src(": w ( -- ) [ ( 'T 'U -- 'T ) drop ] drop [ ( 'X -- 'X ) ] drop ;").unwrap();
+        let body = terms_body(&module.words[0]);
+        match (&body[0].kind, &body[2].kind) {
+            (TermKind::Quotation(_, _, Some(first)), TermKind::Quotation(_, _, Some(second))) => {
+                assert_eq!(first.ty_var_names, vec!["'T".to_string(), "'U".to_string()]);
+                assert_eq!(
+                    first.inputs,
+                    vec![PolyType::Var(0), PolyType::Var(1)],
+                    "a repeated `'T` reuses its id"
+                );
+                assert_eq!(first.outputs, vec![PolyType::Var(0)]);
+                assert_eq!(second.ty_var_names, vec!["'X".to_string()]);
+                assert_eq!(second.inputs, vec![PolyType::Var(0)]);
+            }
+            other => panic!("expected two annotated Quotations, got {other:?}"),
         }
     }
 

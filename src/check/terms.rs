@@ -784,14 +784,32 @@ fn check_term(
         // R5: a quotation literal interns its body into the side table and
         // pushes a compile-time-only marker (D1/D2). The body is *not* checked
         // here (D3): a bare body's input row is unknown until its consumption
-        // site (`call`). The placeholder `ty` is `Cstr`, a registry-free
-        // scalar no user op accepts once R11's default-deny is in place (R4).
-        TermKind::Quotation(body, is_inline) => {
+        // site (`call`) -- unless the literal declares one, which is exactly
+        // what Phase 6 slice 1's annotation supplies. The placeholder `ty` is
+        // `Cstr`, a registry-free scalar no user op accepts once R11's
+        // default-deny is in place (R4).
+        TermKind::Quotation(body, is_inline, annot) => {
+            // Phase 6 slice 1 (R1/R3): an annotated literal is checked against
+            // its own annotation right here, where it is written, so a
+            // body/annotation disagreement is an error independent of whether
+            // the literal ever fills a parameter.
+            let annot = match annot {
+                Some(annot) => {
+                    let resolved = resolve_annotation(ctx, annot)?;
+                    check_literal_against_annotation(
+                        &resolved, body, *is_inline, ctx, env, arrays, cells, refs, prov, scope,
+                        poly,
+                    )?;
+                    Some(resolved)
+                }
+                None => None,
+            };
             let id = QuotId(prov.quotations.len());
             prov.quotations.push(QuotBody {
                 body: body.clone(),
                 span,
                 is_inline: *is_inline,
+                annot,
             });
             prov.quotation_captures.push(capture_names(body));
             stack.push(Slot {
