@@ -64,19 +64,19 @@ A fifth arm of `parse_bodies`'s dispatch loop, symmetric with `extern:`:
 
 ```text
 static-decl := "static:" NAME Type ( "=" literal )? ";"
-literal     := int-lit | float-lit | bool-lit | str-lit
+literal     := int-lit | bool-lit | str-lit
 ```
 
 - One static per declaration (no batch form), matching every other top-level
   form.
-- `= literal` is a **single literal only** (D3): an integer, float, bool, or
+- `= literal` is a **single literal only** (D3): an integer, bool, or
   string literal. No arithmetic, no reference to another static, no
   struct-literal aggregate. Recon confirms no const-expression or
   struct-literal-initialiser machinery exists to reuse; a `Term`-level
   expression here would be new surface nobody asked for.
 - The initialiser may be **elided**, meaning the type's zero value
-  (`static: COUNT i64 ;` is `0`; `bool` is `false`, `float` is `0.0`, and
-  `str`'s zero value is the **empty string** `""`). This is DESIGN.md's
+  (`static: COUNT i64 ;` is `0`; `bool` is `false`, and `str`'s zero value is
+  the **empty string** `""`). This is DESIGN.md's
   `Preelaborate` tier (constants/zero only), which falls straight out of "no
   comptime interpreter".
 - **Scalar types only this slice** (`i64`, `u32`, `bool`, and `str` where its
@@ -160,7 +160,6 @@ pub struct StaticDecl {
 pub enum StaticInit {
     Zero,
     Int(i64),
-    Float(f64),
     Bool(bool),
     Str(String),
 }
@@ -466,7 +465,8 @@ stay Phase 9 regardless: this is plain compiler-allocated storage only.
 
 A module with private static state exports a word whose declared global set the
 checker verifies **exactly** against the inferred one; a mismatch (missing
-entry, wrong mode, or an extra entry the inferred set does not contain) is a
+entry, wrong mode, an extra entry the inferred set does not contain, or a
+declared entry naming a static that doesn't exist in the module) is a
 located error naming the static (R6). An undeclared static access inside a
 module (an exported word touching a static with no `global:` entry for it) is a
 located compile error naming the static (R6). A static accessed only through
@@ -488,9 +488,9 @@ Parser (`src/parser.rs` `#[cfg(test)]`):
   parses to a `StaticDecl` with `StaticInit::Int(10)`.
 - `parse_static_zero_elided_initializer_ok` — `static: COUNT i64 ;` parses with
   `StaticInit::Zero`.
-- `parse_static_bool_float_elided_zero_ok` — `static: FLAG bool ;` and
-  `static: RATE float ;` parse with `StaticInit::Zero`; a build/lowering of the
-  elided value is `false` / `0.0` respectively (D1/D3 zero values).
+- `parse_static_bool_elided_zero_ok` — `static: FLAG bool ;` parses with
+  `StaticInit::Zero`; a build/lowering of the elided value is `false`
+  (D1/D3 zero value).
 - `parse_static_str_elided_zero_is_empty_ok` — `static: NAME str ;` parses with
   `StaticInit::Zero`, whose `str` zero value is the empty string `""` (D1).
 - `parse_static_bool_and_str_initializer_ok` — `static: FLAG bool = true ;` and

@@ -52,7 +52,10 @@ ISR. Those stay Phase 9, where their consumer is.
    asks for the global clause to "attach to the stack effect... without turning a one-line
    signature into three," which points inside the parens, not at the `inline` slot: after
    the `--` outputs, before the closing `)`, the same place a declared quotation parameter's
-   inner effect already nests grammar (`parse_effect`, `parser.rs:1565-1570`).
+   inner effect already nests grammar (`parse_effect`, `parser.rs:1565-1570`). (Reversed by
+   Decision 4 below, which settles on the clause's own trailing keyword slot outside the
+   parens, mirroring `inline`, because an in-parens placement reads as part of the stack
+   shape.)
 
 6. **`export:` is a separate top-level list, not a per-word flag on `WordDef`**
    (`parser.rs:1429`/`:570`, `ParsedBodies.exports: Vec<Vec<(String, Span)>>`), collected
