@@ -17,11 +17,20 @@ against `Result`. Anything Result/Option-specific is Slice 2.
 
 ## Requirements
 
-**R1 — a `type:` header may bind one or more type variables.** `type: Box 'T | val 'T ;`
-and, for the multi-variable case, `type: Pair 'A 'B a 'A b 'B ;` both parse: the header
-declares the variables (`'T`, or `'A 'B`), and every field type in the body may reference
-any variable the header bound. A field naming a variable the header did not bind is a
-located parse error.
+**R1 — a `type:` header may bind one or more type variables, and every bound variable must
+be used.** `type: Box 'T | val 'T ;` and, for the multi-variable case, `type: Pair 'A 'B a
+'A b 'B ;` both parse: the header declares the variables (`'T`, or `'A 'B`), and every
+field type in the body may reference any variable the header bound. A field naming a
+variable the header did not bind is a located parse error. **Added during review (round
+2):** conversely, a bound variable that appears in *no* field (a phantom parameter, e.g.
+`type: Phantom 'T x i64 ;`) is also a located parse error. Reason: R5's instantiation
+dispatch disambiguates two instantiations' generated constructor by its *input* (field)
+types; a phantom variable produces two instantiations (`Phantom i64`, `Phantom bool`)
+whose constructors have identical inputs and differ only in output type, which the
+existing operand-type overload resolution cannot disambiguate. Rejecting a phantom
+variable at declaration time keeps R5's disambiguation claim true unconditionally rather
+than carving out an exception. Result's `'T`/`'E` and Option's `'T` are never phantom, so
+this costs the exit case nothing.
 
 **R2 — a field type may apply a generic type to concrete type arguments.**
 `type: Wrap x Box i64 ;` (a concrete struct with a field of type `Box i64`) and a word
@@ -69,9 +78,11 @@ the same `env.entry(name).or_default().push(Overload{..})` pattern the user-word
 already uses (`src/check.rs:520`). Every instantiation's generated words keep the bare
 spelling (`Box>val`, `1 Box`), living as additional overloads under that name; the
 already-existing operand-type overload resolution (used today for user-word overloads)
-disambiguates `Box i64`'s accessor from `Box bool`'s by receiver type at the call site,
-exactly as it disambiguates any other overloaded word. This is the one concrete change
-R5 requires; no other accessor/constructor/destructor logic changes.
+disambiguates `Box i64`'s accessor from `Box bool`'s by receiver/field type at the call
+site, exactly as it disambiguates any other overloaded word. This disambiguation is
+complete given R1's phantom-variable rejection above (every instantiation's constructor
+differs in at least one input type); it is the one concrete change R5 requires, and no
+other accessor/constructor/destructor logic changes.
 
 **R6 — a generic type's own field may reference a concrete application of another (or the
 same) generic type non-recursively.** `type: Wrap x Box i64 ;` (R2) covers the concrete
@@ -88,16 +99,20 @@ variable-only, never a nested open application.
   rule that `Type` gains no variable-carrying variant (`src/ast.rs:619-621`).
 - **Deterministic, order-independent mangled names.** The synthesized name for a
   monomorphized instantiation's QBE-facing symbol reuses `instantiation_symbol`
-  (`src/ast.rs:729`)'s own sanitize-and-join scheme directly (`sooth_mono_{name}__t{id}_{ty}`-style),
-  not a new ad hoc format: a pure function of `(generic name, concrete type arguments)`,
-  with no dependence on processing order. `decl.name`/`decl.name_static` for the minted
-  `StructDecl`/`EnumDecl` uses this mangled string (leaked to `'static` via `Box::leak`,
-  matching `StructDecl::name_static`'s existing obligation, `src/ast.rs:207`); the
-  generated words' *env keys* stay the bare surface spelling (`Box>val`) per R5's fix, so
-  the mangled name is purely the registry/QBE-symbol identity, never user-visible.
-- **`module: u32` is set on every minted declaration.** `StructDecl`/`EnumDecl`/
-  `VariantDecl` all carry a `module` field (`src/ast.rs:207-232`); D4 fixes it to the
-  instantiating module's id (`0` under this slice's single-module scope) but the mint
+  (`src/ast.rs:729`)'s own sanitize-and-join *scheme* (`sooth_mono_{name}__t{id}_{ty}`-style),
+  not a new ad hoc format — a pure function of `(generic name, concrete type arguments)`
+  with no dependence on processing order, most likely by factoring the existing
+  sanitize-and-join helper out for both call sites rather than forcing a type-instantiation
+  key through `instantiation_symbol`'s own `Subst`-shaped signature (which is word/`Subst`-
+  oriented; a type instantiation's key is `(name, Vec<Type>)`, not a `Subst`). `decl.name`/
+  `decl.name_static` for the minted `StructDecl`/`EnumDecl` uses this mangled string
+  (leaked to `'static` via `Box::leak`, matching `StructDecl::name_static`'s existing
+  obligation, `src/ast.rs:207`); the generated words' *env keys* stay the bare surface
+  spelling (`Box>val`) per R5's fix, so the mangled name is purely the registry/QBE-symbol
+  identity, never user-visible.
+- **`module: u32` is set on every minted declaration.** `StructDecl.module` is
+  `src/ast.rs:234`, `EnumDecl.module` is `:267`, `VariantDecl` mirrors it; D4 fixes it to
+  the instantiating module's id (`0` under this slice's single-module scope) but the mint
   step must set it explicitly, not leave it defaulted.
 - **No regression to existing concrete `type:` declarations.** Every existing golden
   `.sth` file and `parse_typedef_*`/`check_struct_*`/`check_enum_*` test continues to pass
@@ -214,7 +229,7 @@ instantiation registry's own growing offset) before `check`'s `struct_generated_
   structural dedup-and-mint, but keyed on structure not name+variables; the new
   instantiation table is a distinct function/table, not an extension of this one (recon 3
   in the brief).
-- `src/ast.rs:623-651` (`PolyType`), `:663-676` (`PolySig`), `:679-696` (`Subst`),
+- `src/ast.rs:623-651` (`PolyType`), `:658-676` (`PolySig`), `:684-696` (`Subst`),
   `:729-747` (`instantiation_symbol`) — the direct templates: a generic type's field list
   is `PolyType`-shaped like a `PolySig`'s inputs/outputs; a use site's concrete type
   arguments form a `Subst`-like key; the monomorphized name is minted the same
@@ -324,7 +339,7 @@ isn't silently rediscovered when Slice 2 is briefed.
     },
     {
       "phase": 3,
-      "focus": "Fix generated-word registration from overwrite to overload-append (struct_generated_sigs/enum_generated_sigs into env), wiring monomorphized instantiations into the existing layout/destructor machinery, and golden test coverage including the signature-slot and destructor witnesses",
+      "focus": "Fix generated-word registration from overwrite to overload-append (struct_generated_sigs/enum_generated_sigs into env) -- layout and destructor synthesis already apply automatically once phase 2 appends a minted instantiation into Module::structs/enums, so this phase is the registration fix plus golden test coverage including the signature-slot and destructor witnesses",
       "difficulty": "standard"
     }
   ]
