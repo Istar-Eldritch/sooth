@@ -785,7 +785,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut owned_cells = Vec::new();
         let mut refs = Vec::new();
-        let mut generics = crate::ast::GenericTypes::default();
+        let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());
         let mut imports0: HashMap<String, u32> = HashMap::new();
         imports0.insert("lib".to_string(), 1);
         let no_imports: HashMap<String, u32> = HashMap::new();

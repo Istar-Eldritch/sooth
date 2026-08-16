@@ -612,7 +612,10 @@ mod tests {
     /// sharing a bare name across modules (a local `P` and an imported
     /// `o::P` with a different field count, so a wrong dedup gives `W` the
     /// wrong layout) must monomorphize `Box[...]` to two distinct
-    /// `StructId`s, not collapse to one via a rendered-name collision.
+    /// `StructId`s *and* to two distinct names. Ids and names are separate
+    /// claims: dedup is keyed on `Type` identity, so the ids stay distinct
+    /// even with the naming tie-break gone -- what collapses then is the
+    /// rendered name, and `check`'s duplicate-type rule rejects the program.
     #[test]
     fn instantiate_struct_distinct_across_modules_same_bare_name() {
         let s = Sandbox::new("generic-cross-module-name-collision");
@@ -622,7 +625,9 @@ mod tests {
             "import: o \"other.sth\" ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[P] b Box[o::P] ;\n: main ( -- ) ;\n",
         );
         let closure = discover_closure(&entry).expect("closure resolves");
-        let module = assemble_module(&closure, true).expect("assembles");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module)
+            .expect("two instantiations of one generic are not a duplicate type");
 
         let w = module
             .structs
@@ -639,7 +644,12 @@ mod tests {
         };
         assert_ne!(
             box_a_id, box_b_id,
-            "Box[P] and Box[o::P] must mint distinct StructIds, not collapse on the rendered name"
+            "Box[P] and Box[o::P] must mint distinct StructIds"
+        );
+        assert_ne!(
+            module.structs[box_a_id.index()].name,
+            module.structs[box_b_id.index()].name,
+            "Box[P] and Box[o::P] must also render distinct names"
         );
 
         let val_field_count = |box_id: &crate::ast::StructId| {
@@ -659,6 +669,47 @@ mod tests {
             val_field_count(box_b_id),
             2,
             "Box[o::P]'s val is the imported two-field P, not the local one"
+        );
+    }
+
+    /// The same collision one indirection down (round-3 review fix, R4).
+    /// `^P` and `[P 2]` take their spellings from `intern_owned_cell_type`/
+    /// `intern_array_type`, both built from the module-blind `Type::name()`,
+    /// so `Box[^P]` and `Box[^o::P]` render identically unless the
+    /// instantiation name recurses into the wrapper's registry entry. A
+    /// legal program was rejected as a `duplicate type` before it did.
+    #[test]
+    fn instantiate_struct_distinct_for_wrapped_cross_module_args() {
+        let s = Sandbox::new("generic-cross-module-wrapped-collision");
+        s.write("other.sth", "type: P a i64 b i64 ;\nexport: P ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: o \"other.sth\" ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[^P] b Box[^o::P] c Box[[P 2]] d Box[[o::P 2]] ;\n: main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("four distinct instantiations are not a duplicate type");
+
+        let w = module
+            .structs
+            .iter()
+            .find(|d| d.name.starts_with("W"))
+            .expect("W is registered");
+        let names: Vec<&str> = w
+            .fields
+            .iter()
+            .map(|(_, ty)| {
+                let crate::ast::Type::Struct(id, _) = ty else {
+                    panic!("every field of W is a struct: {ty:?}")
+                };
+                module.structs[id.index()].name.as_str()
+            })
+            .collect();
+        let unique: std::collections::HashSet<&&str> = names.iter().collect();
+        assert_eq!(
+            unique.len(),
+            4,
+            "each wrapped instantiation needs its own name: {names:?}"
         );
     }
 

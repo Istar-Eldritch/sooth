@@ -1379,7 +1379,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
-        let mut generics = crate::ast::GenericTypes::default();
+        let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());
         parse_bodies(
             &a,
             &structs,

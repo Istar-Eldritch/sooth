@@ -339,7 +339,7 @@ pub struct GenericVariantDecl {
 /// an instantiation's `StructId`/`EnumId` is final the moment it is minted:
 /// the pre-pass has already registered every named `type:` in every file
 /// before any body parses, so nothing can land between them afterwards.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct GenericTypes {
     pub structs: Vec<GenericStructDecl>,
     pub enums: Vec<GenericEnumDecl>,
@@ -358,6 +358,18 @@ pub struct GenericTypes {
     enum_base: usize,
 }
 
+/// The concrete type registries an instantiation name is rendered against.
+/// Grouped rather than passed one by one because `type_arg_key` needs all
+/// five to walk a nested argument down to its leaf.
+#[derive(Clone, Copy)]
+pub struct NameRegistries<'a> {
+    pub structs: &'a [StructDecl],
+    pub enums: &'a [EnumDecl],
+    pub arrays: &'a [ArrayDecl],
+    pub cells: &'a [OwnedCellDecl],
+    pub refs: &'a [RefDecl],
+}
+
 /// The instantiation-name spelling of one type argument. A primitive
 /// (`i64`, `bool`, ...) has no id and its bare `Type::name()` is already
 /// injective across the whole program, so it renders unchanged. A struct or
@@ -373,24 +385,46 @@ pub struct GenericTypes {
 /// the determinism `type_instantiation_name`'s NFR requires. Only that
 /// ambiguous case gets the registry-id suffix, so the ordinary (non-
 /// colliding) case keeps exactly the plain spelling (`Box[bool]`,
-/// `Box[Box[i64]]`) the NFR asks for. An array/owned-cell/ref argument's
-/// name is left as `Type::name()` unconditionally: its spelling is baked in
-/// at its own (pre-existing, Phase 4) interning site, not recomputed here.
-fn type_arg_key(t: &Type, structs: &[StructDecl], enums: &[EnumDecl]) -> String {
+/// `Box[Box[i64]]`) the NFR asks for.
+///
+/// An array/owned-cell/ref argument is *rebuilt* from its registry entry
+/// rather than taking its own `name_static`: those spellings are built from
+/// the same module-blind `Type::name()` at their interning sites
+/// (`intern_ref_type` renders `&{referent.name()}`), so `&P` inherits the
+/// bare-name ambiguity its referent has. Recursing puts the tie-break at
+/// the leaf where the ids live. Order-independent for the same reason the
+/// leaf case is: a registry entry's referent/payload/element never changes
+/// once minted. A quotation argument keeps its own spelling: R1's
+/// phantom-variable rejection puts every argument in a field, and a quotation
+/// can never be a field, so its rendering is only ever read back inside the
+/// diagnostic rejecting it.
+fn type_arg_key(t: &Type, regs: NameRegistries) -> String {
     match t {
         Type::Struct(id, name) => {
-            if structs.iter().filter(|d| d.name == *name).count() > 1 {
+            if regs.structs.iter().filter(|d| d.name == *name).count() > 1 {
                 format!("{name}.{}", id.index())
             } else {
                 name.to_string()
             }
         }
         Type::Enum(id, name) => {
-            if enums.iter().filter(|d| d.name == *name).count() > 1 {
+            if regs.enums.iter().filter(|d| d.name == *name).count() > 1 {
                 format!("{name}.{}", id.index())
             } else {
                 name.to_string()
             }
+        }
+        Type::Ref(id, mutable, _) => format!(
+            "&{}{}",
+            if *mutable { "!" } else { "" },
+            type_arg_key(&regs.refs[id.index()].referent, regs)
+        ),
+        Type::OwnedCell(id, _) => {
+            format!("^{}", type_arg_key(&regs.cells[id.index()].payload, regs))
+        }
+        Type::Array(id, _) => {
+            let decl = &regs.arrays[id.index()];
+            format!("[{} {}]", type_arg_key(&decl.element, regs), decl.count)
         }
         _ => t.name().to_string(),
     }
@@ -406,19 +440,10 @@ fn type_arg_key(t: &Type, structs: &[StructDecl], enums: &[EnumDecl]) -> String 
 /// argument lists to collide, and the one QBE-facing use of a type name is
 /// sanitized injectively at the emission site anyway. `[` is a lexer
 /// delimiter, so no source type-name token can ever equal one of these.
-/// `structs`/`enums` are threaded through only to break a struct/enum
-/// argument's bare-name tie (`type_arg_key`); every other type argument's
-/// spelling is untouched by them.
-pub fn type_instantiation_name(
-    base: &str,
-    args: &[Type],
-    structs: &[StructDecl],
-    enums: &[EnumDecl],
-) -> String {
-    let args: Vec<String> = args
-        .iter()
-        .map(|t| type_arg_key(t, structs, enums))
-        .collect();
+/// `regs` is threaded through only to break a struct/enum argument's
+/// bare-name tie, at whatever depth it sits (`type_arg_key`).
+pub fn type_instantiation_name(base: &str, args: &[Type], regs: NameRegistries) -> String {
+    let args: Vec<String> = args.iter().map(|t| type_arg_key(t, regs)).collect();
     format!("{base}[{}]", args.join(" "))
 }
 
@@ -436,12 +461,20 @@ fn substitute_generic_field(pty: &PolyType, args: &[Type]) -> Type {
 
 impl GenericTypes {
     /// A registry whose instantiations will be appended onto concrete
-    /// registries of the given lengths.
+    /// registries of the given lengths. The only constructor: a `Default`
+    /// would hand out `(0, 0)` bases silently, and a base that does not
+    /// match the registry an instantiation is appended to mints a
+    /// `StructId` pointing at some other declaration.
     pub fn with_bases(struct_base: usize, enum_base: usize) -> GenericTypes {
         GenericTypes {
+            structs: Vec::new(),
+            enums: Vec::new(),
+            inst_structs: Vec::new(),
+            inst_enums: Vec::new(),
+            struct_keys: Vec::new(),
+            enum_keys: Vec::new(),
             struct_base,
             enum_base,
-            ..GenericTypes::default()
         }
     }
 
@@ -477,8 +510,7 @@ impl GenericTypes {
         idx: usize,
         args: &[Type],
         module: u32,
-        all_structs: &[StructDecl],
-        all_enums: &[EnumDecl],
+        regs: NameRegistries,
     ) -> Type {
         if let Some(i) = self
             .struct_keys
@@ -488,7 +520,7 @@ impl GenericTypes {
             let id = StructId::from_index(self.struct_base + i);
             return Type::Struct(id, self.inst_structs[i].name_static);
         }
-        let name = type_instantiation_name(&self.structs[idx].name, args, all_structs, all_enums);
+        let name = type_instantiation_name(&self.structs[idx].name, args, regs);
         let decl = &self.structs[idx];
         let fields: Vec<(String, Type)> = decl
             .fields
@@ -521,8 +553,7 @@ impl GenericTypes {
         idx: usize,
         args: &[Type],
         module: u32,
-        all_structs: &[StructDecl],
-        all_enums: &[EnumDecl],
+        regs: NameRegistries,
     ) -> Type {
         if let Some(i) = self
             .enum_keys
@@ -532,13 +563,13 @@ impl GenericTypes {
             let id = EnumId::from_index(self.enum_base + i);
             return Type::Enum(id, self.inst_enums[i].name_static);
         }
-        let name = type_instantiation_name(&self.enums[idx].name, args, all_structs, all_enums);
+        let name = type_instantiation_name(&self.enums[idx].name, args, regs);
         let decl = &self.enums[idx];
         let variants: Vec<VariantDecl> = decl
             .variants
             .iter()
             .map(|variant| {
-                let vname = type_instantiation_name(&variant.name, args, all_structs, all_enums);
+                let vname = type_instantiation_name(&variant.name, args, regs);
                 VariantDecl {
                     name_static: Box::leak(vname.clone().into_boxed_str()),
                     name: vname,
@@ -1598,6 +1629,14 @@ fn rename_terms(terms: &[Term], uid: u32, bound: &mut Vec<String>) -> Vec<Term> 
 mod tests {
     use super::*;
 
+    const EMPTY_REGS: NameRegistries<'static> = NameRegistries {
+        structs: &[],
+        enums: &[],
+        arrays: &[],
+        cells: &[],
+        refs: &[],
+    };
+
     /// Slice 10a (R1/R10): a `~` renders `~[ ... -- ... ]`, the ordinary
     /// quotation renders `[ ... -- ... ]`, distinguished only by the sigil.
     #[test]
@@ -2052,9 +2091,9 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(3, 1);
         generics.structs.push(decl);
-        let a = generics.instantiate_struct(0, &[Type::I64], 0, &[], &[]);
-        let b = generics.instantiate_struct(0, &[Type::I64], 0, &[], &[]);
-        let c = generics.instantiate_struct(0, &[Type::BOOL], 0, &[], &[]);
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
+        let b = generics.instantiate_struct(0, &[Type::I64], 0, EMPTY_REGS);
+        let c = generics.instantiate_struct(0, &[Type::BOOL], 0, EMPTY_REGS);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(generics.inst_structs.len(), 2);
@@ -2083,8 +2122,8 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
-        let a = generics.instantiate_enum(0, &[Type::I64], 0, &[], &[]);
-        let b = generics.instantiate_enum(0, &[Type::I64], 0, &[], &[]);
+        let a = generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
+        let b = generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
         assert_eq!(a, b);
         assert_eq!(generics.inst_enums.len(), 1);
         assert_eq!(a, Type::Enum(EnumId::from_index(1), "Res[i64]"));
@@ -2108,7 +2147,14 @@ mod tests {
         }];
         let arg = Type::Struct(StructId::from_index(0), "P");
         assert_eq!(
-            type_instantiation_name("Box", &[arg], &structs, &[]),
+            type_instantiation_name(
+                "Box",
+                &[arg],
+                NameRegistries {
+                    structs: &structs,
+                    ..EMPTY_REGS
+                }
+            ),
             "Box[P]"
         );
     }
@@ -2131,14 +2177,107 @@ mod tests {
         let structs = vec![mk(0), mk(1)];
         let local = Type::Struct(StructId::from_index(0), "P");
         let imported = Type::Struct(StructId::from_index(1), "P");
-        let local_name = type_instantiation_name("Box", &[local], &structs, &[]);
-        let imported_name = type_instantiation_name("Box", &[imported], &structs, &[]);
+        let regs = NameRegistries {
+            structs: &structs,
+            ..EMPTY_REGS
+        };
+        let local_name = type_instantiation_name("Box", &[local], regs);
+        let imported_name = type_instantiation_name("Box", &[imported], regs);
         assert_ne!(
             local_name, imported_name,
             "two structs sharing a bare name must not render the same instantiation name"
         );
         assert_eq!(local_name, "Box[P.0]");
         assert_eq!(imported_name, "Box[P.1]");
+    }
+
+    /// The same ambiguity one indirection down. `intern_ref_type` builds
+    /// `&P` from the same module-blind `Type::name()` the tie-break exists
+    /// to work around, and `intern_owned_cell_type`/`intern_array_type` do
+    /// the same, so a wrapped argument only renders injectively if the
+    /// tie-break recurses into the registry entry instead of trusting its
+    /// baked-in spelling.
+    #[test]
+    fn type_instantiation_name_ambiguous_wrapped_struct_arg_gets_disambiguated() {
+        let mk = |module: u32| StructDecl {
+            name: "P".to_string(),
+            name_static: "P",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        let structs = vec![mk(0), mk(1)];
+        let local = Type::Struct(StructId::from_index(0), "P");
+        let imported = Type::Struct(StructId::from_index(1), "P");
+
+        let mut refs = Vec::new();
+        let mut cells = Vec::new();
+        let mut arrays = Vec::new();
+        let wrapped: Vec<(Type, Type)> = vec![
+            (
+                intern_ref_type(&mut refs, local, false),
+                intern_ref_type(&mut refs, imported, false),
+            ),
+            (
+                intern_owned_cell_type(&mut cells, local),
+                intern_owned_cell_type(&mut cells, imported),
+            ),
+            (
+                intern_array_type(&mut arrays, local, 2),
+                intern_array_type(&mut arrays, imported, 2),
+            ),
+        ];
+        let regs = NameRegistries {
+            structs: &structs,
+            enums: &[],
+            arrays: &arrays,
+            cells: &cells,
+            refs: &refs,
+        };
+        for (a, b) in &wrapped {
+            assert_eq!(
+                a.name(),
+                b.name(),
+                "the interned spellings collide, which is the premise"
+            );
+            assert_ne!(
+                type_instantiation_name("Box", &[*a], regs),
+                type_instantiation_name("Box", &[*b], regs),
+                "a wrapped ambiguous argument must still render distinctly: {}",
+                a.name()
+            );
+        }
+        assert_eq!(
+            type_instantiation_name("Box", &[wrapped[0].0], regs),
+            "Box[&P.0]"
+        );
+        assert_eq!(
+            type_instantiation_name("Box", &[wrapped[1].1], regs),
+            "Box[^P.1]"
+        );
+        assert_eq!(
+            type_instantiation_name("Box", &[wrapped[2].0], regs),
+            "Box[[P.0 2]]"
+        );
+    }
+
+    /// The unambiguous twin: a wrapped argument keeps its plain structural
+    /// spelling, so the recursion above costs the ordinary case nothing.
+    #[test]
+    fn type_instantiation_name_unambiguous_wrapped_arg_stays_bare() {
+        let mut refs = Vec::new();
+        let mut arrays = Vec::new();
+        let r = intern_ref_type(&mut refs, Type::I64, true);
+        let a = intern_array_type(&mut arrays, Type::I64, 4);
+        let regs = NameRegistries {
+            arrays: &arrays,
+            refs: &refs,
+            ..EMPTY_REGS
+        };
+        assert_eq!(type_instantiation_name("Box", &[r], regs), "Box[&!i64]");
+        assert_eq!(type_instantiation_name("Box", &[a], regs), "Box[[i64 4]]");
     }
 
     #[test]

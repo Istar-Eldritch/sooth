@@ -17,8 +17,8 @@
 
 use crate::ast::{
     intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, Import, Len,
-    Line, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect,
-    StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    Line, Module, ModuleInfo, NameRegistries, OwnedCellDecl, PolySig, PolyType, RefDecl, Span,
+    StackEffect, StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -469,7 +469,9 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
-    let mut generics = GenericTypes::default();
+    // `structs`/`enums` below are `&[]`, so an instantiation would be
+    // appended onto empty registries.
+    let mut generics = GenericTypes::with_bases(0, 0);
     let no_imports: HashMap<String, u32> = HashMap::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -508,7 +510,9 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
-    let mut generics = GenericTypes::default();
+    // `structs`/`enums` below are `&[]`, so an instantiation would be
+    // appended onto empty registries.
+    let mut generics = GenericTypes::with_bases(0, 0);
     let no_imports: HashMap<String, u32> = HashMap::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -598,7 +602,7 @@ pub fn parse_line_with_structs(
 ) -> Result<Line, String> {
     // The REPL has no generic `type:` declarations (they are rejected at
     // declaration), so nothing here can apply one: a scratch registry, never read.
-    let mut generics = GenericTypes::default();
+    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -646,7 +650,7 @@ pub fn parse_typedef_line(
 ) -> Result<Vec<(String, Type)>, String> {
     // The REPL has no generic `type:` declarations (they are rejected at
     // declaration), so nothing here can apply one: a scratch registry, never read.
-    let mut generics = GenericTypes::default();
+    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -720,7 +724,7 @@ pub fn parse_enum_typedef_line(
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
     // The REPL has no generic `type:` declarations (they are rejected at
     // declaration), so nothing here can apply one: a scratch registry, never read.
-    let mut generics = GenericTypes::default();
+    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -2699,24 +2703,30 @@ impl<'t> Parser<'t> {
         if let Some(idx) = self.generics.find_struct(name, self.module) {
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
-            return Ok(self.generics.instantiate_struct(
-                idx,
-                &args,
-                self.module,
-                self.structs,
-                self.enums,
-            ));
+            let regs = NameRegistries {
+                structs: self.structs,
+                enums: self.enums,
+                arrays: self.arrays,
+                cells: self.owned_cells,
+                refs: self.refs,
+            };
+            return Ok(self
+                .generics
+                .instantiate_struct(idx, &args, self.module, regs));
         }
         if let Some(idx) = self.generics.find_enum(name, self.module) {
             let arity = self.generics.enums[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
-            return Ok(self.generics.instantiate_enum(
-                idx,
-                &args,
-                self.module,
-                self.structs,
-                self.enums,
-            ));
+            let regs = NameRegistries {
+                structs: self.structs,
+                enums: self.enums,
+                arrays: self.arrays,
+                cells: self.owned_cells,
+                refs: self.refs,
+            };
+            return Ok(self
+                .generics
+                .instantiate_enum(idx, &args, self.module, regs));
         }
         self.resolve_type(name, span)
     }
@@ -3058,7 +3068,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
-        let mut generics = crate::ast::GenericTypes::default();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let no_imports = HashMap::new();
         let bodies = parse_bodies(
             &tokens,
@@ -3092,7 +3102,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
-        let mut generics = crate::ast::GenericTypes::default();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let no_imports = HashMap::new();
         parse_bodies(
             &tokens,
@@ -4105,7 +4115,7 @@ mod tests {
         let mut cells = Vec::new();
         let mut refs = Vec::new();
         let no_imports = HashMap::new();
-        let mut generics = crate::ast::GenericTypes::default();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         let mut run = |tokens: &[(Token, Span)], module: u32| {
             parse_bodies(
                 tokens,
@@ -4141,7 +4151,7 @@ mod tests {
         let mut cells = Vec::new();
         let mut refs = Vec::new();
         let no_imports = HashMap::new();
-        let mut generics = crate::ast::GenericTypes::default();
+        let mut generics = crate::ast::GenericTypes::with_bases(0, 0);
         parse_bodies(
             &tokens,
             &[],
