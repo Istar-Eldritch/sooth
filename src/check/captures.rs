@@ -575,7 +575,7 @@ mod tests {
         // `Ctx::Line`, which can't discriminate a discarded `Ctx` parameter
         // from a used one.
         let word = bare_word("outer", 0);
-        let word_ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
+        let word_ctx = word_ctx(&word, &structs, &enums, &[], None, &CombinatorIndex::new());
         let word_err = check_capture_admission(QuotId(0), true, span, &word_ctx, &mut prov, &scope)
             .expect_err("a captured `~` local must be rejected");
         assert!(

@@ -162,13 +162,15 @@ fn strip_ref_sigil(name: &str) -> (&str, &str) {
 }
 
 /// The per-module name tables the rewrite consults: which bare names are this
-/// module's types (so a constructor/accessor call rewrites) and which are its
-/// words/externs (so a plain call rewrites). Builtins and genuinely unknown
-/// names appear in neither and are left raw for the checker to resolve or
-/// reject.
+/// module's types (so a constructor/accessor call rewrites), which are its
+/// words/externs (so a plain call rewrites), and (R2) which are its `static:`
+/// declarations (so a `&NAME`/`&!NAME` borrow of one rewrites). Builtins and
+/// genuinely unknown names appear in none of them and are left raw for the
+/// checker to resolve or reject.
 struct NameTables {
     types: Vec<HashSet<String>>,
     words: Vec<HashSet<String>>,
+    statics: Vec<HashSet<String>>,
 }
 
 impl NameTables {
@@ -176,6 +178,10 @@ impl NameTables {
         let n = module.modules.len();
         let mut types = vec![HashSet::new(); n];
         let mut words = vec![HashSet::new(); n];
+        let mut statics = vec![HashSet::new(); n];
+        for s in &module.statics {
+            statics[s.module as usize].insert(s.name.clone());
+        }
         for s in &module.structs {
             types[s.module as usize].insert(s.name.clone());
         }
@@ -188,7 +194,11 @@ impl NameTables {
         for x in &module.externs {
             words[x.module as usize].insert(x.name.clone());
         }
-        NameTables { types, words }
+        NameTables {
+            types,
+            words,
+            statics,
+        }
     }
 
     /// Rewrite one call name occurring in a body owned by `module`, given that
@@ -259,6 +269,14 @@ impl NameTables {
                 mangle(type_part, module),
                 suffix
             )));
+        }
+        // R2: a module static is the third name category the sigil can name.
+        // It is module-private -- never exported, never imported -- so only an
+        // accessor-free, unqualified name declared by the *accessing* module
+        // resolves, and only under a sigil: a static is reachable no other
+        // way, so a bare `COUNT` stays whatever it means today.
+        if !sigil.is_empty() && suffix.is_empty() && self.statics[module as usize].contains(core) {
+            return Ok(Some(format!("{sigil}{}", mangle(core, module))));
         }
         // A bare call to one of `check::builtin_table`'s operator names stays
         // unrewritten even when this module declares a same-named overload:
@@ -409,6 +427,12 @@ pub fn resolve_modules(module: &mut Module, always_mangle: bool) -> Result<(), S
     for x in &mut module.externs {
         x.name = mangle(&x.name, x.module);
     }
+    // R2: a static's data symbol is module-scoped exactly as a word's is, so
+    // two modules may each declare `COUNT` without colliding at codegen. No
+    // operator-name carve-out applies: a static is never a dispatch name.
+    for s in &mut module.statics {
+        s.name = mangle(&s.name, s.module);
+    }
     Ok(())
 }
 
@@ -531,6 +555,7 @@ mod tests {
         let tables = NameTables {
             types: vec![HashSet::new(), HashSet::new()],
             words,
+            statics: vec![HashSet::new(), HashSet::new()],
         };
         let mut imports = std::collections::HashMap::new();
         imports.insert("q".to_string(), 1u32);
@@ -580,6 +605,7 @@ mod tests {
         let tables = NameTables {
             types,
             words: vec![HashSet::new(), HashSet::new()],
+            statics: vec![HashSet::new(), HashSet::new()],
         };
         let mut imports = std::collections::HashMap::new();
         imports.insert("geo".to_string(), 1u32);
@@ -697,6 +723,67 @@ mod tests {
         assert!(
             calls.contains(&"&!dst".to_string()),
             "a sigiled word call is never a borrow and stays raw: {calls:?}"
+        );
+    }
+
+    /// R2: each module's `static:` decl is mangled per module, and a
+    /// `&NAME`/`&!NAME` borrow rewrites against the *accessing* module's own
+    /// table -- two modules may each declare `COUNT` and neither reaches the
+    /// other's.
+    #[test]
+    fn static_borrow_resolves_to_the_accessing_modules_own_static() {
+        let mut module = assemble_two_modules(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &!COUNT 1 +! ;",
+            "static: COUNT i64 = 0 ;\n\
+             : bump ( -- ) &COUNT drop ;",
+        );
+        resolve_modules(&mut module, false).unwrap();
+        let names: Vec<&str> = module.statics.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["COUNT__m0", "COUNT__m1"]);
+        let main = module.words.iter().find(|w| w.name == "main").unwrap();
+        assert!(
+            call_names(&main.body).contains(&"&!COUNT__m0".to_string()),
+            "module 0 borrows its own static: {:?}",
+            call_names(&main.body)
+        );
+        let bump = module.words.iter().find(|w| w.name == "bump__m1").unwrap();
+        assert!(
+            call_names(&bump.body).contains(&"&COUNT__m1".to_string()),
+            "module 1 borrows its own static: {:?}",
+            call_names(&bump.body)
+        );
+    }
+
+    /// R2: a static is reachable only through the sigil, so an unsigilled
+    /// `COUNT` is left raw -- it means whatever it means today (a word call,
+    /// or the checker's unknown-word error naming the spelling the author
+    /// wrote), not a silently mangled static.
+    #[test]
+    fn unsigiled_static_name_is_left_unmangled() {
+        let mut statics = vec![HashSet::new(), HashSet::new()];
+        statics[0].insert("COUNT".to_string());
+        let tables = NameTables {
+            types: vec![HashSet::new(), HashSet::new()],
+            words: vec![HashSet::new(), HashSet::new()],
+            statics,
+        };
+        let imports = std::collections::HashMap::new();
+        let selective = std::collections::HashMap::new();
+        let exports = vec![Vec::new(), Vec::new()];
+        let scope = HashSet::new();
+        let span = Span::default();
+        let rewrite = |name: &str, module: u32| {
+            tables
+                .rewrite(name, module, &imports, &selective, &scope, &exports, span)
+                .unwrap()
+        };
+        assert_eq!(rewrite("COUNT", 0), None, "no sigil, no static rewrite");
+        assert_eq!(rewrite("&COUNT", 0), Some("&COUNT__m0".to_string()));
+        assert_eq!(
+            rewrite("&COUNT", 1),
+            None,
+            "module 1 declares no `COUNT`: a static is module-private"
         );
     }
 
@@ -823,6 +910,8 @@ mod tests {
         .unwrap();
         let mut words = entry_bodies.words;
         words.extend(lib_bodies.words);
+        let mut statics = entry_bodies.statics;
+        statics.extend(lib_bodies.statics);
         Module {
             words,
             structs,
@@ -847,7 +936,7 @@ mod tests {
                     selective: HashMap::new(),
                 },
             ],
-            statics: Vec::new(),
+            statics,
         }
     }
 }

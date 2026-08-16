@@ -266,6 +266,16 @@ for a static root.
   field, array, cell, or another static, because that rule *is* type-keyed
   (`contains_reference`), independent of what the ref points at.
 
+One `owned_root`-keyed scan is neither exclusivity nor disposal, and the
+exemption list above does not reach it: `check_reference_across_back_edge`
+(`src/check.rs`) rejects any reference whose `owned_root` is set when it
+crosses a self-tail-call back-edge, because a *local*'s storage does not
+survive to the next iteration. A static's data-segment storage does, so a
+freshly borrowed `&!COUNT` passed to a self-tail call is rejected today
+(`: spin ( &!i64 i64 -- ) | c n | c 1 +! n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;`),
+with a message that calls `COUNT` "a local of this frame". Conservative, not
+unsound; unresolved this slice.
+
 So the mechanism is reused wholesale (a `Deriv` with a real `owned_root`, the
 same borrow-typing arm, the same type-keyed store rule); the only carve-out is
 that the disposal/consume scans treat a static root as nothing to dispose. The

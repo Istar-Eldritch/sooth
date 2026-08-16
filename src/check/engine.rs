@@ -1084,6 +1084,11 @@ pub(super) enum Ctx<'a> {
         effect: &'a StackEffect,
         structs: &'a [StructDecl],
         enums: &'a [EnumDecl],
+        /// R1 (P7 slice 2): the closure's `static:` declarations, which the
+        /// borrow-typing arm consults for the second kind of place a `&`/`&!`
+        /// can name. Scoped to `module` at every lookup: a static is
+        /// module-private.
+        statics: &'a [StaticDecl],
         /// R2 (slice 8b): the owning module of the word being checked, the
         /// caller module D1's `drop` gate and 8a's operator fix scope a name's
         /// visibility against.
@@ -1121,6 +1126,7 @@ pub(super) fn word_ctx<'a>(
     word: &'a WordDef,
     structs: &'a [StructDecl],
     enums: &'a [EnumDecl],
+    statics: &'a [StaticDecl],
     modules: Option<&'a [ModuleInfo]>,
     combs: &CombinatorIndex,
 ) -> Ctx<'a> {
@@ -1130,6 +1136,7 @@ pub(super) fn word_ctx<'a>(
         effect: &word.effect,
         structs,
         enums,
+        statics,
         module: word.module,
         modules,
         self_tail_call: has_self_tail_call(word, combs),
@@ -1146,6 +1153,22 @@ impl Ctx<'_> {
     pub(super) fn enums(&self) -> &[EnumDecl] {
         match self {
             Ctx::Word { enums, .. } | Ctx::Line { enums, .. } => enums,
+        }
+    }
+
+    /// R1 (P7 slice 2): the declared type of the module static `name`, or
+    /// `None` when this module declares no such static. Module-scoped because
+    /// a static is module-private (R2): another module's same-named static is
+    /// not this word's to borrow. A REPL line declares no statics.
+    pub(super) fn static_type(&self, name: &str) -> Option<Type> {
+        match self {
+            Ctx::Word {
+                statics, module, ..
+            } => statics
+                .iter()
+                .find(|s| s.name == name && s.module == *module)
+                .map(|s| s.ty),
+            Ctx::Line { .. } => None,
         }
     }
 
@@ -1236,6 +1259,7 @@ impl<'a> Ctx<'a> {
                 effect,
                 structs,
                 enums,
+                statics,
                 modules,
                 self_tail_call,
                 ..
@@ -1245,6 +1269,7 @@ impl<'a> Ctx<'a> {
                 effect,
                 structs,
                 enums,
+                statics,
                 module,
                 modules,
                 self_tail_call,
@@ -1300,7 +1325,14 @@ mod tests {
     ) -> Result<Option<Vec<Slot>>, String> {
         let word = bare_word("main", caller);
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, structs, &enums, modules, &CombinatorIndex::new());
+        let ctx = word_ctx(
+            &word,
+            structs,
+            &enums,
+            &[],
+            modules,
+            &CombinatorIndex::new(),
+        );
         let arrays: Vec<ArrayDecl> = Vec::new();
         let mut prov = Provenance::default();
         // The term is written in the caller's own module, so its span says so:
@@ -1467,7 +1499,7 @@ mod tests {
         let word = bare_word("main", 3);
         let structs: Vec<StructDecl> = Vec::new();
         let enums: Vec<EnumDecl> = Vec::new();
-        let ctx = word_ctx(&word, &structs, &enums, None, &CombinatorIndex::new());
+        let ctx = word_ctx(&word, &structs, &enums, &[], None, &CombinatorIndex::new());
         assert_eq!(ctx.module(), 3);
         assert!(ctx.modules().is_none());
     }
@@ -1788,6 +1820,47 @@ mod tests {
         assert!(
             !prov.regions_overlap(other, a),
             "unrelated parents share no ancestry"
+        );
+    }
+    /// R1/R2: a static is module-private, so the borrow-typing lookup is
+    /// scoped to the accessing word's own module. Constructed directly: a
+    /// real build mangles every static name per module, so no source program
+    /// can put two same-named raw statics in front of this lookup to
+    /// discriminate the scoping.
+    #[test]
+    fn static_lookup_is_scoped_to_the_accessing_module() {
+        let statics = vec![StaticDecl {
+            name: "COUNT".to_string(),
+            ty: Type::I64,
+            init: crate::ast::StaticInit::Zero,
+            module: 1,
+            span: Span::default(),
+        }];
+        let enums: Vec<EnumDecl> = Vec::new();
+        let structs: Vec<StructDecl> = Vec::new();
+        let owner = bare_word("bump", 1);
+        let ctx = word_ctx(
+            &owner,
+            &structs,
+            &enums,
+            &statics,
+            None,
+            &CombinatorIndex::new(),
+        );
+        assert_eq!(ctx.static_type("COUNT"), Some(Type::I64));
+        let outsider = bare_word("main", 0);
+        let ctx = word_ctx(
+            &outsider,
+            &structs,
+            &enums,
+            &statics,
+            None,
+            &CombinatorIndex::new(),
+        );
+        assert_eq!(
+            ctx.static_type("COUNT"),
+            None,
+            "another module's static is not this word's to borrow"
         );
     }
     #[test]

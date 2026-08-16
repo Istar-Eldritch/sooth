@@ -142,11 +142,19 @@ pub(super) fn check_poly_combinator_standalone(
     cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
     structs: &[StructDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     poly: &mut PolyCtx,
 ) -> Result<(), String> {
     const STANDALONE_LEN: u32 = 4;
-    let ctx = word_ctx(word, structs, enums, modules, poly.combinators.tail());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        poly.combinators.tail(),
+    );
     let span = word_span(word);
     let mut subst = Subst::default();
     for v in 0..sig.ty_var_names.len() as u32 {
@@ -194,6 +202,7 @@ pub(super) fn check_poly_combinator_standalone(
         cells,
         refs,
         structs,
+        statics,
         modules,
         &mut dropped,
         poly,
@@ -230,8 +239,20 @@ pub(crate) fn check_poly_combinator_repl(
     };
     // R8 (slice 8b): the REPL path has no `ModuleInfo` view, so the `drop`
     // import-visibility gate never fires on a session-checked combinator body.
+    // A session retains no `static:` declarations either (P7 slice 2 is a
+    // build-path feature), so the static table is empty here.
     check_poly_combinator_standalone(
-        word, sig, enums, env, arrays, cells, refs, structs, None, &mut poly,
+        word,
+        sig,
+        enums,
+        env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &[],
+        None,
+        &mut poly,
     )
 }
 
@@ -253,6 +274,7 @@ pub fn check_poly_body(
     structs: &[StructDecl],
     enums: &[EnumDecl],
     arrays: &[ArrayDecl],
+    statics: &[StaticDecl],
     modules: Option<&[ModuleInfo]>,
     builtin_overloads: &mut HashMap<Span, String>,
 ) -> Result<(), String> {
@@ -266,7 +288,14 @@ pub fn check_poly_body(
     // empty index is correct here, not just convenient -- lowering never
     // back-edges a polymorphic instantiation either (`lower_instantiation`
     // hardcodes `self_tail = false`).
-    let ctx = word_ctx(word, structs, enums, modules, &CombinatorIndex::new());
+    let ctx = word_ctx(
+        word,
+        structs,
+        enums,
+        statics,
+        modules,
+        &CombinatorIndex::new(),
+    );
     let terms = match &word.body {
         WordBody::Terms { terms } => terms,
         WordBody::Clauses(_) => {

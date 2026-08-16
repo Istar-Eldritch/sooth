@@ -14,8 +14,8 @@ use crate::ast::{
     generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
     intern_owned_cell_type, intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId,
     ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl,
-    PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect, StaticDecl, StructDecl,
+    StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 mod audits;
@@ -589,7 +589,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         instantiations: _,
         builtin_overloads: _,
         modules,
-        statics: _,
+        statics,
     } = module;
     // R6: each body's own `drop` call sites, resolved to a concrete operand
     // type by the walk that checks it. Collected per word so the graph below
@@ -659,6 +659,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     owned_cells,
                     refs,
                     structs,
+                    statics,
                     Some(modules),
                     &mut poly,
                 )?;
@@ -673,6 +674,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                     structs,
                     enums,
                     arrays,
+                    statics,
                     Some(modules),
                     &mut builtin_overloads,
                 )?;
@@ -692,6 +694,7 @@ pub fn check(module: &mut Module) -> Result<(), String> {
                 owned_cells,
                 refs,
                 structs,
+                statics,
                 Some(modules),
                 &mut sites,
                 &mut poly,
@@ -845,8 +848,20 @@ pub(crate) fn check_def_collecting_drop_sites(
     };
     // R8 (slice 8b): a REPL-defined word body has no `ModuleInfo` view, so the
     // `drop` import-visibility gate never fires on the session path.
+    // A REPL session declares no `static:` storage (P7 slice 2 is a build-path
+    // feature), so the static table is empty here.
     check_word(
-        word, enums, &env, arrays, cells, refs, structs, None, &mut sites, &mut poly,
+        word,
+        enums,
+        &env,
+        arrays,
+        cells,
+        refs,
+        structs,
+        &[],
+        None,
+        &mut sites,
+        &mut poly,
     )?;
     Ok((sites, insts, overloads))
 }
