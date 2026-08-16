@@ -1084,6 +1084,10 @@ fn type_node(ty: &Type) -> Option<TypeNode> {
         Type::Enum(id, _) => Some(TypeNode::Enum(id.index())),
         Type::Array(id, _) => Some(TypeNode::Array(id.index())),
         Type::OwnedCell(_, _) => None,
+        // A bare variant is never a field: the enum it belongs to (and that
+        // enum's fields) are the graph nodes, so it closes no by-value
+        // containment cycle (Phase 6 slice 2, R3).
+        Type::Variant(..) => None,
         // A reference is a pointer, not an inline copy, so it closes no
         // by-value cycle — and the no-stored-reference rule keeps one out of
         // every field position
@@ -1290,6 +1294,15 @@ mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::parse;
+
+    #[test]
+    fn type_node_treats_variant_as_a_non_edge_leaf() {
+        // Phase 6 slice 2 (R3): a bare `Type::Variant` is never a struct/enum
+        // field, so it closes no by-value containment cycle -- treated as a
+        // leaf, exactly like `Ref`/`Quotation`.
+        let ty = Type::Variant(EnumId::from_index(0), 0, "Shape.Circle");
+        assert!(type_node(&ty).is_none());
+    }
 
     #[test]
     fn collect_poly_concrete_sees_through_a_reference() {

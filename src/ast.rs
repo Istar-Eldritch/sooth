@@ -280,8 +280,22 @@ pub struct EnumDecl {
 pub struct VariantDecl {
     pub name: String,
     pub name_static: &'static str,
+    /// Phase 6 slice 2 (R1): the leaked `Enum.Variant` display name (e.g.
+    /// `Shape.Circle`), built once at declaration time where the owning
+    /// enum's name is in hand. The **sole** source `variant_type` reads to
+    /// build a `Type::Variant` -- never re-derived per site -- so every
+    /// `Type::Variant` for the same `(EnumId, vi)` compares equal.
+    pub display_static: &'static str,
     pub fields: Vec<(String, Type)>,
     pub span: Span,
+}
+
+/// Phase 6 slice 2 (R1): the **sole** constructor of a `Type::Variant`. Reads
+/// `enums[id].variants[vi].display_static`, never formats a fresh string, so
+/// every construction of the same `(EnumId, vi)` is byte-identical and thus
+/// compares equal under `Type`'s derived `PartialEq`.
+pub fn variant_type(enums: &[EnumDecl], id: EnumId, vi: usize) -> Type {
+    Type::Variant(id, vi, enums[id.index()].variants[vi].display_static)
 }
 
 /// Phase 5 slice 1 (R1, D5): a `type:` header that bound one or more type
@@ -587,9 +601,11 @@ impl GenericTypes {
             .iter()
             .map(|variant| {
                 let vname = type_instantiation_name(&variant.name, args, regs);
+                let display = format!("{name}.{}", generic_surface_name(&variant.name));
                 VariantDecl {
                     name_static: Box::leak(vname.clone().into_boxed_str()),
                     name: vname,
+                    display_static: Box::leak(display.into_boxed_str()),
                     fields: variant
                         .fields
                         .iter()
@@ -651,12 +667,14 @@ pub fn bool_enum_decl() -> EnumDecl {
             VariantDecl {
                 name: "False".to_string(),
                 name_static: "False",
+                display_static: "bool.False",
                 fields: Vec::new(),
                 span: Span::default(),
             },
             VariantDecl {
                 name: "True".to_string(),
                 name_static: "True",
+                display_static: "bool.True",
                 fields: Vec::new(),
                 span: Span::default(),
             },
@@ -1188,6 +1206,14 @@ pub enum Type {
     Float(FloatType),
     Struct(StructId, &'static str),
     Enum(EnumId, &'static str),
+    /// Phase 6 slice 2 (R1): one variant of an enum, standalone rather than
+    /// carried inline as clause-body context -- the type Slice 3's eliminator
+    /// binds an arm's payload to. Carries the owning `EnumId`, the variant's
+    /// index into `EnumDecl.variants`, and a leaked `Enum.Variant` display
+    /// name sourced once from `VariantDecl::display_static` (never a per-site
+    /// `format!`+`Box::leak`, see `variant_type`), so two `Type::Variant`s for
+    /// the same `(EnumId, vi)` are always byte-identical and compare equal.
+    Variant(EnumId, usize, &'static str),
     Array(ArrayId, &'static str),
     /// A single-value owning heap cell: a compiler-known type constructor,
     /// not a generic, one interned registry entry per concrete payload
@@ -1495,6 +1521,7 @@ impl Type {
                 .expect("Type::Float is always constructed from a FLOAT_TYPES row"),
             Type::Struct(_, name) => name,
             Type::Enum(_, name) => name,
+            Type::Variant(_, _, name) => name,
             Type::Array(_, name) => name,
             Type::OwnedCell(_, name) => name,
             Type::Ref(_, _, name) => name,
@@ -2009,9 +2036,13 @@ mod tests {
     }
 
     fn variant(name: &str, fields: Vec<(String, Type)>) -> VariantDecl {
+        let name_static: &'static str = Box::leak(name.to_string().into_boxed_str());
         VariantDecl {
             name: name.to_string(),
-            name_static: Box::leak(name.to_string().into_boxed_str()),
+            name_static,
+            // Placeholder: the caller (`module_with_enum`) holds the owning
+            // enum's name, not this builder, per R1's out-of-scope test sites.
+            display_static: name_static,
             fields,
             span: Span::default(),
         }
@@ -2171,6 +2202,76 @@ mod tests {
         assert_eq!(generics.inst_enums.len(), 1);
         assert_eq!(a, Type::Enum(EnumId::from_index(1), "Res[i64]"));
         assert_eq!(generics.inst_enums[0].variants[0].name, "Ok[i64]");
+    }
+
+    /// Phase 6 slice 2 (R1): a monomorphized generic enum's variant carries
+    /// the enum's mangled name but the variant's *bare surface* name --
+    /// `Res[i64].Ok`, never `Res[i64].Ok[i64]`.
+    #[test]
+    fn instantiate_enum_variant_display_static_uses_bare_variant_name() {
+        let decl = GenericEnumDecl {
+            name: "Res".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Ok".to_string(),
+                fields: vec![("val".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 1);
+        generics.enums.push(decl);
+        generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
+        assert_eq!(
+            generics.inst_enums[0].variants[0].display_static,
+            "Res[i64].Ok"
+        );
+    }
+
+    /// Phase 6 slice 2 (R1): `Type::name()`/`Display` return the leaked
+    /// `Enum.Variant` name directly, with no registry lookup.
+    #[test]
+    fn type_variant_name_and_display_render_enum_dot_variant() {
+        let ty = Type::Variant(EnumId::from_index(0), 1, "Shape.Circle");
+        assert_eq!(ty.name(), "Shape.Circle");
+        assert_eq!(ty.to_string(), "Shape.Circle");
+    }
+
+    /// Phase 6 slice 2 (R1): `variant_type` is the sole constructor, reading
+    /// `display_static` off the registry entry, for both a concrete and a
+    /// monomorphized generic enum, and two calls for the same `(EnumId, vi)`
+    /// build byte-identical, and thus equal, `Type::Variant`s.
+    #[test]
+    fn variant_type_reads_display_static_and_is_stable_across_calls() {
+        let enums = vec![EnumDecl {
+            name: "Shape".to_string(),
+            name_static: "Shape",
+            variants: vec![variant("Circle", vec![("r".to_string(), Type::F64)])],
+            span: Span::default(),
+            module: 0,
+        }];
+        let a = variant_type(&enums, EnumId::from_index(0), 0);
+        let b = variant_type(&enums, EnumId::from_index(0), 0);
+        assert_eq!(a, b);
+        assert_eq!(a.name(), "Circle");
+
+        let decl = GenericEnumDecl {
+            name: "Res".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Ok".to_string(),
+                fields: vec![("val".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 1);
+        generics.enums.push(decl);
+        generics.instantiate_enum(0, &[Type::I64], 0, EMPTY_REGS);
+        let mono = variant_type(&generics.inst_enums, EnumId::from_index(0), 0);
+        assert_eq!(mono.name(), "Res[i64].Ok");
     }
 
     /// Round-2 review fix (R4): a struct argument's bare name is the plain

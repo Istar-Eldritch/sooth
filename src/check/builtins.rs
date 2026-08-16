@@ -639,9 +639,13 @@ mod tests {
             is_bundle: false,
             module: 0,
         }];
+        // Reused across three enums (Plain/Item/Boxed), so it cannot embed
+        // any single owning enum name; the placeholder is diagnostic-only
+        // and equality-safe (R1).
         let variant = |name: &'static str, fields: Vec<(String, Type)>| VariantDecl {
             name: name.to_string(),
             name_static: name,
+            display_static: name,
             fields,
             span: Span::default(),
         };

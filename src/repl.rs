@@ -1570,6 +1570,7 @@ impl Session {
         let variants = variant_names
             .into_iter()
             .map(|(vname, vspan)| VariantDecl {
+                display_static: Box::leak(format!("{name}.{vname}").into_boxed_str()),
                 name: vname.clone(),
                 name_static: Box::leak(vname.into_boxed_str()),
                 fields: Vec::new(),
@@ -1915,6 +1916,10 @@ impl Session {
                 .map(|v| VariantDecl {
                     name: v.name.clone(),
                     name_static: v.name_static,
+                    // Built before the enclosing `EnumDecl` computes its
+                    // import-mangled name (below), so this forwards the
+                    // existing spelling; cosmetic (pre-import), not correctness.
+                    display_static: v.display_static,
                     fields: v
                         .fields
                         .iter()

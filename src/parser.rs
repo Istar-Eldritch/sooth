@@ -275,6 +275,7 @@ fn build_registries_into(
                     .map(|(vname, vspan)| VariantDecl {
                         name: vname.clone(),
                         name_static: Box::leak(vname.clone().into_boxed_str()),
+                        display_static: Box::leak(format!("{name}.{vname}").into_boxed_str()),
                         fields: Vec::new(),
                         span: *vspan,
                     })

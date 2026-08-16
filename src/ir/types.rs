@@ -254,6 +254,9 @@ pub fn ir_type_of(ty: Type) -> IrType {
                 "a `~` inline quotation never reaches the backend (it cannot be materialized)"
             )
         }
+        // Phase 6 slice 2 (R3): a `Type::Variant` never reaches the backend
+        // this slice -- only the not-yet-built eliminator (Slice 3) mints one.
+        Type::Variant(..) => unreachable!("a Type::Variant never reaches the backend (Slice 3)"),
     }
 }
 
@@ -495,6 +498,15 @@ mod tests {
             ir_type_of(Type::from_name("f64").unwrap()),
             IrType::Float { bits: 64 }
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "a Type::Variant never reaches the backend")]
+    fn ir_type_of_variant_is_unreachable() {
+        // Phase 6 slice 2 (R3): a `Type::Variant` never reaches the backend
+        // this slice (only Slice 3's eliminator mints one), mirroring the
+        // `InlineQuotation` arm.
+        let _ = ir_type_of(Type::Variant(EnumId::from_index(0), 0, "Shape.Circle"));
     }
 
     #[test]
