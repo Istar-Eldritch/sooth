@@ -3979,8 +3979,12 @@ mod tests {
         assert_eq!(shape.name, "Shape");
         assert_eq!(shape.variants.len(), 2);
         assert_eq!(shape.variants[0].name, "Circle");
+        // Phase 6 slice 2 (R1): the leaked `Enum.Variant` display name that a
+        // `Type::Variant` renders, built once here at declaration time.
+        assert_eq!(shape.variants[0].display_static, "Shape.Circle");
         assert_eq!(shape.variants[0].fields, vec![("r".to_string(), Type::F64)]);
         assert_eq!(shape.variants[1].name, "Rect");
+        assert_eq!(shape.variants[1].display_static, "Shape.Rect");
         assert_eq!(
             shape.variants[1].fields,
             vec![("w".to_string(), Type::F64), ("h".to_string(), Type::F64)]

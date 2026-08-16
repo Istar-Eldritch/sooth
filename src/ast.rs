@@ -2239,9 +2239,12 @@ mod tests {
     }
 
     /// Phase 6 slice 2 (R1): `variant_type` is the sole constructor, reading
-    /// `display_static` off the registry entry, for both a concrete and a
-    /// monomorphized generic enum, and two calls for the same `(EnumId, vi)`
-    /// build byte-identical, and thus equal, `Type::Variant`s.
+    /// `display_static` off the registry entry rather than reformatting it,
+    /// for both a concrete and a monomorphized generic enum; two calls for
+    /// the same `(EnumId, vi)` build byte-identical, and thus equal,
+    /// `Type::Variant`s. The concrete half uses the `variant()` placeholder
+    /// builder (bare `display_static`), so it does not itself cover the
+    /// `Shape.Circle` naming rule — that's asserted in `parser.rs`.
     #[test]
     fn variant_type_reads_display_static_and_is_stable_across_calls() {
         let enums = vec![EnumDecl {
