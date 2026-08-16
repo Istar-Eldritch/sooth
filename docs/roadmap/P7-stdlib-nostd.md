@@ -65,8 +65,9 @@ everything downstream that needs it. The target-facing half of the embedded stor
 export) stays in Phase 9, where its consumer is. This is what pushes the phase from `[L]`
 toward `[XL]`: it is a language feature and a new checker analysis, not a stdlib item.
 **Exit:** a module with private static state exports a word whose declared global set the
-checker verifies, and an undeclared static access inside that module is a located compile
-error naming the static.
+checker verifies, and an *exported* word's undeclared static access is a located compile
+error naming the static (a private word's static access is inferred, not declaration-forced:
+inferred everywhere, declared at the export boundary).
 
 **P7.S3 — The `fixed` layer.** Allocation-free fixed-capacity vec/map/string/ringbuffer,
 built against `core`, needing no allocator at all. No dependency on S2 or S4; can be built
