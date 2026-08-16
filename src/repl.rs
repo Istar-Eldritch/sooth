@@ -378,7 +378,7 @@ fn remap_imported_combinator(
         declares_inline: w.declares_inline,
         module: module_base + w.module,
         span: w.span,
-        declared_globals: None,
+        declared_globals: w.declared_globals.clone(),
     }
 }
 

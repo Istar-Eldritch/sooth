@@ -168,6 +168,19 @@ fn static_scalar_type_error(name: &str, span: Span) -> String {
     )
 }
 
+/// D1/D3: a `static: X u32 = N;` initialiser whose literal is outside
+/// `u32`'s representable range -- mirrors the array-count range check
+/// (`parse_poly_array`) rather than deferring to Phase 4's lowering, which
+/// would otherwise silently truncate.
+fn static_u32_init_range_error(n: i64, span: Span) -> String {
+    format!(
+        "error: static initializer {n} is out of range for `u32` at line {}, col {} (requires 0 <= N <= {})",
+        span.line,
+        span.col,
+        u32::MAX
+    )
+}
+
 /// D2: a `global:` entry's mode token is neither `r` nor `w` (nor `r,`/`w,`).
 fn invalid_global_mode_error(found: &str, span: Span) -> String {
     format!(
@@ -1586,7 +1599,15 @@ impl<'t> Parser<'t> {
     /// static, no struct-literal aggregate.
     fn parse_static_init(&mut self, ty: Type) -> Result<StaticInit, String> {
         match self.peek() {
-            Some((Token::Int(n), _)) if ty == Type::I64 || ty == Type::U32 => {
+            Some((Token::Int(n), _)) if ty == Type::I64 => {
+                let n = *n;
+                self.pos += 1;
+                Ok(StaticInit::Int(n))
+            }
+            Some((Token::Int(n), span)) if ty == Type::U32 => {
+                if !(0..=i64::from(u32::MAX)).contains(n) {
+                    return Err(static_u32_init_range_error(*n, *span));
+                }
                 let n = *n;
                 self.pos += 1;
                 Ok(StaticInit::Int(n))
@@ -5474,6 +5495,14 @@ mod tests {
         let err = parse_src("type: Uart n i64 ;\nstatic: U Uart ;").unwrap_err();
         assert!(err.contains("not a scalar"), "unexpected message: {err}");
         assert!(err.contains("Uart"), "names the type: {err}");
+    }
+
+    #[test]
+    fn parse_static_u32_init_out_of_range_is_error() {
+        let err = parse_src("static: X u32 = -5 ;").unwrap_err();
+        assert!(err.contains("out of range"), "unexpected message: {err}");
+        let err = parse_src("static: X u32 = 99999999999 ;").unwrap_err();
+        assert!(err.contains("out of range"), "unexpected message: {err}");
     }
 
     #[test]

@@ -129,9 +129,18 @@ mode         := "r" | "w"
 - `mode` is `r` or `w`. It is **declared**, but the checker still verifies it
   against the inferred mode (decision 5: mode is derived, never independently
   authored): a declared `r` on a static the body writes is a wrong-mode error.
-- No new punctuation as a separator (no `;`-as-divider inside anything): the
-  `global:` keyword is itself the unambiguous boundary, the same way `--`
-  already separates inputs from outputs with no extra token either side of it.
+- The comma **is** load-bearing here, unlike everywhere else in the grammar:
+  entries are whitespace-separated tokens with no other delimiter between them,
+  so without a separator `COUNT w LIMIT r` cannot be told apart from a clause
+  that silently ended after `COUNT w` with `LIMIT` and `r` left as body terms.
+  The lexer has no comma token (this is the first comma anywhere in Sooth), so
+  a trailing comma lexes glued to the preceding word (`w,`); the parser strips
+  it with `strip_suffix(',')` and separately accepts a free-standing `,` for
+  the case where whitespace intervenes. A missing comma is not a parse error:
+  it ends the clause early and the dropped entry surfaces later as an unknown
+  word in the body. `global:` itself still needs no punctuation to mark its
+  own start or end — that boundary is the keyword, the same way `--` already
+  separates inputs from outputs with no extra token either side of it.
 - **Explicitly rejected:** a general "compiler annotation" mechanism with
   `global:` as its first instance. One consumer with a checked, structured
   payload (a NAME-mode list the checker verifies exactly, not an inert tag)
