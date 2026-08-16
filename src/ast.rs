@@ -41,6 +41,12 @@ pub struct Module {
     /// structurally. Mirrors `owned_cells`, with mutability as a second key
     /// component so `&T` and `&!T` are separate entries.
     pub refs: Vec<RefDecl>,
+    /// Phase 5 slice 1 (R1): every `type:` declaration whose header bound one
+    /// or more type variables, parsed but not yet monomorphized. Empty for a
+    /// program with no generic `type:` declaration.
+    pub generic_structs: Vec<GenericStructDecl>,
+    /// The enum twin of `generic_structs`.
+    pub generic_enums: Vec<GenericEnumDecl>,
     /// One entry per `extern:` declaration (R1), in source order. Registered
     /// into the ordinary word environment (`check::check`) like any other
     /// word signature, so every existing arity/type check applies to a call
@@ -275,6 +281,46 @@ pub struct VariantDecl {
     pub name: String,
     pub name_static: &'static str,
     pub fields: Vec<(String, Type)>,
+    pub span: Span,
+}
+
+/// Phase 5 slice 1 (R1, D5): a `type:` header that bound one or more type
+/// variables (`type: Box 'T ...`), parsed into its variable-scoped field
+/// list but not yet monomorphized -- minting a concrete `StructDecl` per
+/// distinct application is Phase 2/3 of this slice. Deliberately a *separate*
+/// type from `StructDecl` (not a `ty_var_names` field bolted onto it): the
+/// concrete registry every existing layout/check/lowering pass walks stays
+/// exactly the shape it is today. Nothing walks this registry until an
+/// explicit application mints a concrete entry from it, so a generic type
+/// declared but never applied compiles clean.
+#[derive(Debug, Clone)]
+pub struct GenericStructDecl {
+    pub name: String,
+    /// The header's bound variable names in binding (first-mention) order,
+    /// each keeping its leading `'` (e.g. `"'T"`) -- the id space a field's
+    /// `PolyType::Var` indexes into.
+    pub ty_var_names: Vec<String>,
+    pub fields: Vec<(String, PolyType)>,
+    pub span: Span,
+    pub module: u32,
+}
+
+/// The enum twin of `GenericStructDecl`, mirroring how `EnumDecl` sits
+/// alongside `StructDecl`.
+#[derive(Debug, Clone)]
+pub struct GenericEnumDecl {
+    pub name: String,
+    pub ty_var_names: Vec<String>,
+    pub variants: Vec<GenericVariantDecl>,
+    pub span: Span,
+    pub module: u32,
+}
+
+/// One variant of a `GenericEnumDecl`, mirroring `VariantDecl`.
+#[derive(Debug, Clone)]
+pub struct GenericVariantDecl {
+    pub name: String,
+    pub fields: Vec<(String, PolyType)>,
     pub span: Span,
 }
 
@@ -1510,6 +1556,8 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            generic_structs: Vec::new(),
+            generic_enums: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
@@ -1627,6 +1675,8 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            generic_structs: Vec::new(),
+            generic_enums: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),
@@ -1688,6 +1738,8 @@ mod tests {
             arrays: Vec::new(),
             owned_cells: Vec::new(),
             refs: Vec::new(),
+            generic_structs: Vec::new(),
+            generic_enums: Vec::new(),
             externs: Vec::new(),
             instantiations: std::collections::HashMap::new(),
             builtin_overloads: std::collections::HashMap::new(),

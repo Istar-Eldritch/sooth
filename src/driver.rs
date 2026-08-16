@@ -200,6 +200,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // the six comparison words beside it, from `lib/core.sth`.
     let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
+    let mut generic_structs = Vec::new();
+    let mut generic_enums = Vec::new();
     let mut modules = Vec::with_capacity(closure.nodes.len());
     // R20/R21: every module's selective-import entries, kept with their source
     // qualifier and span for the post-assembly validation (`check::check_selective_imports`).
@@ -251,6 +253,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         }
         words.extend(bodies.words);
         externs.extend(bodies.externs);
+        generic_structs.extend(bodies.generic_structs);
+        generic_enums.extend(bodies.generic_enums);
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
@@ -270,6 +274,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         arrays,
         owned_cells,
         refs,
+        generic_structs,
+        generic_enums,
         externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),

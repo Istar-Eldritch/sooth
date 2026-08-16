@@ -540,6 +540,8 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         arrays,
         owned_cells,
         refs,
+        generic_structs: _,
+        generic_enums: _,
         externs: _,
         instantiations: _,
         builtin_overloads: _,

@@ -65,6 +65,16 @@ fn prepass_type_decls(
             if w == "type:" {
                 if let Some((Token::Word(name), span)) = tokens.get(i + 1) {
                     reject_reserved_name("type", name, *span)?;
+                    // Phase 5 slice 1 (R1/D5): a generic header mints no
+                    // concrete struct/enum registry entry here -- its full
+                    // variable-scoped shape is parsed directly into
+                    // `Module::generic_structs`/`generic_enums` by
+                    // `parse_bodies`, which already has the complete
+                    // (pre-pass-populated) concrete registries in scope for
+                    // any forward-referenced concrete field type.
+                    if header_ty_var_count(tokens, i + 2) > 0 {
+                        continue;
+                    }
                     let kind = if body_has_pipe_before_semicolon(tokens, i + 2) {
                         let variants = scan_variant_names(tokens, i + 2);
                         for (vname, vspan) in &variants {
@@ -80,6 +90,20 @@ fn prepass_type_decls(
         }
     }
     Ok(decls)
+}
+
+/// The count of `'`-prefixed tokens starting at `start` (Phase 5 slice 1,
+/// R1/D2): a `type:` header's bound type variables, immediately following its
+/// declared name, zero for a concrete (non-generic) declaration. Shared by
+/// the pre-pass (which skips registering a generic header into the concrete
+/// registries) and the parser's own lookahead before dispatching to the
+/// generic or concrete production.
+fn header_ty_var_count(tokens: &[(Token, Span)], start: usize) -> usize {
+    let mut n = 0;
+    while matches!(tokens.get(start + n), Some((Token::Word(w), _)) if w.starts_with('\'')) {
+        n += 1;
+    }
+    n
 }
 
 /// A located error for a name reserved by the owning-cell syntax (`^`, `^>`,
@@ -250,6 +274,11 @@ pub struct ParsedBodies {
     pub externs: Vec<ExternDecl>,
     pub struct_fields_by_decl: Vec<Vec<(String, Type)>>,
     pub enum_fields_by_decl: Vec<Vec<Vec<(String, Type)>>>,
+    /// Phase 5 slice 1 (R1): every generic struct `type:` declaration parsed
+    /// from this file's body, in source order.
+    pub generic_structs: Vec<crate::ast::GenericStructDecl>,
+    /// The enum twin of `generic_structs`.
+    pub generic_enums: Vec<crate::ast::GenericEnumDecl>,
     pub exports: Vec<(String, Span)>,
 }
 
@@ -278,6 +307,8 @@ pub fn parse_bodies(
         externs: Vec::new(),
         struct_fields_by_decl: Vec::new(),
         enum_fields_by_decl: Vec::new(),
+        generic_structs: Vec::new(),
+        generic_enums: Vec::new(),
         exports: Vec::new(),
     };
     let mut parser = Parser {
@@ -295,7 +326,13 @@ pub fn parse_bodies(
     };
     while parser.pos < parser.tokens.len() {
         if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
-            if parser.current_typedef_is_enum() {
+            if parser.current_typedef_is_generic() {
+                if parser.current_typedef_is_enum() {
+                    out.generic_enums.push(parser.parse_generic_enum_typedef()?);
+                } else {
+                    out.generic_structs.push(parser.parse_generic_typedef()?);
+                }
+            } else if parser.current_typedef_is_enum() {
                 out.enum_fields_by_decl.push(parser.parse_enum_typedef()?);
             } else {
                 out.struct_fields_by_decl.push(parser.parse_typedef()?);
@@ -395,6 +432,8 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         arrays,
         owned_cells,
         refs,
+        generic_structs: bodies.generic_structs,
+        generic_enums: bodies.generic_enums,
         externs: bodies.externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
@@ -952,6 +991,43 @@ fn var_kind_conflict_error(name: &str, span: Span) -> String {
         "error: variable `{name}` at line {}, col {} is used as both a type variable and a length variable; these are two different variables",
         span.line, span.col
     )
+}
+
+/// Phase 5 slice 1 (R1): a generic `type:` field naming a `'`-prefixed
+/// variable its header never bound.
+fn unbound_generic_ty_var_error(name: &str, decl_name: &str, span: Span) -> String {
+    format!(
+        "error: `{name}` at line {}, col {} is not a type variable bound by `type: {decl_name}`'s header",
+        span.line, span.col
+    )
+}
+
+/// Phase 5 slice 1 (R1, added during round-2 review): a generic `type:`
+/// header binds a variable no field ever references. Rejected at
+/// declaration time so R5's instantiation dispatch -- which disambiguates
+/// two instantiations by their generated constructor's *input* types alone
+/// -- never has to handle two instantiations whose constructors agree on
+/// every input and differ only in a phantom output type.
+fn phantom_ty_var_error(decl_name: &str, name: &str, span: Span) -> String {
+    format!(
+        "error: type variable `{name}` at line {}, col {} is bound by `type: {decl_name}`'s header but appears in no field (a phantom parameter cannot be disambiguated at a call site)",
+        span.line, span.col
+    )
+}
+
+/// Phase 5 slice 1 (R1): the one phantom-variable gate both `parse_generic_typedef`
+/// and `parse_generic_enum_typedef` call once their whole field/variant list is
+/// known.
+fn check_no_phantom_ty_var(
+    decl_name: &str,
+    ty_vars: &[(String, Span)],
+    used: &[bool],
+) -> Result<(), String> {
+    if let Some(idx) = used.iter().position(|&u| !u) {
+        let (name, span) = &ty_vars[idx];
+        return Err(phantom_ty_var_error(decl_name, name, *span));
+    }
+    Ok(())
 }
 
 struct Parser<'t> {
@@ -2214,9 +2290,20 @@ impl<'t> Parser<'t> {
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
     /// position is an enum (D1's `|`-separated-variants body), per
-    /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`.
+    /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`. A
+    /// generic header's bound type variables (Phase 5 slice 1) sit between
+    /// the name and the body, so the pipe search starts past them; zero for a
+    /// concrete declaration, leaving this unchanged for the existing corpus.
     fn current_typedef_is_enum(&self) -> bool {
-        body_has_pipe_before_semicolon(self.tokens, self.pos + 2)
+        let ty_var_count = header_ty_var_count(self.tokens, self.pos + 2);
+        body_has_pipe_before_semicolon(self.tokens, self.pos + 2 + ty_var_count)
+    }
+
+    /// Lookahead (no consumption): whether the `type:` decl at the current
+    /// position is generic (Phase 5 slice 1, R1/D2) -- its header binds one or
+    /// more type variables. `self.pos` must point at `type:`.
+    fn current_typedef_is_generic(&self) -> bool {
+        header_ty_var_count(self.tokens, self.pos + 2) > 0
     }
 
     /// The enum `type:` production (D1, M3): `type: Name '|'? variant ('|'
@@ -2290,6 +2377,178 @@ impl<'t> Parser<'t> {
             }
         }
         Ok(fields)
+    }
+
+    /// Phase 5 slice 1 (R1): the generic struct `type:` production, `type:
+    /// Name ('var)+ (field-name field-type)* ;`. The header's bound type
+    /// variables were already consumed by `current_typedef_is_generic`'s
+    /// caller having noticed them, but not yet by this parser -- they are
+    /// parsed here, then each field's type resolves through
+    /// `parse_generic_field_type_expr` against that variable table. A bound
+    /// variable never referenced by any field (a phantom parameter) is a
+    /// located error (added during round-2 review): R5's instantiation
+    /// dispatch disambiguates two instantiations by their constructor's
+    /// *input* types alone, which a phantom variable (varying only the
+    /// output) breaks.
+    fn parse_generic_typedef(&mut self) -> Result<crate::ast::GenericStructDecl, String> {
+        let type_span = self.expect_word("type:")?;
+        let (name, _) = self.expect_word_any_spanned()?;
+        let ty_vars = self.parse_generic_header_vars()?;
+        let mut used = vec![false; ty_vars.len()];
+        let mut fields = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) => break,
+                Some(_) => {
+                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    if let Some((Token::Semicolon, span)) = self.peek() {
+                        return Err(format!(
+                            "parse error: field `{field_name}` has no type before `;` at line {}, col {} (odd field-token count in `type:` body)",
+                            span.line, span.col
+                        ));
+                    }
+                    let ty = self.parse_generic_field_type_expr(&name, &ty_vars, &mut used)?;
+                    fields.push((field_name, ty));
+                }
+                None => return Err(self.eof_error("`;` (unterminated `type:` declaration)")),
+            }
+        }
+        self.expect(Token::Semicolon)?;
+        check_no_phantom_ty_var(&name, &ty_vars, &used)?;
+        Ok(crate::ast::GenericStructDecl {
+            name,
+            ty_var_names: ty_vars.into_iter().map(|(n, _)| n).collect(),
+            fields,
+            span: type_span,
+            module: self.module,
+        })
+    }
+
+    /// The enum twin of `parse_generic_typedef` (D1, M3, R1): `type: Name
+    /// ('var)+ '|'? variant ('|' variant)* ;`.
+    fn parse_generic_enum_typedef(&mut self) -> Result<crate::ast::GenericEnumDecl, String> {
+        let type_span = self.expect_word("type:")?;
+        let (name, _) = self.expect_word_any_spanned()?;
+        let ty_vars = self.parse_generic_header_vars()?;
+        if matches!(self.peek(), Some((Token::Pipe, _))) {
+            self.pos += 1;
+        }
+        let mut used = vec![false; ty_vars.len()];
+        let mut variants = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) => break,
+                Some((Token::Word(_), _)) => {
+                    variants.push(self.parse_generic_variant_fields(&name, &ty_vars, &mut used)?);
+                    if matches!(self.peek(), Some((Token::Pipe, _))) {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+                Some((tok, span)) => {
+                    return Err(format!(
+                        "parse error: expected a variant name, found {tok:?} at line {}, col {}",
+                        span.line, span.col
+                    ));
+                }
+                None => return Err(self.eof_error("`;` (unterminated `type:` declaration)")),
+            }
+        }
+        self.expect(Token::Semicolon)?;
+        if variants.is_empty() {
+            return Err(format!(
+                "error: malformed `type:` declaration `{name}` (zero variants) at line {}, col {}",
+                type_span.line, type_span.col
+            ));
+        }
+        check_no_phantom_ty_var(&name, &ty_vars, &used)?;
+        Ok(crate::ast::GenericEnumDecl {
+            name,
+            ty_var_names: ty_vars.into_iter().map(|(n, _)| n).collect(),
+            variants,
+            span: type_span,
+            module: self.module,
+        })
+    }
+
+    /// One generic variant's field list, mirroring `parse_variant_fields`
+    /// with fields resolved through `parse_generic_field_type_expr` instead.
+    fn parse_generic_variant_fields(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+    ) -> Result<crate::ast::GenericVariantDecl, String> {
+        let (vname, vspan) = self.expect_word_any_spanned()?;
+        let mut fields = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::Semicolon, _)) | Some((Token::Pipe, _)) => break,
+                Some(_) => {
+                    let (field_name, _) = self.expect_word_any_spanned()?;
+                    if let Some((tok, span)) = self.peek() {
+                        if matches!(tok, Token::Semicolon | Token::Pipe) {
+                            return Err(format!(
+                                "parse error: field `{field_name}` has no type before `{tok:?}` at line {}, col {} (odd field-token count in `type:` body)",
+                                span.line, span.col
+                            ));
+                        }
+                    }
+                    let ty = self.parse_generic_field_type_expr(decl_name, ty_vars, used)?;
+                    fields.push((field_name, ty));
+                }
+                None => return Err(self.eof_error("`;` or `|` (unterminated `type:` declaration)")),
+            }
+        }
+        Ok(crate::ast::GenericVariantDecl {
+            name: vname,
+            fields,
+            span: vspan,
+        })
+    }
+
+    /// A generic `type:` header's bound type variables (R1/D2): one or more
+    /// `'`-prefixed words immediately following the declared name, each
+    /// interned with its span for the phantom-variable diagnostic. The
+    /// caller (`current_typedef_is_generic`) has already established at
+    /// least one is present.
+    fn parse_generic_header_vars(&mut self) -> Result<Vec<(String, Span)>, String> {
+        let mut ty_vars = Vec::new();
+        while matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
+            let (w, span) = self.expect_word_any_spanned()?;
+            ty_vars.push((w, span));
+        }
+        Ok(ty_vars)
+    }
+
+    /// A generic `type:` field's type (R1): either a bare reference to one of
+    /// the header's bound variables (marking it used, for the phantom check),
+    /// or an ordinary concrete field type resolved exactly as
+    /// `parse_field_type_expr` resolves a non-generic `type:`'s field. A bare
+    /// `'name` not found in `ty_vars` is a located error naming the
+    /// declaration -- distinct from an unbound variable in a word signature,
+    /// which errors through `PolyBuilder` instead.
+    fn parse_generic_field_type_expr(
+        &mut self,
+        decl_name: &str,
+        ty_vars: &[(String, Span)],
+        used: &mut [bool],
+    ) -> Result<PolyType, String> {
+        if let Some((Token::Word(w), span)) = self.peek() {
+            if w.starts_with('\'') {
+                let (w, span) = (w.clone(), *span);
+                self.pos += 1;
+                let idx = ty_vars
+                    .iter()
+                    .position(|(n, _)| *n == w)
+                    .ok_or_else(|| unbound_generic_ty_var_error(&w, decl_name, span))?;
+                used[idx] = true;
+                return Ok(PolyType::Var(idx as u32));
+            }
+        }
+        let ty = self.parse_field_type_expr()?;
+        Ok(PolyType::Concrete(ty))
     }
 
     fn parse_locals_opt(&mut self) -> Result<Vec<String>, String> {
@@ -3116,6 +3375,144 @@ mod tests {
         // Slice 9 (R2): `bool` is the reserved index-0 entry.
         assert_eq!(module.enums.len(), 2);
         assert_eq!(module.enums[1].name, "Shape");
+    }
+
+    #[test]
+    fn parse_generic_typedef_single_var_registers_decl() {
+        let module = parse_src("type: Box 'T val 'T ;").unwrap();
+        // A generic header mints no concrete struct entry (R1/D5): only the
+        // side registry gains an entry.
+        assert!(module.structs.is_empty());
+        assert_eq!(module.generic_structs.len(), 1);
+        let decl = &module.generic_structs[0];
+        assert_eq!(decl.name, "Box");
+        assert_eq!(decl.ty_var_names, ["'T"]);
+        assert_eq!(decl.fields.len(), 1);
+        assert_eq!(decl.fields[0].0, "val");
+        assert_eq!(decl.fields[0].1, PolyType::Var(0));
+    }
+
+    #[test]
+    fn parse_generic_typedef_multi_var_binds_each_field_to_its_own_variable() {
+        let module = parse_src("type: Pair 'A 'B a 'A b 'B ;").unwrap();
+        assert_eq!(module.generic_structs.len(), 1);
+        let decl = &module.generic_structs[0];
+        assert_eq!(decl.name, "Pair");
+        assert_eq!(decl.ty_var_names, ["'A", "'B"]);
+        assert_eq!(decl.fields[0], ("a".to_string(), PolyType::Var(0)));
+        assert_eq!(decl.fields[1], ("b".to_string(), PolyType::Var(1)));
+    }
+
+    #[test]
+    fn parse_generic_typedef_concrete_field_resolves_alongside_a_variable_field() {
+        let module = parse_src("type: Wrap 'T tag i64 val 'T ;").unwrap();
+        let decl = &module.generic_structs[0];
+        assert_eq!(
+            decl.fields[0],
+            ("tag".to_string(), PolyType::Concrete(Type::I64))
+        );
+        assert_eq!(decl.fields[1], ("val".to_string(), PolyType::Var(0)));
+    }
+
+    #[test]
+    fn parse_generic_typedef_field_naming_unbound_variable_is_error() {
+        // R1: `'E` is never bound by `Box`'s header.
+        let result = parse_src("type: Box 'T val 'E ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("'E"), "unexpected message: {err}");
+        assert!(err.contains("Box"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_typedef_phantom_variable_is_error() {
+        // R1 (round 2): `'T` is bound but never used in any field.
+        let result = parse_src("type: Phantom 'T x i64 ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("phantom"), "unexpected message: {err}");
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Phantom"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_registers_decl() {
+        let module = parse_src("type: Result 'T 'E | Ok val 'T | Err val 'E ;").unwrap();
+        // Slice 9 (R2): `bool` occupies the reserved index-0 entry; a
+        // generic header mints no further concrete enum entry (R1/D5).
+        assert_eq!(module.enums.len(), 1);
+        assert_eq!(module.generic_enums.len(), 1);
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.name, "Result");
+        assert_eq!(decl.ty_var_names, ["'T", "'E"]);
+        assert_eq!(decl.variants.len(), 2);
+        assert_eq!(decl.variants[0].name, "Ok");
+        assert_eq!(
+            decl.variants[0].fields,
+            [("val".to_string(), PolyType::Var(0))]
+        );
+        assert_eq!(decl.variants[1].name, "Err");
+        assert_eq!(
+            decl.variants[1].fields,
+            [("val".to_string(), PolyType::Var(1))]
+        );
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_without_leading_pipe_registers_first_variant() {
+        let module = parse_src("type: Maybe 'T None | Some v 'T ;").unwrap();
+        let decl = &module.generic_enums[0];
+        assert_eq!(decl.variants[0].name, "None");
+        assert!(decl.variants[0].fields.is_empty());
+        assert_eq!(decl.variants[1].name, "Some");
+        assert_eq!(
+            decl.variants[1].fields,
+            [("v".to_string(), PolyType::Var(0))]
+        );
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_field_naming_unbound_variable_is_error() {
+        let result = parse_src("type: Result 'T 'E | Ok val 'T | Err val 'X ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("'X"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_phantom_variable_is_error() {
+        let result = parse_src("type: Result 'T 'E | Ok val 'T | Err other i64 ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("phantom"), "unexpected message: {err}");
+        assert!(err.contains("'E"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_enum_typedef_zero_variants_is_error() {
+        let result = parse_src("type: Empty 'T | ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("zero variants"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_typedef_declared_but_never_used_compiles_clean() {
+        // Phase 1: a generic type declared and never applied still builds a
+        // whole program clean -- nothing else walks `generic_structs` yet.
+        let module = parse_src("type: Box 'T val 'T ; : main ( -- ) ;").unwrap();
+        assert_eq!(module.generic_structs.len(), 1);
+        assert!(module.words.iter().any(|w| w.name == "main"));
+    }
+
+    #[test]
+    fn parse_generic_typedef_does_not_shadow_a_concrete_typedef_registered_after_it() {
+        // A generic header is skipped entirely by the concrete pre-pass, so a
+        // concrete `type:` elsewhere in the file is unaffected.
+        let module = parse_src("type: Box 'T val 'T ; type: Vec2 x i64 y i64 ;").unwrap();
+        assert_eq!(module.structs.len(), 1);
+        assert_eq!(module.structs[0].name, "Vec2");
+        assert_eq!(module.generic_structs.len(), 1);
     }
 
     /// The `Clause` list of a `WordBody::Clauses`; panics on a term body.

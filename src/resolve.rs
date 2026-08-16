@@ -827,6 +827,8 @@ mod tests {
             arrays,
             owned_cells,
             refs,
+            generic_structs: Vec::new(),
+            generic_enums: Vec::new(),
             externs: Vec::new(),
             instantiations: HashMap::new(),
             builtin_overloads: HashMap::new(),
