@@ -345,8 +345,55 @@ pub struct GenericTypes {
     pub enums: Vec<GenericEnumDecl>,
     pub inst_structs: Vec<StructDecl>,
     pub inst_enums: Vec<EnumDecl>,
+    /// Dedup identity for `inst_structs`/`inst_enums`, parallel by index:
+    /// `(generic decl index, instantiating module, concrete arguments)`.
+    /// `Type` is `Eq` over the real `StructId`/`EnumId`/etc. an argument
+    /// carries, so this is injective where the rendered *name* the fix
+    /// below still is not -- see `type_instantiation_name`. Kept off
+    /// `StructDecl`/`EnumDecl` themselves so those stay shaped exactly like
+    /// a hand-written concrete `type:` (R5).
+    struct_keys: Vec<(usize, u32, Vec<Type>)>,
+    enum_keys: Vec<(usize, u32, Vec<Type>)>,
     struct_base: usize,
     enum_base: usize,
+}
+
+/// The instantiation-name spelling of one type argument. A primitive
+/// (`i64`, `bool`, ...) has no id and its bare `Type::name()` is already
+/// injective across the whole program, so it renders unchanged. A struct or
+/// enum argument's bare name is *not* always injective: `Type::name()`
+/// renders only the declared spelling, never the module, so two distinct
+/// structs (or enums) sharing a bare name across modules -- two files each
+/// declaring `type: P ...`, or one importing the other's `P` as a field
+/// beside its own same-named `P` -- render identically. `structs`/`enums`
+/// are the full merged pre-pass registries (every file's, fixed before any
+/// body parses), so whether a given bare name is actually shared by more
+/// than one declaration is itself a pure function of the argument and the
+/// program's source files, independent of which instantiation runs first --
+/// the determinism `type_instantiation_name`'s NFR requires. Only that
+/// ambiguous case gets the registry-id suffix, so the ordinary (non-
+/// colliding) case keeps exactly the plain spelling (`Box[bool]`,
+/// `Box[Box[i64]]`) the NFR asks for. An array/owned-cell/ref argument's
+/// name is left as `Type::name()` unconditionally: its spelling is baked in
+/// at its own (pre-existing, Phase 4) interning site, not recomputed here.
+fn type_arg_key(t: &Type, structs: &[StructDecl], enums: &[EnumDecl]) -> String {
+    match t {
+        Type::Struct(id, name) => {
+            if structs.iter().filter(|d| d.name == *name).count() > 1 {
+                format!("{name}.{}", id.index())
+            } else {
+                name.to_string()
+            }
+        }
+        Type::Enum(id, name) => {
+            if enums.iter().filter(|d| d.name == *name).count() > 1 {
+                format!("{name}.{}", id.index())
+            } else {
+                name.to_string()
+            }
+        }
+        _ => t.name().to_string(),
+    }
 }
 
 /// R4: the registry name of one monomorphized instantiation, a pure function
@@ -359,8 +406,19 @@ pub struct GenericTypes {
 /// argument lists to collide, and the one QBE-facing use of a type name is
 /// sanitized injectively at the emission site anyway. `[` is a lexer
 /// delimiter, so no source type-name token can ever equal one of these.
-pub fn type_instantiation_name(base: &str, args: &[Type]) -> String {
-    let args: Vec<&str> = args.iter().map(|t| t.name()).collect();
+/// `structs`/`enums` are threaded through only to break a struct/enum
+/// argument's bare-name tie (`type_arg_key`); every other type argument's
+/// spelling is untouched by them.
+pub fn type_instantiation_name(
+    base: &str,
+    args: &[Type],
+    structs: &[StructDecl],
+    enums: &[EnumDecl],
+) -> String {
+    let args: Vec<String> = args
+        .iter()
+        .map(|t| type_arg_key(t, structs, enums))
+        .collect();
     format!("{base}[{}]", args.join(" "))
 }
 
@@ -404,21 +462,33 @@ impl GenericTypes {
     }
 
     /// R4/R5: mint (or find) the concrete struct for one application of
-    /// generic struct `idx`, deduped structurally on `(generic name, module,
-    /// concrete arguments)` -- which `type_instantiation_name` encodes
-    /// exactly, so the minted name is itself the dedup key. The result is an
-    /// ordinary `StructDecl`, indistinguishable from a hand-written concrete
-    /// `type:` of the same shape.
-    pub fn instantiate_struct(&mut self, idx: usize, args: &[Type], module: u32) -> Type {
-        let name = type_instantiation_name(&self.structs[idx].name, args);
+    /// generic struct `idx`, deduped structurally on `(generic decl idx,
+    /// module, concrete arguments)` -- compared by `Type`'s own `Eq`, which
+    /// is exact over the `StructId`/`EnumId`/etc. an argument carries. This
+    /// is deliberately *not* the rendered `type_instantiation_name` string:
+    /// that name is built from `Type::name()`, which two distinct arguments
+    /// (two structs sharing a bare declared name across modules) can render
+    /// identically, so deduping on the string would silently collapse them
+    /// into one `StructId` with the wrong layout. The result is an ordinary
+    /// `StructDecl`, indistinguishable from a hand-written concrete `type:`
+    /// of the same shape.
+    pub fn instantiate_struct(
+        &mut self,
+        idx: usize,
+        args: &[Type],
+        module: u32,
+        all_structs: &[StructDecl],
+        all_enums: &[EnumDecl],
+    ) -> Type {
         if let Some(i) = self
-            .inst_structs
+            .struct_keys
             .iter()
-            .position(|d| d.name == name && d.module == module)
+            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
         {
             let id = StructId::from_index(self.struct_base + i);
             return Type::Struct(id, self.inst_structs[i].name_static);
         }
+        let name = type_instantiation_name(&self.structs[idx].name, args, all_structs, all_enums);
         let decl = &self.structs[idx];
         let fields: Vec<(String, Type)> = decl
             .fields
@@ -428,6 +498,7 @@ impl GenericTypes {
         let span = decl.span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = StructId::from_index(self.struct_base + self.inst_structs.len());
+        self.struct_keys.push((idx, module, args.to_vec()));
         self.inst_structs.push(StructDecl {
             name,
             name_static,
@@ -445,22 +516,29 @@ impl GenericTypes {
     /// keys the generated-constructor `Sig` and the lowering-side variant
     /// word map, so two instantiations sharing a bare `Ok` would silently
     /// clobber each other there exactly as two `Box` constructors would.
-    pub fn instantiate_enum(&mut self, idx: usize, args: &[Type], module: u32) -> Type {
-        let name = type_instantiation_name(&self.enums[idx].name, args);
+    pub fn instantiate_enum(
+        &mut self,
+        idx: usize,
+        args: &[Type],
+        module: u32,
+        all_structs: &[StructDecl],
+        all_enums: &[EnumDecl],
+    ) -> Type {
         if let Some(i) = self
-            .inst_enums
+            .enum_keys
             .iter()
-            .position(|d| d.name == name && d.module == module)
+            .position(|(gi, m, a)| *gi == idx && *m == module && a == args)
         {
             let id = EnumId::from_index(self.enum_base + i);
             return Type::Enum(id, self.inst_enums[i].name_static);
         }
+        let name = type_instantiation_name(&self.enums[idx].name, args, all_structs, all_enums);
         let decl = &self.enums[idx];
         let variants: Vec<VariantDecl> = decl
             .variants
             .iter()
             .map(|variant| {
-                let vname = type_instantiation_name(&variant.name, args);
+                let vname = type_instantiation_name(&variant.name, args, all_structs, all_enums);
                 VariantDecl {
                     name_static: Box::leak(vname.clone().into_boxed_str()),
                     name: vname,
@@ -476,6 +554,7 @@ impl GenericTypes {
         let span = decl.span;
         let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
         let id = EnumId::from_index(self.enum_base + self.inst_enums.len());
+        self.enum_keys.push((idx, module, args.to_vec()));
         self.inst_enums.push(EnumDecl {
             name,
             name_static,
@@ -1973,9 +2052,9 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(3, 1);
         generics.structs.push(decl);
-        let a = generics.instantiate_struct(0, &[Type::I64], 0);
-        let b = generics.instantiate_struct(0, &[Type::I64], 0);
-        let c = generics.instantiate_struct(0, &[Type::BOOL], 0);
+        let a = generics.instantiate_struct(0, &[Type::I64], 0, &[], &[]);
+        let b = generics.instantiate_struct(0, &[Type::I64], 0, &[], &[]);
+        let c = generics.instantiate_struct(0, &[Type::BOOL], 0, &[], &[]);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(generics.inst_structs.len(), 2);
@@ -2004,12 +2083,62 @@ mod tests {
         };
         let mut generics = GenericTypes::with_bases(0, 1);
         generics.enums.push(decl);
-        let a = generics.instantiate_enum(0, &[Type::I64], 0);
-        let b = generics.instantiate_enum(0, &[Type::I64], 0);
+        let a = generics.instantiate_enum(0, &[Type::I64], 0, &[], &[]);
+        let b = generics.instantiate_enum(0, &[Type::I64], 0, &[], &[]);
         assert_eq!(a, b);
         assert_eq!(generics.inst_enums.len(), 1);
         assert_eq!(a, Type::Enum(EnumId::from_index(1), "Res[i64]"));
         assert_eq!(generics.inst_enums[0].variants[0].name, "Ok[i64]");
+    }
+
+    /// Round-2 review fix (R4): a struct argument's bare name is the plain
+    /// spelling when it is unique in the merged registry -- the ordinary
+    /// case, and the one the NFR's `Box[i64]`-over-`sooth_mono_...` argument
+    /// rests on.
+    #[test]
+    fn type_instantiation_name_unambiguous_struct_arg_stays_bare() {
+        let structs = vec![StructDecl {
+            name: "P".to_string(),
+            name_static: "P",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        }];
+        let arg = Type::Struct(StructId::from_index(0), "P");
+        assert_eq!(
+            type_instantiation_name("Box", &[arg], &structs, &[]),
+            "Box[P]"
+        );
+    }
+
+    /// The bug this fix exists for: two structs (a local `P` and an imported
+    /// `P`) share a bare name but are distinct registry entries. Deduping or
+    /// naming an instantiation on `Type::name()` alone cannot tell them
+    /// apart; the merged `structs` table can, since it holds both entries.
+    #[test]
+    fn type_instantiation_name_ambiguous_struct_arg_gets_disambiguated() {
+        let mk = |module: u32| StructDecl {
+            name: "P".to_string(),
+            name_static: "P",
+            fields: vec![("x".to_string(), Type::I64)],
+            span: Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        };
+        let structs = vec![mk(0), mk(1)];
+        let local = Type::Struct(StructId::from_index(0), "P");
+        let imported = Type::Struct(StructId::from_index(1), "P");
+        let local_name = type_instantiation_name("Box", &[local], &structs, &[]);
+        let imported_name = type_instantiation_name("Box", &[imported], &structs, &[]);
+        assert_ne!(
+            local_name, imported_name,
+            "two structs sharing a bare name must not render the same instantiation name"
+        );
+        assert_eq!(local_name, "Box[P.0]");
+        assert_eq!(imported_name, "Box[P.1]");
     }
 
     #[test]

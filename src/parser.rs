@@ -2699,12 +2699,24 @@ impl<'t> Parser<'t> {
         if let Some(idx) = self.generics.find_struct(name, self.module) {
             let arity = self.generics.structs[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
-            return Ok(self.generics.instantiate_struct(idx, &args, self.module));
+            return Ok(self.generics.instantiate_struct(
+                idx,
+                &args,
+                self.module,
+                self.structs,
+                self.enums,
+            ));
         }
         if let Some(idx) = self.generics.find_enum(name, self.module) {
             let arity = self.generics.enums[idx].ty_var_names.len();
             let args = self.parse_type_arguments(name, arity, span)?;
-            return Ok(self.generics.instantiate_enum(idx, &args, self.module));
+            return Ok(self.generics.instantiate_enum(
+                idx,
+                &args,
+                self.module,
+                self.structs,
+                self.enums,
+            ));
         }
         self.resolve_type(name, span)
     }

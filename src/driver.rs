@@ -608,6 +608,60 @@ mod tests {
         );
     }
 
+    /// Phase 5 slice 1 phase 2 (round-2 review fix, R4): two structs
+    /// sharing a bare name across modules (a local `P` and an imported
+    /// `o::P` with a different field count, so a wrong dedup gives `W` the
+    /// wrong layout) must monomorphize `Box[...]` to two distinct
+    /// `StructId`s, not collapse to one via a rendered-name collision.
+    #[test]
+    fn instantiate_struct_distinct_across_modules_same_bare_name() {
+        let s = Sandbox::new("generic-cross-module-name-collision");
+        s.write("other.sth", "type: P a i64 b i64 ;\nexport: P ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: o \"other.sth\" ;\ntype: P x i64 ;\ntype: Box 'T val 'T ;\ntype: W a Box[P] b Box[o::P] ;\n: main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let module = assemble_module(&closure, true).expect("assembles");
+
+        let w = module
+            .structs
+            .iter()
+            .find(|d| d.name.starts_with("W"))
+            .expect("W is registered");
+        let (_, box_a) = &w.fields[0];
+        let (_, box_b) = &w.fields[1];
+        let crate::ast::Type::Struct(box_a_id, _) = box_a else {
+            panic!("field a is a struct: {box_a:?}")
+        };
+        let crate::ast::Type::Struct(box_b_id, _) = box_b else {
+            panic!("field b is a struct: {box_b:?}")
+        };
+        assert_ne!(
+            box_a_id, box_b_id,
+            "Box[P] and Box[o::P] must mint distinct StructIds, not collapse on the rendered name"
+        );
+
+        let val_field_count = |box_id: &crate::ast::StructId| {
+            let boxed = &module.structs[box_id.index()];
+            let (_, val_ty) = &boxed.fields[0];
+            let crate::ast::Type::Struct(p_id, _) = val_ty else {
+                panic!("Box's val field is a struct: {val_ty:?}")
+            };
+            module.structs[p_id.index()].fields.len()
+        };
+        assert_eq!(
+            val_field_count(box_a_id),
+            1,
+            "Box[P]'s val is the local one-field P"
+        );
+        assert_eq!(
+            val_field_count(box_b_id),
+            2,
+            "Box[o::P]'s val is the imported two-field P, not the local one"
+        );
+    }
+
     #[test]
     fn driver_binary_path_from_source_stem() {
         assert_eq!(
