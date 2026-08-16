@@ -147,7 +147,13 @@ fn emit_struct_type(out: &mut String, layout: &StructLayout, layouts: Layouts) {
         .iter()
         .map(|f| member_ty(f.ty, layouts))
         .collect();
-    writeln!(out, "type :{} = {{ {} }}", layout.name, members.join(", ")).unwrap();
+    writeln!(
+        out,
+        "type :{} = {{ {} }}",
+        qbe_name(layout.name),
+        members.join(", ")
+    )
+    .unwrap();
 }
 
 /// Order struct indices (into `ir.structs`, keyed by `StructId`) so a struct
@@ -186,7 +192,7 @@ fn emit_enum_type(out: &mut String, layout: &EnumLayout) {
     writeln!(
         out,
         "type :{} = align {} {{ b {} }}",
-        layout.name,
+        qbe_name(layout.name),
         layout.align,
         layout.size.max(1)
     )
@@ -212,8 +218,10 @@ fn emit_array_type(out: &mut String, idx: usize, layout: &ArrayLayout) {
 /// The QBE aggregate symbol for array `idx`: the `[T N]` spelling is not a
 /// valid QBE identifier (it contains `[`, spaces, `]`), so an array's `:A`
 /// name is derived from its `ArrayId` index instead, which is unique per
-/// compilation unit. Struct/enum names are already valid identifiers and keep
-/// their declared spelling.
+/// compilation unit. A struct/enum aggregate keeps its declared spelling but
+/// goes through `qbe_name` (injectively) at every emission site, since a
+/// hyphenated user type name -- and a monomorphized generic instantiation's
+/// `Box[i64]` registry name -- are no more valid QBE identifiers than `[T N]`.
 fn array_type_symbol(idx: usize) -> String {
     format!("arr_{idx}")
 }
@@ -326,9 +334,9 @@ fn width(ty: IrType, layouts: Layouts) -> &'static str {
 /// aggregate, so a returned `Bool` stays a scalar ABI value.
 fn qbe_abi_ty(ty: IrType, layouts: Layouts) -> String {
     match ty {
-        IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
+        IrType::Struct(id) => format!(":{}", qbe_name(layouts.structs[id.index()].name)),
         IrType::Enum(id) if layouts.enums[id.index()].is_scalar => width(ty, layouts).to_string(),
-        IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
+        IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
         _ => width(ty, layouts).to_string(),
@@ -356,8 +364,8 @@ fn member_ty(ty: IrType, layouts: Layouts) -> String {
         // Slice 9 (R1): a zero-payload-enum field is a scalar byte, matching
         // the retired primitive `Bool`'s own member spelling.
         IrType::Enum(id) if layouts.enums[id.index()].is_scalar => "b".to_string(),
-        IrType::Struct(id) => format!(":{}", layouts.structs[id.index()].name),
-        IrType::Enum(id) => format!(":{}", layouts.enums[id.index()].name),
+        IrType::Struct(id) => format!(":{}", qbe_name(layouts.structs[id.index()].name)),
+        IrType::Enum(id) => format!(":{}", qbe_name(layouts.enums[id.index()].name)),
         IrType::Array(id) => format!(":{}", array_type_symbol(id.index())),
         IrType::Quotation(sig) => format!(":Q{}", quot_index(layouts, sig)),
     }

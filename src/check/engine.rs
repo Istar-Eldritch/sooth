@@ -1379,6 +1379,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::default();
         parse_bodies(
             &a,
             &structs,
@@ -1390,6 +1391,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut generics,
         )
         .unwrap();
         parse_bodies(
@@ -1403,6 +1405,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut generics,
         )
         .unwrap();
         assert_eq!(

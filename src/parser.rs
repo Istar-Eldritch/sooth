@@ -16,9 +16,9 @@
 //!   if       := 'if' term* ('else' term*)? 'end'
 
 use crate::ast::{
-    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, Import, Len, Line, Module,
-    ModuleInfo, OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect, StructDecl, Term,
-    TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_array_type, ArrayDecl, Bound, Clause, EnumDecl, ExternDecl, GenericTypes, Import, Len,
+    Line, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType, RefDecl, Span, StackEffect,
+    StructDecl, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 use crate::lexer::Token;
 use std::collections::HashMap;
@@ -289,11 +289,6 @@ pub struct ParsedBodies {
     pub externs: Vec<ExternDecl>,
     pub struct_fields_by_decl: Vec<Vec<(String, Type)>>,
     pub enum_fields_by_decl: Vec<Vec<Vec<(String, Type)>>>,
-    /// Phase 5 slice 1 (R1): every generic struct `type:` declaration parsed
-    /// from this file's body, in source order.
-    pub generic_structs: Vec<crate::ast::GenericStructDecl>,
-    /// The enum twin of `generic_structs`.
-    pub generic_enums: Vec<crate::ast::GenericEnumDecl>,
     pub exports: Vec<(String, Span)>,
 }
 
@@ -316,14 +311,13 @@ pub fn parse_bodies(
     arrays: &mut Vec<ArrayDecl>,
     owned_cells: &mut Vec<OwnedCellDecl>,
     refs: &mut Vec<RefDecl>,
+    generics: &mut GenericTypes,
 ) -> Result<ParsedBodies, String> {
     let mut out = ParsedBodies {
         words: Vec::new(),
         externs: Vec::new(),
         struct_fields_by_decl: Vec::new(),
         enum_fields_by_decl: Vec::new(),
-        generic_structs: Vec::new(),
-        generic_enums: Vec::new(),
         exports: Vec::new(),
     };
     let mut parser = Parser {
@@ -338,15 +332,13 @@ pub fn parse_bodies(
         imports,
         exports,
         selective,
+        generics,
     };
+    parser.parse_generic_typedefs()?;
     while parser.pos < parser.tokens.len() {
         if matches!(parser.peek(), Some((Token::Word(w), _)) if w == "type:") {
             if parser.current_typedef_is_generic() {
-                if parser.current_typedef_is_enum() {
-                    out.generic_enums.push(parser.parse_generic_enum_typedef()?);
-                } else {
-                    out.generic_structs.push(parser.parse_generic_typedef()?);
-                }
+                parser.skip_typedef();
             } else if parser.current_typedef_is_enum() {
                 out.enum_fields_by_decl.push(parser.parse_enum_typedef()?);
             } else {
@@ -419,6 +411,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
     let no_imports: HashMap<String, u32> = HashMap::new();
+    let mut generics = GenericTypes::with_bases(structs.len(), enums.len());
     let bodies = parse_bodies(
         tokens,
         &structs,
@@ -430,6 +423,7 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         &mut arrays,
         &mut owned_cells,
         &mut refs,
+        &mut generics,
     )?;
     for (idx, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
         structs[idx].fields = fields;
@@ -440,6 +434,12 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
             enums[crate::ast::BOOL_ENUM_ID.index() + 1 + idx].variants[vidx].fields = fields;
         }
     }
+    // R4/D5: every monomorphized instantiation lands in the ordinary
+    // registries, after the pre-pass entries its `StructId`/`EnumId` was
+    // computed against, so the layout/accessor/destructor machinery walks it
+    // like any hand-written concrete `type:`.
+    structs.extend(generics.inst_structs);
+    enums.extend(generics.inst_enums);
     Ok(Module {
         words: bodies.words,
         structs,
@@ -447,8 +447,8 @@ fn parse_without_prelude(tokens: &[(Token, Span)]) -> Result<Module, String> {
         arrays,
         owned_cells,
         refs,
-        generic_structs: bodies.generic_structs,
-        generic_enums: bodies.generic_enums,
+        generic_structs: generics.structs,
+        generic_enums: generics.enums,
         externs: bodies.externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),
@@ -469,6 +469,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut generics = GenericTypes::default();
     let no_imports: HashMap<String, u32> = HashMap::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -485,6 +486,7 @@ pub fn scan_imports(tokens: &[(Token, Span)]) -> Result<Vec<Import>, String> {
                 imports: &no_imports,
                 exports: &[],
                 selective: &no_imports,
+                generics: &mut generics,
             };
             imports.push(parser.parse_import()?);
             i = parser.pos;
@@ -506,6 +508,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
     let mut arrays = Vec::new();
     let mut owned_cells = Vec::new();
     let mut refs = Vec::new();
+    let mut generics = GenericTypes::default();
     let no_imports: HashMap<String, u32> = HashMap::new();
     let mut i = 0;
     while i < tokens.len() {
@@ -522,6 +525,7 @@ pub fn scan_exports(tokens: &[(Token, Span)]) -> Result<Vec<(String, Span)>, Str
                 imports: &no_imports,
                 exports: &[],
                 selective: &no_imports,
+                generics: &mut generics,
             };
             exports.extend(parser.parse_export()?);
             i = parser.pos;
@@ -592,6 +596,9 @@ pub fn parse_line_with_structs(
     refs: &mut Vec<RefDecl>,
     ctx: ImportCtx,
 ) -> Result<Line, String> {
+    // The REPL has no generic `type:` declarations (they are rejected at
+    // declaration), so nothing here can apply one: a scratch registry, never read.
+    let mut generics = GenericTypes::default();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -604,6 +611,7 @@ pub fn parse_line_with_structs(
         imports: ctx.imports,
         exports: ctx.exports,
         selective: ctx.selective,
+        generics: &mut generics,
     };
     if matches!(parser.peek(), Some((Token::Word(w), _)) if w == ":") {
         let def = parser.parse_worddef()?;
@@ -636,6 +644,9 @@ pub fn parse_typedef_line(
     refs: &mut Vec<RefDecl>,
     ctx: ImportCtx,
 ) -> Result<Vec<(String, Type)>, String> {
+    // The REPL has no generic `type:` declarations (they are rejected at
+    // declaration), so nothing here can apply one: a scratch registry, never read.
+    let mut generics = GenericTypes::default();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -648,6 +659,7 @@ pub fn parse_typedef_line(
         imports: ctx.imports,
         exports: ctx.exports,
         selective: ctx.selective,
+        generics: &mut generics,
     };
     reject_generic_typedef_in_repl(&parser)?;
     let fields = parser.parse_typedef()?;
@@ -706,6 +718,9 @@ pub fn parse_enum_typedef_line(
     refs: &mut Vec<RefDecl>,
     ctx: ImportCtx,
 ) -> Result<Vec<Vec<(String, Type)>>, String> {
+    // The REPL has no generic `type:` declarations (they are rejected at
+    // declaration), so nothing here can apply one: a scratch registry, never read.
+    let mut generics = GenericTypes::default();
     let mut parser = Parser {
         tokens,
         pos: 0,
@@ -718,6 +733,7 @@ pub fn parse_enum_typedef_line(
         imports: ctx.imports,
         exports: ctx.exports,
         selective: ctx.selective,
+        generics: &mut generics,
     };
     reject_generic_typedef_in_repl(&parser)?;
     let variant_fields = parser.parse_enum_typedef()?;
@@ -1085,6 +1101,30 @@ fn generic_odd_field_count_error(
     )
 }
 
+/// Phase 5 slice 1 (R3): a generic-type application whose argument count
+/// doesn't match its header's, naming the type, the number of variables the
+/// header declares, and the number of arguments the use site supplied. A bare
+/// generic name with no `[...]` at all reports as zero arguments: a generic
+/// type is never a type by itself.
+fn generic_arity_error(name: &str, declared: usize, supplied: usize, span: Span) -> String {
+    let declared_str = if declared == 1 {
+        "1 type variable".to_string()
+    } else {
+        format!("{declared} type variables")
+    };
+    let supplied_str = match supplied {
+        0 => "none were".to_string(),
+        1 => "1 was".to_string(),
+        n => format!("{n} were"),
+    };
+    format!(
+        "error: generic type `{name}` declares {declared_str}, but {supplied_str} supplied at line {}, col {} (apply it as `{name}[{}]`, one type argument per declared variable)",
+        span.line,
+        span.col,
+        vec!["T"; declared].join(" "),
+    )
+}
+
 /// Phase 5 slice 1 (R1): the one phantom-variable gate both `parse_generic_typedef`
 /// and `parse_generic_enum_typedef` call once their whole field/variant list is
 /// known.
@@ -1152,6 +1192,13 @@ struct Parser<'t> {
     /// here after the own-module lookup fails (own-module-first, R11). Empty
     /// for a single-file program and every REPL line.
     selective: &'t std::collections::HashMap<String, u32>,
+    /// Phase 5 slice 1 (R2/D5): the generic `type:` declarations in scope and
+    /// the concrete struct/enum registry each application of one mints. A
+    /// mutable borrow for the same reason `arrays` is one: an instantiation
+    /// is minted *while* a field or slot type expression resolves. Empty (and
+    /// never written) for a REPL line and for the import/export scans, which
+    /// have no generic declaration to apply.
+    generics: &'t mut GenericTypes,
 }
 
 impl<'t> Parser<'t> {
@@ -1968,7 +2015,7 @@ impl<'t> Parser<'t> {
                 ty,
             })
         } else {
-            let ty = self.resolve_type(&text, span)?;
+            let ty = self.resolve_type_or_apply(&text, span)?;
             Ok(TypedSlot { name: None, ty })
         }
     }
@@ -1993,7 +2040,7 @@ impl<'t> Parser<'t> {
             self.parse_owning_cell_type_expr()
         } else {
             let (name, span) = self.expect_word_any_spanned()?;
-            self.resolve_type(&name, span)
+            self.resolve_type_or_apply(&name, span)
         }
     }
 
@@ -2032,7 +2079,7 @@ impl<'t> Parser<'t> {
                 col: span.col + run_len as u32,
                 ..span
             };
-            self.resolve_type(remainder, remainder_span)?
+            self.resolve_type_or_apply(remainder, remainder_span)?
         };
         for _ in 0..run_len {
             inner = crate::ast::intern_owned_cell_type(self.owned_cells, inner);
@@ -2063,7 +2110,7 @@ impl<'t> Parser<'t> {
         } else if remainder.starts_with('^') {
             self.split_owning_cell_word(remainder, remainder_span)?
         } else {
-            self.resolve_type(remainder, remainder_span)?
+            self.resolve_type_or_apply(remainder, remainder_span)?
         };
         Ok(crate::ast::intern_ref_type(self.refs, referent, mutable))
     }
@@ -2126,7 +2173,7 @@ impl<'t> Parser<'t> {
     /// the already-consumed leading `[`'s span.
     fn parse_array_ctor_term(&mut self, span: Span) -> Result<Term, String> {
         let (name, name_span) = self.expect_word_any_spanned()?;
-        let element = self.resolve_type(&name, name_span)?;
+        let element = self.resolve_type_or_apply(&name, name_span)?;
         self.expect(Token::Semicolon)?;
         let count = self.parse_array_count(element)?;
         self.expect(Token::RBracket)?;
@@ -2281,7 +2328,7 @@ impl<'t> Parser<'t> {
             return self.parse_ref_type_expr();
         }
         let (ty_name, ty_span) = self.expect_field_type_token()?;
-        self.resolve_type(&ty_name, ty_span)
+        self.resolve_type_or_apply(&ty_name, ty_span)
     }
 
     /// A field-type token: a plain word, but not `type:`/`:` (a malformed
@@ -2598,6 +2645,110 @@ impl<'t> Parser<'t> {
         })
     }
 
+    /// Phase 5 slice 1 (R2): parse every generic `type:` declaration in the
+    /// file ahead of the ordinary body pass, wherever it sits in the source,
+    /// so an application (`Box[i64]`) resolves against a generic type declared
+    /// further down -- the order-independence the concrete pre-pass already
+    /// gives a plain `type:` name. The body pass skips each declaration when
+    /// it reaches it, so every one is parsed exactly once.
+    fn parse_generic_typedefs(&mut self) -> Result<(), String> {
+        let mut i = 0;
+        while i < self.tokens.len() {
+            if matches!(&self.tokens[i], (Token::Word(w), _) if w == "type:")
+                && header_ty_var_count(self.tokens, i + 2) > 0
+            {
+                self.pos = i;
+                if self.current_typedef_is_enum() {
+                    let decl = self.parse_generic_enum_typedef()?;
+                    self.generics.enums.push(decl);
+                } else {
+                    let decl = self.parse_generic_typedef()?;
+                    self.generics.structs.push(decl);
+                }
+                i = self.pos;
+                continue;
+            }
+            i += 1;
+        }
+        self.pos = 0;
+        Ok(())
+    }
+
+    /// Advance past a whole `type:` declaration without parsing it. An
+    /// unterminated one needs no error here: `parse_generic_typedefs` already
+    /// parsed (and would already have rejected) every declaration this is
+    /// called for.
+    fn skip_typedef(&mut self) {
+        while let Some((tok, _)) = self.tokens.get(self.pos) {
+            let terminator = matches!(tok, Token::Semicolon);
+            self.pos += 1;
+            if terminator {
+                break;
+            }
+        }
+    }
+
+    /// R2/R3/R4: resolve a type name that may be a generic type applied to
+    /// concrete type arguments (`Box[i64]`). A name a generic `type:` header
+    /// in this module declared (D4: own module only, so a generic type never
+    /// leaks across the merged registry) must be applied here and nowhere
+    /// else -- bare `Box` names no concrete type, which is why an unapplied
+    /// generic reports the argument-count error rather than `unknown type`.
+    /// Every other name resolves exactly as it did before.
+    fn resolve_type_or_apply(&mut self, name: &str, span: Span) -> Result<Type, String> {
+        if let Some(idx) = self.generics.find_struct(name, self.module) {
+            let arity = self.generics.structs[idx].ty_var_names.len();
+            let args = self.parse_type_arguments(name, arity, span)?;
+            return Ok(self.generics.instantiate_struct(idx, &args, self.module));
+        }
+        if let Some(idx) = self.generics.find_enum(name, self.module) {
+            let arity = self.generics.enums[idx].ty_var_names.len();
+            let args = self.parse_type_arguments(name, arity, span)?;
+            return Ok(self.generics.instantiate_enum(idx, &args, self.module));
+        }
+        self.resolve_type(name, span)
+    }
+
+    /// R2/R3: a generic-type application's bracketed argument list,
+    /// `[ type-expr* ]`, each argument a full type expression (so
+    /// `Wrap[Box[i64]]` and `Buf[[i64 4]]` fall out of the recursion).
+    ///
+    /// Bracketed rather than juxtaposed (`Box i64`) because R3's
+    /// argument-count error has to be *decidable*: juxtaposed, a signature
+    /// slot list `( Box i64 bool -- )` reads identically as an over-applied
+    /// `Box` and as a correctly applied one beside a `bool` slot, so an extra
+    /// argument could never be diagnosed there. Brackets also match how
+    /// ROADMAP.md spells a use site (`Option['T]`, `Map['K 'V]`), and `[` is
+    /// already the type sublanguage's own delimiter.
+    fn parse_type_arguments(
+        &mut self,
+        name: &str,
+        arity: usize,
+        span: Span,
+    ) -> Result<Vec<Type>, String> {
+        if !matches!(self.peek(), Some((Token::LBracket, _))) {
+            return Err(generic_arity_error(name, arity, 0, span));
+        }
+        self.pos += 1;
+        let mut args = Vec::new();
+        loop {
+            match self.peek() {
+                Some((Token::RBracket, _)) => {
+                    self.pos += 1;
+                    break;
+                }
+                None => {
+                    return Err(self.eof_error("`]` (unterminated generic type application)"));
+                }
+                _ => args.push(self.parse_type_expr()?),
+            }
+        }
+        if args.len() != arity {
+            return Err(generic_arity_error(name, arity, args.len(), span));
+        }
+        Ok(args)
+    }
+
     /// A generic `type:` header's bound type variables (R1/D2): one or more
     /// `'`-prefixed words immediately following the declared name, each
     /// interned with its span for the phantom-variable diagnostic. The
@@ -2869,6 +3020,7 @@ fn describe_token(tok: &Token) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::{EnumId, StructId};
     use crate::lexer::lex;
 
     fn parse_src(src: &str) -> Result<Module, String> {
@@ -2894,6 +3046,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::default();
         let no_imports = HashMap::new();
         let bodies = parse_bodies(
             &tokens,
@@ -2906,6 +3059,7 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut generics,
         )
         .unwrap();
         let exports: Vec<&str> = bodies.exports.iter().map(|(n, _)| n.as_str()).collect();
@@ -2926,8 +3080,9 @@ mod tests {
         let mut arrays = Vec::new();
         let mut cells = Vec::new();
         let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::default();
         let no_imports = HashMap::new();
-        let bodies = parse_bodies(
+        parse_bodies(
             &tokens,
             &[],
             &[],
@@ -2938,10 +3093,11 @@ mod tests {
             &mut arrays,
             &mut cells,
             &mut refs,
+            &mut generics,
         )
         .unwrap();
-        assert_eq!(bodies.generic_structs[0].module, 7);
-        assert_eq!(bodies.generic_enums[0].module, 7);
+        assert_eq!(generics.structs[0].module, 7);
+        assert_eq!(generics.enums[0].module, 7);
     }
 
     /// R9: a malformed `import:` (no path string) is a located parse error.
@@ -3717,6 +3873,279 @@ mod tests {
         assert_eq!(module.structs.len(), 1);
         assert_eq!(module.structs[0].name, "Vec2");
         assert_eq!(module.generic_structs.len(), 1);
+    }
+
+    /// The registered struct named `name`, with its `StructId`.
+    fn struct_by_name<'m>(module: &'m Module, name: &str) -> (StructId, &'m StructDecl) {
+        let idx = module
+            .structs
+            .iter()
+            .position(|d| d.name == name)
+            .unwrap_or_else(|| panic!("no struct named `{name}`"));
+        (StructId::from_index(idx), &module.structs[idx])
+    }
+
+    #[test]
+    fn parse_generic_application_at_a_field_mints_a_concrete_struct() {
+        // R2/R4/R5: `Box[i64]` in a field position mints an ordinary concrete
+        // `StructDecl` -- substituted fields, appended after every pre-pass
+        // entry -- and the field carries its `StructId`.
+        let module = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] ;").unwrap();
+        assert_eq!(module.structs.len(), 2);
+        let (box_id, boxed) = struct_by_name(&module, "Box[i64]");
+        assert_eq!(boxed.fields, vec![("val".to_string(), Type::I64)]);
+        assert_eq!(boxed.module, 0);
+        let (_, wrap) = struct_by_name(&module, "Wrap");
+        assert_eq!(
+            wrap.fields,
+            vec![("x".to_string(), Type::Struct(box_id, "Box[i64]"))]
+        );
+    }
+
+    #[test]
+    fn parse_generic_application_with_distinct_arguments_mints_distinct_structs() {
+        // R4: two applications of one generic type are two registry entries
+        // with their own field layouts, not one shared entry.
+        let module =
+            parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64] y Box[bool] ;").unwrap();
+        let (int_id, int_box) = struct_by_name(&module, "Box[i64]");
+        let (bool_id, bool_box) = struct_by_name(&module, "Box[bool]");
+        assert_ne!(int_id, bool_id);
+        assert_eq!(int_box.fields[0].1, Type::I64);
+        assert_eq!(bool_box.fields[0].1, Type::BOOL);
+    }
+
+    #[test]
+    fn parse_generic_application_repeated_dedups_to_one_struct_id() {
+        // R4: structural dedup on `(generic name, concrete arguments)`, the
+        // direct assertion (mirrors `intern_bundle_struct`'s own dedup test):
+        // three uses across two declarations and a signature, one entry.
+        let module = parse_src(
+            "type: Box 'T val 'T ;\ntype: A x Box[i64] ;\ntype: B y Box[i64] ;\n: f ( Box[i64] -- ) drop ;",
+        )
+        .unwrap();
+        assert_eq!(
+            module
+                .structs
+                .iter()
+                .filter(|d| d.name == "Box[i64]")
+                .count(),
+            1
+        );
+        let (box_id, _) = struct_by_name(&module, "Box[i64]");
+        assert_eq!(
+            struct_by_name(&module, "A").1.fields[0].1,
+            Type::Struct(box_id, "Box[i64]")
+        );
+        assert_eq!(
+            struct_by_name(&module, "B").1.fields[0].1,
+            Type::Struct(box_id, "Box[i64]")
+        );
+    }
+
+    #[test]
+    fn parse_generic_application_resolves_at_a_word_signature_slot() {
+        // R2: a signature slot is a distinct parser call site from a field
+        // (`parse_slot`, not `parse_field_type_expr`).
+        let module = parse_src("type: Box 'T val 'T ;\n: f ( Box[i64] -- Box[i64] ) ;").unwrap();
+        let (box_id, _) = struct_by_name(&module, "Box[i64]");
+        let f = module.words.iter().find(|w| w.name == "f").unwrap();
+        assert_eq!(f.effect.inputs[0].ty, Type::Struct(box_id, "Box[i64]"));
+        assert_eq!(f.effect.outputs[0].ty, Type::Struct(box_id, "Box[i64]"));
+    }
+
+    #[test]
+    fn parse_generic_application_resolves_at_a_polymorphic_signature_slot() {
+        // R2: the third call site, `parse_poly_slot`'s concrete fallthrough --
+        // a variable-bearing signature never reaches `parse_slot` at all.
+        let module =
+            parse_src("type: Box 'T val 'T ;\n: f ( Box[i64] 'A -- 'A Box[i64] ) ;").unwrap();
+        let (box_id, _) = struct_by_name(&module, "Box[i64]");
+        let f = module.words.iter().find(|w| w.name == "f").unwrap();
+        let poly = f.poly.as_ref().expect("a `'A` slot makes the word poly");
+        assert_eq!(
+            poly.inputs[0],
+            PolyType::Concrete(Type::Struct(box_id, "Box[i64]"))
+        );
+    }
+
+    #[test]
+    fn parse_generic_application_nests_concretely() {
+        // R6: an argument is a full type expression, so a concrete
+        // application inside another resolves by recursion, minting the inner
+        // instantiation first.
+        let module = parse_src("type: Box 'T val 'T ;\ntype: W x Box[Box[i64]] ;").unwrap();
+        let (inner_id, _) = struct_by_name(&module, "Box[i64]");
+        let (_, outer) = struct_by_name(&module, "Box[Box[i64]]");
+        assert_eq!(outer.fields[0].1, Type::Struct(inner_id, "Box[i64]"));
+    }
+
+    #[test]
+    fn parse_generic_application_resolves_a_generic_declared_later_in_the_file() {
+        // The generic declarations are parsed ahead of the body pass, so an
+        // application need not follow its declaration -- the order
+        // independence a concrete `type:` name already has from the pre-pass.
+        let module = parse_src("type: Wrap x Box[i64] ;\ntype: Box 'T val 'T ;").unwrap();
+        let (box_id, _) = struct_by_name(&module, "Box[i64]");
+        assert_eq!(
+            struct_by_name(&module, "Wrap").1.fields[0].1,
+            Type::Struct(box_id, "Box[i64]")
+        );
+    }
+
+    #[test]
+    fn parse_generic_application_with_no_arguments_is_a_located_error() {
+        // R3: a generic name is never a type by itself.
+        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box ;").unwrap_err();
+        assert!(
+            err.contains("generic type `Box` declares 1 type variable"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("none were supplied"), "unexpected: {err}");
+        assert!(err.contains("line 2, col 14"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_application_with_too_many_arguments_is_a_located_error() {
+        // R3: the over-applied case, decidable only because the argument list
+        // is bracketed.
+        let err = parse_src("type: Box 'T val 'T ;\ntype: Wrap x Box[i64 bool] ;").unwrap_err();
+        assert!(
+            err.contains("generic type `Box` declares 1 type variable"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("2 were supplied"), "unexpected: {err}");
+        assert!(err.contains("line 2, col 14"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_application_with_too_few_arguments_is_a_located_error() {
+        // R3 for a multi-variable header: the count is what's checked, not
+        // merely the presence of a bracket.
+        let err =
+            parse_src("type: Pair 'A 'B a 'A b 'B ;\n: f ( Pair[i64] -- ) drop ;").unwrap_err();
+        assert!(
+            err.contains("generic type `Pair` declares 2 type variables"),
+            "unexpected message: {err}"
+        );
+        assert!(err.contains("1 was supplied"), "unexpected: {err}");
+        assert!(err.contains("line 2, col 7"), "unlocated: {err}");
+    }
+
+    #[test]
+    fn parse_generic_application_argument_order_is_part_of_the_identity() {
+        // R4: the instantiation key is the ordered argument list, so the two
+        // orderings are two entries with mirrored field types.
+        let module =
+            parse_src("type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64 bool] y Pair[bool i64] ;")
+                .unwrap();
+        let (first, _) = struct_by_name(&module, "Pair[i64 bool]");
+        let (second, _) = struct_by_name(&module, "Pair[bool i64]");
+        assert_ne!(first, second);
+        assert_eq!(
+            struct_by_name(&module, "Pair[i64 bool]").1.fields,
+            vec![("a".to_string(), Type::I64), ("b".to_string(), Type::BOOL)]
+        );
+        assert_eq!(
+            struct_by_name(&module, "Pair[bool i64]").1.fields,
+            vec![("a".to_string(), Type::BOOL), ("b".to_string(), Type::I64)]
+        );
+    }
+
+    #[test]
+    fn parse_generic_enum_application_mints_a_concrete_enum() {
+        // R2/R4/R5 on the enum side: variants carry the same argument
+        // spelling as their enum, so two instantiations' `Ok` constructors
+        // can't clobber each other in a name-keyed registry.
+        let module =
+            parse_src("type: Res 'T 'E | Ok val 'T | Err val 'E ;\ntype: W r Res[i64 bool] ;")
+                .unwrap();
+        // `bool` holds the reserved index-0 entry; the instantiation follows.
+        assert_eq!(module.enums.len(), 2);
+        let minted = &module.enums[1];
+        assert_eq!(minted.name, "Res[i64 bool]");
+        assert_eq!(minted.module, 0);
+        assert_eq!(minted.variants[0].name, "Ok[i64 bool]");
+        assert_eq!(
+            minted.variants[0].fields,
+            vec![("val".to_string(), Type::I64)]
+        );
+        assert_eq!(minted.variants[1].name, "Err[i64 bool]");
+        assert_eq!(
+            minted.variants[1].fields,
+            vec![("val".to_string(), Type::BOOL)]
+        );
+        assert_eq!(
+            struct_by_name(&module, "W").1.fields[0].1,
+            Type::Enum(EnumId::from_index(1), "Res[i64 bool]")
+        );
+    }
+
+    /// D4: a generic type is applicable only within its declaring module,
+    /// even though every module's instantiations share one registry. Drives
+    /// `parse_bodies` directly, since a single-file parse has one module and
+    /// so cannot discriminate.
+    #[test]
+    fn parse_generic_application_from_another_module_is_unknown() {
+        let owner = lex("type: Box 'T val 'T ;\n").unwrap();
+        let other = lex(": f ( Box[i64] -- ) drop ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let mut generics = crate::ast::GenericTypes::default();
+        let mut run = |tokens: &[(Token, Span)], module: u32| {
+            parse_bodies(
+                tokens,
+                &[],
+                &[],
+                module,
+                &no_imports,
+                &[],
+                &no_imports,
+                &mut arrays,
+                &mut cells,
+                &mut refs,
+                &mut generics,
+            )
+            .map(|_| ())
+        };
+        run(&owner, 0).unwrap();
+        let err = run(&other, 1).unwrap_err();
+        assert!(err.contains("unknown type `Box`"), "unexpected: {err}");
+    }
+
+    /// The minted instantiation carries the *instantiating* module's id, not
+    /// a hard-coded `0` (the same defaulting hazard
+    /// `parse_generic_typedef_and_enum_stamp_the_parser_module_id` guards on
+    /// the declaration side).
+    #[test]
+    fn parse_generic_application_stamps_the_instantiating_module_id() {
+        let tokens = lex(
+            "type: Box 'T val 'T ;\ntype: Res 'T | Ok v 'T ;\n: f ( Box[i64] Res[bool] -- ) drop drop ;\n",
+        )
+        .unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let mut generics = crate::ast::GenericTypes::default();
+        parse_bodies(
+            &tokens,
+            &[],
+            &[],
+            7,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+            &mut generics,
+        )
+        .unwrap();
+        assert_eq!(generics.inst_structs[0].module, 7);
+        assert_eq!(generics.inst_enums[0].module, 7);
     }
 
     /// The `Clause` list of a `WordBody::Clauses`; panics on a term body.

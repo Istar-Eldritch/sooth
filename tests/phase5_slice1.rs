@@ -71,6 +71,48 @@ fn generic_type_declared_but_never_used_builds_and_runs() {
     assert_eq!(code, 0);
 }
 
+/// R2/R4/R5 end to end: two instantiations of one generic struct reach the
+/// backend as ordinary aggregates. Their registry names (`Box[i64]`) are not
+/// valid QBE identifiers, so this is also what guards the aggregate-name
+/// sanitization at the emission site -- a parse-level test cannot see it.
+#[test]
+fn generic_instantiations_reach_the_backend_and_run() {
+    let (stdout, code) = build_and_run(
+        "phase5-slice1-instantiations",
+        "type: Box 'T val 'T ;\ntype: Wrap i Box[i64] b Box[bool] ;\n: f ( Box[i64] -- Box[i64] ) ;\n: main ( -- ) 42 . ;\n",
+    );
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+/// The enum twin: a minted enum is laid out and emitted like a hand-written
+/// one, tag and payload included.
+#[test]
+fn generic_enum_instantiation_reaches_the_backend_and_runs() {
+    let (stdout, code) = build_and_run(
+        "phase5-slice1-enum-instantiation",
+        "type: Res 'T 'E | Ok val 'T | Err val 'E ;\n: f ( Res[i64 bool] -- Res[i64 bool] ) ;\n: main ( -- ) 9 . ;\n",
+    );
+    assert_eq!(stdout, "9\n");
+    assert_eq!(code, 0);
+}
+
+/// R3 end to end: the argument-count error survives the whole driver, not
+/// just a direct parser call.
+#[test]
+fn generic_application_with_the_wrong_argument_count_is_a_build_error() {
+    let err = build_err(
+        "phase5-slice1-arity",
+        "type: Pair 'A 'B a 'A b 'B ;\ntype: W x Pair[i64] ;\n: main ( -- ) 1 . ;\n",
+    );
+    assert!(
+        err.contains("generic type `Pair` declares 2 type variables"),
+        "unexpected: {err}"
+    );
+    assert!(err.contains("1 was supplied"), "unexpected: {err}");
+    assert!(err.contains("line 2, col 11"), "unlocated: {err}");
+}
+
 #[test]
 fn generic_enum_declared_but_never_used_builds_and_runs() {
     let (stdout, code) = build_and_run(

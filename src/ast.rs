@@ -324,6 +324,169 @@ pub struct GenericVariantDecl {
     pub span: Span,
 }
 
+/// Phase 5 slice 1 (R2/R4/D5): the parse-time home of every generic `type:`
+/// declaration and of the concrete struct/enum each distinct application of
+/// one mints. Threaded `&mut` through `parse_bodies` beside the
+/// `arrays`/`owned_cells`/`refs` registries and for the same reason those
+/// are: an instantiation has no declared name a pre-pass could register
+/// ahead of parsing, so the registry grows as field and slot type
+/// expressions resolve.
+///
+/// `structs`/`enums` hold the variable-bearing declarations;
+/// `inst_structs`/`inst_enums` hold ordinary concrete decls, appended onto
+/// `Module::structs`/`Module::enums` once the whole closure has parsed.
+/// `struct_base`/`enum_base` are those registries' post-pre-pass lengths, so
+/// an instantiation's `StructId`/`EnumId` is final the moment it is minted:
+/// the pre-pass has already registered every named `type:` in every file
+/// before any body parses, so nothing can land between them afterwards.
+#[derive(Debug, Default)]
+pub struct GenericTypes {
+    pub structs: Vec<GenericStructDecl>,
+    pub enums: Vec<GenericEnumDecl>,
+    pub inst_structs: Vec<StructDecl>,
+    pub inst_enums: Vec<EnumDecl>,
+    struct_base: usize,
+    enum_base: usize,
+}
+
+/// R4: the registry name of one monomorphized instantiation, a pure function
+/// of `(generic name, concrete type arguments)` with no dependence on
+/// processing order. Spelled the way `ArrayDecl`'s `[i64 4]` name is -- the
+/// structural shape itself -- rather than through `instantiation_symbol`'s
+/// sanitizing scheme: this name is registry identity and diagnostic
+/// rendering (`sooth_mono_Box__t0_i64` would be a regression in every type
+/// mismatch naming one), a sanitized join is lossy enough for two distinct
+/// argument lists to collide, and the one QBE-facing use of a type name is
+/// sanitized injectively at the emission site anyway. `[` is a lexer
+/// delimiter, so no source type-name token can ever equal one of these.
+pub fn type_instantiation_name(base: &str, args: &[Type]) -> String {
+    let args: Vec<&str> = args.iter().map(|t| t.name()).collect();
+    format!("{base}[{}]", args.join(" "))
+}
+
+/// Substitute a generic declaration's field type against a use site's
+/// concrete type arguments. `parse_generic_field_type_expr` admits exactly
+/// two field forms -- a bare bound variable and a fully concrete type (D1
+/// rules out an open application) -- so those are the two shapes here.
+fn substitute_generic_field(pty: &PolyType, args: &[Type]) -> Type {
+    match pty {
+        PolyType::Concrete(t) => *t,
+        PolyType::Var(v) => args[*v as usize],
+        other => unreachable!("a generic `type:` field is never {other:?}"),
+    }
+}
+
+impl GenericTypes {
+    /// A registry whose instantiations will be appended onto concrete
+    /// registries of the given lengths.
+    pub fn with_bases(struct_base: usize, enum_base: usize) -> GenericTypes {
+        GenericTypes {
+            struct_base,
+            enum_base,
+            ..GenericTypes::default()
+        }
+    }
+
+    /// The generic struct declaration `name` names in `module`, if any. D4:
+    /// own-module only, so a generic type declared in one file is invisible
+    /// to another even once both share this registry.
+    pub fn find_struct(&self, name: &str, module: u32) -> Option<usize> {
+        self.structs
+            .iter()
+            .position(|d| d.name == name && d.module == module)
+    }
+
+    /// The enum twin of `find_struct`.
+    pub fn find_enum(&self, name: &str, module: u32) -> Option<usize> {
+        self.enums
+            .iter()
+            .position(|d| d.name == name && d.module == module)
+    }
+
+    /// R4/R5: mint (or find) the concrete struct for one application of
+    /// generic struct `idx`, deduped structurally on `(generic name, module,
+    /// concrete arguments)` -- which `type_instantiation_name` encodes
+    /// exactly, so the minted name is itself the dedup key. The result is an
+    /// ordinary `StructDecl`, indistinguishable from a hand-written concrete
+    /// `type:` of the same shape.
+    pub fn instantiate_struct(&mut self, idx: usize, args: &[Type], module: u32) -> Type {
+        let name = type_instantiation_name(&self.structs[idx].name, args);
+        if let Some(i) = self
+            .inst_structs
+            .iter()
+            .position(|d| d.name == name && d.module == module)
+        {
+            let id = StructId::from_index(self.struct_base + i);
+            return Type::Struct(id, self.inst_structs[i].name_static);
+        }
+        let decl = &self.structs[idx];
+        let fields: Vec<(String, Type)> = decl
+            .fields
+            .iter()
+            .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
+            .collect();
+        let span = decl.span;
+        let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
+        let id = StructId::from_index(self.struct_base + self.inst_structs.len());
+        self.inst_structs.push(StructDecl {
+            name,
+            name_static,
+            fields,
+            span,
+            has_drop_overload: false,
+            is_bundle: false,
+            module,
+        });
+        Type::Struct(id, name_static)
+    }
+
+    /// The enum twin of `instantiate_struct`. A variant's name carries the
+    /// same argument spelling as its enum's (`Ok[i64 str]`): a variant name
+    /// keys the generated-constructor `Sig` and the lowering-side variant
+    /// word map, so two instantiations sharing a bare `Ok` would silently
+    /// clobber each other there exactly as two `Box` constructors would.
+    pub fn instantiate_enum(&mut self, idx: usize, args: &[Type], module: u32) -> Type {
+        let name = type_instantiation_name(&self.enums[idx].name, args);
+        if let Some(i) = self
+            .inst_enums
+            .iter()
+            .position(|d| d.name == name && d.module == module)
+        {
+            let id = EnumId::from_index(self.enum_base + i);
+            return Type::Enum(id, self.inst_enums[i].name_static);
+        }
+        let decl = &self.enums[idx];
+        let variants: Vec<VariantDecl> = decl
+            .variants
+            .iter()
+            .map(|variant| {
+                let vname = type_instantiation_name(&variant.name, args);
+                VariantDecl {
+                    name_static: Box::leak(vname.clone().into_boxed_str()),
+                    name: vname,
+                    fields: variant
+                        .fields
+                        .iter()
+                        .map(|(fname, pty)| (fname.clone(), substitute_generic_field(pty, args)))
+                        .collect(),
+                    span: variant.span,
+                }
+            })
+            .collect();
+        let span = decl.span;
+        let name_static: &'static str = Box::leak(name.clone().into_boxed_str());
+        let id = EnumId::from_index(self.enum_base + self.inst_enums.len());
+        self.inst_enums.push(EnumDecl {
+            name,
+            name_static,
+            variants,
+            span,
+            module,
+        });
+        Type::Enum(id, name_static)
+    }
+}
+
 /// A small `Copy` index into `Module::enums`, mirroring `StructId`. Two
 /// `Type::Enum` values are equal iff they name the same registered enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1792,6 +1955,61 @@ mod tests {
                 ("f1".to_string(), Type::BOOL)
             ]
         );
+    }
+
+    /// Phase 5 slice 1 (R4/D5): a minted instantiation's `StructId` counts
+    /// from the concrete registry's post-pre-pass length, so the ids the
+    /// parser hands out stay valid once the instantiations are appended onto
+    /// that registry. With a base of `0` this arithmetic is invisible, which
+    /// is exactly how an off-by-a-base bug would hide.
+    #[test]
+    fn instantiate_struct_dedups_and_counts_from_its_base() {
+        let decl = GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: vec![("val".to_string(), PolyType::Var(0))],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(3, 1);
+        generics.structs.push(decl);
+        let a = generics.instantiate_struct(0, &[Type::I64], 0);
+        let b = generics.instantiate_struct(0, &[Type::I64], 0);
+        let c = generics.instantiate_struct(0, &[Type::BOOL], 0);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(generics.inst_structs.len(), 2);
+        assert_eq!(a, Type::Struct(StructId::from_index(3), "Box[i64]"));
+        assert_eq!(c, Type::Struct(StructId::from_index(4), "Box[bool]"));
+        assert_eq!(
+            generics.inst_structs[0].fields,
+            vec![("val".to_string(), Type::I64)]
+        );
+    }
+
+    /// The enum twin, including the `enum_base` the reserved `bool` entry
+    /// forces every real program to have.
+    #[test]
+    fn instantiate_enum_dedups_and_counts_from_its_base() {
+        let decl = GenericEnumDecl {
+            name: "Res".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            variants: vec![GenericVariantDecl {
+                name: "Ok".to_string(),
+                fields: vec![("val".to_string(), PolyType::Var(0))],
+                span: Span::default(),
+            }],
+            span: Span::default(),
+            module: 0,
+        };
+        let mut generics = GenericTypes::with_bases(0, 1);
+        generics.enums.push(decl);
+        let a = generics.instantiate_enum(0, &[Type::I64], 0);
+        let b = generics.instantiate_enum(0, &[Type::I64], 0);
+        assert_eq!(a, b);
+        assert_eq!(generics.inst_enums.len(), 1);
+        assert_eq!(a, Type::Enum(EnumId::from_index(1), "Res[i64]"));
+        assert_eq!(generics.inst_enums[0].variants[0].name, "Ok[i64]");
     }
 
     #[test]

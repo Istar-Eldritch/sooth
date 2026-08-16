@@ -200,8 +200,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // the six comparison words beside it, from `lib/core.sth`.
     let mut words = vec![crate::ast::bool_print_word_def()];
     let mut externs = Vec::new();
-    let mut generic_structs = Vec::new();
-    let mut generic_enums = Vec::new();
+    // Phase 5 slice 1 (D5): shared across the closure, its instantiation ids
+    // computed against the concrete registries as the pre-pass left them --
+    // every file's `type:` names are registered above before any body parses,
+    // so nothing lands between those entries and the appended instantiations.
+    let mut generics = crate::ast::GenericTypes::with_bases(structs.len(), enums.len());
     let mut modules = Vec::with_capacity(closure.nodes.len());
     // R20/R21: every module's selective-import entries, kept with their source
     // qualifier and span for the post-assembly validation (`check::check_selective_imports`).
@@ -242,6 +245,7 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut generics,
         )?;
         for (k, fields) in bodies.struct_fields_by_decl.into_iter().enumerate() {
             structs[struct_base[m] + k].fields = fields;
@@ -253,8 +257,6 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         }
         words.extend(bodies.words);
         externs.extend(bodies.externs);
-        generic_structs.extend(bodies.generic_structs);
-        generic_enums.extend(bodies.generic_enums);
         modules.push(ModuleInfo {
             imports: import_map,
             exports: exports_by_module[m].clone(),
@@ -267,6 +269,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // twin of `parser::parse`'s own injection.
     words.extend(parser::prelude_words());
 
+    // R4/D5: the minted instantiations join the ordinary registries, after
+    // every pre-pass entry their ids were computed against.
+    structs.extend(generics.inst_structs);
+    enums.extend(generics.inst_enums);
+
     let mut module = Module {
         words,
         structs,
@@ -274,8 +281,8 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
         arrays,
         owned_cells,
         refs,
-        generic_structs,
-        generic_enums,
+        generic_structs: generics.structs,
+        generic_enums: generics.enums,
         externs,
         instantiations: HashMap::new(),
         builtin_overloads: HashMap::new(),

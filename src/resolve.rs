@@ -785,6 +785,7 @@ mod tests {
         let mut arrays = Vec::new();
         let mut owned_cells = Vec::new();
         let mut refs = Vec::new();
+        let mut generics = crate::ast::GenericTypes::default();
         let mut imports0: HashMap<String, u32> = HashMap::new();
         imports0.insert("lib".to_string(), 1);
         let no_imports: HashMap<String, u32> = HashMap::new();
@@ -803,6 +804,7 @@ mod tests {
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut generics,
         )
         .unwrap();
         let lib_bodies = parse_bodies(
@@ -816,6 +818,7 @@ mod tests {
             &mut arrays,
             &mut owned_cells,
             &mut refs,
+            &mut generics,
         )
         .unwrap();
         let mut words = entry_bodies.words;
