@@ -323,7 +323,12 @@ fn check_clause_word(
         }
     };
     let enum_decl = &enums[enum_id.index()];
-    let enum_name = enum_decl.name.as_str();
+    // Surface name for diagnostics and clause matching: a monomorphized
+    // generic enum stores mangled names (`Result[i64 i64]__m0`, `Ok[i64 i64]`)
+    // so its per-instantiation constructor `Sig`s and variant word map do not
+    // collide, but a clause names the bare surface variant (`Ok`). For a
+    // concrete enum `generic_surface_name` is the identity.
+    let enum_name = crate::ast::generic_surface_name(enum_decl.name.as_str());
 
     let n_inputs = word.effect.inputs.len();
     let below: Vec<Type> = word.effect.inputs[..n_inputs - 1]
@@ -344,7 +349,7 @@ fn check_clause_word(
         let Some(vi) = enum_decl
             .variants
             .iter()
-            .position(|v| v.name == clause.variant)
+            .position(|v| crate::ast::generic_surface_name(&v.name) == clause.variant)
         else {
             return Err(format!(
                 "error: unknown variant `{}` of enum `{}` in clause-style `{}` (line {}){}",
@@ -372,10 +377,11 @@ fn check_clause_word(
     // that sibling missing, and "missing variant `B`" names the real fault
     // where the swollen body's own arity failure would misattribute it.
     for variant in &enum_decl.variants {
-        if !seen.contains_key(variant.name.as_str()) {
+        let variant_surface = crate::ast::generic_surface_name(&variant.name);
+        if !seen.contains_key(variant_surface) {
             return Err(format!(
                 "error: non-exhaustive clause-style `{}`: missing variant `{}` of enum `{}`",
-                word.name, variant.name, enum_name
+                word.name, variant_surface, enum_name
             ));
         }
     }

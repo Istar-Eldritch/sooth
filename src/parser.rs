@@ -1441,10 +1441,20 @@ impl<'t> Parser<'t> {
 
     /// Whether `name` is a registered variant name of any enum (D8's variant
     /// pre-pass result), the load-bearing clause-vs-locals discriminator.
+    /// Consults the generic enum registry too: `parse_generic_typedefs` fills
+    /// it (variant names and all) before any word body parses, so a generic
+    /// enum's variants are recognized order-independently, exactly like a
+    /// concrete enum's -- a variant name is the same across every
+    /// instantiation, so no concrete instantiation need exist yet.
     fn is_variant_name(&self, name: &str) -> bool {
         self.enums
             .iter()
             .any(|e| e.variants.iter().any(|v| v.name == name))
+            || self
+                .generics
+                .enums
+                .iter()
+                .any(|e| e.variants.iter().any(|v| v.name == name))
     }
 
     /// Whether the token at `self.pos + offset` is a registered variant name.
