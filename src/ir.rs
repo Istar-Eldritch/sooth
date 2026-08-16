@@ -13,7 +13,8 @@ use std::mem;
 use crate::ast::{
     generic_surface_name, ArrayDecl, ArrayId, CallInst, Clause, EnumDecl, EnumId, Len, Module,
     OwnedCellDecl, OwnedCellId, PolySig, PolyType, QuotEffect, RefDecl, RefId, Span, StackEffect,
-    StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, WordBody, WordDef,
+    StaticDecl, StaticInit, StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, WordBody,
+    WordDef,
 };
 
 mod destructors;
@@ -29,13 +30,14 @@ use self::func_builder::{lower_materialized, lower_word_parts, word_ret_ty, EnvP
 use self::types::QuotId;
 pub use self::types::{
     ir_type_of, quot_input_slots, quotation_layout, Arity, BinOp, Block, BlockId, CmpOp, Instr,
-    IrFunc, IrModule, IrType, QuotSigId, QuotSigLayout, Resolver, Terminator, Value, ALLOC_SYMBOL,
-    FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
+    IrFunc, IrModule, IrType, QuotSigId, QuotSigLayout, Resolver, StaticData, StaticValue,
+    Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 pub(crate) use self::layout::{
-    build_registries, carried_slot_bytes, ArrayLayout, Arrays, Cells, DropOverride, DropOverrides,
-    EnumLayout, Enums, FieldLayout, Refs, Registries, StructLayout, Structs,
+    build_registries, build_statics, carried_slot_bytes, empty_statics, ArrayLayout, Arrays, Cells,
+    DropOverride, DropOverrides, EnumLayout, Enums, FieldLayout, Refs, Registries, Statics,
+    StructLayout, Structs,
 };
 // `VariantLayout` has no non-test caller anywhere in the crate today (only a
 // `repl.rs` test constructs one); it is still part of the historical `ir::*`

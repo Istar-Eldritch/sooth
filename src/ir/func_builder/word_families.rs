@@ -58,13 +58,24 @@ impl<'a> FuncBuilder<'a> {
                     self.push_reference(addr, field.ty);
                     return;
                 }
-                let value = self
-                    .locals
-                    .iter()
-                    .find(|(n, _)| n == rest)
-                    .map(|(_, v)| *v)
-                    .expect("checked: a borrow's operand is a local");
-                self.lower_borrow(value);
+                let local = self.locals.iter().find(|(n, _)| n == rest).map(|(_, v)| *v);
+                match local {
+                    Some(value) => self.lower_borrow(value),
+                    // R1: a module static, which unlike a local has a data
+                    // symbol to hand out an address for -- so a *scalar*
+                    // static is borrowable where a scalar local is not. Looked
+                    // up second, so a local shadowing a static wins here the
+                    // same way it does in the checker.
+                    None => {
+                        let ty =
+                            *self.statics.referent.get(rest).expect(
+                                "checked: a borrow's operand is a local or a module static",
+                            );
+                        let addr = self.fresh_value(IrType::Ptr);
+                        self.push_instr(Instr::StaticAddr(addr, rest.to_string()));
+                        self.push_reference(addr, ty);
+                    }
+                }
             }
         }
     }
@@ -1072,6 +1083,75 @@ mod tests {
         assert!(
             blit_at < free_at,
             "aggregate payload must blit out before the cell frees: blit at {blit_at}, free at {free_at}"
+        );
+    }
+
+    #[test]
+    fn lower_borrow_of_a_static_takes_its_data_symbol_address() {
+        // R1: a static has an address to hand out, so its borrow is a
+        // `StaticAddr` naming the data symbol -- not the `PtrOffset`-off-a-value
+        // shape a local's borrow uses, and not an `Alloc` giving it a frame
+        // place. Both the `&!` and the `&` reach the same symbol.
+        let ir = lower_src("static: COUNT i64 = 0 ;\n: w ( -- i64 ) &!COUNT 1 +! &COUNT @ ;");
+        let w = func(&ir, "w");
+        let symbols: Vec<&str> = instrs(w)
+            .iter()
+            .filter_map(|i| match i {
+                Instr::StaticAddr(_, sym) => Some(sym.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(symbols, ["COUNT", "COUNT"]);
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::Alloc(..))),
+            0,
+            "a static is storage already; borrowing one allocates nothing: {:?}",
+            instrs(w)
+        );
+    }
+
+    #[test]
+    fn lower_borrow_prefers_a_local_over_a_same_named_static() {
+        // R1's resolution order at lowering, the twin of the checker's: a bound
+        // local wins over a static of the same name. The struct local is what
+        // makes the program checkable at all (a scalar local is not
+        // borrowable), and the witness is that *no* data symbol is addressed --
+        // a lowering that looked statics up first would read the wrong place
+        // and still lower cleanly.
+        let ir = lower_src(
+            "static: COUNT i64 = 0 ;\n\
+             type: P x i64 ;\n\
+             : w ( -- i64 ) 1 P | COUNT | &COUNT &P>x @ ;",
+        );
+        let w = func(&ir, "w");
+        assert_eq!(
+            count(w, |i| matches!(i, Instr::StaticAddr(..))),
+            0,
+            "the local shadows the static: {:?}",
+            instrs(w)
+        );
+    }
+
+    #[test]
+    fn lower_borrow_of_a_static_inside_a_materialized_quotation() {
+        // R4/R5's escaping-quotation corner reaching lowering: the static is
+        // named inside a quotation literal that materializes into its own
+        // `IrFunc`, so the static table has to be visible on that separate
+        // lowering pass too, not only on the enclosing word's.
+        let ir = lower_src("static: COUNT i64 = 0 ;\n: make ( -- [ -- ] ) [ &!COUNT 1 +! ] ;");
+        let quot = ir
+            .funcs
+            .iter()
+            .find(|f| f.name != "make")
+            .expect("the literal materializes into its own func");
+        assert_eq!(
+            count(
+                quot,
+                |i| matches!(i, Instr::StaticAddr(_, sym) if sym == "COUNT")
+            ),
+            1,
+            "the materialized body addresses the static: {:?}",
+            instrs(quot)
         );
     }
 }

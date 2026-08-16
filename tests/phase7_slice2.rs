@@ -1,23 +1,27 @@
 //! Phase 7 Slice 2 exit goldens: static storage and global sets, source in ->
-//! diagnostic out.
+//! diagnostic (or built binary) out.
 //!
 //! The global-set analysis runs in `driver::assemble_module`, not in
 //! `check::check`, so every case here goes through a real file build rather
 //! than the in-process single-file checker.
 //!
-//! The two remaining goldens the spec lists -- an agreeing static program
-//! building and running, and a static ref captured into an escaping closure
-//! being *admitted* without an ICE -- both need scalar-static lowering, which
-//! is Phase 4: today a program that gets past the checker dies in
-//! `lower_reference_word`. They land with that phase, not this one.
-//!
-//! The escaping-closure case is not merely blocked on lowering: it already
-//! *passes this checker today* with no rejection at all (a static's
-//! `owned_root` classifies as `OuterRooted`, so `check::captures` never flags
-//! it). Phase 4 inherits a checker-admitted program with no existing
-//! capture/escape diagnostic to fall back on, so it must either lower the
-//! capture correctly or add a new located rejection -- not assume one is
-//! already there to assert against.
+//! The escaping-closure golden asserts an *admitted* program, not a
+//! diagnostic: a static-rooted `owned_root` classifies as `OuterRooted`, so
+//! `check::captures` never flags it, and unlike a local-rooted reference it
+//! never can dangle -- a static outlives every closure that captures it. Its
+//! job is to prove the admitted program lowers rather than ICEing, which is
+//! the risk this codebase's materialized-quotation paths actually carry.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+fn scratch(tag: &str) -> PathBuf {
+    static N: AtomicU64 = AtomicU64::new(0);
+    let seq = N.fetch_add(1, Ordering::Relaxed);
+    let dir = std::env::temp_dir().join(format!("sooth-p7s2-{}-{tag}-{seq}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("creating the scratch dir should succeed");
+    dir
+}
 
 fn build_error(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
@@ -25,6 +29,28 @@ fn build_error(name: &str, src: &str) -> String {
     let err = sooth::driver::build(&path).expect_err("build should fail its check");
     std::fs::remove_file(&path).ok();
     err
+}
+
+/// Build a scratch entry file and run it, returning `(stdout, exit code)`.
+fn build_and_run(entry: &Path) -> (String, i32) {
+    let binary = sooth::driver::build(entry).expect("build should succeed");
+    let out = std::process::Command::new(&binary)
+        .output()
+        .expect("the built binary should run");
+    let dir = entry.parent().expect("the entry sits in a scratch dir");
+    std::fs::remove_dir_all(dir).ok();
+    (
+        String::from_utf8(out.stdout).expect("stdout should be utf8"),
+        out.status.code().expect("the process exits normally"),
+    )
+}
+
+/// Write one entry file into a fresh scratch dir and build-and-run it.
+fn run_program(tag: &str, src: &str) -> (String, i32) {
+    let dir = scratch(tag);
+    let entry = dir.join("main.sth");
+    std::fs::write(&entry, src).expect("writing the entry should succeed");
+    build_and_run(&entry)
 }
 
 /// Exit case 1: an exported word whose declared set disagrees with what it
@@ -122,4 +148,100 @@ fn static_name_collides_with_word_or_type_diagnostic() {
         err.contains("static `Count` (line 2, col 9) is already the name of a type in this module"),
         "type collision: {err}"
     );
+}
+
+/// Exit (Phase 4): an agreeing program -- a private static counter, an
+/// exported word declaring the global set it actually touches, incrementing it
+/// through `&!` -- builds and runs. The counter starts at its declared
+/// initialiser, so the printed value also pins that the initialiser reached
+/// the emitted storage rather than being dropped for a zero slot.
+#[test]
+fn agreeing_static_program_builds_and_runs() {
+    let (stdout, code) = run_program(
+        "agreeing",
+        "static: COUNT i64 = 40 ;\n\
+         : tick ( -- ) global: COUNT w &!COUNT 1 +! ;\n\
+         export: tick ;\n\
+         : main ( -- ) tick tick &COUNT @ . ;\n",
+    );
+    assert_eq!(stdout, "42\n");
+    assert_eq!(code, 0);
+}
+
+/// R2: a static is module-private and module-mangled, so two modules may each
+/// declare `COUNT` and each gets its own storage. Both counters are read in
+/// one program, so a lowering that collapsed them onto one data symbol shows
+/// up as the wrong numbers, not a link error.
+#[test]
+fn two_modules_declaring_the_same_static_get_distinct_storage() {
+    let dir = scratch("two-modules");
+    std::fs::write(
+        dir.join("lib.sth"),
+        "static: COUNT i64 = 100 ;\n\
+         : bump ( -- ) global: COUNT w &!COUNT 1 +! ;\n\
+         : peek ( -- i64 ) global: COUNT r &COUNT @ ;\n\
+         export: bump peek ;\n",
+    )
+    .unwrap();
+    let entry = dir.join("main.sth");
+    std::fs::write(
+        &entry,
+        "import: l | bump peek | \"lib.sth\" ;\n\
+         static: COUNT i64 = 7 ;\n\
+         : main ( -- ) bump bump peek . &!COUNT 1 +! &COUNT @ . ;\n",
+    )
+    .unwrap();
+    let (stdout, code) = build_and_run(&entry);
+    assert_eq!(stdout, "102\n8\n");
+    assert_eq!(code, 0);
+}
+
+/// The spec's flagged high-risk case: a static-rooted `&!COUNT` named inside a
+/// quotation literal that materializes into a `(code, env)` value and escapes
+/// its defining word. The job here is to prove **no ICE** -- this codebase has
+/// live materialized-quotation crashes elsewhere, so "a static ref behaves like
+/// any other ref" is exactly where it would break. It is admitted rather than
+/// rejected because a static, unlike a local, outlives every closure that can
+/// capture it; the calls through the escaped closure must reach the one shared
+/// data symbol.
+#[test]
+fn static_ref_captured_into_escaping_closure_no_ice() {
+    let (stdout, code) = run_program(
+        "escaping-closure",
+        "static: COUNT i64 = 0 ;\n\
+         : make ( -- [ -- ] ) global: COUNT w [ &!COUNT 1 +! ] ;\n\
+         export: make ;\n\
+         : main ( -- ) make | q | q call q call &COUNT @ . ;\n",
+    );
+    assert_eq!(stdout, "2\n");
+    assert_eq!(code, 0);
+}
+
+/// D1/D3: every static type this slice accepts round-trips through emitted
+/// storage, elided initialiser included -- `bool`'s zero is `false`, `str`'s is
+/// the empty string, and a `u32` reads back at its own width rather than
+/// through an oversized slot.
+#[test]
+fn every_scalar_static_type_round_trips_through_its_storage() {
+    let (stdout, code) = run_program(
+        "kinds",
+        "static: FLAG bool = true ;\n\
+         static: WIDE u32 ;\n\
+         static: TAG str = \"hi\" ;\n\
+         static: EMPTY str ;\n\
+         : main ( -- )\n\
+           &FLAG @ .\n\
+           &!FLAG false !\n\
+           &FLAG @ .\n\
+           &WIDE @ .\n\
+           &!WIDE 7 >u32 !\n\
+           &WIDE @ .\n\
+           &TAG @ .\n\
+           &EMPTY @ .\n\
+           0 . ;\n",
+    );
+    // `str` prints with no trailing newline, so `TAG` and the empty `EMPTY`
+    // run into the final `0`.
+    assert_eq!(stdout, "true\nfalse\n0\n7\nhi0\n");
+    assert_eq!(code, 0);
 }

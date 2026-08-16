@@ -9,8 +9,8 @@ use std::fmt::Write;
 use crate::ast::BOOL_ENUM_ID;
 use crate::ir::{
     ArrayLayout, BinOp, BlockId, CmpOp, EnumLayout, Instr, IrFunc, IrModule, IrType, QuotSigId,
-    QuotSigLayout, StructLayout, Terminator, Value, ALLOC_SYMBOL, FREE_SYMBOL, OOB_TRAP_SYMBOL,
-    TRACE_ALLOC_ENV, WORD_WIDTH,
+    QuotSigLayout, StaticData, StaticValue, StructLayout, Terminator, Value, ALLOC_SYMBOL,
+    FREE_SYMBOL, OOB_TRAP_SYMBOL, TRACE_ALLOC_ENV, WORD_WIDTH,
 };
 
 /// Reached only from the allocator shim's NULL branch, so unlike
@@ -78,7 +78,7 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     );
     // `str`'s print format; see `Instr::Print`'s `IrType::Str` arm for why `%.*s`.
     out.push_str("data $strfmt = { b \"%.*s\", b 0 }\n");
-    let str_lits = collect_str_literals(&ir.funcs);
+    let str_lits = collect_str_literals(&ir.funcs, &ir.statics);
     // Slice 9: emitted in `idx` order, not `HashMap` iteration order -- a
     // module with two or more distinct string literals (previously never
     // exercised by the corpus; the injected `bool` print overload's
@@ -92,6 +92,12 @@ pub fn emit(ir: &IrModule) -> Result<String, String> {
     ordered_lits.sort_by_key(|(_, idx)| *idx);
     for (content, idx) in ordered_lits {
         emit_str_literal(&mut out, idx, content);
+    }
+    // Phase 7 slice 2: after the string data, so a `str`-typed static's
+    // `{ l $strd{n} }` names an already-declared descriptor. Source order,
+    // like every other per-declaration emission here.
+    for s in &ir.statics {
+        emit_static(&mut out, s, &str_lits);
     }
     // Enum and array aggregates are self-contained opaque byte blobs (they name
     // no member types), so they are emitted first: a struct member of enum or
@@ -653,21 +659,63 @@ fn norm_scalar_ww(ty: IrType, word_width: u32) -> IrType {
 /// content. Called once, before any function body is emitted, so `emit_func`
 /// only ever looks an index up rather than assigning one (assigning per-func
 /// would let the same content get two indices in two functions).
-fn collect_str_literals(funcs: &[IrFunc]) -> std::collections::HashMap<String, usize> {
+///
+/// A `str`-typed static's slot holds the address of a descriptor, so its
+/// content is interned in the same pool and shares an entry with an identical
+/// `Instr::StrLit`. The funcs are walked first, so a static-only content is
+/// what extends the pool.
+fn collect_str_literals(
+    funcs: &[IrFunc],
+    statics: &[StaticData],
+) -> std::collections::HashMap<String, usize> {
     let mut lits = std::collections::HashMap::new();
+    let intern = |content: &String, lits: &mut std::collections::HashMap<String, usize>| {
+        if !lits.contains_key(content) {
+            let idx = lits.len();
+            lits.insert(content.clone(), idx);
+        }
+    };
     for func in funcs {
         for block in &func.blocks {
             for instr in &block.instrs {
                 if let Instr::StrLit(_, content) = instr {
-                    if !lits.contains_key(content) {
-                        let idx = lits.len();
-                        lits.insert(content.clone(), idx);
-                    }
+                    intern(content, &mut lits);
                 }
             }
         }
     }
+    for s in statics {
+        if let StaticValue::Str(content) = &s.init {
+            intern(content, &mut lits);
+        }
+    }
     lits
+}
+
+/// Phase 7 slice 2 (D1): one static's storage. The data class comes from the
+/// slot's byte width, which is the same width the `@`/`!` through a borrow of
+/// it loads and stores at, so the two can only agree.
+fn emit_static(
+    out: &mut String,
+    s: &StaticData,
+    str_lits: &std::collections::HashMap<String, usize>,
+) {
+    let sym = qbe_name(&s.symbol);
+    match &s.init {
+        StaticValue::Int(v) => {
+            let class = match s.size {
+                1 => "b",
+                2 => "h",
+                4 => "w",
+                _ => "l",
+            };
+            writeln!(out, "data ${sym} = {{ {class} {v} }}").unwrap();
+        }
+        StaticValue::Str(content) => {
+            let idx = str_lits[content];
+            writeln!(out, "data ${sym} = {{ l $strd{idx} }}").unwrap();
+        }
+    }
 }
 
 /// The byte offset of a `str` descriptor's length word, matching the
@@ -1023,6 +1071,13 @@ fn emit_instr(
         Instr::FuncAddr(dst, sym) => {
             writeln!(out, "\t{} =l copy ${}", val(*dst), qbe_name(sym))
         }
+        // Phase 7 slice 2 (R1): the address of a static's data symbol, taken
+        // exactly as a function symbol's is. The referent width never appears
+        // here -- the borrow is an opaque `Ptr`, and the `@`/`!` through it
+        // picks its own load/store op from the recorded referent.
+        Instr::StaticAddr(dst, sym) => {
+            writeln!(out, "\t{} =l copy ${}", val(*dst), qbe_name(sym))
+        }
         // Slice 7a (R4): an indirect call through a code-handle value. Mirrors
         // `Call` but the callee is `%fp`, not a `$sym`; `env` is not passed in
         // 7a (a non-capturing callee has no env parameter).
@@ -1273,7 +1328,9 @@ mod tests {
     use crate::ast::Line;
     use crate::ast::Type;
     use crate::check::check;
-    use crate::ir::{lower, lower_line, Arrays, Cells, Enums, IrModule, Refs, Registries, Structs};
+    use crate::ir::{
+        empty_statics, lower, lower_line, Arrays, Cells, Enums, IrModule, Refs, Registries, Structs,
+    };
     use crate::lexer::lex;
     use crate::parser::{parse, parse_line};
     use std::collections::HashMap;
@@ -1316,6 +1373,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),
@@ -1398,6 +1456,66 @@ mod tests {
         // overloading) both sanitized to the bare symbol `_`.
         assert_ne!(qbe_name("~"), qbe_name("?"));
         assert_ne!(qbe_name("+"), qbe_name("-"));
+    }
+
+    #[test]
+    fn emit_static_data_class_follows_the_slot_width() {
+        // Phase 7 slice 2 (D1): each static's data class comes from its own
+        // declared width, so a `u32` never occupies (or is read back through)
+        // an 8-byte slot and a `bool` never occupies four. Asserted on the
+        // exact data lines: a wrong class still assembles and still round-trips
+        // a small value, so nothing at runtime would catch it.
+        let il = emit_src(
+            "static: N i64 = 10 ;\n\
+             static: W u32 = 3 ;\n\
+             static: F bool = true ;\n\
+             : main ( -- ) &N @ . ;",
+        );
+        assert!(il.contains("data $N = { l 10 }\n"), "{il}");
+        assert!(il.contains("data $W = { w 3 }\n"), "{il}");
+        assert!(il.contains("data $F = { b 1 }\n"), "{il}");
+    }
+
+    #[test]
+    fn emit_str_static_points_at_a_descriptor_it_shares_with_a_literal() {
+        // A `str` static's slot holds the address of a `{ptr, len}` descriptor,
+        // so its content must be interned in the same pool an `Instr::StrLit`
+        // uses -- and identical content must share one descriptor rather than
+        // emitting a second. The elided `str` zero is the empty string, which
+        // needs a descriptor of its own.
+        let il = emit_src(
+            "static: T str = \"hi\" ;\n\
+             static: E str ;\n\
+             : main ( -- ) \"hi\" . ;",
+        );
+        let idx = il
+            .lines()
+            .find_map(|l| l.strip_prefix("data $T = { l $strd"))
+            .and_then(|r| r.strip_suffix(" }"))
+            .expect("the str static names a descriptor")
+            .to_string();
+        assert!(
+            il.contains(&format!("data $strd{idx} = {{ l $strb{idx}, l 2 }}\n")),
+            "descriptor {idx} carries the content's length: {il}"
+        );
+        assert_eq!(
+            il.matches("l 2 }").count(),
+            1,
+            "the literal and the static share one descriptor: {il}"
+        );
+        assert!(
+            il.contains("data $E = { l $strd"),
+            "the elided `str` zero gets an empty descriptor: {il}"
+        );
+    }
+
+    #[test]
+    fn emit_static_borrow_copies_the_data_symbol_address() {
+        // R1: `Instr::StaticAddr` is realized exactly as a symbol address, the
+        // same shape `FuncAddr` uses -- no load of the value, so the borrow
+        // stays a place the following `@`/`!` reads through.
+        let il = emit_src("static: COUNT i64 = 0 ;\n: main ( -- ) &!COUNT 1 +! ;");
+        assert!(il.contains("copy $COUNT\n"), "{il}");
     }
 
     #[test]
@@ -1621,6 +1739,7 @@ mod tests {
                 arrays: &Arrays::default(),
                 cells: &Cells::default(),
                 refs: &Refs::default(),
+                statics: empty_statics(),
             },
             &std::collections::HashMap::new(),
             &std::collections::HashMap::new(),

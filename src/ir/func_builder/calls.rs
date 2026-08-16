@@ -741,6 +741,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                statics: empty_statics(),
             },
         );
         let term = &line_terms("[ + ]")[0];
@@ -802,6 +803,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                statics: empty_statics(),
             },
         );
         // `lower_self_tail_combinator` is called directly (bypassing the
@@ -1248,6 +1250,7 @@ mod tests {
                 arrays: &arrays,
                 cells: &cells,
                 refs: &refs,
+                statics: empty_statics(),
             },
             "w".to_string(),
         );

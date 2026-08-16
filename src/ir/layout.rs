@@ -379,8 +379,60 @@ pub struct Refs {
     pub referent: Vec<IrType>,
 }
 
-/// The four registries bundled as one `Copy` handle, so lowering and
-/// destructor synthesis pass one argument instead of four (mirrors the
+/// Phase 7 slice 2 (R1): the IR's view of a module's `static:` declarations --
+/// each static's referent `IrType`, keyed by the module-mangled name a borrow
+/// site spells (the same string that is its data symbol). Doubles as the
+/// "is this name a static" test `lower_reference_word` needs once a local
+/// lookup has missed, and as the referent `push_reference` records.
+#[derive(Debug, Default)]
+pub struct Statics {
+    pub referent: std::collections::HashMap<String, IrType>,
+}
+
+/// Phase 7 slice 2 (D1/D3): the two lowering-side views of a module's
+/// `static:` declarations, built together so the name a borrow site looks up
+/// and the symbol the backend defines can only ever be the same string. The
+/// `StaticData` come out in source order, so the emitted preamble is
+/// deterministic. `enums` supplies a scalar enum's (i.e. `bool`'s) width,
+/// which `scalar_size_align` deliberately refuses to guess.
+pub fn build_statics(decls: &[StaticDecl], enums: &Enums) -> (Statics, Vec<StaticData>) {
+    let mut table = Statics::default();
+    let mut data = Vec::with_capacity(decls.len());
+    for decl in decls {
+        let ty = ir_type_of(decl.ty);
+        table.referent.insert(decl.name.clone(), ty);
+        let size = match ty {
+            IrType::Enum(id) => enums.layouts[id.index()].size,
+            other => scalar_size_align(other).0,
+        };
+        let init = match &decl.init {
+            // The elided initialiser is the type's zero: `0`, `false`, and for
+            // `str` the empty string, which is a descriptor like any other.
+            StaticInit::Zero if ty == IrType::Str => StaticValue::Str(String::new()),
+            StaticInit::Zero => StaticValue::Int(0),
+            StaticInit::Int(n) => StaticValue::Int(*n),
+            StaticInit::Bool(b) => StaticValue::Int(*b as i64),
+            StaticInit::Str(s) => StaticValue::Str(s.clone()),
+        };
+        data.push(StaticData {
+            symbol: decl.name.clone(),
+            size,
+            init,
+        });
+    }
+    (table, data)
+}
+
+/// The shared empty static table, for every lowering path with no module
+/// statics to see (the REPL, destructor synthesis, unit tests), so a
+/// `Registries` can be built without each caller owning a `Statics`.
+pub fn empty_statics() -> &'static Statics {
+    static EMPTY: std::sync::OnceLock<Statics> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Statics::default)
+}
+
+/// The registries bundled as one `Copy` handle, so lowering and
+/// destructor synthesis pass one argument instead of six (mirrors the
 /// backend's `Layouts`). The registries stay logically separate types; this
 /// only co-locates references to them.
 #[derive(Debug, Clone, Copy)]
@@ -390,6 +442,7 @@ pub struct Registries<'a> {
     pub arrays: &'a Arrays,
     pub cells: &'a Cells,
     pub refs: &'a Refs,
+    pub statics: &'a Statics,
 }
 
 /// Build the struct and enum layout + generated-word registries from a
@@ -823,6 +876,67 @@ mod tests {
 
         let plain = structs_of("type: File fd i64 ; : main ( -- ) 1 File drop ;");
         assert!(!layout(&plain, "File").is_linear);
+    }
+
+    #[test]
+    fn build_statics_widths_and_zero_values_follow_the_declared_type() {
+        // D1/D3: the slot width is the declared type's, and an elided
+        // initialiser is that type's zero -- `0`, `false`, and for `str` the
+        // empty string, which is a descriptor like any other content.
+        // Source order is preserved so the emitted preamble is deterministic.
+        let ir = lower_src(
+            "static: N i64 = 10 ;\n\
+             static: W u32 ;\n\
+             static: F bool = true ;\n\
+             static: G bool ;\n\
+             static: T str = \"hi\" ;\n\
+             static: E str ;\n\
+             : main ( -- ) ;",
+        );
+        let seen: Vec<(&str, u32, &StaticValue)> = ir
+            .statics
+            .iter()
+            .map(|s| (s.symbol.as_str(), s.size, &s.init))
+            .collect();
+        let expected: Vec<(&str, u32, StaticValue)> = vec![
+            ("N", 8, StaticValue::Int(10)),
+            ("W", 4, StaticValue::Int(0)),
+            // `bool` is an all-unit-variant enum, one byte, so its width comes
+            // from the enum registry rather than `scalar_size_align`.
+            ("F", 1, StaticValue::Int(1)),
+            ("G", 1, StaticValue::Int(0)),
+            ("T", 8, StaticValue::Str("hi".to_string())),
+            ("E", 8, StaticValue::Str(String::new())),
+        ];
+        assert_eq!(seen.len(), expected.len(), "{seen:?}");
+        for ((sym, size, init), (esym, esize, einit)) in seen.iter().zip(&expected) {
+            assert_eq!((sym, size), (esym, esize), "{seen:?}");
+            match (init, einit) {
+                (StaticValue::Int(a), StaticValue::Int(b)) => assert_eq!(a, b, "{sym}"),
+                (StaticValue::Str(a), StaticValue::Str(b)) => assert_eq!(a, b, "{sym}"),
+                _ => panic!("{sym}: {init:?} is not {einit:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_statics_keys_the_borrow_table_by_the_same_name_it_emits() {
+        // The one invariant tying the two halves together: the name a borrow
+        // site looks up and the symbol the backend defines are the same string,
+        // so a module-mangled static cannot address storage that was never laid
+        // down.
+        let (table, data) = build_statics(
+            &[StaticDecl {
+                name: "COUNT".to_string(),
+                ty: Type::I64,
+                init: StaticInit::Zero,
+                module: 0,
+                span: Span::default(),
+            }],
+            &Enums::default(),
+        );
+        assert_eq!(data[0].symbol, "COUNT");
+        assert_eq!(table.referent.get("COUNT"), Some(&IrType::I64));
     }
 
     #[test]

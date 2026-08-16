@@ -2408,6 +2408,7 @@ impl Session {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let funcs = {
             let resolve = resolver_for(&self.env);
@@ -2428,6 +2429,7 @@ impl Session {
             enums: enums.layouts,
             arrays: arrays.layouts,
             quot_sigs,
+            statics: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("drop_{}_epoch{epoch}.so", id.index()));
@@ -2730,6 +2732,7 @@ impl Session {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let mut funcs = {
             let resolve = resolver_with_override(&self.env, &name, &symbol);
@@ -2779,6 +2782,7 @@ impl Session {
             enums: enums.layouts,
             arrays: arrays.layouts,
             quot_sigs,
+            statics: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("{name}_gen{generation}.so"));
@@ -2912,6 +2916,7 @@ impl Session {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let (func, quot_funcs, m, out_bytes, aggregate_destructors) = {
             let resolve = resolver_for(&self.env);
@@ -2967,6 +2972,7 @@ impl Session {
             enums: enums.layouts.clone(),
             arrays: arrays.layouts.clone(),
             quot_sigs,
+            statics: Vec::new(),
         })?;
         let dir = driver::tempfile_dir()?;
         let so_path = dir.join(format!("line{seq}.so"));
@@ -3821,6 +3827,7 @@ mod tests {
             arrays: &arrays,
             cells: &cells,
             refs: &refs,
+            statics: ir::empty_statics(),
         };
         let env = ir_arity_env(&session.typed_env());
         let resolve = resolver_for(&session.env);
