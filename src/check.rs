@@ -1325,6 +1325,7 @@ fn surplus_linear_value_error(word: &WordDef, ty: Type, line: u32) -> String {
 /// what keeps `walk ( &!List -- ) ... walk ;` legal.
 fn reference_across_back_edge_error(ctx: &Ctx, span: Span, callee: &str, place: &str) -> String {
     let callee = crate::resolve::demangle_call(callee);
+    let place = crate::resolve::demangle_word(place);
     match ctx {
         Ctx::Word { name, effect, .. } => format!(
             "error: a reference to a local cannot cross a loop in `{}` (line {})\n  a reference derived from `{place}`, a local of this frame, crosses the self-tail-call back-edge to `{callee}`: that local's storage does not survive to the next iteration\n  note: declared {}",
@@ -1351,6 +1352,13 @@ fn check_reference_across_back_edge(
     for slot in args {
         if let Some(id) = slot.deriv {
             if let Some(place) = &prov.deriv(id).owned_root {
+                // R3: a static's data-segment storage survives every loop
+                // iteration, unlike a local's slot (rebound at the loop
+                // header); only a genuine local's owned_root crosses the
+                // back-edge unsafely.
+                if ctx.static_type(place).is_some() {
+                    continue;
+                }
                 return Err(reference_across_back_edge_error(ctx, span, callee, place));
             }
         }
@@ -2264,6 +2272,7 @@ fn conflicting_borrow_error(
     new_mutable: bool,
     live: &Deriv,
 ) -> String {
+    let place = crate::resolve::demangle_word(place);
     let sigil = if new_mutable { "&!" } else { "&" };
     let held = if live.mutable { "mutable" } else { "shared" };
     let note = if live.projected {
@@ -3343,6 +3352,21 @@ mod tests {
             err.contains("`loopy` expected `str`, found `i64`"),
             "names the callee and both types: {err}"
         );
+    }
+    /// P7 slice 2 (R3) review: a static's data-segment storage survives
+    /// every loop iteration, unlike a local's slot (rebound at the loop
+    /// header), so a fresh `&!COUNT` passed across a self-tail-call
+    /// back-edge must be accepted, not rejected with a message that calls
+    /// `COUNT` "a local of this frame" (false for a static root).
+    #[test]
+    fn static_ref_crosses_self_tail_call_back_edge_ok() {
+        check_src(
+            "static: COUNT i64 = 0 ;\n\
+             : spin ( &!i64 i64 -- )\n  | c n |\n  c 1 +!\n  \
+             n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;\n\
+             : main ( -- ) &!COUNT 3 spin ;",
+        )
+        .expect("a static-rooted reference may cross the back-edge freely");
     }
     /// Slice 10a (R12): `while` -- the symmetric shape whose back-edge produced
     /// the carried input pre-rewrite and produces the ground declared output

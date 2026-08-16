@@ -1076,6 +1076,7 @@ fn peek_of_linear_owned_payload_error(
 /// local name and nothing more, so the diagnostic names what was found there
 /// and points at the binding that would make it one.
 fn borrow_of_non_place_error(ctx: &Ctx, span: Span, spelled: &str, found: &str) -> String {
+    let spelled = crate::resolve::demangle_word(spelled);
     format!(
         "error: `{spelled}` does not borrow a place{} (line {}, col {})\n  {found}\n  a place is a local name or a module `static:`; bind the value with `| name |` first, then borrow that name",
         in_word(ctx),
@@ -1176,6 +1177,7 @@ fn aliased_place_borrow_error(
     place: &str,
     origin: &AliasOrigin<'_>,
 ) -> String {
+    let place = crate::resolve::demangle_word(place);
     let (alias, other, remedy) = match origin {
         AliasOrigin::Name(name) => (
             format!("`{name}`"),
@@ -1208,6 +1210,16 @@ mod tests {
     fn check_src(src: &str) -> Result<(), String> {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
+        check(&mut module)
+    }
+    /// `check_src` skips `resolve_modules` entirely, so it never mangles a
+    /// name and cannot catch a diagnostic that forgot to demangle one. Every
+    /// real build mangles (`assemble_module`'s `always_mangle`, `driver.rs`)
+    /// even for a single file, so this helper runs that same pass first.
+    fn check_src_mangled(src: &str) -> Result<(), String> {
+        let tokens = lex(src).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        crate::resolve::resolve_modules(&mut module, true).unwrap();
         check(&mut module)
     }
     fn infer_src(src: &str, entry: &[Type]) -> Result<Vec<Type>, String> {
@@ -1606,5 +1618,25 @@ mod tests {
             err.contains("`&NOPE` does not borrow a place"),
             "unexpected message: {err}"
         );
+    }
+
+    /// A real build always mangles (`always_mangle`, `driver.rs`), so a
+    /// static reaches this diagnostic as `COUNT__m0`, never as the source
+    /// spelling. `conflicting_borrow_error` must demangle the place before
+    /// rendering it, or the user sees a name they never wrote. Run through
+    /// `check_src_mangled`, not `check_src`: the latter never mangles
+    /// anything and cannot see this class of bug (P7 slice 2 review).
+    #[test]
+    fn conflicting_borrow_error_names_the_source_spelling_not_the_mangled_one() {
+        let err = check_src_mangled(
+            "static: COUNT i64 = 0 ;\n\
+             : main ( -- ) &!COUNT &!COUNT @ . @ . ;",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("`&!COUNT` conflicts with a live borrow of `COUNT`"),
+            "unexpected message: {err}"
+        );
+        assert!(!err.contains("__m"), "leaked a mangled name: {err}");
     }
 }

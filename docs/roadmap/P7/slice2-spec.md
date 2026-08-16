@@ -267,14 +267,16 @@ for a static root.
   (`contains_reference`), independent of what the ref points at.
 
 One `owned_root`-keyed scan is neither exclusivity nor disposal, and the
-exemption list above does not reach it: `check_reference_across_back_edge`
+exemption list above needs its own carve-out for it: `check_reference_across_back_edge`
 (`src/check.rs`) rejects any reference whose `owned_root` is set when it
 crosses a self-tail-call back-edge, because a *local*'s storage does not
-survive to the next iteration. A static's data-segment storage does, so a
-freshly borrowed `&!COUNT` passed to a self-tail call is rejected today
-(`: spin ( &!i64 i64 -- ) | c n | c 1 +! n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;`),
-with a message that calls `COUNT` "a local of this frame". Conservative, not
-unsound; unresolved this slice.
+survive to the next iteration. A static's data-segment storage does, so this
+scan skips a place `ctx.static_type` resolves: a freshly borrowed `&!COUNT`
+passed to a self-tail call
+(`: spin ( &!i64 i64 -- ) | c n | c 1 +! n 0 > ~[ &!COUNT n 1 - spin ] ~[ ] if ;`)
+is accepted, while the same call passing a reference rooted in an ordinary
+local is rejected exactly as before, with the message naming that local "a
+local of this frame".
 
 So the mechanism is reused wholesale (a `Deriv` with a real `owned_root`, the
 same borrow-typing arm, the same type-keyed store rule); the only carve-out is
@@ -631,6 +633,15 @@ phase exit criteria):
   other ref" is most likely to be false or to crash exactly here. This golden's
   job is to prove **no new ICE** — a located diagnostic, not a backend panic —
   not merely that *some* error fires.
+  **Flagged (review, before this golden is written):** `ref_root_is_in_frame`
+  (`src/check/captures.rs`) looks a borrow's `owned_root` up in the *local*
+  scope; a static root is found nowhere there and classifies as `OuterRooted`
+  — semantically correct for data-segment storage, but the opposite of what
+  this golden expects (a rejection). Reconcile before implementing: either the
+  golden's premise is wrong (a static ref captured into an escaping closure
+  is not the same hazard as a local one, so admitting it is correct and the
+  golden should assert *acceptance*), or the classification needs its own
+  static carve-out.
 - `duplicate_static_declaration_diagnostic` — two `static: COUNT ...` in one
   module is a located error at the second declaration.
 - `static_name_collides_with_word_or_type_diagnostic` — a `static: COUNT` whose
