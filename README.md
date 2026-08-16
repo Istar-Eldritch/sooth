@@ -3,7 +3,7 @@
 A small, statically-checked concatenative language in the Forth/Factor/Kitten
 lineage, compiled to native code with no external runtime. A craft language: built
 for the pleasure of writing it and writing programs in it, not as a product. See
-[DESIGN.md](./DESIGN.md) for the why and [ROADMAP.md](./ROADMAP.md) for the plan.
+[DESIGN.md](./DESIGN.md) for the why and [ROADMAP.md](./docs/roadmap/ROADMAP.md) for the plan.
 
 The one bet that makes it more than a tidy Forth: in a stack language the stack
 discipline already is move semantics, so linear types fall out for free. `dup` is the
@@ -60,8 +60,8 @@ values (non-capturing closures, storable and passable to non-inlined higher-orde
 No combinator is compiler-known: `times` is ordinary Sooth source over a
 self-tail-recursive helper, like the rest. Nor is `if`: it is a `lib/core.sth` word
 taking a `bool` and two quotations, over the machine primitives `branch` and `tag`.
-In progress: capturing closures and static ad-hoc overloading (`docs/phase4-slice7b-brief.md`,
-`docs/phase4-slice8a-brief.md`).
+In progress: capturing closures and static ad-hoc overloading (`docs/roadmap/P4/slice7b-brief.md`,
+`docs/roadmap/P4/slice8a-brief.md`).
 
 The compiler is a Rust bootstrap; the language will later self-host.
 

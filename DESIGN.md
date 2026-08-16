@@ -1231,7 +1231,7 @@ that were argued out rather than assumed.
   uniform the other way: `.` writes exactly the value and nothing else, a newline spelled
   explicitly by the caller, e.g. `: println ( i64 -- ) . "\n" . ;`. Consequence: `1 . 2 .` then prints
   `12`, callers supplying every separator, not just newlines. Amends Phase 0's definition of `.`
-  (`docs/phase0-spec.md` defines it as `printf("%ld\n", …)` in three places) and touches
+  (`docs/roadmap/P0/spec.md` defines it as `printf("%ld\n", …)` in three places) and touches
   ~130 stdout assertions across five test files (`assert_eq!(stdout` count: 91 in
   `tests/phase0.rs`, 24 in `tests/phase3_refs.rs`, 9 in `tests/phase3_strings.rs`, 6 in
   `tests/phase3_locals.rs`, plus roughly 22 REPL-session assertions in `tests/phase1.rs`), plus

@@ -5,7 +5,7 @@ Guidance for agents working on Sooth. Keep it short. This is a **craft** project
 and structure. If a change starts to look like a big SaaS codebase, stop.
 
 Sooth is a small, statically-checked concatenative language compiled via QBE. See
-[ROADMAP.md](./ROADMAP.md) for the phased plan.
+[ROADMAP.md](./docs/roadmap/ROADMAP.md) for the phased plan.
 
 ## Build / test / run
 

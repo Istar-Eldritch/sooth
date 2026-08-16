@@ -1051,7 +1051,7 @@ fn quotation_left_as_a_declared_output_is_error() {
     // row. A row quotation that is disposed rather than left on the stack is
     // *not* rejected at all -- it reaches the backend as an invalid phi. That
     // hole predates 10b (it reproduces on any user-declared row combinator,
-    // `my-times` included) and is recorded in `docs/phase4-slice10b-spec.md`;
+    // `my-times` included) and is recorded in `docs/roadmap/P4/slice10b-spec.md`;
     // this golden pins only what does reject.
     let err = check_error(&format!(
         "{TIMES_DEF}: main ( -- ) [ + ] 3 ~[ drop ] times ;\n"

@@ -158,7 +158,7 @@ pub(super) fn classify_capture(b: &Binding, prov: &Provenance, scope: &Scope) ->
         // returns `FrameRooted`, so an aggregate parameter capture is
         // over-rejected at an escaping boundary rather than admitted -- sound
         // (it never under-rejects), just more conservative than case 2's full
-        // rule. See `docs/phase4-slice7b-spec.md`'s R15 section.
+        // rule. See `docs/roadmap/P4/slice7b-spec.md`'s R15 section.
         Type::Struct(..) | Type::Enum(..) | Type::Array(..) | Type::OwnedCell(..) => {
             CaptureClass::FrameRooted
         }
