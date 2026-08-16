@@ -1404,9 +1404,25 @@ fn back_edge_declared_shape(
 /// neither an instantiation for a type variable nor a fixed point for a row
 /// that changes shape, so both are located errors here rather than silently
 /// admitted spellings.
+///
+/// Review fix (F2/F3, round 1): a *passthrough* row (`..a -- ..a`) is rejected
+/// too, not only a shape-changing one. `AnnotEffect` carries no row field --
+/// nothing downstream (`check_literal_against_annotation`,
+/// `reconcile_annotation_with_parameter`) ever compares a row against a
+/// consuming parameter's row, so admitting one here would silently drop it
+/// after this one check: a standalone body could smuggle anything through the
+/// unchecked row-typed prefix, and a literal filling a parameter that
+/// declares *no* row at all would pass R4's equality vacuously (R5 requires
+/// strict equality, which a decorative, uncompared row cannot deliver). This
+/// narrows R2 from the spec's original passthrough-is-self-checking claim to
+/// unconditional row rejection in this slice; see the amended R2 in
+/// `docs/phase6-slice1-spec.md`.
 fn resolve_annotation(ctx: &Ctx, annot: &QuotAnnot) -> Result<AnnotEffect, String> {
     if annot.row_in != annot.row_out {
         return Err(shape_changing_row_unbound_error(ctx, annot));
+    }
+    if annot.row_in.is_some() {
+        return Err(row_annotation_unsupported_error(ctx, annot));
     }
     Ok(AnnotEffect {
         inputs: resolve_annot_slots(ctx, annot, &annot.inputs)?,
@@ -1447,10 +1463,27 @@ fn unbound_effect_variable_error(ctx: &Ctx, annot: &QuotAnnot, var: u32) -> Stri
 /// supplies the difference between the two rows).
 fn shape_changing_row_unbound_error(ctx: &Ctx, annot: &QuotAnnot) -> String {
     let row = |id: Option<u32>| id.map_or("", |i| annot.row_var_names[i as usize].as_str());
+    // Review fix (minor, round 1): either side may be unnamed (`( ..a -- )`),
+    // which left a stray space against the surrounding backtick; `trim()`
+    // keeps the pair readable without hand-casing which side is empty.
+    let spelled = format!("{} -- {}", row(annot.row_in), row(annot.row_out));
     format!(
-        "error: shape-changing row `{} -- {}` in a quotation annotation is unbound{} (line {})\n  a standalone shape-changing row has no fixed point to check against: only a passthrough row or a concrete effect can be checked against a literal's own body",
+        "error: shape-changing row `{}` in a quotation annotation is unbound{} (line {})\n  a standalone shape-changing row has no fixed point to check against: only a passthrough row or a concrete effect can be checked against a literal's own body",
+        spelled.trim(),
+        in_word(ctx),
+        annot.span.line,
+    )
+}
+
+/// Review fix (F2/F3, round 1): a passthrough row (`..a -- ..a`), unlike a
+/// shape-changing one, does have a fixed point -- but `AnnotEffect` has no row
+/// field to hold it in, so accepting it here would check nothing against it
+/// ever again. Rejected outright rather than silently accepted-but-ignored.
+fn row_annotation_unsupported_error(ctx: &Ctx, annot: &QuotAnnot) -> String {
+    let row = |id: Option<u32>| id.map_or("", |i| annot.row_var_names[i as usize].as_str());
+    format!(
+        "error: row `{}` in a quotation annotation is not supported{} (line {})\n  a row is not tracked past this check in this slice: write a fully concrete effect (name every input/output type, no `..` row)",
         row(annot.row_in),
-        row(annot.row_out),
         in_word(ctx),
         annot.span.line,
     )
@@ -2616,7 +2649,7 @@ mod tests {
     }
 
     /// R2: a row that differs between the two sides has no fixed point to
-    /// check a body against; a passthrough row in the same shape does.
+    /// check a body against.
     #[test]
     fn check_standalone_shape_changing_row_is_unbound_error() {
         let err = check_src(": w ( -- ) [ ( ..a -- ..b ) ] drop ;").unwrap_err();
@@ -2626,7 +2659,36 @@ mod tests {
             ),
             "unexpected message: {err}"
         );
-        check_src(": w ( -- ) [ ( ..a -- ..a ) ] drop ;").unwrap();
+    }
+
+    /// Review fix (minor, round 1): an unnamed side (`( ..a -- )`) used to
+    /// leave a stray space against the closing backtick (`` `..a -- ` ``).
+    #[test]
+    fn check_standalone_shape_changing_row_with_unnamed_side_has_no_trailing_space() {
+        let err = check_src(": w ( -- ) [ ( ..a -- ) ] drop ;").unwrap_err();
+        assert!(
+            err.starts_with(
+                "error: shape-changing row `..a --` in a quotation annotation is unbound in `w` (line 1)"
+            ),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// Review fix (F2/F3, round 1): a passthrough row is rejected too, not
+    /// only a shape-changing one -- `AnnotEffect` has no row field, so nothing
+    /// downstream ever compares it against a consuming parameter's row.
+    /// Asserted on the exact message: an ordinary row/arity mismatch from the
+    /// standard body-check machinery could otherwise satisfy an
+    /// `is_err()`-only assertion vacuously.
+    #[test]
+    fn check_standalone_passthrough_row_annotation_is_unsupported_error() {
+        let err = check_src(": w ( -- ) [ ( ..a -- ..a ) ] drop ;").unwrap_err();
+        assert!(
+            err.starts_with(
+                "error: row `..a` in a quotation annotation is not supported in `w` (line 1)"
+            ),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

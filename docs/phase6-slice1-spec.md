@@ -112,6 +112,30 @@ row-carried quotations (recon 5): no materialization boundary is exercised.
 
 ### R2 — variable binding in a standalone annotation
 
+> **Amended after implementation review (round 1).** The paragraph below is the
+> *original* design; it does not describe what shipped. `AnnotEffect` (the
+> resolved form every downstream check reads) has **no row field at all** --
+> `resolve_annotation` reads `row_in`/`row_out` only long enough to compare
+> them to each other, then discards them. A row that survived resolution
+> unrejected would therefore be checked against nothing, ever: not the
+> standalone body (only `annot.inputs`/`annot.outputs`, the *named* slots, seed
+> the sub-stack) and not a consuming parameter's own row
+> (`reconcile_annotation_with_parameter` compares only `inputs`/`outputs`
+> vectors). That is a strict-equality hole (R5) large enough to accept an
+> annotation naming a row a parameter doesn't have at all, and, separately,
+> it makes a real accumulator-threading body (the idiom `fold`/`filter` are
+> built on) unannotatable with any message that isn't a confusing downstream
+> underflow. **Implemented decision:** any annotation naming a row --
+> passthrough (`..a -- ..a`) included, not only shape-changing -- is a located
+> error, unconditionally, in this slice. The *shape-changing* case keeps its
+> own "no fixed point" wording (below); a passthrough row gets a new, distinct
+> wording ("row ... is not supported") for the different reason (there is a
+> fixed point, but this slice tracks nothing to check it against). Giving a row
+> annotation real standalone meaning -- and a real R4 bridge to a consuming
+> parameter's row -- is deferred to whichever later slice needs it; it needs an
+> `AnnotEffect` row field this slice never built, not just relaxing the check
+> below.
+
 A row variable (`..a`) in a standalone annotation denotes the literal's own
 input/output row: it seeds and is matched against the fresh sub-stack's row, the
 same way a plain word's declared row unifies against its own body. A concrete or
@@ -133,6 +157,30 @@ diagnostic, which locate to a line, never a column.)
 This is the concrete resolution of OQ3 for the type-variable case: a
 freestanding `'T` is meaningless (nothing consumes it), so it is rejected rather
 than silently accepted or given an invented meaning.
+
+> **Amended after implementation review (round 1).** Unlike the row case, the
+> *rejection* here shipped exactly as specified above -- but the paragraph's
+> premise that a type variable later "binds where the literal fills a declared
+> quotation parameter" (feeding into R4) does not. `resolve_annot_slots` (the
+> function behind this rejection) runs once, at the literal's interning site,
+> **before any consuming parameter is known**, and rejects *every*
+> `PolyType::Var` unconditionally -- there is no code path where a `'T` survives
+> resolution to be looked up against a poly parameter's ground later. R4 (below)
+> is amended to match: it never sees a `Var`, because none can reach it.
+> **Implemented decision:** a standalone type variable is rejected
+> unconditionally in this slice, full stop, independent of whether the literal
+> goes on to fill a parameter. Binding it against a poly parameter's ground
+> (the deferred-resolution design the original paragraph describes) needs the
+> annotation's own `Var` ids to survive past intern time to the argument-
+> matching site, plus a sweep that errors on any that are never reconciled --
+> machinery this slice does not build. Deferred to whichever later slice needs
+> it.
+>
+> ```text
+> : on inline ( 'T ~[ 'T -- 'T ] -- 'T ) | f | f call ;
+> : main ( -- ) true ~[ ( 'T -- 'T ) dup drop ] on drop ;
+> → error: effect variable `'T` ... is unbound (rejected at the literal, not reconciled at `on`)
+> ```
 
 A **shape-changing row** (`..a -- ..b`, row inputs and outputs differing) is a
 **located error** at the annotation span. A freestanding shape-changing effect
@@ -172,38 +220,44 @@ second wording for an effect disagreement.
 
 ### R4 — reconciliation against a declared parameter (D3)
 
-R4 is scoped down to **only the poly-parameter + type-variable case**. For a
-concrete/mono declared parameter, R4 does no independent work: R3
-(body-vs-annotation) plus the pre-existing R11 body-vs-parameter check
+R4 is scoped down to **only the poly-parameter case** (see the amendment below
+for why this is narrower than "type-variable case"). For a concrete/mono
+declared parameter, R4 does no independent work: R3 (body-vs-annotation) plus
+the pre-existing R11 body-vs-parameter check
 (`check_literal_against_declared_effect` -> `literal_effect_mismatch_error`,
 `src/check.rs:1661`) already force `body == annotation == parameter`
 transitively under R5's strict equality. A concrete-parameter R4 test would
 therefore be a **placebo** (R3 and R11 both already fire), so R4 mints no
 separate concrete-parameter check and no concrete-parameter test.
 
-Where the literal fills a **poly** parameter, that parameter's substitution
-supplies the binding for the annotation's type variables (R2's binder), and R4
-does real work R3/R11 cannot. R3's directional check does not constrain an
-annotation type-variable position against a polymorphic/identity body: an
+Where the literal fills a **poly** parameter, R3's directional check does not
+constrain the annotation against a polymorphic/identity body: an
 identity-shaped body (`'a -- 'a`) absorbs whatever concrete type the annotation
-claims at that position without contradiction, so R3 never pins it, and closing
-that gap is exactly R4's exclusive job (which is why the isolating test below
-requires a polymorphic body, not because it duplicates R3). By the time
+claims without contradiction, so R3 never pins it, and closing that gap is
+exactly R4's exclusive job (which is why the isolating test below requires a
+polymorphic body, not because it duplicates R3). By the time
 `check_literal_against_declared_effect` runs, the parameter's `eff:
-&QuotEffect` is **already grounded**: `PolyCtx`'s substitution (keyed to the
-*signature's* type-variable ids) has replaced each declared type variable with
-its concrete ground in `eff.inputs` / `eff.outputs`. The annotation, by
-contrast, carries its **own** per-literal `QuotAnnot.ty_var_names` / `Var` ids,
-unrelated to the signature's. R4 bridges the two by position: a small helper
-walks the parameter effect and the annotation effect in lockstep, and for each
-declared type-variable position looks up the poly slot's grounded type (from
-the already-substituted `eff`) and compares it against the annotation's
-corresponding position:
+&QuotEffect` is **already grounded**: `PolyCtx`'s substitution has replaced each
+declared type variable with its concrete ground in `eff.inputs` / `eff.outputs`.
 
-- annotation position is a `Var` -> bind that annotation variable to the slot's
-  ground (first occurrence), or require equality with its already-bound ground
-  (later occurrences);
-- annotation position is `Concrete` -> require it to equal the slot's ground.
+> **Amended after implementation review (round 1).** The design above (a
+> positional walk that binds an annotation `Var` to the parameter's grounded
+> type) is **unreachable** as built, and is not what shipped. R2's amendment
+> means `resolve_annotation` has already rejected every `PolyType::Var` before
+> `AnnotEffect` exists -- `annot.inputs`/`annot.outputs` are `Vec<Type>`
+> (fully-resolved, no `Var` variant can survive to reach here) by the time R4
+> runs, for *every* annotated literal, poly-parameter-filling or not.
+> **Implemented decision:** R4 is plain vector equality,
+> `annot.inputs == eff.inputs && annot.outputs == eff.outputs`
+> (`reconcile_annotation_with_parameter`, `src/check.rs`) -- there is no
+> "annotation position is a `Var`" branch to write, because a `Var` can never
+> arrive. What still makes this real work R3/R11 cannot do is exactly the
+> concrete-vs-grounded comparison: the annotation's own concrete claim
+> (`i64`) against the parameter's *substituted* ground (`bool`), which an
+> identity body absorbs on both sides without R3 or R11 ever seeing the
+> conflict. A `'T`-spelled annotation at a poly-parameter position is out of
+> scope for this slice (R2's amendment): it is rejected at the literal before
+> any parameter context exists, never reconciled here.
 
 A disagreement is R11's error (`literal_effect_mismatch_error`,
 `src/check.rs:1661`), naming both the grounded parameter effect and the
@@ -241,15 +295,18 @@ form is accepted:
 - **OQ1** → R5: strict equality, no subtyping/narrowing. Disagreement is always
   an error.
 - **OQ2** → R6: full unelided form only; all elision deferred to Slice 3.
-- **OQ3** → R1/R2: a passthrough row (`..a -- ..a`) or a concrete effect is
-  checked in a per-literal space against the literal's own body
-  (standalone-meaningful); a standalone type variable **or** a standalone
-  shape-changing row (`..a -- ..b`) is unbound and is a located error. The
-  type-variable case binds when a poly parameter consumes the literal (R4); a
-  shape-changing row annotation that fills a parameter is **out of scope** for
-  this slice, since R4's positional bridge grounds type-variable positions
-  only, never row positions. The exit witness uses a concrete annotation,
-  needing no variable binder.
+- **OQ3** → R1/R2 (amended after implementation review, round 1): a fully
+  concrete effect is checked in a per-literal space against the literal's own
+  body (standalone-meaningful). A standalone type variable, a standalone
+  shape-changing row (`..a -- ..b`), **and** a standalone passthrough row
+  (`..a -- ..a`) are each a located error, unconditionally, in this slice --
+  `AnnotEffect` was never given a row field, so a row admitted here would be
+  checked against nothing ever again, and `resolve_annot_slots` rejects every
+  type variable before any consuming parameter is known, so it never reaches a
+  poly parameter's ground either. Neither case "binds when a poly parameter
+  consumes the literal": R4 only ever compares fully-resolved `Vec<Type>`
+  vectors (see R2/R4's amendments above). The exit witness uses a concrete
+  annotation, needing no variable binder.
 
 ## Out of scope
 
@@ -260,11 +317,22 @@ form is accepted:
   exit case exercises (row-carried literal quotations already lower and run,
   `tests/phase4_slice10b.rs`). An annotated literal used as an ordinary
   `[ ... ]` / `~[ ... ]` argument reuses that path unchanged.
-- A **shape-changing row annotation** (`..a -- ..b`) that fills a quotation
-  parameter: Slice 1 rejects such a row only standalone (R2). Grounding it
-  against a consuming parameter needs machinery this slice lacks (R4's
-  positional bridge grounds type-variable positions only, never row
-  positions), deferred to a later slice.
+- **Any row annotation with real meaning** — passthrough (`..a -- ..a`) or
+  shape-changing (`..a -- ..b`), standalone or filling a quotation parameter
+  (amended after implementation review, round 1; supersedes the narrower
+  "shape-changing only" scoping this bullet originally had). Slice 1 rejects
+  every row-bearing annotation outright, unconditionally: `AnnotEffect` has no
+  row field, so nothing this slice built could check one against anything.
+  Giving a row annotation standalone meaning, and a real R4 bridge to a
+  consuming parameter's row, both need machinery (an `AnnotEffect` row field,
+  plus whatever comparison it feeds) this slice does not build, deferred to a
+  later slice.
+- **A `'T`-spelled annotation reconciled against a poly parameter's ground**
+  (amended after implementation review, round 1). `resolve_annot_slots` rejects
+  every type variable unconditionally, before any consuming parameter is
+  known, so R4 never sees one to bind; the positional Var-binding bridge R4
+  originally described is unbuilt, and needs the annotation's `Var` ids to
+  survive past intern time. Deferred to a later slice.
 - Subtyping / effect-narrowing (R5): deferred unless a concrete need appears.
 - `while`'s materialized-quotation rejection (recon 5): unrelated, unchanged.
 
@@ -334,7 +402,9 @@ Parser (`src/parser.rs` `#[cfg(test)]`):
 - `parse_quotation_annotation_elided_is_error` — `[ ( ) ... ]` is a located
   parse error (R6).
 - `parse_quotation_annotation_row_ok` — `[ ( ..a i64 -- ..a ) ... ]` records a
-  per-literal `row_in` / `row_out`.
+  per-literal `row_in` / `row_out`. Parsing still records these; it is the
+  checker (R2, amended) that rejects every row-bearing annotation at intern
+  time, so this parse-level test is unaffected by that amendment.
 
 Checker (`src/check.rs` `#[cfg(test)]`):
 
@@ -363,8 +433,9 @@ Checker (`src/check.rs` `#[cfg(test)]`):
   **polymorphic** at the position in question: R3 (body-vs-annotation) cannot
   fire, because an identity body absorbs the annotation's `i64` claim without
   contradiction; R11 (body-vs-parameter) cannot fire, because it absorbs the
-  grounded `bool` just as readily. Only R4's positional bridge sees the
-  conflict (annotation's concrete `i64` vs the parameter's grounded `bool`).
+  grounded `bool` just as readily. Only R4's plain vector-equality comparison
+  (annot vs the already-grounded `eff`; see R4's amendment) sees the conflict
+  (annotation's concrete `i64` vs the parameter's grounded `bool`).
   Emits R11's mismatch naming both effects (R4/R5). This replaces the earlier
   mono-parameter example (a placebo: R3 + R11 already fire) and the earlier
   `i64`-body/`bool`-annotation example (also a placebo: with a concrete `i64`
@@ -385,11 +456,20 @@ Checker (`src/check.rs` `#[cfg(test)]`):
   satisfy an `is_err()`-only assertion vacuously.
 - `check_standalone_shape_changing_row_is_unbound_error` — a freestanding
   `[ ( ..a -- ..b ) ... ]` bound to a local (no consuming parameter) is the
-  shape-changing-row unbound error (R2). A passthrough `[ ( ..a -- ..a ) ... ]`
-  in the same shape checks (self-checking standalone). Like the previous test,
-  it must assert the **exact** `shape-changing row ... is unbound` message text,
-  not just `is_err()`, so a plausible alternative error path (an ordinary
+  shape-changing-row unbound error (R2). Like the previous test, it must
+  assert the **exact** `shape-changing row ... is unbound` message text, not
+  just `is_err()`, so a plausible alternative error path (an ordinary
   row/arity mismatch) cannot satisfy it vacuously.
+- `check_standalone_passthrough_row_annotation_is_unsupported_error` (amended
+  after implementation review, round 1) — a freestanding passthrough
+  `[ ( ..a -- ..a ) ... ]` is **also** a located error (`row ... is not
+  supported`), not the self-checking success the original R2 described:
+  `AnnotEffect` has no row field to check it against. Asserted on the exact
+  message for the same reason as the previous test.
+- `check_standalone_shape_changing_row_with_unnamed_side_has_no_trailing_space`
+  (minor, round 1) — `[ ( ..a -- ) ... ]` renders `` shape-changing row
+  `..a --` `` with no stray trailing space where the unnamed side would
+  otherwise leave one.
 
 Golden (source in → diagnostic / build out), the phase exit criteria:
 
@@ -407,14 +487,26 @@ Golden (source in → diagnostic / build out), the phase exit criteria:
   ```
 
   `'T` grounds to `bool`, the annotation claims `i64` at that position, and the
-  identity body `dup drop` keeps R3/R11 from firing, so only R4's positional
-  bridge catches the `i64`-vs-`bool` conflict; the golden asserts R11's mismatch
-  diagnostic naming both effects.
+  identity body `dup drop` keeps R3/R11 from firing, so only R4's plain
+  vector-equality comparison catches the `i64`-vs-`bool` conflict; the golden
+  asserts R11's mismatch diagnostic naming both effects.
 - `phase6_slice1.rs::annotated_literal_agreeing_builds` — a program with a
   correctly annotated literal (both standalone and parameter-filling) builds and
   runs (Exit: additive, agreeing case is accepted).
 - Regression: the existing `phase4_slice10b.rs` goldens stay green unchanged
   (unannotated literals unaffected).
+
+**Diagnostic wording note for Phase 3 (round-1 review, minor).** R3
+(`annotation_body_mismatch_error`) and R4
+(`annotation_parameter_mismatch_error`) each mint their own wording rather
+than reusing `literal_effect_mismatch_error`'s text verbatim, as an earlier
+draft of this spec directed. The new wordings are more accurate (R4 in
+particular is a declaration-vs-declaration conflict, not a body complaint), so
+this is kept, not reverted -- but the goldens above must assert against the
+**actual** `check.rs` message text (see the two unit tests
+`check_annotation_disagrees_with_body_is_error` /
+`check_annotation_disagrees_with_poly_parameter_is_error` for the exact
+strings), not against R11's wording.
 
 ## Phases (JSON)
 
