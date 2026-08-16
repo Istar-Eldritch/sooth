@@ -1,406 +1,135 @@
-# Phase 5 Slice 1: generic `type:` declarations (spec)
+## What shipped
 
-## Problem statement
+**R1 — a header binds one or more type variables; every bound variable must be used.**
+`type: Box 'T | val 'T ;` and `type: Pair 'A 'B a 'A b 'B ;` parse. A field naming an
+unbound variable is a located error; so is a *phantom* variable (bound, referenced by no
+field, e.g. `type: Phantom 'T x i64 ;`). Phantom rejection is what makes R5's dispatch
+claim unconditional: two instantiations of a phantom parameter have constructors with
+identical inputs, differing only in output type, which operand-type overload resolution
+cannot disambiguate. A `'`-prefixed word is also rejected at every field-*name* position,
+so the header/body reading of `'x` is consistent (`type: Foo 'bar i64 ;` would otherwise
+read as generic while `type: Foo x i64 'y i64 ;` took `'y` as a field name).
 
-A `type:` header today names one concrete struct or enum: every field type resolves
-through `resolve_type` (`src/parser.rs:2171`) to a plain `Type`, and `StructDecl`/
-`EnumDecl` (`src/ast.rs:207`, `:260`) store only concrete `(String, Type)` field lists.
-There is no way to declare a struct or enum parameterized by a type variable
-(`type: Box 'T | val 'T ;`) the way a word can already declare one
-(`: id ( 'T -- 'T ) ;`, Phase 4 Slice 1). Phase 5's Result/Either (Slice 2) needs exactly
-this mechanism first: `type: Result 'T 'E | Ok val 'T | Err val 'E ;` cannot be written
-until a `type:` header can bind type variables and mint one concrete struct/enum per
-distinct instantiation.
+**R2/D6 — application syntax is bracketed: `Box[i64]`, `Pair[i64 bool]`.** Type arguments
+are always explicit; there is no inference. Applications parse at a field-type position
+and at a word-signature slot (`: unwrap ( Box[i64] -- i64 ) ;`). The juxtaposed form the
+original spec preferred was falsified by R3: in a slot list, `( Box i64 bool -- )` reads
+identically as over-applied `Box` and as `Box i64` beside a `bool` slot, so
+over-application is undecidable there; greedy argument parsing would instead make that
+slot list unwritable. Brackets match ROADMAP's own spelling (`Option['T]`) and the type
+sublanguage's existing delimiter. The *header* stays juxtaposed (`type: Result 'T 'E`),
+where `'`-prefixing keeps the variable list unambiguous.
 
-This slice ships that mechanism alone, proven against a throwaway generic type, not
-against `Result`. Anything Result/Option-specific is Slice 2.
+**R3 — wrong argument count is a located error** naming the generic type, the declared
+variable count, and the supplied count, raised at the same parse/resolve site as the
+application syntax.
 
-## Requirements
+**R4 — distinct applications mint distinct `StructId`/`EnumId`s; the same one dedupes.**
+Dedup is keyed on `(generic decl index, instantiating module, Vec<Type> args)` compared by
+`Type`'s own `Eq` — *not* on the rendered instantiation name. The name is built from
+`Type::name()`, which is module-blind, so two distinct structs sharing a bare name across
+modules render identically; deduping on the string would collapse them into one `StructId`
+with the wrong layout.
 
-**R1 — a `type:` header may bind one or more type variables, and every bound variable must
-be used.** `type: Box 'T | val 'T ;` and, for the multi-variable case, `type: Pair 'A 'B a
-'A b 'B ;` both parse: the header declares the variables (`'T`, or `'A 'B`), and every
-field type in the body may reference any variable the header bound. A field naming a
-variable the header did not bind is a located parse error. **Added during review (round
-2):** conversely, a bound variable that appears in *no* field (a phantom parameter, e.g.
-`type: Phantom 'T x i64 ;`) is also a located parse error. Reason: R5's instantiation
-dispatch disambiguates two instantiations' generated constructor by its *input* (field)
-types; a phantom variable produces two instantiations (`Phantom i64`, `Phantom bool`)
-whose constructors have identical inputs and differ only in output type, which the
-existing operand-type overload resolution cannot disambiguate. Rejecting a phantom
-variable at declaration time keeps R5's disambiguation claim true unconditionally rather
-than carving out an exception. Result's `'T`/`'E` and Option's `'T` are never phantom, so
-this costs the exit case nothing.
+**R5/D7 — an instantiation behaves like a hand-written concrete `type:`.** Layout,
+destructor synthesis, and every existing struct/enum check apply unchanged. Two changes
+were needed, not the one the spec first named:
 
-**R2 — a field type may apply a generic type to concrete type arguments.**
-`type: Wrap x Box i64 ;` (a concrete struct with a field of type `Box i64`) and a word
-signature slot (`: unwrap ( Box i64 -- i64 ) ;`) both parse an explicit generic-type
-application: a name that resolves to a generic `type:` header, followed by exactly as
-many type-expressions as that header declared variables. Type arguments are always
-explicit; there is no inference (a call-site stack has no value to unify a type
-declaration's variables against, unlike a polymorphic word's call site).
+1. `struct_generated_sigs`/`enum_generated_sigs` key generated words on the **surface**
+   name (`generic_surface_name`, strips the `[...]` suffix: `Box`, `Ok`), while
+   `Overload::symbol` keeps the mangled per-instantiation spelling so QBE symbols stay
+   distinct. Without this, env keys were `Box[i64]>val` — unspellable, since `[` is a lexer
+   delimiter.
+2. Registration changed from `env.insert(name, vec![Overload{..}])` (overwrite) to
+   `env.entry(name).or_default().push(..)`, matching the user-word path. On its own this is
+   unobservable (under mangled names no two instantiations share a key); it only becomes
+   load-bearing given (1).
 
-**R3 — an application with the wrong argument count is a located error.** `Box` alone (no
-argument) or `Box i64 bool` (one argument too many) applied where `Box` needs exactly one
-is a located parse/resolution error naming the generic type, the number of variables it
-declares, and the number of arguments supplied. **This check belongs in the same phase as
-the application syntax itself (Phase 2, not Phase 3):** the argument count is only known
-at the parse/resolve site the application syntax adds, so deferring only the diagnostic to
-a later phase would leave Phase 2 shipping an application parser with no defined behavior
-on a bad count (see Phases section).
+Three further checker/lowering sites resolved a struct or variant by name and had to go
+through `generic_surface_name` too: `src/ir/layout.rs`, `src/check/word_families.rs`, and
+`check_struct_peek_word` (the `S|>fi` path, missed by phase 3's first exit golden and
+pinned afterwards by `generic_instantiation_peek_word_dispatches_by_surface_name`).
 
-**R4 — distinct concrete applications monomorphize to distinct `StructId`/`EnumId`s; the
-same application dedupes to one.** `Box i64` and `Box bool` mint two different, correctly
-laid-out concrete struct registry entries. `Box i64` used a second time anywhere in the
-same module resolves to the *same* `StructId` as the first use — structural dedup on
-`(generic name, concrete type arguments)`, mirroring how `intern_bundle_struct`
-(`src/ast.rs:525`) dedups a bundle shape and how a polymorphic word's `Subst`-keyed
-`CallInst` (`:709`) dedups a call-site instantiation.
+**R6/D1 — no open nesting.** A concrete application inside an ordinary struct's field
+(`type: Wrap x Box[i64] ;`) works. `type: Outer 'T x Box['T] ;` is out of scope.
 
-**R5 — a monomorphized instantiation behaves exactly like a hand-written concrete
-`type:` of the same shape, once its generated words are registered without colliding.**
-Once `Box i64` is minted as a `StructId`, its layout, destructor synthesis, and every
-existing struct/enum check (`src/check/declarations.rs`) apply unchanged — they operate
-on the concrete `StructDecl` the registry holds, not on anything specific to how that
-entry was declared. **Corrected during review (round 1, B1):** the earlier claim that
-accessor/constructor dispatch needs "no new logic" is false as stated. The generated
-constructor/destructure/accessor `Sig`s (`struct_generated_sigs`/`enum_generated_sigs`,
-`src/check/declarations.rs:1175`/`:1223`) are keyed by the *bare* `decl.name` (e.g.
-`"Box"`, `"Box>val"`) and registered via `env.insert(name, vec![Overload{..}])`
-(`src/check.rs:449-454`) — an **overwrite**, not an append. Two instantiations that both
-set `decl.name == "Box"` (`Box i64`, `Box bool`) would silently clobber each other's
-constructor/accessor entries.
+## Non-functional outcomes
 
-The fix stays inside the existing overload-resolution machinery, so it is not new
-dispatch logic in the sense R5 originally meant: `struct_generated_sigs`/
-`enum_generated_sigs` registration changes from `env.insert(name, vec![Overload{..}])` to
-the same `env.entry(name).or_default().push(Overload{..})` pattern the user-word path
-already uses (`src/check.rs:520`). Every instantiation's generated words keep the bare
-spelling (`Box>val`, `1 Box`), living as additional overloads under that name; the
-already-existing operand-type overload resolution (used today for user-word overloads)
-disambiguates `Box i64`'s accessor from `Box bool`'s by receiver/field type at the call
-site, exactly as it disambiguates any other overloaded word. This disambiguation is
-complete given R1's phantom-variable rejection above (every instantiation's constructor
-differs in at least one input type); it is the one concrete change R5 requires, and no
-other accessor/constructor/destructor logic changes.
-
-**R6 — a generic type's own field may reference a concrete application of another (or the
-same) generic type non-recursively.** `type: Wrap x Box i64 ;` (R2) covers the concrete
-side. A generic type applying *another* generic type inside its own field list using its
-own still-open variable (`type: Outer 'T x Box 'T ;`) is explicitly **out of scope**
-(decision D1): the exit case is a flat generic type whose fields are concrete or
-variable-only, never a nested open application.
-
-## Non-functional requirements
-
-- **No new `Type` variant.** A generic type's *declaration* carries a variable-bearing
-  field list in a new declaration form; a concrete `Type::Struct`/`Type::Enum` is minted
-  only once every type argument at a use site is concrete, mirroring Phase 4 Slice 1's own
-  rule that `Type` gains no variable-carrying variant (`src/ast.rs:619-621`).
-- **Deterministic, order-independent instantiation names.** The synthesized name for a
-  monomorphized instantiation is a pure function of `(generic name, concrete type
-  arguments)` with no dependence on processing order, leaked to `'static` via `Box::leak`
-  for `decl.name`/`decl.name_static` (matching `StructDecl::name_static`'s existing
-  obligation, `src/ast.rs:207`). **Corrected in phase 2:** the spelling is the structural
-  one, `Box[i64]`, the way `ArrayDecl` already names a shape `[i64 4]` — *not*
-  `instantiation_symbol`'s `sooth_mono_{name}__t{id}_{ty}` sanitize-and-join. Two reasons:
-  a struct/enum's own QBE symbols are minted from its `StructId`/`EnumId`
-  (`struct_drop_symbol`), and the one QBE-facing use of the name — the aggregate
-  `type :Name` — is sanitized at the emission site by the existing *injective* `qbe_name`,
-  whereas `instantiation_symbol`'s sanitize is lossy enough for two distinct argument lists
-  to collide on one aggregate; and this name renders in every diagnostic naming the type,
-  where `sooth_mono_Box__t0_i64` would be a regression. `[` is a lexer delimiter, so no
-  single source type-name token can equal one of these. The generated words' *env keys*
-  must stay the bare surface spelling (`Box>val`) per R5's fix, so the mangled name is
-  registry/QBE-symbol identity only, never user-visible. **This does not hold as of phase
-  2 and is phase 3's to deliver — see D7.**
-- **`module: u32` is set on every minted declaration.** `StructDecl.module` is
-  `src/ast.rs:234`, `EnumDecl.module` is `:267`, `VariantDecl` mirrors it; D4 fixes it to
-  the instantiating module's id (`0` under this slice's single-module scope) but the mint
-  step must set it explicitly, not leave it defaulted.
-- **No regression to existing concrete `type:` declarations.** Every existing golden
-  `.sth` file and `parse_typedef_*`/`check_struct_*`/`check_enum_*` test continues to pass
-  unchanged; a concrete (non-generic) `type:` header parses exactly as it does today, with
-  one deliberate narrowing: a `'`-prefixed word is a type variable, so it is rejected at
-  every field-name position in a `type:` body. Without the narrowing the rule would hold
-  only in some positions: the header scan consumes `'`-prefixed words directly after the
-  type name, so `type: Foo 'bar i64 ;` reads as a generic declaration while
-  `type: Foo x i64 'y i64 ;` would still take `'y` as an ordinary field name.
-
-## Scope and boundaries
-
-**In scope:** parsing a generic `type:` header (struct and enum forms) with one or more
-type variables; an explicit generic-type-application syntax at a field-type position
-(`parse_field_type_expr`) and at a word-signature slot position (`parse_slot`/
-`parse_poly_slot`, delegating to `parse_type_expr`, `src/parser.rs:1834`, for the actual
-type-expression parse); a monomorphization/instantiation table keyed by `(generic name,
-concrete type arguments)` producing a `StructId`/`EnumId`, minted through a `&mut`-threaded
-side registry (see D5 below), not from inside the read-only `resolve_type`; wiring that
-table so an instantiation lands in the ordinary `Module::structs`/`enums` registries the
-existing layout, accessor, constructor, and destructor machinery already walks, with the
-generated-word registration fix from R5.
-
-**Out of scope (explicit; see Decisions for the "why"):**
-
-- `Result`, `Either`, `Option`, `?` sugar, and branch-on-result codegen: Slice 2.
-- A generic type's field applying another still-open generic type (`Outer 'T x Box 'T ;`,
-  R6): deferred; not needed by this slice's exit case or by Slice 2's `Result`/`Option`.
-- A generic type recursively self-referencing through `^` (`type: List 'T | Nil | Cons val
-  'T next ^List 'T ;`): deferred; `Result`/`Option` are not recursive, and this is `Vec`/
-  `List`-shaped territory that belongs with Phase 6's stdlib types.
-- Bounds (`Copy`/`Ord`) on a generic type's variables: deferred; not needed by a plain data
-  carrier.
-- Cross-module generic type import/instantiation (`import:` a generic type, then apply it
-  with a qualifier): deferred to whichever slice first needs a generic type living outside
-  its instantiating module.
-- The default-allocator-parameter question (`Vec['T 'A = Global]`): Phase 6, per ROADMAP.
+- **No new `Type` variant.** Variable-bearing field lists live in a separate
+  `GenericStructDecl`/`GenericEnumDecl` pair holding `ty_var_names: Vec<String>` and
+  `PolyType`-shaped fields; the concrete registries keep exactly their existing shape.
+- **Deterministic instantiation names, spelled structurally** (`type_instantiation_name`,
+  `Box[i64]`), the way `ArrayDecl` names a shape `[i64 4]` — not
+  `instantiation_symbol`'s `sooth_mono_{name}__t{id}_{ty}`. Reasons: a struct's QBE symbols
+  come from its `StructId` (`struct_drop_symbol`); the one QBE-facing use of the name (the
+  aggregate `type :Name`) is sanitized injectively at the emission site, whereas
+  `instantiation_symbol`'s sanitize is lossy enough for two argument lists to collide; and
+  this name renders in every diagnostic naming the type. A struct/enum argument whose bare
+  name is shared by more than one declaration gets an id suffix (`P.3`); wrapped arguments
+  (`&P`, `^P`, `[P 4]`) are rebuilt from their registry entries so the tie-break lands at
+  the leaf where the ids live. Order-independence holds because the pre-pass registries are
+  fixed before any body parses.
+- **`module: u32` set explicitly** on every minted declaration (D4: the instantiating
+  module). Generic headers also participate in duplicate-type-name checking.
+- **No regression:** existing `parse_typedef_*`/`check_struct_*`/`check_enum_*` tests and
+  all golden `.sth` files pass unchanged.
 
 ## Decisions
 
-**D1 (settles brief OQ1, narrow reading) — no generic-in-generic nesting.** A generic
-type's own fields may only be concrete or a bare variable (R1), never an application of
-another generic type using an as-yet-unresolved variable. A *concrete* application inside
-an ordinary (non-generic) struct's field (`type: Wrap x Box i64 ;`, R2) is in scope, since
-`Box i64` is fully concrete at that point — the restriction is specifically on an *open*
-variable flowing into another generic application inside a declaration body. Reason:
-Result/Option (Slice 2) need only single-level generic types; nesting adds a second axis
-of instantiation-table complexity (an instantiation whose own type arguments are
-themselves unresolved) with no concrete consumer yet.
+- **D1 — no generic-in-generic nesting.** Fields are concrete or a bare variable. A
+  concrete application inside a non-generic struct is fine.
+- **D2 — N type variables from the start, no bounds.** Result needs two; the grammar
+  generalizes at the same cost. `Copy`/`Ord` bounds deferred.
+- **D3 — no recursive self-reference.** `List`/`Vec`-shaped generics are Phase 6; proving
+  them needs the pre-pass sequencing fix (registering a generic name before its own body
+  can reference it) that nothing here needs.
+- **D4 — single-module only.** `GenericTypes::find_struct`/`find_enum` match on
+  `(name, module)`.
+- **D5 — minting is parse-time through a `&mut`-threaded side registry** (`GenericTypes`,
+  threaded through `parse_bodies` beside `arrays`/`owned_cells`/`refs`), not inside
+  `resolve_type` (which holds `&self` over an immutable `&[StructDecl]`) and not at
+  check-time like `intern_bundle_struct` (too late for a struct field's type).
+  `struct_base`/`enum_base` are the post-pre-pass registry lengths, so an instantiation's
+  id is final the moment it is minted.
+- **D6 — bracketed application arguments** (see R2).
+- **D7 — an instantiation carries both a mangled name and a surface name** (see R5).
 
-**D2 (settles brief OQ2, minimal-but-not-single reading) — multiple type variables are
-supported from the start, no bounds.** Result needs two variables (`Result 'T 'E`), so
-restricting Slice 1's grammar to exactly one variable would force a re-parse change in
-Slice 2 for no reason: the header grammar (`'T` `'E` ... in sequence) generalizes to N
-variables at the same implementation cost as one. Bounds (`Copy`/`Ord`) are left out: nothing
-in this slice's exit case or in `Result`/`Option` needs one.
+## Out of scope
 
-**D3 (settles brief OQ3, narrow reading) — no recursive self-reference in the exit case.**
-The exit witness is a flat generic struct or enum (e.g. `Box 'T`, `Pair 'A 'B`, or a
-non-recursive two-variant enum). `List`/`Vec`-shaped recursive generics are explicitly
-deferred (out of scope above): they are Phase 6 territory per the ROADMAP's own framing,
-and proving the recursive self-reference case adds the pre-pass sequencing problem (recon
-6 in the brief: registering a generic name before its own body can reference it) that
-neither this slice's exit case nor Slice 2 needs solved.
+`Result`/`Either`/`Option`, `?` sugar, branch-on-result codegen (Slice 2); open nested
+applications (R6); recursive generics; variable bounds; cross-module generic
+import/instantiation; the default-allocator parameter (`Vec['T 'A = Global]`, Phase 6).
 
-**D4 (settles brief OQ4, narrow reading) — single-module only.** A generic type is
-declared and instantiated within one module in this slice. Cross-module generic import
-(`import: v | Vec | "vec.sth" ; v::Vec i64`) is deferred: Phase 4 Slice 5's qualified-name
-machinery (`resolve_type`'s `::` handling) already threads a `module: u32` through
-concrete types, so extending it to a generic-type dictionary is mechanical once a
-consumer needs it. **Corrected during review (round 1): this does not mean Slice 2 is
-unaffected.** ROADMAP.md's own Phase 5 exit criterion states `Option['T]` must be
-"importable from `core`" — importing a generic declaration from one module and
-instantiating it in another (`Option i64` in a consumer module, with `Option` declared in
-`core`) *is* cross-module generic instantiation, and cannot ride the existing
-concrete-type import path (which only ever imports an already-concrete type). Slice 1
-itself stays single-module (no change to this slice's scope), but Slice 2's own spec must
-treat cross-module generic import as a named prerequisite it either builds itself or pulls
-forward from here — it is not free.
+## Verified by
 
-**D5 (new; settles reviewer B2) — an instantiation is minted through a `&mut`-threaded
-side registry populated during body parsing, mirroring `intern_array_type`/
-`intern_ref_type`, not from inside `resolve_type` and not at check-time like
-`intern_bundle_struct`.** `resolve_type` (`src/parser.rs:2171`) takes `&self` over
-`structs: &'t [StructDecl]` (`Parser`'s own field, `src/parser.rs:965`) — an immutable
-borrow that cannot mint a new `StructId`. `intern_bundle_struct` mints at check-time,
-after parsing, which is too late for a struct *field*'s type (resolved during
-`parse_field_type_expr`, at parse time). The correct model is `intern_array_type`
-(`src/ast.rs`): a `&mut Vec<StructDecl>`-style instantiation registry threaded through
-`parse_bodies` alongside the existing `arrays`/`owned_cells`/`refs` registries, appended
-into `Module::structs`/`enums` (`StructId` computed from the pre-pass length plus the
-instantiation registry's own growing offset) before `check`'s `struct_generated_sigs`/
-`enum_generated_sigs`/layout pass runs over the assembled module.
+`tests/phase5_slice1.rs` (declared-but-unused generic struct and enum build clean; two
+struct instantiations reach the backend and run; enum instantiation runs; wrong argument
+count errors; two instantiations sharing a surface name dispatch correctly; peek-word
+dispatch; destructor runs like a concrete type's; application at a word-signature slot),
+plus unit tests for dedup and base offsets (`instantiate_struct_dedups_and_counts_from_its_base`
+and its enum twin), name determinism and cross-module disambiguation
+(`type_instantiation_name_*`, `instantiate_struct_distinct_across_modules_same_bare_name`,
+`instantiate_struct_distinct_for_wrapped_cross_module_args`), and the parse-side
+unbound/phantom/duplicate-variable errors. Every new test was mutation-tested.
 
-## Codebase map
+Delivered in three phases: (1) generic header parsing and the variable-scoped field list;
+(2) application syntax, the parse-time instantiation table with structural dedup, and the
+argument-count error; (3) surface-name keying plus overload-append registration, with the
+goldens.
 
-- `src/parser.rs:2091-2136` (`parse_typedef`) — struct field parsing; gains a header-level
-  type-variable list and (R1) a per-field check that a bare variable reference resolves
-  against that list.
-- `src/parser.rs:2228-2299` (`parse_enum_typedef`, `parse_variant_fields`) — enum/variant
-  field parsing; same header-level variable-list threading as the struct path.
-- `src/parser.rs:2119-2136` (`parse_field_type_expr`), `src/parser.rs:1777` (`parse_slot`),
-  `src/parser.rs:1417` (`parse_poly_slot`), and `src/parser.rs:1834` (`parse_type_expr`,
-  the shared signature-side type-expression resolver `parse_slot` delegates to) — all four
-  gain the explicit generic-type-application syntax (R2): a generic-type name followed by
-  its argument type-expressions.
-- `src/parser.rs:2171` (`resolve_type`) — today resolves a name to a concrete `Type` via
-  `resolve_type_name_in_module`; gains the lookup-and-instantiate path for a generic name
-  plus explicit arguments (R2/R4) — but per D5, the actual mint happens through the new
-  `&mut`-threaded instantiation registry passed alongside, not inside `resolve_type`'s own
-  `&self` body.
-- `src/ast.rs:207-273` (`StructDecl`, `EnumDecl`) — unchanged in shape (decision: stays
-  concrete-only, mirrors `PolyType` living apart from `Type`); a new declaration-time
-  registry, settled as a **separate `GenericStructDecl`/`GenericEnumDecl` pair** (not a
-  `ty_vars` field bolted onto the existing decl types — keeping the concrete registries
-  untouched-in-shape is exactly the point), each holding `ty_var_names: Vec<String>` and a
-  `PolyType`-shaped field list, added alongside `Module::structs`/`enums`.
-- `src/ast.rs:525-548` (`intern_bundle_struct`) — the closest existing template for
-  structural dedup-and-mint, but keyed on structure not name+variables; the new
-  instantiation table is a distinct function/table, not an extension of this one (recon 3
-  in the brief).
-- `src/ast.rs:623-651` (`PolyType`), `:658-676` (`PolySig`), `:684-696` (`Subst`),
-  `:729-747` (`instantiation_symbol`) — the direct templates: a generic type's field list
-  is `PolyType`-shaped like a `PolySig`'s inputs/outputs; a use site's concrete type
-  arguments form a `Subst`-like key; the monomorphized name is minted the same
-  deterministic, sanitized way `instantiation_symbol` mints a word's mangled symbol.
-- `src/check/declarations.rs:1175` (`struct_generated_sigs`), `:1223`
-  (`enum_generated_sigs`) — the actual constructor/destructure/accessor `Sig` synthesis,
-  keyed by `decl.name`; unchanged in logic, but its registration site (below) must change.
-  (`src/check/declarations.rs:2322-2360` are the *tests* exercising this path, not the
-  synthesis itself — useful as confirming evidence, not as the edit site.)
-- `src/check.rs:449-454` — struct/enum generated `Sig`s registered into `env` via
-  `env.insert(name, vec![Overload{..}])` (overwrite); per R5's fix, changes to
-  `env.entry(name).or_default().push(Overload{..})` (matching the user-word registration
-  at `src/check.rs:520`), so two instantiations sharing a bare accessor/constructor name
-  become two overloads disambiguated by operand type instead of clobbering each other.
-- `src/check.rs:14` (imports from `ast.rs` used across the checker) — gains the new
-  instantiation-table type and any accessor functions it needs (e.g. `intern_generic_struct`/
-  `intern_generic_enum`, mirroring `intern_bundle_struct`'s naming, but with D5's `&mut`
-  parse-time threading rather than check-time interning).
+## Prerequisites this slice hands to Slice 2
 
-## Open questions
+Neither blocks Slice 1; both must be named in Slice 2's own spec or a small slice ahead of it.
 
-None blocking; all four raised in the brief are settled above (D1-D4), plus D5 (parse-time
-minting site) settled during round-1 review.
-
-**D6 (settled in phase 2) — an application's type arguments are bracketed,
-`Box[i64]`/`Pair[i64 bool]`, not juxtaposed.** The doc previously preferred the bare
-juxtaposed form; implementing R3 falsified it. Juxtaposed, a signature slot list
-`( Box i64 bool -- )` reads identically as an over-applied `Box` and as a correctly applied
-`Box i64` beside a `bool` slot, so an extra argument is *undecidable* at a slot position and
-R3's over-application error could never be raised there — while parsing arguments greedily
-instead would make `( Box i64 bool -- )` unwritable. Brackets also match how ROADMAP.md
-already spells a use site (`Option['T]`, `Map['K 'V]`, `Vec['T 'A = Global]`), and `[` is
-already the type sublanguage's delimiter (array shapes, quotation effects). The *header*
-stays juxtaposed (`type: Result 'T 'E`), where `'`-prefixing makes the variable list
-unambiguous.
-
-**D7 (settled in phase 3 review of phase 2) — an instantiation needs a surface name
-alongside its mangled one; the R5 registration fix alone does not give R5's behaviour.**
-`struct_generated_sigs`/`enum_generated_sigs` key every generated word on `decl.name`, and
-phase 2 sets `decl.name` to the mangled `Box[i64]`, so the env keys are today `Box[i64]`,
-`Box[i64]>val`, `Box[i64]<val`. `[` is a lexer delimiter, so no term can spell one: `7
-Box[i64] Box[i64]>val` fails with an unknown-word error on `Box`, and there is no other
-spelling.
-The mangled `decl.name` is nonetheless correct and stays: it is what keeps two
-instantiations distinct in the duplicate-type check and in every diagnostic.
-
-Phase 3's stated fix (`env.insert` -> `env.entry().or_default().push()`) is therefore
-necessary but not sufficient, and on its own is unobservable: under mangled names no two
-instantiations share a key, so nothing clobbers and nothing appends. Phase 3 must *also*
-carry the bare surface spelling on the minted `StructDecl`/`EnumDecl` (the generic
-header's own name, `Box`, and the variant's own name, `Ok`) and key the generated `Sig`s
-off that, keeping `Overload::symbol` on the mangled name so the QBE symbols stay distinct
--- `src/check.rs:449-454` currently sets `symbol = name.clone()`, so the two must be
-split there. Only then does R5's overload-by-operand-type dispatch have two entries under
-one key to choose between, and only then can phase 3's exit golden ("constructs and reads
-back both instantiations") be written at all.
-
-**Flagged for the user, not blocking this slice:** D4's correction means Slice 2's own
-spec (not this one) must explicitly plan for cross-module generic instantiation to meet
-ROADMAP's "`Option` importable from `core`" exit criterion — either as an in-scope line on
-Slice 2 or a small prerequisite slice ahead of it. No action needed now; noting it so it
-isn't silently rediscovered when Slice 2 is briefed.
-
-**D7 addendum (phase 3 review round 2) — `check_struct_peek_word` also compared against
-the mangled name.** `S|>fi` (R10) is a fourth checker-side site that resolves a struct by
-name directly against `ctx.structs()`, independent of `struct_generated_sigs`/`swords`;
-phase 3 missed it because its own exit golden never exercised peek. Fixed: the comparison
-now goes through `generic_surface_name`, same as the other three sites, with a golden
-(`generic_instantiation_peek_word_dispatches_by_surface_name`) pinning it.
-
-**Flagged for the user, not blocking this slice: generic enums cannot be eliminated at
-all, only constructed.** Three more mangled-name comparisons block a clause-style body
-over a generic enum's variants — `is_variant_name` (`src/parser.rs`), `is_registered_variant`
-(`src/check.rs`), and the clause matcher (`src/check/word_entry.rs`) — and fixing all three
-is not sufficient on its own: `prepass_type_decls` (`src/parser.rs`) skips a generic header
-entirely, so the parse-time clause-vs-locals discriminator never learns a generic enum's
-variant names in the first place. A clause body over `Res[i64 bool]`'s `Ok`/`Err` today
-parses as a locals binding and fails with a name-collision error, not a working match. This
-slice's own exit criteria only require construction
-(`generic_enum_instantiation_reaches_the_backend_and_runs`), so it is unaffected, but
-Slice 2's `Result 'T 'E` is an enum whose whole point is elimination — this is a
-prerequisite for Slice 2, either as an explicit in-scope line there or a small slice ahead
-of it. No action needed now.
-
-## Solution approach (advisory)
-
-1. Add the generic-declaration registry (`GenericStructDecl`/`GenericEnumDecl`, per the
-   codebase map's settled representation), populated by the pre-pass when a `type:`
-   header's name is followed by one or more `'`-prefixed tokens before the first field
-   name. State explicitly what a declared-but-never-instantiated generic type does to a
-   whole-program build: it must compile clean (the new registry is walked by nothing
-   `check`/`lower` touch until an instantiation appends into `Module::structs`/`enums`),
-   giving Phase 1 a defined stopping point with no dependency on Phase 2/3.
-2. Parse the header's type variables into a local name->index table scoped to that
-   declaration; parse each field's type through a `PolyType`-shaped path (reusing
-   `RawTy`-style folding from Phase 4 Slice 1 where possible) so a bare variable reference
-   resolves against that table and a bare unresolvable name is still a located error.
-3. Add the explicit application syntax at `parse_field_type_expr` and the signature-slot
-   type parser: a resolved generic-type name followed by exactly `ty_vars.len()` further
-   type-expressions (R2/R3).
-4. Add the instantiation table: `(generic name, module, Vec<Type> args) -> StructId/EnumId`,
-   structurally deduped (R4), threaded as a `&mut` side registry through `parse_bodies`
-   per D5 (mirroring `intern_array_type`'s mutation discipline, not `intern_bundle_struct`'s
-   check-time one), populated the first time a use site's arguments are all concrete; the
-   wrong-argument-count diagnostic (R3) lives here too, in this same phase.
-5. When minting a new instantiation, substitute the generic declaration's `PolyType` field
-   list against the concrete arguments to produce an ordinary concrete `StructDecl`/
-   `EnumDecl` (mangled `name`/`name_static` per the NFR, `module` set per D4), push it
-   into `Module::structs`/`enums` exactly like any hand-written concrete `type:` (R5) — no
-   new layout/destructor path, and the one generated-word registration change from R5
-   (insert -> overload-append).
-6. Golden tests: two distinct instantiations of one generic struct with distinct,
-   correctly laid-out fields and working accessors; the same instantiation used twice
-   dedupes to one `StructId` (direct assertion, mirroring
-   `intern_bundle_struct_same_tuple_dedups_expected`); a missing-argument and an
-   extra-argument use site each produce the R3 located error; existing concrete `type:`
-   goldens are unaffected.
-
-## Success criteria (observable)
-
-- A generic `type:` declaration with at least one type variable monomorphizes per
-  distinct concrete instantiation: two applications with different concrete arguments
-  produce two distinct `StructId`s (or `EnumId`s) with correct field layout, verified by a
-  golden `.sth` program that constructs and reads back both.
-- The same concrete application used twice resolves to one `StructId`/`EnumId` (a direct
-  unit-test assertion, not merely "the program runs").
-- A use site with the wrong number of type arguments is a located compile error naming the
-  generic type, the expected argument count, and the supplied count.
-- All pre-existing tests (`parse_typedef_*`, `check_struct_*`, `check_enum_*`, and every
-  golden `.sth` file) pass unchanged.
-- A field naming a variable its `type:` header did not bind (R1) is a located parse
-  error, asserted directly.
-- A generic-type application at a **word-signature slot** (`: unwrap ( Box i64 -- i64 )
-  ;`, R2), not only at a struct field, parses and resolves — a distinct golden from the
-  field-position case, since it is a distinct parser call site (`parse_slot`/
-  `parse_poly_slot` vs `parse_field_type_expr`).
-- A monomorphized instantiation's destructor is synthesized and runs like a hand-written
-  concrete type's (R5), not merely constructed and read back.
-- Every new test is mutation-tested: reverting the code it guards must make it fail (the
-  project's standing placebo-test hazard — see `CLAUDE.md`/memory on mutation-testing
-  guards).
-
-## Phases (JSON)
-
-```json
-{
-  "phases": [
-    {
-      "phase": 1,
-      "focus": "Generic type: header parsing (struct + enum) and the type-variable-scoped field list, with no instantiation yet",
-      "difficulty": "standard"
-    },
-    {
-      "phase": 2,
-      "focus": "Explicit generic-type-application syntax at field-type and signature-slot positions (parse_field_type_expr, parse_slot/parse_poly_slot via parse_type_expr), the parse-time-threaded instantiation table minting concrete StructId/EnumId with structural dedup, and the wrong-argument-count located error at the same site",
-      "difficulty": "hard"
-    },
-    {
-      "phase": 3,
-      "focus": "Give a minted instantiation a bare surface name (D7) and key struct_generated_sigs/enum_generated_sigs off it while keeping Overload::symbol on the mangled name, then fix generated-word registration from overwrite to overload-append (env.insert -> entry().or_default().push()) so two instantiations coexist as operand-type-disambiguated overloads -- layout and destructor synthesis already apply automatically once phase 2 appends a minted instantiation into Module::structs/enums, so this phase is those two changes plus golden test coverage including the signature-slot and destructor witnesses",
-      "difficulty": "standard"
-    }
-  ]
-}
-```
+1. **Cross-module generic instantiation.** ROADMAP's Phase 5 exit criterion says
+   `Option['T]` must be importable from `core`. Importing a generic *declaration* and
+   instantiating it elsewhere cannot ride the concrete-type import path, which only ever
+   imports an already-concrete type. D4 keeps Slice 1 single-module; this is not free.
+2. **Generic enums can be constructed but not eliminated.** Three mangled-name comparisons
+   block a clause-style body over a generic enum's variants (`is_variant_name` in
+   `src/parser.rs`, `is_registered_variant` in `src/check.rs`, the clause matcher in
+   `src/check/word_entry.rs`), and fixing them is not sufficient: `prepass_type_decls` skips
+   a generic header, so the parse-time clause-vs-locals discriminator never learns the
+   variant names. A clause body over `Res[i64 bool]`'s `Ok`/`Err` parses as a locals binding
+   and fails with a name collision. Slice 2's `Result 'T 'E` is an enum whose whole point is
+   elimination.
