@@ -377,10 +377,15 @@ then stop.
 
 For each word, using the raw export list of its owning module:
 
-- **Exported word:** the `global:` clause is **mandatory** and must equal the
-  inferred set **exactly** (same names, each with the exact inferred mode).
+- **Exported word:** the `global:` clause is **mandatory whenever the inferred
+  set is non-empty**, and must then equal it **exactly** (same names, each with
+  the exact inferred mode). An exported word that touches no static needs no
+  clause: the empty set has no spelling, since `Some(vec![])` is unrepresentable
+  by D4 and a bare `global:` is a parse error. (Every export in the existing
+  corpus, and every injected prelude word, is that case.)
   - Clause absent -> located error at the word: *"exported word `W` must
-    declare its global set (line L): it touches NAME (mode), ..."*.
+    declare its global set (line L): it touches NAME (mode), ..."*, which hands
+    back the exact clause text to write.
   - Clause present but disagreeing -> a **single located-error family**
     (`global_set_mismatch_error`) at the offending entry's span (or the word
     span for a missing entry), covering these disagreements, each naming the
@@ -494,6 +499,11 @@ stay Phase 9 regardless: this is plain compiler-allocated storage only.
   (`strip_ref_sigil` fallthrough, R2).
 - `src/check/word_families.rs`: the static branch in the borrow-typing arm
   (R1); a scalar static is borrowable.
+- `src/check/declarations.rs`: the `static:` declaration name rules — a repeat
+  declaration, and a name a word/extern/type of the same module already holds,
+  both located errors (`check_static_decls`). They live beside
+  `check_exported_signatures` rather than in `globals.rs`: same pre-mangle slot,
+  same declaration-check responsibility, and no part of the global-set analysis.
 - `src/check/globals.rs` (new): direct-set traversal (R4), the worklist fixpoint
   (R5), and the boundary exact-match check + diagnostics (R6). New module under
   `src/check/` because it is a self-contained analysis with its own imports and
