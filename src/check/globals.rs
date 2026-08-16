@@ -51,15 +51,10 @@ fn join_into(set: &mut GlobalSet, name: &str, mode: GlobalMode) -> bool {
 /// R4: the static a `&NAME`/`&!NAME` term names, and the mode it implies, or
 /// `None` for every term that names no static of this module.
 ///
-/// The filter is the load-bearing part. A bare `capture_names`-style walk
-/// over-includes ordinary word calls, which is harmless there (the result is
-/// intersected against real scope bindings downstream) but would miscount a
-/// plain call as a static access here, where nothing intersects afterwards.
-/// So the sigil, the accessor/qualifier shape and the static table are all
-/// checked, in the same order `resolve::NameTables::rewrite` checks them: only
-/// an unqualified, accessor-free name under a sigil can be a static, and a
-/// local of that name shadows the static exactly as it does at type-check time
-/// (`check::word_families`'s borrow arm resolves a local first).
+/// The sigil strip plus the exact-name table lookup is the whole filter: a
+/// qualified or accessor-suffixed name never equals a bare static name, so
+/// `statics.contains(rest)` already rejects it with no separate shape check
+/// needed.
 fn static_access<'a>(
     name: &'a str,
     shadowed: &HashSet<String>,
@@ -72,9 +67,6 @@ fn static_access<'a>(
     } else {
         return None;
     };
-    if rest.contains(['>', '<', '|']) || rest.contains("::") {
-        return None;
-    }
     if shadowed.contains(rest) || !statics.contains(rest) {
         return None;
     }
@@ -227,9 +219,9 @@ pub(crate) fn check_globals(module: &Module) -> Result<(), String> {
     }
     let empty: HashSet<&str> = HashSet::new();
     for (word, inferred) in module.words.iter().zip(&sets) {
-        let Some(info) = module.modules.get(word.module as usize) else {
-            continue;
-        };
+        let info = module.modules.get(word.module as usize).expect(
+            "assemble_module pushes one ModuleInfo per closure node, indexed by word.module",
+        );
         let exported = info.exports.iter().any(|(n, _)| n == &word.name);
         let statics = by_module.get(&word.module).unwrap_or(&empty);
         check_clause(word, inferred, exported, statics)?;

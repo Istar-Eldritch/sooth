@@ -10,6 +10,14 @@
 //! being *admitted* without an ICE -- both need scalar-static lowering, which
 //! is Phase 4: today a program that gets past the checker dies in
 //! `lower_reference_word`. They land with that phase, not this one.
+//!
+//! The escaping-closure case is not merely blocked on lowering: it already
+//! *passes this checker today* with no rejection at all (a static's
+//! `owned_root` classifies as `OuterRooted`, so `check::captures` never flags
+//! it). Phase 4 inherits a checker-admitted program with no existing
+//! capture/escape diagnostic to fall back on, so it must either lower the
+//! capture correctly or add a new located rejection -- not assume one is
+//! already there to assert against.
 
 fn build_error(name: &str, src: &str) -> String {
     let path = std::env::temp_dir().join(format!("sooth-{name}-{}.sth", std::process::id()));
