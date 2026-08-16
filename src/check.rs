@@ -12,10 +12,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     generic_surface_name, instantiation_symbol, intern_array_type, intern_bundle_struct,
-    intern_owned_cell_type, intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId,
-    ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl,
-    PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId,
-    Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_owned_cell_type, intern_ref_type, variant_type, ArrayDecl, Bound, CallInst, Clause,
+    EnumDecl, EnumId, ExternDecl, GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo,
+    OwnedCellDecl, PolySig, PolyType, QuotAnnot, QuotEffect, RefDecl, Span, StackEffect,
+    StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 mod audits;
@@ -50,7 +50,7 @@ pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
     check_exported_signatures, check_selective_imports, check_types, enum_generated_sigs,
-    selective_not_exported_error, struct_generated_sigs, SelectiveName,
+    selective_not_exported_error, struct_generated_sigs, variant_generated_sigs, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{
@@ -514,6 +514,9 @@ pub fn check(module: &mut Module) -> Result<(), String> {
         env.entry(name).or_default().push(Overload { sig, symbol });
     }
     for (name, symbol, sig) in enum_generated_sigs(&module.enums) {
+        env.entry(name).or_default().push(Overload { sig, symbol });
+    }
+    for (name, symbol, sig) in variant_generated_sigs(&module.enums) {
         env.entry(name).or_default().push(Overload { sig, symbol });
     }
 

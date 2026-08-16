@@ -353,6 +353,15 @@ Sooth's craft conventions.
 - A `Variant<field` setter (R8).
 - Variant-correct behaviour for `is_copy`/`contains_reference`/`is_aggregate`/drop/return/
   borrow guards: Slice 3 (no variant value flows through them until the eliminator exists).
+- **A variant sharing a struct's name** (`type: S x i64 ; type: E | S y i64 ;` builds clean
+  today: `check_duplicate_type_names` checks *type* names, and neither the enum nor the
+  variant registry rejects a variant name colliding with a struct name). The generated
+  constructors already collide pre-slice: both are keyed `S`, both take `( i64 -- )`, so the
+  native env's operand match picks the first candidate and the variant constructor is
+  unreachable, while the REPL's single-candidate `env.insert` model clobbers outright. R6
+  extends the same collision to the destructure key `S>`. Neither is fixed here: the root
+  rule is the missing variant-vs-type name-collision check, which belongs with Slice 3's
+  eliminator work (where a variant name first has to resolve unambiguously).
 
 ## Codebase Map
 

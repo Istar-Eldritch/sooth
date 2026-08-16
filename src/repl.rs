@@ -1219,6 +1219,9 @@ impl Session {
         for (name, symbol, sig) in check::enum_generated_sigs(&self.enums) {
             env.insert(name, vec![check::Overload { sig, symbol }]);
         }
+        for (name, symbol, sig) in check::variant_generated_sigs(&self.enums) {
+            env.insert(name, vec![check::Overload { sig, symbol }]);
+        }
         for (name, entry) in &self.env {
             let symbol = name.clone();
             env.insert(
@@ -4180,6 +4183,31 @@ mod tests {
             err.contains("not supported in the REPL yet"),
             "unexpected message: {err}"
         );
+    }
+
+    /// Phase 6 slice 2 (R6/R-OQ2): the variant accessors register into the
+    /// session env too, not only into a native build's. No REPL line can mint
+    /// a `Type::Variant` operand until slice 3's eliminator, so what
+    /// discriminates "registered" from "never wired into `typed_env`" is which
+    /// diagnostic a bare call gets: a registered word underflows, an
+    /// unregistered one is an unknown word. `Dot>x` is R7 -- a zero-field
+    /// variant mints the destructure and no getter.
+    #[test]
+    fn repl_variant_accessor_sigs_reach_the_session_env() {
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        session
+            .eval_line("type: Shape | Circle r i64 | Dot ;", &mut out)
+            .unwrap();
+        for call in ["Circle>r", "Circle>", "Dot>"] {
+            let err = session.eval_type(call, &mut out).unwrap_err();
+            assert!(
+                err.contains("stack underflow: needs 1 values"),
+                "{call}: unexpected message: {err}"
+            );
+        }
+        let err = session.eval_type("Dot>x", &mut out).unwrap_err();
+        assert!(err.contains("unknown word `Dot>x`"), "unexpected: {err}");
     }
 
     #[test]

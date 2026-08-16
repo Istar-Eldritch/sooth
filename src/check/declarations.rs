@@ -1264,11 +1264,12 @@ pub fn struct_generated_sigs(structs: &[StructDecl]) -> Vec<(String, String, Sig
 /// Synthesize the generated-word `Sig` for every registered enum variant
 /// (D2, R9): a constructor `Variant ( T1 … Tn -- Enum )`, fields in declared
 /// order (first field deepest), a zero-field variant being `Variant ( --
-/// Enum )`. Unlike a struct, a variant has no destructure/getter/setter
-/// (D2: not a standalone type; elimination is clause-style, Phase 4). These
-/// join the env alongside user words and struct-generated words, so a
-/// constructor's arity/field-type misuse (X9) falls out of the existing
-/// call-check path.
+/// Enum )`. The destructure and getters live beside this in
+/// `variant_generated_sigs` (phase 6 slice 2 reverses D2's "a variant has no
+/// destructure/getter": it is a standalone `Type::Variant` now); a variant
+/// still has no setter (R8). These join the env alongside user words and
+/// struct-generated words, so a constructor's arity/field-type misuse (X9)
+/// falls out of the existing call-check path.
 pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
     let mut sigs = Vec::new();
     for (idx, decl) in enums.iter().enumerate() {
@@ -1289,11 +1290,85 @@ pub fn enum_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
     sigs
 }
 
+/// Phase 6 slice 2 (R6): per enum variant, the whole-variant destructure
+/// `Variant> ( Variant -- T1 … Tn )` and a per-field getter
+/// `Variant>fi ( Variant -- Ti )`, fields in declared order (first field
+/// deepest). A zero-field variant registers only the (no-op) destructure
+/// (R7), and no variant gets a `Variant<fi` setter: a `Type::Variant` value
+/// has no legal destination outside the arm that bound it (R8).
+///
+/// The input slot is built through `variant_type`, the sole constructor of a
+/// `Type::Variant`, so its leaked `Enum.Variant` display name has one origin
+/// and every construction of the same `(EnumId, vi)` compares equal (R1).
+/// Keying follows `struct_generated_sigs`' D7 rule: the env key is the bare
+/// surface variant name, the lowering symbol the mangled registry spelling.
+pub fn variant_generated_sigs(enums: &[EnumDecl]) -> Vec<(String, String, Sig)> {
+    let mut sigs = Vec::new();
+    // Value-mode projection interns nothing, so this scratch registry stays
+    // empty; the helper is shared with the clause path so a destructure's
+    // outputs and a clause's bindings project by one rule (R4).
+    let mut no_refs = Vec::new();
+    for (idx, decl) in enums.iter().enumerate() {
+        let id = EnumId::from_index(idx);
+        for (vi, variant) in decl.variants.iter().enumerate() {
+            let variant_ty = variant_type(enums, id, vi);
+            let field_types = variant_field_projection(variant, None, &mut no_refs);
+            let surface = generic_surface_name(&variant.name);
+            sigs.push((
+                format!("{surface}>"),
+                format!("{}>", variant.name),
+                Sig {
+                    inputs: vec![variant_ty],
+                    outputs: field_types,
+                },
+            ));
+            for (field_name, field_ty) in &variant.fields {
+                sigs.push((
+                    format!("{surface}>{field_name}"),
+                    format!("{}>{}", variant.name, field_name),
+                    Sig {
+                        inputs: vec![variant_ty],
+                        outputs: vec![*field_ty],
+                    },
+                ));
+            }
+        }
+    }
+    sigs
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lexer::lex;
     use crate::parser::parse;
+
+    #[test]
+    fn variant_accessor_sigs_reach_the_module_env() {
+        // R6/R-OQ2: the accessors register globally now, with no eliminator to
+        // mint an operand. Nothing can call one legally yet, so what discriminates
+        // "registered" from "never wired into `check`" is *which* diagnostic a
+        // bare call gets: a registered word underflows, an unregistered one is
+        // an unknown word. The zero-field row is R7: `Dot>` registers, `Dot>x`
+        // never exists.
+        let rows = [
+            ("Circle>r", "`Circle>r` needs 1 values"),
+            ("Circle>", "`Circle>` needs 1 values"),
+        ];
+        for (call, wanted) in rows {
+            let err = check_src(&format!(
+                "type: Shape | Circle r i64 | Dot ;\n: main ( -- ) {call} ;\n"
+            ))
+            .unwrap_err();
+            assert!(err.contains(wanted), "{call}: unexpected message: {err}");
+        }
+        let err =
+            check_src("type: Shape | Circle r i64 | Dot ;\n: main ( -- ) Dot> ;\n").unwrap_err();
+        assert!(err.contains("`Dot>` needs 1 values"), "unexpected: {err}");
+        let err =
+            check_src("type: Shape | Circle r i64 | Dot ;\n: main ( -- ) Dot>x ;\n").unwrap_err();
+        assert!(err.contains("unknown word `Dot>x`"), "unexpected: {err}");
+    }
 
     #[test]
     fn type_node_treats_variant_as_a_non_edge_leaf() {

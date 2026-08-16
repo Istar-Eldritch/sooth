@@ -105,8 +105,8 @@ pub(super) fn check_reference_word(
             stack.push(Slot::derived(out, deriv));
         }
         _ => {
-            if let Some((struct_name, field_name)) = rest.split_once('>') {
-                if let Some(idx) = ctx.structs().iter().position(|d| d.name == struct_name) {
+            if let Some((head, field_name)) = rest.split_once('>') {
+                if let Some(idx) = ctx.structs().iter().position(|d| d.name == head) {
                     let decl = &ctx.structs()[idx];
                     if let Some(field_ty) = decl
                         .fields
@@ -137,6 +137,44 @@ pub(super) fn check_reference_word(
                         stack.truncate(n - 1);
                         stack.push(Slot::derived(out, deriv));
                         return Ok(Some(std::mem::take(stack)));
+                    }
+                }
+                // Phase 6 slice 2 (R9 mechanism 3 / R11): `&Variant>fi` /
+                // `&!Variant>fi`. Shaped like the struct arm above, but the
+                // variant is resolved from the `EnumId` the operand already
+                // carries rather than by a global name scan: variant names
+                // are not unique across enums (only *type* names are deduped),
+                // so a scan would mis-resolve the second enum's variant.
+                let n = stack.len();
+                if n >= 1 {
+                    if let Some((Type::Variant(id, _, _), _)) = ref_parts(stack[n - 1].ty, refs) {
+                        if let Some((spelled_vi, field_ty)) =
+                            variant_accessor_field(ctx.enums(), id, head, field_name)
+                        {
+                            let variant_ty = variant_type(ctx.enums(), id, spelled_vi);
+                            let want = intern_ref_type(refs, variant_ty, mutable);
+                            if stack[n - 1].quot.is_some() {
+                                return Err(reject_quotation_operand(ctx, span, name));
+                            }
+                            // Full-type equality, the struct arm's idiom: it
+                            // catches a wrong variant and a wrong mutability
+                            // in one comparison, since the two interned
+                            // reference types differ either way.
+                            if stack[n - 1].ty != want {
+                                return Err(type_mismatch_error(
+                                    ctx,
+                                    span,
+                                    name,
+                                    want,
+                                    stack[n - 1].ty,
+                                ));
+                            }
+                            let out = intern_ref_type(refs, field_ty, mutable);
+                            let deriv = prov.project(stack[n - 1].deriv);
+                            stack.truncate(n - 1);
+                            stack.push(Slot::derived(out, deriv));
+                            return Ok(Some(std::mem::take(stack)));
+                        }
                     }
                 }
             }
@@ -756,6 +794,88 @@ pub(super) fn check_struct_get_word(
     // extracted field -- an aggregate field carrying a closure (a nested
     // struct/array/cell) must keep that closure visible to R22's return
     // guard past this getter.
+    stack.push(Slot {
+        alias,
+        surviving: top.surviving,
+        ..Slot::computed(field_ty)
+    });
+    Ok(Some(std::mem::take(stack)))
+}
+
+/// Phase 6 slice 2 (R11/R12): resolve an accessor's spelled variant name and
+/// field name against the enum the **operand** names -- never a global
+/// variant-name scan, which would mis-resolve, since variant names are not
+/// unique across enums (only *type* names are deduped). `None` if that enum
+/// holds no variant by that name, or that variant no such field; both
+/// accessor mechanisms then fall through rather than invent a diagnostic for
+/// a name they have not established is an accessor at all.
+fn variant_accessor_field(
+    enums: &[EnumDecl],
+    id: EnumId,
+    variant_name: &str,
+    field_name: &str,
+) -> Option<(usize, Type)> {
+    // D7: a source term can only ever spell the bare surface name (`[` is a
+    // lexer delimiter), while an instantiated `variant.name` is mangled.
+    let vi = enums[id.index()]
+        .variants
+        .iter()
+        .position(|v| generic_surface_name(&v.name) == variant_name)?;
+    let field_ty = enums[id.index()].variants[vi]
+        .fields
+        .iter()
+        .find(|(f, _)| f == field_name)
+        .map(|(_, ty)| *ty)?;
+    Some((vi, field_ty))
+}
+
+/// Phase 6 slice 2 (R9 mechanism 2): `Variant>fi` for an **aggregate** field,
+/// the variant twin of `check_struct_get_word`. A scalar field and the whole
+/// `Variant>` destructure never reach here: they are typed entirely by the
+/// `Sig` `variant_generated_sigs` registered, and this returns `Ok(None)` for
+/// them. An aggregate field is claimed here so the getter pushes the field's
+/// *interior address* (the `peek_region` device) rather than copying it out,
+/// exactly as the struct getter does.
+///
+/// R11/R12: the variant is resolved from the `EnumId` the operand already
+/// carries, never by a global variant-name scan -- variant names are not
+/// unique across enums, so a scan would pick the first match arbitrarily.
+/// Every fall-through is `Ok(None)` (not a variant operand, name absent from
+/// the operand's own enum, scalar field), leaving an unrelated word to the
+/// ordinary lookup chain; only a resolved aggregate field with the wrong
+/// variant on top is an error here.
+pub(super) fn check_variant_get_word(
+    name: &str,
+    span: Span,
+    stack: &mut Vec<Slot>,
+    ctx: &Ctx,
+    prov: &mut Provenance,
+) -> Result<Option<Vec<Slot>>, String> {
+    let Some((variant_name, field_name)) = name.split_once('>') else {
+        return Ok(None);
+    };
+    let n = stack.len();
+    if n < 1 {
+        return Ok(None);
+    }
+    let top = stack[n - 1];
+    let Type::Variant(id, vi, _) = top.ty else {
+        return Ok(None);
+    };
+    let enums = ctx.enums();
+    let Some((spelled_vi, field_ty)) = variant_accessor_field(enums, id, variant_name, field_name)
+    else {
+        return Ok(None);
+    };
+    if !field_ty.is_aggregate() {
+        return Ok(None);
+    }
+    let want = variant_type(enums, id, spelled_vi);
+    if spelled_vi != vi {
+        return Err(type_mismatch_error(ctx, span, name, want, top.ty));
+    }
+    let alias = peek_region(&mut stack[n - 1], field_ty, field_name, span, prov);
+    stack.truncate(n - 1);
     stack.push(Slot {
         alias,
         surviving: top.surviving,
@@ -1476,5 +1596,253 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(err.contains("found `bool`"), "unexpected message: {err}");
+    }
+
+    // --- Phase 6 slice 2 (R10): the variant accessor family, per mechanism.
+    //
+    // No surface syntax mints a `Type::Variant` operand until slice 3's
+    // eliminator, so every case here seeds one onto a hand-built stack. Each
+    // names the mechanism it guards and asserts a discriminating shape: a
+    // scalar getter driven through `check_variant_get_word` would return
+    // `Ok(None)` and pass vacuously, so scalar cases go through env dispatch
+    // instead, and only the R12 fall-through case asserts on `Ok(None)`.
+
+    /// `Circle` carries one scalar (`r`) and one aggregate (`p`) field, `Rect`
+    /// an aggregate one, `Dot` none. Parsed and checked from source so each
+    /// `display_static` carries its real `Shape.Circle` spelling; `bool`
+    /// occupies enum 0, so `Shape` is enum 1.
+    const SHAPE_SRC: &str = "type: P a i64 b i64 ;\ntype: Shape | Circle r i64 p P | Rect q P | Dot ;\n: main ( -- ) ;\n";
+
+    fn shape_module() -> Module {
+        let tokens = lex(SHAPE_SRC).unwrap();
+        let mut module = parse(&tokens).unwrap();
+        check(&mut module).unwrap();
+        module
+    }
+
+    fn shape_variant(module: &Module, vi: usize) -> Type {
+        variant_type(&module.enums, EnumId::from_index(1), vi)
+    }
+
+    fn struct_ty(module: &Module, name: &str) -> Type {
+        let idx = module.structs.iter().position(|d| d.name == name).unwrap();
+        Type::Struct(StructId::from_index(idx), module.structs[idx].name_static)
+    }
+
+    /// Mechanism 1: the ordinary env-call path, with only the variant-generated
+    /// sigs registered, over an entry stack the caller seeds. Returns the
+    /// residual stack.
+    fn infer_variant_line(module: &Module, entry: &[Type], src: &str) -> Result<Vec<Type>, String> {
+        let tokens = lex(src).unwrap();
+        let terms = match crate::parser::parse_line(&tokens).unwrap() {
+            crate::ast::Line::Expr(terms) => terms,
+            other => panic!("expected Expr, got {other:?}"),
+        };
+        let mut env: HashMap<String, Vec<Overload>> = HashMap::new();
+        for (name, symbol, sig) in variant_generated_sigs(&module.enums) {
+            env.entry(name).or_default().push(Overload { sig, symbol });
+        }
+        infer_line(
+            &terms,
+            entry,
+            &env,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &module.structs,
+            &module.enums,
+            &HashMap::new(),
+            &CombinatorEnv::default(),
+        )
+        .map(|(stack, _insts, _overloads)| stack)
+    }
+
+    #[test]
+    fn variant_scalar_getter_types_by_sig_dispatch() {
+        // Mechanism 1: `check_variant_get_word` bails `Ok(None)` on a scalar
+        // field, so the registered `Sig` alone types this. The exact residual
+        // stack is the discriminator.
+        let module = shape_module();
+        let stack = infer_variant_line(&module, &[shape_variant(&module, 0)], "Circle>r").unwrap();
+        assert_eq!(stack, vec![Type::I64]);
+    }
+
+    #[test]
+    fn variant_whole_destructure_types_by_sig_dispatch() {
+        // Mechanism 1 (R6): the whole destructure projects every field in
+        // declared order, first field deepest, and has no check function at
+        // all (structs have none either).
+        let module = shape_module();
+        let stack = infer_variant_line(&module, &[shape_variant(&module, 0)], "Circle>").unwrap();
+        assert_eq!(stack, vec![Type::I64, struct_ty(&module, "P")]);
+    }
+
+    #[test]
+    fn zero_field_variant_destructures_to_nothing_and_mints_no_getter() {
+        // R7: `Dot>` is a no-op destructure and no `Dot>anything` exists.
+        let module = shape_module();
+        let stack = infer_variant_line(&module, &[shape_variant(&module, 2)], "Dot>").unwrap();
+        assert_eq!(stack, vec![]);
+        let minted: Vec<String> = variant_generated_sigs(&module.enums)
+            .into_iter()
+            .map(|(key, _, _)| key)
+            .filter(|key| key.starts_with("Dot>"))
+            .collect();
+        assert_eq!(minted, vec!["Dot>".to_string()]);
+    }
+
+    #[test]
+    fn variant_aggregate_getter_aliases_the_operand_region() {
+        // Mechanism 2 (R-OQ3): an aggregate field is claimed by
+        // `check_variant_get_word`, which pushes the field's *interior
+        // address* rather than a fresh unaliased slot. The pushed alias must
+        // be the operand region's `p` projection, which is what a bare
+        // `Slot::computed(field_ty)` placebo would not produce.
+        let module = shape_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut prov = Provenance::default();
+        let region = prov.fresh_region();
+        let base = prov.alias_set_of(region);
+        let mut stack = vec![Slot {
+            alias: Some(Alias {
+                set: base,
+                span: Span::default(),
+            }),
+            ..Slot::computed(shape_variant(&module, 0))
+        }];
+        let out = check_variant_get_word("Circle>p", Span::default(), &mut stack, &ctx, &mut prov)
+            .unwrap()
+            .expect("an aggregate variant field is claimed here");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].ty, struct_ty(&module, "P"));
+        let alias = out[0].alias.expect("the field aliases the operand");
+        assert_eq!(alias.set, prov.field_alias_set(base, "p"));
+    }
+
+    #[test]
+    fn variant_aggregate_getter_of_the_wrong_variant_names_both_spellings() {
+        // Mechanism 2 + R2: the wrong-operand mismatch renders the leaked
+        // `Enum.Variant` names. It must use an aggregate field -- a scalar one
+        // never reaches `check_variant_get_word` at all.
+        let module = shape_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut prov = Provenance::default();
+        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
+        let err = check_variant_get_word("Rect>q", Span::default(), &mut stack, &ctx, &mut prov)
+            .unwrap_err();
+        assert!(
+            err.contains("expected `Shape.Rect`, found `Shape.Circle`"),
+            "unexpected message: {err}"
+        );
+    }
+
+    #[test]
+    fn variant_accessor_absent_from_the_operands_enum_falls_through() {
+        // R12: a name the operand's own enum does not hold is not established
+        // to be an accessor at all, so both mechanisms return `Ok(None)` and
+        // the call degrades to the ordinary unknown-word error rather than a
+        // variant-specific one. The single case that may assert on `Ok(None)`.
+        let module = shape_module();
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut prov = Provenance::default();
+        let mut stack = vec![Slot::computed(shape_variant(&module, 0))];
+        assert!(
+            check_variant_get_word("Nope>q", Span::default(), &mut stack, &ctx, &mut prov)
+                .unwrap()
+                .is_none()
+        );
+        let err = infer_variant_line(&module, &[shape_variant(&module, 0)], "Nope>q").unwrap_err();
+        assert!(err.contains("unknown word `Nope>q`"), "unexpected: {err}");
+        assert!(
+            !err.contains("Shape"),
+            "invented a variant diagnostic: {err}"
+        );
+    }
+
+    /// Mechanism 3 (R11): `check_reference_word` raw, since no source line can
+    /// produce a `&Variant` operand this slice. Returns the pushed slot plus
+    /// the operand's own derivation, so the caller can assert the projection.
+    fn call_variant_ref_word(
+        module: &Module,
+        word: &str,
+        operand_mutable: bool,
+    ) -> Result<(Slot, Provenance, DerivId, Vec<RefDecl>), String> {
+        let ctx = Ctx::Line {
+            structs: &module.structs,
+            enums: &module.enums,
+        };
+        let mut refs = Vec::new();
+        let mut prov = Provenance::default();
+        let operand = prov.borrow("s", operand_mutable, Span::default());
+        let ref_ty = intern_ref_type(&mut refs, shape_variant(module, 0), operand_mutable);
+        let mut stack = vec![Slot::derived(ref_ty, Some(operand))];
+        let out = check_reference_word(
+            word,
+            Span::default(),
+            &mut stack,
+            &ctx,
+            &Scope::default(),
+            &[],
+            &[],
+            &mut refs,
+            &mut prov,
+            &Liveness::scan(&[], &HashSet::new(), false),
+            0,
+        )?
+        .expect("the variant reference arm claims this word");
+        assert_eq!(out.len(), 1);
+        Ok((out[0], prov, operand, refs))
+    }
+
+    #[test]
+    fn variant_reference_getter_projects_through_the_operand() {
+        // Mechanism 3: pushes `&field`/`&!field` and a *projected* derivation
+        // that keeps the operand's chain. `project` mints a fresh `DerivId`,
+        // so the discriminator is the derivation's contents: `projected` set,
+        // place and owned root inherited. A placebo forwarding the parent id
+        // unchanged leaves `projected` false.
+        for mutable in [false, true] {
+            let module = shape_module();
+            let word = if mutable { "&!Circle>r" } else { "&Circle>r" };
+            let (pushed, prov, operand, mut refs) =
+                call_variant_ref_word(&module, word, mutable).unwrap();
+            assert_eq!(
+                pushed.ty,
+                intern_ref_type(&mut refs, Type::I64, mutable),
+                "{word}"
+            );
+            let deriv = prov.deriv(pushed.deriv.expect("a reference carries provenance"));
+            assert!(deriv.projected, "{word}: not a projection");
+            assert_eq!(deriv.place, prov.deriv(operand).place, "{word}");
+            assert_eq!(deriv.owned_root, prov.deriv(operand).owned_root, "{word}");
+        }
+    }
+
+    #[test]
+    fn variant_reference_getter_rejects_a_mutability_mismatch() {
+        // Mechanism 3 (R11): caught on the `want`-equality path -- the two
+        // interned reference types differ -- not by a `recv_mut != mutable`
+        // test, which belongs only to the `&>`/`&^` arms. The message spells
+        // both interned reference names, which is what R1's leaked name buys.
+        let module = shape_module();
+        let err = call_variant_ref_word(&module, "&!Circle>r", false).unwrap_err();
+        assert!(
+            err.contains("expected `&!Shape.Circle`, found `&Shape.Circle`"),
+            "unexpected message: {err}"
+        );
+        let err = call_variant_ref_word(&module, "&Circle>r", true).unwrap_err();
+        assert!(
+            err.contains("expected `&Shape.Circle`, found `&!Shape.Circle`"),
+            "unexpected message: {err}"
+        );
     }
 }

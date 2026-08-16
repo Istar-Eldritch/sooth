@@ -480,6 +480,16 @@ fn check_term(
             if let Some(stack) = check_struct_get_word(name, span, &mut stack, ctx, prov)? {
                 return Ok(stack);
             }
+            // Phase 6 slice 2 (R9 mechanism 2): the variant twin, claiming an
+            // aggregate variant field for the same interior-address device. A
+            // scalar field and the whole `Variant>` destructure fall through
+            // to the env call path below, typed by their generated `Sig`.
+            // Nothing reachable from source claims a term here until slice 3's
+            // eliminator binds an arm: no surface syntax puts a `Type::Variant`
+            // on the stack, so every name still falls through today.
+            if let Some(stack) = check_variant_get_word(name, span, &mut stack, ctx, prov)? {
+                return Ok(stack);
+            }
             // R6-R9: a tail-position call, inside a self-tail combinator
             // body splice, to that same combinator is the loop back-edge, not
             // a re-splice (which would recurse forever). Intercepted before
