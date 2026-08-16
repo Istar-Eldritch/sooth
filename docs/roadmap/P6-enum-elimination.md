@@ -56,7 +56,7 @@ involved. See `docs/roadmap/P6/slice1-spec.md` for the full design.
 **Exit:** an annotated quotation whose body contradicts its declared effect is a located
 error, standalone or parameter-filling.
 
-**P6.S2 — Phase 6 Slice 2 — variant types and accessors.** `Type::Variant(EnumId, usize)`, legal
+**P6.S2 — Phase 6 Slice 2 — variant types and accessors.** `Type::Variant(EnumId, usize, &'static str)`, legal
 only as an arm's declared input and as the value inside that arm, so it never becomes a
 general first-class type: the eliminator is its only introducer. Plus generated
 per-variant field accessors and whole-variant destructures. Layouts already exist per
