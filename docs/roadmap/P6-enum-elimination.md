@@ -44,12 +44,17 @@ quotation value on sight regardless of whether one exists elsewhere in the progr
 blocker for Slice 1 below, which checks annotated quotations against ordinary contexts, not
 materialized ones.
 
-**P6.S1 — Phase 6 Slice 1 — quotation effect annotations.** A quotation literal may carry a
-declared stack effect (`[ ( ..a T -- ..b ) ... ]`), checked against its body and against
-the context consuming it. Independently useful and independently testable; no enum
-machinery involved.
+**P6.S1 — Phase 6 Slice 1 — quotation effect annotations.** `[ done ]` A quotation literal
+may carry a declared stack effect (`[ ( ..a T -- ..b ) ... ]`), checked against its own
+body standalone and, where it fills a declared quotation parameter, reconciled against
+that parameter. Reconciliation only does independent work for a poly parameter whose
+type variable the annotation also names (a concrete/mono parameter's disagreement is
+already caught by the standalone body check); a shape-changing row (`..a -- ..b`) in an
+annotation is rejected outright, standalone or filling a parameter, since nothing in this
+slice grounds it. Independently useful and independently testable; no enum machinery
+involved. See `docs/roadmap/P6/slice1-spec.md` for the full design.
 **Exit:** an annotated quotation whose body contradicts its declared effect is a located
-error.
+error, standalone or parameter-filling.
 
 **P6.S2 — Phase 6 Slice 2 — variant types and accessors.** `Type::Variant(EnumId, usize)`, legal
 only as an arm's declared input and as the value inside that arm, so it never becomes a

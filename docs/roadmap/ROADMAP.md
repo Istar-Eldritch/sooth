@@ -8,11 +8,10 @@ not a schedule.
 Design phase complete (DESIGN.md, Decided section). Backend: **QBE**. Phases 0-5 are
 complete and merged to `main` — see each phase file's own header for its exit criteria
 and dogfood. **Phase 6 (term-level enum elimination) is in progress**: Slice 1
-(quotation effect annotations) has a brief/spec drafted (`docs/roadmap/P6/slice1-brief.md`,
-`docs/roadmap/P6/slice1-spec.md`); see [P6](./P6-enum-elimination.md) for the full slice
-breakdown. Per-phase completion history (what shipped in which slice, defects found and
-fixed in review) lives in each phase's own file and its `docs/roadmap/P{N}/` briefs/specs,
-not here.
+(quotation effect annotations) is done and merged; see [P6](./P6-enum-elimination.md)
+for the full slice breakdown. Per-phase completion history (what shipped in which slice,
+defects found and fixed in review) lives in each phase's own file and its
+`docs/roadmap/P{N}/` briefs/specs, not here.
 
 Host language is Rust — no longer forced by LLVM/Z3 (both dropped), so it is a free
 choice in principle, but nothing motivates switching.
