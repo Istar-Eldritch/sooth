@@ -76,6 +76,10 @@ fn free_locals_into(terms: &[Term], shadowed: &mut HashSet<String>, out: &mut Ha
 /// keeps its header phi; an aggregate carries no header phi but a stable
 /// entry-hoisted slot (the pointer the body reads every iteration) plus a
 /// staging temp and blit `size` for the back-edge read-before-write copy (R4).
+/// A bare quotation phantom is neither: it owns no bytes to seed a stable slot
+/// with and no defining `Instr` to feed a phi, so it gets no header phi and no
+/// staging at all -- `finalize_loop`'s two passes both pattern-match only
+/// `Scalar`/`Aggregate`, so a `Phantom` slot is a silent no-op in both.
 pub(super) enum CarriedSlot {
     Scalar {
         phi: Value,
@@ -85,6 +89,7 @@ pub(super) enum CarriedSlot {
         temp: Value,
         size: u32,
     },
+    Phantom,
 }
 
 /// R15/D4: the five fields `save_loop_state`/`restore_loop_state` snapshot
@@ -494,6 +499,25 @@ impl<'a> FuncBuilder<'a> {
         }
         let mut outs = Vec::with_capacity(params.len());
         for &p in params {
+            // A bare quotation phantom carries a lying `IrType::I64` placeholder
+            // (`lower_term`'s `TermKind::Quotation` arm), not `IrType::Quotation`,
+            // so `is_aggregate` never recognizes it and it would otherwise fall
+            // to the scalar phi branch below -- which needs a defining `Instr`
+            // the phantom never has, an undefined-operand crash at the backend
+            // (a row-carried quotation ridden through untouched by a self-tail
+            // combinator: `[ + ] 3 [ drop ] times drop`, `while` likewise). A
+            // phantom is compile-time-fixed and only ever reachable in one
+            // form (no runtime construction without a real materialized
+            // closure, which already carries genuine `IrType::Quotation` and
+            // already takes the aggregate branch below), so every iteration's
+            // back-edge value at this slot is provably the same id: reuse it
+            // unchanged, with no phi and no staging, checked via `quot_bodies`
+            // (the phantom's own identity map) rather than its placeholder type.
+            if self.quot_bodies.contains_key(&p) {
+                self.carried_slots.push(CarriedSlot::Phantom);
+                outs.push(p);
+                continue;
+            }
             let ty = self.value_type(p);
             if stage_aggregates && is_aggregate(ty, self.enums) {
                 // R1: one stable slot (the pointer the body reads) and one

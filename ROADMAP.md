@@ -631,20 +631,36 @@ half was renumbered into slice 10's lineage as slice 10c, since what it depended
 10a's row mechanism, not 9's own scope, and shipped a different mechanism than originally
 assumed — full account in `docs/phase4-slice10c-spec.md`.
 
-**Next action: none locked.** Two independent, previously-identified gaps remain open and
-unscheduled (see below and `docs/phase4-slice13-brief.md`'s Deferred section): the
-row-typed-combinator quotation crash, and closing slice 13's conservative borrow-liveness
-fallback to full mono-checker parity.
+**Fixed: the row-typed-combinator quotation crash.** A bare quotation phantom riding
+untouched through a self-tail combinator's carried row (`[ + ] 3 [ drop ] times drop`, and
+the same shape over `while` or any user-declared row combinator) used to die at the backend
+on an undefined phi operand (`qbe: invalid type for operand %v0 in phi %v4`): a phantom
+carries a lying `IrType::I64` placeholder and no defining `Instr` (`lower_term`'s
+`TermKind::Quotation` arm), so `begin_loop`'s `is_aggregate` check never recognized it and
+it fell to the scalar-phi branch, which needs a real defining instruction the phantom never
+has. `CarriedSlot::Phantom` (`src/ir/func_builder/mod.rs`), keyed on the `quot_bodies`
+identity map rather than the placeholder type, now reuses the same id unchanged across every
+iteration with no phi and no aggregate staging — sound because a phantom is compile-time-
+fixed and reachable in only one form absent a materialized closure (7b, not built), which
+already carries a genuine `IrType::Quotation` and already took the aggregate branch
+correctly. Confirmed fixed live for both `times` and `while`, including nested composition,
+and that the row-carried quotation's identity survives intact (callable afterward, not just
+droppable). Goldens: `times_carries_an_untouched_quotation_through_the_row`,
+`while_carries_an_untouched_quotation_through_the_row`,
+`times_nested_inside_times_still_carries_a_row_quotation`
+(`tests/phase4_slice10b.rs`).
 
-**Known gap, not yet scheduled:** a row-typed combinator call over a quotation left in (or
-read back out of) the row crashes the backend instead of being rejected. `[ + ] 3 [ drop ]
-times drop` (and the same shape over any user-declared row combinator, e.g. 10a's
-`my-times`) reaches QBE as an invalid-type phi; calling the row quotation afterward hits
-`unreachable!()` in `func_builder/quotation.rs`; a third, same family, `while` over an
-*erased* quotation panics in `control_flow.rs`. All three are recorded in
-`docs/phase4-slice10b-spec.md`. No general guard covers any of them: this is one slice's
-worth of work (a single check at a row-typed combinator's call site covering all three
-shapes), not three.
+The third shape `docs/phase4-slice10b-spec.md` named alongside these two (`while` over a
+*materialized* quotation panicking in `control_flow.rs`) is a different crash, not this one:
+it needs a way to feed a real `(code, env)` closure value into a `~[ ... ]` parameter, and
+no such value is constructible anywhere in the language today (7b's capturing closures are
+not built) — every path that could reach it is checker-rejected already (10b: "a materialized
+quotation value" at a `~` parameter), so it is presumed dead code, not verified reproducible.
+Revisit once 7b exists.
+
+**Next action: none locked.** One previously-identified gap remains open and unscheduled
+(`docs/phase4-slice13-brief.md`'s Deferred section): closing slice 13's conservative
+borrow-liveness fallback to full mono-checker parity.
 
 Host language: Rust is the sensible default (ADT + pattern-matching-heavy compiler
 workload, `no_std` for the runtime/intrinsics library), but nothing now requires

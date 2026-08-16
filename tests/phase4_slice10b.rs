@@ -456,6 +456,60 @@ fn times_carries_an_aggregate_through_the_row() {
 }
 
 #[test]
+fn times_carries_an_untouched_quotation_through_the_row() {
+    // A bare quotation phantom (`lower_term`'s `TermKind::Quotation` arm) has a
+    // lying `IrType::I64` placeholder and no defining `Instr` -- riding
+    // untouched below `times`'s own count/quotation arguments (never bound,
+    // never named, just whatever's below), it used to reach `begin_loop`'s
+    // scalar-phi branch (its placeholder type isn't `IrType::Quotation`, so
+    // `is_aggregate` missed it) and die at the backend on an undefined phi
+    // operand: `qbe: invalid type for operand %v0 in phi %v4`. `CarriedSlot::
+    // Phantom` (keyed on `quot_bodies`, not the placeholder type) now reuses
+    // the same id across every iteration with no phi and no staging. Calling
+    // it after the loop (not just dropping it) pins that its identity is
+    // still the original literal, not a corrupted one.
+    let src = format!(
+        "{}: main ( -- )\n\
+         \x20 ~[ 10 + ] 3 ~[ drop ] times\n\
+         \x20 5 swap call . ;\n",
+        combinators_import("c | times |")
+    );
+    let (stdout, code) = run_src("10b_times_row_quotation", &src);
+    assert_eq!(stdout, "15\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn while_carries_an_untouched_quotation_through_the_row() {
+    // The same shape over `while` (also `lower_self_tail_combinator`, R10):
+    // the counting condition never touches the row-riding quotation below it.
+    let src = format!(
+        "{}: main ( -- )\n\
+         \x20 ~[ 10 + ] 0 ~[ dup 3 < ~[ 1 + true ] ~[ false ] if ] c::while . drop ;\n",
+        combinators_import("c")
+    );
+    let (stdout, code) = run_src("10b_while_row_quotation", &src);
+    assert_eq!(stdout, "3\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
+fn times_nested_inside_times_still_carries_a_row_quotation() {
+    // Nested self-tail loops save/restore loop state (`save_loop_state`); the
+    // phantom-passthrough fix must survive composition, not just a single
+    // loop level.
+    let src = format!(
+        "{}: main ( -- )\n\
+         \x20 ~[ 100 + ] 2 ~[ drop 3 ~[ drop ] times ] times\n\
+         \x20 7 swap call . ;\n",
+        combinators_import("c | times |")
+    );
+    let (stdout, code) = run_src("10b_times_nested_row_quotation", &src);
+    assert_eq!(stdout, "107\n");
+    assert_eq!(code, 0);
+}
+
+#[test]
 fn times_nested_inside_each_map_fold_and_filter_runs() {
     // The novel risk beyond 10a: a leaf combinator's call site is now three
     // splices deep (leaf -> `times` -> `times-helper`), and a `times` written
