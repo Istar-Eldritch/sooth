@@ -136,10 +136,12 @@ mode         := "r" | "w"
   The lexer has no comma token (this is the first comma anywhere in Sooth), so
   a trailing comma lexes glued to the preceding word (`w,`); the parser strips
   it with `strip_suffix(',')` and separately accepts a free-standing `,` for
-  the case where whitespace intervenes. A missing comma is not a parse error:
-  it ends the clause early and the dropped entry surfaces later as an unknown
-  word in the body. `global:` itself still needs no punctuation to mark its
-  own start or end — that boundary is the keyword, the same way `--` already
+  the case where whitespace intervenes. A missing comma **is** a located parse
+  error: leaving the clause to end early would report the dropped entry as an
+  unknown word in the body, a silent truncation of the exact kind this language
+  exists to eliminate, so on ending the clause the parser looks ahead one entry
+  and rejects a following NAME + `r`/`w` pair. `global:` itself still needs no
+  punctuation to mark its own start or end — that boundary is the keyword, the same way `--` already
   separates inputs from outputs with no extra token either side of it.
 - **Explicitly rejected:** a general "compiler annotation" mechanism with
   `global:` as its first instance. One consumer with a checked, structured
@@ -495,6 +497,13 @@ Parser (`src/parser.rs` `#[cfg(test)]`):
 
 - `parse_static_scalar_with_initializer_ok` — `static: LIMIT i64 = 10 ;`
   parses to a `StaticDecl` with `StaticInit::Int(10)`.
+- `parse_static_decl_span_points_at_the_name` — `StaticDecl.span` is the
+  name's, not the `static:` keyword's, matching `WordDef.span` so Phase 3's
+  duplicate-declaration error points at the name it names.
+- The existing `reserved_reference_name_is_error_at_every_declaration_site` and
+  `redefining_an_access_word_is_error` gain the `static:` site, covering the
+  two `NAME` rejections this declaration inherits (`reject_reserved_name`,
+  `ACCESS_WORDS`).
 - `parse_static_zero_elided_initializer_ok` — `static: COUNT i64 ;` parses with
   `StaticInit::Zero`.
 - `parse_static_bool_elided_zero_ok` — `static: FLAG bool ;` parses with
@@ -506,13 +515,20 @@ Parser (`src/parser.rs` `#[cfg(test)]`):
   `static: TAG str = "x" ;` parse with `StaticInit::Bool(true)` /
   `StaticInit::Str("x")`.
 - `parse_static_struct_type_is_error` — `static: U Uart ;` is a located error
-  naming the type. The rejection is **allow-list-based**: the parser accepts
-  only the fixed scalar keyword set (`i64`/`u32`/`bool`/`str`) with no type
-  table at parse time, so a genuine struct type and a mistyped/forward-referenced
-  user type produce the *same* "not a scalar" error (D1; OQ1 deferral surfaces at
-  the declaration).
+  naming **both** the static and the type (the offending name is the static's;
+  the type is what disqualified it). The rejection is **allow-list-based**: the
+  parser accepts only the fixed scalar keyword set (`i64`/`u32`/`bool`/`str`)
+  with no type table at parse time, so a genuine struct type and a
+  mistyped/forward-referenced user type produce the *same* "non-scalar type"
+  error (D1; OQ1 deferral surfaces at the declaration).
 - `parse_global_clause_records_entries` — `( -- i64 ) global: COUNT w, LIMIT r`
   parses to two `GlobalEntry` with the right modes.
+- `parse_global_clause_accepts_a_free_standing_comma` — the same clause written
+  `COUNT w , LIMIT r` (separator spaced off its mode token) yields the same
+  entries as the glued `w,` form.
+- `parse_global_clause_missing_comma_is_error` — `global: COUNT w LIMIT r` is a
+  located parse error naming `LIMIT`, not a clause that silently ends after the
+  first entry.
 - `parse_global_clause_empty_is_error` — a bare `global:` with no entry is a
   located parse error.
 - `parse_effect_without_global_clause_unchanged` — `( i64 -- i64 )` parses with

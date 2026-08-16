@@ -161,9 +161,9 @@ fn shadowed_access_word_error(name: &str, span: Span) -> String {
 /// struct-detection-based (see `Parser::parse_static_decl`): a genuine struct
 /// type and a mistyped or forward-referenced user type are indistinguishable
 /// here and get the same message.
-fn static_scalar_type_error(name: &str, span: Span) -> String {
+fn static_scalar_type_error(name: &str, ty_name: &str, span: Span) -> String {
     format!(
-        "error: static `{name}` is not a scalar type (only `i64`, `u32`, `bool`, and `str` are supported this slice; struct-typed statics are deferred) at line {}, col {}",
+        "error: static `{name}` has a non-scalar type `{ty_name}` (only `i64`, `u32`, `bool`, and `str` are supported this slice; struct-typed statics are deferred) at line {}, col {}",
         span.line, span.col
     )
 }
@@ -178,6 +178,17 @@ fn static_u32_init_range_error(n: i64, span: Span) -> String {
         span.line,
         span.col,
         u32::MAX
+    )
+}
+
+/// D2: two `global:` entries written without the separating `,`. Without this
+/// the clause just ends at the first entry and the rest becomes body terms,
+/// reported far away as an unknown word -- exactly the silent truncation this
+/// language exists to turn into a sharp error.
+fn missing_global_comma_error(name: &str, span: Span) -> String {
+    format!(
+        "parse error: missing `,` between global-set entries, before `{name}` at line {}, col {}",
+        span.line, span.col
     )
 }
 
@@ -1558,7 +1569,7 @@ impl<'t> Parser<'t> {
     /// declared shape) but with a type instead of an effect and an optional
     /// `= literal` initialiser instead of a mandatory C symbol.
     fn parse_static_decl(&mut self) -> Result<StaticDecl, String> {
-        let span = self.expect_word("static:")?;
+        self.expect_word("static:")?;
         let (name, name_span) = self.expect_word_any_spanned()?;
         reject_reserved_name("static", &name, name_span)?;
         if ACCESS_WORDS.contains(&name.as_str()) {
@@ -1576,7 +1587,7 @@ impl<'t> Parser<'t> {
             "u32" => Type::U32,
             "bool" => Type::BOOL,
             "str" => Type::Str,
-            _ => return Err(static_scalar_type_error(&ty_name, ty_span)),
+            _ => return Err(static_scalar_type_error(&name, &ty_name, ty_span)),
         };
         let init = if matches!(self.peek(), Some((Token::Word(w), _)) if w == "=") {
             self.pos += 1;
@@ -1590,7 +1601,9 @@ impl<'t> Parser<'t> {
             ty,
             init,
             module: self.module,
-            span,
+            // The name, not the `static:` keyword, matching `WordDef.span`:
+            // Phase 3's duplicate-declaration error points at the name it names.
+            span: name_span,
         })
     }
 
@@ -1662,6 +1675,17 @@ impl<'t> Parser<'t> {
             if matches!(self.peek(), Some((Token::Word(w), _)) if w == ",") {
                 self.pos += 1;
                 continue;
+            }
+            // A body opening `NAME r`/`NAME w` is a dropped separator far more
+            // often than it is two real terms, and letting it through defers
+            // the report to an unknown-word error on the *next* line.
+            if let (Some((Token::Word(name), span)), Some((Token::Word(mode), _))) =
+                (self.tokens.get(self.pos), self.tokens.get(self.pos + 1))
+            {
+                let mode = mode.strip_suffix(',').unwrap_or(mode);
+                if mode == "r" || mode == "w" {
+                    return Err(missing_global_comma_error(name, *span));
+                }
             }
             break;
         }
@@ -5352,6 +5376,7 @@ mod tests {
             "type: Shape | &Odd ;",
             ": w ( i64 -- ) | &a | ;",
             ": w ( &x : i64 -- ) drop ;",
+            "static: &X i64 ;",
         ] {
             let err = parse_src(src).unwrap_err();
             assert!(
@@ -5364,11 +5389,16 @@ mod tests {
     #[test]
     fn redefining_an_access_word_is_error() {
         for name in ["@", "!", "+!"] {
-            let err = parse_src(&format!(": {name} ( i64 -- ) . ;")).unwrap_err();
-            assert!(
-                err.contains("is a builtin access word"),
-                "unexpected message for `{name}`: {err}"
-            );
+            for src in [
+                format!(": {name} ( i64 -- ) . ;"),
+                format!("static: {name} i64 ;"),
+            ] {
+                let err = parse_src(&src).unwrap_err();
+                assert!(
+                    err.contains("is a builtin access word"),
+                    "unexpected message for `{src}`: {err}"
+                );
+            }
         }
     }
 
@@ -5488,13 +5518,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_static_decl_span_points_at_the_name() {
+        let module = parse_src("  static: COUNT i64 ;").unwrap();
+        let span = module.statics[0].span;
+        assert_eq!((span.line, span.col), (1, 11));
+    }
+
+    #[test]
     fn parse_static_struct_type_is_error() {
         // OQ1/D1: allow-list-based, not struct-detection-based -- a genuine
         // struct type and a mistyped/forward-referenced user type produce the
-        // same "not a scalar" error.
+        // same "non-scalar type" error.
         let err = parse_src("type: Uart n i64 ;\nstatic: U Uart ;").unwrap_err();
-        assert!(err.contains("not a scalar"), "unexpected message: {err}");
-        assert!(err.contains("Uart"), "names the type: {err}");
+        assert!(err.contains("non-scalar"), "unexpected message: {err}");
+        assert!(err.contains("`Uart`"), "names the type: {err}");
+        assert!(err.contains("static `U`"), "names the static: {err}");
     }
 
     #[test]
@@ -5514,6 +5552,28 @@ mod tests {
         assert_eq!(entries[0].mode, GlobalMode::W);
         assert_eq!(entries[1].name, "LIMIT");
         assert_eq!(entries[1].mode, GlobalMode::R);
+    }
+
+    #[test]
+    fn parse_global_clause_accepts_a_free_standing_comma() {
+        // The separator may be spaced off its mode token (`w ,`) as well as
+        // glued to it (`w,`); both reach the same entry list.
+        let module = parse_src(": tick ( -- i64 ) global: COUNT w , LIMIT r 0 ;").unwrap();
+        let entries = module.words[0].declared_globals.as_ref().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "COUNT");
+        assert_eq!(entries[0].mode, GlobalMode::W);
+        assert_eq!(entries[1].name, "LIMIT");
+        assert_eq!(entries[1].mode, GlobalMode::R);
+    }
+
+    #[test]
+    fn parse_global_clause_missing_comma_is_error() {
+        // Without the guard the clause silently ends at `COUNT w` and
+        // `LIMIT r` becomes body terms, reported as an unknown word.
+        let err = parse_src(": tick ( -- i64 ) global: COUNT w LIMIT r 0 ;").unwrap_err();
+        assert!(err.contains("missing `,`"), "unexpected message: {err}");
+        assert!(err.contains("LIMIT"), "points at the second entry: {err}");
     }
 
     #[test]
