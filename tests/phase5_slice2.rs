@@ -23,6 +23,30 @@ fn build_and_run(name: &str, src: &str) -> (String, i32) {
     )
 }
 
+/// Builds and runs a multi-file source tree rooted at `entry`, one of `files`
+/// (each written into a shared temp directory so relative `import:` paths
+/// between them resolve).
+fn build_and_run_dir(name: &str, files: &[(&str, &str)], entry: &str) -> (String, i32) {
+    let dir = std::env::temp_dir().join(format!("sooth-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("creating temp dir should succeed");
+    for (fname, src) in files {
+        std::fs::write(dir.join(fname), src).expect("writing temp source should succeed");
+    }
+    let binary = sooth::driver::build(&dir.join(entry)).expect("build should succeed");
+    let output = std::process::Command::new(&binary)
+        .env_remove(sooth::ir::TRACE_ALLOC_ENV)
+        .output()
+        .expect("binary should run");
+    std::fs::remove_dir_all(&dir).ok();
+    (
+        String::from_utf8(output.stdout).expect("stdout should be utf8"),
+        output
+            .status
+            .code()
+            .expect("process should exit normally, not die by signal"),
+    )
+}
+
 /// The 2-variable case: a fallible word returns `Result[i64 i64]` (attributeless
 /// `Ok 'T` / `Err 'E`, matching `lib/result.sth` exactly) and a clause
 /// eliminator handles both arms.
@@ -45,18 +69,24 @@ fn result_constructs_monomorphizes_and_eliminates_both_arms() {
 }
 
 /// The 1-variable case: `Option[i64]` constructed, monomorphized, and
-/// eliminated through both the `Some` and `None` arms.
+/// eliminated through both the `Some` and `None` arms, imported from the
+/// real, committed `lib/option.sth` rather than a copy declared inline (the
+/// file is otherwise never imported by any test and its `export:` line goes
+/// unwitnessed).
 #[test]
 fn option_constructs_monomorphizes_and_eliminates_both_arms() {
     let (stdout, code) = build_and_run(
         "slice2-option-i64",
-        "type: Option 'T | None | Some 'T ;\n\
-         : unwrap-or ( i64 Option[i64] -- i64 )\n\
-         | Some |v| drop v\n\
-         | None ;\n\
-         : main ( -- )\n\
-           9 5 Some unwrap-or .\n\
-           9 None unwrap-or . ;\n",
+        &format!(
+            "import: o \"{}/lib/option.sth\" ;\n\
+             : unwrap-or ( i64 o::Option[i64] -- i64 )\n\
+             | Some |v| drop v\n\
+             | None ;\n\
+             : main ( -- )\n\
+               9 5 Some unwrap-or .\n\
+               9 None unwrap-or . ;\n",
+            env!("CARGO_MANIFEST_DIR")
+        ),
     );
     assert_eq!(stdout, "5\n9\n");
     assert_eq!(code, 0);
@@ -87,8 +117,7 @@ fn option_instantiates_over_a_pointer_type() {
 /// The cross-module witness of Phase 2: a program `import:`s `Result` from
 /// the real, committed `lib/result.sth` by ordinary relative (here,
 /// absolute-for-temp-dir) path, applies it qualified, and monomorphizes
-/// correctly -- in both discovery orders, since the whole-closure header
-/// pre-pass (OQ1) is what makes the applier-first order work at all.
+/// correctly.
 fn result_import(qualifier: &str) -> String {
     format!(
         "import: {qualifier} \"{}/lib/result.sth\" ;\n",
@@ -113,4 +142,50 @@ fn result_imports_and_applies_qualified_across_a_module() {
     );
     assert_eq!(stdout, "12\n-3\n");
     assert_eq!(code, 0);
+}
+
+/// The genuine two-discovery-order witness (OQ1): `use.sth` applies
+/// `r::Result[i64 i64]` qualified against the real `lib/result.sth`, and the
+/// entry file imports both `use.sth` and `lib/result.sth` directly, in each
+/// order in turn, so the closure reaches the applier module either before or
+/// after the declaring module has registered its header. The applier-first
+/// arrangement is the one the whole-closure header pre-pass exists for:
+/// without it, `use.sth` body-parses before `lib/result.sth`'s header is
+/// registered, and a legal program fails with `unknown type` on nothing but
+/// import order.
+#[test]
+fn result_cross_module_application_resolves_in_either_discovery_order() {
+    let use_src = format!(
+        "{}\
+         : to-int ( r::Result[i64 i64] -- i64 )\n\
+         | Ok  |v| v\n\
+         | Err |e| e ;\n\
+         : show-ok ( i64 -- ) Ok to-int . ;\n\
+         : show-err ( i64 -- ) Err to-int . ;\n\
+         export: show-ok ;\n\
+         export: show-err ;\n",
+        result_import("r")
+    );
+
+    let applier_first = format!(
+        "import: u \"use.sth\" ;\n{}: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
+        result_import("r")
+    );
+    let owner_first = format!(
+        "{}import: u \"use.sth\" ;\n: main ( -- ) 12 u::show-ok -3 u::show-err ;\n",
+        result_import("r")
+    );
+
+    for (tag, main_src) in [
+        ("slice2-result-xmod-applier-first", applier_first),
+        ("slice2-result-xmod-owner-first", owner_first),
+    ] {
+        let (stdout, code) = build_and_run_dir(
+            tag,
+            &[("use.sth", &use_src), ("main.sth", &main_src)],
+            "main.sth",
+        );
+        assert_eq!(stdout, "12\n-3\n", "{tag}");
+        assert_eq!(code, 0, "{tag}");
+    }
 }
