@@ -257,6 +257,72 @@ pub fn check_exported_signatures(module: &Module) -> Result<(), String> {
     Ok(())
 }
 
+/// Phase 7 slice 2: a `static:` declaration's own name rules, checked on the
+/// raw, pre-mangle module beside `check_exported_signatures`. A static shares
+/// one name category with a module's words and types -- `&NAME` resolves
+/// against all three (`resolve::NameTables`) -- so a repeat declaration, or a
+/// name a word/extern/type of the same module already holds, is rejected here
+/// rather than left to shadow silently at the borrow site.
+pub fn check_static_decls(module: &Module) -> Result<(), String> {
+    let mut seen: HashMap<(u32, &str), Span> = HashMap::new();
+    for decl in &module.statics {
+        if let Some(first) = seen.insert((decl.module, decl.name.as_str()), decl.span) {
+            return Err(duplicate_static_error(decl, first));
+        }
+    }
+    for decl in &module.statics {
+        if let Some(kind) = colliding_name_kind(decl, module) {
+            return Err(static_name_collision_error(decl, kind));
+        }
+    }
+    Ok(())
+}
+
+/// What else in the static's own module already holds its name, if anything.
+fn colliding_name_kind(decl: &StaticDecl, module: &Module) -> Option<&'static str> {
+    let owns = |m: u32| m == decl.module;
+    if module
+        .words
+        .iter()
+        .any(|w| owns(w.module) && w.name == decl.name)
+    {
+        return Some("word");
+    }
+    if module
+        .externs
+        .iter()
+        .any(|x| owns(x.module) && x.name == decl.name)
+    {
+        return Some("extern");
+    }
+    if module
+        .structs
+        .iter()
+        .any(|s| owns(s.module) && s.name_static == decl.name)
+        || module
+            .enums
+            .iter()
+            .any(|e| owns(e.module) && e.name_static == decl.name)
+    {
+        return Some("type");
+    }
+    None
+}
+
+fn duplicate_static_error(decl: &StaticDecl, first: Span) -> String {
+    format!(
+        "error: duplicate static `{}` (line {}, col {}); first declared at line {}, col {}",
+        decl.name, decl.span.line, decl.span.col, first.line, first.col
+    )
+}
+
+fn static_name_collision_error(decl: &StaticDecl, kind: &str) -> String {
+    format!(
+        "error: static `{}` (line {}, col {}) is already the name of a {} in this module\n  a `&{}` borrow would have two things to resolve to: rename one of them",
+        decl.name, decl.span.line, decl.span.col, kind, decl.name
+    )
+}
+
 /// Every concrete `Type` a word's declared effect mentions: its ordinary
 /// input/output slots, plus, for a polymorphic word, every `Concrete` leaf
 /// its `PolySig` mentions (a type variable itself names no type, so `Var`

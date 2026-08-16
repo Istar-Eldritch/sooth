@@ -330,6 +330,11 @@ pub(crate) fn assemble_module(closure: &Closure, always_mangle: bool) -> Result<
     // R20/R21: validate selective imports (each name exported by its source,
     // no collision) on the raw, pre-mangle module.
     check::check_selective_imports(&module, &selective_by_module)?;
+    // Phase 7 slice 2 (R6): the `static:` declarations and then the per-word
+    // global sets, both pre-mangle for the same reason -- a static's name, a
+    // word's name and a module's `export:` list all still agree here.
+    check::check_static_decls(&module)?;
+    check::check_globals(&module)?;
     resolve::resolve_modules(&mut module, always_mangle)?;
     Ok(module)
 }

@@ -25,6 +25,7 @@ mod combinators;
 mod declarations;
 mod drop_graph;
 mod engine;
+mod globals;
 mod operators;
 mod poly;
 mod terms;
@@ -49,14 +50,15 @@ pub(crate) use self::combinators::{
 pub use self::declarations::check_structs;
 use self::declarations::*;
 pub(crate) use self::declarations::{
-    check_exported_signatures, check_selective_imports, check_types, enum_generated_sigs,
-    selective_not_exported_error, struct_generated_sigs, SelectiveName,
+    check_exported_signatures, check_selective_imports, check_static_decls, check_types,
+    enum_generated_sigs, selective_not_exported_error, struct_generated_sigs, SelectiveName,
 };
 use self::drop_graph::*;
 pub(crate) use self::drop_graph::{
     check_drop_overload_reachability, has_self_tail_call, terms_tail_call_self,
 };
 use self::engine::*;
+pub(crate) use self::globals::check_globals;
 use self::operators::*;
 use self::poly::*;
 pub(crate) use self::poly::{check_poly_body, check_poly_combinator_repl, poly_type_str};
