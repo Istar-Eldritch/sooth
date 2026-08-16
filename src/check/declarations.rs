@@ -547,11 +547,16 @@ fn check_no_stored_references(
     }
     for decl in enums {
         for variant in &decl.variants {
-            for (field, ty) in &variant.fields {
+            for (idx, (field, ty)) in variant.fields.iter().enumerate() {
                 if contains_reference(*ty, structs, enums, arrays) {
+                    let field_desc = if field == crate::parser::POSITIONAL_FIELD_NAME {
+                        format!("payload field {idx}")
+                    } else {
+                        format!("payload field `{field}`")
+                    };
                     return Err(stored_reference_error(
                         &format!(
-                            "payload field `{field}` of variant `{}` of type `{}`",
+                            "{field_desc} of variant `{}` of type `{}`",
                             variant.name, decl.name
                         ),
                         *ty,

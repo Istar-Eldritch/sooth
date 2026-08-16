@@ -168,10 +168,13 @@ pub fn reject_reserved_name(kind: &str, name: &str, span: Span) -> Result<(), St
 }
 
 /// Phase 5 slice 1: a `'`-prefixed word inside a `type:` body is a type
-/// variable, never a field name. Rejected at every field-name position so the
-/// rule holds uniformly -- a generic header consumes its `'`-prefixed words
-/// before any field is read, which would otherwise leave `'x` legal as a field
-/// name everywhere except directly after the type name.
+/// variable, never a field name. Rejected at every named-field-name position
+/// so the rule holds uniformly -- a generic header consumes its `'`-prefixed
+/// words before any field is read, which would otherwise leave `'x` legal as
+/// a field name everywhere except directly after the type name. One caller
+/// (`parse_generic_variant_fields`, Phase 5 slice 2) never actually needs
+/// this check: its `'`-prefixed arm already diverts every such token to the
+/// attributeless-field path before the named-field arm is reached.
 fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
     if name.starts_with('\'') {
         return Err(format!(
@@ -186,7 +189,9 @@ fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
 /// variant field. It contains a space, which the lexer never produces inside
 /// a single `Word` token (words are whitespace-delimited), so this string can
 /// never be typed, matched as a field name, or collide with a real one.
-const POSITIONAL_FIELD_NAME: &str = "$positional field$";
+/// `pub(crate)` so `check_no_stored_references` can recognize it and report
+/// the field's position instead of this literal string.
+pub(crate) const POSITIONAL_FIELD_NAME: &str = "$positional field$";
 
 /// R12: the `extern:` symbol string is emitted verbatim as `call $<symbol>`
 /// once lowered, so it must already be a valid C identifier here at the
@@ -2643,8 +2648,11 @@ impl<'t> Parser<'t> {
                     fields.push((POSITIONAL_FIELD_NAME.to_string(), ty));
                 }
                 Some(_) => {
-                    let (field_name, field_span) = self.expect_word_any_spanned()?;
-                    reject_ty_var_field_name(&field_name, field_span)?;
+                    // The `'`-prefixed arm above already consumes every
+                    // type-variable token, so `field_name` here can never
+                    // start with `'`; unlike the other three field-name
+                    // sites, `reject_ty_var_field_name` would be dead code.
+                    let field_name = self.expect_word_any()?;
                     if let Some((tok, span)) = self.peek() {
                         if matches!(tok, Token::Semicolon | Token::Pipe) {
                             return Err(generic_odd_field_count_error(
