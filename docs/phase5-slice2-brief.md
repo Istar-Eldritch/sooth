@@ -79,15 +79,14 @@ unrelated `/tmp` exec-race flake in some `phase0` goldens; serial is always gree
    `discover_closure` (`src/driver.rs:78`) resolves every `import:` path by joining it
    to the *importing file's own directory* (`dir.join(&imp.path)`) and canonicalizing —
    there is no compiler-relative or installed-library search path (that's Phase 6's
-   dependency-management territory, per ROADMAP). A user program anywhere on disk
-   cannot write a single stable `import: opt | Option | "core.sth" ;` today; it would
-   need a path relative to wherever the compiler's `lib/` directory happens to sit
-   relative to that program, which is not portable. This is a real open question this
-   slice must settle, not a detail: either the driver gains a small special-cased
-   resolution rule for a `lib/`-shipped file (a new, narrow mechanism), or Option's
-   "importable from core" claim is satisfied only for programs inside this repository
-   (examples, tests) until Phase 6's package system exists, and that limitation should
-   be stated plainly rather than implied.
+   dependency-management territory, per ROADMAP). **Settled (2026-08-16): no special
+   resolution rule.** `Result`/`Option` are imported exactly like any other cross-module
+   type, with an ordinary relative `import:` path — the same mechanism every Slice-1
+   cross-module test already uses. "Importable from `core`" is satisfied for a program
+   that can write a relative path to the file (this repository's examples/tests, or any
+   consumer that vendors/locates the file itself); the general "any program anywhere
+   resolves this trivially" case stays Phase 6's package-management problem, not this
+   slice's, and is not silently implied to be solved here.
 
 5. **Multi-variable and single-variable instantiation both already work end-to-end
    through elimination**, not merely construction. Beyond the `Result 'T 'E` probe
@@ -167,16 +166,13 @@ unrelated `/tmp` exec-race flake in some `phase0` goldens; serial is always gree
   real design fork, not a detail, and should be settled explicitly rather than left to
   the implementer.
 
-- **OQ3 — does `Result`/`Option` live in `lib/core.sth` itself, or a new file?**
-  `lib/core.sth` currently holds only `if`/`unless`/comparisons — words with no
-  `type:` declarations at all. Since recon 3 shows the prelude path can't carry a type
-  regardless of which file it's in, there's no automatic-visibility argument for
-  putting `Result`/`Option` in `core.sth` specifically; a dedicated file may be
-  clearer file-organization (mirrors how a real stdlib would eventually split
-  `Vec`/`Map`/`Option` into their own modules in Phase 6) at the cost of one more file
-  to resolve per OQ2. Recommend a narrow reading: whichever the spec picks, name it
-  explicitly and treat it as a decision, not an implementation detail discovered mid-
-  phase.
+- **OQ3 — settled (2026-08-16): `Result` and `Option` each live in their own dedicated
+  file, not `lib/core.sth`.** `lib/result.sth` and `lib/option.sth` (exact names for
+  the spec to confirm), each holding just that type's `type:` declaration. Consistent
+  with recon 3 (the prelude path can't carry a type regardless of which file it's in,
+  so there's no automatic-visibility argument for bundling into `core.sth`) and with
+  how a real stdlib would eventually split `Vec`/`Map`/`Option` into their own modules
+  in Phase 6 anyway.
 
 - **OQ4 — attributeless variant syntax specifics.** Recon 7 folds tuple-style variants
   in; the spec needs to settle the concrete grammar: is a field with no name simply
@@ -194,8 +190,9 @@ unrelated `/tmp` exec-race flake in some `phase0` goldens; serial is always gree
 - Rebuilding the allocator's OOM trap to return `Option`/`Result`: a future consumer
   (Phase 3 Slice 2's allocator), not a consequence of this slice existing.
 - A general package/dependency-management system for resolving library imports outside
-  this repository: Phase 6, per ROADMAP's own `docs/dependency-management.md`
-  reference. OQ2's option (b), if chosen, is a narrow special case, not this system.
+  this repository, or any special-cased `lib/`-relative import resolution rule: Phase
+  6, per ROADMAP's own `docs/dependency-management.md` reference (decision, OQ2). This
+  slice ships `Result`/`Option` reachable by ordinary relative-path `import:` only.
 - Bounds, recursion, nested generics, or any other Slice 1 out-of-scope item: still out
   of scope; `Result`/`Option` don't need any of them.
 
@@ -206,10 +203,11 @@ No gate from any open Phase 4 item. Builds directly on Slice 1
 to) and the elimination fix (`3df4846`). Touches `src/parser.rs` (qualified generic
 application resolution, the whole-closure generic-header pre-pass, attributeless
 variant parsing if OQ4 lands as proposed), `src/driver.rs` (the pre-pass call site,
-alongside the existing concrete-type one), and a new or existing `lib/` file for the
-`Result`/`Option` declarations themselves. No changes expected to
-`src/check/word_entry.rs` (elimination) or `src/ast.rs`'s instantiation machinery
-(construction) — both are recon-confirmed already correct for this slice's shapes.
+alongside the existing concrete-type one), and two new `lib/` files
+(`lib/result.sth`, `lib/option.sth`, per OQ3) for the `Result`/`Option` declarations
+themselves. No changes expected to `src/check/word_entry.rs` (elimination) or
+`src/ast.rs`'s instantiation machinery (construction) — both are recon-confirmed
+already correct for this slice's shapes.
 
 ## Exit
 
@@ -226,12 +224,11 @@ continue to pass unchanged.
 
 ## Ready to spec?
 
-**Yes, with four open questions handed to the spec.** OQ2 and OQ3 are the most
-consequential — they decide what "importable from `core`" actually means operationally
-and where the file lives — and should be settled before implementation starts, not
-discovered mid-phase, since they affect where every other decision in the spec points.
-OQ1 and OQ4 are contained, mechanical questions with an obvious narrow answer each.
-Recon's main finding is that this slice is smaller than ROADMAP's phrasing implies:
-branch-on-result codegen is already delivered, and the real unbuilt piece is
+**Yes. OQ2 and OQ3 are now settled** (plain relative-path import, no special
+resolution rule; `Result`/`Option` each in their own dedicated `lib/` file), leaving
+OQ1 (pre-pass shape) and OQ4 (attributeless variant grammar) as the two open questions
+for the spec — both contained, mechanical questions with an obvious narrow answer
+each. Recon's main finding is that this slice is smaller than ROADMAP's phrasing
+implies: branch-on-result codegen is already delivered, and the real unbuilt piece is
 cross-module generic import, which existing concrete-type machinery already models
 closely enough to copy.
