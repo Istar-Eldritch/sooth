@@ -1604,6 +1604,14 @@ fn check_literal_against_annotation(
     ))
 }
 
+/// The shorter of two slot vectors matches the other's tail. Stacks grow
+/// rightwards, so the tail is the end both sides agree on when one of them
+/// extends past a row boundary the other doesn't name.
+fn tails_agree(a: &[Type], b: &[Type]) -> bool {
+    let n = a.len().min(b.len());
+    a[a.len() - n..] == b[b.len() - n..]
+}
+
 /// R4/R5: reconcile an annotated literal against the quotation parameter it
 /// fills. By this point `eff` is already grounded -- `PolyCtx`'s substitution
 /// has replaced each declared type variable with its concrete ground -- so the
@@ -1614,14 +1622,29 @@ fn check_literal_against_annotation(
 /// parameter) cannot make: a polymorphic body absorbs the annotation's claim
 /// and the parameter's ground alike without contradiction, so only holding the
 /// two declarations against each other sees the conflict.
+///
+/// A `shape_changing` parameter (`~[ ..i -- ..o ]`, `..i != ..o`) declares only
+/// the fixed slots sitting above the row; a literal filling it may legitimately
+/// reach further into the row, or leave more behind than the declaration names
+/// -- that is the shape change. Only the overlapping tails are determined, so
+/// only those are compared: the declared inputs sit directly under the
+/// literal's consumption point and the declared outputs directly under its
+/// exit, which is fixed point enough to catch a flat contradiction.
 fn reconcile_annotation_with_parameter(
     annot: &AnnotEffect,
     eff: &QuotEffect,
     is_inline: bool,
+    shape_changing: bool,
     ctx: &Ctx,
     word: &str,
 ) -> Result<(), String> {
-    if annot.inputs == eff.inputs && annot.outputs == eff.outputs {
+    let agrees = match shape_changing {
+        true => {
+            tails_agree(&annot.inputs, &eff.inputs) && tails_agree(&annot.outputs, &eff.outputs)
+        }
+        false => annot.inputs == eff.inputs && annot.outputs == eff.outputs,
+    };
+    if agrees {
         return Ok(());
     }
     let declared = annotated_effect_type(is_inline, eff.inputs.clone(), eff.outputs.clone());
@@ -1697,13 +1720,9 @@ fn check_literal_against_declared_effect(
         });
     }
     // Phase 6 slice 1 (R4/R5): an annotated literal must also agree with the
-    // parameter it fills. Skipped for a shape-changing declared parameter:
-    // its rows have no fixed point (R-P2-4), so there is nothing to hold the
-    // annotation's own fixed slots against.
-    if !shape_changing {
-        if let Some(annot) = prov.quotations[id.0].annot.clone() {
-            reconcile_annotation_with_parameter(&annot, eff, is_inline, ctx, word)?;
-        }
+    // parameter it fills.
+    if let Some(annot) = prov.quotations[id.0].annot.clone() {
+        reconcile_annotation_with_parameter(&annot, eff, is_inline, shape_changing, ctx, word)?;
     }
     let outer_locals: HashSet<String> = scope.bound.iter().map(|b| b.name.clone()).collect();
     let moves_before = scope.moves.states.clone();
@@ -2632,6 +2651,36 @@ mod tests {
     fn check_annotation_agrees_with_poly_parameter_ok() {
         let src = format!("{ON_DEF}: w ( -- ) true ~[ ( bool -- bool ) dup drop ] on drop ;\n");
         check_src(&src).unwrap();
+    }
+
+    /// Review fix (F1, round 2): R4 was skipped outright for a shape-changing
+    /// declared parameter, so an annotation flatly contradicting it went
+    /// unchecked -- R3 seeds from the annotation, R11's exit check only holds
+    /// the declared *suffix*, and the identity body absorbs both. The declared
+    /// `i64` and the annotated `bool` are the same fixed slot, above the row,
+    /// so nothing about the shape change makes them incomparable.
+    #[test]
+    fn check_annotation_disagrees_with_shape_changing_parameter_is_error() {
+        let src = ": sc inline ( ..i i64 ~[ ..i i64 -- ..o i64 ] -- ..o i64 ) | f | f call ;\n\
+             : w ( -- ) 5 ~[ ( bool -- bool ) dup drop ] sc . ;\n";
+        let err = check_src(src).unwrap_err();
+        assert_eq!(
+            err,
+            "error: the quotation passed to `sc` is annotated `~[ bool -- bool ]` but `sc` declares it `~[ i64 -- i64 ]` in `w` (line 2)"
+        );
+    }
+
+    /// The other half of that fix: comparing the two effects outright (rather
+    /// than their determined tails) would reject both of these correct calls.
+    /// A shape-changing parameter names only the slots above the row, so a
+    /// literal may reach past them into the row (`( i64 -- )` against a
+    /// declared `~[ ..i -- ..o ]`) or leave more behind than the declaration
+    /// names (`( -- i64 )`) -- that is the shape change, not a disagreement.
+    #[test]
+    fn check_annotation_extending_shape_changing_parameter_row_ok() {
+        let sc = ": sc inline ( ..i ~[ ..i -- ..o ] -- ..o ) | f | f call ;\n";
+        check_src(&format!("{sc}: w ( -- ) ~[ ( -- i64 ) 5 ] sc . ;\n")).unwrap();
+        check_src(&format!("{sc}: w ( -- ) 7 ~[ ( i64 -- ) drop ] sc ;\n")).unwrap();
     }
 
     /// R2: nothing a freestanding literal can see instantiates `'T`. Asserted

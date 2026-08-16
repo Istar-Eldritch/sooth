@@ -258,6 +258,21 @@ declared type variable with its concrete ground in `eff.inputs` / `eff.outputs`.
 > conflict. A `'T`-spelled annotation at a poly-parameter position is out of
 > scope for this slice (R2's amendment): it is rejected at the literal before
 > any parameter context exists, never reconciled here.
+>
+> **Amended after implementation review (round 2).** R4 as first built was
+> skipped entirely for a *shape-changing* declared parameter
+> (`~[ ..i -- ..o ]`, `..i != ..o`), on the reasoning that such a parameter has
+> no fixed point. That left a hole with the same shape R4 exists to close: a
+> fully concrete annotation flatly contradicting the parameter's fixed slots
+> (`~[ ( bool -- bool ) dup drop ]` against a declared `~[ ..i i64 -- ..o i64 ]`)
+> passed every check, since R3 seeds from the annotation, R11 holds only the
+> declared *suffix*, and an identity body absorbs both. **Implemented
+> decision:** R4 also runs for a shape-changing parameter, comparing the
+> annotation and the declaration where both are determined -- their overlapping
+> tails. Full vector equality would be wrong there: the parameter names only
+> the slots above the row, so a literal may legitimately reach past them into
+> the row (`( i64 -- )` at a declared `~[ ..i -- ..o ]`) or leave more behind
+> than the declaration names (`( -- i64 )`), and both of those check today.
 
 A disagreement is R11's error (`literal_effect_mismatch_error`,
 `src/check.rs:1661`), naming both the grounded parameter effect and the
@@ -333,6 +348,15 @@ form is accepted:
   known, so R4 never sees one to bind; the positional Var-binding bridge R4
   originally described is unbuilt, and needs the annotation's `Var` ids to
   survive past intern time. Deferred to a later slice.
+- **The annotation is not checked against the stack at a direct `call`**
+  (observed in implementation review, round 2). R3 holds the annotation against
+  the literal's own body and R4 against a *declared* quotation parameter, but
+  `[ ( bool -- bool ) dup drop ] call` on an `i64` checks and runs: the
+  annotation is never held against the actual stack the literal is invoked on.
+  This follows R4's scoping ("where a consuming context *declares* a quotation
+  effect") rather than contradicting it, but `call` is the most common
+  consumption path, so what slice 1 ships is narrower than "annotations are
+  checked". Whichever later slice wants it owns the new check.
 - Subtyping / effect-narrowing (R5): deferred unless a concrete need appears.
 - `while`'s materialized-quotation rejection (recon 5): unrelated, unchanged.
 
@@ -448,6 +472,14 @@ Checker (`src/check.rs` `#[cfg(test)]`):
   as `true ~[ ( bool -- bool ) dup drop ] on`: the annotation's concrete claim
   matches the parameter's grounded `bool`, so R4 is an identity no-op and the
   literal checks (R5).
+- `check_annotation_disagrees_with_shape_changing_parameter_is_error` (round 2,
+  see R4's second amendment) — `~[ ( bool -- bool ) dup drop ]` filling a
+  declared `~[ ..i i64 -- ..o i64 ]`, asserted on the exact R4 message. Nothing
+  else rejects it: R3 seeds from the annotation, R11 checks only the declared
+  suffix, and the identity body absorbs both claims.
+- `check_annotation_extending_shape_changing_parameter_row_ok` (round 2) — the
+  counterweight: `( -- i64 )` and `( i64 -- )` against a declared
+  `~[ ..i -- ..o ]` both check, so the fix cannot be full vector equality.
 - `check_standalone_type_variable_annotation_is_unbound_error` — a freestanding
   `[ ( 'T -- 'T ) ]` bound to a local (no consuming parameter) is the unbound
   error (R2). The test must assert the **exact** diagnostic message text (the
