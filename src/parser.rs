@@ -634,6 +634,7 @@ pub fn parse_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
     };
+    reject_generic_typedef_in_repl(&parser)?;
     let fields = parser.parse_typedef()?;
     if let Some((tok, span)) = parser.peek() {
         return Err(format!(
@@ -642,6 +643,23 @@ pub fn parse_typedef_line(
         ));
     }
     Ok(fields)
+}
+
+/// Phase 5 slice 1: a generic `type:` header (`type: Box 'T ...`) has no REPL
+/// support yet -- `parse_typedef_line`/`parse_enum_typedef_line` only ever
+/// reach the concrete productions, so without this gate a generic header runs
+/// straight into `parse_typedef`'s/`parse_enum_typedef`'s field loop and
+/// reports a nonsense "unknown type" error naming a type variable. `parser`
+/// must not have consumed any tokens yet (`self.pos` still points at `type:`).
+fn reject_generic_typedef_in_repl(parser: &Parser) -> Result<(), String> {
+    if parser.current_typedef_is_generic() {
+        let (_, span) = parser.tokens[parser.pos];
+        return Err(format!(
+            "error: generic `type:` declarations are not supported in the REPL yet at line {}, col {}",
+            span.line, span.col
+        ));
+    }
+    Ok(())
 }
 
 /// Whether a `type:` line is an enum declaration (a `|`-bearing body, D1), so
@@ -686,6 +704,7 @@ pub fn parse_enum_typedef_line(
         exports: ctx.exports,
         selective: ctx.selective,
     };
+    reject_generic_typedef_in_repl(&parser)?;
     let variant_fields = parser.parse_enum_typedef()?;
     if let Some((tok, span)) = parser.peek() {
         return Err(format!(
@@ -989,6 +1008,20 @@ fn unknown_capability_error(name: &str, span: Span) -> String {
 fn var_kind_conflict_error(name: &str, span: Span) -> String {
     format!(
         "error: variable `{name}` at line {}, col {} is used as both a type variable and a length variable; these are two different variables",
+        span.line, span.col
+    )
+}
+
+/// Phase 5 slice 1 (R1, round-3 review): a generic `type:` header binding
+/// the same variable name twice (`type: Bad 'T 'T ...`). Caught here, at the
+/// binding site, rather than left to surface as an unbound-or-phantom error
+/// once a field references the name: the second binding shadows nothing (the
+/// header has no scoping), so a field naming it would otherwise resolve
+/// against whichever entry `position()` finds first and silently mark the
+/// duplicate entry itself as the phantom.
+fn duplicate_generic_ty_var_error(name: &str, decl_name: &str, span: Span) -> String {
+    format!(
+        "error: type variable `{name}` at line {}, col {} is bound twice by `type: {decl_name}`'s header",
         span.line, span.col
     )
 }
@@ -2290,13 +2323,14 @@ impl<'t> Parser<'t> {
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
     /// position is an enum (D1's `|`-separated-variants body), per
-    /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`. A
-    /// generic header's bound type variables (Phase 5 slice 1) sit between
-    /// the name and the body, so the pipe search starts past them; zero for a
-    /// concrete declaration, leaving this unchanged for the existing corpus.
+    /// `body_has_pipe_before_semicolon`. `self.pos` must point at `type:`.
+    /// `body_has_pipe_before_semicolon` scans forward for the first `Pipe` or
+    /// `Semicolon` and ignores every other token, so a generic header's bound
+    /// type variables (Phase 5 slice 1, always plain `Word` tokens) in the
+    /// scanned range don't change the verdict; the search need not skip past
+    /// them first.
     fn current_typedef_is_enum(&self) -> bool {
-        let ty_var_count = header_ty_var_count(self.tokens, self.pos + 2);
-        body_has_pipe_before_semicolon(self.tokens, self.pos + 2 + ty_var_count)
+        body_has_pipe_before_semicolon(self.tokens, self.pos + 2)
     }
 
     /// Lookahead (no consumption): whether the `type:` decl at the current
@@ -2380,10 +2414,10 @@ impl<'t> Parser<'t> {
     }
 
     /// Phase 5 slice 1 (R1): the generic struct `type:` production, `type:
-    /// Name ('var)+ (field-name field-type)* ;`. The header's bound type
-    /// variables were already consumed by `current_typedef_is_generic`'s
-    /// caller having noticed them, but not yet by this parser -- they are
-    /// parsed here, then each field's type resolves through
+    /// Name ('var)+ (field-name field-type)* ;`. `current_typedef_is_generic`
+    /// only peeks at the header to classify the declaration; it consumes no
+    /// tokens, so the bound type variables are parsed here, then each field's
+    /// type resolves through
     /// `parse_generic_field_type_expr` against that variable table. A bound
     /// variable never referenced by any field (a phantom parameter) is a
     /// located error (added during round-2 review): R5's instantiation
@@ -2393,7 +2427,7 @@ impl<'t> Parser<'t> {
     fn parse_generic_typedef(&mut self) -> Result<crate::ast::GenericStructDecl, String> {
         let type_span = self.expect_word("type:")?;
         let (name, _) = self.expect_word_any_spanned()?;
-        let ty_vars = self.parse_generic_header_vars()?;
+        let ty_vars = self.parse_generic_header_vars(&name)?;
         let mut used = vec![false; ty_vars.len()];
         let mut fields = Vec::new();
         loop {
@@ -2429,7 +2463,7 @@ impl<'t> Parser<'t> {
     fn parse_generic_enum_typedef(&mut self) -> Result<crate::ast::GenericEnumDecl, String> {
         let type_span = self.expect_word("type:")?;
         let (name, _) = self.expect_word_any_spanned()?;
-        let ty_vars = self.parse_generic_header_vars()?;
+        let ty_vars = self.parse_generic_header_vars(&name)?;
         if matches!(self.peek(), Some((Token::Pipe, _))) {
             self.pos += 1;
         }
@@ -2474,6 +2508,10 @@ impl<'t> Parser<'t> {
 
     /// One generic variant's field list, mirroring `parse_variant_fields`
     /// with fields resolved through `parse_generic_field_type_expr` instead.
+    /// The reserved-name gate runs here rather than in a pre-pass: the
+    /// module-level pre-pass skips every generic header entirely (its
+    /// variant names are only ever seen by this parser), so this is the one
+    /// site that can reject a generic variant named `^Evil`.
     fn parse_generic_variant_fields(
         &mut self,
         decl_name: &str,
@@ -2481,6 +2519,7 @@ impl<'t> Parser<'t> {
         used: &mut [bool],
     ) -> Result<crate::ast::GenericVariantDecl, String> {
         let (vname, vspan) = self.expect_word_any_spanned()?;
+        reject_reserved_name("variant", &vname, vspan)?;
         let mut fields = Vec::new();
         loop {
             match self.peek() {
@@ -2512,11 +2551,19 @@ impl<'t> Parser<'t> {
     /// `'`-prefixed words immediately following the declared name, each
     /// interned with its span for the phantom-variable diagnostic. The
     /// caller (`current_typedef_is_generic`) has already established at
-    /// least one is present.
-    fn parse_generic_header_vars(&mut self) -> Result<Vec<(String, Span)>, String> {
-        let mut ty_vars = Vec::new();
+    /// least one is present. A name bound twice in one header is rejected
+    /// here, at the binding site, rather than left for a field reference to
+    /// misreport as unbound or phantom.
+    fn parse_generic_header_vars(
+        &mut self,
+        decl_name: &str,
+    ) -> Result<Vec<(String, Span)>, String> {
+        let mut ty_vars: Vec<(String, Span)> = Vec::new();
         while matches!(self.peek(), Some((Token::Word(w), _)) if w.starts_with('\'')) {
             let (w, span) = self.expect_word_any_spanned()?;
+            if ty_vars.iter().any(|(n, _)| *n == w) {
+                return Err(duplicate_generic_ty_var_error(&w, decl_name, span));
+            }
             ty_vars.push((w, span));
         }
         Ok(ty_vars)
@@ -2812,6 +2859,38 @@ mod tests {
         .unwrap();
         let exports: Vec<&str> = bodies.exports.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(exports, vec!["Queue", "drain"]);
+    }
+
+    /// Phase 5 slice 1 review fix: `parse_generic_typedef`/
+    /// `parse_generic_enum_typedef` stamp `module: self.module` on the decl
+    /// they build, but every other test in this file drives `parse_bodies`
+    /// with `module: 0`, so a hard-coded `0` there would pass unnoticed (this
+    /// exact class of gap -- a span or id silently defaulting to module 0 --
+    /// has bitten this codebase before). Drives `parse_bodies` directly with a
+    /// non-zero module id and asserts both generic registries carry it.
+    #[test]
+    fn parse_generic_typedef_and_enum_stamp_the_parser_module_id() {
+        let tokens =
+            lex("type: Box 'T val 'T ; type: Result 'T 'E | Ok val 'T | Err val 'E ;\n").unwrap();
+        let mut arrays = Vec::new();
+        let mut cells = Vec::new();
+        let mut refs = Vec::new();
+        let no_imports = HashMap::new();
+        let bodies = parse_bodies(
+            &tokens,
+            &[],
+            &[],
+            7,
+            &no_imports,
+            &[],
+            &no_imports,
+            &mut arrays,
+            &mut cells,
+            &mut refs,
+        )
+        .unwrap();
+        assert_eq!(bodies.generic_structs[0].module, 7);
+        assert_eq!(bodies.generic_enums[0].module, 7);
     }
 
     /// R9: a malformed `import:` (no path string) is a located parse error.
@@ -3436,6 +3515,21 @@ mod tests {
     }
 
     #[test]
+    fn parse_generic_typedef_header_binding_same_variable_twice_is_error() {
+        // Phase 5 slice 1 review fix (round 3): without a dedicated check, the
+        // second `'T` shadows nothing (the header has no scoping), so a field
+        // referencing `'T` used to resolve against the first entry and leave
+        // the second entry's `used` flag false, misreporting this as a
+        // phantom-variable error rather than naming the real fault.
+        let result = parse_src("type: Bad 'T 'T x 'T ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("bound twice"), "unexpected message: {err}");
+        assert!(err.contains("'T"), "unexpected message: {err}");
+        assert!(err.contains("Bad"), "unexpected message: {err}");
+    }
+
+    #[test]
     fn parse_generic_enum_typedef_registers_decl() {
         let module = parse_src("type: Result 'T 'E | Ok val 'T | Err val 'E ;").unwrap();
         // Slice 9 (R2): `bool` occupies the reserved index-0 entry; a
@@ -3497,9 +3591,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_generic_typedef_declared_but_never_used_compiles_clean() {
-        // Phase 1: a generic type declared and never applied still builds a
-        // whole program clean -- nothing else walks `generic_structs` yet.
+    fn parse_generic_enum_typedef_reserved_variant_name_is_error() {
+        // Phase 5 slice 1 review fix: the module-level pre-pass skips a
+        // generic header entirely, so the reserved-name gate on a variant
+        // must run inside `parse_generic_variant_fields` itself, not rely on
+        // the pre-pass having already caught it.
+        let result = parse_src("type: Bad 'T | ^Evil val 'T ;");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("^Evil"), "unexpected message: {err}");
+        assert!(err.contains("reserved"), "unexpected message: {err}");
+    }
+
+    #[test]
+    fn parse_generic_typedef_declared_but_never_used_parses_clean() {
+        // Phase 1: a generic type declared and never applied parses without
+        // error alongside an ordinary word def. The end-to-end claim (a whole
+        // program with this shape builds and runs) is the actual golden,
+        // `tests/phase5_slice1.rs::generic_type_declared_but_never_used_builds_and_runs`.
         let module = parse_src("type: Box 'T val 'T ; : main ( -- ) ;").unwrap();
         assert_eq!(module.generic_structs.len(), 1);
         assert!(module.words.iter().any(|w| w.name == "main"));

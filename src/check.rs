@@ -12,9 +12,10 @@ use std::collections::{HashMap, HashSet};
 
 use crate::ast::{
     instantiation_symbol, intern_array_type, intern_bundle_struct, intern_owned_cell_type,
-    intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId, ExternDecl, Len, Module,
-    ModuleInfo, OwnedCellDecl, PolySig, PolyType, QuotEffect, RefDecl, Span, StackEffect,
-    StructDecl, StructId, Subst, Term, TermKind, Type, TypedSlot, VariantDecl, WordBody, WordDef,
+    intern_ref_type, ArrayDecl, Bound, CallInst, Clause, EnumDecl, EnumId, ExternDecl,
+    GenericEnumDecl, GenericStructDecl, Len, Module, ModuleInfo, OwnedCellDecl, PolySig, PolyType,
+    QuotEffect, RefDecl, Span, StackEffect, StructDecl, StructId, Subst, Term, TermKind, Type,
+    TypedSlot, VariantDecl, WordBody, WordDef,
 };
 
 mod audits;
@@ -433,6 +434,8 @@ pub fn check(module: &mut Module) -> Result<(), String> {
     check_types(
         &module.structs,
         &module.enums,
+        &module.generic_structs,
+        &module.generic_enums,
         &module.arrays,
         &module.owned_cells,
     )?;

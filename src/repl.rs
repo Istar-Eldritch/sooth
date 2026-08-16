@@ -1526,7 +1526,14 @@ impl Session {
         )
         .and_then(|fields| {
             self.structs[idx].fields = fields;
-            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)?;
+            check::check_types(
+                &self.structs,
+                &self.enums,
+                &[],
+                &[],
+                &self.arrays,
+                &self.owned_cells,
+            )?;
             // R7a (item 2): a quotation-typed struct field never reaches the
             // native `unreachable!` because the native `check` audits it; the
             // REPL must run the same audit or the field bricks the session.
@@ -1595,7 +1602,14 @@ impl Session {
             for (vidx, fields) in variant_fields.into_iter().enumerate() {
                 self.enums[idx].variants[vidx].fields = fields;
             }
-            check::check_types(&self.structs, &self.enums, &self.arrays, &self.owned_cells)?;
+            check::check_types(
+                &self.structs,
+                &self.enums,
+                &[],
+                &[],
+                &self.arrays,
+                &self.owned_cells,
+            )?;
             // R7a (item 2): a quotation-typed enum-variant payload, same hazard.
             check::audit_quotation_type_registries(
                 &self.structs,
@@ -4134,6 +4148,33 @@ mod tests {
             "unexpected message: {err}"
         );
         assert!(session.drop_overloads.is_empty());
+    }
+
+    #[test]
+    fn repl_generic_typedef_is_a_located_not_supported_error() {
+        // Phase 5 slice 1 review fix: without this gate, a generic header
+        // ran straight into the concrete `parse_typedef`/`parse_enum_typedef`
+        // field loop and reported a nonsense "unknown type 'T" error naming a
+        // type variable, rather than a diagnostic naming the real gap.
+        let mut session = Session::new();
+        let mut out = Vec::new();
+        let err = session
+            .eval_line("type: Box 'T val 'T ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("not supported in the REPL yet"),
+            "unexpected message: {err}"
+        );
+        // Session state rolls back cleanly: the failed line registers no type.
+        assert!(session.structs.is_empty());
+
+        let err = session
+            .eval_line("type: Result 'T | Ok val 'T ;", &mut out)
+            .unwrap_err();
+        assert!(
+            err.contains("not supported in the REPL yet"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

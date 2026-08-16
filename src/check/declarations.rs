@@ -501,14 +501,19 @@ fn selective_arity_clash_error(
 /// word body is type-checked: no two `type:` declarations share a name across
 /// the combined struct+enum registries, and no struct or enum contains itself
 /// by value, directly or transitively, through the combined type graph (D9,
-/// D10, R8, R10).
+/// D10, R8, R10). `generic_structs`/`generic_enums` take part only in the
+/// duplicate-name check (Phase 5 slice 1 fix): a generic header mints no
+/// concrete registry entry the recursion/stored-reference/linear-array passes
+/// could walk, so those three stay unchanged and un-widened.
 pub fn check_types(
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    generic_structs: &[GenericStructDecl],
+    generic_enums: &[GenericEnumDecl],
     arrays: &[ArrayDecl],
     cells: &[OwnedCellDecl],
 ) -> Result<(), String> {
-    check_duplicate_type_names(structs, enums)?;
+    check_duplicate_type_names(structs, enums, generic_structs, generic_enums)?;
     check_recursion(structs, enums, arrays)?;
     check_no_stored_references(structs, enums, arrays, cells)?;
     check_no_linear_array_elements(structs, enums, arrays)?;
@@ -620,10 +625,10 @@ fn check_no_linear_array_elements(
     Ok(())
 }
 
-/// The struct-only projection of `check_types` (no enums/arrays), for callers
-/// that don't yet declare either.
+/// The struct-only projection of `check_types` (no enums/arrays/generics), for
+/// callers that don't yet declare any of them.
 pub fn check_structs(structs: &[StructDecl]) -> Result<(), String> {
-    check_types(structs, &[], &[], &[])
+    check_types(structs, &[], &[], &[], &[], &[])
 }
 
 /// A duplicate `type:` name is a sharp located error naming the type. R12
@@ -644,15 +649,23 @@ fn check_duplicate_struct_names(structs: &[StructDecl]) -> Result<(), String> {
     Ok(())
 }
 
-/// A duplicate type name across the *combined* struct + enum registries
-/// (D10, X2) is a sharp located error naming the type: a name used by two
-/// structs, two enums, or one of each. Delegates the struct-only pass to
+/// A duplicate type name across the combined struct, enum, generic-struct and
+/// generic-enum registries (D10, X2; widened for generic headers by the
+/// Phase 5 slice 1 review) is a sharp located error naming the type: a name
+/// used by any two of a struct, an enum, a generic struct, or a generic enum.
+/// A generic header mints no concrete registry entry (`prepass_type_decls`
+/// skips it), so without this it could collide with an existing concrete
+/// type, or with another generic header, and neither would be caught here,
+/// only surfacing later as an ambiguous name for Phase 2's instantiation
+/// lookup to pick between arbitrarily. Delegates the struct-only pass to
 /// `check_duplicate_struct_names` (also called directly by struct-only
-/// callers, e.g. the REPL, which doesn't yet declare enums) rather than
-/// re-scanning `structs` twice.
+/// callers, e.g. the REPL, which doesn't yet declare enums or generics)
+/// rather than re-scanning `structs` twice.
 pub(super) fn check_duplicate_type_names(
     structs: &[StructDecl],
     enums: &[EnumDecl],
+    generic_structs: &[GenericStructDecl],
+    generic_enums: &[GenericEnumDecl],
 ) -> Result<(), String> {
     check_duplicate_struct_names(structs)?;
     let mut seen: HashMap<(u32, &str), ()> = structs
@@ -664,6 +677,22 @@ pub(super) fn check_duplicate_type_names(
             return Err(format!(
                 "error: duplicate type `{}` (line {}, col {})",
                 decl.name_static, decl.span.line, decl.span.col
+            ));
+        }
+    }
+    for decl in generic_structs {
+        if seen.insert((decl.module, decl.name.as_str()), ()).is_some() {
+            return Err(format!(
+                "error: duplicate type `{}` (line {}, col {})",
+                decl.name, decl.span.line, decl.span.col
+            ));
+        }
+    }
+    for decl in generic_enums {
+        if seen.insert((decl.module, decl.name.as_str()), ()).is_some() {
+            return Err(format!(
+                "error: duplicate type `{}` (line {}, col {})",
+                decl.name, decl.span.line, decl.span.col
             ));
         }
     }
@@ -1468,7 +1497,7 @@ mod tests {
             module,
         };
         // Two modules, one `Point` each: not a duplicate.
-        assert!(check_duplicate_type_names(&[mk(0), mk(1)], &[]).is_ok());
+        assert!(check_duplicate_type_names(&[mk(0), mk(1)], &[], &[], &[]).is_ok());
         // Same module, two `Point`: a duplicate, named by the raw surface name.
         let same_module = vec![
             StructDecl {
@@ -1490,8 +1519,55 @@ mod tests {
                 module: 0,
             },
         ];
-        let err = check_duplicate_type_names(&same_module, &[]).unwrap_err();
+        let err = check_duplicate_type_names(&same_module, &[], &[], &[]).unwrap_err();
         assert!(err.contains("duplicate type `Point`"), "raw name: {err}");
+    }
+    /// Phase 5 slice 1 review fix: a generic header mints no concrete
+    /// registry entry (`prepass_type_decls` skips it), so without threading
+    /// `generic_structs`/`generic_enums` through this check, a generic
+    /// `Box` could collide with a concrete `Box` -- or another generic
+    /// `Box` -- undetected.
+    #[test]
+    fn duplicate_type_check_includes_generic_headers() {
+        let concrete_box = StructDecl {
+            name: "Box".to_string(),
+            name_static: "Box",
+            fields: Vec::new(),
+            span: crate::ast::Span::default(),
+            has_drop_overload: false,
+            is_bundle: false,
+            module: 0,
+        };
+        let generic_box = |module: u32| crate::ast::GenericStructDecl {
+            name: "Box".to_string(),
+            ty_var_names: vec!["'T".to_string()],
+            fields: Vec::new(),
+            span: crate::ast::Span::default(),
+            module,
+        };
+        // A generic `Box` colliding with a concrete `Box` in the same module.
+        let err = check_duplicate_type_names(
+            std::slice::from_ref(&concrete_box),
+            &[],
+            &[generic_box(0)],
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("duplicate type `Box`"),
+            "generic vs concrete: {err}"
+        );
+        // Two generic `Box` headers in the same module.
+        let err = check_duplicate_type_names(&[], &[], &[generic_box(0), generic_box(0)], &[])
+            .unwrap_err();
+        assert!(
+            err.contains("duplicate type `Box`"),
+            "generic vs generic: {err}"
+        );
+        // The same generic `Box` split across two modules is not a duplicate.
+        assert!(
+            check_duplicate_type_names(&[], &[], &[generic_box(0), generic_box(1)], &[]).is_ok()
+        );
     }
     /// Two words of the same name in one module are rejected; the same pair
     /// split across two modules is not (mirrors `duplicate_type_check_is_per_module`).
