@@ -319,6 +319,18 @@ fn unify_pair(a: Slot, b: Slot) -> PairMatch {
     }
 }
 
+/// Renders one enum variant payload field for a diagnostic. An attributeless
+/// (positional) field has no user-written name, so it is named by its index
+/// instead: `POSITIONAL_FIELD_NAME` is an internal placeholder and must never
+/// surface in a message.
+pub(crate) fn variant_field_desc(field: &str, idx: usize) -> String {
+    if field == crate::parser::POSITIONAL_FIELD_NAME {
+        format!("field {idx}")
+    } else {
+        format!("field `{field}`")
+    }
+}
+
 /// D3 (slice 6h phase 2): whether `ty` transitively contains a pointer-shaped
 /// `Copy` type the array constructor cannot safely zero-initialize --
 /// `Type::Str`, `Type::Cstr`, `Type::Quotation` -- recursing through struct
@@ -350,11 +362,18 @@ fn find_zero_unsafe_element(
         }
         Type::Enum(id, _) => {
             for variant in &enums[id.index()].variants {
-                for (fname, fty) in &variant.fields {
+                for (idx, (fname, fty)) in variant.fields.iter().enumerate() {
                     if let Some((bad, mut path)) =
                         find_zero_unsafe_element(*fty, structs, enums, arrays)
                     {
-                        path.insert(0, format!("variant `{}` field `{fname}`", variant.name));
+                        path.insert(
+                            0,
+                            format!(
+                                "variant `{}` {}",
+                                variant.name,
+                                variant_field_desc(fname, idx)
+                            ),
+                        );
                         return Some((bad, path));
                     }
                 }
@@ -2151,6 +2170,25 @@ mod tests {
         let tokens = lex(src).unwrap();
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
+    }
+
+    #[test]
+    fn zero_unsafe_positional_variant_field_is_named_by_index() {
+        // OQ4/Phase 1: `find_zero_unsafe_element` builds a path out of variant
+        // field names, so an attributeless field must appear as its position
+        // rather than as the internal placeholder.
+        let err = check_src(
+            "type: Option 'T | None | Some 'T ;\n: main ( -- ) [ Option[str] ; 4 ] drop ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("variant `Some[str]` field 0"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains(crate::parser::POSITIONAL_FIELD_NAME),
+            "the internal placeholder leaked into a diagnostic: {err}"
+        );
     }
 
     /// Review fix (R-P2-3, declaration half): a shape-changing declared

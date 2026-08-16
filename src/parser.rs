@@ -189,8 +189,8 @@ fn reject_ty_var_field_name(name: &str, span: Span) -> Result<(), String> {
 /// variant field. It contains a space, which the lexer never produces inside
 /// a single `Word` token (words are whitespace-delimited), so this string can
 /// never be typed, matched as a field name, or collide with a real one.
-/// `pub(crate)` so `check_no_stored_references` can recognize it and report
-/// the field's position instead of this literal string.
+/// `pub(crate)` so `check::variant_field_desc` can recognize it and report the
+/// field's position instead of this literal string.
 pub(crate) const POSITIONAL_FIELD_NAME: &str = "$positional field$";
 
 /// R12: the `extern:` symbol string is emitted verbatim as `call $<symbol>`
@@ -3809,14 +3809,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_generic_variant_tick_prefixed_field_name_is_error() {
-        // The same gate inside a generic enum variant, where the header has
-        // already consumed its own `'`-prefixed words.
+    fn parse_generic_variant_unbound_type_variable_is_error() {
+        // Not the field-name gate: since positional fields landed, a trailing
+        // `'z` in a variant body opens a positional field, so what rejects
+        // this is `'z` not being bound by the `E 'T` header. Binding it (`type:
+        // E 'T 'z | Ok v 'T 'z ;`) parses clean.
         let result = parse_src("type: E 'T | Ok v 'T 'z ;");
         let err = result.unwrap_err();
         assert!(err.contains("'z"), "unexpected message: {err}");
-        assert!(err.contains("type variable"), "unexpected message: {err}");
+        assert!(err.contains("bound by"), "unexpected message: {err}");
         assert!(err.contains("line 1, col 22"), "unlocated: {err}");
+        assert!(
+            parse_src("type: E 'T 'z | Ok v 'T 'z ;").is_ok(),
+            "binding `'z` in the header should make the same body legal"
+        );
     }
 
     #[test]

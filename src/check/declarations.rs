@@ -549,15 +549,12 @@ fn check_no_stored_references(
         for variant in &decl.variants {
             for (idx, (field, ty)) in variant.fields.iter().enumerate() {
                 if contains_reference(*ty, structs, enums, arrays) {
-                    let field_desc = if field == crate::parser::POSITIONAL_FIELD_NAME {
-                        format!("payload field {idx}")
-                    } else {
-                        format!("payload field `{field}`")
-                    };
                     return Err(stored_reference_error(
                         &format!(
-                            "{field_desc} of variant `{}` of type `{}`",
-                            variant.name, decl.name
+                            "payload {} of variant `{}` of type `{}`",
+                            super::variant_field_desc(field, idx),
+                            variant.name,
+                            decl.name
                         ),
                         *ty,
                         Some(variant.span),
@@ -1313,6 +1310,25 @@ mod tests {
         let mut module = parse(&tokens).unwrap();
         check(&mut module)
     }
+    #[test]
+    fn stored_reference_in_a_positional_variant_field_is_named_by_index() {
+        // OQ4/Phase 1: an attributeless field's stored name is an internal
+        // placeholder, so every diagnostic that prints a variant field name
+        // must identify it by position instead of leaking the placeholder.
+        let err = check_src(
+            "type: Option 'T | None | Some 'T ;\n: w ( Option[&i64] -- ) drop ;\n: main ( -- ) ;\n",
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("payload field 0 of variant `Some[&i64]`"),
+            "unexpected message: {err}"
+        );
+        assert!(
+            !err.contains(crate::parser::POSITIONAL_FIELD_NAME),
+            "the internal placeholder leaked into a diagnostic: {err}"
+        );
+    }
+
     /// A checked module, for the tests that read a type fact back out of the
     /// registries rather than only asserting a diagnostic.
     fn checked_module(src: &str) -> Module {
