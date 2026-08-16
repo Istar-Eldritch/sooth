@@ -805,6 +805,53 @@ mod tests {
         assert_eq!(declared, 1, "`Box` is registered once, not per pass");
     }
 
+    /// R15c: a selectively imported generic name applies bare, the rule a
+    /// selectively imported concrete type already follows -- the spelling a
+    /// `Result`/`Option` user reaches for before the qualified one.
+    #[test]
+    fn selectively_imported_generic_name_applies_bare() {
+        let s = Sandbox::new("generic-xmod-selective");
+        s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: b | Box | \"box.sth\" ;\n: unwrap ( Box[i64] -- i64 ) Box> ;\n\
+             : main ( -- ) 7 Box unwrap . ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let mut module = assemble_module(&closure, true).expect("assembles");
+        check::check(&mut module).expect("the bare selective application checks");
+        assert!(
+            module.structs.iter().any(|d| d.name_static == "Box[i64]"),
+            "the bare selective application monomorphized"
+        );
+    }
+
+    /// Own module first: a locally declared generic header wins over a
+    /// selectively imported one of the same name, the order
+    /// `resolve_type_name_in_module` already gives a concrete name. (For a
+    /// concrete type that arrangement is an R21 collision error instead --
+    /// `check_selective_imports` reads the instantiated `structs`/`enums`
+    /// registries, where a generic header has no entry under its bare name.)
+    #[test]
+    fn local_generic_header_shadows_a_selectively_imported_one() {
+        let s = Sandbox::new("generic-xmod-selective-shadow");
+        s.write("box.sth", "type: Box 'T val 'T ;\nexport: Box ;\n");
+        let entry = s.write(
+            "main.sth",
+            "import: b | Box | \"box.sth\" ;\ntype: Box 'T val 'T tag i64 ;\n\
+             type: W f Box[i64] ;\n: main ( -- ) ;\n",
+        );
+        let closure = discover_closure(&entry).expect("closure resolves");
+        let module = assemble_module(&closure, true).expect("assembles");
+        let boxed = module
+            .structs
+            .iter()
+            .find(|d| d.name_static == "Box[i64]")
+            .expect("the application monomorphized");
+        let names: Vec<&str> = boxed.fields.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["val", "tag"], "the local header was applied");
+    }
+
     /// The whole-closure pre-pass parses a generic header against the same
     /// name environment `parse_bodies` gets, not a bare one: a field naming an
     /// imported concrete type (`o::P`) has to resolve through the declaring

@@ -82,12 +82,12 @@ stored **unresolved**, as `PolyType::Var`/`PolyType::Concrete`, `src/parser.rs:2
 resolution against concrete arguments happens later, at instantiation time in the
 applying module, not during this parse. The reason to run the full header parse
 upfront is reuse of existing machinery, not a resolved-poly-type requirement.) Within
-this slice's scope a generic decl's fields reference only concrete types (already
-registered by `prepass_and_register`) plus the decl's own type variables — never
-another generic's instantiation (nested generics are out of scope) and never an
-imported or selectively-imported concrete type (state this as an explicit assumption:
-a generic field naming such a type is not supported by this slice's empty-import-map
-pre-pass call, below).
+this slice's scope a generic decl's fields reference concrete types (already
+registered by `prepass_and_register`), including imported and selectively-imported
+ones, plus the decl's own type variables — never another generic's instantiation
+(nested generics are out of scope). The pre-pass gets the declaring module's real
+name environment (below), so an imported field type resolves there exactly as it does
+in the body pass.
 
 Mechanics:
 
@@ -97,12 +97,14 @@ Mechanics:
   body-parse loop — not "immediately after `prepass_and_register`", which runs before
   `generics`, `arrays`/`owned_cells`/`refs` even exist. For each module `m` in
   discovery order, construct a `Parser` sharing the *same* `&mut arrays`/`owned_cells`/
-  `refs` vecs the body loop will use (so ids stay in sync across the two passes), with
-  **empty** import/exports/selective maps (the pattern already used at
-  `src/parser.rs:4128`'s `no_imports`/`&[]`), and call `parse_generic_typedefs()` on it.
+  `refs` vecs the body loop will use (so ids stay in sync across the two passes), and
+  with that module's own import/exports/selective maps — the same ones the body loop
+  passes it — so a generic field naming an imported concrete type resolves in both
+  passes. Then call `parse_generic_typedefs()` on it.
 - Extract a new `pub(crate) fn prepass_generic_typedefs(tokens, structs, enums, module,
-  arrays, owned_cells, refs, generics)` in `parser.rs` that constructs exactly this
-  `Parser` and calls `parse_generic_typedefs()` — `driver.rs` cannot reach a private
+  imports, exports, selective, arrays, owned_cells, refs, generics)` in `parser.rs`
+  that constructs exactly this `Parser` and calls `parse_generic_typedefs()` —
+  `driver.rs` cannot reach a private
   `Parser`/method directly, only a `pub` function (mirroring how it already calls
   `parser::parse_bodies`/`parser::prepass_and_register`), so name this wrapper rather
   than leaving its shape to the implementer.
@@ -199,10 +201,12 @@ Two changes, both recon-confirmed necessary:
 2. **Qualified generic application resolution**: extend `resolve_type_or_apply`
    (`src/parser.rs:2712`) to split a `q::Base` application name and resolve `q` through
    the import map before `find_struct`/`find_enum`, mirroring
-   `resolve_type_name_in_module` (`src/ast.rs:157`). A **bare unqualified** cross-module
-   generic name stays `unknown type` (own-module-only for bare names, matching concrete
-   types); only a qualified `q::Box[i64]` (and, if the concrete-type selective-import
-   rule already applies, a selectively-imported bare name) resolves cross-module.
+   `resolve_type_name_in_module` (`src/ast.rs:157`). A **bare** name resolves against
+   the applying module first and then, failing that, against the module it is
+   selectively imported from (`import: q | Box | "box.sth"`) — the same two-step a bare
+   concrete name already gets, so a local header shadows an imported one of the same
+   name. A bare name that is neither declared locally nor selectively imported stays
+   `unknown type`.
 
 Update `parse_generic_application_from_another_module_is_unknown`
 (`src/parser.rs:4121`): it currently asserts the old D4 "own module only" rule with a
@@ -285,6 +289,17 @@ directory) is explicitly Phase 6's, not re-attempted by this slice.
 - Struct positional (unnamed) fields — only enum variant fields are sugared here.
 - Bounds, recursion, nested generics — still Slice 1 out-of-scope.
 - The allocator returning `Option`/`Result` (a future consumer, not this slice).
+- **A generic instantiation in a cross-module word effect** (later slice; it gates the
+  same Phase 6 territory as the general import rule). An exported word whose effect
+  names `Box[i64]` is rejected with ``exported word `make` names private type
+  `Box[i64]`, which is not exported``, and that advice is unfollowable: `export:
+  Box[i64] ;` does not parse (`expected ';' terminating 'export:', found LBracket`).
+  This predates Phase 2 and Phase 3's goldens do not need it (they apply an imported
+  generic within one module), but it means a fallible word in one module cannot yet
+  *return* a `Result` to another — most of why `Result` exists. Fix it together with
+  `instantiate_struct`'s dedup key, `(generic_idx, applying_module, args)`
+  (`src/ast.rs:535`): two importers of one `Box` mint two non-identical `Box[i64]`
+  types, which only the export wall keeps unreachable today.
 
 ## Sequencing
 

@@ -2810,12 +2810,16 @@ impl<'t> Parser<'t> {
     /// Slice 2 (OQ1): a `q::Box[i64]` name maps `q` through the import map and
     /// looks the header up in that module, mirroring how
     /// `resolve_type_name_in_module` reaches a concrete cross-module type. A
-    /// bare name stays own-module-only, again as for a concrete type.
+    /// bare name resolves against this module, or, failing that, against the
+    /// module it is selectively imported from -- again as for a concrete type.
     ///
     /// R14/R16 (phase 2 review fix): a declared-but-unexported generic header
     /// is gated here, mirroring `resolve_type`'s check for a concrete
     /// cross-module type -- otherwise a private generic type would be
-    /// reachable from another module while a private concrete one is not.
+    /// reachable from another module while a private concrete one is not. A
+    /// bare selectively imported name needs no gate here: `check`'s
+    /// `check_selective_imports` rejects a private one post-assembly, which is
+    /// how a concrete selective import is validated too.
     fn resolve_type_or_apply(&mut self, name: &str, span: Span) -> Result<Type, String> {
         let (base, owner, qualifier) = match name.split_once("::") {
             Some((qualifier, base)) => match self.imports.get(qualifier) {
@@ -2823,12 +2827,10 @@ impl<'t> Parser<'t> {
                 // An unbound qualifier is `resolve_type`'s error to report.
                 None => return self.resolve_type(name, span),
             },
-            None => (name, self.module, None),
+            None => (name, self.bare_generic_owner(name), None),
         };
         if let Some(qualifier) = qualifier {
-            let declared = self.generics.find_struct(base, owner).is_some()
-                || self.generics.find_enum(base, owner).is_some();
-            if declared && !self.type_is_exported(qualifier, base) {
+            if self.generic_is_declared(base, owner) && !self.type_is_exported(qualifier, base) {
                 return Err(not_exported_error(base, qualifier, span));
             }
         }
@@ -2861,6 +2863,25 @@ impl<'t> Parser<'t> {
                 .instantiate_enum(idx, &args, self.module, regs));
         }
         self.resolve_type(name, span)
+    }
+
+    /// R15c: the module a bare generic name is declared in -- this one, or,
+    /// when this one declares no such header, the module the name is
+    /// selectively imported from (`import: q | Box | "box.sth"`). Own module
+    /// first, exactly as `resolve_type_name_in_module` orders the two for a
+    /// concrete name, so a local header shadows a selectively imported one.
+    fn bare_generic_owner(&self, name: &str) -> u32 {
+        if self.generic_is_declared(name, self.module) {
+            return self.module;
+        }
+        self.selective.get(name).copied().unwrap_or(self.module)
+    }
+
+    /// Whether `module` declares a generic `type:` header named `name`, of
+    /// either shape.
+    fn generic_is_declared(&self, name: &str, module: u32) -> bool {
+        self.generics.find_struct(name, module).is_some()
+            || self.generics.find_enum(name, module).is_some()
     }
 
     /// R2/R3: a generic-type application's bracketed argument list,
